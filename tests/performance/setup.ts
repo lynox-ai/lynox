@@ -35,15 +35,15 @@ export function generateText(chars: number): string {
 /** Generate a realistic German/English mixed text for entity extraction benchmarks. */
 export function generateEntityText(): string {
   return `
-Herr Thomas Müller von der Firma Acme GmbH hat das Projekt "Webshop Redesign" besprochen.
-Dr. Schmidt empfiehlt SvelteKit für das Frontend, wir haben uns für PostgreSQL 16 entschieden.
-Client Roland betreibt v-skin.ch und nutzt unseren Service seit März.
-Company Digitec AG in Zürich hat Interesse an einer Integration gezeigt.
+Mr. Thomas Miller from Acme Corp discussed the "Webshop Redesign" project.
+Dr. Chen recommends SvelteKit for the frontend, the team chose PostgreSQL 16.
+Client James runs example-store.com and has been using the service since March.
+Company Globex Inc in New York expressed interest in an integration.
 The team uses Docker for deployment and runs on Cloudflare Workers.
-Project "nodyn-ai/nodyn" requires Node.js 22+ and TypeScript strict mode.
-Partner Maria from Berlin mentioned switching to Lucia v3 for authentication.
-Mrs. Weber from Organisation TechHub suggested using Brave Search API.
-Located in Bern, the startup chose Tailwind CSS v4 for their design system.
+Project "example-org/example" requires Node.js 22+ and TypeScript strict mode.
+Partner Sarah from London mentioned switching to Lucia v3 for authentication.
+Ms. Park from TechHub suggested using Brave Search API.
+Located in Austin, the startup chose Tailwind CSS v4 for their design system.
 Colleague Alex uses GitHub Actions for CI/CD and migrated to pnpm.
 `.trim();
 }

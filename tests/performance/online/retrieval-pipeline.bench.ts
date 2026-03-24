@@ -43,7 +43,7 @@ describe.skipIf(SKIP)('Online: Retrieval Pipeline', () => {
 
     // Seed with realistic business data
     const memories = [
-      { text: 'Client Roland runs v-skin.ch and wants BYOK support.', ns: 'knowledge' },
+      { text: 'Client James runs example-store.com and wants BYOK support.', ns: 'knowledge' },
       { text: 'PostgreSQL 16 was chosen for JSONB path queries.', ns: 'knowledge' },
       { text: 'SvelteKit is the frontend framework, Tailwind CSS v4 for styling.', ns: 'knowledge' },
       { text: 'Auth uses Lucia v3 with Arctic and SvelteKit, no Clerk.', ns: 'knowledge' },
@@ -63,13 +63,13 @@ describe.skipIf(SKIP)('Online: Retrieval Pipeline', () => {
     // Create entities
     const entityIds: string[] = [];
     const entities = [
-      { name: 'Roland', type: 'person' },
+      { name: 'James', type: 'person' },
       { name: 'PostgreSQL', type: 'technology' },
       { name: 'SvelteKit', type: 'technology' },
       { name: 'Lucia v3', type: 'technology' },
       { name: 'LadybugDB', type: 'technology' },
       { name: 'Docker', type: 'technology' },
-      { name: 'v-skin.ch', type: 'organization' },
+      { name: 'example-store.com', type: 'organization' },
       { name: 'nodyn', type: 'project' },
     ];
 

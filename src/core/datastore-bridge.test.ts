@@ -108,15 +108,15 @@ describe('DataStoreBridge', () => {
 
     await bridge.indexRecords(
       'contacts',
-      [{ name: 'Herr Schmidt', company: 'test-firma.ch', revenue: 5000 }],
+      [{ name: 'John Smith', company: 'acme-corp.com', revenue: 5000 }],
       scope,
     );
 
-    const schmidt = await graph.findEntityByCanonicalName('Schmidt');
+    const schmidt = await graph.findEntityByCanonicalName('Smith');
     expect(schmidt).not.toBeNull();
     expect(schmidt!['e.entity_type']).toBe('person');
 
-    const firma = await graph.findEntityByCanonicalName('test-firma.ch');
+    const firma = await graph.findEntityByCanonicalName('acme-corp.com');
     expect(firma).not.toBeNull();
     expect(firma!['e.entity_type']).toBe('organization');
   });
@@ -145,7 +145,7 @@ describe('DataStoreBridge', () => {
   // --- Find Related Data ---
 
   it('finds collections related to an entity', async () => {
-    const schmidt = await graph.findEntityByCanonicalName('Schmidt');
+    const schmidt = await graph.findEntityByCanonicalName('Smith');
     if (!schmidt) return;
 
     const hints = await bridge.findRelatedData([schmidt['e.id'] as string]);
@@ -154,7 +154,7 @@ describe('DataStoreBridge', () => {
   });
 
   it('returns preview data from DataStore', async () => {
-    const schmidt = await graph.findEntityByCanonicalName('Schmidt');
+    const schmidt = await graph.findEntityByCanonicalName('Smith');
     if (!schmidt) return;
 
     const hints = await bridge.findRelatedData([schmidt['e.id'] as string]);

@@ -9,7 +9,7 @@ import { extractEntitiesRegex } from '../../src/core/entity-extractor.js';
 import { generateEntityText, generateText } from './setup.js';
 
 const entityRichText = generateEntityText();
-const shortText = 'Client Thomas from Zürich uses PostgreSQL.';
+const shortText = 'Client Thomas from New York uses PostgreSQL.';
 const mediumText = generateEntityText() + '\n' + generateEntityText();
 const largeText = Array.from({ length: 10 }, () => generateEntityText()).join('\n');
 const plainText = generateText(2000);

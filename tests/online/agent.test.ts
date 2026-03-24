@@ -104,13 +104,13 @@ describe.skipIf(SKIP)('Online: Agent', () => {
 
     let result: string;
     try {
-      result = await agent.send('What is the weather in Zürich?');
+      result = await agent.send('What is the weather in London?');
     } catch (err) { skipOnServerError(err); return; }
 
     expect(toolCalled.called).toBe(true);
-    expect(toolCalled.input.toLowerCase()).toContain('z');
+    expect(toolCalled.input.toLowerCase()).toContain('london');
     expect(result).toBeTruthy();
-    expect(result).toMatch(/sunny|22|warm|wetter/i);
+    expect(result).toMatch(/sunny|22|warm|weather/i);
   }, 30_000);
 
   it('respects maxIterations limit', async () => {

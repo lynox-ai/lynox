@@ -80,9 +80,9 @@ language now has over 30 million weekly npm downloads.`;
   it('handles concurrent extraction calls without errors', async () => {
     await memory.loadAll();
 
-    const longText = 'Customer Roland from v-skin.ch signed up for the BYOK plan. '.repeat(10) +
-      'His business specializes in skincare products. The contract was signed on March 15, 2026. ' +
-      'He runs his operations from Switzerland and needs integration with Google Sheets for inventory tracking.';
+    const longText = 'Customer James from example-store.com signed up for the BYOK plan. '.repeat(10) +
+      'His business specializes in retail products. The contract was signed on March 15, 2026. ' +
+      'He runs his operations from the US and needs integration with Google Sheets for inventory tracking.';
 
     // Fire multiple extractions concurrently (simulates rapid agent turns)
     const extractions = [
