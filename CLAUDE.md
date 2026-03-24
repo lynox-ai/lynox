@@ -14,9 +14,11 @@ This is the **public** OSS repo (`nodyn-ai/nodyn`). Internal docs (PRDs, pricing
 
 ```bash
 npm run typecheck   # tsc --noEmit — must pass with zero errors
+npm run lint        # eslint src/ — must pass with zero errors
 npm run build       # tsc → dist/
 npm run dev         # node --env-file=.env --watch --import tsx src/index.ts
 npm run start       # node dist/index.js
+npm run coverage    # vitest + coverage report (CI enforces ≥80%)
 npm run smoke:manual # offline smoke: typecheck + build + vitest + debug subscriber + MCP health/auth/client flow
 npx vitest run          # full suite (113 files / ~2610 tests)
 npx vitest run <file>   # single file
@@ -289,8 +291,9 @@ Streamlined 2-interaction onboarding: (1) API key with live validation, (2) inte
 
 ## TypeScript Rules
 
-- `strictest` config: `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`
-- Zero `any` — use `unknown` plus type narrowing
+- `strictest` config: `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `useUnknownInCatchVariables`
+- Zero `any` — use `unknown` plus type narrowing. Catch variables are `unknown` — always narrow before use
+- **ESLint** (`eslint.config.js`): `no-explicit-any`, `no-floating-promises`, `consistent-type-imports`, `no-unused-vars`, `eqeqeq`, `no-console`, `no-eval`. Run via `npm run lint`
 - Optional properties must be typed as `T | undefined` (required by `exactOptionalPropertyTypes`)
 - All imports use `.js` extensions (ESM + NodeNext resolution)
 - `NODYN_BETAS` must be included in every beta API call
@@ -409,7 +412,7 @@ Shared setup in `tests/performance/setup.ts`: `createBenchDir()`, `generateText(
 ## Git Hooks & CI Security
 
 - **lefthook** (`lefthook.yml`): pre-push runs `gitleaks protect --staged` + regex pattern scan for secrets; pre-commit runs typecheck
-- **CI** (`.github/workflows/ci.yml`): `gitleaks/gitleaks-action@v2` scans full history on push/PR
+- **CI** (`.github/workflows/ci.yml`): `gitleaks/gitleaks-action@v2` scans full history, `npm run lint` (ESLint), `npm run typecheck`, `vitest run --coverage` (≥80% line coverage enforced), Trivy Docker scan
 - `"prepare": "lefthook install || true"` in `package.json` — auto-installs hooks on `npm install`
 - Requires `lefthook` + `gitleaks` binaries (`brew install lefthook gitleaks`)
 
@@ -421,6 +424,8 @@ Shared setup in `tests/performance/setup.ts`: `createBenchDir()`, `generateText(
 - `@huggingface/transformers` — ONNX inference for local embeddings. Default model: `multilingual-e5-small` (384d, 100 languages, ~118MB). Configurable via `embedding_model` config. Docker uses `node:22-slim` (Debian) because `onnxruntime-node` requires glibc
 - `@ladybugdb/core` — LadybugDB embedded graph database (Kuzu fork, Apple acquired Kuzu Oct 2025). Native C++ addon with prebuilt binaries. Used for Knowledge Graph (`~/.nodyn/knowledge-graph/`). Known issue: SIGSEGV on process exit (non-functional, after `close()`)
 - `zod` — Schema validation for DAG manifests
+- `eslint` + `@typescript-eslint/eslint-plugin` + `@typescript-eslint/parser` — Linting (dev)
+- `@vitest/coverage-v8` — Coverage reporting (dev)
 
 ## Docker & Deployment
 

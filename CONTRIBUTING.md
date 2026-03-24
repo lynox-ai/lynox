@@ -18,8 +18,10 @@ Requirements: Node.js 22+.
 ```bash
 npm run dev          # Watch mode with hot reload
 npm run typecheck    # tsc --noEmit — must pass with zero errors
+npm run lint         # eslint src/ — must pass with zero errors
 npm run build        # tsc → dist/
-npx vitest run       # 107 files / ~2545 tests — all must pass
+npx vitest run       # 113 files / ~2610 tests — all must pass
+npm run coverage     # coverage report (CI enforces ≥80%)
 ```
 
 Run a single test file:
@@ -41,8 +43,9 @@ Hooks are auto-installed by `npm install` via the `prepare` script.
 ## Code Standards
 
 - **ESM-only** — All imports use `.js` extensions
-- **TypeScript strict mode** — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`
-- **Zero `any`** — Use `unknown` plus type narrowing
+- **TypeScript strict mode** — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `useUnknownInCatchVariables`
+- **Zero `any`** — Use `unknown` plus type narrowing (catch variables are `unknown`)
+- **ESLint enforced** — `npm run lint` must pass. Rules in `eslint.config.js`: no-explicit-any, no-floating-promises, consistent-type-imports, no-unused-vars, eqeqeq, no-console, no-eval
 - **Single type source** — All types live in `src/types/index.ts`
 - **Co-located tests** — `*.test.ts` next to source files
 
@@ -51,7 +54,7 @@ Hooks are auto-installed by `npm install` via the `prepare` script.
 1. Fork the repository
 2. Create a feature branch from `main`
 3. Make your changes
-4. Ensure `npm run typecheck` and `npx vitest run` pass
+4. Ensure `npm run typecheck`, `npm run lint`, and `npx vitest run` pass
 5. Open a PR with a clear description of what and why
 
 Keep PRs focused — one concern per PR.

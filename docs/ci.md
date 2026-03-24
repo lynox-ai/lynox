@@ -6,21 +6,22 @@ GitHub Actions runs tests on every push to `main` and on pull requests.
 
 | Job | Trigger | What it does |
 |-----|---------|--------------|
-| `test` | push + PR | typecheck + vitest |
+| `test` | push + PR | lint + typecheck + vitest + coverage ≥80% |
 
 ## Pipeline
 
 ```
 git push origin main
     ↓
-GitHub Actions: npm ci → tsc --noEmit → vitest run
+GitHub Actions: npm ci → eslint → tsc --noEmit → vitest run (coverage ≥80%)
 ```
 
 ## Manual Release Gate
 
-CI runs `typecheck` + `vitest`, but the stronger local pre-release gate is:
+CI runs `lint` + `typecheck` + `vitest` + coverage, but the stronger local pre-release gate is:
 
 ```bash
+npm run lint
 npm run typecheck
 npm run build
 npx vitest run
@@ -39,7 +40,7 @@ ANTHROPIC_API_KEY=... NODYN_SMOKE_ONLINE=1 npm run smoke:manual
 
 `.github/workflows/ci.yml`
 
-- **`test` job**: `ubuntu-latest`, Node 22, runs `npm ci` + `npm run typecheck` + `npx vitest run`
+- **`test` job**: `ubuntu-latest`, Node 22, runs `npm ci` → `npm audit` → `npm run lint` → `npm run typecheck` → `npx vitest run --coverage` → coverage threshold check (≥80%)
 
 ## Monitoring
 
@@ -82,8 +83,9 @@ pnpm bench:online       # online benchmarks (requires API key, ~$0.02)
 ```bash
 # What CI runs:
 npm ci
+npm run lint
 npm run typecheck
-npx vitest run
+npx vitest run --coverage
 
 # Stronger local gate before shipping:
 npm run build
