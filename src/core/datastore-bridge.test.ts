@@ -108,13 +108,13 @@ describe('DataStoreBridge', () => {
 
     await bridge.indexRecords(
       'contacts',
-      [{ name: 'John Smith', company: 'acme-corp.com', revenue: 5000 }],
+      [{ name: 'Mr. Smith', company: 'acme-corp.com', revenue: 5000 }],
       scope,
     );
 
-    const schmidt = await graph.findEntityByCanonicalName('Smith');
-    expect(schmidt).not.toBeNull();
-    expect(schmidt!['e.entity_type']).toBe('person');
+    const smith = await graph.findEntityByCanonicalName('Smith');
+    expect(smith).not.toBeNull();
+    expect(smith!['e.entity_type']).toBe('person');
 
     const firma = await graph.findEntityByCanonicalName('acme-corp.com');
     expect(firma).not.toBeNull();
@@ -145,19 +145,19 @@ describe('DataStoreBridge', () => {
   // --- Find Related Data ---
 
   it('finds collections related to an entity', async () => {
-    const schmidt = await graph.findEntityByCanonicalName('Smith');
-    if (!schmidt) return;
+    const smith = await graph.findEntityByCanonicalName('Smith');
+    if (!smith) return;
 
-    const hints = await bridge.findRelatedData([schmidt['e.id'] as string]);
+    const hints = await bridge.findRelatedData([smith['e.id'] as string]);
     expect(hints.length).toBeGreaterThanOrEqual(1);
     expect(hints.some(h => h.collection === 'contacts')).toBe(true);
   });
 
   it('returns preview data from DataStore', async () => {
-    const schmidt = await graph.findEntityByCanonicalName('Smith');
-    if (!schmidt) return;
+    const smith = await graph.findEntityByCanonicalName('Smith');
+    if (!smith) return;
 
-    const hints = await bridge.findRelatedData([schmidt['e.id'] as string]);
+    const hints = await bridge.findRelatedData([smith['e.id'] as string]);
     const contactsHint = hints.find(h => h.collection === 'contacts');
     if (contactsHint) {
       // Preview should contain data from the mock queryRecords
