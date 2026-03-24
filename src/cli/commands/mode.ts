@@ -12,7 +12,7 @@ import { listPlaybooks, savePlaybook, exportPlaybook, importPlaybook, deletePlay
 import type { Playbook } from '../../types/index.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { listProfiles, loadProfile } from '../profiles.js';
-import { renderTable, renderError, BOLD, DIM, BLUE, GREEN, RED, MAGENTA, RESET } from '../ui.js';
+import { renderTable, renderError, BOLD, DIM, BLUE, GREEN, RESET } from '../ui.js';
 import { state, spinner } from '../cli-state.js';
 import type { CLICtx } from './types.js';
 

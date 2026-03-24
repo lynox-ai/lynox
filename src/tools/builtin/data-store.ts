@@ -1,5 +1,4 @@
-import type { ToolEntry, IAgent, DataStoreColumnDef, DataStoreSort, DataStoreMetric } from '../../types/index.js';
-import type { DataStore } from '../../core/data-store.js';
+import type { ToolEntry, DataStoreColumnDef, DataStoreSort, DataStoreMetric } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { channels } from '../../core/observability.js';

@@ -1,5 +1,4 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { randomUUID } from 'node:crypto';
 import type {
   IKnowledgeLayer,
   MemoryNamespace,
@@ -18,7 +17,6 @@ import { EntityResolver } from './entity-resolver.js';
 import { RetrievalEngine } from './retrieval-engine.js';
 import type { RetrievalOptions } from './retrieval-engine.js';
 import { extractEntities } from './entity-extractor.js';
-import type { ExtractedEntity, ExtractedRelation } from './entity-extractor.js';
 import { detectContradictions } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { channels } from './observability.js';

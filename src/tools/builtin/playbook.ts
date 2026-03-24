@@ -1,5 +1,4 @@
-import type { ToolEntry, IAgent, NodynUserConfig, Playbook, PlaybookPhase, PlaybookParameter } from '../../types/index.js';
-import type { RunHistory } from '../../core/run-history.js';
+import type { ToolEntry, IAgent, Playbook, PlaybookPhase, PlaybookParameter } from '../../types/index.js';
 import { listPlaybooks, loadPlaybook, savePlaybook } from '../../core/playbooks.js';
 import { getPipeline } from './pipeline.js';
 import { getErrorMessage } from '../../core/utils.js';

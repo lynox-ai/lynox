@@ -154,7 +154,7 @@ import { MODEL_MAP } from './types/index.js';
 import { hasApiKey } from './core/config.js';
 import { runSetupWizard } from './cli/setup-wizard.js';
 
-import { renderBanner, animateBanner, renderError, renderWarning, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from './cli/ui.js';
+import { animateBanner, renderError, renderWarning, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from './cli/ui.js';
 import { PROMPT_READY } from './cli/spinner.js';
 import { InteractiveDialog } from './cli/dialog.js';
 import { Watchdog } from './cli/watchdog.js';

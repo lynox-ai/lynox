@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 
 import type { Nodyn } from '../../core/orchestrator.js';
 import type { BatchRequest } from '../../types/index.js';
-import { renderTable, renderError, BOLD, DIM, BLUE, GREEN, RED, RESET } from '../ui.js';
+import { renderTable, BOLD, DIM, BLUE, GREEN, RED, RESET } from '../ui.js';
 import type { CLICtx } from './types.js';
 
 // /tree is an internal command dispatched from /runs tree

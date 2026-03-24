@@ -2,7 +2,7 @@
  * Extracted batch processing functions for the Nodyn orchestrator.
  * Pure functions operating on explicit parameters — no class state.
  */
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
 import type { MessageBatchIndividualResponse } from '@anthropic-ai/sdk/resources/messages/batches.js';
 import { sleep } from './utils.js';
 import type { BatchRequest, BatchResult, ModelTier } from '../types/index.js';

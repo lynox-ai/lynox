@@ -651,7 +651,6 @@ export class RunHistory {
   }
 
   searchRuns(query: string, limit = 20): RunRecord[] {
-    const pattern = `%${query}%`;
     // Search works on plaintext rows via LIKE; encrypted rows checked post-decrypt
     const rows = this.db.prepare(
       'SELECT * FROM runs ORDER BY created_at DESC LIMIT ?'

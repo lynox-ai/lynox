@@ -3,10 +3,10 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
 import { getErrorMessage } from './utils.js';
 import { writeFileAtomicSync } from './atomic-write.js';
 import type {
@@ -19,7 +19,7 @@ import type {
   DataStoreColumnDef,
 } from '../types/index.js';
 import { SCOPE_WEIGHTS } from '../types/index.js';
-import { RunHistory } from './run-history.js';
+import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
 import { SecretVault } from './secret-vault.js';
 import { SecretStore } from './secret-store.js';
@@ -575,7 +575,7 @@ export function setupMemoryStoreSubscription(
       })();
 
       activeEmbeddings.add(embedTask);
-      embedTask.finally(() => { activeEmbeddings.delete(embedTask); });
+      void embedTask.finally(() => { activeEmbeddings.delete(embedTask); });
     };
 
     void run();

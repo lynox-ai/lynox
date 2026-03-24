@@ -1,4 +1,4 @@
-import type { IMemory, MemoryScopeRef, MemoryNamespace, IKnowledgeLayer } from '../types/index.js';
+import type { IMemory, MemoryScopeRef, IKnowledgeLayer } from '../types/index.js';
 import { ALL_NAMESPACES } from '../types/index.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { cosineSimilarity, blobToEmbed } from './embedding.js';

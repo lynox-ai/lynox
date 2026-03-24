@@ -1,5 +1,4 @@
 import type { ToolEntry, IAgent, TaskPriority, MemoryScopeRef } from '../../types/index.js';
-import type { TaskManager } from '../../core/task-manager.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { logErrorChain } from '../../core/utils.js';
 
@@ -175,9 +174,6 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     if (input.due) {
       const scopes = agent.activeScopes;
       if (input.due === 'overdue') {
-        const tasks = managerRef.getOverdueCount(scopes) > 0
-          ? managerRef.getUpcomingDeadlines(scopes, 0) // won't return overdue
-          : [];
         // Use the history directly for overdue
         const overdue = managerRef.getWeekSummary(scopes).overdue;
         if (overdue.length === 0) return 'No overdue tasks.';

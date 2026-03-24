@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline, NodynUserConfig } from '../../types/index.js';
+import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
 import { storePipeline } from './pipeline.js';
 

@@ -220,7 +220,7 @@ export function getEmbeddingsFiltered(db: Database.Database, projectId: string, 
   source_run_id: string | null; last_retrieved_at: string | null; created_at: string;
 }> {
   const limit = opts?.limit ?? 500;
-  if (opts?.namespace != null) {
+  if (opts?.namespace !== undefined) {
     return db.prepare(
       'SELECT * FROM memory_embeddings WHERE (project_id = ? OR project_id = ?) AND namespace = ? ORDER BY rowid DESC LIMIT ?'
     ).all(projectId, '', opts.namespace, limit) as Array<{
@@ -252,7 +252,7 @@ export function getEmbeddingsMultiScopeFiltered(db: Database.Database, scopes: A
   const limit = opts?.limit ?? 500;
   const conditions = scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
   const params: Array<string | number> = scopes.flatMap(s => [s.type, s.id]);
-  if (opts?.namespace != null) {
+  if (opts?.namespace !== undefined) {
     return db.prepare(
       `SELECT * FROM memory_embeddings WHERE (${conditions}) AND namespace = ? ORDER BY rowid DESC LIMIT ?`
     ).all(...params, opts.namespace, limit) as Array<{

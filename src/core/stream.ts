@@ -171,14 +171,14 @@ export class StreamProcessor {
 
     // Merge delta into existing usage (preserve cache fields from message_start)
     if (existingUsage) {
-      if (deltaUsage.input_tokens != null && deltaUsage.input_tokens > 0) {
+      if (deltaUsage.input_tokens !== null && deltaUsage.input_tokens !== undefined && deltaUsage.input_tokens > 0) {
         existingUsage.input_tokens = deltaUsage.input_tokens;
       }
       existingUsage.output_tokens = deltaUsage.output_tokens;
-      if (deltaUsage.cache_creation_input_tokens != null) {
+      if (deltaUsage.cache_creation_input_tokens !== null && deltaUsage.cache_creation_input_tokens !== undefined) {
         existingUsage.cache_creation_input_tokens = deltaUsage.cache_creation_input_tokens;
       }
-      if (deltaUsage.cache_read_input_tokens != null) {
+      if (deltaUsage.cache_read_input_tokens !== null && deltaUsage.cache_read_input_tokens !== undefined) {
         existingUsage.cache_read_input_tokens = deltaUsage.cache_read_input_tokens;
       }
     }

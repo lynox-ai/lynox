@@ -9,7 +9,7 @@ import { stderr } from 'node:process';
 
 import type { StreamEvent } from '../types/index.js';
 import { CONTEXT_WINDOW } from '../types/index.js';
-import { renderToolCall, renderToolResult, renderSpawn, renderError, renderThinking, BOLD, DIM, BLUE, GRAY, GREEN, RED, YELLOW, MAGENTA, RESET } from './ui.js';
+import { renderToolCall, renderToolResult, renderSpawn, renderError, renderThinking, BOLD, DIM, BLUE, GREEN, RED, MAGENTA, RESET } from './ui.js';
 import { state, spinner, md, footer, toolsUsed } from './cli-state.js';
 
 // ── Pipeline DAG Renderer (in-place updates) ──────────────────────────
@@ -20,7 +20,7 @@ let pipelineRenderedLines = 0;
 let pipelineSpinnerIdx = 0;
 let pipelineHeartbeat: ReturnType<typeof setInterval> | null = null;
 
-export function renderPipelineBlock(stdout: NodeJS.WriteStream): string {
+export function renderPipelineBlock(_stdout: NodeJS.WriteStream): string {
   pipelineSpinnerIdx = (pipelineSpinnerIdx + 1) % BRAILLE.length;
   let out = '';
   for (const [stepId, step] of pipelineSteps) {

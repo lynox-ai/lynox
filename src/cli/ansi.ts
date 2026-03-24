@@ -26,7 +26,7 @@ export const CLEAR_LINE = '\x1b[2K';
 // Box-drawing characters for tables
 export const TBL = { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│', lm: '├', rm: '┤', tm: '┬', bm: '┴', cr: '┼' } as const;
 
-// eslint-disable-next-line no-control-regex
+ 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
 export function stripAnsi(str: string): string {

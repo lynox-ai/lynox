@@ -1,5 +1,4 @@
 import type { ToolEntry } from '../../types/index.js';
-import type { GoalTracker } from '../../core/goal-tracker.js';
 
 interface GoalUpdateInput {
   action: 'add_subtask' | 'complete_subtask' | 'goal_complete' | 'goal_failed';

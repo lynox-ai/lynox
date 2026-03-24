@@ -24,7 +24,7 @@ import {
 import type { PendingTool, FollowUpSuggestion } from './telegram-formatter.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { chatSessions, runQueue } from './telegram-session.js';
-import { t, detectLang, type Lang } from './telegram-i18n.js';
+import { t, type Lang } from './telegram-i18n.js';
 
 // Re-declare Nodyn as the orchestrator class with the methods we need
 interface NodynInstance {

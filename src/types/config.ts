@@ -5,7 +5,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 import type { ModelTier, ThinkingMode, EffortLevel } from './models.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
 import type { TabQuestion } from './agent.js';
-import type { IMemory, MemoryScopeRef, NodynContext, MemoryNamespace } from './memory.js';
+import type { IMemory, MemoryScopeRef, NodynContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, ModeConfig, CostGuardConfig } from './modes.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';

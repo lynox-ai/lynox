@@ -74,7 +74,7 @@ async function executeThinker(
   if (spec.model && resolved) {
     const warning = warnModelMismatch(resolved, spec.model);
     if (warning) {
-      parentOnStream?.({ type: 'error', message: `[warning] ${warning}`, agent: parentAgent.name });
+      void parentOnStream?.({ type: 'error', message: `[warning] ${warning}`, agent: parentAgent.name });
     }
   }
 

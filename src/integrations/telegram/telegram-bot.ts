@@ -157,7 +157,7 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
     if (isNew && typeof task === 'string') {
       finalTask = `[First interaction with this user. Be warm and welcoming. Ask about their business if relevant. Respond in the user's language.]\n\n${task}`;
     }
-    executeRun(bot!, nodyn, chatId, finalTask, lang).finally(() => {
+    void executeRun(bot!, nodyn, chatId, finalTask, lang).finally(() => {
       rateLimiter.release(userId);
     });
   }
@@ -410,7 +410,7 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
         }
         ack('Starting…');
         const cbLang = detectLang(ctx.from?.language_code);
-        executeRun(bot!, nodyn, chatId, followUpTask, cbLang).finally(() => {
+        void executeRun(bot!, nodyn, chatId, followUpTask, cbLang).finally(() => {
           rateLimiter.release(String(chatId));
         });
         break;

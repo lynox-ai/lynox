@@ -163,7 +163,7 @@ export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx)
         return true;
       }
       steps = [];
-      // eslint-disable-next-line no-constant-condition
+       
       while (true) {
         const step = await ctx.cliPrompt(`Step ${steps.length + 1} (empty to run):`);
         if (!step) break;
@@ -252,7 +252,7 @@ export async function handleChain(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     }
     // Interactive: collect steps one by one
     steps = [];
-    // eslint-disable-next-line no-constant-condition
+     
     while (true) {
       const step = await ctx.cliPrompt(`Step ${steps.length + 1} (empty to run):`);
       if (!step) break;

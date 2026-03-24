@@ -134,7 +134,6 @@ export function markdownToHtml(markdown: string): string {
   let inList: 'ul' | 'ol' | null = null;
   let inBlockquote = false;
   let inTable = false;
-  let tableStarted = false;
 
   const closeList = () => {
     if (inList) { html.push(`</${inList}>`); inList = null; }
@@ -146,7 +145,6 @@ export function markdownToHtml(markdown: string): string {
     if (inTable) {
       html.push('</tbody></table>');
       inTable = false;
-      tableStarted = false;
     }
   };
 

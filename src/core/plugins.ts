@@ -75,7 +75,7 @@ export class PluginManager {
     if (enabledNames.length === 0) return;
 
     // Strip secrets before passing config to plugins
-    const { api_key, api_base_url, ...safeConfig } = this.config;
+    const { api_key: _api_key, api_base_url: _api_base_url, ...safeConfig } = this.config;
     const ctx: PluginContext = {
       projectDir: process.cwd(),
       config: safeConfig as NodynUserConfig,

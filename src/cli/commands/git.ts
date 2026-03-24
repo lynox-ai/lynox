@@ -6,7 +6,7 @@ import { stderr } from 'node:process';
 
 import type { Nodyn } from '../../core/orchestrator.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { renderError, BOLD, DIM, BLUE, GREEN, YELLOW, RESET } from '../ui.js';
+import { renderError, BOLD, DIM, YELLOW, RESET } from '../ui.js';
 import { spinner } from '../cli-state.js';
 import { gitExec } from '../cli-helpers.js';
 import type { CLICtx } from './types.js';
@@ -50,7 +50,7 @@ export async function handleGit(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Pr
   return true;
 }
 
-export async function handlePr(_parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handlePr(_parts: string[], nodyn: Nodyn, _ctx: CLICtx): Promise<boolean> {
   const diff = gitExec('diff main...HEAD --stat');
   const log = gitExec('log main...HEAD --oneline');
   const prompt = `Generate a concise PR description for these changes:\n\nCommits:\n${log}\n\nDiff summary:\n${diff}`;

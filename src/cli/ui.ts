@@ -1,15 +1,7 @@
-import { RESET, BOLD, DIM, RED, GREEN, MAGENTA, BLUE, GRAY, YELLOW, stripAnsi, wordWrap, TBL } from './ansi.js';
+import { RESET, BOLD, DIM, RED, GREEN, MAGENTA, BLUE, GRAY, YELLOW, stripAnsi, TBL } from './ansi.js';
 export { RESET, BOLD, DIM, RED, GREEN, MAGENTA, BLUE, GRAY, YELLOW };
 import { sleep } from '../core/utils.js';
 import { TOOL_DISPLAY_NAMES } from '../types/index.js';
-
-const BOX = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
-
-function boxLine(content: string, width: number): string {
-  const visible = stripAnsi(content);
-  const pad = Math.max(0, width - visible.length);
-  return `${GRAY}${BOX.v}${RESET} ${content}${' '.repeat(pad)} ${GRAY}${BOX.v}${RESET}\n`;
-}
 
 // Bot icon with brand gradient (8 lines tall)
 const ASCII_NODYN = [

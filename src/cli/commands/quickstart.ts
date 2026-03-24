@@ -5,7 +5,7 @@
 
 import type { Nodyn } from '../../core/orchestrator.js';
 import { BOLD, DIM, BLUE, GREEN, RESET } from '../ui.js';
-import { state, spinner } from '../cli-state.js';
+import { spinner } from '../cli-state.js';
 import type { CLICtx } from './types.js';
 
 const QUICKSTART_TASKS = [

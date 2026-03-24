@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { MODEL_MAP, NODYN_BETAS } from '../types/index.js';
-import type { ProcessRecord, ProcessStep, ProcessParameter, NodynUserConfig } from '../types/index.js';
+import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
 
 /** Tools that are internal bookkeeping — excluded from process capture */

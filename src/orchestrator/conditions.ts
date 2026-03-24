@@ -32,7 +32,7 @@ export function evaluateCondition(ctx: Record<string, unknown>, cond: ManifestCo
     case 'neq':
       return actual !== cond.value;
     case 'contains':
-      return actual != null && String(actual).includes(String(cond.value));
+      return actual !== null && actual !== undefined && String(actual).includes(String(cond.value));
     case 'lt': {
       const n = Number(actual);
       const v = Number(cond.value);

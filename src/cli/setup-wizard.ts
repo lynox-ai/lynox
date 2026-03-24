@@ -1,33 +1,18 @@
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline/promises';
 import { randomBytes } from 'node:crypto';
-import { readFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, appendFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { stdin, stdout } from 'node:process';
 import { saveUserConfig, getNodynDir, ensureNodynDir, reloadConfig } from '../core/config.js';
 import { writeFileAtomicSync } from '../core/atomic-write.js';
 import type { NodynUserConfig, ModelTier } from '../types/index.js';
-import { BOLD, DIM, BLUE, GREEN, RED, YELLOW, RESET } from './ansi.js';
+import { BOLD, DIM, GREEN, RED, YELLOW, RESET } from './ansi.js';
 import { confirm, multiSelect } from './interactive.js';
 import { renderGradientArt } from './ui.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { hasBusinessProfile, runBusinessOnboarding } from './onboarding.js';
 import { getErrorMessage } from '../core/utils.js';
-
-// ---------------------------------------------------------------------------
-// Progress bar
-// ---------------------------------------------------------------------------
-
-function progressBar(current: number, total: number): string {
-  const width = 24;
-  const filled = Math.round((current / total) * width);
-  const empty = width - filled;
-  return `${DIM}${'█'.repeat(filled)}${'░'.repeat(empty)}${RESET}`;
-}
-
-function step(n: number, total: number, label: string): void {
-  stdout.write(`\n${progressBar(n, total)}  ${BLUE}[${n}/${total}]${RESET} ${BOLD}${label}${RESET}\n`);
-}
 
 // ---------------------------------------------------------------------------
 // Prerequisites check

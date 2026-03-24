@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 
 import type { Nodyn } from '../../core/orchestrator.js';
 import { MODEL_MAP } from '../../types/index.js';
-import { renderTable, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from '../ui.js';
+import { BOLD, DIM, BLUE, GREEN, RED, YELLOW, RESET } from '../ui.js';
 import { state } from '../cli-state.js';
 import type { CLICtx } from './types.js';
 
@@ -117,7 +117,7 @@ export async function handleConfig(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
   // Interactive loop
   const { readUserConfig: readCfg, saveUserConfig: saveCfg, reloadConfig } = await import('../../core/config.js');
 
-  // eslint-disable-next-line no-constant-condition
+   
   while (true) {
     const cfg = nodyn.getUserConfig();
     const settingsOptions = settings.map(s => {

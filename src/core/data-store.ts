@@ -8,7 +8,6 @@ import type {
   DataStoreColumnDef,
   DataStoreCollectionInfo,
   DataStoreAggFn,
-  DataStoreMetric,
   DataStoreAggregation,
   DataStoreSort,
   MemoryScopeRef,

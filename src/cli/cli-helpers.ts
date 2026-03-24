@@ -5,7 +5,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync, appendFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { stdout } from 'node:process';
 

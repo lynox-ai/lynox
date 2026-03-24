@@ -1,7 +1,6 @@
 import type {
   MemoryScopeRef,
   DataStoreColumnDef,
-  EntityRecord,
 } from '../types/index.js';
 import type { KuzuGraph } from './knowledge-graph.js';
 import type { EntityResolver } from './entity-resolver.js';

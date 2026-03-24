@@ -11,7 +11,7 @@ import type { KuzuGraph } from './knowledge-graph.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { cosineSimilarity } from './embedding.js';
 import { extractEntitiesRegex } from './entity-extractor.js';
-import { EntityResolver } from './entity-resolver.js';
+import type { EntityResolver } from './entity-resolver.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import type { LbugValue } from '@ladybugdb/core';
 import { escapeXml } from './data-boundary.js';
@@ -26,7 +26,6 @@ const DEFAULT_MAX_KNOWLEDGE_CONTEXT_CHARS = 12_000;
 
 /** Weight allocation for multi-signal scoring. */
 const VECTOR_WEIGHT = 0.55;
-const FTS_WEIGHT = 0.30;
 const GRAPH_BOOST = 0.15;
 
 export interface RetrievalOptions {

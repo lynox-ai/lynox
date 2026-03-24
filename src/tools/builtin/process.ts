@@ -1,5 +1,4 @@
-import type { ToolEntry, IAgent, NodynUserConfig, ProcessRecord, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
-import type { RunHistory } from '../../core/run-history.js';
+import type { ToolEntry, IAgent, ProcessRecord, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { captureProcess } from '../../core/process-capture.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import { storePipeline } from './pipeline.js';

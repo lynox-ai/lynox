@@ -1,4 +1,4 @@
-import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef, IKnowledgeLayer } from '../../types/index.js';
+import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../types/index.js';
 import { ALL_NAMESPACES } from '../../types/index.js';
 import { channels } from '../../core/observability.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific } from '../../core/scope-resolver.js';

@@ -8,7 +8,7 @@ import { stderr } from 'node:process';
 import type { Nodyn } from '../../core/orchestrator.js';
 import { writeFileAtomicSync } from '../../core/atomic-write.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { renderError, GREEN, DIM, BOLD, RESET } from '../ui.js';
+import { renderError, GREEN, DIM, RESET } from '../ui.js';
 import { state, spinner } from '../cli-state.js';
 import { saveSession, loadSessionFile, loadHistory as loadHistoryFile } from '../cli-helpers.js';
 import { HELP_TEXT_BASICS, HELP_TEXT_FULL } from '../help-text.js';

@@ -26,7 +26,7 @@ import { MODEL_MAP } from '../types/index.js';
 import { ModeController } from './mode-controller.js';
 import type { ModeOrchestrator } from './mode-controller.js';
 import { Agent } from './agent.js';
-import { Memory } from './memory.js';
+import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { loadConfig, getNodynDir } from './config.js';

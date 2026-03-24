@@ -3,7 +3,7 @@
 // Falls back to readline for non-TTY (tests, piped input).
 
 import { stdin, stdout } from 'node:process';
-import { BOLD, DIM, BLUE, GREEN, YELLOW, RESET } from './ansi.js';
+import { BOLD, DIM, BLUE, GREEN, RESET } from './ansi.js';
 
 export interface SelectOption<T> {
   label: string;
