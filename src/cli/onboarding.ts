@@ -68,7 +68,7 @@ export async function runBusinessOnboarding(rl?: ReadlineInterface): Promise<boo
 
   try {
     stdout.write(`\n${DIM}── Business Profile ──────────────────────────────────────${RESET}\n\n`);
-    stdout.write('NODYN works better when it knows your business.\n');
+    stdout.write('nodyn works better when it knows your business.\n');
     stdout.write(`${DIM}Answer a few quick questions — or press Enter to skip any.${RESET}\n\n`);
 
     const answers: Record<string, string> = {};
@@ -101,7 +101,7 @@ export async function runBusinessOnboarding(rl?: ReadlineInterface): Promise<boo
     // Write to facts memory file
     await saveProfile(profileText);
 
-    stdout.write(`${GREEN}✓${RESET} Business profile saved. NODYN will remember this across sessions.\n\n`);
+    stdout.write(`${GREEN}✓${RESET} Business profile saved. nodyn will remember this across sessions.\n\n`);
     return true;
   } finally {
     if (ownRl) {

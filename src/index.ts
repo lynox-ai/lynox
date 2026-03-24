@@ -997,6 +997,8 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     if (isFirstSession) {
       // First session: natural onboarding conversation — agent asks about the business.
       // Uses configured model with memory extraction so answers are remembered.
+      // Ensure thinking is adaptive (wizard doesn't set it, default may be disabled).
+      nodyn.setThinking({ type: 'adaptive' });
       const allToolNames = nodyn.getRegistry().getEntries().map(e => e.definition.name);
       const memoryTools = ['memory_store', 'memory_recall'];
       const excludeTools = allToolNames.filter(n => !memoryTools.includes(n));
@@ -1007,6 +1009,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
         );
         await Promise.race([nodyn.run(
           'This is the user\'s very first session. Welcome them warmly in 3-4 sentences. ' +
+          'Refer to yourself as "nodyn" (lowercase). ' +
           'Then ask 1-2 natural questions to learn about their business — what they do, ' +
           'what tools they use, or what they need help with. Be conversational, not like a form. ' +
           'End with an open question so they feel invited to respond. ' +
