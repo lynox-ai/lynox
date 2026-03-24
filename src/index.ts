@@ -980,60 +980,85 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
   });
 
   // === Initial greeting — nodyn introduces itself proactively ===
-  // Optimized: pre-load task/memory context into the prompt so Claude doesn't need tool calls.
-  // This reduces greeting from 2-3 API calls to exactly 1. maxIterations:1 as safety net.
   const userCfg = nodyn.getUserConfig();
   let greetingShown = false;
   if (stdin.isTTY && userCfg.greeting !== false) {
+    const { hasBusinessProfile } = await import('./cli/onboarding.js');
+    const isFirstSession = !(await hasBusinessProfile());
+
     let greetingText = '';
-    // Quiet stream handler — spinner + collect text, no tool/thinking verbose output
     spinner.start('...');
     nodyn.onStream = (event: StreamEvent) => {
       if (event.type === 'text') {
         greetingText += event.text;
       }
     };
-    // Pre-load task overview and memory context (avoids tool calls during greeting)
-    const taskBriefing = nodyn.getTaskManager()?.getBriefingSummary(nodyn.getActiveScopes()) ?? '';
-    const memoryContent = nodyn.getAgent()?.memory?.render() ?? '';
-    const greetingContext = [taskBriefing, memoryContent].filter(Boolean).join('\n\n');
-    const greetingPrompt = greetingContext
-      ? `Context:\n${greetingContext}\n\nGreet the user in 1-2 short sentences. Mention the project name and any useful context from above. Do NOT describe what you are doing, do NOT report bugs or issues, do NOT give advice — just a friendly, brief welcome. No feature lists, no tool narration.`
-      : 'Greet the user in 1-2 short sentences. Be brief and friendly. No feature lists, no tool narration.';
-    // Use Haiku for greeting — cheap, fast, sufficient for 2-4 sentences
-    const savedTier = nodyn.getModelTier();
-    const savedThinking = nodyn.getThinking();
-    nodyn.setModel('haiku');
-    nodyn.setThinking({ type: 'disabled' });
-    nodyn.setSkipMemoryExtraction(true);
-    // Exclude ALL tools — greeting is pure text generation, no tool calls
-    const allToolNames = nodyn.getRegistry().getEntries().map(e => e.definition.name);
-    nodyn._recreateAgent({ maxIterations: 1, excludeTools: allToolNames });
-    try {
-      const greetingTimeout = new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error('Greeting timed out')), 15_000),
-      );
-      await Promise.race([nodyn.run(greetingPrompt), greetingTimeout]);
-    } catch (err: unknown) {
-      const msg = getErrorMessage(err);
-      const isApiError = msg.includes('authentication') || msg.includes('invalid x-api-key')
-        || msg.includes('API key') || msg.includes('401')
-        || msg.includes('credit balance') || msg.includes('billing');
-      if (isApiError) {
-        stderr.write(renderWarning(`API error: ${msg}`));
+
+    if (isFirstSession) {
+      // First session: natural onboarding conversation — agent asks about the business.
+      // Uses configured model with memory extraction so answers are remembered.
+      const allToolNames = nodyn.getRegistry().getEntries().map(e => e.definition.name);
+      const memoryTools = ['memory_store', 'memory_recall'];
+      const excludeTools = allToolNames.filter(n => !memoryTools.includes(n));
+      nodyn._recreateAgent({ maxIterations: 2, excludeTools });
+      try {
+        const timeout = new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error('Greeting timed out')), 30_000),
+        );
+        await Promise.race([nodyn.run(
+          'This is the user\'s very first session. Welcome them warmly in 3-4 sentences. ' +
+          'Then ask 1-2 natural questions to learn about their business — what they do, ' +
+          'what tools they use, or what they need help with. Be conversational, not like a form. ' +
+          'End with an open question so they feel invited to respond. ' +
+          'Write in the user\'s language (detect from system locale or default to English).',
+        ), timeout]);
+      } catch (err: unknown) {
+        const msg = getErrorMessage(err);
+        const isApiError = msg.includes('authentication') || msg.includes('invalid x-api-key')
+          || msg.includes('API key') || msg.includes('401')
+          || msg.includes('credit balance') || msg.includes('billing');
+        if (isApiError) {
+          stderr.write(renderWarning(`API error: ${msg}`));
+        }
       }
-      // Transient errors (network, rate-limit, timeout) are silently skipped — greeting is best-effort
+      nodyn._recreateAgent();
+    } else {
+      // Returning user: quick greeting via Haiku (cheap, fast, no tools)
+      const taskBriefing = nodyn.getTaskManager()?.getBriefingSummary(nodyn.getActiveScopes()) ?? '';
+      const memoryContent = nodyn.getAgent()?.memory?.render() ?? '';
+      const greetingContext = [taskBriefing, memoryContent].filter(Boolean).join('\n\n');
+      const greetingPrompt = greetingContext
+        ? `Context:\n${greetingContext}\n\nGreet the user in 1-2 short sentences. Mention the project name and any useful context from above. Do NOT describe what you are doing, do NOT report bugs or issues, do NOT give advice — just a friendly, brief welcome. No feature lists, no tool narration.`
+        : 'Greet the user in 1-2 short sentences. Be brief and friendly. No feature lists, no tool narration.';
+      const savedTier = nodyn.getModelTier();
+      const savedThinking = nodyn.getThinking();
+      nodyn.setModel('haiku');
+      nodyn.setThinking({ type: 'disabled' });
+      nodyn.setSkipMemoryExtraction(true);
+      const allToolNames = nodyn.getRegistry().getEntries().map(e => e.definition.name);
+      nodyn._recreateAgent({ maxIterations: 1, excludeTools: allToolNames });
+      try {
+        const timeout = new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error('Greeting timed out')), 15_000),
+        );
+        await Promise.race([nodyn.run(greetingPrompt), timeout]);
+      } catch (err: unknown) {
+        const msg = getErrorMessage(err);
+        const isApiError = msg.includes('authentication') || msg.includes('invalid x-api-key')
+          || msg.includes('API key') || msg.includes('401')
+          || msg.includes('credit balance') || msg.includes('billing');
+        if (isApiError) {
+          stderr.write(renderWarning(`API error: ${msg}`));
+        }
+      }
+      nodyn.setSkipMemoryExtraction(false);
+      nodyn.setModel(savedTier);
+      nodyn.setThinking(savedThinking ?? { type: 'adaptive' });
+      nodyn._recreateAgent();
     }
-    // Restore model, thinking, agent config, and stream handler
-    // Use setModel/setThinking (each recreates agent internally), then
-    // one final _recreateAgent() to clear the maxIterations override.
-    nodyn.setSkipMemoryExtraction(false);
-    nodyn.setModel(savedTier);
-    nodyn.setThinking(savedThinking ?? { type: 'adaptive' });
-    nodyn._recreateAgent();
+
     spinner.stop();
     nodyn.onStream = streamHandler;
-    // Render greeting output cleanly
     if (greetingText.trim()) {
       stdout.write(`👾 `);
       stdout.write(md.push(greetingText));

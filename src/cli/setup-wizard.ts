@@ -11,7 +11,7 @@ import { BOLD, DIM, GREEN, RED, YELLOW, RESET } from './ansi.js';
 import { confirm, multiSelect } from './interactive.js';
 import { renderGradientArt } from './ui.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { hasBusinessProfile, runBusinessOnboarding } from './onboarding.js';
+import { hasBusinessProfile } from './onboarding.js';
 import { getErrorMessage } from '../core/utils.js';
 
 // ---------------------------------------------------------------------------
@@ -94,7 +94,8 @@ async function offerShellProfileInjection(rl: ReadlineInterface): Promise<void> 
   const profileName = basename(profilePath);
   const isFish = profilePath.includes('fish');
 
-  const wantInject = await confirm(`Add to ~/${profileName} (auto-load on shell start)?`, true, rl);
+  // TTY: raw mode (single keypress Y/n). Non-TTY: readline fallback.
+  const wantInject = await confirm(`Add to ~/${profileName} (auto-load on shell start)?`, true, stdin.isTTY ? undefined : rl);
   if (!wantInject) {
     stdout.write(`  ${DIM}Manual: add to your shell profile:${RESET}\n`);
     stdout.write(`  ${BOLD}${SHELL_PROFILE_SOURCE}${RESET}\n`);
@@ -241,11 +242,15 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<NodynUserC
       writeFileAtomicSync(envPath, `NODYN_VAULT_KEY=${vaultKey}\n`);
       process.env['NODYN_VAULT_KEY'] = vaultKey;
       stdout.write(`  ${GREEN}✓${RESET} Encryption enabled.\n`);
+
+      // Close readline before raw-mode prompts (confirm, multiSelect use stdin raw mode)
+      if (stdin.isTTY) rl.close();
       await offerShellProfileInjection(rl);
     } catch {
       process.env['NODYN_VAULT_KEY'] = vaultKey;
       stdout.write(`  ${GREEN}✓${RESET} Encryption enabled. Add to your shell profile:\n`);
       stdout.write(`  ${BOLD}export NODYN_VAULT_KEY='${vaultKey}'${RESET}\n`);
+      if (stdin.isTTY) rl.close();
     }
 
     const tier: ModelTier = 'sonnet';
@@ -258,11 +263,16 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<NodynUserC
       { label: 'Google Workspace', value: 'google',    hint: 'Gmail, Sheets, Calendar' },
       { label: 'Telegram',         value: 'telegram',  hint: 'use nodyn from your phone' },
       { label: 'Web Research',     value: 'websearch', hint: 'live research via Tavily' },
-    ], { rl });
+    ], stdin.isTTY ? undefined : { rl });
 
     const wantGoogle = selected.includes('google');
     const wantTelegram = selected.includes('telegram');
     const wantSearch = selected.includes('websearch');
+
+    // Re-open readline for credential text input
+    if (stdin.isTTY && (wantGoogle || wantTelegram || wantSearch)) {
+      rl = createInterface({ input: stdin, output: stdout, terminal: true });
+    }
 
     // ── Collect credentials for selected integrations ───────────
     let googleClientId = '';
@@ -346,11 +356,6 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<NodynUserC
       stdout.write(`${DIM}  Add integrations anytime: /google, /telegram, /config${RESET}\n`);
     }
     stdout.write('\n');
-
-    // Business onboarding
-    if (!(await hasBusinessProfile())) {
-      await runBusinessOnboarding(rl);
-    }
 
     return config;
   } finally {
