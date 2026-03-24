@@ -121,7 +121,7 @@ export async function handleTask(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
       });
       const assignLabel = task.assignee ? ` @${task.assignee}` : '';
       ctx.stdout.write(`${GREEN}Task created: ${task.id} — ${task.title}${assignLabel}${RESET}\n`);
-    } catch (e) {
+    } catch (e: unknown) {
       ctx.stdout.write(`${RED}Error: ${e instanceof Error ? e.message : String(e)}${RESET}\n`);
     }
     return true;

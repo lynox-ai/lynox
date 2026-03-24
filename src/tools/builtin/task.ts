@@ -95,7 +95,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         parentTaskId: input.parent_task_id,
       });
       return `Task created: ${formatTaskLine(task)}`;
-    } catch (e) {
+    } catch (e: unknown) {
       logErrorChain('task_create', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -144,7 +144,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       });
       if (!task) return `Task not found: ${input.task_id}`;
       return `Task updated: ${formatTaskLine(task)}`;
-    } catch (e) {
+    } catch (e: unknown) {
       logErrorChain('task_update', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
     }

@@ -88,7 +88,7 @@ export async function handleGoogle(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
       ctx.stdout.write(`${GREEN}${BOLD}Google account connected.${RESET}\n`);
       const info = googleAuth.getAccountInfo();
       ctx.stdout.write(`${DIM}Scopes: ${info.scopes.length}${RESET}\n`);
-    } catch (e) {
+    } catch (e: unknown) {
       ctx.stdout.write(`${RED}Auth failed: ${getErrorMessage(e)}${RESET}\n`);
     }
   } else if (googleSub === 'status') {
@@ -138,7 +138,7 @@ export async function handleVault(parts: string[], _nodyn: Nodyn, ctx: CLICtx): 
         const vault = new SecretVault();
         ctx.stdout.write(`  Secrets stored: ${vault.size}\n`);
         vault.close();
-      } catch (e) {
+      } catch (e: unknown) {
         ctx.stdout.write(`  ${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
       }
     }
@@ -155,7 +155,7 @@ export async function handleVault(parts: string[], _nodyn: Nodyn, ctx: CLICtx): 
         }
       }
       vault.close();
-    } catch (e) {
+    } catch (e: unknown) {
       ctx.stdout.write(`${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
     }
   } else if (vaultSub === 'set') {
@@ -170,7 +170,7 @@ export async function handleVault(parts: string[], _nodyn: Nodyn, ctx: CLICtx): 
         vault.set(name, value, scope);
         ctx.stdout.write(`${GREEN}Secret '${name}' stored in vault.${RESET}\n`);
         vault.close();
-      } catch (e) {
+      } catch (e: unknown) {
         ctx.stdout.write(`${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
       }
     }
@@ -184,7 +184,7 @@ export async function handleVault(parts: string[], _nodyn: Nodyn, ctx: CLICtx): 
         const deleted = vault.delete(name);
         ctx.stdout.write(deleted ? `${GREEN}Secret '${name}' deleted.${RESET}\n` : `${DIM}Secret '${name}' not found.${RESET}\n`);
         vault.close();
-      } catch (e) {
+      } catch (e: unknown) {
         ctx.stdout.write(`${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
       }
     }
@@ -196,7 +196,7 @@ export async function handleVault(parts: string[], _nodyn: Nodyn, ctx: CLICtx): 
         ? `${GREEN}Migrated ${count} secret(s) to vault. secrets.json renamed to .bak.${RESET}\n`
         : `${DIM}Nothing to migrate.${RESET}\n`);
       vault.close();
-    } catch (e) {
+    } catch (e: unknown) {
       ctx.stdout.write(`${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
     }
   } else if (vaultSub === 'rotate') {
@@ -251,7 +251,7 @@ export async function handleVault(parts: string[], _nodyn: Nodyn, ctx: CLICtx): 
       ctx.stdout.write(`  History rows re-encrypted: ${historyCount}\n`);
       ctx.stdout.write(`  ${DIM}New key saved to ~/.nodyn/.env${RESET}\n`);
       ctx.stdout.write(`  ${YELLOW}⚠${RESET} Restart your shell to load the new key.\n`);
-    } catch (e) {
+    } catch (e: unknown) {
       spinner.stop();
       ctx.stdout.write(`${RED}Rotation failed: ${getErrorMessage(e)}${RESET}\n`);
       ctx.stdout.write(`${DIM}Your original key is unchanged. No data was lost.${RESET}\n`);
@@ -292,7 +292,7 @@ export async function handleSecret(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
         const scope = (parts[4] ?? 'any') as import('../../types/index.js').SecretScope;
         store.set(name, value, scope);
         ctx.stdout.write(`${GREEN}Secret '${name}' stored.${RESET}\n`);
-      } catch (e) {
+      } catch (e: unknown) {
         ctx.stdout.write(`${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
       }
     }
@@ -313,7 +313,7 @@ export async function handleSecret(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
         const vault = new SecretVault();
         ctx.stdout.write(`  Secrets stored: ${vault.size}\n`);
         vault.close();
-      } catch (e) {
+      } catch (e: unknown) {
         ctx.stdout.write(`  ${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
       }
     }
@@ -325,7 +325,7 @@ export async function handleSecret(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
         ? `${GREEN}Migrated ${count} secret(s) to vault. secrets.json renamed to .bak.${RESET}\n`
         : `${DIM}Nothing to migrate.${RESET}\n`);
       vault.close();
-    } catch (e) {
+    } catch (e: unknown) {
       ctx.stdout.write(`${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
     }
   } else {

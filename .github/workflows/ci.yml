@@ -24,7 +24,9 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=moderate
       - run: npm run typecheck
-      - run: npx vitest run
+      - run: npx vitest run --coverage
+      - name: Check coverage threshold
+        run: node --input-type=module -e "import{readFileSync}from'node:fs';const r=JSON.parse(readFileSync('./coverage/coverage-summary.json','utf8')).total;const p=r.lines.pct;console.log('Line coverage '+p+'%');if(p<80)process.exit(1)"
 
   docker-scan:
     runs-on: ubuntu-latest

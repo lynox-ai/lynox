@@ -15,8 +15,6 @@ npx @nodyn-ai/core
 
 Needs [Node.js 22+](https://nodejs.org) and an [Anthropic API key](https://console.anthropic.com/). The setup wizard handles everything else — encryption, integrations, business profile — then drops you straight into the REPL.
 
-<!-- TODO: terminal recording of setup wizard + first REPL interaction -->
-
 ## What can it do?
 
 ```
@@ -87,6 +85,8 @@ curl -fsSL https://nodyn.dev/install.sh | sh
 ```bash
 npx @nodyn-ai/core
 ```
+
+> **Note:** `better-sqlite3` requires C++ build tools. macOS: `xcode-select --install`. Ubuntu/Debian: `sudo apt-get install build-essential python3`. Windows: [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/).
 
 ### Clone & run
 
