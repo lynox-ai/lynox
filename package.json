@@ -44,6 +44,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "bench": "vitest bench --config vitest.bench.config.ts",
+    "bench:online": "vitest bench --config vitest.bench.config.ts tests/performance/online/",
     "smoke:manual": "bash scripts/smoke-manual.sh",
     "test:watch": "vitest",
     "prepare": "lefthook install || true",

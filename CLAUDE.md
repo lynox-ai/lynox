@@ -18,8 +18,10 @@ npm run build       # tsc → dist/
 npm run dev         # node --env-file=.env --watch --import tsx src/index.ts
 npm run start       # node dist/index.js
 npm run smoke:manual # offline smoke: typecheck + build + vitest + debug subscriber + MCP health/auth/client flow
-npx vitest run          # full suite (107 files / ~2545 tests)
+npx vitest run          # full suite (113 files / ~2610 tests)
 npx vitest run <file>   # single file
+pnpm bench              # offline performance benchmarks (no API key needed)
+pnpm bench:online       # online benchmarks (requires API key, ~$0.02)
 ```
 
 ## Architecture
@@ -340,10 +342,10 @@ Session counters (cost, HTTP requests, write bytes) reset on process restart. Ex
 
 ## Testing
 
-**108 test files / ~2570 tests** (offline) + **5 online test files / 22 tests** (real API). Framework: Vitest (`pool: 'forks'`, `testTimeout: 10_000`). Co-located `*.test.ts` beside source files. Integration tests in `tests/integration/`. Performance baselines in `tests/performance/`.
+**113 test files / ~2610 tests** (offline) + **5 online test files / 22 tests** (real API). Framework: Vitest (`pool: 'forks'`, `testTimeout: 10_000`). Co-located `*.test.ts` beside source files. Integration tests in `tests/integration/`. Performance benchmarks in `tests/performance/`.
 
 ```bash
-npx vitest run                    # full offline suite (108 files / ~2570 tests)
+npx vitest run                    # full offline suite (113 files / ~2610 tests)
 npx vitest run tests/online/      # online tests with real Haiku API (~$0.02, ~35s)
 NODYN_DEBUG=1 npx vitest run      # with debug output
 ```
@@ -372,6 +374,37 @@ End-to-end tests that make real LLM API calls via Haiku (~$0.001/call). **Not in
 | `memory-extraction.test.ts` | 4 | Fact extraction, short-skip, Q&A-skip, concurrent safety |
 
 Shared setup in `tests/online/setup.ts`: `getApiKey()`, `hasApiKey()`, `createTmpDir()`, `HAIKU` constant.
+
+### Performance Benchmarks (`tests/performance/`)
+
+Vitest bench-based performance benchmarks. Config in `vitest.bench.config.ts`. JSON output to `tests/performance/results.json` (gitignored).
+
+```bash
+pnpm bench              # all offline benchmarks (~30s, no API key)
+pnpm bench:online       # online benchmarks (requires API key, ~$0.02)
+```
+
+**Offline benchmarks** (7 files):
+
+| File | What it measures |
+|------|-----------------|
+| `embedding.bench.ts` | ONNX cold/warm start, cosine similarity, blob serialization |
+| `data-store.bench.ts` | SQLite collection CRUD, insert (single/batch), query with filters/sort/aggregation |
+| `entity-extractor.bench.ts` | Regex tier entity extraction throughput |
+| `security.bench.ts` | Injection detection, write scanning, tool result scanning, data wrapping |
+| `memory.bench.ts` | Flat-file save/load/append/delete/render |
+| `knowledge-graph.bench.ts` | LadybugDB init, entity/memory creation, Cypher queries |
+| `history-truncation.bench.ts` | Message history truncation at various sizes and context pressures |
+
+**Online benchmarks** (3 files in `online/`):
+
+| File | What it measures | Cost |
+|------|-----------------|------|
+| `agent-loop.bench.ts` | Agent send() round-trip, streaming, multi-turn, tool dispatch | ~$0.005 |
+| `retrieval-pipeline.bench.ts` | Full retrieval: embed → vector → graph → MMR, with/without HyDE | ~$0.01 |
+| `dag-planner.bench.ts` | Haiku DAG decomposition for simple/medium/complex goals | ~$0.005 |
+
+Shared setup in `tests/performance/setup.ts`: `createBenchDir()`, `generateText()`, `generateEntityText()`.
 
 ## Git Hooks & CI Security
 

@@ -13,6 +13,8 @@ dist/
 secrets.json
 cliproxyapi
 coverage/
+tests/performance/results.json
+tests/performance/*.log
 *.debug.log
 .playwright-mcp/
 .wrangler/

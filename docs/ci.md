@@ -66,6 +66,17 @@ NODYN_DEBUG=1 npx vitest run tests/online/  # with debug output
 
 Transient Anthropic 500/529 errors are caught and logged, not reported as test failures. Shared setup in `tests/online/setup.ts`.
 
+## Performance Benchmarks (`tests/performance/`)
+
+Vitest bench-based performance benchmarks. See [benchmarks.md](benchmarks.md) for full documentation.
+
+```bash
+pnpm bench              # offline benchmarks (~30s, no API key)
+pnpm bench:online       # online benchmarks (requires API key, ~$0.02)
+```
+
+7 offline benchmark files (embedding, data-store, entity-extractor, security, memory, knowledge-graph, history-truncation) + 3 online files (agent-loop, retrieval-pipeline, dag-planner). Results saved to `tests/performance/results.json` (gitignored). Baselines committed in `tests/performance/baselines/`.
+
 ## Local Equivalent
 
 ```bash
@@ -77,12 +88,16 @@ npx vitest run
 # Stronger local gate before shipping:
 npm run build
 npm run smoke:manual
+pnpm bench
 
 # Optional online smoke:
 ANTHROPIC_API_KEY=... NODYN_SMOKE_ONLINE=1 npm run smoke:manual
 
 # Online integration tests (real Haiku API, ~$0.02):
 npx vitest run tests/online/
+
+# Performance benchmarks (online, ~$0.02):
+pnpm bench:online
 
 # Build Docker image locally:
 docker build -t nodyn .
