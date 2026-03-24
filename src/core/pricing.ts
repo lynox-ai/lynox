@@ -1,0 +1,49 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+export interface ModelPricing {
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+}
+
+const DEFAULT_PRICING: Record<string, ModelPricing> = {
+  'claude-opus-4-6':           { input: 15,   output: 75, cacheWrite: 18.75, cacheRead: 1.5  },
+  'claude-sonnet-4-6':         { input: 3,    output: 15, cacheWrite: 3.75,  cacheRead: 0.3  },
+  'claude-haiku-4-5-20251001': { input: 0.80, output: 4,  cacheWrite: 1.0,   cacheRead: 0.08 },
+};
+
+let overridePricing: Record<string, ModelPricing> | null = null;
+
+function loadPricingOverride(): Record<string, ModelPricing> | null {
+  try {
+    const raw = readFileSync(join(homedir(), '.nodyn', 'pricing.json'), 'utf-8');
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    return parsed as Record<string, ModelPricing>;
+  } catch {
+    return null;
+  }
+}
+
+export function getPricing(model: string): ModelPricing {
+  if (overridePricing === null) {
+    overridePricing = loadPricingOverride() ?? {};
+  }
+  return overridePricing[model] ?? DEFAULT_PRICING[model] ?? DEFAULT_PRICING['claude-opus-4-6']!;
+}
+
+export function calculateCost(model: string, usage: {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens?: number | undefined;
+  cache_read_input_tokens?: number | undefined;
+}): number {
+  const p = getPricing(model);
+  return (usage.input_tokens / 1_000_000) * p.input
+       + (usage.output_tokens / 1_000_000) * p.output
+       + ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * p.cacheWrite
+       + ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * p.cacheRead;
+}

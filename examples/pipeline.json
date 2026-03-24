@@ -1,0 +1,25 @@
+{
+  "manifest_version": "1.1",
+  "name": "research-and-summarize",
+  "triggered_by": "manual",
+  "context": {
+    "topic": "WebAssembly adoption in 2026"
+  },
+  "agents": [
+    {
+      "id": "research",
+      "agent": "researcher",
+      "runtime": "agent",
+      "task": "Research the current state of {{topic}}. Focus on real-world production use cases.",
+      "model": "sonnet"
+    },
+    {
+      "id": "summarize",
+      "agent": "creator",
+      "runtime": "agent",
+      "task": "Summarize the research into 5 bullet points for a technical blog post.",
+      "model": "haiku",
+      "input_from": ["research"]
+    }
+  ]
+}

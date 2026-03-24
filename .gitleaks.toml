@@ -1,0 +1,9 @@
+[allowlist]
+  description = "Test fixtures with fake API keys"
+  paths = [
+    '''src/core/secret-store-vault\.test\.ts''',
+    '''src/core/secret-store\.test\.ts''',
+    '''src/core/secret-vault\.test\.ts''',
+    '''docs/docker\.md''',
+    '''docs/prd-auth-multiuser\.md''',
+  ]

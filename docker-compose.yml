@@ -1,0 +1,40 @@
+# nodyn — single-instance Docker Compose setup
+#
+# Quick start:
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   docker compose up
+#
+# For daily use, connect Telegram — it's your primary interface
+# for working with nodyn from any device. See "Telegram" below.
+#
+# Full docs: docs/docker.md
+
+services:
+  nodyn:
+    image: ghcr.io/nodyn-ai/nodyn:latest
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=512M
+    security_opt:
+      - no-new-privileges
+    environment:
+      # ── Required ──────────────────────────────────────
+      - ANTHROPIC_API_KEY
+
+      # ── Telegram (recommended) ────────────────────────
+      # Your primary interface for daily use. Work from your
+      # phone, get results when they're ready.
+      # Create a bot: t.me/BotFather → /newbot → copy token
+      - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_ALLOWED_CHAT_IDS
+
+      # ── Optional features ─────────────────────────────
+      # - NODYN_VAULT_KEY           # Encrypt data at rest (generate: openssl rand -base64 48)
+      # - TAVILY_API_KEY            # Web search (free: tavily.com, 1K/month)
+      # - GOOGLE_CLIENT_ID          # Google Workspace OAuth
+      # - GOOGLE_CLIENT_SECRET      # Google Workspace OAuth
+    volumes:
+      - ${HOME}/.nodyn:/home/nodyn/.nodyn
