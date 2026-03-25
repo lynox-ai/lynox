@@ -1140,6 +1140,12 @@ export class RunHistory {
     persistence.updateTaskRunResult(this.db, id, update);
   }
 
+  /** Update the watch_config JSON for a watch task. */
+  updateTaskWatchConfig(id: string, watchConfig: string): void {
+    this.db.prepare('UPDATE tasks SET watch_config = ?, updated_at = ? WHERE id = ?')
+      .run(watchConfig, new Date().toISOString(), id);
+  }
+
   /**
    * Delete a single run and all associated data (tool calls, spawns).
    * Returns true if a run was deleted.

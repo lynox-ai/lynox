@@ -62,6 +62,15 @@ export class TaskManager {
       throw new Error(`Invalid due_date format: ${params.dueDate}. Use YYYY-MM-DD.`);
     }
 
+    // Auto-trigger: if assigned to nodyn with no explicit schedule/watch,
+    // set nextRunAt = now so WorkerLoop picks it up immediately.
+    let resolvedNextRunAt = params.nextRunAt;
+    let resolvedTaskType = params.taskType;
+    if (params.assignee === 'nodyn' && !params.scheduleCron && !params.watchConfig && !params.nextRunAt) {
+      resolvedNextRunAt = new Date().toISOString();
+      resolvedTaskType = resolvedTaskType ?? 'manual';
+    }
+
     this.history.insertTask({
       id,
       title: params.title,
@@ -74,8 +83,8 @@ export class TaskManager {
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
       scheduleCron: params.scheduleCron,
-      nextRunAt: params.nextRunAt,
-      taskType: params.taskType,
+      nextRunAt: resolvedNextRunAt,
+      taskType: resolvedTaskType,
       watchConfig: params.watchConfig,
       maxRetries: params.maxRetries,
       notificationChannel: params.notificationChannel,
@@ -312,6 +321,11 @@ export class TaskManager {
   /** Get tasks due for execution (next_run_at <= now, not completed). */
   getDueTasks(): TaskRecord[] {
     return this.history.getDueTasks();
+  }
+
+  /** Update the watch_config JSON for a watch task (e.g. to store last_hash). */
+  updateWatchConfig(id: string, config: Record<string, unknown>): void {
+    this.history.updateTaskWatchConfig(id, JSON.stringify(config));
   }
 
   /** Record the result of a worker task execution. Updates last_run_at, result, status, and optionally next_run_at for recurring tasks. */
