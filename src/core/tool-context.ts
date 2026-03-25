@@ -44,6 +44,9 @@ export interface ToolContext {
   hourlyRateLimit: number;
   dailyRateLimit: number;
 
+  // ── API Store (per-API rate limiting + knowledge) ──
+  apiStore: import('./api-store.js').ApiStore | null;
+
   // ── Isolation (bash tool) ──
   isolationEnvOverride: Record<string, string> | undefined;
   isolationMinimalEnv: boolean;
@@ -65,6 +68,7 @@ export function createToolContext(userConfig: NodynUserConfig): ToolContext {
     rateLimitProvider: null,
     hourlyRateLimit: Infinity,
     dailyRateLimit: Infinity,
+    apiStore: null,
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
   };

@@ -145,6 +145,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   captureProcessTool: { definition: { name: 'capture_process' }, handler: vi.fn() },
   promoteProcessTool: { definition: { name: 'promote_process' }, handler: vi.fn() },
   setProcessConfig: vi.fn(),
+  apiSetupTool: { definition: { name: 'api_setup' }, handler: vi.fn() },
 }));
 
 vi.mock('./changeset.js', () => ({
@@ -268,7 +269,7 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool (17 core + 3 pipeline/process + 5 datastore = 25)
-      expect(mockRegister).toHaveBeenCalledTimes(25);
+      expect(mockRegister).toHaveBeenCalledTimes(26);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -334,7 +335,7 @@ describe('Engine + Session (Orchestrator)', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
       // 25 tools total (17 core + 3 pipeline/process + 5 datastore)
-      expect(mockRegister).toHaveBeenCalledTimes(25);
+      expect(mockRegister).toHaveBeenCalledTimes(26);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

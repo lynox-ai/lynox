@@ -15,7 +15,7 @@ export const COMMANDS = [
   '/model', '/mode', '/roles', '/plugin',
   '/pipeline', '/workflow', '/approvals', '/google', '/secret',
   '/status', '/config', '/context', '/hooks',
-  '/backup',
+  '/api', '/backup',
   '/task', '/schedule', '/quickstart', '/help', '/exit', '/quit',
 ];
 

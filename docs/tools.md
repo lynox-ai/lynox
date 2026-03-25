@@ -168,6 +168,17 @@ Makes HTTP requests with full SSRF protection (see [Security](security.md)). Ret
 
 **Network policy enforcement** (`setNetworkPolicy()`): Available as an extension point for Pro. When a tenant context is active (via `nodyn-pro`), the http tool enforces the tenant's network policy. `allow-all` (default) permits any request. `allow-list` restricts requests to hostnames in `IsolationConfig.allowedHosts`. `deny-all` blocks all outbound HTTP requests. See [Security](security.md#isolation-levels).
 
+**API profile enforcement**: When API profiles are loaded (see [API Store](api-store.md)), requests to API-like URLs without a registered profile are blocked. Per-API rate limits from profiles are enforced automatically.
+
+### `api_setup` -- API Profile Management
+
+| Property | Value |
+|----------|-------|
+| Source | `src/tools/builtin/api-setup.ts` |
+| Actions | `create`, `update`, `delete`, `list` |
+
+Create and manage API profiles that teach the agent how to correctly use external APIs. Profiles include endpoints, auth method, rate limits, guidelines, and common mistakes. Created profiles are validated (must include endpoints, guidelines, avoid rules, and auth), written to `~/.nodyn/apis/`, and activated immediately (hot-reload). See [API Store](api-store.md).
+
 ### `run_pipeline` -- Run Workflow
 
 | Property | Value |

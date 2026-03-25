@@ -13,7 +13,7 @@ npm run lint        # eslint src/
 npm run build       # tsc → dist/
 npm run dev         # watch mode with tsx
 npm run security    # security scan + vitest security tests
-npx vitest run      # 110 test files / ~2547 tests
+npx vitest run      # 112 test files / ~2583 tests
 npx vitest run tests/online/  # 22 real API tests
 ```
 
@@ -23,7 +23,7 @@ Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 
 - `src/core/` — 60 modules: engine, session, agent, worker-loop, KG, memory, etc.
 - `src/cli/` — Terminal UI + 11 command handler modules
-- `src/tools/` — 13 builtin tools + permission guard
+- `src/tools/` — 14 builtin tools + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Telegram, Google Workspace, Web Search
 - `src/server/` — MCP server (stdio + HTTP SSE)
@@ -50,7 +50,7 @@ See `docs/` for detailed documentation per topic.
 
 ## Testing
 
-110 offline test files / ~2547 tests. Co-located *.test.ts.
+112 offline test files / ~2583 tests. Co-located *.test.ts.
 19 security audit tests in tests/security/.
 5 online test files / 22 tests (real Haiku API).
 Coverage enforced on src/core/, src/tools/, src/orchestrator/ (>=70%).

@@ -37,5 +37,8 @@ export { handlePipeline, handleChain, handleManifest, handleTools, handleMcp } f
 // Backup command
 export { handleBackup } from './backup.js';
 
+// API command
+export { handleApi } from './api.js';
+
 // Quickstart command
 export { handleQuickstart } from './quickstart.js';

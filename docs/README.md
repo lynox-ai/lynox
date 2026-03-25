@@ -17,7 +17,7 @@ The AI that knows your business — persistent knowledge, autonomous workflows, 
 [Knowledge](memory.md) → [Workflows](dag-engine.md) → [Pre-Approve](pre-approve.md)
 
 ### Connect your tools
-[Telegram Bot](telegram.md) → [Google Workspace](google-workspace.md) → [MCP Server](mcp-server.md)
+[API Store](api-store.md) → [Telegram Bot](telegram.md) → [Google Workspace](google-workspace.md) → [MCP Server](mcp-server.md)
 
 ### Build on nodyn
 [SDK](sdk.md) → [Extension Points](extension-points.md) → [Batch API](batch-api.md)
@@ -51,6 +51,7 @@ The AI that knows your business — persistent knowledge, autonomous workflows, 
 | [Extension Points](extension-points.md) | Mode registry, hooks, CLI commands, feature flags |
 | [CI/CD](ci.md) | Test workflow, local validation |
 | [Benchmarks](benchmarks.md) | Performance benchmarks, baselines, regression detection |
+| [API Store](api-store.md) | API profiles, per-API rate limiting, agent knowledge injection |
 | [Backup & Restore](backup.md) | Crash-safe backups, encryption, scheduled backups, restore |
 | [Error Reporting](sentry.md) | Opt-in Sentry integration, PII protection, /bug command |
 | [Slack](slack.md) | Slack integration (Pro feature) |
@@ -73,7 +74,7 @@ The following features are available in [`nodyn-pro`](https://github.com/nodyn-a
 
 ## Validation Baseline
 
-- Current verified baseline: `npm run lint`, `npm run typecheck`, `npm run build`, `npx vitest run` (`110` files / `2547` tests, coverage ≥80%), `npm run security` (static analysis + 19 security tests), and `npm run smoke:manual`
+- Current verified baseline: `npm run lint`, `npm run typecheck`, `npm run build`, `npx vitest run` (`112` files / `2583` tests, coverage ≥80%), `npm run security` (static analysis + 19 security tests), and `npm run smoke:manual`
 - Online integration tests: `npx vitest run tests/online/` (`5` files / `22` tests, real Haiku API, ~$0.02)
 - Performance benchmarks: `pnpm bench` (offline, ~30s) + `pnpm bench:online` (~$0.02)
 - Real API smoke is available via `NODYN_SMOKE_ONLINE=1 npm run smoke:manual` and requires a configured API key

@@ -375,6 +375,30 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       return friendlyBlockMessage(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
+    // Per-API rate limiting + profile enforcement (from API Store)
+    const toolContext = agent.toolContext;
+    if (toolContext?.apiStore && toolContext.apiStore.size > 0) {
+      try {
+        const reqHostname = new URL(input.url).hostname;
+        // Check per-API rate limit
+        const apiBlock = toolContext.apiStore.checkRateLimit(reqHostname);
+        if (apiBlock) {
+          return friendlyBlockMessage(apiBlock);
+        }
+        // Soft-gate: warn if no profile exists for this API host
+        // Skip for common non-API hosts (search engines, CDNs, generic websites)
+        const SKIP_PROFILE_CHECK = new Set(['www.google.com', 'google.com', 'github.com', 'raw.githubusercontent.com', 'cdn.jsdelivr.net', 'localhost', '127.0.0.1']);
+        if (!toolContext.apiStore.getByHostname(reqHostname) && !SKIP_PROFILE_CHECK.has(reqHostname)) {
+          const looksLikeApi = reqHostname.startsWith('api.') || input.url.includes('/v1') || input.url.includes('/v2') || input.url.includes('/v3') || input.url.includes('/api/');
+          if (looksLikeApi) {
+            return `No API profile registered for "${reqHostname}". Create a profile first via api_setup (research the API docs, then register endpoints, auth method, rate limits, and guidelines). Blind API calls often fail or get blocked.\n\nAfter creating the profile, retry this request.`;
+          }
+        }
+      } catch {
+        // Invalid URL — will be caught below
+      }
+    }
+
     const method = input.method ?? 'GET';
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(input.headers ?? {})) {

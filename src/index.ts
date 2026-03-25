@@ -100,6 +100,10 @@ export type { VerifyResult, BackupFileEntry } from './core/backup-verify.js';
 export { GDriveBackupUploader } from './core/backup-upload-gdrive.js';
 export type { RemoteBackupInfo, UploadResult, DownloadResult } from './core/backup-upload-gdrive.js';
 
+// === API Store ===
+export { ApiStore } from './core/api-store.js';
+export type { ApiProfile, ApiEndpoint, ApiAuth, ApiRateLimit } from './core/api-store.js';
+
 // === Sentry (opt-in error reporting) ===
 export {
   initSentry, shutdownSentry, captureNodynError, captureError,
@@ -173,7 +177,7 @@ import {
   handleClear, handleCompact, handleSave, handleLoad, handleExport,
   handleHistory, handleHelp, handleExit,
   handleGit, handlePr, handleDiff,
-  handleTask, handleSchedule, handleBusiness, handleBackup,
+  handleTask, handleSchedule, handleBusiness, handleBackup, handleApi,
   handleRuns, handleStats, handleBatch, handleBatchStatus, handleTree,
   handleAlias, handleGoogle, handleVault, handleSecret, handlePlugin,
   handleConfig, handleStatus, handleHooks, handleApprovals, pkg,
@@ -231,6 +235,7 @@ const DISPATCH: Record<string, InternalHandler> = {
   '/pipeline': handlePipeline,
   '/workflow': handlePipeline,
   '/chain': handleChain,
+  '/api': handleApi,
   '/backup': handleBackup,
   '/manifest': handleManifest,
   '/tools': handleTools,

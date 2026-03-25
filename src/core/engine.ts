@@ -54,6 +54,7 @@ import {
   dataStoreDeleteTool,
   captureProcessTool,
   promoteProcessTool,
+  apiSetupTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
@@ -151,6 +152,7 @@ export class Engine {
   private _notificationRouter = new NotificationRouter();
   private _workerLoop: WorkerLoop | null = null;
   private _backupManager: import('./backup.js').BackupManager | null = null;
+  private _apiStore: import('./api-store.js').ApiStore | null = null;
 
   constructor(config: NodynConfig) {
     this.userConfig = loadConfig();
@@ -307,6 +309,23 @@ export class Engine {
       this.context?.id ?? '', () => null,
     );
 
+    // Load API profiles (teaches agent how to use external APIs)
+    try {
+      const { ApiStore } = await import('./api-store.js');
+      this._apiStore = new ApiStore();
+      const apisDir = join(getNodynDir(), 'apis');
+      const loaded = this._apiStore.loadFromDirectory(apisDir);
+      if (loaded > 0) {
+        // Inject API knowledge into briefing
+        const apiContext = this._apiStore.formatForSystemPrompt();
+        this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;
+        // Wire per-API rate limiter into tool context
+        this._toolContext.apiStore = this._apiStore;
+      }
+    } catch {
+      this._apiStore = null;
+    }
+
     // Register builtin tools
     this.registry
       .register(bashTool)
@@ -322,6 +341,7 @@ export class Engine {
       .register(askUserTool)
       .register(batchFilesTool)
       .register(httpRequestTool)
+      .register(apiSetupTool)
       .register(taskCreateTool)
       .register(taskUpdateTool)
       .register(taskListTool)
@@ -560,6 +580,7 @@ export class Engine {
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }
+  getApiStore(): import('./api-store.js').ApiStore | null { return this._apiStore; }
 
   /** Start the background worker loop. Call from long-lived server modes (Telegram, MCP). */
   startWorkerLoop(intervalMs?: number | undefined): void {

@@ -10,3 +10,4 @@ export { taskCreateTool, taskUpdateTool, taskListTool } from './task.js';
 export { planTaskTool } from './plan-task.js';
 export { dataStoreCreateTool, dataStoreInsertTool, dataStoreQueryTool, dataStoreListTool, dataStoreDeleteTool } from './data-store.js';
 export { captureProcessTool, promoteProcessTool } from './process.js';
+export { apiSetupTool } from './api-setup.js';
