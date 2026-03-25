@@ -455,7 +455,7 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (19);
    DROP TABLE IF EXISTS memory_embeddings;`,
 
-  // v20: Task scheduling support — cron, watch, run tracking, retries, notifications
+  // v20: Task scheduling + pipeline bridge — cron, watch, run tracking, retries, notifications, pipeline_id
   `INSERT OR IGNORE INTO schema_version (version) VALUES (20);
    ALTER TABLE tasks ADD COLUMN schedule_cron TEXT;
    ALTER TABLE tasks ADD COLUMN next_run_at TEXT;
@@ -467,12 +467,9 @@ const MIGRATIONS: string[] = [
    ALTER TABLE tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE tasks ADD COLUMN notification_channel TEXT;
+   ALTER TABLE tasks ADD COLUMN pipeline_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run_at);
    CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);`,
-
-  // v21: Process→Task bridge — pipeline_id on tasks
-  `INSERT OR IGNORE INTO schema_version (version) VALUES (21);
-   ALTER TABLE tasks ADD COLUMN pipeline_id TEXT;`,
 ];
 
 export class RunHistory {

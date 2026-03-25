@@ -13,6 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TaskRecord } from '../types/index.js';
+import { WORKER_PROMPT_SUFFIX } from './orchestrator-prompts.js';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
@@ -208,7 +209,7 @@ export class WorkerLoop {
   private async executeStandard(task: TaskRecord): Promise<void> {
     const session = this.engine.createSession({
       autonomy: 'autonomous',
-      systemPromptSuffix: WORKER_SUFFIX,
+      systemPromptSuffix: WORKER_PROMPT_SUFFIX,
     });
     // Cost control: cap agent loop iterations for background tasks
     session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous' });
@@ -318,6 +319,17 @@ export class WorkerLoop {
       return;
     }
 
+    // SSRF protection: only allow http/https, block internal networks
+    const parsedUrl = new URL(config.url);
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      throw new Error(`Watch task: only HTTP/HTTPS URLs allowed, got ${parsedUrl.protocol}`);
+    }
+    const host = parsedUrl.hostname;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1'
+        || host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('172.')) {
+      throw new Error('Watch task: internal/private URLs are not allowed');
+    }
+
     // Direct HTTP fetch — no LLM needed, saves ~$0.001 per check
     let fetchResult: string;
     try {
@@ -349,7 +361,7 @@ export class WorkerLoop {
     // Content changed (or first run) — run analysis via agent
     const analysisSession = this.engine.createSession({
       autonomy: 'autonomous',
-      systemPromptSuffix: WORKER_SUFFIX,
+      systemPromptSuffix: WORKER_PROMPT_SUFFIX,
     });
 
     const isFirstRun = !previousHash;
@@ -382,15 +394,4 @@ export class WorkerLoop {
   }
 }
 
-const WORKER_SUFFIX = `
-
-## Background Worker
-You are running as an autonomous background worker.
-- You CAN ask questions via ask_user — the user will be notified and your task pauses until they respond
-- Only ask when truly necessary (e.g., approval needed, ambiguous request)
-- The user may take minutes or hours to respond
-- Complete the task independently using available tools
-- Be thorough but concise — your response will be sent as a notification
-- Always conclude with a clear summary of what was accomplished or why it failed
-`;
 
