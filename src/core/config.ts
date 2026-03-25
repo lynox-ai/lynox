@@ -61,6 +61,8 @@ export function loadConfig(): NodynUserConfig {
     'pipeline_context_limit', 'pipeline_step_result_limit',
     'memory_extraction_limit', 'http_response_limit',
     'enforce_https',
+    'sentry_dsn',
+    'backup_dir', 'backup_schedule', 'backup_retention_days', 'backup_encrypt',
   ]);
 
   if (projectConfig) {

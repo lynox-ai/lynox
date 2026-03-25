@@ -156,7 +156,9 @@ export class WorkerLoop {
 
     try {
       await workerTaskStorage.run(taskCtx, async () => {
-        if (task.pipeline_id) {
+        if (task.task_type === 'backup') {
+          await this.executeBackup(task);
+        } else if (task.pipeline_id) {
           await this.executePipeline(task);
         } else if (task.task_type === 'watch') {
           await this.executeWatch(task);
@@ -165,6 +167,21 @@ export class WorkerLoop {
         }
       });
     } catch (err: unknown) {
+      // Sentry capture for background task failures
+      void import('./sentry.js').then(({ captureError }) => {
+        import('@sentry/node').then((Sentry) => {
+          Sentry.withScope((scope) => {
+            scope.setTag('task.id', task.id);
+            scope.setTag('task.type', task.task_type ?? 'manual');
+            scope.setTag('source', 'worker-loop');
+            captureError(err);
+          });
+        }).catch(() => {
+          // Sentry not installed — use basic capture
+          captureError(err);
+        });
+      }).catch(() => {});
+
       const isTimeout = err instanceof Error && err.name === 'TimeoutError';
       const errorMsg = isTimeout
         ? `Task timed out after ${Math.round(this.taskTimeoutMs / 1000)}s`
@@ -202,6 +219,38 @@ export class WorkerLoop {
       }
     } finally {
       this.activeTasks.delete(task.id);
+    }
+  }
+
+  /** Execute a backup task — no LLM needed, direct BackupManager call. */
+  private async executeBackup(task: TaskRecord): Promise<void> {
+    const backupManager = this.engine.getBackupManager();
+    if (!backupManager) {
+      throw new Error('Backup manager not initialized');
+    }
+
+    const result = await backupManager.createBackup();
+    const taskManager = this.engine.getTaskManager();
+
+    if (taskManager) {
+      taskManager.recordTaskRun(
+        task.id,
+        result.success
+          ? `Backup created: ${result.path} (${String(result.duration_ms)}ms)`
+          : `Backup failed: ${result.error ?? 'unknown'}`,
+        result.success ? 'success' : 'failed',
+      );
+    }
+
+    // Auto-prune old backups
+    const config = this.engine.getUserConfig();
+    const retentionDays = config.backup_retention_days ?? 30;
+    if (retentionDays > 0) {
+      backupManager.pruneBackups(retentionDays);
+    }
+
+    if (!result.success) {
+      throw new Error(result.error ?? 'Backup failed');
     }
   }
 

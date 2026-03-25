@@ -34,5 +34,8 @@ export { handleMemory, handleScope, handleKnowledge } from './memory.js';
 // Pipeline commands
 export { handlePipeline, handleChain, handleManifest, handleTools, handleMcp } from './pipeline.js';
 
+// Backup command
+export { handleBackup } from './backup.js';
+
 // Quickstart command
 export { handleQuickstart } from './quickstart.js';

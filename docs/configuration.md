@@ -35,6 +35,12 @@ interface NodynUserConfig {
   changeset_review?:     boolean;                 // Backup files before write, review post-run (default: true; mandatory for autonomous modes)
   google_oauth_scopes?:  string[];                // Google OAuth scopes (default: read-only). Add write scopes as needed
   enforce_https?:        boolean;                 // Block plain HTTP requests except localhost (default: false)
+  sentry_dsn?:           string;                  // Sentry DSN for opt-in error reporting
+  backup_dir?:           string;                  // Backup storage directory (default: ~/.nodyn/backups)
+  backup_schedule?:      string;                  // Cron schedule for auto-backups (default: '0 3 * * *')
+  backup_retention_days?: number;                 // Days to keep old backups (default: 30)
+  backup_encrypt?:       boolean;                 // Encrypt backups (default: true when vault key set)
+  backup_gdrive?:        boolean;                 // Upload backups to Google Drive (default: true when Google auth has drive.file scope)
 }
 ```
 
@@ -94,6 +100,16 @@ interface SessionOptions {
 ```
 
 Session-level settings mutated via `session.setModel()`, `session.setEffort()`, `session.setThinking()` only affect that session, not the engine or other sessions.
+
+## Automatic Behaviors
+
+These behaviors run automatically on `Engine.init()` without configuration:
+
+| Behavior | Trigger | Details |
+|----------|---------|---------|
+| **Pre-update backup** | Version change detected | Compares `~/.nodyn/.last_version` with current package version. Creates a full backup before anything else runs. See [Backup](backup.md#pre-update-backup) |
+| **Debug logging** | `NODYN_DEBUG` env var | Activates diagnostic channel subscribers |
+| **Security audit** | Always (when run history available) | Subscribes to security channels, logs to `history.db` |
 
 ## Worker Configuration
 
@@ -188,6 +204,7 @@ Controls the `output_config.effort` parameter (accuracy level). Set via config, 
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | -- | Path to service account JSON key file (headless/Docker) |
 | `TAVILY_API_KEY` | -- | Tavily API key for web search |
 | `BRAVE_API_KEY` | -- | Brave Search API key (alternative to Tavily) |
+| `NODYN_SENTRY_DSN` | -- | Sentry DSN for opt-in error reporting. See [Error Reporting](sentry.md) |
 
 ## Profiles
 

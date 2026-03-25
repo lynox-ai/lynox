@@ -215,6 +215,40 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
     }
   });
 
+  bot.command('bug', (ctx) => {
+    const lang = detectLang(ctx.from?.language_code);
+    const text = ctx.message.text.replace(/^\/bug\s*/, '').trim();
+
+    if (!text) {
+      void ctx.reply(t('cmd.bug_usage', lang), { parse_mode: 'HTML' });
+      return;
+    }
+
+    void (async () => {
+      try {
+        const { captureUserFeedback, isSentryEnabled } = await import('../../core/sentry.js');
+        if (!isSentryEnabled()) {
+          void ctx.reply(t('cmd.bug_disabled', lang));
+          return;
+        }
+
+        const userName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ') || `telegram:${ctx.chat.id}`;
+        const eventId = await captureUserFeedback({
+          name: userName,
+          comments: text,
+        });
+
+        if (eventId) {
+          void ctx.reply(t('cmd.bug_sent', lang));
+        } else {
+          void ctx.reply(t('cmd.bug_failed', lang));
+        }
+      } catch {
+        void ctx.reply(t('cmd.bug_failed', lang));
+      }
+    })();
+  });
+
   // --- Text messages ---
   bot.on(message('text'), (ctx) => {
     if (ctx.message.from.is_bot) return;

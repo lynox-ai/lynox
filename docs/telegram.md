@@ -101,6 +101,7 @@ Every running task shows a Stop button. Tap it or send `/stop` to abort.
 | `/stop` | Abort the current running task |
 | `/clear` | Start a fresh conversation (knowledge preserved) |
 | `/status` | Show whether a task is running |
+| `/bug` | Report a bug or issue (sent to Sentry). See [Error Reporting](sentry.md) |
 | `/help` | List available commands |
 
 ## Rich Status Message

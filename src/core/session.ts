@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
+import { NodynError } from './errors.js';
 import type {
   NodynUserConfig,
   ToolEntry,
@@ -368,6 +369,15 @@ export class Session {
 
       return result;
     } catch (err: unknown) {
+      // Sentry capture — structured error with tags
+      void import('./sentry.js').then(({ captureNodynError, captureError: captureSentryError }) => {
+        if (err instanceof NodynError) {
+          captureNodynError(err);
+        } else {
+          captureSentryError(err);
+        }
+      }).catch(() => {});
+
       if (runHistory && this.currentRunId) {
         try {
           runHistory.updateRun(this.currentRunId, {
@@ -501,6 +511,10 @@ export class Session {
         this.usage.output_tokens += event.usage.output_tokens;
         this.usage.cache_creation_input_tokens += event.usage.cache_creation_input_tokens ?? 0;
         this.usage.cache_read_input_tokens += event.usage.cache_read_input_tokens ?? 0;
+        // Sentry breadcrumb — model + token counts only (no prompt content)
+        void import('./sentry.js').then(({ addLLMBreadcrumb }) => {
+          addLLMBreadcrumb(model, event.usage.input_tokens, event.usage.output_tokens);
+        }).catch(() => {});
       }
       if (this.onStream) {
         await this.onStream(event);

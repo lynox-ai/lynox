@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import type {
   NodynConfig,
@@ -149,6 +150,7 @@ export class Engine {
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
   private _workerLoop: WorkerLoop | null = null;
+  private _backupManager: import('./backup.js').BackupManager | null = null;
 
   constructor(config: NodynConfig) {
     this.userConfig = loadConfig();
@@ -201,6 +203,29 @@ export class Engine {
   async init(): Promise<this> {
     // Activate debug logging early (before any channel publishing)
     initDebugSubscriber();
+
+    // Initialize Sentry error reporting (opt-in — requires DSN env var or config field)
+    const sentryDsn = process.env['NODYN_SENTRY_DSN'] ?? this.userConfig.sentry_dsn;
+    if (sentryDsn) {
+      try {
+        const { initSentry, installGlobalHandlers } = await import('./sentry.js');
+        const sentryActive = await initSentry(sentryDsn);
+        if (sentryActive) {
+          installGlobalHandlers();
+          // Subscribe to tool:end channel for automatic breadcrumbs
+          const { channels: obsChannels } = await import('./observability.js');
+          const { addToolBreadcrumb } = await import('./sentry.js');
+          obsChannels.toolEnd.subscribe((msg: unknown) => {
+            const data = msg as { name?: string; success?: boolean; duration?: number } | undefined;
+            if (data?.name) {
+              addToolBreadcrumb(String(data.name), Boolean(data.success), typeof data.duration === 'number' ? data.duration : 0);
+            }
+          });
+        }
+      } catch {
+        // Sentry init failed — non-critical, continue without it
+      }
+    }
 
     // Initialize run history (optional — fails gracefully)
     try {
@@ -388,6 +413,67 @@ export class Engine {
     // Register pipeline tools and inject config
     this.registerPipelineTools();
 
+    // Initialize backup manager (always available — backup is essential)
+    try {
+      const { BackupManager } = await import('./backup.js');
+      const backupDir = this.userConfig.backup_dir ?? join(getNodynDir(), 'backups');
+      this._backupManager = new BackupManager(getNodynDir(), {
+        backupDir,
+        retentionDays: this.userConfig.backup_retention_days ?? 30,
+        encrypt: this.userConfig.backup_encrypt ?? (!!process.env['NODYN_VAULT_KEY']),
+      }, process.env['NODYN_VAULT_KEY'] ?? null);
+    } catch {
+      this._backupManager = null;
+    }
+
+    // Auto-backup on version change (protects against update regressions)
+    if (this._backupManager) {
+      try {
+        const { existsSync: exists, readFileSync: readF, writeFileSync: writeF } = await import('node:fs');
+        const versionFile = join(getNodynDir(), '.last_version');
+        let currentVersion = 'unknown';
+        try {
+          const { fileURLToPath } = await import('node:url');
+          const { dirname } = await import('node:path');
+          const thisDir = dirname(fileURLToPath(import.meta.url));
+          const pkgPath = join(thisDir, '..', '..', 'package.json');
+          if (exists(pkgPath)) {
+            const pkg = JSON.parse(readF(pkgPath, 'utf-8')) as { version?: string };
+            currentVersion = pkg.version ?? 'unknown';
+          }
+        } catch { /* best effort */ }
+
+        const lastVersion = exists(versionFile) ? readF(versionFile, 'utf-8').trim() : null;
+
+        if (lastVersion && lastVersion !== currentVersion && currentVersion !== 'unknown') {
+          process.stderr.write(`[nodyn] Version changed (${lastVersion} → ${currentVersion}) — creating pre-update backup...\n`);
+          const result = await this._backupManager.createBackup();
+          if (result.success) {
+            process.stderr.write(`[nodyn] Pre-update backup created: ${result.path}\n`);
+          } else {
+            process.stderr.write(`[nodyn] Pre-update backup failed: ${result.error ?? 'unknown'}\n`);
+          }
+        }
+
+        // Always write current version
+        if (currentVersion !== 'unknown') {
+          writeF(versionFile, currentVersion, { mode: 0o600 });
+        }
+      } catch {
+        // Version check failed — non-critical
+      }
+    }
+
+    // Wire Google Drive backup upload if Google auth is available
+    if (this._backupManager && this._googleAuth) {
+      try {
+        const { GDriveBackupUploader } = await import('./backup-upload-gdrive.js');
+        this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));
+      } catch {
+        // Non-critical — GDrive backup upload not available
+      }
+    }
+
     // Fire plugin session start hooks
     if (this.pluginManager) {
       void this.pluginManager.fireSessionStart();
@@ -473,6 +559,7 @@ export class Engine {
   getDataStoreEnabled(): boolean { return this._dataStoreEnabled; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
+  getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }
 
   /** Start the background worker loop. Call from long-lived server modes (Telegram, MCP). */
   startWorkerLoop(intervalMs?: number | undefined): void {
@@ -566,6 +653,13 @@ export class Engine {
     if (this.knowledgeLayer) {
       try { await this.knowledgeLayer.close(); } catch { /* ignore */ }
       this.knowledgeLayer = null;
+    }
+    // Flush Sentry events before shutdown
+    try {
+      const { shutdownSentry } = await import('./sentry.js');
+      await shutdownSentry();
+    } catch {
+      // best-effort
     }
     await shutdownDebugSubscriber();
   }

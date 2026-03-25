@@ -13,7 +13,7 @@ npm run lint        # eslint src/
 npm run build       # tsc → dist/
 npm run dev         # watch mode with tsx
 npm run security    # security scan + vitest security tests
-npx vitest run      # 103 test files / ~2481 tests
+npx vitest run      # 110 test files / ~2547 tests
 npx vitest run tests/online/  # 22 real API tests
 ```
 
@@ -50,7 +50,7 @@ See `docs/` for detailed documentation per topic.
 
 ## Testing
 
-103 offline test files / ~2481 tests. Co-located *.test.ts.
+110 offline test files / ~2547 tests. Co-located *.test.ts.
 19 security audit tests in tests/security/.
 5 online test files / 22 tests (real Haiku API).
 Coverage enforced on src/core/, src/tools/, src/orchestrator/ (>=70%).

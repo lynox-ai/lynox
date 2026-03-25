@@ -179,6 +179,18 @@ export interface NodynUserConfig {
   google_oauth_scopes?: string[] | undefined;
   /** Block plain HTTP requests (except localhost). Default: false */
   enforce_https?: boolean | undefined;
+  /** Sentry DSN for opt-in error reporting. No data sent unless configured. */
+  sentry_dsn?: string | undefined;
+  /** Directory for backup storage. Default: ~/.nodyn/backups */
+  backup_dir?: string | undefined;
+  /** Cron schedule for automatic backups. Default: '0 3 * * *' (daily 3 AM). */
+  backup_schedule?: string | undefined;
+  /** Days to retain old backups. Default: 30. Set 0 to disable auto-deletion. */
+  backup_retention_days?: number | undefined;
+  /** Encrypt backups with vault key. Default: true when NODYN_VAULT_KEY is set. */
+  backup_encrypt?: boolean | undefined;
+  /** Upload backups to Google Drive. Default: true when Google auth is configured with drive.file scope. */
+  backup_gdrive?: boolean | undefined;
 }
 
 // === DataStore ===
