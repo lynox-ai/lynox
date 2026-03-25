@@ -161,8 +161,9 @@ async function detectTelegramChatId(token: string): Promise<number | null> {
     bot.on('message', (ctx) => {
       clearTimeout(timeout);
       stdout.write(`\r  ${GREEN}✓${RESET} Chat ID: ${BOLD}${ctx.chat.id}${RESET}                    \n`);
-      bot.stop('detected');
-      resolve(ctx.chat.id);
+      void ctx.reply('✓ Connected! Setup continues in the terminal.').catch(() => {});
+      // Small delay so the reply is sent before the bot stops
+      setTimeout(() => { bot.stop('detected'); resolve(ctx.chat.id); }, 500);
     });
 
     bot.launch().catch((err: unknown) => {
