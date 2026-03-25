@@ -38,10 +38,9 @@ interface PreApprovalSet {
 
 ### Modules
 
-- **`src/core/pre-approve.ts`** — `globToRegex()`, `extractMatchString()`, `matchesPreApproval()`, `buildApprovalSet()`, `isCriticalTool()`
+- **`src/core/pre-approve.ts`** — `globToRegex()`, `extractMatchString()`, `matchesPreApproval()`, `buildApprovalSet()`
 - **`src/tools/permission-guard.ts`** — `isDangerous()` 4th param `preApproval?`, inline matching (avoids circular dep)
 - **`src/core/agent.ts`** — `preApproval` field, passed to `isDangerous()`
-- **`src/core/session.ts`** — `agentOverrides.preApproval` passed through to Agent
 - **`src/index.ts`** — `--pre-approve <glob>` (repeatable)
 
 ### Security
@@ -113,7 +112,7 @@ async function showApprovalDialog(
 ### Security
 
 - Haiku receives only goal text + tool names (no secrets)
-- All proposed patterns filtered through `isCriticalTool()`
+- All proposed patterns filtered through `isCriticalTool()` (in `permission-guard.ts`)
 - Operator has final approval via dialog
 - `--auto-approve-all` only auto-approves low + medium risk
 - Planning failure is never fatal
@@ -128,12 +127,7 @@ All pre-approval decisions and usage are persisted to SQLite for compliance trac
 
 ### Implementation
 
-- **`src/core/pre-approve-audit.ts`** — `PreApproveAudit` facade for SQLite audit trail
-  - `recordSetCreated()` persists set metadata
-  - `recordCheck()` persists individual decisions + publishes to observability channels
-  - `getSummary()`, `listSets()`, `getEvents()`, `exportAudit()` for querying
-  - Fire-and-forget writes (try/catch, never throws)
-  - Implements `PreApproveAuditLike` interface from types
+- **~~`src/core/pre-approve-audit.ts`~~** — *(deleted)* Audit trail functionality consolidated into `permission-guard.ts`
 - **SQLite tables** (migration v4):
   - `pre_approval_sets` — set metadata (id, run_id, patterns JSON, approved_by, task_summary, etc.)
   - `pre_approval_events` — individual check decisions (set_id, tool, pattern, decision, timestamp)
@@ -146,4 +140,4 @@ All pre-approval decisions and usage are persisted to SQLite for compliance trac
 
 ### Tests
 
-- `pre-approve-audit.test.ts` — 12 tests: set creation, event recording, summaries, export, error resilience
+- ~~`pre-approve-audit.test.ts`~~ — *(deleted)* Tests consolidated into `permission-guard.test.ts`

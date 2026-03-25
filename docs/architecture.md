@@ -98,7 +98,7 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `features.ts` | -- | Feature flags (`NODYN_FEATURE_*` env vars), dynamic registration via `registerFeature()` for Pro |
 | `cost-guard.ts` | `CostGuard` | Budget tracking + enforcement, cache tokens at correct rates (write 1.25x, read 0.1x) |
 | `pre-approve.ts` | -- | Glob-based pattern matching for auto-approving operations in autonomous modes |
-| `pre-approve-audit.ts` | `PreApproveAudit` | SQLite audit trail for pre-approval decisions |
+| ~~`pre-approve-audit.ts`~~ | *(deleted)* | Audit trail functionality consolidated into `permission-guard.ts` |
 | `task-manager.ts` | `TaskManager` | Task CRUD facade over RunHistory. Week summaries, briefing integration, scope-aware queries |
 | `changeset.ts` | `ChangesetManager` | Backup-before-write system: copies originals to temp dir, generates unified diffs via `diff -u`, supports full/partial rollback. Created per-run by Session when `changeset_review` enabled |
 | `worker-loop.ts` | `WorkerLoop` | Persistent background task executor. 60s tick interval, headless Sessions per task, `AbortSignal.timeout(5min)` per execution, `AsyncLocalStorage` per task for isolated context. Multi-turn support: wires `promptUser` on headless sessions so agent can `ask_user` — question sent as notification — promise-based pause/resume via `ActiveTask.pendingInput`. One-shot background tasks auto-trigger (`nextRunAt=now` when `assignee='nodyn'`). Retry with exponential backoff (1min to 30min cap). Calls `runManifest()` for pipeline tasks (`pipeline_id` set). Started on `engine.init()`, stopped on `engine.shutdown()` |
