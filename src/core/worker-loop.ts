@@ -9,12 +9,25 @@
  */
 
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TaskRecord } from '../types/index.js';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
+const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
+
+/** Per-task execution context available via AsyncLocalStorage. */
+export interface WorkerTaskContext {
+  taskId: string;
+  taskTitle: string;
+  taskType: string;
+  startedAt: number;
+}
+
+/** Access the current worker task context from anywhere in the async call chain. */
+export const workerTaskStorage = new AsyncLocalStorage<WorkerTaskContext>();
 
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -25,6 +38,7 @@ export class WorkerLoop {
     private readonly engine: Engine,
     private readonly notificationRouter: NotificationRouter,
     private readonly intervalMs: number = DEFAULT_INTERVAL_MS,
+    private readonly taskTimeoutMs: number = DEFAULT_TASK_TIMEOUT_MS,
   ) {}
 
   start(): void {
@@ -81,17 +95,35 @@ export class WorkerLoop {
     const controller = new AbortController();
     this.activeTasks.set(task.id, controller);
 
+    // Node.js AbortSignal.timeout() — hard kill after taskTimeoutMs
+    const timeoutSignal = AbortSignal.timeout(this.taskTimeoutMs);
+    timeoutSignal.addEventListener('abort', () => controller.abort(), { once: true });
+
+    // AsyncLocalStorage — per-task context for logging/tracing
+    const taskCtx: WorkerTaskContext = {
+      taskId: task.id,
+      taskTitle: task.title,
+      taskType: task.task_type ?? 'manual',
+      startedAt: Date.now(),
+    };
+
     try {
-      if (task.task_type === 'watch') {
-        await this.executeWatch(task);
-      } else {
-        await this.executeStandard(task);
-      }
+      await workerTaskStorage.run(taskCtx, async () => {
+        if (task.task_type === 'watch') {
+          await this.executeWatch(task);
+        } else {
+          await this.executeStandard(task);
+        }
+      });
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
+      const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+      const errorMsg = isTimeout
+        ? `Task timed out after ${Math.round(this.taskTimeoutMs / 1000)}s`
+        : (err instanceof Error ? err.message : String(err));
+      const status = isTimeout ? 'timeout' as const : 'failed' as const;
       const taskManager = this.engine.getTaskManager();
       if (taskManager) {
-        taskManager.recordTaskRun(task.id, errorMsg, 'failed');
+        taskManager.recordTaskRun(task.id, errorMsg, status);
       }
 
       // Notify failure
