@@ -109,7 +109,9 @@ export class WorkerLoop {
 
     try {
       await workerTaskStorage.run(taskCtx, async () => {
-        if (task.task_type === 'watch') {
+        if (task.pipeline_id) {
+          await this.executePipeline(task);
+        } else if (task.task_type === 'watch') {
           await this.executeWatch(task);
         } else {
           await this.executeStandard(task);
@@ -121,18 +123,27 @@ export class WorkerLoop {
         ? `Task timed out after ${Math.round(this.taskTimeoutMs / 1000)}s`
         : (err instanceof Error ? err.message : String(err));
       const status = isTimeout ? 'timeout' as const : 'failed' as const;
+
+      // Check if task will be retried BEFORE recording (retry_count not yet incremented)
+      const willRetry = (task.max_retries ?? 0) > 0
+        && (task.retry_count ?? 0) < (task.max_retries ?? 0);
+
       const taskManager = this.engine.getTaskManager();
       if (taskManager) {
         taskManager.recordTaskRun(task.id, errorMsg, status);
       }
 
-      // Notify failure
-      if (this.notificationRouter.hasChannels()) {
+      // Only notify on FINAL failure (all retries exhausted)
+      if (!willRetry && this.notificationRouter.hasChannels()) {
         await this.notificationRouter.notify({
           title: `\u2717 ${task.title}`,
           body: `Task failed: ${errorMsg}`,
           taskId: task.id,
           priority: 'high',
+          followUps: [
+            { label: 'Retry', task: task.description ?? task.title },
+            { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${errorMsg}` },
+          ],
         });
       }
     } finally {
@@ -167,6 +178,49 @@ export class WorkerLoop {
         body: truncatedResult,
         taskId: task.id,
         priority: 'normal',
+        followUps: [
+          { label: 'Details', task: `Show me more details about: ${task.title}` },
+          { label: 'Run again', task: task.description ?? task.title },
+        ],
+      });
+    }
+  }
+
+  /** Execute a pipeline task via the DAG engine. */
+  private async executePipeline(task: TaskRecord): Promise<void> {
+    const runHistory = this.engine.getRunHistory();
+    if (!runHistory || !task.pipeline_id) return;
+
+    // Load the pipeline manifest
+    const manifestJson = runHistory.getPipelineRunManifest(task.pipeline_id);
+    if (!manifestJson) {
+      throw new Error(`Pipeline ${task.pipeline_id} not found`);
+    }
+
+    const manifest = JSON.parse(manifestJson) as import('../orchestrator/types.js').Manifest;
+    const config = this.engine.getUserConfig();
+
+    // Execute pipeline using existing DAG engine
+    const { runManifest } = await import('../orchestrator/runner.js');
+    const state = await runManifest(manifest, config, { runHistory });
+
+    const success = state.status === 'completed';
+    const stepCount = state.outputs.size;
+    const resultSummary = success
+      ? `Pipeline completed: ${String(stepCount)} steps`
+      : `Pipeline ${state.status}: ${state.error ?? 'unknown error'}`;
+
+    const taskManager = this.engine.getTaskManager();
+    if (taskManager) {
+      taskManager.recordTaskRun(task.id, resultSummary, success ? 'success' : 'failed');
+    }
+
+    if (this.notificationRouter.hasChannels()) {
+      await this.notificationRouter.notify({
+        title: `${success ? '\u2713' : '\u2717'} ${task.title}`,
+        body: resultSummary,
+        taskId: task.id,
+        priority: success ? 'normal' : 'high',
       });
     }
   }

@@ -16,6 +16,7 @@ interface TaskCreateInput {
   schedule?: string | undefined;
   watch_url?: string | undefined;
   watch_interval_minutes?: number | undefined;
+  pipeline_id?: string | undefined;
 }
 
 interface TaskUpdateInput {
@@ -63,6 +64,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         schedule: { type: 'string', description: 'Cron schedule for recurring tasks. Standard cron (e.g. \'0 8 * * *\' for daily at 8am) or shorthand (\'30m\', \'1h\', \'6h\', \'1d\').' },
         watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
         watch_interval_minutes: { type: 'number', description: 'How often to check the watched URL (in minutes). Default: 60.' },
+        pipeline_id: { type: 'string', description: 'ID of a stored workflow/pipeline to execute on this schedule.' },
       },
       required: ['title'],
     },
@@ -99,6 +101,17 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         tags: input.tags,
         parentTaskId: input.parent_task_id,
       };
+
+      if (input.pipeline_id) {
+        const task = managerRef.createPipelineTask({
+          ...baseParams,
+          pipelineId: input.pipeline_id,
+          scheduleCron: input.schedule,
+        });
+        const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
+        const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
+        return `Pipeline task created: ${formatTaskLine(task)}${nextRun}${scheduleInfo}`;
+      }
 
       if (input.schedule) {
         const task = managerRef.createScheduled({

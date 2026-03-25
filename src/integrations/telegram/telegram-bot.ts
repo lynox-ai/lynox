@@ -359,16 +359,52 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       return;
     }
 
-    let parsed: { t: string; v?: string; i?: number };
-    try {
-      parsed = JSON.parse(data) as { t: string; v?: string; i?: number };
-    } catch {
+    const chatId = ctx.chat?.id;
+    if (chatId === undefined) {
       ack();
       return;
     }
 
-    const chatId = ctx.chat?.id;
-    if (chatId === undefined) {
+    // Task follow-up callbacks use colon-delimited format: t:<taskId>:<index>
+    if (data.startsWith('t:')) {
+      const parts = data.split(':');
+      const taskId = parts[1];
+      const index = parseInt(parts[2] ?? '0', 10);
+      if (taskId) {
+        void (async () => {
+          const { getTaskFollowUp } = await import('./telegram-notification.js');
+          const followUp = getTaskFollowUp(taskId, index);
+          if (followUp) {
+            if (hasActiveRun(chatId)) {
+              ack('A task is already running.');
+              return;
+            }
+            const rl = rateLimiter.acquire(String(chatId));
+            if (!rl.allowed) {
+              ack(rl.reason ?? 'Rate limit reached.');
+              return;
+            }
+            ack('Starting…');
+            const contextualTask = `[Following up on background task "${taskId}"]\n\n${followUp.task}`;
+            const cbLang = detectLang(ctx.from?.language_code);
+            void executeRun(bot!, nodyn, chatId, contextualTask, cbLang).finally(() => {
+              rateLimiter.release(String(chatId));
+            });
+          } else {
+            ack(t('msg.followup_expired', detectLang(ctx.from?.language_code)));
+          }
+        })();
+      } else {
+        ack();
+      }
+      return;
+    }
+
+    // JSON-encoded callbacks (existing format)
+    let parsed: { t: string; v?: string; i?: number };
+    try {
+      parsed = JSON.parse(data) as { t: string; v?: string; i?: number };
+    } catch {
       ack();
       return;
     }

@@ -9,6 +9,16 @@ import type {
 } from '../../core/notification-router.js';
 
 // ---------------------------------------------------------------------------
+// Module-level storage for task follow-ups (callback handler retrieval)
+// ---------------------------------------------------------------------------
+
+const taskFollowUps = new Map<string, Array<{ label: string; task: string }>>();
+
+export function getTaskFollowUp(taskId: string, index: number): { label: string; task: string } | undefined {
+  return taskFollowUps.get(taskId)?.[index];
+}
+
+// ---------------------------------------------------------------------------
 // Minimal bot interface (matches Telegraf instance shape)
 // ---------------------------------------------------------------------------
 
@@ -17,7 +27,7 @@ interface TelegramBotLike {
     sendMessage(
       chatId: number,
       text: string,
-      extra?: { parse_mode?: string | undefined },
+      extra?: Record<string, unknown>,
     ): Promise<unknown>;
   };
 }
@@ -54,9 +64,18 @@ export class TelegramNotificationChannel implements NotificationChannel {
       const truncated =
         text.length > 4000 ? text.slice(0, 4000) + '\u2026' : text;
 
-      await this.bot.telegram.sendMessage(this.chatId, truncated, {
-        parse_mode: 'HTML',
-      });
+      const extra: Record<string, unknown> = { parse_mode: 'HTML' };
+      if (msg.followUps && msg.followUps.length > 0 && msg.taskId) {
+        taskFollowUps.set(msg.taskId, msg.followUps);
+        extra['reply_markup'] = {
+          inline_keyboard: [msg.followUps.map((f, i) => ({
+            text: f.label,
+            callback_data: `t:${msg.taskId}:${i}`,
+          }))],
+        };
+      }
+
+      await this.bot.telegram.sendMessage(this.chatId, truncated, extra);
       return true;
     } catch {
       return false;

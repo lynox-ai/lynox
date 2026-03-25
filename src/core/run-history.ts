@@ -469,6 +469,10 @@ const MIGRATIONS: string[] = [
    ALTER TABLE tasks ADD COLUMN notification_channel TEXT;
    CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run_at);
    CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);`,
+
+  // v21: Process→Task bridge — pipeline_id on tasks
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (21);
+   ALTER TABLE tasks ADD COLUMN pipeline_id TEXT;`,
 ];
 
 export class RunHistory {
@@ -1082,8 +1086,15 @@ export class RunHistory {
     watchConfig?: string | undefined;
     maxRetries?: number | undefined;
     notificationChannel?: string | undefined;
+    pipelineId?: string | undefined;
   }): void {
     persistence.insertTask(this.db, params);
+  }
+
+  /** Retrieve the manifest JSON for a pipeline run (by pipeline_runs.id). */
+  getPipelineRunManifest(pipelineRunId: string): string | undefined {
+    const row = persistence.getPipelineRun(this.db, pipelineRunId);
+    return row?.manifest_json;
   }
 
   updateTask(id: string, params: {

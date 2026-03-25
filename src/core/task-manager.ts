@@ -19,6 +19,7 @@ export interface TaskCreateParams {
   watchConfig?: string | undefined;
   maxRetries?: number | undefined;
   notificationChannel?: string | undefined;
+  pipelineId?: string | undefined;
 }
 
 export interface TaskUpdateParams {
@@ -88,6 +89,7 @@ export class TaskManager {
       watchConfig: params.watchConfig,
       maxRetries: params.maxRetries,
       notificationChannel: params.notificationChannel,
+      pipelineId: params.pipelineId,
     });
 
     return this.history.getTask(id)!;
@@ -293,6 +295,37 @@ export class TaskManager {
     });
   }
 
+  /** Create a pipeline task. Sets task_type='pipeline', assignee='nodyn'. Optionally recurring via scheduleCron. */
+  createPipelineTask(params: TaskCreateParams & {
+    pipelineId: string;
+    scheduleCron?: string | undefined;
+    maxRetries?: number | undefined;
+  }): TaskRecord {
+    if (params.scheduleCron) {
+      if (!isValidCron(params.scheduleCron)) {
+        throw new Error(`Invalid cron expression: ${params.scheduleCron}`);
+      }
+      const nextRun = nextOccurrence(params.scheduleCron);
+      return this.create({
+        ...params,
+        assignee: 'nodyn',
+        taskType: 'pipeline',
+        pipelineId: params.pipelineId,
+        scheduleCron: params.scheduleCron,
+        nextRunAt: nextRun.toISOString(),
+        maxRetries: params.maxRetries,
+      });
+    }
+
+    return this.create({
+      ...params,
+      assignee: 'nodyn',
+      taskType: 'pipeline',
+      pipelineId: params.pipelineId,
+      maxRetries: params.maxRetries,
+    });
+  }
+
   /** Create a watch/monitor task. Sets task_type='watch', assignee='nodyn', computes next_run_at from interval. */
   createWatch(params: TaskCreateParams & {
     watchUrl: string;
@@ -342,14 +375,28 @@ export class TaskManager {
 
     // Determine next_run_at based on task type
     let nextRunAt: string | undefined;
+    let retryCount: number | undefined;
 
     if (task.schedule_cron) {
       // Recurring cron task — always compute next run
       nextRunAt = nextOccurrence(task.schedule_cron, now).toISOString();
+      // Reset retry count on success
+      if (status === 'success') retryCount = 0;
     } else if (task.watch_config) {
       // Watch task — compute next run from interval
       const config = JSON.parse(task.watch_config) as { interval_minutes: number };
       nextRunAt = new Date(now.getTime() + config.interval_minutes * 60_000).toISOString();
+      // Reset retry count on success
+      if (status === 'success') retryCount = 0;
+    } else if (
+      (status === 'failed' || status === 'timeout')
+      && task.max_retries
+      && (task.retry_count ?? 0) < task.max_retries
+    ) {
+      // Retry with exponential backoff if retries remaining
+      retryCount = (task.retry_count ?? 0) + 1;
+      const backoffMs = Math.min(60_000 * Math.pow(2, retryCount - 1), 30 * 60_000); // 1m, 2m, 4m... cap 30m
+      nextRunAt = new Date(now.getTime() + backoffMs).toISOString();
     } else if (status === 'success') {
       // One-shot background task — mark as completed on success
       this.history.updateTask(id, { status: 'completed', completedAt: now.toISOString() });
@@ -360,6 +407,7 @@ export class TaskManager {
       lastRunResult: truncatedResult,
       lastRunStatus: status,
       nextRunAt,
+      retryCount,
     });
   }
 }

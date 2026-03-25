@@ -1,9 +1,9 @@
 /**
- * Task and business CLI commands: /task, /business
+ * Task and business CLI commands: /task, /business, /schedule
  */
 
 import type { Session } from '../../core/session.js';
-import { renderTable, BOLD, DIM, BLUE, GREEN, RED, MAGENTA, RESET } from '../ui.js';
+import { renderTable, BOLD, DIM, BLUE, GREEN, RED, MAGENTA, YELLOW, RESET } from '../ui.js';
 import type { CLICtx } from './types.js';
 
 export async function handleTask(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
@@ -214,6 +214,141 @@ export async function handleTask(parts: string[], session: Session, ctx: CLICtx)
   }
 
   ctx.stdout.write(`Unknown subcommand: ${sub}\nUsage: /task [list|add|done|start|show|edit|delete]\n`);
+  return true;
+}
+
+export async function handleSchedule(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  const history = session.getRunHistory();
+  if (!history) { ctx.stdout.write('Run history not available.\n'); return true; }
+  const { TaskManager } = await import('../../core/task-manager.js');
+  const tm = new TaskManager(history);
+  const sub = parts[1];
+
+  // /schedule or /schedule list — list active scheduled/watch tasks
+  if (!sub || sub === 'list') {
+    const allTasks = tm.list({ assignee: 'nodyn' });
+    const scheduled = allTasks.filter(t => t.task_type !== 'manual' && t.task_type !== undefined && t.status !== 'completed');
+
+    if (scheduled.length === 0) {
+      ctx.stdout.write(`${DIM}No active scheduled or watch tasks.${RESET}\n`);
+      return true;
+    }
+
+    const rows = scheduled.map(t => {
+      // Schedule column
+      let scheduleStr = '';
+      if (t.schedule_cron) {
+        scheduleStr = t.schedule_cron;
+      } else if (t.watch_config) {
+        try {
+          const wc = JSON.parse(t.watch_config) as { interval_minutes?: number };
+          scheduleStr = wc.interval_minutes ? `every ${String(wc.interval_minutes)}m` : 'watch';
+        } catch {
+          scheduleStr = 'watch';
+        }
+      }
+
+      // Next run
+      const nextRun = t.next_run_at ? t.next_run_at.slice(0, 19).replace('T', ' ') + 'Z' : '-';
+
+      // Last status with color
+      let lastStatus = t.last_run_status ?? '-';
+      if (lastStatus === 'success') lastStatus = `${GREEN}success${RESET}`;
+      else if (lastStatus === 'failed') lastStatus = `${RED}failed${RESET}`;
+      else if (lastStatus === 'timeout') lastStatus = `${YELLOW}timeout${RESET}`;
+
+      return [
+        t.id.slice(0, 8),
+        t.task_type ?? 'unknown',
+        scheduleStr,
+        nextRun,
+        lastStatus,
+        t.title.slice(0, 40),
+      ];
+    });
+
+    ctx.stdout.write(renderTable(
+      ['ID', 'Type', 'Schedule', 'Next Run', 'Last Status', 'Title'],
+      rows,
+    ) + '\n');
+    return true;
+  }
+
+  // /schedule details <id>
+  if (sub === 'details') {
+    const id = parts[2];
+    if (!id) { ctx.stdout.write('Usage: /schedule details <id>\n'); return true; }
+    const task = history.getTask(id);
+    if (!task) { ctx.stdout.write(`${RED}Task not found: ${id}${RESET}\n`); return true; }
+
+    // Schedule description
+    let scheduleDesc = '';
+    if (task.schedule_cron) {
+      scheduleDesc = task.schedule_cron;
+    } else if (task.watch_config) {
+      try {
+        const wc = JSON.parse(task.watch_config) as { interval_minutes?: number; url?: string };
+        scheduleDesc = wc.interval_minutes ? `every ${String(wc.interval_minutes)}m` : 'watch';
+        if (wc.url) scheduleDesc += ` (${wc.url})`;
+      } catch {
+        scheduleDesc = 'watch';
+      }
+    }
+
+    ctx.stdout.write(`${BOLD}Task: ${task.title} (${task.id.slice(0, 8)})${RESET}\n`);
+    ctx.stdout.write(`  Type:       ${task.task_type ?? 'unknown'}\n`);
+    ctx.stdout.write(`  Schedule:   ${scheduleDesc}\n`);
+    ctx.stdout.write(`  Status:     ${task.status}\n`);
+    if (task.next_run_at) ctx.stdout.write(`  Next run:   ${task.next_run_at}\n`);
+    if (task.last_run_at) {
+      const statusLabel = task.last_run_status ?? 'unknown';
+      ctx.stdout.write(`  Last run:   ${task.last_run_at} (${statusLabel})\n`);
+    }
+    if (task.last_run_result) {
+      const truncated = task.last_run_result.length > 500
+        ? task.last_run_result.slice(0, 500) + '...'
+        : task.last_run_result;
+      ctx.stdout.write(`  Last result: ${truncated}\n`);
+    }
+    const maxRetries = task.max_retries ?? 3;
+    const retryCount = task.retry_count ?? 0;
+    ctx.stdout.write(`  Retries:    ${String(retryCount)}/${String(maxRetries)}\n`);
+    if (task.notification_channel) ctx.stdout.write(`  Notify:     ${task.notification_channel}\n`);
+    return true;
+  }
+
+  // /schedule cancel <id>
+  if (sub === 'cancel') {
+    const id = parts[2];
+    if (!id) { ctx.stdout.write('Usage: /schedule cancel <id>\n'); return true; }
+    const task = tm.complete(id);
+    if (!task) { ctx.stdout.write(`${RED}Task not found: ${id}${RESET}\n`); return true; }
+    ctx.stdout.write(`${GREEN}Scheduled task cancelled: ${task.id.slice(0, 8)} — ${task.title}${RESET}\n`);
+    return true;
+  }
+
+  // /schedule test <cron>
+  if (sub === 'test') {
+    const cronExpr = parts.slice(2).join(' ');
+    if (!cronExpr) { ctx.stdout.write('Usage: /schedule test <cron expression>\n'); return true; }
+
+    const { isValidCron, nextOccurrence } = await import('../../core/cron-parser.js');
+    if (!isValidCron(cronExpr)) {
+      ctx.stdout.write(`${RED}Invalid cron expression: ${cronExpr}${RESET}\n`);
+      return true;
+    }
+
+    ctx.stdout.write(`${BOLD}Next 5 occurrences for: ${cronExpr}${RESET}\n`);
+    let cursor = new Date();
+    for (let i = 0; i < 5; i++) {
+      const next = nextOccurrence(cronExpr, cursor);
+      ctx.stdout.write(`  ${String(i + 1)}. ${next.toISOString()}\n`);
+      cursor = next;
+    }
+    return true;
+  }
+
+  ctx.stdout.write(`Unknown subcommand: ${sub}\nUsage: /schedule [list|details|cancel|test]\n`);
   return true;
 }
 

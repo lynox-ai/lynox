@@ -500,10 +500,11 @@ export function insertTask(db: Database.Database, params: {
   watchConfig?: string | undefined;
   maxRetries?: number | undefined;
   notificationChannel?: string | undefined;
+  pipelineId?: string | undefined;
 }): void {
   db.prepare(`
-    INSERT INTO tasks (id, title, description, status, priority, assignee, scope_type, scope_id, due_date, tags, parent_task_id, schedule_cron, next_run_at, task_type, watch_config, max_retries, notification_channel)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, title, description, status, priority, assignee, scope_type, scope_id, due_date, tags, parent_task_id, schedule_cron, next_run_at, task_type, watch_config, max_retries, notification_channel, pipeline_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.title, params.description ?? '',
     params.status ?? 'open', params.priority ?? 'medium',
@@ -513,6 +514,7 @@ export function insertTask(db: Database.Database, params: {
     params.scheduleCron ?? null, params.nextRunAt ?? null,
     params.taskType ?? 'manual', params.watchConfig ?? null,
     params.maxRetries ?? 0, params.notificationChannel ?? null,
+    params.pipelineId ?? null,
   );
 }
 

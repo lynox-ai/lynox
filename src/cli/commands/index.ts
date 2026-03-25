@@ -11,7 +11,7 @@ export { handleClear, handleCompact, handleSave, handleLoad, handleExport, handl
 export { handleGit, handlePr, handleDiff } from './git.js';
 
 // Task commands
-export { handleTask, handleBusiness } from './task.js';
+export { handleTask, handleSchedule, handleBusiness } from './task.js';
 
 // History commands
 export { handleRuns, handleStats, handleBatch, handleBatchStatus, handleTree } from './history.js';

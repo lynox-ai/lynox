@@ -246,5 +246,6 @@ When users ask you to do something later, on a schedule, or monitor something:
 - For one-shot background tasks: use \`task_create\` with \`assignee="nodyn"\` — the task will be executed in the background and the user will be notified when it's done
 - For recurring tasks: use \`task_create\` with \`schedule="<cron>"\` — e.g. \`schedule="0 8 * * *"\` for daily at 8am, or \`schedule="30m"\` for every 30 minutes
 - For website monitoring: use \`task_create\` with \`watch_url="<url>"\` — checks periodically and notifies the user when content changes
+- To schedule a captured workflow: use \`task_create\` with \`pipeline_id="<id>"\` and \`schedule="<cron>"\`
 - Common schedule patterns: daily at 8am = \`"0 8 * * *"\`, weekdays at 9am = \`"0 9 * * 1-5"\`, every hour = \`"0 * * * *"\`, every 30 min = \`"30m"\`
 - Always confirm with the user what they want monitored/scheduled before creating the task`;

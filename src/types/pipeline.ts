@@ -110,4 +110,5 @@ export interface TaskRecord {
   max_retries?: number | undefined;
   retry_count?: number | undefined;
   notification_channel?: string | undefined;
+  pipeline_id?: string | undefined;
 }

@@ -12,6 +12,7 @@ export interface NotificationMessage {
   body: string;
   taskId?: string | undefined;
   priority: 'low' | 'normal' | 'high';
+  followUps?: Array<{ label: string; task: string }> | undefined;
 }
 
 export interface NotificationChannel {
