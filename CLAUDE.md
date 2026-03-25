@@ -20,7 +20,8 @@ npm run dev         # node --env-file=.env --watch --import tsx src/index.ts
 npm run start       # node dist/index.js
 npm run coverage    # vitest + coverage report (CI enforces ≥80%)
 npm run smoke:manual # offline smoke: typecheck + build + vitest + debug subscriber + MCP health/auth/client flow
-npx vitest run          # full suite (107 files / ~2520 tests)
+npm run security    # security scan (scripts/security-scan.sh + vitest run tests/security/)
+npx vitest run          # full suite (104 files / ~2493 tests)
 npx vitest run <file>   # single file
 pnpm bench              # offline performance benchmarks (no API key needed)
 pnpm bench:online       # online benchmarks (requires API key, ~$0.02)
@@ -36,7 +37,7 @@ Single source of truth for types: `src/types/index.ts`. Barrel file re-exporting
 src/
 ├── index.ts              # CLI REPL entry + thin command dispatcher + module exports (~1130 LOC). Exports: Engine, Session, WorkerLoop, NotificationRouter, TelegramNotificationChannel, NotificationChannel, NotificationMessage types
 ├── types/index.ts        # Barrel re-export from 11 domain files (models, worker, tools, agent, memory, config, roles, pipeline, security, modes, records)
-├── core/                 # Agent framework + orchestration (63 modules + 5 triggers)
+├── core/                 # Agent framework + orchestration (60 modules + 1 trigger)
 ├── cli/                  # Terminal UI + command handlers
 │   ├── cli-state.ts      # Mutable CLI state (showThinking, currentModelId, spinner, etc.)
 │   ├── cli-helpers.ts    # gitExec, saveSession, printCost, aliases, PRICING
@@ -44,7 +45,7 @@ src/
 │   ├── stream-handler.ts # streamHandler() + pipeline DAG renderer
 │   ├── commands/         # Slash command handlers by domain (11 modules)
 │   └── ...               # UI modules: banner, markdown, dialog, diff, footer, spinner, visualizer, autocomplete, ansi, setup-wizard, onboarding, interactive
-├── tools/                # ToolRegistry + permission guard + 10 builtin tools (12 modules)
+├── tools/                # ToolRegistry + permission guard + 13 builtin tools
 ├── orchestrator/         # DAG pipeline engine: validate, graph, conditions, runner (9 modules)
 ├── integrations/search/  # Web search tool (Tavily/Brave providers, content extractor)
 ├── integrations/telegram/ # Telegram bot (formatter, runner, bot)
@@ -112,7 +113,7 @@ src/
 | `project.ts` | `detectProjectRoot()` walks up for `.git`, `package.json`, `.nodyn-project`. `generateBriefing()` from last 3-5 runs | Briefing enriched with last response summary, failed status, top-3 tool usage. Security: `task_text` and `response_text` scanned via `detectInjectionAttempt()` — injection patterns redacted with `[redacted]` |
 | `plugins.ts` | Validated `import()` from `~/.nodyn/plugins/node_modules/` only | Plugin names validated against `NPM_NAME_RE`. Secrets stripped from context |
 | `process-capture.ts` | Extracts reusable ProcessRecord from run_history tool calls. Filters internal tools, Haiku call for step naming + parameter identification. Sanitizes secrets, truncates inputs | `INTERNAL_TOOLS` set excludes memory/ask_user/plan_task/capture_process. `MAX_INPUT_CHARS` (500), `MAX_OUTPUT_CHARS` (200) for LLM context. Uses forced tool_choice for structured JSON output |
-Also: `cost-guard.ts`, `session-budget.ts` ($50 session ceiling shared by spawn + pipeline), `session-store.ts`, `batch-index.ts`, `prompt-hash.ts`, `roles.ts`, `pre-approve-audit.ts`, `dag-planner.ts`, `observability.ts`, `debug-subscriber.ts` (token masking for `ya29.*`/JWT patterns via `maskTokenPatterns()`, debug file written with 0o600, production warning when `NODYN_DEBUG` + `NODE_ENV=production`), `atomic-write.ts` (sync + async `ensureDir()` variant, imports from `constants.ts`), `constants.ts` (shared numeric constants: `MAX_BUFFER_BYTES`, `DIR_MODE_PRIVATE`, `FILE_MODE_PRIVATE`, `DEFAULT_BASH_TIMEOUT_MS`, `WORKER_MAX_ITERATIONS`, `DEFAULT_TASK_TIMEOUT_MS`), `crypto-constants.ts` (shared AES-256-GCM constants: `CRYPTO_ALGORITHM`, `CRYPTO_KEY_LENGTH`, `CRYPTO_IV_LENGTH`, `CRYPTO_TAG_LENGTH`), `task-manager.ts` (extended: `createScheduled()`, `createWatch()`, `createPipelineTask()`, `getDueTasks()`, `recordTaskRun()`, `updateWatchConfig()`. Task types: `manual`, `scheduled`, `watch`, `pipeline`. DB migrations v20 (scheduling columns) + v21 (`pipeline_id`). Watch tasks use direct HTTP fetch + `crypto.createHash('sha256')` for change detection — first run = baseline, only notifies on actual changes), `features.ts`, `changeset.ts`, `memory-gc.ts` (`temporalDecay()` utility), `triggers/` (file, http, cron, git).
+Also: `cost-guard.ts`, `session-budget.ts` ($50 session ceiling shared by spawn + pipeline), `session-store.ts`, `batch-index.ts`, `prompt-hash.ts`, `roles.ts`, `pre-approve-audit.ts`, `dag-planner.ts`, `observability.ts`, `debug-subscriber.ts` (token masking for `ya29.*`/JWT patterns via `maskTokenPatterns()`, debug file written with 0o600, production warning when `NODYN_DEBUG` + `NODE_ENV=production`), `atomic-write.ts` (sync + async `ensureDir()` variant, imports from `constants.ts`), `constants.ts` (shared numeric constants: `MAX_BUFFER_BYTES`, `DIR_MODE_PRIVATE`, `FILE_MODE_PRIVATE`, `DEFAULT_BASH_TIMEOUT_MS`, `WORKER_MAX_ITERATIONS`, `DEFAULT_TASK_TIMEOUT_MS`), `crypto-constants.ts` (shared AES-256-GCM constants: `CRYPTO_ALGORITHM`, `CRYPTO_KEY_LENGTH`, `CRYPTO_IV_LENGTH`, `CRYPTO_TAG_LENGTH`), `task-manager.ts` (extended: `createScheduled()`, `createWatch()`, `createPipelineTask()`, `getDueTasks()`, `recordTaskRun()`, `updateWatchConfig()`. Task types: `manual`, `scheduled`, `watch`, `pipeline`. DB migrations v20 (scheduling columns) + v21 (`pipeline_id`). Watch tasks use direct HTTP fetch + `crypto.createHash('sha256')` for change detection — first run = baseline, only notifies on actual changes), `features.ts`, `changeset.ts`, `memory-gc.ts` (`temporalDecay()` utility), `triggers/` (file-trigger only — http-trigger, cron-trigger, git-trigger deleted).
 
 ### Roles (`src/core/roles.ts`)
 
@@ -301,10 +302,10 @@ Session counters (cost, HTTP requests, write bytes) reset on process restart. Ex
 
 ## Testing
 
-**107 test files / ~2520 tests** (offline) + **5 online test files / 22 tests** (real API). Framework: Vitest (`pool: 'forks'`, `testTimeout: 10_000`). Co-located `*.test.ts` beside source files. Integration tests in `tests/integration/`. Performance benchmarks in `tests/performance/`.
+**104 test files / ~2493 tests** (offline) + **19 security tests** (`tests/security/agent-security.test.ts`) + **5 online test files / 22 tests** (real API). Framework: Vitest (`pool: 'forks'`, `testTimeout: 10_000`). Co-located `*.test.ts` beside source files. Integration tests in `tests/integration/`. Security tests in `tests/security/`. Performance benchmarks in `tests/performance/`.
 
 ```bash
-npx vitest run                    # full offline suite (112 files / ~2653 tests)
+npx vitest run                    # full offline suite (104 files / ~2493 tests)
 npx vitest run tests/online/      # online tests with real Haiku API (~$0.02, ~35s)
 NODYN_DEBUG=1 npx vitest run      # with debug output
 ```
@@ -367,7 +368,7 @@ Shared setup in `tests/performance/setup.ts`: `createBenchDir()`, `generateText(
 
 ## Git Hooks & CI Security
 
-- **lefthook** (`lefthook.yml`): pre-push runs `gitleaks protect --staged` + regex pattern scan for secrets; pre-commit runs typecheck
+- **lefthook** (`lefthook.yml`): pre-push runs `gitleaks protect --staged` + regex pattern scan for secrets + `security-scan` (static analysis via `scripts/security-scan.sh`); pre-commit runs typecheck
 - **CI** (`.github/workflows/ci.yml`): `gitleaks/gitleaks-action@v2` scans full history, `npm run lint` (ESLint), `npm run typecheck`, `vitest run --coverage` (≥80% line coverage enforced), Trivy Docker scan
 - `"prepare": "lefthook install || true"` in `package.json` — auto-installs hooks on `npm install`
 - Requires `lefthook` + `gitleaks` binaries (`brew install lefthook gitleaks`)

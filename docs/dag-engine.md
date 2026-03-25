@@ -73,7 +73,7 @@ nodyn --manifest ./my.manifest.json  # uses LocalGateAdapter for gate points in 
 | `runtime` | `"agent" \| "mock" \| "inline"` | yes | Execution mode |
 | `task` | `string` | inline only | Task description for the inline sub-agent (required when `runtime` is `"inline"`) |
 | `model` | `string` | no | Override model tier (e.g. `"sonnet"`) or full model ID |
-| `role` | `string` | no | Role ID (e.g. `researcher`, `executor`) — applies the role's model, system prompt, and tool scoping to the step |
+| `role` | `string` | no | Role ID (e.g. `researcher`, `creator`, `operator`, `collector`) — applies the role's model, system prompt, and tool scoping to the step |
 | `input_from` | `string[]` | no | Step IDs whose output to inject into context |
 | `conditions` | `ManifestCondition[]` | no | AND-conditions — step skipped if any fails |
 | `timeout_ms` | `number` | no | Step timeout in milliseconds (default 600,000 ms) |

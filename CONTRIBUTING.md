@@ -20,7 +20,7 @@ npm run dev          # Watch mode with hot reload
 npm run typecheck    # tsc --noEmit — must pass with zero errors
 npm run lint         # eslint src/ — must pass with zero errors
 npm run build        # tsc → dist/
-npx vitest run       # 113 files / ~2610 tests — all must pass
+npx vitest run       # 104 files / ~2493 tests — all must pass
 npm run coverage     # coverage report (CI enforces ≥80%)
 ```
 

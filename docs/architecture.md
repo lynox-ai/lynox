@@ -128,10 +128,8 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | Module | Class | Purpose |
 |--------|-------|---------|
 | `file-trigger.ts` | `FileTrigger` | `fs.watch` + glob matching + debounce, with full tree fallback when recursive watch is unavailable |
-| `http-trigger.ts` | `HttpTrigger` | `node:http` server + HMAC signature verification |
-| `cron-trigger.ts` | `CronTrigger` | `setInterval` + shorthand parsing (e.g., `5m`, `1h`) |
-| `git-trigger.ts` | `GitTrigger` | Git hook script + signal file watcher |
-| `index.ts` | -- | Factory function for creating triggers from `TriggerConfig` |
+
+> **Note:** `http-trigger.ts`, `cron-trigger.ts`, and `git-trigger.ts` have been removed. Cron scheduling is now handled by `WorkerLoop` + `cron-parser.ts`. Only `file-trigger` remains for filesystem watching (used by CLI `--watch` and `watchdog.ts`).
 
 ### `src/tools/` -- Tool System
 

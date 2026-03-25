@@ -7,9 +7,9 @@ Open business AI engine. Persistent knowledge, autonomous workflows, tool connec
 ### Core
 
 - **Agentic loop** — Streaming tool dispatch with adaptive thinking, automatic retry with exponential backoff, parallel tool execution via `Promise.allSettled`
-- **Roles** — 8 built-in roles (Researcher, Analyst, Executor, Operator, Strategist, Creator, Collector, Communicator) with tool scoping and isolated budgets
-- **Playbooks** — 7 built-in strategic playbooks (Research, Evaluation, Diagnosis, Synthesis, Assessment, Creation, Planning) for proven task approaches
-- **Operational modes** — Assistant (you steer) and Autopilot (goal-driven with budget enforcement)
+- **Roles** — 4 built-in roles (Researcher, Creator, Operator, Collector) with tool scoping and isolated budgets
+- **Engine/Session** — Engine (shared singleton) + Session (per-conversation) architecture enabling REPL + Telegram + MCP in one process
+- **Persistent AI Worker** — WorkerLoop for background task execution with cron scheduling, watch-URL polling, and multi-turn conversations
 - **Cost tracking** — Per-model pricing with cache token accounting (write 1.25x, read 0.1x) and budget enforcement via CostGuard
 
 ### Knowledge
@@ -20,7 +20,7 @@ Open business AI engine. Persistent knowledge, autonomous workflows, tool connec
 - **Smart retrieval** — HyDE query expansion, multi-signal search (vector + full-text + graph), namespace-specific decay, MMR re-ranking
 - **Embeddings** — Local ONNX (multilingual-e5-small, 384d, 100 languages), fully offline
 
-### Tools (14 built-in)
+### Tools (13 built-in)
 
 - `bash` — Shell execution with dangerous command detection and environment sanitization
 - `read_file` / `write_file` — File operations with path traversal protection and symlink validation
@@ -29,19 +29,17 @@ Open business AI engine. Persistent knowledge, autonomous workflows, tool connec
 - `ask_user` — Interactive user input with select, confirm, and freeform modes
 - `batch_files` — Multi-file rename, move, and transform operations
 - `http` — External API calls with SSRF protection, redirect handling, and network policy enforcement
-- `goal_update` — Autopilot goal tracking
 - `run_pipeline` — Multi-step workflow execution with dependency graphs and parallel steps
-- `task` — Task management with priority, due dates, and assignees
+- `task` — Task management with priority, due dates, scheduling, and watch-URL monitoring
 - `plan_task` — Structured planning with automatic workflow conversion
 - `data_store` — Structured SQLite storage with typed columns, filters, and aggregation
 - `capture_process` / `promote_process` — Turn ad-hoc work into reusable workflows
-- `playbook` — List, suggest, and extract strategic playbooks
 
 ### Automation
 
 - **Workflow engine** — Declarative manifests with dependency graphs, parallel execution, conditions, and template syntax
 - **Process capture** — Record what you did, save it as a reusable workflow with parameters
-- **Triggers** — File, HTTP, cron, and git-based trigger system
+- **File trigger** — File system watcher with glob matching and debounce (CLI `--watch`)
 - **Advisor** — Analyzes run history for patterns, suggests optimizations
 
 ### Integration

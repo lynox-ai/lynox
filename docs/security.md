@@ -497,6 +497,19 @@ Additional security fixes across MCP server, Knowledge Graph, HTTP tool, and Tel
 - **`execSync` → `execFileSync`**: `/git` command uses `execFileSync` to prevent shell injection
 - **Path resolution**: `/export` and `--output` use `resolve()` for safe path handling
 
+## Static Analysis & Security Testing
+
+### `npm run security`
+
+Runs the full security validation pipeline:
+
+1. **`scripts/security-scan.sh`** — Static analysis shell script (pattern scanning, dependency checks)
+2. **`vitest run tests/security/`** — 19 automated security tests (`tests/security/agent-security.test.ts`)
+
+### Pre-Push Hook
+
+The `security-scan` command also runs automatically on every `git push` via lefthook (`lefthook.yml`), alongside `gitleaks protect --staged` and a regex pattern scan for hardcoded secrets.
+
 ## Isolation Levels
 
 > **Note:** Isolation enforcement is activated by Pro extensions (`nodyn-pro`). Core provides the extension points (`setIsolationEnv()`, `setNetworkPolicy()`, workspace sandbox) that Pro's tenant system uses to apply isolation levels.

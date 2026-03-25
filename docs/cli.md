@@ -190,7 +190,7 @@ Show current session information at a glance:
 /status
 ```
 
-Displays: version, model, mode, accuracy level, tool count, MCP servers, knowledge status, active scopes, secrets, changeset review, goal state, cost, and session token stats.
+Displays: version, model, accuracy level, tool count, MCP servers, knowledge status, active scopes, secrets, changeset review, cost, and session token stats.
 
 ## Config
 
@@ -452,7 +452,7 @@ Separator + inline status line after each turn showing:
 - Token counts (input/output) with elapsed time
 - Context window usage bar (10-char `█░` bar, green/yellow/red by %)
 - Cache hit percentage (green >= 50%, dim otherwise)
-- Mode indicator (for non-assistant modes with goal progress)
+- Mode indicator (when a non-default mode is active)
 - Thinking indicator (`👾 detailed` when detailed thinking is active)
 
 ### Diff Renderer
