@@ -153,6 +153,7 @@ export class Engine {
   private _workerLoop: WorkerLoop | null = null;
   private _backupManager: import('./backup.js').BackupManager | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
+  private _crm: import('./crm.js').CRM | null = null;
 
   constructor(config: NodynConfig) {
     this.userConfig = loadConfig();
@@ -433,6 +434,17 @@ export class Engine {
     // Register pipeline tools and inject config
     this.registerPipelineTools();
 
+    // Initialize CRM (auto-creates contacts/deals/interactions tables)
+    if (this._dataStore) {
+      try {
+        const { CRM } = await import('./crm.js');
+        this._crm = new CRM(this._dataStore);
+        this._crm.ensureSchema();
+      } catch {
+        this._crm = null;
+      }
+    }
+
     // Initialize backup manager (always available — backup is essential)
     try {
       const { BackupManager } = await import('./backup.js');
@@ -581,6 +593,7 @@ export class Engine {
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }
   getApiStore(): import('./api-store.js').ApiStore | null { return this._apiStore; }
+  getCRM(): import('./crm.js').CRM | null { return this._crm; }
 
   /** Start the background worker loop. Call from long-lived server modes (Telegram, MCP). */
   startWorkerLoop(intervalMs?: number | undefined): void {

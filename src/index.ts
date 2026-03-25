@@ -100,6 +100,10 @@ export type { VerifyResult, BackupFileEntry } from './core/backup-verify.js';
 export { GDriveBackupUploader } from './core/backup-upload-gdrive.js';
 export type { RemoteBackupInfo, UploadResult, DownloadResult } from './core/backup-upload-gdrive.js';
 
+// === CRM ===
+export { CRM } from './core/crm.js';
+export type { ContactData, DealData, InteractionData, ContactRecord } from './core/crm.js';
+
 // === API Store ===
 export { ApiStore } from './core/api-store.js';
 export type { ApiProfile, ApiEndpoint, ApiAuth, ApiRateLimit } from './core/api-store.js';
