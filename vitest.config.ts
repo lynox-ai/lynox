@@ -5,5 +5,16 @@ export default defineConfig({
     include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
     testTimeout: 10_000,
     pool: 'forks',
+    coverage: {
+      provider: 'v8',
+      include: ['src/core/**', 'src/tools/**', 'src/orchestrator/**'],
+      exclude: ['**/*.test.ts', '**/*.bench.ts'],
+      thresholds: {
+        lines: 70,
+        functions: 65,
+        branches: 55,
+        statements: 70,
+      },
+    },
   },
 });
