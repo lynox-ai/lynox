@@ -83,7 +83,8 @@ export type { ProjectInfo } from './core/project.js';
 export { resolveContext } from './core/context.js';
 export type { NodynContext, ContextSource } from './types/index.js';
 export { runSetupWizard } from './cli/setup-wizard.js';
-export { startTelegramBot, stopTelegramBot } from './integrations/telegram/telegram-bot.js';
+export { startTelegramBot, stopTelegramBot, getTelegramBot } from './integrations/telegram/telegram-bot.js';
+export { TelegramNotificationChannel } from './integrations/telegram/telegram-notification.js';
 export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES, createGoogleTools } from './integrations/google/index.js';
 export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult } from './integrations/google/index.js';
 export { loadRole, listRoles, getBuiltinRoleIds, saveRole, exportRole, importRole, deleteRole, warnModelMismatch } from './core/roles.js';
@@ -92,6 +93,9 @@ export { isFeatureEnabled, getFeatureFlags, getFeatureEnvVar, registerFeature, c
 export type { FeatureFlag } from './core/features.js';
 export type { ModeHandler, ModeControllerContext, ModeOrchestrator } from './core/mode-controller.js';
 export type { NodynHooks, RunContext, AccumulatedUsage } from './core/engine.js';
+export { NotificationRouter } from './core/notification-router.js';
+export type { NotificationChannel, NotificationMessage } from './core/notification-router.js';
+export { WorkerLoop } from './core/worker-loop.js';
 export * from './types/index.js';
 
 // === Error hierarchy ===
@@ -495,6 +499,19 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     process.on('SIGTERM', () => void shutdown());
 
     await startTgBot({ token, allowedChatIds, nodyn: tgSession });
+
+    // Register Telegram notification channel for background task results
+    const { getTelegramBot } = await import('./integrations/telegram/telegram-bot.js');
+    const { TelegramNotificationChannel } = await import('./integrations/telegram/telegram-notification.js');
+    const notifyChatId = allowedChatIds?.[0];
+    const tgBot = getTelegramBot();
+    if (notifyChatId && tgBot) {
+      tgEngine.getNotificationRouter().register(new TelegramNotificationChannel(tgBot, notifyChatId));
+    }
+
+    // Start background worker loop for scheduled task execution
+    tgEngine.startWorkerLoop();
+
     return;
   }
 

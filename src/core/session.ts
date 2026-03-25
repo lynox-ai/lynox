@@ -51,6 +51,10 @@ import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 
 export interface SessionOptions {
+  model?: ModelTier | undefined;
+  effort?: EffortLevel | undefined;
+  thinking?: ThinkingMode | undefined;
+  autonomy?: import('../types/index.js').AutonomyLevel | undefined;
   briefing?: string | undefined;
   onStream?: StreamHandler | undefined;
   promptUser?: ((question: string, options?: string[]) => Promise<string>) | undefined;
@@ -89,6 +93,13 @@ export class Session {
   private _promptTabs: ((questions: TabQuestion[]) => Promise<string[]>) | null = null;
   private _tenantId: string | null = null;
 
+  // Per-session config (copied from engine.config at creation, mutated independently)
+  private _model: ModelTier;
+  private _effort: EffortLevel;
+  private _thinking: ThinkingMode | undefined;
+  private _maxTokens: number | undefined;
+  private _systemPrompt: string | undefined;
+
   readonly usage: AccumulatedUsage = {
     input_tokens: 0,
     output_tokens: 0,
@@ -99,6 +110,12 @@ export class Session {
   constructor(engine: Engine, opts?: SessionOptions) {
     this.engine = engine;
     this.sessionId = randomUUID();
+    // Copy config from engine — session mutates its own copy, not the shared config
+    this._model = opts?.model ?? engine.config.model ?? 'sonnet';
+    this._effort = opts?.effort ?? engine.config.effort ?? 'high';
+    this._thinking = opts?.thinking ?? engine.config.thinking;
+    this._maxTokens = engine.config.maxTokens;
+    this._systemPrompt = engine.config.systemPrompt;
     this.briefing = opts?.briefing ?? engine.getBriefing();
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
@@ -106,6 +123,9 @@ export class Session {
     this._tenantId = opts?.tenantId ?? null;
     if (opts?.systemPromptSuffix) {
       this.agentOverrides.systemPromptSuffix = opts.systemPromptSuffix;
+    }
+    if (opts?.autonomy) {
+      this.agentOverrides.autonomy = opts.autonomy;
     }
     this._createAgent();
     if (opts?.messages) {
@@ -182,7 +202,7 @@ export class Session {
     const preRunContext: RunContext = {
       runId: randomUUID(),
       contextId: context?.id ?? '',
-      modelTier: this.engine.config.model ?? 'opus',
+      modelTier: this._model,
       durationMs: 0,
       source: context?.source ?? 'cli',
       tenantId: this._tenantId ?? undefined,
@@ -216,7 +236,7 @@ export class Session {
       }
     }
 
-    const model = MODEL_MAP[this.engine.config.model ?? 'opus'];
+    const model = MODEL_MAP[this._model];
     const startTime = Date.now();
     this.runToolCallSeq = 0;
 
@@ -224,7 +244,7 @@ export class Session {
     this.engine._activeRunToolCallSeq = 0;
 
     // Compute prompt hash from the system prompt the agent uses
-    const basePrompt = this.engine.config.systemPrompt ?? SYSTEM_PROMPT;
+    const basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
     const effectivePrompt = this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
       : basePrompt;
@@ -237,7 +257,7 @@ export class Session {
         this.currentRunId = runHistory.insertRun({
           sessionId: this.sessionId,
           taskText,
-          modelTier: this.engine.config.model ?? 'opus',
+          modelTier: this._model,
           modelId: model,
           promptHash,
           contextId: context?.id ?? '',
@@ -319,7 +339,7 @@ export class Session {
       const runContext: RunContext = {
         runId: this.currentRunId!,
         contextId: context?.id ?? '',
-        modelTier: this.engine.config.model ?? 'opus',
+        modelTier: this._model,
         durationMs,
         source: context?.source ?? 'cli',
         ...(this._tenantId ? { tenantId: this._tenantId } : {}),
@@ -433,36 +453,36 @@ export class Session {
 
   setModel(tier: ModelTier): string {
     const messages = this.saveMessages();
-    this.engine.config.model = tier;
+    this._model = tier;
     this._createAgent();
     this.loadMessages(messages);
     return MODEL_MAP[tier];
   }
 
   getModelTier(): ModelTier {
-    return this.engine.config.model ?? 'opus';
+    return this._model;
   }
 
   setEffort(level: EffortLevel): void {
     const messages = this.saveMessages();
-    this.engine.config.effort = level;
+    this._effort = level;
     this._createAgent();
     this.loadMessages(messages);
   }
 
   getEffort(): EffortLevel {
-    return this.engine.config.effort ?? 'high';
+    return this._effort;
   }
 
   setThinking(mode: ThinkingMode | undefined): void {
     const messages = this.saveMessages();
-    this.engine.config.thinking = mode;
+    this._thinking = mode;
     this._createAgent();
     this.loadMessages(messages);
   }
 
   getThinking(): ThinkingMode | undefined {
-    return this.engine.config.thinking;
+    return this._thinking;
   }
 
   setSkipMemoryExtraction(skip: boolean): void {
@@ -489,7 +509,6 @@ export class Session {
 
   private _createAgent(): void {
     const engine = this.engine;
-    const config = engine.config;
     const userConfig = engine.getUserConfig();
     const registry = engine.getRegistry();
     const pluginManager = engine.getPluginManager();
@@ -499,7 +518,7 @@ export class Session {
     toolContext.tools = registry.getEntries();
     toolContext.streamHandler = this.onStream ?? null;
 
-    const model = MODEL_MAP[config.model ?? 'opus'] ?? MODEL_MAP['sonnet'];
+    const model = MODEL_MAP[this._model] ?? MODEL_MAP['sonnet'];
     const mcpServers = registry.getMCPServers();
     const entries = registry.getEntries();
     const tools = pluginManager
@@ -527,7 +546,7 @@ export class Session {
       }
     };
 
-    let basePrompt = config.systemPrompt ?? SYSTEM_PROMPT;
+    let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
     // Append pipeline docs only when pipeline tools are registered
     if (engine.getPipelinesEnabled()) {
       basePrompt += PIPELINE_PROMPT_SUFFIX;
@@ -560,9 +579,9 @@ export class Session {
       systemPrompt,
       tools: effectiveTools,
       mcpServers: mcpServers.length > 0 ? mcpServers : undefined,
-      thinking: config.thinking,
-      effort: config.effort,
-      maxTokens: config.maxTokens,
+      thinking: this._thinking,
+      effort: this._effort,
+      maxTokens: this._maxTokens,
       memory: engine.getMemory() ?? undefined,
       onStream: streamHandler,
       promptUser: this._promptUser

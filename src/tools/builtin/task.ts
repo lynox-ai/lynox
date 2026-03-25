@@ -13,6 +13,9 @@ interface TaskCreateInput {
   scope?: string | undefined;
   tags?: string[] | undefined;
   parent_task_id?: string | undefined;
+  schedule?: string | undefined;
+  watch_url?: string | undefined;
+  watch_interval_minutes?: number | undefined;
 }
 
 interface TaskUpdateInput {
@@ -57,6 +60,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         scope: { type: 'string', description: 'Scope as "type:id" (e.g., "client:acme"). Default: current project scope.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tags for categorization' },
         parent_task_id: { type: 'string', description: 'Parent task ID for subtasks' },
+        schedule: { type: 'string', description: 'Cron schedule for recurring tasks. Standard cron (e.g. \'0 8 * * *\' for daily at 8am) or shorthand (\'30m\', \'1h\', \'6h\', \'1d\').' },
+        watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
+        watch_interval_minutes: { type: 'number', description: 'How often to check the watched URL (in minutes). Default: 60.' },
       },
       required: ['title'],
     },
@@ -82,7 +88,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     }
 
     try {
-      const task = managerRef.create({
+      const baseParams = {
         title: input.title,
         description: input.description,
         priority: input.priority,
@@ -92,7 +98,28 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         dueDate: input.due_date,
         tags: input.tags,
         parentTaskId: input.parent_task_id,
-      });
+      };
+
+      if (input.schedule) {
+        const task = managerRef.createScheduled({
+          ...baseParams,
+          scheduleCron: input.schedule,
+        });
+        const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
+        return `Scheduled task created: ${formatTaskLine(task)}${nextRun}`;
+      }
+
+      if (input.watch_url) {
+        const intervalMinutes = input.watch_interval_minutes ?? 60;
+        const task = managerRef.createWatch({
+          ...baseParams,
+          watchUrl: input.watch_url,
+          watchIntervalMinutes: intervalMinutes,
+        });
+        return `Watch task created: ${formatTaskLine(task)} — watching ${input.watch_url} every ${String(intervalMinutes)}min`;
+      }
+
+      const task = managerRef.create(baseParams);
       return `Task created: ${formatTaskLine(task)}`;
     } catch (e: unknown) {
       logErrorChain('task_create', e);

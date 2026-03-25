@@ -77,6 +77,8 @@ import { PluginManager } from './plugins.js';
 import { isFeatureEnabled } from './features.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc } from './memory-gc.js';
+import { NotificationRouter } from './notification-router.js';
+import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
 
@@ -150,6 +152,8 @@ export class Engine {
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
+  private _notificationRouter = new NotificationRouter();
+  private _workerLoop: WorkerLoop | null = null;
 
   // Active session's per-run state — used by history subscription closures.
   // These are set by Session before each run for single-session compatibility.
@@ -496,6 +500,15 @@ export class Engine {
   getPipelinesEnabled(): boolean { return this._pipelinesEnabled; }
   getDataStoreEnabled(): boolean { return this._dataStoreEnabled; }
   getPlaybooksEnabled(): boolean { return this._playbooksEnabled; }
+  getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
+  getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
+
+  /** Start the background worker loop. Call from long-lived server modes (Telegram, MCP). */
+  startWorkerLoop(intervalMs?: number | undefined): void {
+    if (this._workerLoop) return; // already started
+    this._workerLoop = new WorkerLoop(this, this._notificationRouter, intervalMs);
+    this._workerLoop.start();
+  }
 
   // ── Batch ──
 
@@ -549,6 +562,12 @@ export class Engine {
   // ── Shutdown ──
 
   async shutdown(): Promise<void> {
+    // Stop worker loop first — prevents new task executions during shutdown
+    if (this._workerLoop) {
+      this._workerLoop.stop();
+      this._workerLoop = null;
+    }
+
     // Save file manifest for next session's diff
     if (this.context && this.currentManifest) {
       try {

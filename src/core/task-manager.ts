@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TaskStatus, TaskPriority, MemoryScopeRef } from '../types/index.js';
+import { isValidCron, nextOccurrence } from './cron-parser.js';
 
 export interface TaskCreateParams {
   title: string;
@@ -12,6 +13,12 @@ export interface TaskCreateParams {
   dueDate?: string | undefined;
   tags?: string[] | undefined;
   parentTaskId?: string | undefined;
+  scheduleCron?: string | undefined;
+  nextRunAt?: string | undefined;
+  taskType?: string | undefined;
+  watchConfig?: string | undefined;
+  maxRetries?: number | undefined;
+  notificationChannel?: string | undefined;
 }
 
 export interface TaskUpdateParams {
@@ -66,6 +73,12 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
+      scheduleCron: params.scheduleCron,
+      nextRunAt: params.nextRunAt,
+      taskType: params.taskType,
+      watchConfig: params.watchConfig,
+      maxRetries: params.maxRetries,
+      notificationChannel: params.notificationChannel,
     });
 
     return this.history.getTask(id)!;
@@ -243,4 +256,98 @@ export class TaskManager {
     const scopeArr = scopes?.map(s => ({ type: s.type, id: s.id }));
     return this.history.getTasksDueInRange(start, end, scopeArr);
   }
+
+  // ---------------------------------------------------------------------------
+  // Scheduling CRUD
+  // ---------------------------------------------------------------------------
+
+  /** Create a scheduled recurring task. Sets task_type='scheduled', assignee='nodyn', computes next_run_at. */
+  createScheduled(params: TaskCreateParams & {
+    scheduleCron: string;
+    maxRetries?: number | undefined;
+    notificationChannel?: string | undefined;
+  }): TaskRecord {
+    if (!isValidCron(params.scheduleCron)) {
+      throw new Error(`Invalid cron expression: ${params.scheduleCron}`);
+    }
+
+    const nextRun = nextOccurrence(params.scheduleCron);
+
+    return this.create({
+      ...params,
+      assignee: 'nodyn',
+      taskType: 'scheduled',
+      scheduleCron: params.scheduleCron,
+      nextRunAt: nextRun.toISOString(),
+      maxRetries: params.maxRetries,
+      notificationChannel: params.notificationChannel,
+    });
+  }
+
+  /** Create a watch/monitor task. Sets task_type='watch', assignee='nodyn', computes next_run_at from interval. */
+  createWatch(params: TaskCreateParams & {
+    watchUrl: string;
+    watchIntervalMinutes?: number | undefined;
+    watchSelector?: string | undefined;
+    notificationChannel?: string | undefined;
+  }): TaskRecord {
+    const intervalMinutes = params.watchIntervalMinutes ?? 60;
+
+    const watchConfig = JSON.stringify({
+      url: params.watchUrl,
+      interval_minutes: intervalMinutes,
+      selector: params.watchSelector ?? null,
+    });
+
+    return this.create({
+      ...params,
+      assignee: 'nodyn',
+      taskType: 'watch',
+      watchConfig,
+      nextRunAt: new Date(Date.now() + intervalMinutes * 60_000).toISOString(),
+      notificationChannel: params.notificationChannel,
+    });
+  }
+
+  /** Get tasks due for execution (next_run_at <= now, not completed). */
+  getDueTasks(): TaskRecord[] {
+    return this.history.getDueTasks();
+  }
+
+  /** Record the result of a worker task execution. Updates last_run_at, result, status, and optionally next_run_at for recurring tasks. */
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout'): void {
+    const task = this.history.getTask(id);
+    if (!task) {
+      throw new Error(`Task not found: ${id}`);
+    }
+
+    const now = new Date();
+    const truncatedResult = result.length > MAX_RUN_RESULT_CHARS
+      ? result.slice(0, MAX_RUN_RESULT_CHARS)
+      : result;
+
+    // Determine next_run_at based on task type
+    let nextRunAt: string | undefined;
+
+    if (task.schedule_cron) {
+      // Recurring cron task — always compute next run
+      nextRunAt = nextOccurrence(task.schedule_cron, now).toISOString();
+    } else if (task.watch_config) {
+      // Watch task — compute next run from interval
+      const config = JSON.parse(task.watch_config) as { interval_minutes: number };
+      nextRunAt = new Date(now.getTime() + config.interval_minutes * 60_000).toISOString();
+    } else if (status === 'success') {
+      // One-shot background task — mark as completed on success
+      this.history.updateTask(id, { status: 'completed', completedAt: now.toISOString() });
+    }
+
+    this.history.updateTaskRunResult(id, {
+      lastRunAt: now.toISOString(),
+      lastRunResult: truncatedResult,
+      lastRunStatus: status,
+      nextRunAt,
+    });
+  }
 }
+
+const MAX_RUN_RESULT_CHARS = 10_000;

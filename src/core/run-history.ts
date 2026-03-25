@@ -454,6 +454,21 @@ const MIGRATIONS: string[] = [
   // v19: Drop legacy memory_embeddings table (replaced by Knowledge Graph)
   `INSERT OR IGNORE INTO schema_version (version) VALUES (19);
    DROP TABLE IF EXISTS memory_embeddings;`,
+
+  // v20: Task scheduling support — cron, watch, run tracking, retries, notifications
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (20);
+   ALTER TABLE tasks ADD COLUMN schedule_cron TEXT;
+   ALTER TABLE tasks ADD COLUMN next_run_at TEXT;
+   ALTER TABLE tasks ADD COLUMN last_run_at TEXT;
+   ALTER TABLE tasks ADD COLUMN last_run_result TEXT;
+   ALTER TABLE tasks ADD COLUMN last_run_status TEXT;
+   ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'manual';
+   ALTER TABLE tasks ADD COLUMN watch_config TEXT;
+   ALTER TABLE tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE tasks ADD COLUMN notification_channel TEXT;
+   CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run_at);
+   CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);`,
 ];
 
 export class RunHistory {
@@ -1061,6 +1076,12 @@ export class RunHistory {
     dueDate?: string | undefined;
     tags?: string | undefined;
     parentTaskId?: string | undefined;
+    scheduleCron?: string | undefined;
+    nextRunAt?: string | undefined;
+    taskType?: string | undefined;
+    watchConfig?: string | undefined;
+    maxRetries?: number | undefined;
+    notificationChannel?: string | undefined;
   }): void {
     persistence.insertTask(this.db, params);
   }
@@ -1103,6 +1124,20 @@ export class RunHistory {
 
   getOverdueTasks(scopes?: Array<{ type: string; id: string }> | undefined): TaskRecord[] {
     return persistence.getOverdueTasks(this.db, scopes);
+  }
+
+  getDueTasks(): TaskRecord[] {
+    return persistence.getDueTasks(this.db);
+  }
+
+  updateTaskRunResult(id: string, update: {
+    lastRunAt: string;
+    lastRunResult: string;
+    lastRunStatus: string;
+    nextRunAt?: string | undefined;
+    retryCount?: number | undefined;
+  }): void {
+    persistence.updateTaskRunResult(this.db, id, update);
   }
 
   /**

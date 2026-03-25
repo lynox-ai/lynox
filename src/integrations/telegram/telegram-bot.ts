@@ -436,6 +436,11 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
   process.stderr.write('NODYN Telegram bot running.\n');
 }
 
+/** Return the live Telegraf instance (or null if not started). */
+export function getTelegramBot(): Telegraf | null {
+  return bot;
+}
+
 export async function stopTelegramBot(): Promise<void> {
   stopEvictionTimer();
   if (signalHandler) {
