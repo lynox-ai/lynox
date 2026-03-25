@@ -307,7 +307,7 @@ This walks through all steps again. Existing config is overwritten.
 
 ## What's Next
 
-- [CLI Reference](cli.md) — all slash commands and modes
+- [CLI Reference](cli.md) — all slash commands and flags
 - [Tools](tools.md) — available builtin tools
 - [Configuration](configuration.md) — accuracy, thinking, cost settings
 - [Knowledge](memory.md) — how nodyn remembers your business

@@ -115,7 +115,7 @@ All commands support tab autocomplete in the REPL.
 |---------|-------------|
 | `/memory [subcommand]` | Show knowledge (optional: knowledge/methods/project-state/learnings), gc [dry], embeddings (`list`, `prune`), scope (`info`, `list`, `create`, `tree`, `overrides`, `memory`, `stats`, `migrate`) |
 
-### Modes
+### Session
 
 | Command | Description |
 |---------|-------------|

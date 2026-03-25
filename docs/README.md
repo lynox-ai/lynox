@@ -5,7 +5,7 @@ Open agent engine — persistent knowledge, autonomous workflows, tool connectio
 ## Start Here
 
 - [Getting Started](getting-started.md) — install and first run
-- [CLI Reference](cli.md) — slash commands and modes
+- [CLI Reference](cli.md) — slash commands and flags
 - [Configuration](configuration.md) — settings and environment variables
 
 ## By Goal
@@ -33,7 +33,7 @@ Open agent engine — persistent knowledge, autonomous workflows, tool connectio
 | Document | Description |
 |----------|-------------|
 | [Getting Started](getting-started.md) | Installation, setup wizard, first run |
-| [CLI Reference](cli.md) | Modes, flags, slash commands, UI components |
+| [CLI Reference](cli.md) | Flags, slash commands, UI components |
 | [Configuration](configuration.md) | Config tiers, env vars, profiles |
 | [Knowledge](memory.md) | Storage, scopes, auto-extraction, retrieval |
 | [Workflows](dag-engine.md) | Multi-step automation, dependency graphs, conditions |
@@ -58,7 +58,7 @@ Open agent engine — persistent knowledge, autonomous workflows, tool connectio
 The following features are available in [`nodyn-pro`](https://github.com/nodyn-ai/nodyn-pro) (separate repository, commercial license):
 
 - Slack integration (Socket Mode, MCP bridge)
-- Watchdog, Background, Team operational modes
+- Background tasks via WorkerLoop (scheduled, watch-URL, pipeline)
 - Tenant isolation (multi-tenant, 4 isolation levels)
 - Worker pool (thread-based parallel execution)
 - Docker Compose multi-service deployment

@@ -68,4 +68,4 @@ Open business AI engine. Persistent knowledge, autonomous workflows, tool connec
 - **Docker** — Single-stage `node:22-slim` image, non-root user, read-only root filesystem, tmpfs, no-new-privileges
 - **Config system** — 3-tier merge (env > project > user) with project-safe allowlist
 - **Setup wizard** — First-run guided configuration with API key validation and accuracy level selection
-- **CLI** — 40+ slash commands for conversation, model control, project management, tools, knowledge, modes, automation, tasks, history, and identity
+- **CLI** — 40+ slash commands for conversation, model control, project management, tools, knowledge, automation, tasks, history, and identity

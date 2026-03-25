@@ -184,7 +184,7 @@ Structured bridge from ad-hoc execution to reusable pipelines. Core value: "disc
 2. `capture_process` reads actual steps (not LLM memory)
 3. Agent presents steps + parameters for user confirmation
 4. `promote_process` creates parameterized pipeline
-5. Agent suggests scheduling (daemon mode + cron)
+5. Agent suggests scheduling (background task + cron)
 
 **Storage**: SQLite `processes` table with CRUD (insertProcess, getProcess with prefix match, listProcesses, updateProcessPromotion, deleteProcess). Dependencies accessed via `agent.toolContext` (ToolContext pattern).
 

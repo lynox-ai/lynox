@@ -55,7 +55,7 @@ No re-briefing. No copy-paste. nodyn picks up where you left off.
 
 - **Multi-step automation** — Dependency graphs, conditions, parallel execution
 - **Workflow capture** — Teach nodyn your process once, save it as a reusable template
-- **7 built-in playbooks** — Research, Evaluation, Diagnosis, Synthesis, Assessment, Creation, Planning
+- **Background tasks** — Schedule recurring work, monitor URLs, get notified when results are ready
 - **Task management** — Priority, due dates, assignees — nodyn proposes working on tasks assigned to it
 
 ### Works where you work
@@ -67,8 +67,8 @@ No re-briefing. No copy-paste. nodyn picks up where you left off.
 
 ### You stay in control
 
-- **Assistant or Autopilot** — You steer step by step, or set a goal and let nodyn run
-- **8 specialized roles** — Researcher, Analyst, Executor, Strategist, Creator, and more
+- **Supervised or Autonomous** — You steer step by step, or set a goal and let nodyn run
+- **4 specialized roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets
 - **Pre-approval** — Glob-based auto-approval with audit trail for autonomous operation
 - **Cost tracking** — Budget enforcement, cache accounting, daily and monthly caps
 
@@ -165,8 +165,8 @@ For SDK usage, see [docs/sdk.md](docs/sdk.md) and [`examples/`](examples/).
 │  Knowledge       Roles          Workflows          │
 │  (remembers)    (specializes)   (automates)        │
 │                                                    │
-│  Playbooks       Tools          Security           │
-│  (strategizes)  (acts)          (protects)         │
+│  Tasks           Tools          Security           │
+│  (schedules)    (acts)          (protects)         │
 └────────────────────────────────────────────────────┘
 ```
 
