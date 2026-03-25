@@ -10,10 +10,13 @@ nodyn includes a built-in Telegram bot for hands-free operation. Send tasks to y
 Telegram API (long polling)
     ↕  HTTPS (outbound only)
 nodyn process
-    └─ Telegraf bot + Nodyn orchestrator (in-process)
+    ├─ Engine (shared singleton)
+    ├─ Session (per-conversation)
+    ├─ Telegraf bot (message routing, commands)
+    └─ TelegramNotificationChannel (background task notifications)
 ```
 
-Unlike the Slack integration (Pro), the Telegram bot runs in-process using `nodyn.run()` directly — no MCP server needed.
+The Telegram bot runs in-process using `session.run()` directly — no MCP server needed. It also serves as a notification channel for background tasks via `TelegramNotificationChannel`, which is registered with the `NotificationRouter` on the Engine.
 
 ## Setup
 
@@ -212,6 +215,26 @@ Use `/clear` to start a fresh conversation while keeping all long-term knowledge
 
 One active run per chat. If you send a message while a task is running, the bot replies with a "busy" message. This keeps the UX simple and avoids resource contention for personal use.
 
+## Background Task Notifications
+
+When the WorkerLoop completes a background task, the `TelegramNotificationChannel` pushes the result to the user's Telegram chat. Notifications include:
+
+- **Task result summary** (success or error)
+- **Follow-up buttons** as inline keyboard:
+  - **Details** — show full task output
+  - **Run again** / **Retry** — re-execute the task (retry on error, run again on success)
+  - **Explain** — ask the agent to explain what it did
+
+Follow-up button callbacks use the `'t:'` prefix (e.g., `t:details:<task_id>`).
+
+### Inquiry Handling
+
+When a background task's agent needs user input (via `ask_user`), the question is sent to Telegram as an inline keyboard with the available options. The user taps a button, and the response is routed back to the paused task via `ActiveTask.pendingInput`.
+
+- Inquiry callbacks use the `'q:'` prefix (e.g., `q:<task_id>:<option_index>`)
+- The task resumes automatically once the user responds
+- If no response is received, the task times out after the configured task timeout
+
 ## Source Files
 
 | File | Purpose |
@@ -219,3 +242,4 @@ One active run per chat. If you send a message while a task is running, the bot 
 | `src/integrations/telegram/telegram-bot.ts` | Telegraf setup, message routing, commands, follow-up callbacks |
 | `src/integrations/telegram/telegram-runner.ts` | Run lifecycle, rich status edits, follow-up suggestion state |
 | `src/integrations/telegram/telegram-formatter.ts` | Markdown→HTML, message splitting, `buildRichStatus`, `toolInputPreview`, `parseFollowUps`, inline keyboards |
+| `src/core/telegram-notification.ts` | `TelegramNotificationChannel` — push notifications from background tasks, follow-up buttons (`'t:'` prefix), inquiry responses (`'q:'` prefix) |

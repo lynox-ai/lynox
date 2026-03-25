@@ -4,29 +4,34 @@
 
 ```
                          ┌─────────────────────────┐
-                         │     CLI REPL / Stdin     │
+                         │  CLI / Telegram / MCP    │
                          │   (src/index.ts)         │
                          └────────────┬─────────────┘
                                       │
                          ┌────────────▼─────────────┐
-                         │      nodyn Orchestrator    │
-                         │  (src/core/orchestrator)  │
+                         │     Engine (singleton)    │
+                         │   (src/core/engine.ts)    │
+                         │  KG, Memory, DataStore,   │
+                         │  Secrets, Config, Tools,  │
+                         │  WorkerLoop, Notifier     │
                          └──┬──────┬──────┬──────┬──┘
                             │      │      │      │
-                   ┌────────▼──┐ ┌─▼────┐ ┌▼─────┐ ┌▼──────────┐
-                   │   Agent   │ │Memory│ │Regis-│ │   Mode     │
-                   │  (agent)  │ │      │ │ try  │ │ Controller │
-                   └────┬──────┘ └──────┘ └──────┘ └────────────┘
-                        │
-               ┌────────▼────────┐
-               │ StreamProcessor │
-               │   (stream)      │
-               └────────┬────────┘
-                        │
-            ┌───────────▼───────────┐
-            │    Anthropic SDK      │
-            │  (beta messages API)  │
-            └───────────────────────┘
+                    ┌───────▼──────▼──────▼──────▼────┐
+                    │   Session (per-conversation)     │
+                    │   (src/core/session.ts)          │
+                    │   Agent, messages, mode,         │
+                    │   callbacks, run tracking        │
+                    └──────────────┬───────────────────┘
+                                   │
+                          ┌────────▼────────┐
+                          │ StreamProcessor │
+                          │   (stream)      │
+                          └────────┬────────┘
+                                   │
+                       ┌───────────▼───────────┐
+                       │    Anthropic SDK      │
+                       │  (beta messages API)  │
+                       └───────────────────────┘
 ```
 
 ## Module Map
@@ -48,7 +53,7 @@ Single source of truth for all types. Contains:
 - `GoalState`, `TriggerConfig`, `ITrigger` -- goal tracking and triggers
 - `NODYN_BETAS` -- beta header array
 - `ALL_NAMESPACES` -- canonical list of all `MemoryNamespace` values (shared by knowledge system, knowledge-gc, knowledge tools)
-- `TaskRecord`, `TaskStatus`, `TaskPriority` -- task management types
+- `TaskRecord`, `TaskStatus`, `TaskPriority` -- task management types. Task types: `manual`, `scheduled`, `watch`, `pipeline`
 - `InlinePipelineStep` includes `role` field -- connects roles to DAG workflow steps
 - `IsolationConfig`, `IsolationLevel` -- context isolation configuration (used by Pro tenant system)
 - `MODEL_TIER_SET`, `EFFORT_LEVEL_SET`, `AUTONOMY_LEVEL_SET`, `SCOPE_TYPE_SET`, `OUTPUT_FORMAT_SET` -- centralized validation sets (never redeclare locally)
@@ -68,7 +73,9 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `agent.ts` | `Agent` | Agentic loop with streaming, tool dispatch, permission checks, retry with backoff, knowledge context support (`setKnowledgeContext()`) |
 | `stream.ts` | `StreamProcessor` | Assembles stream deltas into content blocks, emits `StreamEvent`s |
 | `memory.ts` | `Memory` | Context-scoped local file storage in `~/.nodyn/memory/<contextId>/` with global fallback, `hasContent()`, publishes to `nodyn:memory:store`. Unified scope-keyed cache (`${type}:${id}:${ns}`) covers global, project, and user scopes |
-| `orchestrator.ts` | `Nodyn` | Facade class (~1137 LOC): wires Agent + Memory + ToolRegistry + ModeController + RunHistory + PluginManager + EmbeddingProvider + KnowledgeLayer + ChangesetManager. Delegates to `orchestrator-prompts.ts` (system prompt constants), `orchestrator-init.ts` (11 init helpers), `orchestrator-batch.ts` (batch processing). `NodynHooks` lifecycle hooks for Pro extensions. Creates `ChangesetManager` per-run when `changeset_review` enabled |
+| `engine.ts` | `Engine` | Shared singleton per process. Owns KG, Memory, DataStore, Secrets, Config, ToolRegistry, WorkerLoop, NotificationRouter. `init()` once, then `createSession()` for per-conversation state. `NodynHooks.onAfterRun` receives `RunContext` (includes `runId`, `contextId`, `modelTier`, `durationMs`, `source`, `tenantId?`). Hook errors logged to `costWarning` debug channel |
+| `session.ts` | `Session` | Per-conversation state created via `engine.createSession()`. Implements `ModeOrchestrator`. Owns Agent, messages, mode, callbacks, run tracking. Entry point for `run()`, `batch()`, `shutdown()`. Per-session config isolation: `setModel()`, `setEffort()`, `setThinking()` mutate session-local fields, not `engine.config`. `SessionOptions`: `model`, `effort`, `thinking`, `autonomy`, `briefing`, `systemPromptSuffix` |
+| `orchestrator.ts` | -- | Thin re-export shim for backward compatibility -- re-exports Engine + Session as `Nodyn` facade. Existing consumers continue to work without changes |
 | `session-store.ts` | `SessionStore` | Multi-turn MCP session management |
 | `batch-index.ts` | `BatchIndex` | Persists batch metadata to `~/.nodyn/batch-index.json` |
 | `utils.ts` | -- | Shared utilities: `sleep()`, `getErrorMessage()`, `sha256Short()` (used by prompt-hash, run-history, project) |
@@ -98,9 +105,13 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `pre-approve.ts` | -- | Glob-based pattern matching for auto-approving operations in autonomous modes |
 | `pre-approve-audit.ts` | `PreApproveAudit` | SQLite audit trail for pre-approval decisions |
 | `task-manager.ts` | `TaskManager` | Task CRUD facade over RunHistory. Week summaries, briefing integration, scope-aware queries |
-| `changeset.ts` | `ChangesetManager` | Backup-before-write system: copies originals to temp dir, generates unified diffs via `diff -u`, supports full/partial rollback. Created per-run by orchestrator when `changeset_review` enabled |
+| `changeset.ts` | `ChangesetManager` | Backup-before-write system: copies originals to temp dir, generates unified diffs via `diff -u`, supports full/partial rollback. Created per-run by Session when `changeset_review` enabled |
+| `worker-loop.ts` | `WorkerLoop` | Persistent background task executor. 60s tick interval, headless Sessions per task, `AbortSignal.timeout(5min)` per execution, `AsyncLocalStorage` per task for isolated context. Multi-turn support: wires `promptUser` on headless sessions so agent can `ask_user` — question sent as notification — promise-based pause/resume via `ActiveTask.pendingInput`. One-shot background tasks auto-trigger (`nextRunAt=now` when `assignee='nodyn'`). Retry with exponential backoff (1min to 30min cap). Calls `runManifest()` for pipeline tasks (`pipeline_id` set). Started on `engine.init()`, stopped on `engine.shutdown()` |
+| `cron-parser.ts` | -- | 5-field standard cron expression parser + shorthand interval syntax (e.g. `every 5 minutes`). Pure function, no external dependencies. Used by WorkerLoop for scheduled task due-time calculation |
+| `notification-router.ts` | `NotificationRouter` | Pluggable notification channel system. Registers `NotificationChannel` implementations, routes `NotificationMessage` to appropriate channels. Supports task completion, error, and inquiry notifications. Follow-up buttons on task completion (Details, Run again / Retry, Explain). Extension point for custom channels |
+| `telegram-notification.ts` | `TelegramNotificationChannel` | Implements `NotificationChannel` for Telegram. Sends task results with inline follow-up buttons, handles inquiry responses for multi-turn tasks. Callback prefixes: `'t:'` for follow-ups, `'q:'` for inquiry responses. Integrates with `ActiveTask.pendingInput` for pause/resume |
 | `workspace.ts` | -- | Workspace isolation for Docker: path validation, sandbox boundaries |
-| `tool-context.ts` | -- | `ToolContext` interface — shared dependency container for tool handlers. Replaces module-level closure setters. Created by orchestrator, passed via `agent.toolContext`. `createToolContext()` factory, `applyNetworkPolicy()`, `applyHttpRateLimits()` helpers |
+| `tool-context.ts` | -- | `ToolContext` interface — shared dependency container for tool handlers. Replaces module-level closure setters. Created by Session, passed via `agent.toolContext`. `createToolContext()` factory, `applyNetworkPolicy()`, `applyHttpRateLimits()` helpers |
 | `errors.ts` | `NodynError` | Centralized error hierarchy: `NodynError` (base with `code` + `context`), `ValidationError`, `ConfigError`, `ExecutionError` (supports `Error.cause`), `ToolError`, `NotFoundError`. Business-friendly error codes |
 | `input-guard.ts` | -- | Content policy — scans user input before LLM (Tier 1 hard block + Tier 2 soft flag) |
 | `data-boundary.ts` | -- | Prompt injection defense: `wrapUntrustedData()` with boundary-escape neutralization, `detectInjectionAttempt()` for 17 patterns (12 categories), `escapeXml()`. Applied to web search, HTTP, Google tools, spawn context, pipeline templates, memory extraction, briefing |
@@ -181,15 +192,15 @@ See [DAG Engine](dag-engine.md) for full documentation.
 
 ### `src/integrations/telegram/` -- Telegram Bot
 
-In-process Telegram bot using Telegraf. Connects directly to `nodyn.run()` (no MCP needed). Three modules: `telegram-bot.ts` (Telegraf setup, message routing, commands), `telegram-runner.ts` (run lifecycle, stream handling, status edits), `telegram-formatter.ts` (markdown→HTML, message splitting, inline keyboards).
+In-process Telegram bot using Telegraf. Connects directly to `session.run()` (no MCP needed). Three modules: `telegram-bot.ts` (Telegraf setup, message routing, commands), `telegram-runner.ts` (run lifecycle, stream handling, status edits), `telegram-formatter.ts` (markdown→HTML, message splitting, inline keyboards). Also serves as a notification channel for background tasks via `TelegramNotificationChannel` (registered with `NotificationRouter`).
 
 ### `src/server/mcp-server.ts` -- MCP Server
 
-Exposes NODYN as an MCP server with stdio and HTTP transport, including async run polling with cursor-based event log, reply/abort flow, file attachments, buffered output limits, and persisted async run state for restart-resilient polling.
+Exposes NODYN as an MCP server with stdio and HTTP transport. Uses `Engine` internally — `SessionStore` holds per-session `Session` instances (not raw Agents). Includes async run polling with cursor-based event log, reply/abort flow, file attachments, buffered output limits, and persisted async run state for restart-resilient polling.
 
 ### `src/index.ts` -- Entry Point
 
-Module re-exports + CLI REPL with interactive dialog, streaming, session management, slash commands. Extension points: `registerCommand()` for Pro slash commands, `registerValidMode()` for custom modes.
+Module re-exports (Engine, Session, WorkerLoop, NotificationRouter, TelegramNotificationChannel, NotificationChannel, NotificationMessage) + CLI REPL with interactive dialog, streaming, session management, slash commands. Extension points: `registerCommand()` for Pro slash commands, `registerValidMode()` for custom modes.
 
 ## Data Flow
 
@@ -197,7 +208,7 @@ Module re-exports + CLI REPL with interactive dialog, streaming, session managem
 User Input
     │
     ▼
-Nodyn.run(task)
+Session.run(task)                   (Session created via engine.createSession())
     │
     ├──► loadConfig() ──► 3-tier merge (env > project > user)
     ├──► detectProjectRoot() ──► project ID (SHA-256)
@@ -254,7 +265,7 @@ Agent.send(userMessage)
 - **3-tier config**: env vars > project `.nodyn/config.json` > user `~/.nodyn/config.json`.
 - **Security-first**: `PROJECT_SAFE_KEYS` allowlist, `NPM_NAME_RE`/`SAFE_ROLE_NAME_RE`/`SAFE_PROFILE_NAME_RE` validation, SSRF protection, XML escaping in RAG.
 - **DRY utilities**: Shared primitives in `src/core/utils.ts` (`sha256Short`, `getErrorMessage`, `sleep`) and `src/cli/ansi.ts` (`TBL`, `stripAnsi`, `wordWrap`). Constants like `ALL_NAMESPACES` live in `src/types/index.ts`.
-- **Open-core extensibility**: Core provides 5 extension points (Mode Registry, Orchestrator Hooks, CLI Command Registry, Mode Validation, Feature Flags) so Pro can integrate without modifying core source. See [Extension Points](extension-points.md).
+- **Open-core extensibility**: Core provides 6 extension points (Mode Registry, Orchestrator Hooks, CLI Command Registry, Mode Validation, Feature Flags, Notification Router) so Pro can integrate without modifying core source. See [Extension Points](extension-points.md).
 
 ## Error Handling
 

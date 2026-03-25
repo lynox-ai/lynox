@@ -138,6 +138,9 @@ All commands support tab autocomplete in the REPL.
 | Command | Description |
 |---------|-------------|
 | `/task [subcommand]` | Task management (`list`, `add`, `done`, `start`, `show`, `edit`, `delete`) |
+| `/task answer` | Answer a pending question from a background task |
+| `/schedule [subcommand]` | Scheduled tasks (`list`, `details <id>`, `cancel <id>`, `test <cron>`) |
+
 ### History
 
 | Command | Description |

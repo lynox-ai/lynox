@@ -5,29 +5,34 @@ Use nodyn as a library in your own TypeScript projects.
 ## Minimal example
 
 ```typescript
-import { Nodyn } from '@nodyn-ai/core';
+import { Engine } from '@nodyn-ai/core';
 
-// Tiers: 'opus' (thorough), 'sonnet' (balanced), 'haiku' (fast)
-const nodyn = new Nodyn({ model: 'sonnet' });
-await nodyn.init();
+// Create the shared Engine singleton
+const engine = new Engine({ model: 'sonnet' });
+await engine.init();
 
-const result = await nodyn.run('List all TODO comments in this codebase');
+// Create a session for this conversation
+const session = engine.createSession({ model: 'sonnet' });
+const result = await session.run('List all TODO comments in this codebase');
 console.log(result);
 
-await nodyn.shutdown();
+await engine.shutdown();
 ```
+
+> **Backward compatibility:** `import { Nodyn } from '@nodyn-ai/core'` still works via a thin re-export shim in `orchestrator.ts`. New code should use `Engine` + `Session` directly.
 
 ## Error handling
 
 ```typescript
-import { Nodyn, ValidationError, ExecutionError } from '@nodyn-ai/core';
+import { Engine, ValidationError, ExecutionError } from '@nodyn-ai/core';
 
-// Tiers: 'opus' (thorough), 'sonnet' (balanced), 'haiku' (fast)
-const nodyn = new Nodyn({ model: 'sonnet' });
-await nodyn.init();
+const engine = new Engine({ model: 'sonnet' });
+await engine.init();
+
+const session = engine.createSession();
 
 try {
-  const result = await nodyn.run('Analyze the quarterly report');
+  const result = await session.run('Analyze the quarterly report');
   console.log(result);
 } catch (err) {
   if (err instanceof ValidationError) {
@@ -38,14 +43,14 @@ try {
     throw err;
   }
 } finally {
-  await nodyn.shutdown();
+  await engine.shutdown();
 }
 ```
 
 ## Register a custom tool
 
 ```typescript
-nodyn.addTool({
+engine.addTool({
   definition: {
     type: 'custom',
     name: 'lookup_price',
@@ -69,12 +74,14 @@ nodyn.addTool({
 ## Stream events
 
 ```typescript
-nodyn.onStream = (event) => {
+const session = engine.createSession();
+
+session.onStream = (event) => {
   if (event.type === 'text') process.stdout.write(event.text);
   if (event.type === 'tool_call') console.log(`\n🔧 ${event.name}`);
 };
 
-await nodyn.run('Write a summary of this project');
+await session.run('Write a summary of this project');
 ```
 
 ## Run a workflow
@@ -113,7 +120,7 @@ Workflow manifest (`workflow.json`):
 ## Batch processing
 
 ```typescript
-const results = await nodyn.batchAndAwait([
+const results = await session.batchAndAwait([
   { id: 'a', task: 'Summarize Q1 report' },
   { id: 'b', task: 'Summarize Q2 report' },
   { id: 'c', task: 'Summarize Q3 report' },

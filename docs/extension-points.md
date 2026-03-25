@@ -50,15 +50,15 @@ ModeController.registerMode('my-custom-mode', myMode);
 
 ## 2. Orchestrator Hooks
 
-Lifecycle hooks for extending Nodyn's init, agent creation, run, and shutdown phases.
+Lifecycle hooks for extending the Engine's init, agent creation, run, and shutdown phases.
 
 ```typescript
 import type { NodynHooks, RunContext } from 'nodyn';
 
 const hooks: NodynHooks = {
-  async onInit(nodyn) {
-    // Called after core init (agent created, memory loaded)
-    // Use for tenant setup, license validation, etc.
+  async onInit(engine) {
+    // Called after core init (Engine created, memory loaded, WorkerLoop started)
+    // Receives Engine (not Nodyn/Session). Use for tenant setup, license validation, etc.
   },
 
   onBeforeCreateAgent(tools) {
@@ -77,7 +77,7 @@ const hooks: NodynHooks = {
   },
 };
 
-nodyn.registerHooks(hooks);
+engine.registerHooks(hooks);
 ```
 
 All hook methods are optional. Hook errors are logged to the `costWarning` debug channel instead of silently swallowed.
@@ -90,7 +90,7 @@ Register custom slash commands without modifying the core REPL.
 import { registerCommand } from 'nodyn';
 import type { SlashCommandHandler } from 'nodyn';
 
-const tenantCommand: SlashCommandHandler = async (parts, nodyn, ctx) => {
+const tenantCommand: SlashCommandHandler = async (parts, session, ctx) => {
   const sub = parts[1];
   if (sub === 'list') {
     ctx.stdout.write('Listing tenants...\n');
@@ -130,6 +130,30 @@ if (isFeatureEnabled('advanced-analytics')) {
 
 Core flags (`tenants`, `triggers`, `plugins`, `worker-pool`) are immutable. Dynamic flags are registered at runtime and checked the same way.
 
+## 6. Notification Router
+
+Register custom notification channels for background task results and inquiries.
+
+```typescript
+import type { NotificationChannel, NotificationMessage } from 'nodyn';
+
+class SlackNotificationChannel implements NotificationChannel {
+  readonly id = 'slack';
+
+  async send(message: NotificationMessage): Promise<void> {
+    // Send to Slack via webhook, Socket Mode, etc.
+  }
+
+  async handleFollowUp(action: string, taskId: string): Promise<void> {
+    // Handle follow-up button clicks (Details, Retry, Explain)
+  }
+}
+
+engine.notificationRouter.register(new SlackNotificationChannel());
+```
+
+The `NotificationRouter` is available on the `Engine` instance after `init()`. Core ships with `TelegramNotificationChannel` (registered automatically when Telegram is configured). Pro can register additional channels (e.g., Slack, email, webhooks).
+
 ## Pro Code (Phase 3 — Extracted)
 
 In Phase 2, Pro modes, tenant tracking, and worker pool were wired through extension points inside the core codebase. In Phase 3, this code was extracted to the separate `nodyn-pro` repository. Pro registers the same way externally via the extension points listed above:
@@ -146,8 +170,9 @@ Pro extensions (or custom plugins) register at import time:
 
 ```typescript
 // nodyn-pro/src/index.ts
-import { ModeController, registerCommand, registerValidMode, registerFeature } from 'nodyn';
+import { ModeController, registerCommand, registerValidMode, registerFeature, Engine } from 'nodyn';
 import { createTenantHook, createWorkerPoolHook } from 'nodyn';
+import type { NotificationChannel } from 'nodyn';
 
 // Register Pro modes
 ModeController.registerMode('sentinel', sentinelHandler);
@@ -168,12 +193,15 @@ registerFeature('advanced-analytics', 'NODYN_FEATURE_ANALYTICS', false);
 
 Then in the entry point:
 ```typescript
-import 'nodyn-pro'; // side-effect: registers all extensions
-import { Nodyn } from 'nodyn';
+import 'nodyn-pro'; // side-effect: registers modes, commands, feature flags
+import { Engine } from 'nodyn';
 
-const nodyn = new Nodyn({});
-nodyn.tenantId = 'my-tenant'; // Set active tenant for billing
-nodyn.registerHooks(createTenantHook()); // Reads RunContext.tenantId
-nodyn.registerHooks(createWorkerPoolHook(4));
-await nodyn.init();
+const engine = new Engine({});
+engine.registerHooks(createTenantHook()); // Reads RunContext.tenantId
+engine.registerHooks(createWorkerPoolHook(4));
+await engine.init(); // Starts WorkerLoop, NotificationRouter, etc.
+
+const session = engine.createSession({ model: 'sonnet' });
+session.tenantId = 'my-tenant'; // Set active tenant for billing
+const result = await session.run('Your task here');
 ```
