@@ -1,0 +1,71 @@
+#!/bin/sh
+# Quick security pattern scan for nodyn source code.
+# Run: ./scripts/security-scan.sh
+
+set -e
+ERRORS=0
+SRC="src"
+
+echo "🔒 nodyn security scan"
+echo ""
+
+# Check for dangerous code execution patterns — actual calls, not mentions in comments/regex/strings
+if grep -rn -E '[^a-zA-Z_]eval\s*\(' "$SRC" --include='*.ts' | grep -v '.test.ts' | grep -v 'no-eval' | grep -v '// eslint' | grep -v 'pattern:' | grep -v "'eval" | grep -v '"eval' | grep -v 'Retrieval'; then
+  echo "❌ Found dangerous code execution pattern in source files"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "✓ No dangerous code execution patterns found"
+fi
+
+# Check for hardcoded secrets
+if grep -rn 'sk-ant-api' "$SRC" --include='*.ts' | grep -v '.test.ts'; then
+  echo "❌ Found hardcoded API key"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "✓ No hardcoded secrets"
+fi
+
+# Check external tools have wrapUntrustedData
+WRAP_OK=true
+for file in src/tools/builtin/http.ts src/integrations/search/web-search-tool.ts src/integrations/google/google-gmail.ts src/integrations/google/google-sheets.ts src/integrations/google/google-drive.ts src/integrations/google/google-calendar.ts src/integrations/google/google-docs.ts; do
+  if [ -f "$file" ] && ! grep -q 'wrapUntrustedData' "$file"; then
+    echo "❌ $file missing wrapUntrustedData"
+    WRAP_OK=false
+    ERRORS=$((ERRORS + 1))
+  fi
+done
+if [ "$WRAP_OK" = true ]; then
+  echo "✓ External tools use wrapUntrustedData"
+fi
+
+# Check SSRF protection on worker watch
+if ! grep -q '127.0.0.1' src/core/worker-loop.ts; then
+  echo "❌ worker-loop.ts missing SSRF protection"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "✓ Watch task has SSRF protection"
+fi
+
+# Check spawn injection scanning in permission guard
+if ! grep -q 'detectInjectionAttempt' src/tools/permission-guard.ts; then
+  echo "❌ permission-guard.ts missing spawn injection detection"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "✓ Permission guard scans spawn context"
+fi
+
+# Check debug subscriber masks tokens
+if ! grep -q 'maskTokenPatterns' src/core/debug-subscriber.ts; then
+  echo "❌ debug-subscriber.ts missing token masking"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "✓ Debug subscriber masks token patterns"
+fi
+
+echo ""
+if [ $ERRORS -gt 0 ]; then
+  echo "❌ Security scan failed with $ERRORS issues"
+  exit 1
+else
+  echo "✓ Security scan passed"
+fi

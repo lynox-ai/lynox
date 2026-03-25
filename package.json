@@ -56,6 +56,7 @@
     "smoke:manual": "bash scripts/smoke-manual.sh",
     "test:watch": "vitest",
     "prepare": "lefthook install || true",
+    "security": "sh scripts/security-scan.sh && vitest run tests/security/",
     "lint": "eslint src/",
     "prepublishOnly": "npm run build"
   },
