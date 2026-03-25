@@ -1,7 +1,7 @@
 /**
  * CRM — automatic contact management, interaction logging, and deal pipeline.
  *
- * Creates standard DataStore tables on first use. Hooks into Telegram/Email
+ * Creates standard DataStore tables on first use. Hooks into Email (Gmail)
  * to auto-create contacts and log interactions without manual effort.
  *
  * Schema:
