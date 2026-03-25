@@ -80,8 +80,8 @@ ${BOLD}Tools${RESET}
 ${BOLD}Knowledge${RESET}
   ${BLUE}/knowledge${RESET} [sub]    Show or manage knowledge (prune)
 
-${BOLD}Modes${RESET}
-  ${BLUE}/mode${RESET}               Show current status
+${BOLD}Roles${RESET}
+  ${BLUE}/mode${RESET}               Show current session status
   ${BLUE}/roles${RESET}             Show available roles for delegation
 
 ${BOLD}Workflows${RESET}
