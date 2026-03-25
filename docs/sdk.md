@@ -19,7 +19,7 @@ console.log(result);
 await engine.shutdown();
 ```
 
-> **Backward compatibility:** `import { Nodyn } from '@nodyn-ai/core'` still works via a thin re-export shim in `orchestrator.ts`. New code should use `Engine` + `Session` directly.
+> **Note:** Use `Engine` + `Session` directly. The old `Nodyn` class no longer exists.
 
 ## Error handling
 

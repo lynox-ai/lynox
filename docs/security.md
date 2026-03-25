@@ -345,7 +345,7 @@ Everything else is stripped — including `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`,
 
 ## System Prompt Security Boundaries
 
-The `SYSTEM_PROMPT` (in `src/core/prompts.ts`, re-exported from `orchestrator.ts`) includes a consolidated `## Safety` section covering all boundaries in compact key-value format:
+The `SYSTEM_PROMPT` (in `src/core/prompts.ts`) includes a consolidated `## Safety` section covering all boundaries in compact key-value format:
 
 - **Git**: No commit/push/merge without explicit request
 - **Publishing**: No npm publish, docker push, or deploy CLIs without permission
