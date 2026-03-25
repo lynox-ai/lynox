@@ -45,6 +45,27 @@ vi.mock('./telegram-runner.js', () => ({
 import { startTelegramBot, stopTelegramBot } from './telegram-bot.js';
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function createMockEngine() {
+  return {
+    createSession: vi.fn().mockReturnValue({
+      run: vi.fn(),
+      abort: vi.fn(),
+      reset: vi.fn(),
+      saveMessages: vi.fn().mockReturnValue([]),
+      loadMessages: vi.fn(),
+      onStream: null,
+      promptUser: null,
+      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      getModelTier: vi.fn().mockReturnValue('sonnet'),
+    }),
+    getWorkerLoop: vi.fn().mockReturnValue(null),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -59,14 +80,9 @@ describe('telegram-bot', () => {
   });
 
   it('creates bot and registers handlers', async () => {
-    const nodyn = {
-      run: vi.fn(),
-      abort: vi.fn(),
-      onStream: null,
-      promptUser: null,
-    };
+    const engine = createMockEngine();
 
-    await startTelegramBot({ token: 'test-token', nodyn: nodyn as never });
+    await startTelegramBot({ token: 'test-token', engine: engine as never });
 
     // Should register commands
     expect(mockCommand).toHaveBeenCalledWith('start', expect.any(Function));
@@ -87,17 +103,12 @@ describe('telegram-bot', () => {
   });
 
   it('sets up allowedChatIds middleware when provided', async () => {
-    const nodyn = {
-      run: vi.fn(),
-      abort: vi.fn(),
-      onStream: null,
-      promptUser: null,
-    };
+    const engine = createMockEngine();
 
     await startTelegramBot({
       token: 'test-token',
       allowedChatIds: [123, 456],
-      nodyn: nodyn as never,
+      engine: engine as never,
     });
 
     // Should have registered middleware
@@ -107,14 +118,9 @@ describe('telegram-bot', () => {
   });
 
   it('does not set up allowlist middleware with NODYN_TELEGRAM_OPEN_ACCESS', async () => {
-    const nodyn = {
-      run: vi.fn(),
-      abort: vi.fn(),
-      onStream: null,
-      promptUser: null,
-    };
+    const engine = createMockEngine();
 
-    await startTelegramBot({ token: 'test-token', nodyn: nodyn as never });
+    await startTelegramBot({ token: 'test-token', engine: engine as never });
 
     // Should not register allowlist middleware (open access mode)
     expect(mockUse).not.toHaveBeenCalled();
@@ -124,43 +130,28 @@ describe('telegram-bot', () => {
 
   it('starts in setup mode without allowedChatIds', async () => {
     delete process.env['NODYN_TELEGRAM_OPEN_ACCESS'];
-    const nodyn = {
-      run: vi.fn(),
-      abort: vi.fn(),
-      onStream: null,
-      promptUser: null,
-    };
+    const engine = createMockEngine();
 
     // Should NOT throw — starts in setup mode instead
-    await startTelegramBot({ token: 'test-token', nodyn: nodyn as never });
+    await startTelegramBot({ token: 'test-token', engine: engine as never });
     await stopTelegramBot();
   });
 
   it('stopTelegramBot calls bot.stop()', async () => {
-    const nodyn = {
-      run: vi.fn(),
-      abort: vi.fn(),
-      onStream: null,
-      promptUser: null,
-    };
+    const engine = createMockEngine();
 
-    await startTelegramBot({ token: 'test-token', nodyn: nodyn as never });
+    await startTelegramBot({ token: 'test-token', engine: engine as never });
     await stopTelegramBot();
 
     expect(mockStop).toHaveBeenCalledWith('shutdown');
   });
 
   it('cleans up signal listeners on stop', async () => {
-    const nodyn = {
-      run: vi.fn(),
-      abort: vi.fn(),
-      onStream: null,
-      promptUser: null,
-    };
+    const engine = createMockEngine();
 
     const removeListenerSpy = vi.spyOn(process, 'removeListener');
 
-    await startTelegramBot({ token: 'test-token', nodyn: nodyn as never });
+    await startTelegramBot({ token: 'test-token', engine: engine as never });
     await stopTelegramBot();
 
     expect(removeListenerSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
@@ -170,32 +161,22 @@ describe('telegram-bot', () => {
   });
 
   it('does not leak signal listeners across multiple start/stop cycles', async () => {
-    const nodyn = {
-      run: vi.fn(),
-      abort: vi.fn(),
-      onStream: null,
-      promptUser: null,
-    };
+    const engine = createMockEngine();
 
     const sigintBefore = process.listenerCount('SIGINT');
 
-    await startTelegramBot({ token: 'test-token', nodyn: nodyn as never });
+    await startTelegramBot({ token: 'test-token', engine: engine as never });
     await stopTelegramBot();
-    await startTelegramBot({ token: 'test-token', nodyn: nodyn as never });
+    await startTelegramBot({ token: 'test-token', engine: engine as never });
     await stopTelegramBot();
 
     expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
   });
 
   it('registers callback_query handler that supports follow-up type', async () => {
-    const nodyn = {
-      run: vi.fn(),
-      abort: vi.fn(),
-      onStream: null,
-      promptUser: null,
-    };
+    const engine = createMockEngine();
 
-    await startTelegramBot({ token: 'test-token', nodyn: nodyn as never });
+    await startTelegramBot({ token: 'test-token', engine: engine as never });
 
     // callback_query handler should be registered
     expect(mockOn).toHaveBeenCalledWith('callback_query', expect.any(Function));

@@ -1,11 +1,7 @@
-// === Telegram Session Store ===
-// Per-chat conversation persistence + serialized run queue.
-// Each chat maintains its own message history (sliding window),
-// swapped in/out of the shared Session instance between runs.
-// Runs are serialized across all chats to prevent handler corruption.
-//
-// Future: when Engine is passed to the bot directly, each chat
-// can have its own Session — eliminating the message swap pattern.
+// === Telegram Session Map ===
+// Per-chat Session isolation via engine.createSession().
+// Each chat owns its own Session (Agent + message history).
+// Runs are serialized across all chats to prevent concurrent API calls.
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -13,101 +9,83 @@
 
 const MAX_SESSIONS = 50;
 const STALE_SESSION_MS = 30 * 60 * 1000; // 30 minutes idle → evict
-const MAX_MESSAGES_PER_CHAT = 20;         // ~10 turns — older messages drop off
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface ChatSession {
-  messages: unknown[];
-  lastActivityAt: number;
-  trimNotified: boolean;
-}
-
-/** Minimal interface for the Session methods we need. */
-export interface SessionNodyn {
+/** Minimal interface for the Session returned by engine.createSession(). */
+export interface TelegramSession {
+  run(task: string | unknown[]): Promise<string>;
+  abort(): void;
   reset(): void;
   saveMessages(): unknown[];
   loadMessages(msgs: unknown[]): void;
+  onStream: ((event: import('../../types/index.js').StreamEvent) => void | Promise<void>) | null;
+  get promptUser(): ((question: string, options?: string[]) => Promise<string>) | null;
+  set promptUser(fn: ((question: string, options?: string[]) => Promise<string>) | null);
+  readonly usage: { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number };
+  getModelTier(): string;
+}
+
+/** Minimal interface for the Engine used by SessionMap. */
+export interface TelegramEngine {
+  createSession(opts?: Record<string, unknown>): TelegramSession;
+  getWorkerLoop(): { resolveTaskInput(taskId: string, answer: string): boolean } | null;
 }
 
 // ---------------------------------------------------------------------------
-// ChatSessionStore — per-chat conversation history
+// SessionMap — per-chat Session isolation
 // ---------------------------------------------------------------------------
 
-export class ChatSessionStore {
-  private readonly sessions = new Map<number, ChatSession>();
+export class SessionMap {
+  private readonly sessions = new Map<number, TelegramSession>();
+  private readonly lastActivity = new Map<number, number>();
 
-  /** Load a chat's saved messages into the nodyn instance. Resets agent first. */
-  load(chatId: number, nodyn: SessionNodyn): void {
-    const session = this.sessions.get(chatId);
-    nodyn.reset();
-    if (session && session.messages.length > 0) {
-      nodyn.loadMessages(session.messages);
-    }
-  }
-
-  /** Save the current nodyn messages as this chat's history (sliding window). Returns true if messages were trimmed. */
-  save(chatId: number, nodyn: SessionNodyn): boolean {
-    let messages = nodyn.saveMessages();
-    // Sliding window: keep only the most recent messages.
-    // Messages are user/assistant pairs — trim from the front to preserve recent context.
-    const trimmed = messages.length > MAX_MESSAGES_PER_CHAT;
-    if (trimmed) {
-      messages = messages.slice(-MAX_MESSAGES_PER_CHAT);
-    }
-    const existing = this.sessions.get(chatId);
-    if (existing) {
-      existing.messages = messages;
-      existing.lastActivityAt = Date.now();
-    } else {
+  /** Get an existing session or create a new one for this chat. */
+  getOrCreate(chatId: number, engine: TelegramEngine, systemPromptSuffix: string): TelegramSession {
+    let session = this.sessions.get(chatId);
+    if (!session) {
       this.evictIfFull();
-      this.sessions.set(chatId, { messages, lastActivityAt: Date.now(), trimNotified: false });
+      session = engine.createSession({ systemPromptSuffix });
+      this.sessions.set(chatId, session);
     }
-    return trimmed;
+    this.lastActivity.set(chatId, Date.now());
+    return session;
   }
 
-  /** Whether the user has already been notified about context trimming in this session. */
-  wasTrimNotified(chatId: number): boolean {
-    return this.sessions.get(chatId)?.trimNotified ?? false;
-  }
-
-  /** Mark that the user has been notified about context trimming. */
-  markTrimNotified(chatId: number): void {
-    const session = this.sessions.get(chatId);
-    if (session) session.trimNotified = true;
-  }
-
-  /** Clear a chat's conversation history. */
+  /** Clear a chat's session. */
   clear(chatId: number): void {
     this.sessions.delete(chatId);
-  }
-
-  /** Evict sessions idle longer than maxAgeMs. Returns count evicted. */
-  evictStale(maxAgeMs: number = STALE_SESSION_MS): number {
-    const cutoff = Date.now() - maxAgeMs;
-    let evicted = 0;
-    for (const [chatId, session] of this.sessions) {
-      if (session.lastActivityAt < cutoff) {
-        this.sessions.delete(chatId);
-        evicted++;
-      }
-    }
-    return evicted;
-  }
-
-  get size(): number {
-    return this.sessions.size;
+    this.lastActivity.delete(chatId);
   }
 
   has(chatId: number): boolean {
     return this.sessions.has(chatId);
   }
 
+  get size(): number {
+    return this.sessions.size;
+  }
+
   /** Clear all sessions. */
   clearAll(): void {
     this.sessions.clear();
+    this.lastActivity.clear();
+  }
+
+  /** Evict sessions idle longer than maxAgeMs. Returns count evicted. */
+  evictStale(maxAgeMs: number = STALE_SESSION_MS): number {
+    const cutoff = Date.now() - maxAgeMs;
+    let evicted = 0;
+    for (const [chatId, ts] of this.lastActivity) {
+      if (ts < cutoff) {
+        this.sessions.delete(chatId);
+        this.lastActivity.delete(chatId);
+        evicted++;
+      }
+    }
+    return evicted;
   }
 
   /** If at capacity, evict the oldest session. */
@@ -115,13 +93,16 @@ export class ChatSessionStore {
     if (this.sessions.size < MAX_SESSIONS) return;
     let oldestId: number | undefined;
     let oldestTime = Infinity;
-    for (const [chatId, session] of this.sessions) {
-      if (session.lastActivityAt < oldestTime) {
-        oldestTime = session.lastActivityAt;
+    for (const [chatId, ts] of this.lastActivity) {
+      if (ts < oldestTime) {
+        oldestTime = ts;
         oldestId = chatId;
       }
     }
-    if (oldestId !== undefined) this.sessions.delete(oldestId);
+    if (oldestId !== undefined) {
+      this.sessions.delete(oldestId);
+      this.lastActivity.delete(oldestId);
+    }
   }
 }
 
@@ -176,7 +157,7 @@ export class RunQueue {
 // Module-level singletons
 // ---------------------------------------------------------------------------
 
-export const chatSessions = new ChatSessionStore();
+export const sessionMap = new SessionMap();
 export const runQueue = new RunQueue();
 
 // ---------------------------------------------------------------------------
@@ -189,7 +170,7 @@ let evictTimer: ReturnType<typeof setInterval> | null = null;
 export function startEvictionTimer(): void {
   if (evictTimer) return;
   evictTimer = setInterval(() => {
-    chatSessions.evictStale();
+    sessionMap.evictStale();
   }, EVICT_INTERVAL_MS);
   evictTimer.unref();
 }

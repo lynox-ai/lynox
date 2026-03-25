@@ -21,22 +21,15 @@ import {
   formatFollowUpKeyboard,
   friendlyError,
 } from './telegram-formatter.js';
-import type { PendingTool, FollowUpSuggestion } from './telegram-formatter.js';
+import type { PendingTool } from './telegram-formatter.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { chatSessions, runQueue } from './telegram-session.js';
+import { runQueue } from './telegram-session.js';
+import type { TelegramSession } from './telegram-session.js';
 import { t, type Lang } from './telegram-i18n.js';
+import { setChatFollowUps, getChatFollowUp, clearChatFollowUps, clearAll as clearCallbackStore } from './telegram-callbacks.js';
 
-// Duck-typed Session interface — avoids importing Session directly (circular)
-interface NodynInstance {
-  run(task: string | unknown[]): Promise<string>;
-  abort(): void;
-  reset(): void;
-  saveMessages(): unknown[];
-  loadMessages(msgs: unknown[]): void;
-  onStream: ((event: StreamEvent) => void | Promise<void>) | null;
-  get promptUser(): ((question: string, options?: string[]) => Promise<string>) | null;
-  set promptUser(fn: ((question: string, options?: string[]) => Promise<string>) | null);
-}
+// Sliding window: keep last 20 messages per chat to prevent unbounded growth
+const MAX_MESSAGES_PER_CHAT = 20;
 
 // ---------------------------------------------------------------------------
 // Telegram API error helpers
@@ -96,9 +89,6 @@ interface ActiveRun {
 }
 
 const activeRuns = new Map<number, ActiveRun>();
-
-// Follow-up state — module-level for callback lookup
-const pendingFollowUps = new Map<number, { suggestions: FollowUpSuggestion[]; task: string }>();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -171,11 +161,11 @@ export function resolveInput(chatId: number, answer: string): boolean {
   return true;
 }
 
-export async function abortRun(chatId: number, nodyn: NodynInstance, bot?: Telegraf): Promise<void> {
+export async function abortRun(chatId: number, session: TelegramSession, bot?: Telegraf): Promise<void> {
   const run = activeRuns.get(chatId);
   if (!run) return;
   run.aborted = true;
-  nodyn.abort();
+  session.abort();
   // If waiting for input, resolve with abort signal
   if (run.pendingInput) {
     run.pendingInput.resolve('[ABORTED]');
@@ -200,15 +190,12 @@ export async function abortRun(chatId: number, nodyn: NodynInstance, bot?: Teleg
 }
 
 export function getFollowUpTask(chatId: number, index: number): string | null {
-  const entry = pendingFollowUps.get(chatId);
-  if (!entry) return null;
-  const suggestion = entry.suggestions[index];
-  return suggestion?.task ?? null;
+  return getChatFollowUp(chatId, index)?.task ?? null;
 }
 
 export async function executeRun(
   bot: Telegraf,
-  nodyn: NodynInstance,
+  session: TelegramSession,
   chatId: number,
   task: string | unknown[],
   lang: Lang = 'en',
@@ -250,20 +237,17 @@ export async function executeRun(
   activeRuns.set(chatId, run);
 
   // Clear any previous follow-ups for this chat
-  pendingFollowUps.delete(chatId);
+  clearChatFollowUps(chatId);
 
-  // 2. Serialize via queue — prevents cross-chat handler corruption
+  // 2. Serialize via queue — prevents concurrent API calls (single-user Core)
   await runQueue.enqueue(async () => {
-    // Load this chat's conversation history into the shared session
-    chatSessions.load(chatId, nodyn);
+    await executeRunInner(bot, session, chatId, task, run);
 
-    await executeRunInner(bot, nodyn, chatId, task, run);
-
-    // Save updated conversation history (sliding window applied)
-    const wasTrimmed = chatSessions.save(chatId, nodyn);
-    if (wasTrimmed && !chatSessions.wasTrimNotified(chatId)) {
-      chatSessions.markTrimNotified(chatId);
-      void bot.telegram.sendMessage(chatId, t('msg.context_trimmed', lang), { parse_mode: 'HTML' });
+    // Sliding window: keep last N messages to prevent unbounded growth
+    const msgs = session.saveMessages();
+    if (msgs.length > MAX_MESSAGES_PER_CHAT) {
+      session.reset();
+      session.loadMessages(msgs.slice(-MAX_MESSAGES_PER_CHAT));
     }
   });
 }
@@ -271,7 +255,7 @@ export async function executeRun(
 /** Inner run logic — called within the serialized queue. */
 async function executeRunInner(
   bot: Telegraf,
-  nodyn: NodynInstance,
+  session: TelegramSession,
   chatId: number,
   task: string | unknown[],
   run: ActiveRun,
@@ -282,17 +266,17 @@ async function executeRunInner(
     if (Date.now() - run.lastActivityAt > STALE_TIMEOUT_MS) {
       clearInterval(staleTimer);
       process.stderr.write(`NODYN Telegram: run stale for chat ${chatId}, aborting\n`);
-      nodyn.abort();
+      session.abort();
       void bot.telegram.sendMessage(chatId, t('msg.timeout', run.lang)).catch(() => {});
     }
   }, STALE_CHECK_INTERVAL_MS);
 
   // 2. Save original handlers to restore later
-  const prevOnStream = nodyn.onStream;
-  const prevPromptUser = nodyn.promptUser;
+  const prevOnStream = session.onStream;
+  const prevPromptUser = session.promptUser;
 
   // 3. Set promptUser → sends question to Telegram
-  nodyn.promptUser = (question: string, options?: string[]): Promise<string> => {
+  session.promptUser = (question: string, options?: string[]): Promise<string> => {
     return new Promise<string>((resolve) => {
       run.pendingInput = { resolve, question, options };
 
@@ -329,7 +313,7 @@ async function executeRunInner(
   };
 
   // 4. Set stream handler — rich status via edits
-  nodyn.onStream = (event: StreamEvent): void => {
+  session.onStream = (event: StreamEvent): void => {
     run.lastActivityAt = Date.now();
 
     switch (event.type) {
@@ -409,14 +393,14 @@ async function executeRunInner(
 
   // 5. Execute
   try {
-    const result = await nodyn.run(task);
+    const result = await session.run(task);
     const elapsed = Date.now() - run.startedAt;
     const originalTask = typeof task === 'string' ? task : '[image]';
 
     if (run.aborted) {
       // Aborted — show retry button via fallback
       const followUps = fallbackFollowUps(originalTask, run.lang);
-      pendingFollowUps.set(chatId, { suggestions: followUps, task: originalTask });
+      setChatFollowUps(chatId, followUps);
       const followUpKeyboard = formatFollowUpKeyboard(followUps);
       const stoppedStatus = buildRichStatus(
         undefined, 'stopped', elapsed, run.toolCount, '', run.trackedTools, run.lang,
@@ -435,7 +419,7 @@ async function executeRunInner(
       const { suggestions: followUps, cleanText } = parseFollowUps(result);
       let followUpKeyboard: ReturnType<typeof formatFollowUpKeyboard> | undefined;
       if (followUps.length > 0) {
-        pendingFollowUps.set(chatId, { suggestions: followUps, task: originalTask });
+        setChatFollowUps(chatId, followUps);
         followUpKeyboard = formatFollowUpKeyboard(followUps);
       }
 
@@ -510,7 +494,7 @@ async function executeRunInner(
       originalTask, run.lang,
       run.aborted ? undefined : message,
     );
-    pendingFollowUps.set(chatId, { suggestions: followUps, task: originalTask });
+    setChatFollowUps(chatId, followUps);
     const followUpKeyboard = formatFollowUpKeyboard(followUps);
 
     if (run.aborted) {
@@ -566,13 +550,13 @@ async function executeRunInner(
   } finally {
     clearInterval(staleTimer);
     activeRuns.delete(chatId);
-    nodyn.onStream = prevOnStream;
-    nodyn.promptUser = prevPromptUser;
+    session.onStream = prevOnStream;
+    session.promptUser = prevPromptUser;
   }
 }
 
 /** Reset module-level state. For testing only. */
 export function _resetRunnerState(): void {
   activeRuns.clear();
-  pendingFollowUps.clear();
+  clearCallbackStore();
 }

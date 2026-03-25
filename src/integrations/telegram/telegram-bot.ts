@@ -7,9 +7,10 @@ import { execFile as nodeExecFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
-import type { StreamHandler } from '../../types/index.js';
 import { executeRun, hasActiveRun, resolveInput, abortRun, getFollowUpTask } from './telegram-runner.js';
-import { chatSessions, startEvictionTimer, stopEvictionTimer } from './telegram-session.js';
+import { getTaskInquiry, clearTaskInquiry, getTaskFollowUp } from './telegram-callbacks.js';
+import { sessionMap, startEvictionTimer, stopEvictionTimer } from './telegram-session.js';
+import type { TelegramEngine } from './telegram-session.js';
 import { t, detectLang } from './telegram-i18n.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { createRateLimiterFromEnv } from '../../core/rate-limiter.js';
@@ -67,34 +68,23 @@ async function transcribeAudio(buffer: Buffer, filename: string): Promise<string
   }
 }
 
-// Duck-typed Session interface — avoids importing Session directly (circular)
-interface NodynInstance {
-  run(task: string | unknown[]): Promise<string>;
-  abort(): void;
-  reset(): void;
-  saveMessages(): unknown[];
-  loadMessages(msgs: unknown[]): void;
-  onStream: StreamHandler | null;
-  set promptUser(fn: ((question: string, options?: string[]) => Promise<string>) | null);
-  readonly usage: { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number };
-  getModelTier(): string;
-}
-
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;    // 4MB — Claude's limit is ~5MB base64
 const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // 10MB — practical limit for file analysis
+
+/** System prompt suffix injected into every per-chat Session. */
+const TELEGRAM_SYSTEM_PROMPT_SUFFIX = '\n\n## Telegram Mode\nYou are running inside a Telegram bot. The user communicates with you via Telegram messages.\n- Files you create with write_file are automatically sent to the user as Telegram documents. Just write the file — no extra steps needed.\n- Voice messages from the user are automatically transcribed and sent to you as text.\n- You cannot send images or media directly — only text replies and files via write_file.\n- Keep responses concise — Telegram messages are split at 4096 characters.\n- Do NOT ask the user to set up Telegram, email, or other integrations — you are already connected.\n\n### Follow-up suggestions\nAt the very end of every response, include a `<follow_ups>` block with 2-4 contextual follow-up actions the user might want to take next. Use the user\'s language for labels.\n\nFormat:\n<follow_ups>[{"label":"Short label","task":"Full task description for the agent"}]</follow_ups>\n\nRules:\n- Labels: 2-4 words, max 20 characters (these become Telegram buttons)\n- Tasks: complete instructions that the agent can execute independently\n- Be contextual — suggest actions that make sense given what just happened\n- No filler — if nothing useful comes to mind, output an empty array\n- Always place the block as the very last thing in your response';
 
 export interface TelegramBotOptions {
   token: string;
   allowedChatIds?: number[] | undefined;
-  nodyn: NodynInstance;
-  engine?: { getWorkerLoop(): { resolveTaskInput(taskId: string, answer: string): boolean } | null } | undefined;
+  engine: TelegramEngine;
 }
 
 let bot: Telegraf | null = null;
 let signalHandler: (() => void) | null = null;
 
 export async function startTelegramBot(options: TelegramBotOptions): Promise<void> {
-  const { token, allowedChatIds, nodyn, engine } = options;
+  const { token, allowedChatIds, engine } = options;
 
   bot = new Telegraf(token);
 
@@ -153,12 +143,13 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       return;
     }
     // Onboarding: if first interaction, prepend a warm context note
-    const isNew = !chatSessions.has(chatId);
+    const isNew = !sessionMap.has(chatId);
     let finalTask = task;
     if (isNew && typeof task === 'string') {
       finalTask = `[First interaction with this user. Be warm and welcoming. Ask about their business if relevant. Respond in the user's language.]\n\n${task}`;
     }
-    void executeRun(bot!, nodyn, chatId, finalTask, lang).finally(() => {
+    const session = sessionMap.getOrCreate(chatId, engine, TELEGRAM_SYSTEM_PROMPT_SUFFIX);
+    void executeRun(bot!, session, chatId, finalTask, lang).finally(() => {
       rateLimiter.release(userId);
     });
   }
@@ -166,13 +157,13 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
   // --- Commands ---
   bot.command('start', (ctx) => {
     const lang = detectLang(ctx.from?.language_code);
-    const isNew = !chatSessions.has(ctx.chat.id);
+    const isNew = !sessionMap.has(ctx.chat.id);
     void ctx.reply(t(isNew ? 'cmd.start_new' : 'cmd.start', lang), { parse_mode: 'HTML' });
   });
 
   bot.command('clear', (ctx) => {
     const lang = detectLang(ctx.from?.language_code);
-    chatSessions.clear(ctx.chat.id);
+    sessionMap.clear(ctx.chat.id);
     void ctx.reply(t('cmd.clear', lang));
   });
 
@@ -183,8 +174,10 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
 
   bot.command('stop', (ctx) => {
     const lang = detectLang(ctx.from?.language_code);
-    if (hasActiveRun(ctx.chat.id)) {
-      void abortRun(ctx.chat.id, nodyn, bot!);
+    const chatId = ctx.chat.id;
+    if (hasActiveRun(chatId)) {
+      const session = sessionMap.getOrCreate(chatId, engine, TELEGRAM_SYSTEM_PROMPT_SUFFIX);
+      void abortRun(chatId, session, bot!);
     } else {
       void ctx.reply(t('cmd.stop_none', lang));
     }
@@ -197,7 +190,13 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
 
   bot.command('cost', (ctx) => {
     const lang = detectLang(ctx.from?.language_code);
-    const u = nodyn.usage;
+    const chatId = ctx.chat.id;
+    if (!sessionMap.has(chatId)) {
+      void ctx.reply(`\uD83D\uDCB0 <b>${t('cost.session', lang)}:</b> $0.0000`, { parse_mode: 'HTML' });
+      return;
+    }
+    const session = sessionMap.getOrCreate(chatId, engine, TELEGRAM_SYSTEM_PROMPT_SUFFIX);
+    const u = session.usage;
     const inputCost = (u.input_tokens * 15 + u.cache_creation_input_tokens * 18.75 + u.cache_read_input_tokens * 1.5) / 1_000_000;
     const outputCost = (u.output_tokens * 75) / 1_000_000;
     const total = inputCost + outputCost;
@@ -371,9 +370,8 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       const parts = data.split(':');
       const taskId = parts[1];
       const optionIndex = parseInt(parts[2] ?? '0', 10);
-      if (taskId && engine) {
+      if (taskId) {
         void (async () => {
-          const { getTaskInquiry, clearTaskInquiry } = await import('./telegram-notification.js');
           const { escapeHtml } = await import('./telegram-formatter.js');
           const inquiry = getTaskInquiry(taskId);
           if (inquiry) {
@@ -413,7 +411,6 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       const index = parseInt(parts[2] ?? '0', 10);
       if (taskId) {
         void (async () => {
-          const { getTaskFollowUp } = await import('./telegram-notification.js');
           const followUp = getTaskFollowUp(taskId, index);
           if (followUp) {
             if (hasActiveRun(chatId)) {
@@ -428,7 +425,8 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
             ack('Starting…');
             const contextualTask = `[Following up on background task "${taskId}"]\n\n${followUp.task}`;
             const cbLang = detectLang(ctx.from?.language_code);
-            void executeRun(bot!, nodyn, chatId, contextualTask, cbLang).finally(() => {
+            const cbSession = sessionMap.getOrCreate(chatId, engine, TELEGRAM_SYSTEM_PROMPT_SUFFIX);
+            void executeRun(bot!, cbSession, chatId, contextualTask, cbLang).finally(() => {
               rateLimiter.release(String(chatId));
             });
           } else {
@@ -462,7 +460,8 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
 
       case 's': // Stop
         if (hasActiveRun(chatId)) {
-          void abortRun(chatId, nodyn, bot!);
+          const stopSession = sessionMap.getOrCreate(chatId, engine, TELEGRAM_SYSTEM_PROMPT_SUFFIX);
+          void abortRun(chatId, stopSession, bot!);
           ack('Stopping…');
         } else {
           ack('No active task.');
@@ -487,7 +486,8 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
         }
         ack('Starting…');
         const cbLang = detectLang(ctx.from?.language_code);
-        void executeRun(bot!, nodyn, chatId, followUpTask, cbLang).finally(() => {
+        const fuSession = sessionMap.getOrCreate(chatId, engine, TELEGRAM_SYSTEM_PROMPT_SUFFIX);
+        void executeRun(bot!, fuSession, chatId, followUpTask, cbLang).finally(() => {
           rateLimiter.release(String(chatId));
         });
         break;

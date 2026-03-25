@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { executeRun, hasActiveRun, resolveInput, abortRun, getFollowUpTask, _resetRunnerState } from './telegram-runner.js';
-import { chatSessions, runQueue } from './telegram-session.js';
+import { sessionMap, runQueue } from './telegram-session.js';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -15,7 +15,7 @@ function createMockBot() {
   } as unknown as import('telegraf').Telegraf;
 }
 
-function createMockNodyn() {
+function createMockSession() {
   let _onStream: ((event: unknown) => void) | null = null;
   let _promptUser: unknown = null;
   let _messages: unknown[] = [];
@@ -30,6 +30,8 @@ function createMockNodyn() {
     set onStream(fn: unknown) { _onStream = fn as typeof _onStream; },
     get promptUser() { return _promptUser; },
     set promptUser(fn: unknown) { _promptUser = fn; },
+    usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    getModelTier: vi.fn().mockReturnValue('sonnet'),
   };
 }
 
@@ -39,19 +41,19 @@ function createMockNodyn() {
 
 describe('telegram-runner', () => {
   let bot: ReturnType<typeof createMockBot>;
-  let nodyn: ReturnType<typeof createMockNodyn>;
+  let session: ReturnType<typeof createMockSession>;
 
   beforeEach(() => {
     bot = createMockBot();
-    nodyn = createMockNodyn();
+    session = createMockSession();
     _resetRunnerState();
-    chatSessions.clearAll();
+    sessionMap.clearAll();
     runQueue.reset();
   });
 
   describe('executeRun', () => {
     it('sends status message and result', async () => {
-      await executeRun(bot, nodyn as never, 123, 'test task');
+      await executeRun(bot, session as never, 123, 'test task');
 
       // Status message sent
       expect(bot.telegram.sendMessage).toHaveBeenCalledWith(
@@ -80,17 +82,17 @@ describe('telegram-runner', () => {
 
     it('rejects concurrent runs', async () => {
       // Start a run that blocks
-      const blockingNodyn = createMockNodyn();
-      blockingNodyn.run.mockReturnValue(new Promise(() => {})); // never resolves
+      const blockingSession = createMockSession();
+      blockingSession.run.mockReturnValue(new Promise(() => {})); // never resolves
 
       // Start first run (don't await — it will block)
-      void executeRun(bot, blockingNodyn as never, 456, 'blocking');
+      void executeRun(bot, blockingSession as never, 456, 'blocking');
 
       // Wait a tick for the first run to register in activeRuns
       await new Promise(r => setTimeout(r, 10));
 
       // Try to start another — should get "busy" reply
-      await executeRun(bot, nodyn as never, 456, 'second task');
+      await executeRun(bot, session as never, 456, 'second task');
 
       // Should get friendly "busy" message
       expect(bot.telegram.sendMessage).toHaveBeenCalledWith(
@@ -99,13 +101,13 @@ describe('telegram-runner', () => {
       );
 
       // Clean up: abort the blocking run
-      await abortRun(456, blockingNodyn as never);
+      await abortRun(456, blockingSession as never);
     });
 
     it('handles errors', async () => {
-      nodyn.run.mockRejectedValue(new Error('Something failed'));
+      session.run.mockRejectedValue(new Error('Something failed'));
 
-      await executeRun(bot, nodyn as never, 789, 'failing task');
+      await executeRun(bot, session as never, 789, 'failing task');
 
       // Error status update
       expect(bot.telegram.editMessageText).toHaveBeenCalledWith(
@@ -123,8 +125,8 @@ describe('telegram-runner', () => {
     });
 
     it('tracks tool calls and shows done status with tool list', async () => {
-      nodyn.run.mockImplementation(async () => {
-        const handler = nodyn.onStream as ((event: Record<string, unknown>) => void) | null;
+      session.run.mockImplementation(async () => {
+        const handler = session.onStream as ((event: Record<string, unknown>) => void) | null;
         if (handler) {
           handler({ type: 'tool_call', name: 'bash', input: { command: 'npm test' }, agent: 'test' });
           handler({ type: 'tool_result', name: 'bash', result: 'All tests passed', agent: 'test' });
@@ -134,7 +136,7 @@ describe('telegram-runner', () => {
         return 'done';
       });
 
-      await executeRun(bot, nodyn as never, 100, 'tool task');
+      await executeRun(bot, session as never, 100, 'tool task');
 
       // Done status should include tool list
       const editCalls = (bot.telegram.editMessageText as ReturnType<typeof vi.fn>).mock.calls;
@@ -149,8 +151,8 @@ describe('telegram-runner', () => {
     });
 
     it('shows failed tool with ❌ in done status', async () => {
-      nodyn.run.mockImplementation(async () => {
-        const handler = nodyn.onStream as ((event: Record<string, unknown>) => void) | null;
+      session.run.mockImplementation(async () => {
+        const handler = session.onStream as ((event: Record<string, unknown>) => void) | null;
         if (handler) {
           handler({ type: 'tool_call', name: 'bash', input: { command: 'bad cmd' }, agent: 'test' });
           handler({ type: 'tool_result', name: 'bash', result: 'Error: command not found', agent: 'test' });
@@ -158,7 +160,7 @@ describe('telegram-runner', () => {
         return 'failed tool result';
       });
 
-      await executeRun(bot, nodyn as never, 101, 'fail tool task');
+      await executeRun(bot, session as never, 101, 'fail tool task');
 
       const editCalls = (bot.telegram.editMessageText as ReturnType<typeof vi.fn>).mock.calls;
       const doneCall = editCalls.find((c: unknown[]) =>
@@ -169,8 +171,8 @@ describe('telegram-runner', () => {
     });
 
     it('shows tool input previews in status', async () => {
-      nodyn.run.mockImplementation(async () => {
-        const handler = nodyn.onStream as ((event: Record<string, unknown>) => void) | null;
+      session.run.mockImplementation(async () => {
+        const handler = session.onStream as ((event: Record<string, unknown>) => void) | null;
         if (handler) {
           handler({ type: 'tool_call', name: 'bash', input: { command: 'npm test' }, agent: 'test' });
           handler({ type: 'tool_result', name: 'bash', result: 'ok', agent: 'test' });
@@ -178,7 +180,7 @@ describe('telegram-runner', () => {
         return 'done';
       });
 
-      await executeRun(bot, nodyn as never, 102, 'preview task');
+      await executeRun(bot, session as never, 102, 'preview task');
 
       const editCalls = (bot.telegram.editMessageText as ReturnType<typeof vi.fn>).mock.calls;
       const doneCall = editCalls.find((c: unknown[]) =>
@@ -190,8 +192,8 @@ describe('telegram-runner', () => {
 
     it('always posts result as one clean message', async () => {
       const longResult = 'This is the complete result text.';
-      nodyn.run.mockImplementation(async () => {
-        const handler = nodyn.onStream as ((event: Record<string, unknown>) => void) | null;
+      session.run.mockImplementation(async () => {
+        const handler = session.onStream as ((event: Record<string, unknown>) => void) | null;
         if (handler) {
           // Text events are ignored — result posted as one message at the end
           handler({ type: 'text', text: 'This is ', agent: 'test' });
@@ -200,7 +202,7 @@ describe('telegram-runner', () => {
         return longResult;
       });
 
-      await executeRun(bot, nodyn as never, 103, 'text task');
+      await executeRun(bot, session as never, 103, 'text task');
 
       const calls = (bot.telegram.sendMessage as ReturnType<typeof vi.fn>).mock.calls;
       const resultCall = calls.find((c: unknown[]) =>
@@ -210,8 +212,8 @@ describe('telegram-runner', () => {
     });
 
     it('attaches follow-up keyboard to result message', async () => {
-      nodyn.run.mockImplementation(async () => {
-        const handler = nodyn.onStream as ((event: Record<string, unknown>) => void) | null;
+      session.run.mockImplementation(async () => {
+        const handler = session.onStream as ((event: Record<string, unknown>) => void) | null;
         if (handler) {
           handler({ type: 'tool_call', name: 'bash', input: { command: 'npm test' }, agent: 'test' });
           handler({ type: 'tool_result', name: 'bash', result: 'ok', agent: 'test' });
@@ -219,7 +221,7 @@ describe('telegram-runner', () => {
         return 'Tests passed. Here are the next steps.';
       });
 
-      await executeRun(bot, nodyn as never, 105, 'test task');
+      await executeRun(bot, session as never, 105, 'test task');
 
       // Follow-up keyboard should be attached to a result message, not a separate "Suggestions:" message
       const calls = (bot.telegram.sendMessage as ReturnType<typeof vi.fn>).mock.calls;
@@ -235,9 +237,9 @@ describe('telegram-runner', () => {
     });
 
     it('attaches follow-up keyboard to error message', async () => {
-      nodyn.run.mockRejectedValue(new Error('Build failed'));
+      session.run.mockRejectedValue(new Error('Build failed'));
 
-      await executeRun(bot, nodyn as never, 106, 'failing task');
+      await executeRun(bot, session as never, 106, 'failing task');
 
       const calls = (bot.telegram.sendMessage as ReturnType<typeof vi.fn>).mock.calls;
       const errorWithKeyboard = calls.find((c: unknown[]) =>
@@ -248,8 +250,8 @@ describe('telegram-runner', () => {
     });
 
     it('does not post separate messages for thinking or tools', async () => {
-      nodyn.run.mockImplementation(async () => {
-        const handler = nodyn.onStream as ((event: Record<string, unknown>) => void) | null;
+      session.run.mockImplementation(async () => {
+        const handler = session.onStream as ((event: Record<string, unknown>) => void) | null;
         if (handler) {
           handler({ type: 'thinking', thinking: 'Let me think about this', agent: 'test' });
           handler({ type: 'thinking_done', agent: 'test' });
@@ -260,7 +262,7 @@ describe('telegram-runner', () => {
         return 'done';
       });
 
-      await executeRun(bot, nodyn as never, 107, 'quiet task');
+      await executeRun(bot, session as never, 107, 'quiet task');
 
       const calls = (bot.telegram.sendMessage as ReturnType<typeof vi.fn>).mock.calls;
       // Should only have: status msg, result msg, suggestions msg — no thinking/tool/spawn msgs
@@ -283,16 +285,16 @@ describe('telegram-runner', () => {
     it('resolves pending input during a run', async () => {
       let capturedAnswer = '';
 
-      nodyn.run.mockImplementation(async () => {
+      session.run.mockImplementation(async () => {
         // Trigger promptUser
-        if (nodyn.promptUser) {
-          const answer = await (nodyn.promptUser as (q: string) => Promise<string>)('Choose one');
+        if (session.promptUser) {
+          const answer = await (session.promptUser as (q: string) => Promise<string>)('Choose one');
           capturedAnswer = answer;
         }
         return 'result';
       });
 
-      const runPromise = executeRun(bot, nodyn as never, 200, 'input task');
+      const runPromise = executeRun(bot, session as never, 200, 'input task');
 
       // Wait a tick for promptUser to be called
       await new Promise(r => setTimeout(r, 50));
@@ -307,17 +309,17 @@ describe('telegram-runner', () => {
   });
 
   describe('abortRun', () => {
-    it('calls nodyn.abort()', async () => {
-      const blockingNodyn = createMockNodyn();
-      blockingNodyn.run.mockReturnValue(new Promise(() => {}));
+    it('calls session.abort()', async () => {
+      const blockingSession = createMockSession();
+      blockingSession.run.mockReturnValue(new Promise(() => {}));
 
-      const runPromise = executeRun(bot, blockingNodyn as never, 300, 'long task');
+      const runPromise = executeRun(bot, blockingSession as never, 300, 'long task');
 
       // Wait for run to start
       await new Promise(r => setTimeout(r, 10));
 
-      await abortRun(300, blockingNodyn as never);
-      expect(blockingNodyn.abort).toHaveBeenCalled();
+      await abortRun(300, blockingSession as never);
+      expect(blockingSession.abort).toHaveBeenCalled();
     });
   });
 
@@ -345,8 +347,8 @@ describe('telegram-runner', () => {
       bot.telegram.editMessageText = vi.fn()
         .mockRejectedValue({ code: 429, message: 'Too Many Requests' });
 
-      nodyn.run.mockImplementation(async () => {
-        const handler = nodyn.onStream as ((event: Record<string, unknown>) => void) | null;
+      session.run.mockImplementation(async () => {
+        const handler = session.onStream as ((event: Record<string, unknown>) => void) | null;
         if (handler) {
           // Fire rapid tool calls to trigger editStatus
           handler({ type: 'tool_call', name: 'bash', input: {}, agent: 'test' });
@@ -358,7 +360,7 @@ describe('telegram-runner', () => {
         return 'done';
       });
 
-      await executeRun(bot, nodyn as never, 500, 'rate limit task');
+      await executeRun(bot, session as never, 500, 'rate limit task');
 
       const stderrCalls = stderrSpy.mock.calls.map(c => String(c[0]));
       const hasRateLimitLog = stderrCalls.some(c => c.includes('rate limited'));
@@ -373,8 +375,8 @@ describe('telegram-runner', () => {
       bot.telegram.editMessageText = vi.fn()
         .mockRejectedValue(new Error('400: Bad Request: message is not modified'));
 
-      nodyn.run.mockImplementation(async () => {
-        const handler = nodyn.onStream as ((event: Record<string, unknown>) => void) | null;
+      session.run.mockImplementation(async () => {
+        const handler = session.onStream as ((event: Record<string, unknown>) => void) | null;
         if (handler) {
           handler({ type: 'tool_call', name: 'bash', input: {}, agent: 'test' });
           await new Promise(r => setTimeout(r, 3100));
@@ -384,7 +386,7 @@ describe('telegram-runner', () => {
         return 'done';
       });
 
-      await executeRun(bot, nodyn as never, 501, 'unchanged task');
+      await executeRun(bot, session as never, 501, 'unchanged task');
 
       const stderrCalls = stderrSpy.mock.calls.map(c => String(c[0]));
       const hasEditError = stderrCalls.some(c => c.includes('editStatus failed'));
@@ -398,11 +400,11 @@ describe('telegram-runner', () => {
     it('aborts run when no stream events for stale period', async () => {
       vi.useFakeTimers();
 
-      const blockingNodyn = createMockNodyn();
+      const blockingSession = createMockSession();
       // Run that blocks forever
-      blockingNodyn.run.mockReturnValue(new Promise(() => {}));
+      blockingSession.run.mockReturnValue(new Promise(() => {}));
 
-      const runPromise = executeRun(bot, blockingNodyn as never, 600, 'stale task');
+      const runPromise = executeRun(bot, blockingSession as never, 600, 'stale task');
 
       // Wait for run to register
       await vi.advanceTimersByTimeAsync(10);
@@ -411,7 +413,7 @@ describe('telegram-runner', () => {
       // Advance past stale timeout (5 min check interval is 30s)
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 30_000);
 
-      expect(blockingNodyn.abort).toHaveBeenCalled();
+      expect(blockingSession.abort).toHaveBeenCalled();
 
       // Stale message sent
       const calls = (bot.telegram.sendMessage as ReturnType<typeof vi.fn>).mock.calls;
@@ -427,34 +429,34 @@ describe('telegram-runner', () => {
   describe('handler restoration', () => {
     it('restores previous promptUser after run', async () => {
       const originalPromptUser = vi.fn().mockResolvedValue('original');
-      nodyn.promptUser = originalPromptUser as never;
+      session.promptUser = originalPromptUser as never;
 
-      await executeRun(bot, nodyn as never, 700, 'restore task');
+      await executeRun(bot, session as never, 700, 'restore task');
 
-      expect(nodyn.promptUser).toBe(originalPromptUser);
+      expect(session.promptUser).toBe(originalPromptUser);
     });
 
     it('restores previous onStream after run', async () => {
       const originalOnStream = vi.fn();
-      nodyn.onStream = originalOnStream;
+      session.onStream = originalOnStream;
 
-      await executeRun(bot, nodyn as never, 701, 'restore task');
+      await executeRun(bot, session as never, 701, 'restore task');
 
-      expect(nodyn.onStream).toBe(originalOnStream);
+      expect(session.onStream).toBe(originalOnStream);
     });
 
     it('restores handlers even on error', async () => {
       const originalOnStream = vi.fn();
       const originalPromptUser = vi.fn().mockResolvedValue('original');
-      nodyn.onStream = originalOnStream;
-      nodyn.promptUser = originalPromptUser as never;
+      session.onStream = originalOnStream;
+      session.promptUser = originalPromptUser as never;
 
-      nodyn.run.mockRejectedValue(new Error('boom'));
+      session.run.mockRejectedValue(new Error('boom'));
 
-      await executeRun(bot, nodyn as never, 702, 'error task');
+      await executeRun(bot, session as never, 702, 'error task');
 
-      expect(nodyn.onStream).toBe(originalOnStream);
-      expect(nodyn.promptUser).toBe(originalPromptUser);
+      expect(session.onStream).toBe(originalOnStream);
+      expect(session.promptUser).toBe(originalPromptUser);
     });
   });
 });

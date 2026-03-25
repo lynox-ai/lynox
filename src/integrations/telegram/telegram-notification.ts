@@ -7,30 +7,16 @@ import type {
   NotificationChannel,
   NotificationMessage,
 } from '../../core/notification-router.js';
+import {
+  setTaskFollowUps,
+  getTaskFollowUp,
+  setTaskInquiry,
+  getTaskInquiry,
+  clearTaskInquiry,
+} from './telegram-callbacks.js';
 
-// ---------------------------------------------------------------------------
-// Module-level storage for task follow-ups (callback handler retrieval)
-// ---------------------------------------------------------------------------
-
-const taskFollowUps = new Map<string, Array<{ label: string; task: string }>>();
-
-export function getTaskFollowUp(taskId: string, index: number): { label: string; task: string } | undefined {
-  return taskFollowUps.get(taskId)?.[index];
-}
-
-// ---------------------------------------------------------------------------
-// Module-level storage for task inquiries (question callback handler)
-// ---------------------------------------------------------------------------
-
-const taskInquiries = new Map<string, { options?: string[] | undefined }>();
-
-export function getTaskInquiry(taskId: string): { options?: string[] | undefined } | undefined {
-  return taskInquiries.get(taskId);
-}
-
-export function clearTaskInquiry(taskId: string): void {
-  taskInquiries.delete(taskId);
-}
+// Re-export for backward compatibility (telegram-bot.ts dynamic imports)
+export { getTaskFollowUp, getTaskInquiry, clearTaskInquiry };
 
 // ---------------------------------------------------------------------------
 // Minimal bot interface (matches Telegraf instance shape)
@@ -84,7 +70,7 @@ export class TelegramNotificationChannel implements NotificationChannel {
 
       // Inquiry messages: store inquiry state and build inline keyboard
       if (msg.inquiry && msg.taskId) {
-        taskInquiries.set(msg.taskId, { options: msg.inquiry.options });
+        setTaskInquiry(msg.taskId, { options: msg.inquiry.options });
         if (msg.inquiry.options && msg.inquiry.options.length > 0) {
           extra['reply_markup'] = {
             inline_keyboard: [msg.inquiry.options.map((opt, i) => ({
@@ -96,7 +82,7 @@ export class TelegramNotificationChannel implements NotificationChannel {
         // If no options, the message text itself serves as the prompt
         // (user replies via the button-based flow only in v1)
       } else if (msg.followUps && msg.followUps.length > 0 && msg.taskId) {
-        taskFollowUps.set(msg.taskId, msg.followUps);
+        setTaskFollowUps(msg.taskId, msg.followUps);
         extra['reply_markup'] = {
           inline_keyboard: [msg.followUps.map((f, i) => ({
             text: f.label,

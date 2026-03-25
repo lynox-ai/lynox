@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { NotificationMessage } from '../../core/notification-router.js';
-import { TelegramNotificationChannel } from './telegram-notification.js';
+import {
+  TelegramNotificationChannel,
+  getTaskInquiry,
+  clearTaskInquiry,
+} from './telegram-notification.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -14,7 +18,7 @@ function makeBot() {
           (
             chatId: number,
             text: string,
-            extra?: { parse_mode?: string | undefined },
+            extra?: Record<string, unknown>,
           ) => Promise<{ message_id: number }>
         >()
         .mockResolvedValue({ message_id: 1 }),
@@ -139,5 +143,163 @@ describe('TelegramNotificationChannel', () => {
 
     const text = bot.telegram.sendMessage.mock.calls[0]![1];
     expect(text).not.toContain('Task:');
+  });
+
+  // -------------------------------------------------------------------------
+  // Inquiry flow
+  // -------------------------------------------------------------------------
+
+  describe('inquiry flow', () => {
+    it('send() with inquiry builds inline keyboard with q: callback data', async () => {
+      const inquiryMsg: NotificationMessage = {
+        title: 'Choose next step',
+        body: 'What should I do next?',
+        priority: 'normal',
+        taskId: 'task-inq-1',
+        inquiry: {
+          question: 'What should I do next?',
+          options: ['Option A', 'Option B', 'Option C'],
+        },
+      };
+
+      await channel.send(inquiryMsg);
+
+      const extra = bot.telegram.sendMessage.mock.calls[0]![2] as Record<string, unknown>;
+      expect(extra).toBeDefined();
+      expect(extra['reply_markup']).toBeDefined();
+
+      const markup = extra['reply_markup'] as {
+        inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+      };
+      expect(markup.inline_keyboard).toHaveLength(1);
+
+      const buttons = markup.inline_keyboard[0]!;
+      expect(buttons).toHaveLength(3);
+      expect(buttons[0]!.text).toBe('Option A');
+      expect(buttons[0]!.callback_data).toBe('q:task-inq-1:0');
+      expect(buttons[1]!.text).toBe('Option B');
+      expect(buttons[1]!.callback_data).toBe('q:task-inq-1:1');
+      expect(buttons[2]!.text).toBe('Option C');
+      expect(buttons[2]!.callback_data).toBe('q:task-inq-1:2');
+    });
+
+    it('send() with inquiry and options builds buttons for each option', async () => {
+      const inquiryMsg: NotificationMessage = {
+        title: 'Confirm action',
+        body: 'Proceed with deployment?',
+        priority: 'normal',
+        taskId: 'task-inq-2',
+        inquiry: {
+          question: 'Proceed with deployment?',
+          options: ['Yes', 'No'],
+        },
+      };
+
+      await channel.send(inquiryMsg);
+
+      const extra = bot.telegram.sendMessage.mock.calls[0]![2] as Record<string, unknown>;
+      const markup = extra['reply_markup'] as {
+        inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+      };
+      const buttons = markup.inline_keyboard[0]!;
+      expect(buttons).toHaveLength(2);
+      expect(buttons[0]!.text).toBe('Yes');
+      expect(buttons[1]!.text).toBe('No');
+    });
+
+    it('getTaskInquiry() returns stored inquiry after send', async () => {
+      const inquiryMsg: NotificationMessage = {
+        title: 'Pick one',
+        body: 'Which report format?',
+        priority: 'normal',
+        taskId: 'task-inq-3',
+        inquiry: {
+          question: 'Which report format?',
+          options: ['PDF', 'CSV'],
+        },
+      };
+
+      await channel.send(inquiryMsg);
+
+      const stored = getTaskInquiry('task-inq-3');
+      expect(stored).toBeDefined();
+      expect(stored!.options).toEqual(['PDF', 'CSV']);
+    });
+
+    it('clearTaskInquiry() removes the entry', async () => {
+      const inquiryMsg: NotificationMessage = {
+        title: 'Pick one',
+        body: 'Which report format?',
+        priority: 'normal',
+        taskId: 'task-inq-4',
+        inquiry: {
+          question: 'Which report format?',
+          options: ['PDF', 'CSV'],
+        },
+      };
+
+      await channel.send(inquiryMsg);
+      expect(getTaskInquiry('task-inq-4')).toBeDefined();
+
+      clearTaskInquiry('task-inq-4');
+      expect(getTaskInquiry('task-inq-4')).toBeUndefined();
+    });
+
+    it('send() with inquiry uses question mark icon instead of priority icon', async () => {
+      const inquiryMsg: NotificationMessage = {
+        title: 'User Input Needed',
+        body: 'Please confirm the target.',
+        priority: 'high',
+        taskId: 'task-inq-5',
+        inquiry: {
+          question: 'Please confirm the target.',
+          options: ['Production', 'Staging'],
+        },
+      };
+
+      await channel.send(inquiryMsg);
+
+      const text = bot.telegram.sendMessage.mock.calls[0]![1];
+      // Should use question mark icon (U+2753), not the red circle (U+1F534) for high priority
+      expect(text).toMatch(/^\u{2753}/u);
+      expect(text).not.toMatch(/^\u{1F534}/u);
+    });
+
+    it('send() with inquiry but no options does not add reply_markup', async () => {
+      const inquiryMsg: NotificationMessage = {
+        title: 'Free-form Question',
+        body: 'What is your budget?',
+        priority: 'normal',
+        taskId: 'task-inq-6',
+        inquiry: {
+          question: 'What is your budget?',
+        },
+      };
+
+      await channel.send(inquiryMsg);
+
+      const extra = bot.telegram.sendMessage.mock.calls[0]![2] as Record<string, unknown>;
+      // parse_mode is set but no reply_markup when no options
+      expect(extra['parse_mode']).toBe('HTML');
+      expect(extra['reply_markup']).toBeUndefined();
+    });
+
+    it('send() with inquiry stores entry even without options', async () => {
+      const inquiryMsg: NotificationMessage = {
+        title: 'Open Question',
+        body: 'Describe your requirements.',
+        priority: 'normal',
+        taskId: 'task-inq-7',
+        inquiry: {
+          question: 'Describe your requirements.',
+        },
+      };
+
+      await channel.send(inquiryMsg);
+
+      const stored = getTaskInquiry('task-inq-7');
+      expect(stored).toBeDefined();
+      expect(stored!.options).toBeUndefined();
+    });
   });
 });

@@ -61,7 +61,6 @@ import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import {
   configureBudgetAndRateLimits,
-  setupHistorySubscriptions,
   generateInitBriefing,
   initSecrets,
   initScopes,
@@ -155,12 +154,6 @@ export class Engine {
   private _notificationRouter = new NotificationRouter();
   private _workerLoop: WorkerLoop | null = null;
 
-  // Active session's per-run state — used by history subscription closures.
-  // These are set by Session before each run for single-session compatibility.
-  // Multi-session (parallel runs) requires a future refactor of setupHistorySubscriptions.
-  _activeCurrentRunId: string | null = null;
-  _activeRunToolCallSeq = 0;
-
   constructor(config: NodynConfig) {
     this.userConfig = loadConfig();
     // Apply user config defaults if not already set in NodynConfig
@@ -231,14 +224,10 @@ export class Engine {
       }
     }
 
-    // Configure persistent budget caps, HTTP rate limits, and history subscriptions
+    // Configure persistent budget caps and HTTP rate limits
+    // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     if (this.runHistory) {
       configureBudgetAndRateLimits(this.runHistory, this.userConfig);
-      setupHistorySubscriptions(
-        this.runHistory,
-        () => this._activeCurrentRunId,
-        () => this._activeRunToolCallSeq++,
-      );
     }
 
     // Resolve context (CLI: project detection, others: explicit)
@@ -290,9 +279,11 @@ export class Engine {
     }
 
     // Subscribe to memory:store for automatic knowledge graph storage
+    // Note: sourceRunId is null here because memory store events don't carry session context.
+    // A future improvement could include runId in the channel payload.
     setupMemoryStoreSubscription(
       this.knowledgeLayer, this.embeddingProvider, this.runHistory,
-      this.context?.id ?? '', () => this._activeCurrentRunId,
+      this.context?.id ?? '', () => null,
     );
 
     // Register builtin tools

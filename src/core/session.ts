@@ -38,6 +38,7 @@ import {
   PLAYBOOK_PROMPT_SUFFIX,
 } from './orchestrator-prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, NodynHooks } from './engine.js';
+import { setupHistorySubscriptions } from './orchestrator-init.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -128,6 +129,18 @@ export class Session {
       this.agentOverrides.autonomy = opts.autonomy;
     }
     this._createAgent();
+
+    // Each Session subscribes once to record tool calls against its own run.
+    // The closures read session-local fields, so concurrent sessions don't interfere.
+    const runHistory = engine.getRunHistory();
+    if (runHistory) {
+      setupHistorySubscriptions(
+        runHistory,
+        () => this.currentRunId,
+        () => this.runToolCallSeq++,
+      );
+    }
+
     if (opts?.messages) {
       this.loadMessages(opts.messages);
     }
@@ -240,9 +253,6 @@ export class Session {
     const startTime = Date.now();
     this.runToolCallSeq = 0;
 
-    // Sync active run state to engine for history subscription closures
-    this.engine._activeRunToolCallSeq = 0;
-
     // Compute prompt hash from the system prompt the agent uses
     const basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
     const effectivePrompt = this.agentOverrides.systemPromptSuffix
@@ -269,9 +279,6 @@ export class Session {
         this.currentRunId = null;
       }
     }
-
-    // Sync run ID to engine for history subscriptions
-    this.engine._activeCurrentRunId = this.currentRunId;
 
     // Thread run ID to agent so spawn tool can read it
     this.agent.currentRunId = this.currentRunId ?? undefined;
@@ -386,7 +393,6 @@ export class Session {
       throw err;
     } finally {
       this.currentRunId = null;
-      this.engine._activeCurrentRunId = null;
       if (this.agent) {
         this.agent.currentRunId = undefined;
       }

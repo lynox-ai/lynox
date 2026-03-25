@@ -480,9 +480,6 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     }
     const tgEngine = new Engine({});
     await tgEngine.init();
-    const tgSession = tgEngine.createSession({
-      systemPromptSuffix: '\n\n## Telegram Mode\nYou are running inside a Telegram bot. The user communicates with you via Telegram messages.\n- Files you create with write_file are automatically sent to the user as Telegram documents. Just write the file — no extra steps needed.\n- Voice messages from the user are automatically transcribed and sent to you as text.\n- You cannot send images or media directly — only text replies and files via write_file.\n- Keep responses concise — Telegram messages are split at 4096 characters.\n- Do NOT ask the user to set up Telegram, email, or other integrations — you are already connected.\n\n### Follow-up suggestions\nAt the very end of every response, include a `<follow_ups>` block with 2-4 contextual follow-up actions the user might want to take next. Use the user\'s language for labels.\n\nFormat:\n<follow_ups>[{"label":"Short label","task":"Full task description for the agent"}]</follow_ups>\n\nRules:\n- Labels: 2-4 words, max 20 characters (these become Telegram buttons)\n- Tasks: complete instructions that the agent can execute independently\n- Be contextual — suggest actions that make sense given what just happened\n- No filler — if nothing useful comes to mind, output an empty array\n- Always place the block as the very last thing in your response',
-    });
 
     const allowedRaw = process.env['TELEGRAM_ALLOWED_CHAT_IDS'];
     const allowedChatIds = allowedRaw
@@ -499,7 +496,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     process.on('SIGINT', () => void shutdown());
     process.on('SIGTERM', () => void shutdown());
 
-    await startTgBot({ token, allowedChatIds, nodyn: tgSession, engine: tgEngine });
+    await startTgBot({ token, allowedChatIds, engine: tgEngine });
 
     // Register Telegram notification channel for background task results
     const { getTelegramBot } = await import('./integrations/telegram/telegram-bot.js');
