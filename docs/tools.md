@@ -95,7 +95,7 @@ Returns the contents of a knowledge namespace.
 | Eager streaming | Yes |
 | Timeout | 10 minutes per agent |
 
-Creates a new `Agent` instance per sub-agent. Supports **role-based spawning** — set `role` to a role ID (e.g. `researcher`, `executor`) to apply the role's model, system prompt, and tool restrictions automatically.
+Creates a new `Agent` instance per sub-agent. Supports **role-based spawning** — set `role` to a role ID (e.g. `researcher`, `creator`, `operator`, `collector`) to apply the role's model, system prompt, and tool restrictions automatically.
 
 **SpawnSpec fields:**
 
@@ -167,15 +167,6 @@ In Slack, questions with `options` render as interactive buttons. Questions with
 Makes HTTP requests with full SSRF protection (see [Security](security.md)). Returns status, headers, and body. JSON responses are pretty-printed.
 
 **Network policy enforcement** (`setNetworkPolicy()`): Available as an extension point for Pro. When a tenant context is active (via `nodyn-pro`), the http tool enforces the tenant's network policy. `allow-all` (default) permits any request. `allow-list` restricts requests to hostnames in `IsolationConfig.allowedHosts`. `deny-all` blocks all outbound HTTP requests. See [Security](security.md#isolation-levels).
-
-### `goal_update` -- Goal Update
-
-| Property | Value |
-|----------|-------|
-| Source | `src/tools/builtin/goal-update.ts` |
-| Registration | Dynamic (only in goal-tracking modes: autopilot, background, team) |
-
-Allows the agent to update goal and subtask status. Registered by `ModeController` when a mode uses `GoalTracker`.
 
 ### `run_pipeline` -- Run Workflow
 
@@ -270,64 +261,6 @@ Returns a `ProcessRecord` with typed steps, parameters (with source classificati
 | Registration | Dynamic (with workflow tools) |
 
 Converts a captured process into a reusable workflow. Steps are organized into a dependency graph. Parameters become workflow context variables with `{{param}}` templates. Returns `pipeline_id` for `run_pipeline`.
-
-### `list_playbooks` -- List Playbooks
-
-| Property | Value |
-|----------|-------|
-| Source | `src/tools/builtin/playbook.ts` |
-| Input | none |
-| Registration | Always (at init) |
-
-Lists all available playbooks (built-in, user, project) with descriptions, phase count, and tags.
-
-### `suggest_playbook` -- Suggest Playbook
-
-| Property | Value |
-|----------|-------|
-| Source | `src/tools/builtin/playbook.ts` |
-| Input | `task_description` |
-| Registration | Always (at init) |
-
-Returns all playbooks with their details (phases, parameters, applicableWhen) so the agent can semantically match against the user's task. No embedding or similarity search needed — the LLM does semantic matching naturally.
-
-### `extract_playbook` -- Extract Playbook
-
-| Property | Value |
-|----------|-------|
-| Source | `src/tools/builtin/playbook.ts` |
-| Input | `pipeline_id`, `name`, `description?` |
-| Registration | Always (at init) |
-
-Creates a reusable playbook from a completed workflow. Extracts steps into playbook phases with role heuristics (tool-to-role mapping). Detects `{{template}}` parameters. Saves to user playbooks directory.
-
-#### Built-in Playbooks (7 Universal Arcs)
-
-Each built-in playbook represents a fundamental cognitive arc — a proven sequence of roles for a type of task:
-
-| Arc | Playbook ID | Role Sequence | Cognitive Question |
-|-----|-------------|---------------|--------------------|
-| Discover | `research` | Collector → Researcher → Analyst → Creator | "What don't I know yet?" |
-| Evaluate | `evaluation` | Collector → Researcher → Analyst → Strategist | "Which option is best?" |
-| Diagnose | `diagnosis` | Collector → Researcher → Strategist → Strategist | "What is broken and why?" |
-| Synthesize | `synthesis` | Collector → Researcher → Analyst → Creator | "What do these information mean?" |
-| Improve | `assessment` | Analyst → Analyst → Researcher → Strategist | "What can be better?" |
-| Create | `creation` | Collector → Researcher → Creator → Analyst | "What needs to be built?" |
-| Plan | `planning` | Researcher → Analyst → Strategist → Creator | "How do we get there?" |
-
-#### Domain-Specific Playbooks (Examples)
-
-Domain-specific playbooks specialize a universal arc for a particular use case. Create them via `/playbooks create <id>` or `extract_playbook`. Store in `~/.nodyn/playbooks/` (user) or `.nodyn/playbooks/` (project).
-
-| Domain Playbook | Derives From | Example Use |
-|----------------|-------------|-------------|
-| `market-research` | `research` | Industry/market deep-dive |
-| `competitive-evaluation` | `evaluation` | Competitor benchmarking |
-| `incident-diagnosis` | `diagnosis` | Post-incident analysis |
-| `quarterly-synthesis` | `synthesis` | Quarterly business report |
-| `content-assessment` | `assessment` | Website content review |
-| `client-onboarding` | `creation` | New client setup |
-| `quarterly-planning` | `planning` | Quarterly roadmap |
 
 ### `web_search` -- Web Search (Native)
 

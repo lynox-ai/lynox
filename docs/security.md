@@ -144,7 +144,7 @@ Guard blocks are published to the `nodyn:guard:block` diagnostic channel for obs
 
 ## Persistent Budget Caps
 
-Cross-session spending limits prevent unbounded costs from long-running agents (daemons, autopilot):
+Cross-session spending limits prevent unbounded costs from long-running agents:
 
 | Config Key | Effect |
 |------------|--------|
@@ -288,8 +288,7 @@ The pre-approval system (`src/core/pre-approve.ts`) allows operators to pre-appr
 ### CLI Usage
 
 ```bash
-nodyn --mode autopilot --goal "Deploy" \
-  --pre-approve "npm run *" \
+nodyn --pre-approve "npm run *" \
   --pre-approve "rm dist/**"
 ```
 

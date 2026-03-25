@@ -75,9 +75,9 @@ This starts a localhost redirect OAuth flow:
 
 Tokens auto-refresh. Run `/google status` to check connection.
 
-## Service Account (Docker/Daemon)
+## Service Account (Docker/Headless)
 
-For headless deployments (Docker, daemon mode), use a service account instead of OAuth:
+For headless deployments (Docker, background tasks), use a service account instead of OAuth:
 
 1. Go to **IAM & Admin > Service Accounts** in GCP Console
 2. Create a service account

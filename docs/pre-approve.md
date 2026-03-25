@@ -40,7 +40,6 @@ interface PreApprovalSet {
 
 - **`src/core/pre-approve.ts`** — `globToRegex()`, `extractMatchString()`, `matchesPreApproval()`, `buildApprovalSet()`, `isCriticalTool()`
 - **`src/tools/permission-guard.ts`** — `isDangerous()` 4th param `preApproval?`, inline matching (avoids circular dep)
-- **`src/core/mode-controller.ts`** — `_buildPreApproval()` constructs set from `ModeConfig.autoApprovePatterns`
 - **`src/core/agent.ts`** — `preApproval` field, passed to `isDangerous()`
 - **`src/core/session.ts`** — `agentOverrides.preApproval` passed through to Agent
 - **`src/index.ts`** — `--pre-approve <glob>` (repeatable)
@@ -56,8 +55,7 @@ interface PreApprovalSet {
 ### Usage
 
 ```bash
-nodyn --mode autopilot --goal "Deploy v2" \
-  --pre-approve "npm run *" \
+nodyn --pre-approve "npm run *" \
   --pre-approve "rm dist/**"
 ```
 
@@ -72,8 +70,7 @@ Before executing a task in autonomous modes, a fast Haiku planning pass analyzes
 ### Flow
 
 ```
-User: --mode autopilot --goal "Deploy v2" \
-      --approve "bash:npm run *" --approve "write_file:dist/**"
+User: --approve "bash:npm run *" --approve "write_file:dist/**"
                  │
                  ▼
      ┌─── CLI Patterns ────────────┐
@@ -109,7 +106,7 @@ async function showApprovalDialog(
 
 ### Modified Files
 
-- **`src/core/mode-controller.ts`** — In `_applyAutopilot/Daemon/Swarm`: if no `autoApprovePatterns` and TTY, run planner → show dialog → build set
+- **`src/index.ts`** — `--auto-approve-all` auto-approves low + medium risk patterns
 - **`src/core/session.ts`** — Pass `apiKey`/`apiBaseURL` to mode controller for planner
 - **`src/index.ts`** — `--no-pre-approve` (skip planning), `--auto-approve-all` (approve low+medium without dialog)
 

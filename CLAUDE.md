@@ -20,7 +20,7 @@ npm run dev         # node --env-file=.env --watch --import tsx src/index.ts
 npm run start       # node dist/index.js
 npm run coverage    # vitest + coverage report (CI enforces ≥80%)
 npm run smoke:manual # offline smoke: typecheck + build + vitest + debug subscriber + MCP health/auth/client flow
-npx vitest run          # full suite (112 files / ~2653 tests)
+npx vitest run          # full suite (107 files / ~2520 tests)
 npx vitest run <file>   # single file
 pnpm bench              # offline performance benchmarks (no API key needed)
 pnpm bench:online       # online benchmarks (requires API key, ~$0.02)
@@ -44,7 +44,7 @@ src/
 │   ├── stream-handler.ts # streamHandler() + pipeline DAG renderer
 │   ├── commands/         # Slash command handlers by domain (11 modules)
 │   └── ...               # UI modules: banner, markdown, dialog, diff, footer, spinner, visualizer, autocomplete, ansi, setup-wizard, onboarding, interactive
-├── tools/                # ToolRegistry + permission guard + 12 builtin tools (14 modules)
+├── tools/                # ToolRegistry + permission guard + 10 builtin tools (12 modules)
 ├── orchestrator/         # DAG pipeline engine: validate, graph, conditions, runner (9 modules)
 ├── integrations/search/  # Web search tool (Tavily/Brave providers, content extractor)
 ├── integrations/telegram/ # Telegram bot (formatter, runner, bot)
@@ -78,10 +78,10 @@ src/
 | `cron-parser.ts` | 5-field standard cron expression parser + shorthand interval syntax (e.g. `every 5 minutes`). Pure function, no external dependencies | Used by WorkerLoop for scheduled task due-time calculation |
 | `notification-router.ts` | `NotificationRouter` — pluggable notification channel system. Registers `NotificationChannel` implementations, routes `NotificationMessage` to appropriate channels. Supports task completion, error, and inquiry notifications | Follow-up buttons on task completion notifications (Details, Run again / Retry, Explain). Context-continuity via callback data |
 | `telegram-notification.ts` | `TelegramNotificationChannel` — implements `NotificationChannel` for Telegram. Sends task results with inline follow-up buttons, handles inquiry responses for multi-turn tasks | Telegram callback prefixes: `'t:'` for follow-ups (Details/Retry/Explain), `'q:'` for inquiry responses. Integrates with `ActiveTask.pendingInput` for pause/resume |
-| `orchestrator-prompts.ts` | System prompt constants: `SYSTEM_PROMPT`, `PIPELINE_PROMPT_SUFFIX`, `DATASTORE_PROMPT_SUFFIX`, `PLAYBOOK_PROMPT_SUFFIX`. Pure constants, zero coupling. Re-exported from `orchestrator.ts` for backward compat | Business-friendly language throughout: no model names, no cost references, no developer jargon. Roles described by capability, not model tier. Modes described by user experience (Assistant, Autopilot, Watchdog, Background, Team). Background task intent recognition: natural language triggers in DE/EN (e.g. "Research X and get back to me", "Jeden Tag um 8...") mapped to `task_create` with appropriate fields (`schedule`, `watch_url`, `pipeline_id`). Proactive suggestions: agent offers background work for long tasks. Multi-turn: background tasks can `ask_user` (pauses until user responds via notification channel) |
+| `orchestrator-prompts.ts` | System prompt constants: `SYSTEM_PROMPT`, `PIPELINE_PROMPT_SUFFIX`, `DATASTORE_PROMPT_SUFFIX`. Pure constants, zero coupling. Re-exported from `orchestrator.ts` for backward compat | Business-friendly language throughout: no model names, no cost references, no developer jargon. Roles described by capability, not model tier. Background task intent recognition: natural language triggers in DE/EN (e.g. "Research X and get back to me", "Jeden Tag um 8...") mapped to `task_create` with appropriate fields (`schedule`, `watch_url`, `pipeline_id`). Proactive suggestions: agent offers background work for long tasks. Multi-turn: background tasks can `ask_user` (pauses until user responds via notification channel) |
 | `orchestrator-init.ts` | Extracted init helpers (pure functions): `configureBudgetAndRateLimits`, `setupHistorySubscriptions`, `generateInitBriefing`, `initSecrets`, `initScopes`, `initMemoryInstance`, `initEmbeddingProvider`, `initKnowledgeLayer`, `initDataStoreBridge`, `setupMemoryStoreSubscription`. `initSecrets` auto-migrates all config secrets (`api_key`, `google_client_secret`, `search_api_key`, `voyage_api_key`) to vault, loads `NODYN_MCP_SECRET` from vault, warns on stale MCP secret (>90 days) | Same pattern as run-history-analytics.ts / run-history-persistence.ts. Functions take explicit parameters, return explicit results |
 | `orchestrator-batch.ts` | Extracted batch processing: `parseBatchItem`, `submitBatch`, `pollBatch`. Pure functions operating on Anthropic client + RunHistory + BatchIndex | Batch parent/child run tracking. Exponential backoff polling (30s → 5min) |
-| `tool-context.ts` | `ToolContext` interface — shared dependency container for tool handlers. Replaces module-level closure setters (`setDataStore()`, `setGoalTracker()`, `setPipelineConfig()`, etc.). Created by orchestrator, passed to Agent via `agent.toolContext`. Includes core deps (DataStore, GoalTracker, TaskManager, KnowledgeLayer, RunHistory), pipeline/process/playbook refs, network policy, and isolation config | `createToolContext()` factory, `applyNetworkPolicy()`, `applyHttpRateLimits()` helpers. `ToolCallCountProvider` interface for cross-session HTTP rate limiting |
+| `tool-context.ts` | `ToolContext` interface — shared dependency container for tool handlers. Replaces module-level closure setters (`setDataStore()`, `setPipelineConfig()`, etc.). Created by orchestrator, passed to Agent via `agent.toolContext`. Includes core deps (DataStore, TaskManager, KnowledgeLayer, RunHistory), pipeline/process refs, network policy, and isolation config | `createToolContext()` factory, `applyNetworkPolicy()`, `applyHttpRateLimits()` helpers. `ToolCallCountProvider` interface for cross-session HTTP rate limiting |
 | `errors.ts` | Centralized error hierarchy: `NodynError` (base with `code` + `context`), `ValidationError`, `ConfigError`, `ExecutionError` (supports `Error.cause`), `ToolError`, `NotFoundError` | Business-friendly error codes. Used across tools and core modules for typed error handling |
 | `data-store.ts` | SQLite-based structured data storage (`~/.nodyn/datastore.db`). Agent-defined collections with typed columns, filter→SQL translation, aggregation, upsert, delete | One-table-per-collection (dynamic DDL). WAL mode. Max 100 collections, 50 columns, 100K records. `MAX_DB_SIZE_BYTES` (500MB) checked before insert. Filter operators: `$eq`, `$neq`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$like`, `$is_null`, `$or`, `$and`. Upsert via `uniqueKey` + `ON CONFLICT DO UPDATE`. `deleteRecords()` requires filter (no bulk delete) |
 | `datastore-bridge.ts` | `DataStoreBridge`: connects DataStore tables to Knowledge Graph. `registerCollection()` creates collection entities, `indexRecords()` extracts entities from string fields, `findRelatedData()` provides DataStore hints during retrieval | Entity type `'collection'` for tables. `has_data_in` relation type. Regex-only extraction (no LLM for bulk data). Max 20 entities per batch, max 100 records scanned |
@@ -101,8 +101,6 @@ src/
 | `secret-vault.ts` | Encrypted SQLite vault (`~/.nodyn/vault.db`), AES-256-GCM, PBKDF2 600K SHA-512. `deriveTenantKey()` via HKDF-SHA256 for per-tenant cryptographic isolation. `rotateVault()` for in-place key rotation. `estimateKeyEntropy()` for Shannon entropy validation (warns <128 bits). Decryption failures logged to stderr (not silent). Imports crypto constants from `crypto-constants.ts` and shared constants from `constants.ts` | Requires `NODYN_VAULT_KEY` env var |
 
 | `secret-store.ts` | Multi-source secrets: env (`NODYN_SECRET_*`) > vault > config fields. `extractSecretNames()` and `resolveSecretRefs()` centralize secret reference handling (moved from agent.ts) | Consent gate. `SECRET_REF_PATTERN` with `\b` word boundaries. `SecretStoreLike` interface includes extraction + resolution methods. Memory guard blocks secret content |
-| `mode-controller.ts` | Translates `ModeConfig` into agent config. Manages triggers, CostGuard, GoalTracker | Auto-DAG via `planDAG()`. Always passes `continuationPrompt` regardless of `maxIterations` |
-
 | `pre-approve.ts` | Glob pattern matching for autonomous mode auto-approval | `isCriticalTool()` blocks dangerous ops. TTL + maxUses enforcement |
 | `permission-guard.ts` | Tool permission checks before execution. Business-friendly block messages ("this action needs to be run manually for safety", "I need your OK before doing this", "I can only write files within the current project") | `normalizeCommand()` defeats encoding bypasses (ANSI-C quoting, hex escapes). `splitCommandSegments()` checks each chained command independently. `CRITICAL_BASH` blocks rm -rf, sudo, env dumps, SQL DROP/TRUNCATE, payment mutations, ncat/socat, /dev/tcp, openssl s_client, curl upload, python http.server. `DANGEROUS_BASH` adds database CLIs, email, payments, webhooks, messaging, xxd/printf piped to shell. HTTP POST/PUT/PATCH blocked in autonomous mode (pre-approvable). Google write actions (including `draft`, `append`) blocked in autonomous. `spawn_agent` task+context scanned for injection patterns in autonomous mode via `detectInjectionAttempt()`. Guard blocks published to `nodyn:guard:block` diagnostic channel |
 | `input-guard.ts` | Content policy — scans user input before LLM | Tier 1 hard block: malware/exploit/phishing creation. Tier 2 soft flag: social engineering, brute force, DDoS. Intent-based matching (verb+target, not keywords). Wired in `orchestrator.run()` |
@@ -113,27 +111,21 @@ src/
 | `workspace.ts` | Docker sandbox: write to `/workspace` + `/tmp` only, read also `/app`. `ensureContextWorkspace()` for non-CLI | Non-CLI sources auto-sandboxed. CLI retains direct filesystem access |
 | `project.ts` | `detectProjectRoot()` walks up for `.git`, `package.json`, `.nodyn-project`. `generateBriefing()` from last 3-5 runs | Briefing enriched with last response summary, failed status, top-3 tool usage. Security: `task_text` and `response_text` scanned via `detectInjectionAttempt()` — injection patterns redacted with `[redacted]` |
 | `plugins.ts` | Validated `import()` from `~/.nodyn/plugins/node_modules/` only | Plugin names validated against `NPM_NAME_RE`. Secrets stripped from context |
-| `process-capture.ts` | Extracts reusable ProcessRecord from run_history tool calls. Filters internal tools, Haiku call for step naming + parameter identification. Sanitizes secrets, truncates inputs | `INTERNAL_TOOLS` set excludes memory/ask_user/goal_update/plan_task/capture_process. `MAX_INPUT_CHARS` (500), `MAX_OUTPUT_CHARS` (200) for LLM context. Uses forced tool_choice for structured JSON output |
-Also: `cost-guard.ts`, `goal-tracker.ts`, `session-budget.ts` ($50 session ceiling shared by spawn + pipeline), `daemon-journal.ts`, `session-store.ts`, `batch-index.ts`, `prompt-hash.ts`, `roles.ts`, `pre-approve-audit.ts`, `dag-planner.ts`, `observability.ts`, `debug-subscriber.ts` (token masking for `ya29.*`/JWT patterns via `maskTokenPatterns()`, debug file written with 0o600, production warning when `NODYN_DEBUG` + `NODE_ENV=production`), `atomic-write.ts` (sync + async `ensureDir()` variant, imports from `constants.ts`), `constants.ts` (shared numeric constants: `MAX_BUFFER_BYTES`, `DIR_MODE_PRIVATE`, `FILE_MODE_PRIVATE`, `DEFAULT_BASH_TIMEOUT_MS`, `WORKER_MAX_ITERATIONS`, `DEFAULT_TASK_TIMEOUT_MS`), `crypto-constants.ts` (shared AES-256-GCM constants: `CRYPTO_ALGORITHM`, `CRYPTO_KEY_LENGTH`, `CRYPTO_IV_LENGTH`, `CRYPTO_TAG_LENGTH`), `task-manager.ts` (extended: `createScheduled()`, `createWatch()`, `createPipelineTask()`, `getDueTasks()`, `recordTaskRun()`, `updateWatchConfig()`. Task types: `manual`, `scheduled`, `watch`, `pipeline`. DB migrations v20 (scheduling columns) + v21 (`pipeline_id`). Watch tasks use direct HTTP fetch + `crypto.createHash('sha256')` for change detection — first run = baseline, only notifies on actual changes), `features.ts`, `changeset.ts`, `memory-gc.ts` (`temporalDecay()` utility), `triggers/` (file, http, cron, git).
+| `process-capture.ts` | Extracts reusable ProcessRecord from run_history tool calls. Filters internal tools, Haiku call for step naming + parameter identification. Sanitizes secrets, truncates inputs | `INTERNAL_TOOLS` set excludes memory/ask_user/plan_task/capture_process. `MAX_INPUT_CHARS` (500), `MAX_OUTPUT_CHARS` (200) for LLM context. Uses forced tool_choice for structured JSON output |
+Also: `cost-guard.ts`, `session-budget.ts` ($50 session ceiling shared by spawn + pipeline), `session-store.ts`, `batch-index.ts`, `prompt-hash.ts`, `roles.ts`, `pre-approve-audit.ts`, `dag-planner.ts`, `observability.ts`, `debug-subscriber.ts` (token masking for `ya29.*`/JWT patterns via `maskTokenPatterns()`, debug file written with 0o600, production warning when `NODYN_DEBUG` + `NODE_ENV=production`), `atomic-write.ts` (sync + async `ensureDir()` variant, imports from `constants.ts`), `constants.ts` (shared numeric constants: `MAX_BUFFER_BYTES`, `DIR_MODE_PRIVATE`, `FILE_MODE_PRIVATE`, `DEFAULT_BASH_TIMEOUT_MS`, `WORKER_MAX_ITERATIONS`, `DEFAULT_TASK_TIMEOUT_MS`), `crypto-constants.ts` (shared AES-256-GCM constants: `CRYPTO_ALGORITHM`, `CRYPTO_KEY_LENGTH`, `CRYPTO_IV_LENGTH`, `CRYPTO_TAG_LENGTH`), `task-manager.ts` (extended: `createScheduled()`, `createWatch()`, `createPipelineTask()`, `getDueTasks()`, `recordTaskRun()`, `updateWatchConfig()`. Task types: `manual`, `scheduled`, `watch`, `pipeline`. DB migrations v20 (scheduling columns) + v21 (`pipeline_id`). Watch tasks use direct HTTP fetch + `crypto.createHash('sha256')` for change detection — first run = baseline, only notifies on actual changes), `features.ts`, `changeset.ts`, `memory-gc.ts` (`temporalDecay()` utility), `triggers/` (file, http, cron, git).
 
 ### Roles (`src/core/roles.ts`)
 
-Unified agent configuration system. 8 built-in roles. System prompt describes them by capability, not model tier.
+4 built-in roles as a const map. System prompt describes them by capability, not model tier.
 
 | ID | Model | Effort | Autonomy | Tools | User-Facing Description |
 |----|-------|--------|----------|-------|------------------------|
 | `researcher` | opus | max | guided | deny: write_file, bash | Thorough exploration, source citation. Read-only |
-| `analyst` | sonnet | high | guided | deny: write_file, bash | Pattern recognition, structured evidence. Read-only |
-| `executor` | opus | high | guided | full access | Full tool access for task execution |
-| `operator` | haiku | high | autonomous | deny: write_file | Fast status checks, concise reporting. Read-only |
-| `strategist` | opus | high | guided | deny: bash, write_file | Planning, risk assessment. Read-only |
 | `creator` | sonnet | high | guided | deny: bash | Content creation, tone adaptation. No system commands |
+| `operator` | haiku | high | autonomous | deny: write_file | Fast status checks, concise reporting. Read-only |
 | `collector` | haiku | medium | supervised | allow: ask_user, memory_store, memory_recall | Structured Q&A with user. Minimal tools |
-| `communicator` | sonnet | high | guided | deny: write_file, bash | Message crafting, tone adaptation. Read-only |
 
-Resolution: project `.nodyn/roles/` > user `~/.nodyn/roles/` > built-in. Supports `extends` chains (max depth 3, cycle-protected). `warnModelMismatch()` flags downgrade/upgrade vs role default.
-
-Spawn and pipeline steps use `role` field exclusively. CLI command: `/roles`.
+No file-based CRUD. Spawn and pipeline steps use `role` field exclusively. CLI command: `/roles`.
 
 **Web search integration** (in core): `src/integrations/search/` — `search-provider.ts` (Tavily + Brave providers, factory), `content-extractor.ts` (Readability + SSRF-protected URL reading), `web-search-tool.ts` (`web_research` with search/read actions), `index.ts` (barrel + registration). Conditional — requires `TAVILY_API_KEY` or `BRAVE_API_KEY`.
 
@@ -141,13 +133,13 @@ Spawn and pipeline steps use `role` field exclusively. CLI command: `/roles`.
 
 **Google Workspace integration** (in core): `src/integrations/google/` — `google-auth.ts` (OAuth 2.0 localhost redirect + device flow + service account JWT + token refresh), `google-gmail.ts` (search/read/send/reply/draft/archive/labels), `google-sheets.ts` (read/write/append/create/list/format), `google-drive.ts` (search/read/upload/create_doc/list/move/share), `google-calendar.ts` (list/create/update/delete/free_busy), `google-docs.ts` (read/create/append/replace), `google-docs-format.ts` (Docs JSON→markdown, markdown→HTML for import), `index.ts` (barrel + `createGoogleTools()`). CLI `/google auth` uses localhost OAuth only (browser redirect). Device flow code retained for future Telegram/headless use. Tokens encrypted in SecretVault (`GOOGLE_OAUTH_TOKENS` key, requires `NODYN_VAULT_KEY`). Conditional — requires `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET`. Default OAuth scopes are **read-only** (`READ_ONLY_SCOPES`); write scopes (`WRITE_SCOPES`) opt-in via `google_oauth_scopes` config or `requestScope()` at runtime. Service account key files validated: must be absolute path, permissions 0o600/0o400 on Unix, valid JSON with `type: "service_account"` + required fields. **Security hardening (anti-injection)**: All 5 Google tools in `EXTERNAL_TOOLS` → `scanToolResult()` applied to every response. Defense in depth: all read handlers wrap external content via `wrapUntrustedData()` (Gmail body, Calendar events, Sheets cells, Drive file content, Docs markdown). Gmail `stripHtml()` strips HTML comments/CDATA/hidden elements to prevent injection hiding. Search snippets excluded from results. `wrapUntrustedData()` neutralizes `</untrusted_data>` boundary escape tags. `ToolCallTracker` detects Google-specific exfiltration patterns (google_read → email_send, google_read → http_request, google_read → sensitive_file_read). `detectInjectionAttempt()` patterns include Google tool invocation, email exfiltration instructions, and boundary escape.
 
-**Pro modules** (in `nodyn-pro`): `modes/` (sentinel, daemon, swarm handlers), `tenant.ts`, `isolation.ts`, `worker-pool.ts`, `pro-hooks.ts` (tenant cost + worker pool lifecycle), Slack integration. Uses `Engine` + `Session` architecture — tenant billing reads `RunContext.tenantId` (set via `Session.tenantId` property).
+**Pro modules** (in `nodyn-pro`): `tenant.ts`, `isolation.ts`, `worker-pool.ts`, `pro-hooks.ts` (tenant cost + worker pool lifecycle), Slack integration. Uses `Engine` + `Session` architecture — tenant billing reads `RunContext.tenantId` (set via `Session.tenantId` property). Sentinel/daemon/swarm modes are deprecated.
 
 ### Builtin Tools (`src/tools/builtin/`)
 
 All tool descriptions use business-friendly language (no model names, no developer jargon). LLM sees capability descriptions, not implementation details.
 
-bash, fs (read_file + write_file, `MAX_WRITE_BYTES_PER_SESSION` 100MB, symlink escape → business-friendly error), memory (store/recall/delete/update/list/promote — descriptions use "knowledge" language, scope descriptions use "organization/personal/project". Delete/update/promote sync with Knowledge Graph: deactivate/update Memory nodes + re-extract entities), spawn (spawn_agent — "delegate to roles", per-agent $5 default budget via CostGuard, $50 session ceiling, unknown role → "Unknown role" with available roles listed, `spec.context` XML-escaped via `escapeXml()` to prevent tag injection), ask-user (options use `\x00` sentinel to suppress "Other"), batch-files (`MAX_FIND_DEPTH` 10, `MAX_FIND_FILES` 10K), http (SSRF-protected with `friendlyBlockMessage()` wrapper — "internal network", "only HTTP/HTTPS", "limit reached", `MAX_REQUESTS_PER_SESSION` 100, `enforce_https` config blocks plain HTTP except localhost, sensitive response headers redacted: Set-Cookie/Authorization/X-Auth-Token/Cookie → `[redacted]`), goal-update ("track progress on objective"), pipeline (run_pipeline — inline steps or stored workflow execution, registered at init, 15s heartbeat), task (create/update/list + extended: `schedule` field for cron expressions, `watch_url` for URL monitoring, `pipeline_id` for pipeline bridge — scope format error improved), plan-task (phased plan with workflow bridge + auto-planning fallback via planDAG — see below), process (capture_process + promote_process — structured process capture from run_history, converts to parameterized workflows), data-store (create/insert/query/delete/list — "data table" language, errors wrapped with "Error working with data table:", filter description uses examples not syntax docs. Delete requires filter — no bulk delete. DataStore bridge auto-indexes entities from string fields into Knowledge Graph), playbook (list_playbooks/suggest_playbook/extract_playbook — strategic guidance for task approaches, registered at init). **Conditional:** web-search (Tavily/Brave), google_* tools (Gmail/Sheets/Drive/Calendar/Docs).
+bash, fs (read_file + write_file, `MAX_WRITE_BYTES_PER_SESSION` 100MB, symlink escape → business-friendly error), memory (store/recall/delete/update/list/promote — descriptions use "knowledge" language, scope descriptions use "organization/personal/project". Delete/update/promote sync with Knowledge Graph: deactivate/update Memory nodes + re-extract entities), spawn (spawn_agent — "delegate to roles", per-agent $5 default budget via CostGuard, $50 session ceiling, unknown role → "Unknown role" with available roles listed, `spec.context` XML-escaped via `escapeXml()` to prevent tag injection), ask-user (options use `\x00` sentinel to suppress "Other"), batch-files (`MAX_FIND_DEPTH` 10, `MAX_FIND_FILES` 10K), http (SSRF-protected with `friendlyBlockMessage()` wrapper — "internal network", "only HTTP/HTTPS", "limit reached", `MAX_REQUESTS_PER_SESSION` 100, `enforce_https` config blocks plain HTTP except localhost, sensitive response headers redacted: Set-Cookie/Authorization/X-Auth-Token/Cookie → `[redacted]`), pipeline (run_pipeline — inline steps or stored workflow execution, registered at init, 15s heartbeat), task (create/update/list + extended: `schedule` field for cron expressions, `watch_url` for URL monitoring, `pipeline_id` for pipeline bridge — scope format error improved), plan-task (phased plan with workflow bridge + auto-planning fallback via planDAG — see below), process (capture_process + promote_process — structured process capture from run_history, converts to parameterized workflows), data-store (create/insert/query/delete/list — "data table" language, errors wrapped with "Error working with data table:", filter description uses examples not syntax docs. Delete requires filter — no bulk delete. DataStore bridge auto-indexes entities from string fields into Knowledge Graph). **Conditional:** web-search (Tavily/Brave), google_* tools (Gmail/Sheets/Drive/Calendar/Docs).
 
 ### Plan Task (`src/tools/builtin/plan-task.ts`)
 
@@ -195,39 +187,6 @@ Structured bridge from ad-hoc execution to reusable pipelines. Core value: "disc
 
 **Storage**: SQLite `processes` table with CRUD (insertProcess, getProcess with prefix match, listProcesses, updateProcessPromotion, deleteProcess). Dependencies accessed via `agent.toolContext` (ToolContext pattern).
 
-### Playbooks (`src/core/playbooks.ts` + `src/tools/builtin/playbook.ts`)
-
-Strategic guidance for common business tasks. Built-in playbooks provide proven phases with recommended roles, verification criteria, and configurable parameters. Playbooks answer "HOW to approach a task" — sitting alongside Roles (WHO), Modes (HOW MUCH autonomy), Knowledge (WHAT is known), and Processes (WHAT was done).
-
-**Architecture**: Playbook → agent interpretation → `plan_task` phases → pipeline execution. Playbooks are guidance, not scripts — the agent adapts phases to context.
-
-**Types** (in `types/index.ts`):
-- `Playbook`: id, name, description, version, phases[], parameters?, applicableWhen?, extends?, tags?, source?
-- `PlaybookPhase`: name, description, recommendedRole?, verification?, dependsOn?
-- `PlaybookParameter`: name, description, type (string/number/date/boolean), required, defaultValue?
-
-**7 Built-in Playbooks (universal cognitive arcs):**
-
-| # | Arc | ID | Phases | Cognitive Question |
-|---|-----|-----|--------|--------------------|
-| 1 | Discover | `research` | 4 | "What don't I know yet?" |
-| 2 | Evaluate | `evaluation` | 4 | "Which option is best?" |
-| 3 | Diagnose | `diagnosis` | 4 | "What is broken and why?" |
-| 4 | Synthesize | `synthesis` | 4 | "What do these information mean?" |
-| 5 | Improve | `assessment` | 4 | "What can be better?" |
-| 6 | Create | `creation` | 4 | "What needs to be built?" |
-| 7 | Plan | `planning` | 4 | "How do we get from here to there?" |
-
-Each arc defines a proven role sequence (e.g., Discover: Collector → Researcher → Analyst → Creator). Domain-specific playbooks (competitive-analysis, content-audit, etc.) are specializations of these arcs — created via user/project scope, not built-in.
-
-**Resolution**: project `.nodyn/playbooks/` > user `~/.nodyn/playbooks/` > built-in. Supports `extends` chains (max depth 3). CLI: `/playbooks`.
-
-**Inheritance merge rules**: phases — child replaces parent. parameters — child replaces parent. tags — union. applicableWhen — concatenated. Everything else — child overrides.
-
-**Tools**: `list_playbooks` (show all), `suggest_playbook` (check for matching approach), `extract_playbook` (create playbook from completed workflow).
-
-**Bottom-up learning**: `capture_process` → `promote_process` → `extract_playbook` creates a reusable playbook from completed work.
-
 ### DAG Engine (`src/orchestrator/`)
 
 Declarative JSON manifest runner. v1.0 = sequential, v1.1 = parallel (phase-based `Promise.allSettled`). 4 runtime types: `agent`, `mock`, `inline`, `pipeline` (max depth 3). 9 condition operators (YAML manifests only). `{{step.result}}` template syntax. Simple per-step cost estimation (opus=$1.20, sonnet=$0.08, haiku=$0.005), step retry, DAG visualization.
@@ -266,7 +225,7 @@ Commands are implemented in `src/cli/commands/` as domain-grouped modules. `hand
 | `commands/memory.ts` | `/memory`, `/scope`, `/knowledge` |
 | `commands/pipeline.ts` | `/pipeline`, `/tools`, `/mcp`, `/chain`, `/manifest` |
 | `commands/history.ts` | `/runs`, `/stats`, `/batch`, `/batch-status`, `/tree` |
-| `commands/mode.ts` | `/mode`, `/roles`, `/profile` |
+| `commands/mode.ts` | `/mode` (status-only), `/roles`, `/profile` |
 | `commands/identity.ts` | `/alias`, `/google`, `/vault`, `/secret`, `/plugin` |
 | `commands/task.ts` | `/task`, `/business` |
 | `commands/schedule.ts` | `/schedule list`, `/schedule details <id>`, `/schedule cancel <id>`, `/schedule test <cron>` |
@@ -282,18 +241,6 @@ Streamlined 2-interaction onboarding: (1) API key with live validation, (2) inte
 3. Shell profile injection — sources on shell login (belt-and-suspenders)
 
 **Security hardening**: Both auto-load paths validate before reading: reject symlinks (`lstatSync` / `-L`), check file ownership (`statSync().uid` vs `getuid()`), reject group/other permissions (must be `0o600`/`0o400`), validate vault key format (`^[A-Za-z0-9+/=]{32,128}$`), warn on low entropy (<10 unique chars in `loadDotEnv()`, <128 bits Shannon in `SecretVault` constructor). Only `NODYN_VAULT_KEY` extracted — never API keys, never eval'd as code. Shell profile injection uses `basename($SHELL)` (not `endsWith`), `writeFileAtomicSync` for .env (no race window), single quotes in fallback. If vault.db exists but key is missing, `orchestrator-init.ts` warns to stderr. Docker `entrypoint.sh` skips vault key load when permissions cannot be determined (previously loaded without check).
-
-## Operational Modes
-
-| Mode (internal) | Display Name | maxIter | CostGuard | Triggers | User-Facing Description |
-|------|-------------|---------|----------|---------|------------------------|
-| interactive | Assistant | 20 | optional | none | Default. Works with you step by step |
-| autopilot | Autopilot | 50 | required | none | Runs independently toward a goal |
-| sentinel* | Watchdog | 20 | optional | required | Monitors and alerts you (Pro) |
-| daemon* | Background | 50 | required | required + heartbeat | Runs on a schedule, fully autonomous (Pro) |
-| swarm* | Team | 100 | required | none | Multiple agents work in parallel (Pro) |
-
-*Pro modes require `nodyn-pro`. Register via `ModeController.registerMode()`.
 
 ## TypeScript Rules
 
@@ -354,7 +301,7 @@ Session counters (cost, HTTP requests, write bytes) reset on process restart. Ex
 
 ## Testing
 
-**112 test files / ~2653 tests** (offline) + **5 online test files / 22 tests** (real API). Framework: Vitest (`pool: 'forks'`, `testTimeout: 10_000`). Co-located `*.test.ts` beside source files. Integration tests in `tests/integration/`. Performance benchmarks in `tests/performance/`.
+**107 test files / ~2520 tests** (offline) + **5 online test files / 22 tests** (real API). Framework: Vitest (`pool: 'forks'`, `testTimeout: 10_000`). Co-located `*.test.ts` beside source files. Integration tests in `tests/integration/`. Performance benchmarks in `tests/performance/`.
 
 ```bash
 npx vitest run                    # full offline suite (112 files / ~2653 tests)
@@ -365,7 +312,7 @@ NODYN_DEBUG=1 npx vitest run      # with debug output
 ### Offline Tests (mocked SDK)
 
 Key patterns:
-- Real filesystem via `mkdtemp` for fs/batch-files/daemon-journal/batch-index/profiles/data-store
+- Real filesystem via `mkdtemp` for fs/batch-files/batch-index/profiles/data-store
 - Real HTTP server (port 0) for http-trigger tests
 - `vi.mock` for SDK, child_process, node:fs, node:os, node:worker_threads
 - `vi.useFakeTimers()` for cron/spinner/file-trigger debounce
@@ -465,10 +412,10 @@ Entrypoint (`entrypoint.sh`): auto-loads `~/.nodyn/.env` (vault key), allows `--
 | `NODYN_EMBEDDING_PROVIDER` | Override: `onnx`, `voyage`, `local` |
 | `NODYN_USER` | User scope identity for multi-scope memory |
 | `NODYN_FEATURE_TENANTS` | Enable tenant isolation (off by default) |
-| `NODYN_FEATURE_TRIGGERS` | Enable triggers for daemon/sentinel modes (off by default) |
+| `NODYN_FEATURE_TRIGGERS` | Enable triggers (off by default) |
 | `NODYN_FEATURE_PLUGINS` | Enable plugin loading (off by default) |
 | `NODYN_FEATURE_WORKER_POOL` | Enable worker pool (off by default) |
-| `NODYN_DEBUG` | Debug logging: `1`/`true`/`*` for all, or comma-separated groups (`tool,spawn,dag,mode,trigger,cost,goal,preapproval,memory,secret`). `memory` group also includes memory extraction success/error events. `tool` group includes content truncation events. `trigger` group includes file watcher fallback events |
+| `NODYN_DEBUG` | Debug logging: `1`/`true`/`*` for all, or comma-separated groups (`tool,spawn,dag,trigger,cost,preapproval,memory,secret`). `memory` group also includes memory extraction success/error events. `tool` group includes content truncation events. `trigger` group includes file watcher fallback events |
 | `NODYN_DEBUG_FILE` | Write debug output to file instead of stderr |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token — auto-starts bot mode |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Comma-separated chat IDs to restrict bot access |

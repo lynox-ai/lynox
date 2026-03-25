@@ -60,9 +60,7 @@ See [MCP Server](mcp-server.md) for details.
 | `--output <path>` | Save response to file (single-task mode) |
 | `--mcp-server` | Start as MCP server |
 | `--transport sse` | Use SSE transport for MCP server |
-| `--mode <name>` | Set operational mode (assistant/autopilot/watchdog/background/team) |
-| `--goal "X"` | Set goal for autopilot/background modes |
-| `--budget N` | Set cost budget (USD) for mode |
+| `--task "description"` | Create a background task (processed by WorkerLoop) |
 | `--manifest <path>` | Run a manifest file (DAG workflow) |
 | `--pre-approve <glob>` | Pre-approve bash commands matching glob (repeatable) |
 | `--no-pre-approve` | Disable fast-tier planning pass for pre-approvals |
@@ -121,7 +119,7 @@ All commands support tab autocomplete in the REPL.
 
 | Command | Description |
 |---------|-------------|
-| `/mode [name]` | Interactive mode select, or switch directly with name |
+| `/mode` | Show current session status |
 
 ### Automation
 
@@ -129,8 +127,7 @@ All commands support tab autocomplete in the REPL.
 |---------|-------------|
 | `/pipeline [subcommand]` | Workflows (`list`, `plan`, `run`, `show`, `retry`, `history`, `chain`, `manifest`, `workflow`) |
 | `/profile [subcommand]` | Profiles (`list`, `<name>`) |
-| `/roles [subcommand]` | Roles (`list`, `show`, `create`, `delete`, `import`, `export`, `<name>`) |
-| `/playbooks [subcommand]` | Playbooks (`list`, `show`, `create`, `delete`, `import`) |
+| `/roles` | List the 4 built-in roles |
 | `/batch [subcommand]` | Batches (`submit <file>`, `list`, `<id>`, `retry-failed`, `export`) |
 
 ### Tasks
@@ -251,30 +248,24 @@ Aliases: `apex`=opus, `fast`=sonnet, `micro`=haiku.
 /accuracy         # Interactive select dialog
 ```
 
-## Operational Modes
+## Background Tasks
 
-Switch modes at runtime with `/mode` (interactive select) or directly with `/mode <name>`. Also available at launch with `--mode`:
+Use `--task` to create a background task processed by the WorkerLoop:
 
-```
-/mode                # Interactive select dialog with descriptions
-/mode assistant      # Default: 20 iterations, manual permission prompts
-/mode autopilot      # Goal-driven: 50 iterations, GoalTracker continuation, no promptUser
-/mode watchdog       # Trigger-based: 20 iterations, guided permission, requires triggers
-/mode background     # Long-running: 50 iterations, heartbeat, requires triggers
-/mode team           # Parallel: 100 iterations, wave status continuation
+```bash
+nodyn --task "Check website status every hour"
 ```
 
-Autopilot and background modes require `--goal` and `--budget`. Watchdog and background require triggers.
+The agent recognizes natural language scheduling intents (e.g. "Every morning check...", "Research X and get back to me") and creates the appropriate background task automatically via `task_create`.
 
-> **Scheduling note:** For simple recurring or one-shot background work, use `task_create` with `schedule` (or `watch_url` / `pipeline_id`) — no mode switch needed. The agent recognizes natural language scheduling intents (e.g. "Every morning check...", "Research X and get back to me") and creates the appropriate background task automatically. `/mode background` is for complex daemon scenarios that require persistent triggers, heartbeat monitoring, and full mode configuration.
+`/mode` shows current session status (no mode switching).
 
 ### Pre-Approval
 
-Use `--pre-approve` to auto-approve bash commands matching glob patterns in any mode:
+Use `--pre-approve` to auto-approve bash commands matching glob patterns:
 
 ```bash
-nodyn --mode autopilot --goal "Deploy v2" \
-  --pre-approve "npm run *" \
+nodyn --pre-approve "npm run *" \
   --pre-approve "rm dist/**"
 ```
 
@@ -349,18 +340,12 @@ Profiles are reusable agent configurations stored in `~/.nodyn/profiles/{name}.j
 
 ## Roles
 
-Roles define sub-agent configurations with tool restrictions, model defaults, and system prompts. Used via `spawn_agent`'s `role` field (which takes a role ID). 3-tier resolution: project `.nodyn/roles/` > user `~/.nodyn/roles/` > built-in. Supports `extends` chains (max depth 3).
+4 built-in roles as a const map. Used via `spawn_agent`'s `role` field. No file-based CRUD.
 
-8 built-in roles: `researcher`, `analyst`, `executor`, `operator`, `strategist`, `creator`, `collector`, `communicator`.
+Built-in roles: `researcher`, `creator`, `operator`, `collector`.
 
 ```
-/roles list              # List available roles with source
-/roles show <id>         # Show role configuration as JSON
-/roles create <id>       # Scaffold a new custom role
-/roles delete <id>       # Remove a user role
-/roles import <path>     # Import role from JSON file
-/roles export <id>       # Export role as JSON
-/roles <name>            # Load a role
+/roles                   # List available roles
 ```
 
 ## Workflows

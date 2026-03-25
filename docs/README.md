@@ -37,7 +37,7 @@ Open agent engine — persistent knowledge, autonomous workflows, tool connectio
 | [Configuration](configuration.md) | Config tiers, env vars, profiles |
 | [Knowledge](memory.md) | Storage, scopes, auto-extraction, retrieval |
 | [Workflows](dag-engine.md) | Multi-step automation, dependency graphs, conditions |
-| [Tools](tools.md) | Tool system, 14+ builtin tools reference |
+| [Tools](tools.md) | Tool system, 10+ builtin tools reference |
 | [Security](security.md) | Permission guard, SSRF protection, path validation |
 | [Docker](docker.md) | Container deployment, production hardening |
 | [Telegram Bot](telegram.md) | Setup, commands, inline keyboards, file handling |

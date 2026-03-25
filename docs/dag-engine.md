@@ -659,20 +659,15 @@ Workflow runs are persisted to `~/.nodyn/history.db` (v7 migration):
 
 Query via `RunHistory` methods: `insertPipelineRun()`, `getRecentPipelineRuns()`, `getPipelineStepResults()`.
 
-### Auto-DAG in Autopilot Mode
+### Auto-DAG Planning
 
-In autopilot mode with `--auto-dag`, goals are automatically decomposed into DAG workflows:
-
-```bash
-nodyn --mode autopilot --goal "Refactor auth module" --auto-dag --budget 5
-```
+Goals can be automatically decomposed into DAG workflows via `planDAG()`:
 
 Flow:
 1. `planDAG(goal)` generates workflow steps
-2. Approval dialog shown (unless `--skip-dag-approval`)
-3. Subtasks registered with GoalTracker
-4. Workflow executed, results injected into agent context as `<auto_dag_results>`
-5. Agent reviews results and completes remaining work
+2. Approval dialog shown
+3. Workflow executed, results injected into agent context as `<auto_dag_results>`
+4. Agent reviews results and completes remaining work
 
 ### When to Use What
 

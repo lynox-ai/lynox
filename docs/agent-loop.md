@@ -39,7 +39,7 @@ messages.push({ role: 'user', content: userMessage })
 
 ## Continuation & Iteration Limits
 
-When `continuationPrompt` is set (e.g., in autopilot/daemon modes via `ModeController`, applied through `Session`):
+When `continuationPrompt` is set (applied through `Session`):
 
 - **Iteration limit exceeded**: Agent auto-recurses with the continuation prompt
 - **`max_tokens` stop reason**: Falls through to continuation logic (not silently truncated)
@@ -110,7 +110,6 @@ type StreamEvent =
   | { type: 'spawn';         agents: string[];        agent: string }
   | { type: 'turn_end';      stop_reason: string; usage: BetaUsage; agent: string }
   | { type: 'error';         message: string;         agent: string }
-  | { type: 'goal_update';   state: GoalState;        agent: string }
   | { type: 'trigger';       trigger: string;         agent: string }
   | { type: 'cost_warning';  snapshot: CostSnapshot;  agent: string }
   | { type: 'continuation';  iteration: number;       agent: string }

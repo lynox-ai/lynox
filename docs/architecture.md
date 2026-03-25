@@ -43,14 +43,13 @@ Single source of truth for all types. Contains:
 - `ModelTier`, `MODEL_MAP`, `CONTEXT_WINDOW` -- model tier definitions
 - `ThinkingMode`, `EffortLevel` -- reasoning / accuracy configuration
 - `ToolEntry`, `ToolHandler` -- tool contract
-- `StreamEvent`, `StreamHandler` -- event union (includes `goal_update`, `trigger`, `cost_warning`, `continuation`, `advice`)
+- `StreamEvent`, `StreamHandler` -- event union (includes `trigger`, `cost_warning`, `continuation`, `advice`)
 - `IAgent`, `IMemory`, `IWorkerPool` -- core interfaces
 - `AgentConfig`, `NodynConfig`, `NodynUserConfig`, `MCPServer` -- configuration
 - `ChangesetEntry`, `ChangesetDiff`, `ChangesetResult`, `ChangesetManagerLike` -- changeset review types
 - `SpawnSpec`, `BatchRequest`, `BatchResult` -- operation types (SpawnSpec includes `role`, `context`, `isolated_memory`)
 - `Role`, `ToolScopeConfig` -- role-based agent configuration
-- `OperationalMode`, `ModeConfig`, `CostGuardConfig`, `CostSnapshot` -- mode system
-- `GoalState`, `TriggerConfig`, `ITrigger` -- goal tracking and triggers
+- `TriggerConfig`, `ITrigger` -- triggers
 - `NODYN_BETAS` -- beta header array
 - `ALL_NAMESPACES` -- canonical list of all `MemoryNamespace` values (shared by knowledge system, knowledge-gc, knowledge tools)
 - `TaskRecord`, `TaskStatus`, `TaskPriority` -- task management types. Task types: `manual`, `scheduled`, `watch`, `pipeline`
@@ -94,14 +93,10 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `entity-resolver.ts` | `EntityResolver` | Canonical name resolution (exact → alias → normalized → create), entity merge with alias transfer |
 | `contradiction-detector.ts` | -- | Contradiction detection for knowledge/learnings: vector search >0.80 → heuristic checks (negation DE/EN, number change, state change) |
 | `datastore-bridge.ts` | `DataStoreBridge` | Connects DataStore tables to Knowledge Graph. `registerCollection()` creates collection entities, `indexRecords()` extracts entities from string fields via regex, `findRelatedData()` provides DataStore hints during retrieval. Entity type `'collection'`, relation type `has_data_in` |
-| `roles.ts` | -- | 3-tier role resolution (project > user > built-in), 8 built-in roles (researcher, analyst, executor, operator, strategist, creator, collector, communicator), `SAFE_ROLE_NAME_RE` validation. Roles define sub-agent tool restrictions, model defaults, and system prompts (compressed single-paragraph format) |
-| `playbooks.ts` | -- | Strategic guidance via 7 universal cognitive arcs: Discover (research), Evaluate (evaluation), Diagnose (diagnosis), Synthesize (synthesis), Improve (assessment), Create (creation), Plan (planning). Each arc defines a proven role sequence. 3-tier resolution (project > user > built-in), extends chains (max depth 3). Domain-specific playbooks are user/project scope specializations |
+| `roles.ts` | -- | 4 built-in roles as a const map (researcher, creator, operator, collector). No file-based CRUD. Roles define sub-agent tool restrictions, model defaults, and system prompts (compressed single-paragraph format) |
 | `plugins.ts` | `PluginManager` | Validated `import()` from `~/.nodyn/plugins/node_modules/` only, `NPM_NAME_RE`, secrets stripped, lifecycle hooks |
-| `mode-controller.ts` | `ModeController` | Translates `ModeConfig` into agent config, manages CostGuard/GoalTracker/triggers/heartbeat. Static mode registry (`registerMode()`) for Pro extensions. `ModeControllerContext` exposes controller internals to handlers: `isQuietHours()`, `registerGoalTools()`, `appendJournal()`, `requestTeardown()` |
 | `features.ts` | -- | Feature flags (`NODYN_FEATURE_*` env vars), dynamic registration via `registerFeature()` for Pro |
-| `goal-tracker.ts` | `GoalTracker` | Goal + subtask state machine, continuation prompts, summary for history truncation |
 | `cost-guard.ts` | `CostGuard` | Budget tracking + enforcement, cache tokens at correct rates (write 1.25x, read 0.1x) |
-| `daemon-journal.ts` | `DaemonJournal` | Append-only JSONL journal for background mode logging |
 | `pre-approve.ts` | -- | Glob-based pattern matching for auto-approving operations in autonomous modes |
 | `pre-approve-audit.ts` | `PreApproveAudit` | SQLite audit trail for pre-approval decisions |
 | `task-manager.ts` | `TaskManager` | Task CRUD facade over RunHistory. Week summaries, briefing integration, scope-aware queries |
@@ -151,7 +146,6 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `builtin/ask-user.ts` | Interactive prompting (select/confirm/freeform/tabbed) |
 | `builtin/batch-files.ts` | Glob-based rename/move/transform |
 | `builtin/http.ts` | HTTP requests with SSRF protection |
-| `builtin/goal-update.ts` | `goal_update` tool (registered dynamically in goal-tracking modes) |
 | `builtin/pipeline.ts` | `run_pipeline` — inline or stored workflow execution with parallel phases |
 | `builtin/task.ts` | `task_create`, `task_update`, `task_list` with scope validation |
 | `builtin/plan-task.ts` | `plan_task` — phased plan with workflow bridge. Auto-converts approved phases to workflow via `phasesToPipelineSteps()` |
@@ -200,7 +194,7 @@ Exposes NODYN as an MCP server with stdio and HTTP transport. Uses `Engine` inte
 
 ### `src/index.ts` -- Entry Point
 
-Module re-exports (Engine, Session, WorkerLoop, NotificationRouter, TelegramNotificationChannel, NotificationChannel, NotificationMessage) + CLI REPL with interactive dialog, streaming, session management, slash commands. Extension points: `registerCommand()` for Pro slash commands, `registerValidMode()` for custom modes.
+Module re-exports (Engine, Session, WorkerLoop, NotificationRouter, TelegramNotificationChannel, NotificationChannel, NotificationMessage) + CLI REPL with interactive dialog, streaming, session management, slash commands. Extension points: `registerCommand()` for Pro slash commands.
 
 ## Data Flow
 
@@ -265,7 +259,7 @@ Agent.send(userMessage)
 - **3-tier config**: env vars > project `.nodyn/config.json` > user `~/.nodyn/config.json`.
 - **Security-first**: `PROJECT_SAFE_KEYS` allowlist, `NPM_NAME_RE`/`SAFE_ROLE_NAME_RE`/`SAFE_PROFILE_NAME_RE` validation, SSRF protection, XML escaping in RAG.
 - **DRY utilities**: Shared primitives in `src/core/utils.ts` (`sha256Short`, `getErrorMessage`, `sleep`) and `src/cli/ansi.ts` (`TBL`, `stripAnsi`, `wordWrap`). Constants like `ALL_NAMESPACES` live in `src/types/index.ts`.
-- **Open-core extensibility**: Core provides 6 extension points (Mode Registry, Orchestrator Hooks, CLI Command Registry, Mode Validation, Feature Flags, Notification Router) so Pro can integrate without modifying core source. See [Extension Points](extension-points.md).
+- **Open-core extensibility**: Core provides 4 extension points (Orchestrator Hooks, CLI Command Registry, Feature Flags, Notification Router) so Pro can integrate without modifying core source. See [Extension Points](extension-points.md).
 
 ## Error Handling
 
@@ -292,16 +286,6 @@ All error classes are exported from `@nodyn-ai/core`.
 
 The thorough tier has a 1M token context window; balanced and fast tiers have 200K. All model-specific defaults (max_tokens, continuations, truncation thresholds) scale automatically via `DEFAULT_MAX_TOKENS`, `MAX_CONTINUATIONS`, and `CONTEXT_WINDOW` in `src/types/index.ts`.
 
-## Operational Modes
+## Background Tasks
 
-5 modes across 3 axes (autonomy, trigger, persistence):
-
-| Mode | maxIter | Continuation | promptUser | CostGuard | Triggers |
-|------|---------|-------------|-----------|----------|---------|
-| `assistant` | 20 | none | kept | optional | none |
-| `autopilot` | 50 | GoalTracker | removed | required | none |
-| `watchdog` (Pro) | 20 | none | guided | optional | required |
-| `background` (Pro) | 50 | active | removed | required | required + heartbeat |
-| `team` (Pro) | 100 | wave status | removed | required | none |
-
-`ModeController.apply()` orchestrates: sets agent overrides, wraps stream handler, creates CostGuard/GoalTracker, starts triggers, registers `goal_update` tool. Pro modes (watchdog, background, team), tenant management, worker pool, and Slack integration live in `nodyn-pro` and register via the extension points (Mode Registry, Orchestrator Hooks, CLI Command Registry). See [Extension Points](extension-points.md).
+ModeController, GoalTracker, and the 5-mode system have been removed. Background work is handled by `WorkerLoop` via `task_create` with scheduling fields. The `--task` CLI flag creates a background task directly. Pro's sentinel/daemon/swarm modes are deprecated. See [Extension Points](extension-points.md) for how Pro integrates via hooks.
