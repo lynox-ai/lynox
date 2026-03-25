@@ -17,6 +17,7 @@ import type { TaskRecord } from '../types/index.js';
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
 const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
+const WORKER_MAX_ITERATIONS = 30; // cap agent loops per background task (cost control)
 
 /** Per-task execution context available via AsyncLocalStorage. */
 export interface WorkerTaskContext {
@@ -78,6 +79,22 @@ export class WorkerLoop {
       if (!taskManager) return;
 
       const dueTasks = taskManager.getDueTasks();
+
+      // Missed run detection: warn about tasks that were due >10min ago
+      const now = Date.now();
+      for (const task of dueTasks) {
+        if (task.next_run_at) {
+          const dueAt = new Date(task.next_run_at).getTime();
+          const delayMs = now - dueAt;
+          if (delayMs > 10 * 60_000) {
+            const delayMin = Math.round(delayMs / 60_000);
+            process.stderr.write(
+              `[nodyn:worker] Missed run: "${task.title}" (${task.id}) was due ${String(delayMin)}min ago\n`,
+            );
+          }
+        }
+      }
+
       for (const task of dueTasks) {
         // Skip if already executing
         if (this.activeTasks.has(task.id)) continue;
@@ -157,6 +174,8 @@ export class WorkerLoop {
       autonomy: 'autonomous',
       systemPromptSuffix: WORKER_SUFFIX,
     });
+    // Cost control: cap agent loop iterations for background tasks
+    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous' });
 
     const prompt = task.description
       ? `Task: ${task.title}\n\n${task.description}`
@@ -246,16 +265,20 @@ export class WorkerLoop {
       return;
     }
 
-    // Fetch the page via a headless session with http_request tool
-    const fetchSession = this.engine.createSession({
-      autonomy: 'autonomous',
-      model: 'haiku', // cheap fetch — just reading a page
-      systemPromptSuffix: WATCH_FETCH_SUFFIX,
-    });
-
-    const fetchResult = await fetchSession.run(
-      `Fetch the content of this URL and return ONLY the raw text content, no commentary:\n${config.url}`,
-    );
+    // Direct HTTP fetch — no LLM needed, saves ~$0.001 per check
+    let fetchResult: string;
+    try {
+      const res = await fetch(config.url, {
+        signal: AbortSignal.timeout(30_000),
+        headers: { 'User-Agent': 'nodyn-watch/1.0' },
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${String(res.status)} ${res.statusText}`);
+      }
+      fetchResult = await res.text();
+    } catch (err: unknown) {
+      throw new Error(`Watch fetch failed for ${config.url}: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     // Hash the fetched content
     const currentHash = createHash('sha256').update(fetchResult).digest('hex');
@@ -316,10 +339,3 @@ You are running as an autonomous background worker.
 - Always conclude with a clear summary of what was accomplished or why it failed
 `;
 
-const WATCH_FETCH_SUFFIX = `
-
-## URL Fetch Mode
-You are fetching a URL for content monitoring. Use the http_request tool to GET the URL.
-Return ONLY the page text content — no commentary, no analysis, no markdown formatting.
-If the page fails to load, return the error message.
-`;

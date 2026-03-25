@@ -45,7 +45,7 @@ function makeSession(result: string | Error = 'Done.'): Session {
   const runFn = result instanceof Error
     ? vi.fn<(task: string) => Promise<string>>().mockRejectedValue(result)
     : vi.fn<(task: string) => Promise<string>>().mockResolvedValue(result);
-  return { run: runFn } as unknown as Session;
+  return { run: runFn, _recreateAgent: vi.fn() } as unknown as Session;
 }
 
 function makeEngine(opts?: {
@@ -139,6 +139,7 @@ describe('WorkerLoop', () => {
     // Session that never resolves — simulates a long-running task
     const neverResolve = {
       run: vi.fn<(task: string) => Promise<string>>().mockReturnValue(new Promise(() => {})),
+      _recreateAgent: vi.fn(),
     } as unknown as Session;
     const task = makeTask();
     const tm = makeTaskManager([task]);
@@ -222,15 +223,13 @@ describe('WorkerLoop', () => {
   // ---- 7. stop aborts active tasks ----
 
   it('stop() aborts active tasks and clears the map', async () => {
-    const abortSpy = vi.fn();
     const neverResolve = {
       run: vi.fn<(task: string) => Promise<string>>().mockImplementation(
         () => new Promise((_resolve, reject) => {
-          // Listen for abort in a real scenario — here we just never resolve
-          // The AbortController's abort() is what we verify
           void reject; // unused
         }),
       ),
+      _recreateAgent: vi.fn(),
     } as unknown as Session;
     const task = makeTask();
     const tm = makeTaskManager([task]);
@@ -253,6 +252,7 @@ describe('WorkerLoop', () => {
   it('isRunning and activeTaskCount reflect correct state', async () => {
     const neverResolve = {
       run: vi.fn<(task: string) => Promise<string>>().mockReturnValue(new Promise(() => {})),
+      _recreateAgent: vi.fn(),
     } as unknown as Session;
     const tasks = [makeTask({ id: 'a' }), makeTask({ id: 'b' })];
     const tm = makeTaskManager(tasks);
