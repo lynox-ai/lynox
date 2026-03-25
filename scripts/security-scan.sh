@@ -78,13 +78,13 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 
-# npm audit — check for known CVEs in production dependencies
+# Dependency audit — check for known CVEs in production dependencies
 echo ""
-echo "Running npm audit..."
-if npm audit --omit=dev --audit-level=high > /dev/null 2>&1; then
-  echo "✓ No high/critical vulnerabilities in production dependencies"
+echo "Running dependency audit..."
+if pnpm audit --prod > /dev/null 2>&1; then
+  echo "✓ No known vulnerabilities in production dependencies"
 else
-  echo "⚠ npm audit found high/critical vulnerabilities (review with: npm audit --omit=dev)"
+  echo "⚠ Dependency audit found vulnerabilities (review with: pnpm audit --prod)"
   # Don't increment ERRORS — advisory only, may have false positives or unfixable issues
 fi
 
