@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { IAgent, ToolEntry, StreamHandler, Role } from '../../types/index.js';
+import type { IAgent, ToolEntry, StreamHandler } from '../../types/index.js';
+import type { RoleConfig } from '../../core/roles.js';
 
 // === Mocks ===
 
@@ -20,11 +21,11 @@ vi.mock('../../core/observability.js', () => ({
   },
 }));
 
-const mockLoadRole = vi.fn().mockReturnValue(null);
-const mockWarnModelMismatch = vi.fn().mockReturnValue(null);
+const mockGetRole = vi.fn().mockReturnValue(undefined);
+const mockGetRoleNames = vi.fn().mockReturnValue(['researcher', 'creator', 'operator', 'collector']);
 vi.mock('../../core/roles.js', () => ({
-  loadRole: (...args: unknown[]) => mockLoadRole(...args),
-  warnModelMismatch: (...args: unknown[]) => mockWarnModelMismatch(...args),
+  getRole: (...args: unknown[]) => mockGetRole(...args),
+  getRoleNames: (...args: unknown[]) => mockGetRoleNames(...args),
 }));
 
 import { spawnAgentTool, resetSessionSpawnCost } from './spawn.js';
@@ -61,8 +62,7 @@ describe('spawn_agent tool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSend.mockResolvedValue('sub-agent result');
-    mockLoadRole.mockReturnValue(null);
-    mockWarnModelMismatch.mockReturnValue(null);
+    mockGetRole.mockReturnValue(undefined);
     resetSessionSpawnCost();
   });
 
@@ -260,17 +260,15 @@ describe('spawn_agent tool', () => {
 
   // === Role-based spawn tests ===
 
-  it('applies role model, system prompt, and tool scoping', async () => {
+  it('applies role model and tool scoping', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
-    mockLoadRole.mockReturnValue({
-      id: 'researcher',
-      name: 'Researcher',
-      description: 'Research role',
-      version: '1.0.0',
-      systemPrompt: 'You are a researcher.',
+    mockGetRole.mockReturnValue({
       model: 'sonnet',
-      deniedTools: ['write_file', 'bash'],
-    } as Role);
+      effort: 'high',
+      autonomy: 'guided',
+      denyTools: ['write_file', 'bash'],
+      description: 'Thorough exploration, source citation. Read-only.',
+    } as RoleConfig);
 
     const agent = makeAgent();
     await spawnAgentTool.handler(
@@ -278,9 +276,8 @@ describe('spawn_agent tool', () => {
       agent,
     );
 
-    expect(mockLoadRole).toHaveBeenCalledWith('researcher');
+    expect(mockGetRole).toHaveBeenCalledWith('researcher');
     const agentCall = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
-    expect(agentCall['systemPrompt']).toBe('You are a researcher.');
     // write_file and bash should be excluded, spawn_agent always excluded
     const toolNames = (agentCall['tools'] as ToolEntry[]).map(t => t.definition.name);
     expect(toolNames).toContain('read_file');
@@ -291,15 +288,12 @@ describe('spawn_agent tool', () => {
 
   it('explicit spec fields override role defaults', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
-    mockLoadRole.mockReturnValue({
-      id: 'researcher',
-      name: 'Researcher',
-      description: 'Research role',
-      version: '1.0.0',
-      systemPrompt: 'Role prompt.',
+    mockGetRole.mockReturnValue({
       model: 'sonnet',
       effort: 'high',
-    } as Role);
+      autonomy: 'guided',
+      description: 'Research role',
+    } as RoleConfig);
 
     const agent = makeAgent();
     await spawnAgentTool.handler(
@@ -314,7 +308,7 @@ describe('spawn_agent tool', () => {
   });
 
   it('throws for unknown role', async () => {
-    mockLoadRole.mockReturnValue(null);
+    mockGetRole.mockReturnValue(undefined);
     const agent = makeAgent();
 
     await expect(
@@ -325,17 +319,15 @@ describe('spawn_agent tool', () => {
     ).rejects.toThrow(/Unknown role "nonexistent"/);
   });
 
-  it('role allowedTools whitelist filters parent tools', async () => {
+  it('role allowTools whitelist filters parent tools', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
-    mockLoadRole.mockReturnValue({
-      id: 'collector',
-      name: 'Collector',
-      description: 'Collector role',
-      version: '1.0.0',
-      systemPrompt: 'Collect feedback.',
+    mockGetRole.mockReturnValue({
       model: 'haiku',
-      allowedTools: ['read_file'],
-    } as Role);
+      effort: 'medium',
+      autonomy: 'supervised',
+      allowTools: ['read_file'],
+      description: 'Collector role',
+    } as RoleConfig);
 
     const agent = makeAgent();
     await spawnAgentTool.handler(
@@ -350,14 +342,13 @@ describe('spawn_agent tool', () => {
 
   it('spec.tools overrides role tool scoping', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
-    mockLoadRole.mockReturnValue({
-      id: 'researcher',
-      name: 'Researcher',
+    mockGetRole.mockReturnValue({
+      model: 'opus',
+      effort: 'max',
+      autonomy: 'guided',
+      denyTools: ['write_file', 'bash'],
       description: 'Research role',
-      version: '1.0.0',
-      systemPrompt: 'Research.',
-      deniedTools: ['write_file', 'bash'],
-    } as Role);
+    } as RoleConfig);
 
     const agent = makeAgent();
     await spawnAgentTool.handler(
@@ -396,28 +387,23 @@ describe('spawn_agent tool', () => {
 
   it('3-tier resolution: spec > role > defaults', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
-    mockLoadRole.mockReturnValue({
-      id: 'strategist',
-      name: 'Strategist',
-      description: 'Strategy role',
-      version: '1.0.0',
-      systemPrompt: 'Plan.',
+    mockGetRole.mockReturnValue({
       model: 'opus',
       effort: 'high',
-      maxIterations: 30,
-    } as Role);
+      autonomy: 'guided',
+      description: 'Strategy role',
+    } as RoleConfig);
 
     const agent = makeAgent();
-    // spec overrides effort but not model or maxIterations
+    // spec overrides effort but not model
     await spawnAgentTool.handler(
-      { agents: [{ name: 'p1', task: 'Plan it', role: 'strategist', effort: 'max' }] },
+      { agents: [{ name: 'p1', task: 'Plan it', role: 'researcher', effort: 'max' }] },
       agent,
     );
 
     const agentCall = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
     expect(agentCall['model']).toBe('claude-opus-4-6'); // from role
     expect(agentCall['effort']).toBe('max'); // from spec (overrides role)
-    expect(agentCall['maxIterations']).toBe(30); // from role
   });
 
   it('always excludes spawn_agent from children', async () => {

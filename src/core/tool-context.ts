@@ -1,16 +1,14 @@
 /**
  * ToolContext — shared context for tool handlers.
  *
- * Replaces closure-based module-level state setters (setDataStore, setGoalTracker, etc.)
+ * Replaces closure-based module-level state setters (setDataStore, etc.)
  * with a single context object scoped to the Nodyn orchestrator instance.
  *
  * The orchestrator creates one ToolContext and passes it to each Agent.
  * Tool handlers read from `agent.toolContext` instead of module-level variables.
- * Properties are mutable so the orchestrator and mode controller can update them
- * (e.g. goalTracker during mode changes) without recreating the agent.
+ * Properties are mutable so the orchestrator can update them without recreating the agent.
  */
 import type { DataStore } from './data-store.js';
-import type { GoalTracker } from './goal-tracker.js';
 import type { TaskManager } from './task-manager.js';
 import type { RunHistory } from './run-history.js';
 import type {
@@ -29,13 +27,12 @@ export interface ToolCallCountProvider {
 export interface ToolContext {
   // ── Core dependencies ──
   dataStore: DataStore | null;
-  goalTracker: GoalTracker | null;
   taskManager: TaskManager | null;
   knowledgeLayer: IKnowledgeLayer | null;
   runHistory: RunHistory | null;
   userConfig: NodynUserConfig;
 
-  // ── Pipeline / process / playbook ──
+  // ── Pipeline / process ──
   tools: ToolEntry[];
   streamHandler: StreamHandler | null;
 
@@ -56,7 +53,6 @@ export interface ToolContext {
 export function createToolContext(userConfig: NodynUserConfig): ToolContext {
   return {
     dataStore: null,
-    goalTracker: null,
     taskManager: null,
     knowledgeLayer: null,
     runHistory: null,

@@ -37,9 +37,6 @@ export { RunHistory, hashTask } from './core/run-history.js';
 export { calculateCost, getPricing } from './core/pricing.js';
 export { createEmbeddingProvider, cosineSimilarity } from './core/embedding.js';
 export { temporalDecay, MEMORY_HALF_LIFE_DAYS } from './core/memory-gc.js';
-export { GoalTracker } from './core/goal-tracker.js';
-export { ModeController } from './core/mode-controller.js';
-export type { Journal } from './core/mode-controller.js';
 export { PluginManager } from './core/plugins.js';
 export { runManifest, loadManifestFile, validateManifest } from './orchestrator/runner.js';
 export { LocalGateAdapter } from './orchestrator/gates.js';
@@ -87,11 +84,10 @@ export { startTelegramBot, stopTelegramBot, getTelegramBot } from './integration
 export { TelegramNotificationChannel } from './integrations/telegram/telegram-notification.js';
 export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES, createGoogleTools } from './integrations/google/index.js';
 export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult } from './integrations/google/index.js';
-export { loadRole, listRoles, getBuiltinRoleIds, saveRole, exportRole, importRole, deleteRole, warnModelMismatch } from './core/roles.js';
-export type { RoleSource, RoleListEntry } from './core/roles.js';
+export { getRole, getRoleNames, BUILTIN_ROLES } from './core/roles.js';
+export type { RoleConfig } from './core/roles.js';
 export { isFeatureEnabled, getFeatureFlags, getFeatureEnvVar, registerFeature, clearDynamicFeatures } from './core/features.js';
 export type { FeatureFlag } from './core/features.js';
-export type { ModeHandler, ModeControllerContext, ModeOrchestrator } from './core/mode-controller.js';
 export type { NodynHooks, RunContext, AccumulatedUsage } from './core/engine.js';
 export { NotificationRouter } from './core/notification-router.js';
 export type { NotificationChannel, NotificationMessage } from './core/notification-router.js';
@@ -132,17 +128,6 @@ export function registerCommand(name: string, handler: SlashCommandHandler): voi
   _commandRegistry.set(name.startsWith('/') ? name : `/${name}`, handler);
 }
 
-// Extensible mode validation set (Pro registers sentinel/daemon/swarm via registerValidMode)
-const _validModes = new Set<string>(['interactive', 'autopilot']);
-
-export function registerValidMode(mode: string): void {
-  _validModes.add(mode);
-}
-
-export function getValidModes(): string[] {
-  return [..._validModes];
-}
-
 // === CLI REPL ===
 
 import { createInterface } from 'node:readline/promises';
@@ -155,7 +140,7 @@ import { homedir } from 'node:os';
 
 import { Engine } from './core/engine.js';
 import type { Session } from './core/session.js';
-import type { StreamEvent, TabQuestion, OperationalMode, PreApprovalPattern } from './types/index.js';
+import type { StreamEvent, TabQuestion } from './types/index.js';
 import { MODEL_MAP } from './types/index.js';
 import { hasApiKey } from './core/config.js';
 import { runSetupWizard } from './cli/setup-wizard.js';
@@ -183,15 +168,13 @@ import {
   handleAlias, handleGoogle, handleVault, handleSecret, handlePlugin,
   handleConfig, handleStatus, handleHooks, handleApprovals, pkg,
   handleModel, handleAccuracy, handleCost, handleContext,
-  handleMode, handleRoles, handlePlaybooks, handleProfile, setGetValidModes,
+  handleMode, handleRoles, handleProfile,
   handleMemory, handleScope, handleKnowledge,
   handlePipeline, handleChain, handleManifest, handleTools, handleMcp,
   handleQuickstart,
 } from './cli/commands/index.js';
 import type { InternalHandler, CLICtx } from './cli/commands/types.js';
 
-// Wire getValidModes into the mode handler (avoids circular dep)
-setGetValidModes(getValidModes);
 // === Command dispatch map ===
 
 import { loadAliases } from './cli/cli-helpers.js';
@@ -231,7 +214,6 @@ const DISPATCH: Record<string, InternalHandler> = {
   '/context': handleContext,
   '/mode': handleMode,
   '/roles': handleRoles,
-  '/playbooks': handlePlaybooks,
   '/profile': handleProfile,
   '/memory': handleMemory,
   '/scope': handleScope,
@@ -400,11 +382,8 @@ Options:
   --version, -v                 Show version
   --init                        Run setup wizard
   --project <dir>               Set project directory
-  --mode <name>                 Operational mode (assistant/autopilot/watchdog/background/team)
-  --goal "<goal>"               Set goal for autopilot/background mode
-  --budget <usd>                Set cost guard budget
   --manifest <file>             Run a workflow manifest
-  --pre-approve <patterns>      Auto-approve tool patterns
+  --task "<title>"              Create a background task and exit
   --output <file>               Save output to file
   --resume                      Resume previous session
 
@@ -614,19 +593,8 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     }
   }
 
-  // === --mode validation (before task execution so pipe mode also validates) ===
-  const modeIdxEarly = args.indexOf('--mode');
-  const modeFlagEarly = modeIdxEarly !== -1 ? args[modeIdxEarly + 1] : undefined;
-  if (modeFlagEarly) {
-    const validModes = getValidModes();
-    if (!validModes.includes(modeFlagEarly)) {
-      stderr.write(`${RED}✗${RESET} Unknown mode: ${modeFlagEarly}. Valid: ${validModes.join(', ')}\n`);
-      process.exit(1);
-    }
-  }
-
   // === Single task mode ===
-  const flagsWithValues = new Set(['--project', '--output', '--watch', '--on-change', '--transport', '--mode', '--goal', '--budget', '--manifest', '--pre-approve']);
+  const flagsWithValues = new Set(['--project', '--output', '--watch', '--on-change', '--transport', '--manifest', '--task']);
   const filteredArgs: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i]!.startsWith('--')) {
@@ -698,111 +666,26 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     return;
   }
 
-  // === --mode flag ===
-  const modeIdx = args.indexOf('--mode');
-  const modeFlagValue = modeIdx !== -1 ? args[modeIdx + 1] as OperationalMode | undefined : undefined;
-  if (modeFlagValue) {
-    const validModes = getValidModes();
-    if (!validModes.includes(modeFlagValue)) {
-      stderr.write(`${RED}✗${RESET} Unknown mode: ${modeFlagValue}. Valid: ${validModes.join(', ')}\n`);
-      process.exit(1);
-    }
+  // === --task flag: create background task and exit ===
+  const taskIdx = args.indexOf('--task');
+  const taskFlag = taskIdx !== -1 ? args[taskIdx + 1] : undefined;
+  if (taskFlag) {
+    await initPromise;
     session = await ensureSession();
-    const goalIdx = args.indexOf('--goal');
-    const goalFlag = goalIdx !== -1 ? args[goalIdx + 1] : undefined;
-    const budgetIdx = args.indexOf('--budget');
-    const budgetRaw = budgetIdx !== -1 ? args[budgetIdx + 1] : undefined;
-    let budgetFlag: number | undefined;
-    if (budgetRaw !== undefined) {
-      const parsedBudget = Number(budgetRaw);
-      if (!Number.isFinite(parsedBudget) || parsedBudget <= 0) {
-        stderr.write(`${RED}✗${RESET} Invalid --budget value "${budgetRaw}". Use a positive number.\n`);
-        process.exit(1);
-      }
-      budgetFlag = parsedBudget;
-    }
-
-    // Parse --pre-approve flags (repeatable)
-    const preApprovePatterns: PreApprovalPattern[] = [];
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === '--pre-approve' && args[i + 1]) {
-        preApprovePatterns.push({
-          tool: 'bash',
-          pattern: args[i + 1]!,
-          label: args[i + 1]!,
-          risk: 'medium',
-        });
-      }
-    }
-    const skipPreApprove = args.includes('--no-pre-approve');
-    const autoApproveAll = args.includes('--auto-approve-all');
-    const enableAutoDAG = args.includes('--auto-dag');
-    const skipDagApproval = args.includes('--skip-dag-approval');
-    const maxDagStepsIdx = args.indexOf('--max-dag-steps');
-    const maxDagSteps = maxDagStepsIdx !== -1 ? parseInt(args[maxDagStepsIdx + 1] ?? '10', 10) : undefined;
-
-    if (modeFlagValue === 'sentinel') {
-      const sWatchIdx = args.indexOf('--watch');
-      const sWatchDir = sWatchIdx !== -1 ? args[sWatchIdx + 1] : '.';
-      const sOnChangeIdx = args.indexOf('--on-change');
-      const sTask = sOnChangeIdx !== -1 ? args[sOnChangeIdx + 1] : goalFlag ?? 'Review changes in {files}';
-      await session.setMode({
-        mode: 'sentinel',
-        autonomy: 'guided',
-        triggers: [{ type: 'file', dir: sWatchDir ?? '.' }],
-        taskTemplate: sTask,
-        costGuard: budgetFlag ? { maxBudgetUSD: budgetFlag } : undefined,
-        autoApprovePatterns: preApprovePatterns.length > 0 ? preApprovePatterns : undefined,
-        skipPreApprove: skipPreApprove || undefined,
-        autoApproveAll: autoApproveAll || undefined,
+    const taskManager = session.getTaskManager();
+    if (taskManager) {
+      const task = taskManager.create({
+        title: taskFlag,
+        description: taskFlag,
+        assignee: 'nodyn',
       });
-      stderr.write(`${GREEN}✓${RESET} Sentinel mode active. Watching ${sWatchDir ?? '.'}\n`);
-      await new Promise<void>(() => {}); // keep alive
-      return;
+      stderr.write(`${GREEN}\u2713${RESET} Background task created: ${task.id}\n`);
     }
-
-    if (modeFlagValue === 'daemon') {
-      await session.setMode({
-        mode: 'daemon',
-        goal: goalFlag,
-        costGuard: { maxBudgetUSD: budgetFlag ?? 10 },
-        autoApprovePatterns: preApprovePatterns.length > 0 ? preApprovePatterns : undefined,
-        skipPreApprove: skipPreApprove || undefined,
-        autoApproveAll: autoApproveAll || undefined,
-      });
-      stderr.write(`${GREEN}✓${RESET} Daemon mode active.${goalFlag ? ` Goal: ${goalFlag}` : ''}\n`);
-      await new Promise<void>(() => {}); // keep alive
-      return;
-    }
-
-    // autopilot / swarm — run the goal then exit
-    if (modeFlagValue === 'autopilot' || modeFlagValue === 'swarm') {
-      if (!goalFlag) {
-        stderr.write(`${RED}✗${RESET} ${modeFlagValue} mode requires --goal "your goal"\n`);
-        process.exit(1);
-      }
-      await session.setMode({
-        mode: modeFlagValue,
-        goal: goalFlag,
-        costGuard: { maxBudgetUSD: budgetFlag ?? 5 },
-        autoApprovePatterns: preApprovePatterns.length > 0 ? preApprovePatterns : undefined,
-        skipPreApprove: skipPreApprove || undefined,
-        autoApproveAll: autoApproveAll || undefined,
-        enableAutoDAG: enableAutoDAG || undefined,
-        skipDagApproval: skipDagApproval || undefined,
-        maxDagSteps,
-      });
-      stderr.write(`${GREEN}✓${RESET} ${modeFlagValue} mode — ${goalFlag}\n`);
-      try {
-        await session.run(goalFlag);
-      } finally {
-        await engine.shutdown();
-      }
-      return;
-    }
+    await engine.shutdown();
+    return;
   }
 
-  // === Sprint 7a: --watch mode ===
+  // === --watch mode ===
   const watchIdx = args.indexOf('--watch');
   const watchDir = watchIdx !== -1 ? args[watchIdx + 1] : undefined;
   if (watchDir) {

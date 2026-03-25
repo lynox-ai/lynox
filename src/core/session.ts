@@ -13,15 +13,9 @@ import type {
   EffortLevel,
   ThinkingMode,
   TabQuestion,
-  ModeConfig,
-  OperationalMode,
-  CostSnapshot,
-  GoalState,
   IAgent,
 } from '../types/index.js';
 import { MODEL_MAP } from '../types/index.js';
-import { ModeController } from './mode-controller.js';
-import type { ModeOrchestrator } from './mode-controller.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -30,12 +24,10 @@ import { abortSpawnedAgents } from '../tools/builtin/spawn.js';
 import { abortPipelineAgents } from '../orchestrator/runtime-adapter.js';
 import { ChangesetManager } from './changeset.js';
 import { checkPersistentBudget } from './session-budget.js';
-import { listPlaybooks, formatPlaybookIndex } from './playbooks.js';
 import {
   SYSTEM_PROMPT,
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
-  PLAYBOOK_PROMPT_SUFFIX,
 } from './orchestrator-prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, NodynHooks } from './engine.js';
 import { setupHistorySubscriptions } from './orchestrator-init.js';
@@ -88,7 +80,6 @@ export class Session {
   private currentRunId: string | null = null;
   private runToolCallSeq = 0;
   private _changesetManager: ChangesetManager | null = null;
-  private modeController: ModeController | null = null;
   onStream: StreamHandler | null = null;
   private _promptUser: ((question: string, options?: string[]) => Promise<string>) | null = null;
   private _promptTabs: ((questions: TabQuestion[]) => Promise<string[]>) | null = null;
@@ -423,38 +414,6 @@ export class Session {
     }
   }
 
-  // ── Mode management ──
-
-  async setMode(config: ModeConfig): Promise<void> {
-    // Teardown previous mode
-    if (this.modeController) {
-      await this.modeController.teardown();
-      this.modeController = null;
-      this.agentOverrides = {};
-    }
-
-    if (config.mode === 'interactive') {
-      // Reset to default interactive mode
-      this._createAgent();
-      return;
-    }
-
-    this.modeController = new ModeController(config);
-    await this.modeController.apply(this as ModeOrchestrator);
-  }
-
-  getMode(): OperationalMode {
-    return this.modeController?.getMode() ?? 'interactive';
-  }
-
-  getCostSnapshot(): CostSnapshot | null {
-    return this.modeController?.getCostSnapshot() ?? null;
-  }
-
-  getGoalState(): GoalState | null {
-    return this.modeController?.getGoalState() ?? null;
-  }
-
   // ── Model / Effort / Thinking ──
 
   setModel(tier: ModelTier): string {
@@ -497,7 +456,7 @@ export class Session {
 
   // ── Agent creation (internal) ──
 
-  /** Called by ModeController to recreate agent with mode overrides */
+  /** Recreate agent with overrides (preserves conversation history) */
   _recreateAgent(overrides?: {
     maxIterations?: number | undefined;
     continuationPrompt?: string | undefined;
@@ -560,12 +519,6 @@ export class Session {
     // Append data store docs only when data store tools are registered
     if (engine.getDataStoreEnabled()) {
       basePrompt += DATASTORE_PROMPT_SUFFIX;
-    }
-    // Append playbook docs with dynamic index
-    if (engine.getPlaybooksEnabled()) {
-      const pbList = listPlaybooks();
-      const pbIndex = formatPlaybookIndex(pbList);
-      basePrompt += PLAYBOOK_PROMPT_SUFFIX.replace('{PLAYBOOK_INDEX}', pbIndex);
     }
     const systemPrompt = this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
@@ -647,7 +600,6 @@ export class Session {
   registerTool<T>(entry: ToolEntry<T>): void { this.engine.registerTool(entry); }
   registerPipelineTools(): void { this.engine.registerPipelineTools(); }
   registerDataStoreTools(): void { this.engine.registerDataStoreTools(); }
-  registerPlaybookTools(): void { this.engine.registerPlaybookTools(); }
   registerHooks(hooks: NodynHooks): void { this.engine.registerHooks(hooks); }
   addTool<T>(entry: ToolEntry<T>): void {
     this.engine.addTool(entry);
@@ -681,10 +633,6 @@ export class Session {
   // ── Shutdown (delegates to engine, plus session-level teardown) ──
 
   async shutdown(): Promise<void> {
-    if (this.modeController) {
-      await this.modeController.teardown();
-      this.modeController = null;
-    }
     await this.engine.shutdown();
   }
 }

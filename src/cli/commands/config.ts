@@ -177,20 +177,17 @@ export async function handleConfig(parts: string[], session: Session, ctx: CLICt
 
 export async function handleStatus(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const model = MODEL_MAP[session.getModelTier()];
-  const currentMode = session.getMode();
   const tier = session.getModelTier();
   const reg = session.getRegistry();
   const servers = reg.getMCPServers();
   const mem = session.getMemory();
   const scopes = session.getActiveScopes();
-  const goalState = session.getGoalState();
-  const costSnap = session.getCostSnapshot();
   const secretStore = session.getSecretStore();
   const cfg = session.getUserConfig();
 
   ctx.stdout.write(`${BOLD}NODYN${RESET} v${pkg.version}\n\n`);
   ctx.stdout.write(`  ${DIM}Model:${RESET}      ${BLUE}${model}${RESET} (${tier})\n`);
-  ctx.stdout.write(`  ${DIM}Mode:${RESET}       ${currentMode}\n`);
+  ctx.stdout.write(`  ${DIM}Mode:${RESET}       interactive\n`);
   ctx.stdout.write(`  ${DIM}Effort:${RESET}     ${session.getEffort()}\n`);
   ctx.stdout.write(`  ${DIM}Tools:${RESET}      ${reg.getEntries().length} builtin\n`);
   ctx.stdout.write(`  ${DIM}MCP:${RESET}        ${servers.length > 0 ? `${servers.length} server${servers.length > 1 ? 's' : ''} (${servers.map(s => s.name).join(', ')})` : 'none'}\n`);
@@ -198,13 +195,6 @@ export async function handleStatus(_parts: string[], session: Session, ctx: CLIC
   ctx.stdout.write(`  ${DIM}Scopes:${RESET}     ${scopes.length > 0 ? scopes.map(s => s.type === 'global' ? 'global' : `${s.type}:${s.id}`).join(', ') : 'none'}\n`);
   ctx.stdout.write(`  ${DIM}Secrets:${RESET}    ${secretStore ? `${secretStore.listNames().length} loaded` : 'off'}\n`);
   ctx.stdout.write(`  ${DIM}Changeset:${RESET}  ${cfg.changeset_review !== false ? 'enabled' : 'disabled'}\n`);
-  if (goalState) {
-    const done = goalState.subtasks.filter(s => s.status === 'complete').length;
-    ctx.stdout.write(`  ${DIM}Goal:${RESET}       ${goalState.goal} [${done}/${goalState.subtasks.length}]\n`);
-  }
-  if (costSnap) {
-    ctx.stdout.write(`  ${DIM}Cost:${RESET}       $${costSnap.estimatedCostUSD.toFixed(4)} (${costSnap.budgetPercent}% budget)\n`);
-  }
   // Session stats
   const u = session.usage;
   if (u.input_tokens > 0 || u.output_tokens > 0) {

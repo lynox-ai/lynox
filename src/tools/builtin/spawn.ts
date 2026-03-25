@@ -1,10 +1,10 @@
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, Role, IsolationConfig, IsolationLevel, CostGuardConfig } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig } from '../../types/index.js';
 import { MODEL_MAP, DEFAULT_MAX_TOKENS } from '../../types/index.js';
 import { Agent } from '../../core/agent.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
-import { loadRole, warnModelMismatch } from '../../core/roles.js';
+import { getRole, getRoleNames } from '../../core/roles.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget, resetSessionCost } from '../../core/session-budget.js';
@@ -55,31 +55,25 @@ async function executeThinker(
   childDepth: number,
 ): Promise<{ result: string; childRunId: string | undefined }> {
   // Load role if specified
-  let resolved: Role | null = null;
-  if (spec.role) {
-    resolved = loadRole(spec.role);
-    if (!resolved) throw new Error(`Unknown role "${spec.role}". Available roles: researcher, analyst, executor, strategist, operator, creator, collector, communicator.`);
+  const resolved = spec.role ? getRole(spec.role) : undefined;
+  if (spec.role && !resolved) {
+    throw new Error(`Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}.`);
   }
 
   // 4-tier resolution: spec fields > role defaults > user config > global default
   const userConfig = loadConfig();
   const modelTier = (spec.model ?? resolved?.model ?? userConfig.default_tier ?? 'sonnet') as ModelTier;
   const model = MODEL_MAP[modelTier] ?? MODEL_MAP['sonnet'];
-  const systemPrompt = spec.system_prompt ?? resolved?.systemPrompt;
-  const thinking = spec.thinking ?? resolved?.thinking;
+  const systemPrompt = spec.system_prompt;
+  const thinking = spec.thinking;
   const effort = spec.effort ?? resolved?.effort;
-  const maxIterations = spec.max_turns ?? resolved?.maxIterations;
+  const maxIterations = spec.max_turns;
 
-  // Model mismatch warning
-  if (spec.model && resolved) {
-    const warning = warnModelMismatch(resolved, spec.model);
-    if (warning) {
-      void parentOnStream?.({ type: 'error', message: `[warning] ${warning}`, agent: parentAgent.name });
-    }
-  }
-
-  // Tool scoping
-  const tools = resolveTools(spec.tools, resolved, parentAgent.tools, SPAWN_EXCLUDED);
+  // Tool scoping — map RoleConfig fields to resolveTools interface
+  const roleProfile = resolved
+    ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
+    : null;
+  const tools = resolveTools(spec.tools, roleProfile, parentAgent.tools, SPAWN_EXCLUDED);
 
   // Context injection (XML-escaped to prevent tag injection)
   const task = spec.context
@@ -166,7 +160,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
             properties: {
               name: { type: 'string' },
               task: { type: 'string' },
-              role: { type: 'string', description: 'Role ID (e.g. researcher, analyst, executor, operator, strategist, creator, collector, communicator). Configures model, tools, and system prompt.' },
+              role: { type: 'string', description: 'Role ID (e.g. researcher, creator, operator, collector). Configures model, tools, and capabilities.' },
               context: { type: 'string', description: 'Additional context prepended to the task.' },
               isolated_memory: { type: 'boolean', description: 'If true, agent has no access to parent memory.' },
               system_prompt: { type: 'string' },

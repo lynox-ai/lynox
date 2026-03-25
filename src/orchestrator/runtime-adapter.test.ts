@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { Role, ToolEntry, NodynUserConfig } from '../types/index.js';
+import type { ToolEntry, NodynUserConfig } from '../types/index.js';
+import type { RoleConfig } from '../core/roles.js';
 
 const mockSend = vi.fn().mockResolvedValue('mock result');
 
@@ -11,11 +12,12 @@ vi.mock('../core/agent.js', () => ({
   }),
 }));
 
-// Mock loadRole
-const mockLoadRole = vi.fn().mockReturnValue(null);
+// Mock getRole
+const mockGetRole = vi.fn().mockReturnValue(undefined);
+const mockGetRoleNames = vi.fn().mockReturnValue(['researcher', 'creator', 'operator', 'collector']);
 vi.mock('../core/roles.js', () => ({
-  loadRole: (...args: unknown[]) => mockLoadRole(...args),
-  warnModelMismatch: vi.fn().mockReturnValue(null),
+  getRole: (...args: unknown[]) => mockGetRole(...args),
+  getRoleNames: (...args: unknown[]) => mockGetRoleNames(...args),
 }));
 
 import { Agent } from '../core/agent.js';
@@ -60,7 +62,7 @@ describe('resolveModel', () => {
 describe('spawnInline with role', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockLoadRole.mockReturnValue(null);
+    mockGetRole.mockReturnValue(undefined);
   });
 
   it('uses default settings when no role specified', async () => {
@@ -86,43 +88,37 @@ describe('spawnInline with role', () => {
     expect(tools.find(t => t.definition.name === 'run_pipeline')).toBeUndefined();
   });
 
-  it('applies role model, system prompt, and effort', async () => {
-    const role: Role = {
-      id: 'analyst',
-      name: 'Analyst',
-      description: 'Analyzes code',
-      version: '1.0.0',
-      systemPrompt: 'You are an analyst.',
+  it('applies role model and effort', async () => {
+    const role: RoleConfig = {
       model: 'opus',
       effort: 'max',
+      autonomy: 'guided',
+      description: 'Analyzes code',
     };
-    mockLoadRole.mockReturnValue(role);
+    mockGetRole.mockReturnValue(role);
 
     const step: ManifestStep = {
       id: 'review-step',
       agent: 'review-step',
       runtime: 'inline',
-      role: 'analyst',
+      role: 'researcher',
     };
 
     await spawnInline(step, {}, mockConfig, mockParentTools);
 
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
-    expect(agentConfig['systemPrompt']).toBe('You are an analyst.');
     expect(agentConfig['effort']).toBe('max');
     expect(agentConfig['model']).toContain('opus');
   });
 
   it('step.model overrides role.model', async () => {
-    const role: Role = {
-      id: 'researcher',
-      name: 'Researcher',
-      description: 'Researches',
-      version: '1.0.0',
-      systemPrompt: 'Research stuff.',
+    const role: RoleConfig = {
       model: 'opus',
+      effort: 'max',
+      autonomy: 'guided',
+      description: 'Researches',
     };
-    mockLoadRole.mockReturnValue(role);
+    mockGetRole.mockReturnValue(role);
 
     const step: ManifestStep = {
       id: 'research-step',
@@ -139,7 +135,7 @@ describe('spawnInline with role', () => {
   });
 
   it('throws for unknown role', async () => {
-    mockLoadRole.mockReturnValue(null);
+    mockGetRole.mockReturnValue(undefined);
 
     const step: ManifestStep = {
       id: 'bad-step',
@@ -151,16 +147,15 @@ describe('spawnInline with role', () => {
     await expect(spawnInline(step, {}, mockConfig, mockParentTools)).rejects.toThrow('Unknown role "nonexistent"');
   });
 
-  it('role deniedTools filters tools', async () => {
-    const role: Role = {
-      id: 'operator',
-      name: 'Operator',
+  it('role denyTools filters tools', async () => {
+    const role: RoleConfig = {
+      model: 'haiku',
+      effort: 'high',
+      autonomy: 'autonomous',
+      denyTools: ['write_file'],
       description: 'Monitors',
-      version: '1.0.0',
-      systemPrompt: 'Monitor stuff.',
-      deniedTools: ['write_file'],
     };
-    mockLoadRole.mockReturnValue(role);
+    mockGetRole.mockReturnValue(role);
 
     const step: ManifestStep = {
       id: 'monitor-step',
@@ -178,16 +173,15 @@ describe('spawnInline with role', () => {
     expect(tools.find(t => t.definition.name === 'bash')).toBeDefined();
   });
 
-  it('role allowedTools restricts to whitelist', async () => {
-    const role: Role = {
-      id: 'collector',
-      name: 'Collector',
+  it('role allowTools restricts to whitelist', async () => {
+    const role: RoleConfig = {
+      model: 'haiku',
+      effort: 'medium',
+      autonomy: 'supervised',
+      allowTools: ['read_file'],
       description: 'Collects feedback',
-      version: '1.0.0',
-      systemPrompt: 'Collect feedback.',
-      allowedTools: ['read_file'],
     };
-    mockLoadRole.mockReturnValue(role);
+    mockGetRole.mockReturnValue(role);
 
     const step: ManifestStep = {
       id: 'feedback-step',
@@ -204,27 +198,25 @@ describe('spawnInline with role', () => {
     expect(tools[0]!.definition.name).toBe('read_file');
   });
 
-  it('role maxIterations propagates to agent', async () => {
-    const role: Role = {
-      id: 'strategist',
-      name: 'Strategist',
+  it('role defaults to maxIterations 10', async () => {
+    const role: RoleConfig = {
+      model: 'opus',
+      effort: 'high',
+      autonomy: 'guided',
       description: 'Plans',
-      version: '1.0.0',
-      systemPrompt: 'Plan stuff.',
-      maxIterations: 5,
     };
-    mockLoadRole.mockReturnValue(role);
+    mockGetRole.mockReturnValue(role);
 
     const step: ManifestStep = {
       id: 'plan-step',
       agent: 'plan-step',
       runtime: 'inline',
-      role: 'strategist',
+      role: 'researcher',
     };
 
     await spawnInline(step, {}, mockConfig, mockParentTools);
 
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
-    expect(agentConfig['maxIterations']).toBe(5);
+    expect(agentConfig['maxIterations']).toBe(10);
   });
 });

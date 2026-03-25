@@ -145,11 +145,6 @@ vi.mock('../tools/builtin/index.js', () => ({
   captureProcessTool: { definition: { name: 'capture_process' }, handler: vi.fn() },
   promoteProcessTool: { definition: { name: 'promote_process' }, handler: vi.fn() },
   setProcessConfig: vi.fn(),
-  listPlaybooksTool: { definition: { name: 'list_playbooks' }, handler: vi.fn() },
-  suggestPlaybookTool: { definition: { name: 'suggest_playbook' }, handler: vi.fn() },
-  extractPlaybookTool: { definition: { name: 'extract_playbook' }, handler: vi.fn() },
-  setPlaybookConfig: vi.fn(),
-  _resetPlaybookConfig: vi.fn(),
 }));
 
 vi.mock('./changeset.js', () => ({
@@ -168,25 +163,6 @@ vi.mock('./changeset.js', () => ({
     this.acceptAll = vi.fn();
     // @ts-expect-error mock constructor
     this.cleanup = vi.fn();
-  }),
-}));
-
-const mockApply = vi.fn();
-const mockTeardown = vi.fn().mockResolvedValue(undefined);
-const mockGetMode = vi.fn().mockReturnValue('autopilot');
-
-vi.mock('./mode-controller.js', () => ({
-  ModeController: vi.fn().mockImplementation(function () {
-    // @ts-expect-error mock constructor
-    this.apply = mockApply;
-    // @ts-expect-error mock constructor
-    this.teardown = mockTeardown;
-    // @ts-expect-error mock constructor
-    this.getMode = mockGetMode;
-    // @ts-expect-error mock constructor
-    this.getCostSnapshot = vi.fn().mockReturnValue(null);
-    // @ts-expect-error mock constructor
-    this.getGoalState = vi.fn().mockReturnValue(null);
   }),
 }));
 
@@ -225,11 +201,6 @@ vi.mock('./project.js', () => ({
   loadManifest: vi.fn().mockReturnValue(null),
 }));
 
-vi.mock('./playbooks.js', () => ({
-  listPlaybooks: vi.fn().mockReturnValue([]),
-  formatPlaybookIndex: vi.fn().mockReturnValue('No playbooks available.'),
-}));
-
 const mockInsertRun = vi.fn().mockReturnValue('run-123');
 const mockInsertPromptSnapshot = vi.fn();
 
@@ -266,8 +237,6 @@ import { Engine } from './engine.js';
 import { Session } from './session.js';
 import { Agent } from './agent.js';
 import { Memory } from './memory.js';
-import { ModeController } from './mode-controller.js';
-
 // === Helper ===
 
 async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
@@ -285,8 +254,6 @@ describe('Engine + Session (Orchestrator)', () => {
     mockGetMessages.mockReturnValue([]);
     mockRegister.mockReturnThis();
     mockRegisterMCP.mockReturnThis();
-    mockTeardown.mockResolvedValue(undefined);
-    mockGetMode.mockReturnValue('autopilot');
     // Enable feature flags for tests
     process.env['NODYN_FEATURE_PLUGINS'] = '1';
     process.env['NODYN_FEATURE_TRIGGERS'] = '1';
@@ -300,8 +267,8 @@ describe('Engine + Session (Orchestrator)', () => {
 
       expect(Memory).toHaveBeenCalled();
 
-      // Registry should have register called for each builtin tool (23 core + 2 process tools = 25)
-      expect(mockRegister).toHaveBeenCalledTimes(28);
+      // Registry should have register called for each builtin tool (17 core + 3 pipeline/process + 5 datastore = 25)
+      expect(mockRegister).toHaveBeenCalledTimes(25);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -366,8 +333,8 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 25 core tools (pipeline + process tools registered at init)
-      expect(mockRegister).toHaveBeenCalledTimes(28);
+      // 25 tools total (17 core + 3 pipeline/process + 5 datastore)
+      expect(mockRegister).toHaveBeenCalledTimes(25);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
@@ -454,50 +421,6 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
-  // -- setMode() --
-
-  describe('setMode()', () => {
-    it('creates ModeController for non-interactive modes', async () => {
-      const { session } = await createEngineAndSession();
-
-      await session.setMode({ mode: 'autopilot', goal: 'Build it' });
-
-      expect(ModeController).toHaveBeenCalledWith({ mode: 'autopilot', goal: 'Build it' });
-      expect(mockApply).toHaveBeenCalled();
-      expect(session.getMode()).toBe('autopilot');
-    });
-
-    it('resets to interactive mode without ModeController', async () => {
-      const { session } = await createEngineAndSession();
-
-      // First set a non-interactive mode
-      await session.setMode({ mode: 'autopilot', goal: 'Do stuff' });
-      expect(session.getMode()).toBe('autopilot');
-
-      // Switch back to interactive
-      vi.mocked(Agent).mockClear();
-      await session.setMode({ mode: 'interactive' });
-
-      // Should teardown previous controller
-      expect(mockTeardown).toHaveBeenCalled();
-
-      // Should recreate agent (via _createAgent)
-      expect(Agent).toHaveBeenCalled();
-
-      // Mode should be interactive (no controller)
-      expect(session.getMode()).toBe('interactive');
-    });
-
-    it('tears down previous mode controller when switching modes', async () => {
-      const { session } = await createEngineAndSession();
-
-      await session.setMode({ mode: 'autopilot', goal: 'Goal 1' });
-
-      await session.setMode({ mode: 'sentinel', triggers: [{ type: 'cron', expression: '5m' }] });
-      expect(mockTeardown).toHaveBeenCalled();
-    });
-  });
-
   // -- Other methods --
 
   describe('other methods', () => {
@@ -528,15 +451,13 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockLoadMessages).toHaveBeenCalledWith(msgs);
     });
 
-    it('shutdown() tears down mode controller and fires shutdown hooks', async () => {
+    it('shutdown() fires shutdown hooks', async () => {
       const mockShutdownHook = vi.fn().mockResolvedValue(undefined);
       const { engine, session } = await createEngineAndSession();
       engine.registerHooks({ async onShutdown() { await mockShutdownHook(); } });
-      await session.setMode({ mode: 'autopilot', goal: 'X' });
 
       await session.shutdown();
 
-      expect(mockTeardown).toHaveBeenCalled();
       expect(mockShutdownHook).toHaveBeenCalled();
     });
 

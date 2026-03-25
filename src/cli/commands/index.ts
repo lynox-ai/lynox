@@ -26,7 +26,7 @@ export { handleConfig, handleStatus, handleHooks, handleApprovals, pkg } from '.
 export { handleModel, handleAccuracy, handleCost, handleContext } from './model.js';
 
 // Mode commands
-export { handleMode, handleRoles, handlePlaybooks, handleProfile, setGetValidModes } from './mode.js';
+export { handleMode, handleRoles, handleProfile } from './mode.js';
 
 // Memory commands
 export { handleMemory, handleScope, handleKnowledge } from './memory.js';

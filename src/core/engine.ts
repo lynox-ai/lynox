@@ -53,9 +53,6 @@ import {
   dataStoreDeleteTool,
   captureProcessTool,
   promoteProcessTool,
-  listPlaybooksTool,
-  suggestPlaybookTool,
-  extractPlaybookTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
@@ -143,7 +140,6 @@ export class Engine {
   private activeScopes: MemoryScopeRef[] = [];
   private _pipelinesEnabled = false;
   private _dataStoreEnabled = false;
-  private _playbooksEnabled = false;
   private _dataStore: DataStore | null = null;
   private _taskManager: import('./task-manager.js').TaskManager | null = null;
   private _hooks: NodynHooks[] = [];
@@ -367,9 +363,8 @@ export class Engine {
       }
     }
 
-    // Pipeline and playbook tools registered conditionally
+    // Pipeline tools registered conditionally
     this._pipelinesEnabled = false;
-    this._playbooksEnabled = false;
 
     if (this.config.mcpServers) {
       for (const server of this.config.mcpServers) {
@@ -392,9 +387,6 @@ export class Engine {
 
     // Register pipeline tools and inject config
     this.registerPipelineTools();
-
-    // Register playbook tools
-    this.registerPlaybookTools();
 
     // Fire plugin session start hooks
     if (this.pluginManager) {
@@ -441,22 +433,11 @@ export class Engine {
       .register(dataStoreDeleteTool);
   }
 
-  /** Register playbook tools */
-  registerPlaybookTools(): void {
-    if (this._playbooksEnabled) return;
-    this._playbooksEnabled = true;
-    this.registry
-      .register(listPlaybooksTool)
-      .register(suggestPlaybookTool)
-      .register(extractPlaybookTool);
-    // runHistory + userConfig already on _toolContext
-  }
-
   addTool<T>(entry: ToolEntry<T>): void {
     this.registry.register(entry);
   }
 
-  /** Register a tool without recreating agents (used by ModeController) */
+  /** Register a tool without recreating agents */
   registerTool<T>(entry: ToolEntry<T>): void {
     this.registry.register(entry);
   }
@@ -490,7 +471,6 @@ export class Engine {
   getHooks(): NodynHooks[] { return this._hooks; }
   getPipelinesEnabled(): boolean { return this._pipelinesEnabled; }
   getDataStoreEnabled(): boolean { return this._dataStoreEnabled; }
-  getPlaybooksEnabled(): boolean { return this._playbooksEnabled; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
 

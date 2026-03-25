@@ -12,7 +12,7 @@ export const COMMANDS = [
   '/batch', '/batch-status', '/save', '/load', '/history',
   '/runs', '/stats',
   '/git', '/pr', '/export', '/alias',
-  '/model', '/mode', '/roles', '/playbooks', '/plugin',
+  '/model', '/mode', '/roles', '/plugin',
   '/pipeline', '/workflow', '/approvals', '/google', '/secret',
   '/status', '/config', '/context', '/hooks',
   '/task', '/schedule', '/quickstart', '/help', '/exit', '/quit',
@@ -40,14 +40,13 @@ export const HELP_TEXT_BASICS = `${BOLD}Basics${RESET}
   ${BLUE}/knowledge${RESET} [sub]    Show or manage knowledge (prune)
   ${BLUE}/task${RESET} [sub]          Tasks (list/add/done/start/show/edit/delete)
   ${BLUE}/schedule${RESET} [sub]      Scheduled & watch tasks (list/details/cancel/test)
-  ${BLUE}/mode${RESET} [name]        Operational mode (assistant/autopilot)
+  ${BLUE}/mode${RESET}               Show current status
   ${BLUE}/quickstart${RESET}          Guided first steps
   ${BLUE}/help${RESET} all           Show all commands
 
 ${BOLD}Workflows${RESET}
   ${BLUE}/workflow${RESET} [sub]     Multi-step workflows (list/plan/run/show/retry)
-  ${BLUE}/roles${RESET} [sub]       Roles (list/show/create/delete)
-  ${BLUE}/playbooks${RESET} [sub]   Playbooks (list/show/create/delete)
+  ${BLUE}/roles${RESET}             Show available roles for delegation
   ${BLUE}/git${RESET} [cmd]          Git info (status/diff/log/branch)
   ${BLUE}/pr${RESET}                 Generate PR description
 `;
@@ -82,11 +81,11 @@ ${BOLD}Knowledge${RESET}
   ${BLUE}/knowledge${RESET} [sub]    Show or manage knowledge (prune)
 
 ${BOLD}Modes${RESET}
-  ${BLUE}/mode${RESET} [name]        Operational mode (assistant/autopilot)
+  ${BLUE}/mode${RESET}               Show current status
+  ${BLUE}/roles${RESET}             Show available roles for delegation
 
 ${BOLD}Workflows${RESET}
   ${BLUE}/workflow${RESET} [sub]     Multi-step workflows (list/plan/run/show/retry)
-  ${BLUE}/roles${RESET} [sub]       Roles (list/show/create/delete/apply)
   ${BLUE}/batch${RESET} [sub]        Bulk API processing (submit/list/retry)
 
 ${BOLD}Tasks${RESET}

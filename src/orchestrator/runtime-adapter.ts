@@ -1,9 +1,9 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
 import { MODEL_MAP } from '../types/index.js';
-import type { IAgent, ToolEntry, NodynUserConfig, ModelTier, StreamEvent, PreApprovalSet, InlinePipelineStep, Role } from '../types/index.js';
+import type { IAgent, ToolEntry, NodynUserConfig, ModelTier, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from './types.js';
-import { loadRole, warnModelMismatch } from '../core/roles.js';
+import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_pipeline']);
@@ -170,39 +170,31 @@ export async function spawnInline(
   const startTime = Date.now();
 
   // Load role if specified
-  let resolved: Role | null = null;
-  if (step.role) {
-    resolved = loadRole(step.role);
-    if (!resolved) throw new Error(`Unknown role "${step.role}" on step "${step.id}". Use /roles list.`);
-  }
-
-  // Model mismatch warning
-  if (step.model && resolved) {
-    const warning = warnModelMismatch(resolved, step.model as ModelTier);
-    if (warning) {
-      // istanbul ignore next
-      if (typeof process !== 'undefined') process.stderr?.write?.(`[warning] ${warning}\n`);
-    }
+  const resolved = step.role ? getRole(step.role) : undefined;
+  if (step.role && !resolved) {
+    throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
   }
 
   // 4-tier resolution: step > role > user config > defaults
   const configTier = config.default_tier;
   const modelTier = (step.model ?? resolved?.model ?? configTier ?? 'sonnet') as ModelTier;
   const model = resolveModel(modelTier, 'sonnet');
-  const systemPrompt = resolved?.systemPrompt
-    ?? 'You are a focused task agent. Complete the task precisely. Return structured output when possible.';
-  // Use minimal tool set for inline steps unless profile specifies custom tools
-  const filteredParent = resolved?.allowedTools ? parentTools : parentTools.filter(t => INLINE_CORE_TOOLS.has(t.definition.name));
-  const tools = resolveTools(undefined, resolved, filteredParent, INLINE_EXCLUDED_TOOLS);
+  const systemPrompt = 'You are a focused task agent. Complete the task precisely. Return structured output when possible.';
+  // Use minimal tool set for inline steps unless role specifies custom tools
+  const roleProfile = resolved
+    ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
+    : null;
+  const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => INLINE_CORE_TOOLS.has(t.definition.name));
+  const tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
   // Pipeline steps: Haiku gets explicit thinking budget (improves tool-call reliability)
   // Agent constructor will map adaptive→disabled for Haiku, so we set explicit budget here
   const isHaikuStep = model.includes('haiku');
   const defaultThinking = isHaikuStep
     ? { type: 'enabled' as const, budget_tokens: 4096 }
     : { type: 'adaptive' as const };
-  const thinking = resolved?.thinking ?? defaultThinking;
+  const thinking = defaultThinking;
   const effort = step.effort ?? resolved?.effort ?? config.effort_level ?? 'medium';
-  const maxIter = resolved?.maxIterations ?? 10;
+  const maxIter = 10;
 
   const agent = new Agent({
     name: step.id,

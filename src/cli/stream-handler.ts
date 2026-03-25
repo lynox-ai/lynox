@@ -167,20 +167,8 @@ export function streamHandler(event: StreamEvent, stdout: NodeJS.WriteStream): v
         const cacheSuffix = (cacheRead > 0 || cacheCreate > 0)
           ? `  ${cachePct >= 50 ? GREEN : DIM}cache ${cachePct}%${RESET}`
           : '';
-        // Mode indicator
-        let modeSuffix = '';
-        if (state.activeSession) {
-          const mode = state.activeSession.getMode();
-          if (mode !== 'interactive') {
-            const goalState = state.activeSession.getGoalState();
-            if (goalState) {
-              const done = goalState.subtasks.filter((s: { status: string }) => s.status === 'complete').length;
-              modeSuffix = `  ${MAGENTA}${mode}${RESET} ${DIM}[${done}/${goalState.subtasks.length}]${RESET}`;
-            } else {
-              modeSuffix = `  ${MAGENTA}${mode}${RESET}`;
-            }
-          }
-        }
+        // Mode indicator (always interactive now)
+        const modeSuffix = '';
         const truncMark = state.sessionTruncated ? '*' : '';
         const thinkingSuffix = state.showThinking ? `  ${DIM}👾 detailed${RESET}` : '';
         const elapsedMs = state.turnStartMs > 0 ? Date.now() - state.turnStartMs : 0;
