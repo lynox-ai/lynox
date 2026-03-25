@@ -47,7 +47,6 @@ export type {
   GateAdapter, GateDecision, GateSubmitParams,
 } from './orchestrator/types.js';
 export { GateRejectedError, GateExpiredError } from './orchestrator/types.js';
-export { createTrigger } from './core/triggers/index.js';
 export { globToRegex, extractMatchString, matchesPreApproval, buildApprovalSet, isCriticalTool } from './core/pre-approve.js';
 
 export { PreApproveAudit } from './core/pre-approve-audit.js';

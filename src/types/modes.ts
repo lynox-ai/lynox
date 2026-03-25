@@ -1,22 +1,7 @@
-// === Operational Modes ===
+// === Autonomy & Tool Display ===
 
 export type AutonomyLevel = 'supervised' | 'guided' | 'autonomous';
 export const AUTONOMY_LEVEL_SET: ReadonlySet<AutonomyLevel> = new Set(['supervised', 'guided', 'autonomous']);
-export type TriggerSource = 'on-demand' | 'reactive' | 'proactive';
-export type PersistenceStrategy = 'bounded' | 'continuous';
-export type OperationalMode = 'interactive' | 'autopilot' | 'sentinel' | 'daemon' | 'swarm';
-
-/** Customer-facing display names for modes (internal -> user-visible) */
-export const MODE_DISPLAY: Record<OperationalMode, string> = {
-  interactive: 'assistant', autopilot: 'autopilot',
-  sentinel: 'watchdog', daemon: 'background', swarm: 'team',
-};
-
-/** Reverse mapping: customer-facing name -> internal mode */
-export const MODE_FROM_DISPLAY: Record<string, OperationalMode> = {
-  assistant: 'interactive', autopilot: 'autopilot',
-  watchdog: 'sentinel', background: 'daemon', team: 'swarm',
-};
 
 /** Customer-facing display names for tools (internal -> user-visible) */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
@@ -52,15 +37,14 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   google_docs: 'Google Docs',
 };
 
-export interface FileTriggerConfig { type: 'file'; dir: string; glob?: string | undefined; debounceMs?: number | undefined; }
-export interface HttpTriggerConfig { type: 'http'; port: number; path?: string | undefined; hmacSecret?: string | undefined; }
-export interface CronTriggerConfig { type: 'cron'; expression: string; }
-export interface GitTriggerConfig  { type: 'git'; hook: 'post-commit' | 'post-merge' | 'post-checkout'; repoDir?: string | undefined; }
-export type TriggerConfig = FileTriggerConfig | HttpTriggerConfig | CronTriggerConfig | GitTriggerConfig;
+// === Trigger types (FileTrigger used by watchdog) ===
 
+export interface FileTriggerConfig { type: 'file'; dir: string; glob?: string | undefined; debounceMs?: number | undefined; }
 export interface TriggerEvent { source: string; payload: unknown; timestamp: string; }
 export type TriggerCallback = (event: TriggerEvent) => Promise<void>;
 export interface ITrigger { readonly type: string; start(callback: TriggerCallback): void; stop(): void; }
+
+// === Cost ===
 
 export interface CostGuardConfig {
   maxBudgetUSD?: number | undefined;
@@ -83,37 +67,6 @@ export interface CostSnapshot {
   estimatedCostUSD: number;
   iterationsUsed: number;
   budgetPercent: number;
-}
-
-export interface GoalSubtask { description: string; status: 'pending' | 'active' | 'complete' | 'failed'; }
-export interface GoalState {
-  goal: string;
-  subtasks: GoalSubtask[];
-  status: 'active' | 'complete' | 'failed';
-  iterationsUsed: number;
-  costUSD: number;
-  startedAt: string;
-  completedAt?: string | undefined;
-}
-
-export interface ModeConfig {
-  mode: OperationalMode;
-  autonomy?: AutonomyLevel | undefined;
-  triggers?: TriggerConfig[] | undefined;
-  persistence?: PersistenceStrategy | undefined;
-  costGuard?: CostGuardConfig | undefined;
-  maxIterations?: number | undefined;  // 0 = unlimited (OpenClaw-style)
-  goal?: string | undefined;
-  taskTemplate?: string | undefined;
-  heartbeatMs?: number | undefined;
-  quietHours?: { start: number; end: number } | undefined;
-  autoApprovePatterns?: PreApprovalPattern[] | undefined;
-  maxWorkers?: number | undefined;
-  skipPreApprove?: boolean | undefined;
-  autoApproveAll?: boolean | undefined;
-  enableAutoDAG?: boolean | undefined;
-  skipDagApproval?: boolean | undefined;
-  maxDagSteps?: number | undefined;
 }
 
 // === Pre-Approval ===

@@ -75,7 +75,7 @@ describe.skipIf(SKIP)('Online: Process Capture', () => {
   it('filters internal tools and returns empty steps for memory-only runs', async () => {
     const toolCalls: ToolCallRecord[] = [
       tc('memory_store', '{"key": "test", "value": "data"}', 'Stored', 0),
-      tc('goal_update', '{"status": "done"}', 'Updated', 1),
+      tc('memory_recall', '{"key": "test"}', 'Recalled', 1),
     ];
 
     const result = await captureProcess(

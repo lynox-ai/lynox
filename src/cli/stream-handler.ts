@@ -9,7 +9,7 @@ import { stderr } from 'node:process';
 
 import type { StreamEvent } from '../types/index.js';
 import { CONTEXT_WINDOW } from '../types/index.js';
-import { renderToolCall, renderToolResult, renderSpawn, renderError, renderThinking, BOLD, DIM, BLUE, GREEN, RED, MAGENTA, RESET } from './ui.js';
+import { renderToolCall, renderToolResult, renderSpawn, renderError, renderThinking, BOLD, DIM, BLUE, GREEN, RED, RESET } from './ui.js';
 import { state, spinner, md, footer, toolsUsed } from './cli-state.js';
 
 // ── Pipeline DAG Renderer (in-place updates) ──────────────────────────
@@ -190,22 +190,6 @@ export function streamHandler(event: StreamEvent, stdout: NodeJS.WriteStream): v
         const prefix = event.agent !== 'nodyn' ? `[${event.agent}] ` : '';
         stderr.write(renderError(`${prefix}${event.message}`));
       }
-      break;
-
-    case 'goal_update': {
-      const g = event.goal;
-      const completed = g.subtasks.filter(s => s.status === 'complete').length;
-      const total = g.subtasks.length;
-      const key = `${g.status}:${completed}/${total}`;
-      if (key === state.lastGoalKey) break; // Skip duplicate renders
-      state.lastGoalKey = key;
-      const statusColor = g.status === 'complete' ? GREEN : g.status === 'failed' ? RED : BLUE;
-      stdout.write(`  ${statusColor}◉${RESET} ${DIM}Goal:${RESET} ${g.goal} ${DIM}[${completed}/${total} subtasks — ${g.status}]${RESET}\n`);
-      break;
-    }
-
-    case 'trigger':
-      stdout.write(`  ${MAGENTA}⚡${RESET} ${DIM}Trigger:${RESET} ${event.event.source} ${DIM}at ${event.event.timestamp}${RESET}\n`);
       break;
 
     case 'cost_warning': {

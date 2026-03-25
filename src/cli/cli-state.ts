@@ -30,7 +30,6 @@ export const state = {
   hadError: false,
   sessionTruncated: false,
   turnStartMs: 0,
-  lastGoalKey: '',
 };
 
 // ── Shared instances ───────────────────────────────────────────────────

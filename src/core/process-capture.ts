@@ -7,7 +7,7 @@ import type { ToolCallRecord } from './run-history.js';
 /** Tools that are internal bookkeeping — excluded from process capture */
 const INTERNAL_TOOLS = new Set([
   'memory_store', 'memory_recall', 'memory_delete', 'memory_update', 'memory_list', 'memory_promote',
-  'goal_update', 'ask_user', 'plan_task', 'capture_process', 'promote_process',
+  'ask_user', 'plan_task', 'capture_process', 'promote_process',
 ]);
 
 const MAX_INPUT_CHARS = 500;

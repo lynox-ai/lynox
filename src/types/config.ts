@@ -7,7 +7,7 @@ import type { ToolEntry, StreamHandler } from './tools.js';
 import type { TabQuestion } from './agent.js';
 import type { IMemory, MemoryScopeRef, NodynContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
-import type { AutonomyLevel, PreApprovalSet, ModeConfig, CostGuardConfig } from './modes.js';
+import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
 
 export interface AgentConfig {
@@ -110,7 +110,6 @@ export interface NodynConfig {
   memory?:         boolean | undefined;
   promptUser?:     ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?:     ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
-  mode?:           ModeConfig | undefined;
   context?:        NodynContext | undefined;
 }
 
