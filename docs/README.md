@@ -1,6 +1,6 @@
 # nodyn Documentation
 
-Open agent engine — persistent knowledge, autonomous workflows, tool connections.
+The AI that knows your business — persistent knowledge, autonomous workflows, tool connections.
 
 ## Start Here
 

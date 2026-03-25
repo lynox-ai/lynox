@@ -407,10 +407,13 @@ export class Agent implements IAgent {
       webSearch,
     ];
 
-    // Estimate overhead from system prompt + tools so truncation accounts for it
+    // Estimate overhead from system prompt + tools so truncation accounts for it.
+    // MCP servers resolve server-side into tool definitions that consume context but
+    // aren't visible client-side. Estimate ~500 tokens per MCP server as buffer.
     const systemTokens = JSON.stringify(systemBlocks).length / Agent.CHARS_PER_TOKEN;
     const toolTokens = JSON.stringify(toolsDef).length / Agent.CHARS_PER_TOKEN;
-    const overheadTokens = systemTokens + toolTokens;
+    const mcpOverhead = (this.mcpServers?.length ?? 0) * 500;
+    const overheadTokens = systemTokens + toolTokens + mcpOverhead;
     this._truncateHistory(overheadTokens);
 
     // Emit context budget breakdown when usage exceeds 70% (helps debugging context pressure)

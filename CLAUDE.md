@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Project
 
-nodyn — open business AI engine built on native Anthropic SDK. ESM-only TypeScript, Node.js 22+.
+nodyn — the AI that knows your business. AI agent that runs on your server, learns your business over time, and works in the background. Built on native Anthropic SDK. ESM-only TypeScript, Node.js 22+.
 
 ## Repository Split
 

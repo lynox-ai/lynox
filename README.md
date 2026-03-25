@@ -5,7 +5,7 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
-**Open agent engine that gives any business persistent knowledge, autonomous workflows, and tool connections — running entirely in your own infrastructure.**
+**The AI that knows your business.** An AI agent that runs on your server, learns your business over time, and works in the background for you. Persistent knowledge, autonomous workflows, tool connections — running entirely in your own infrastructure.
 
 ## Get started
 

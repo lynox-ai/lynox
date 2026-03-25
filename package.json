@@ -1,7 +1,7 @@
 {
   "name": "@nodyn-ai/core",
   "version": "1.0.0",
-  "description": "Open business AI engine — persistent knowledge, autonomous workflows, tool connections, MCP server",
+  "description": "The AI that knows your business — persistent knowledge, autonomous workflows, tool connections, MCP server",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
   "homepage": "https://nodyn.dev",

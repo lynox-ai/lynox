@@ -246,8 +246,19 @@ export async function executeRun(
     // Sliding window: keep last N messages to prevent unbounded growth
     const msgs = session.saveMessages();
     if (msgs.length > MAX_MESSAGES_PER_CHAT) {
+      // Adjust boundary to avoid splitting tool_use/tool_result pairs
+      // (an orphaned tool_use without matching tool_result causes API 400)
+      let keep = MAX_MESSAGES_PER_CHAT;
+      while (keep < msgs.length) {
+        const boundary = msgs[msgs.length - keep] as { role?: string; content?: unknown } | undefined;
+        if (!boundary || boundary.role !== 'user' || typeof boundary.content === 'string') break;
+        const hasToolResult = Array.isArray(boundary.content)
+          && (boundary.content as Array<{ type: string }>).some(b => b.type === 'tool_result');
+        if (!hasToolResult) break;
+        keep++; // include the preceding assistant(tool_use) message
+      }
       session.reset();
-      session.loadMessages(msgs.slice(-MAX_MESSAGES_PER_CHAT));
+      session.loadMessages(msgs.slice(-keep));
     }
   });
 }

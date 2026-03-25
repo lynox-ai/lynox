@@ -54,7 +54,7 @@ RUN mkdir -p /usr/share/whisper \
 FROM debian:trixie-slim
 
 LABEL org.opencontainers.image.title="nodyn" \
-      org.opencontainers.image.description="Open business AI engine built on Anthropic Claude" \
+      org.opencontainers.image.description="The AI that knows your business — built on Anthropic Claude" \
       org.opencontainers.image.url="https://github.com/nodyn-ai/nodyn" \
       org.opencontainers.image.source="https://github.com/nodyn-ai/nodyn" \
       org.opencontainers.image.licenses="ELv2" \

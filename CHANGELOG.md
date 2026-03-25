@@ -2,7 +2,7 @@
 
 ## 1.0.0 — Initial Release
 
-Open business AI engine. Persistent knowledge, autonomous workflows, tool connections — running entirely in your own infrastructure.
+The AI that knows your business. Persistent knowledge, autonomous workflows, tool connections — running entirely in your own infrastructure.
 
 ### Core
 

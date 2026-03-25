@@ -48,7 +48,7 @@ fi
 # --- Header ---
 
 printf "\n"
-printf "  %snodyn%s — Open Agent Engine\n" "$BOLD" "$RESET"
+printf "  %snodyn%s — the AI that knows your business\n" "$BOLD" "$RESET"
 printf "  %shttps://nodyn.dev%s\n" "$DIM" "$RESET"
 printf "\n"
 
