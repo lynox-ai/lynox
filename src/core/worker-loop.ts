@@ -27,13 +27,23 @@ export interface WorkerTaskContext {
   startedAt: number;
 }
 
+/** Active task state including abort control and optional pending user input. */
+export interface ActiveTask {
+  controller: AbortController;
+  pendingInput?: {
+    question: string;
+    options?: string[] | undefined;
+    resolve: (answer: string) => void;
+  } | undefined;
+}
+
 /** Access the current worker task context from anywhere in the async call chain. */
 export const workerTaskStorage = new AsyncLocalStorage<WorkerTaskContext>();
 
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
-  private readonly activeTasks = new Map<string, AbortController>();
+  private readonly activeTasks = new Map<string, ActiveTask>();
 
   constructor(
     private readonly engine: Engine,
@@ -55,9 +65,12 @@ export class WorkerLoop {
       clearInterval(this.timer);
       this.timer = null;
     }
-    // Abort all active tasks
-    for (const [, controller] of this.activeTasks) {
-      controller.abort();
+    for (const [, active] of this.activeTasks) {
+      if (active.pendingInput) {
+        active.pendingInput.resolve('Task cancelled.');
+        active.pendingInput = undefined;
+      }
+      active.controller.abort();
     }
     this.activeTasks.clear();
   }
@@ -68,6 +81,22 @@ export class WorkerLoop {
 
   get activeTaskCount(): number {
     return this.activeTasks.size;
+  }
+
+  /** Resolve a pending user-input request for a background task. Returns true if resolved. */
+  resolveTaskInput(taskId: string, answer: string): boolean {
+    const active = this.activeTasks.get(taskId);
+    if (!active?.pendingInput) return false;
+    active.pendingInput.resolve(answer);
+    active.pendingInput = undefined;
+    return true;
+  }
+
+  /** Get pending input request for a task, if any. */
+  getTaskPendingInput(taskId: string): { question: string; options?: string[] | undefined } | undefined {
+    const active = this.activeTasks.get(taskId);
+    if (!active?.pendingInput) return undefined;
+    return { question: active.pendingInput.question, options: active.pendingInput.options };
   }
 
   /** @internal Exposed for testing. */
@@ -110,7 +139,7 @@ export class WorkerLoop {
 
   private async executeTask(task: TaskRecord): Promise<void> {
     const controller = new AbortController();
-    this.activeTasks.set(task.id, controller);
+    this.activeTasks.set(task.id, { controller });
 
     // Node.js AbortSignal.timeout() — hard kill after taskTimeoutMs
     const timeoutSignal = AbortSignal.timeout(this.taskTimeoutMs);
@@ -150,6 +179,13 @@ export class WorkerLoop {
         taskManager.recordTaskRun(task.id, errorMsg, status);
       }
 
+      // If task had pending input, it was interrupted while waiting
+      const active = this.activeTasks.get(task.id);
+      if (active?.pendingInput) {
+        active.pendingInput.resolve('Task failed while waiting for your response.');
+        active.pendingInput = undefined;
+      }
+
       // Only notify on FINAL failure (all retries exhausted)
       if (!willRetry && this.notificationRouter.hasChannels()) {
         await this.notificationRouter.notify({
@@ -176,6 +212,23 @@ export class WorkerLoop {
     });
     // Cost control: cap agent loop iterations for background tasks
     session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous' });
+
+    // Wire promptUser so background tasks can ask questions via notifications
+    session.promptUser = (question: string, options?: string[]): Promise<string> => {
+      return new Promise<string>((resolve) => {
+        const active = this.activeTasks.get(task.id);
+        if (active) {
+          active.pendingInput = { question, options, resolve };
+        }
+        void this.notificationRouter.notify({
+          title: `\u2753 ${task.title}`,
+          body: question,
+          taskId: task.id,
+          priority: 'high',
+          inquiry: { question, options },
+        });
+      });
+    };
 
     const prompt = task.description
       ? `Task: ${task.title}\n\n${task.description}`
@@ -333,7 +386,9 @@ const WORKER_SUFFIX = `
 
 ## Background Worker
 You are running as an autonomous background worker.
-- You CANNOT ask questions — there is no user present
+- You CAN ask questions via ask_user — the user will be notified and your task pauses until they respond
+- Only ask when truly necessary (e.g., approval needed, ambiguous request)
+- The user may take minutes or hours to respond
 - Complete the task independently using available tools
 - Be thorough but concise — your response will be sent as a notification
 - Always conclude with a clear summary of what was accomplished or why it failed

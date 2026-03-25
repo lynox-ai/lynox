@@ -19,6 +19,20 @@ export function getTaskFollowUp(taskId: string, index: number): { label: string;
 }
 
 // ---------------------------------------------------------------------------
+// Module-level storage for task inquiries (question callback handler)
+// ---------------------------------------------------------------------------
+
+const taskInquiries = new Map<string, { options?: string[] | undefined }>();
+
+export function getTaskInquiry(taskId: string): { options?: string[] | undefined } | undefined {
+  return taskInquiries.get(taskId);
+}
+
+export function clearTaskInquiry(taskId: string): void {
+  taskInquiries.delete(taskId);
+}
+
+// ---------------------------------------------------------------------------
 // Minimal bot interface (matches Telegraf instance shape)
 // ---------------------------------------------------------------------------
 
@@ -46,8 +60,10 @@ export class TelegramNotificationChannel implements NotificationChannel {
 
   async send(msg: NotificationMessage): Promise<boolean> {
     try {
-      const icon =
-        msg.priority === 'high'
+      // Use ❓ icon for inquiry messages, otherwise priority-based icon
+      const icon = msg.inquiry
+        ? '\u{2753}'
+        : msg.priority === 'high'
           ? '\u{1F534}'
           : msg.priority === 'low'
             ? '\u{1F4A4}'
@@ -65,7 +81,21 @@ export class TelegramNotificationChannel implements NotificationChannel {
         text.length > 4000 ? text.slice(0, 4000) + '\u2026' : text;
 
       const extra: Record<string, unknown> = { parse_mode: 'HTML' };
-      if (msg.followUps && msg.followUps.length > 0 && msg.taskId) {
+
+      // Inquiry messages: store inquiry state and build inline keyboard
+      if (msg.inquiry && msg.taskId) {
+        taskInquiries.set(msg.taskId, { options: msg.inquiry.options });
+        if (msg.inquiry.options && msg.inquiry.options.length > 0) {
+          extra['reply_markup'] = {
+            inline_keyboard: [msg.inquiry.options.map((opt, i) => ({
+              text: opt,
+              callback_data: `q:${msg.taskId}:${i}`,
+            }))],
+          };
+        }
+        // If no options, the message text itself serves as the prompt
+        // (user replies via the button-based flow only in v1)
+      } else if (msg.followUps && msg.followUps.length > 0 && msg.taskId) {
         taskFollowUps.set(msg.taskId, msg.followUps);
         extra['reply_markup'] = {
           inline_keyboard: [msg.followUps.map((f, i) => ({

@@ -499,7 +499,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     process.on('SIGINT', () => void shutdown());
     process.on('SIGTERM', () => void shutdown());
 
-    await startTgBot({ token, allowedChatIds, nodyn: tgSession });
+    await startTgBot({ token, allowedChatIds, nodyn: tgSession, engine: tgEngine });
 
     // Register Telegram notification channel for background task results
     const { getTelegramBot } = await import('./integrations/telegram/telegram-bot.js');

@@ -87,13 +87,14 @@ export interface TelegramBotOptions {
   token: string;
   allowedChatIds?: number[] | undefined;
   nodyn: NodynInstance;
+  engine?: { getWorkerLoop(): { resolveTaskInput(taskId: string, answer: string): boolean } | null } | undefined;
 }
 
 let bot: Telegraf | null = null;
 let signalHandler: (() => void) | null = null;
 
 export async function startTelegramBot(options: TelegramBotOptions): Promise<void> {
-  const { token, allowedChatIds, nodyn } = options;
+  const { token, allowedChatIds, nodyn, engine } = options;
 
   bot = new Telegraf(token);
 
@@ -362,6 +363,46 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
     const chatId = ctx.chat?.id;
     if (chatId === undefined) {
       ack();
+      return;
+    }
+
+    // Inquiry callbacks: q:<taskId>:<optionIndex>
+    if (data.startsWith('q:')) {
+      const parts = data.split(':');
+      const taskId = parts[1];
+      const optionIndex = parseInt(parts[2] ?? '0', 10);
+      if (taskId && engine) {
+        void (async () => {
+          const { getTaskInquiry, clearTaskInquiry } = await import('./telegram-notification.js');
+          const { escapeHtml } = await import('./telegram-formatter.js');
+          const inquiry = getTaskInquiry(taskId);
+          if (inquiry) {
+            const answer = inquiry.options?.[optionIndex] ?? String(optionIndex);
+            const workerLoop = engine.getWorkerLoop();
+            if (workerLoop?.resolveTaskInput(taskId, answer)) {
+              clearTaskInquiry(taskId);
+              ack('Answered');
+              // Edit the question message to show it was answered
+              try {
+                const msg = ctx.callbackQuery.message;
+                if (msg) {
+                  await ctx.telegram.editMessageText(
+                    chatId, msg.message_id, undefined,
+                    `\u2705 <b>Answered:</b> ${escapeHtml(answer)}`,
+                    { parse_mode: 'HTML' },
+                  );
+                }
+              } catch { /* best-effort edit */ }
+            } else {
+              ack('Question expired');
+            }
+          } else {
+            ack('Question expired');
+          }
+        })();
+      } else {
+        ack();
+      }
       return;
     }
 

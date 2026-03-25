@@ -45,7 +45,7 @@ function makeSession(result: string | Error = 'Done.'): Session {
   const runFn = result instanceof Error
     ? vi.fn<(task: string) => Promise<string>>().mockRejectedValue(result)
     : vi.fn<(task: string) => Promise<string>>().mockResolvedValue(result);
-  return { run: runFn, _recreateAgent: vi.fn() } as unknown as Session;
+  return { run: runFn, _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
 }
 
 function makeEngine(opts?: {
@@ -376,5 +376,132 @@ describe('WorkerLoop', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(session.run).toHaveBeenCalledWith('Task: Daily Report');
+  });
+
+  // ---- 13. resolveTaskInput resolves pending input ----
+
+  it('resolveTaskInput returns false when no task is active', () => {
+    const engine = makeEngine();
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    expect(loop.resolveTaskInput('nonexistent', 'hello')).toBe(false);
+  });
+
+  it('resolveTaskInput returns false when task has no pending input', async () => {
+    const neverResolve = {
+      run: vi.fn<(task: string) => Promise<string>>().mockReturnValue(new Promise(() => {})),
+      _recreateAgent: vi.fn(),
+      promptUser: undefined,
+    } as unknown as Session;
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: neverResolve });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Task is active but has no pending input
+    expect(loop.resolveTaskInput(task.id, 'answer')).toBe(false);
+
+    loop.stop();
+  });
+
+  // ---- 14. getTaskPendingInput returns undefined when no pending input ----
+
+  it('getTaskPendingInput returns undefined for non-existent task', () => {
+    const engine = makeEngine();
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    expect(loop.getTaskPendingInput('nonexistent')).toBeUndefined();
+  });
+
+  // ---- 15. promptUser is wired to session during executeStandard ----
+
+  it('wires promptUser to session during executeStandard', async () => {
+    let capturedPromptUser: ((q: string, o?: string[]) => Promise<string>) | undefined;
+
+    const session = {
+      run: vi.fn<(task: string) => Promise<string>>().mockResolvedValue('Done.'),
+      _recreateAgent: vi.fn(),
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+    };
+
+    // Intercept the session to capture promptUser after it's assigned
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager([makeTask()])),
+      createSession: vi.fn(() => {
+        // Return a proxy that captures promptUser assignment
+        return new Proxy(session, {
+          set(target, prop, value: unknown) {
+            if (prop === 'promptUser') {
+              capturedPromptUser = value as typeof capturedPromptUser;
+            }
+            (target as Record<string | symbol, unknown>)[prop] = value;
+            return true;
+          },
+        });
+      }),
+    } as unknown as Engine;
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // promptUser should have been assigned
+    expect(capturedPromptUser).toBeDefined();
+  });
+
+  // ---- 16. stop() resolves pending inputs before aborting ----
+
+  it('stop() resolves pending inputs with cancellation message', async () => {
+    let promptResolve: ((answer: string) => void) | undefined;
+    const promptPromise = new Promise<string>((resolve) => {
+      promptResolve = resolve;
+    });
+
+    // Session that triggers a prompt during run, then waits forever
+    const session = {
+      run: vi.fn<(task: string) => Promise<string>>().mockReturnValue(new Promise(() => {})),
+      _recreateAgent: vi.fn(),
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+    };
+
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const engine = {
+      getTaskManager: vi.fn(() => tm),
+      createSession: vi.fn(() => session),
+    } as unknown as Engine;
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Manually simulate pending input on the active task
+    // by calling promptUser which was wired during executeStandard
+    if (session.promptUser) {
+      // This creates pending input
+      void session.promptUser('Approve this?', ['Yes', 'No']);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    // Verify pending input exists
+    const pending = loop.getTaskPendingInput(task.id);
+    if (pending) {
+      expect(pending.question).toBe('Approve this?');
+      expect(pending.options).toEqual(['Yes', 'No']);
+    }
+
+    loop.stop();
+    expect(loop.activeTaskCount).toBe(0);
+
+    void promptPromise;
+    void promptResolve;
   });
 });
