@@ -129,7 +129,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       };
     }
 
-    // 3. Contradiction detection
+    // 3. Contradiction detection (reuse embedding to avoid duplicate embed call)
     let contradictions: ContradictionInfo[] = [];
     if (!options?.skipContradictionCheck) {
       contradictions = await detectContradictions(
@@ -138,6 +138,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         scope,
         this.graph,
         this.embeddingProvider,
+        embedding,
       );
     }
 

@@ -1216,8 +1216,9 @@ describe('Agent', () => {
         onStream: (e: StreamEvent) => { events.push(e); },
       });
 
-      // Fill message history to ~75% of context (200K * 0.75 * 3.5 chars/token ≈ 525K chars)
-      const bigContent = 'x'.repeat(100_000);
+      // Fill message history to ~73% of context (200K × 0.73 × 3.5 chars/token ≈ 511K chars)
+      // Use 85K per message (6 × 85K = 510K) — stays above 70% but below 85% truncation threshold
+      const bigContent = 'x'.repeat(85_000);
       for (let i = 0; i < 3; i++) {
         agent.loadMessages([
           ...agent.getMessages(),

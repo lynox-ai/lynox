@@ -28,12 +28,13 @@ export async function detectContradictions(
   scope: MemoryScopeRef,
   graph: KuzuGraph,
   embeddingProvider: EmbeddingProvider,
+  reuseEmbedding?: number[] | undefined,
 ): Promise<ContradictionInfo[]> {
   // Only check factual namespaces
   if (!FACTUAL_NAMESPACES.has(namespace)) return [];
 
-  // Embed the new text
-  const embedding = await embeddingProvider.embed(newText);
+  // Reuse pre-computed embedding when available (avoids duplicate embed call)
+  const embedding = reuseEmbedding ?? await embeddingProvider.embed(newText);
 
   // Find similar existing memories
   const similar = await graph.findSimilarMemories(

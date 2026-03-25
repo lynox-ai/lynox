@@ -386,6 +386,8 @@ export class Agent implements IAgent {
             '\n[…content truncated to fit context window]';
         }
       }
+      // Invalidate cached message length after in-place content truncation
+      this._msgCount = -1;
     }
   }
 

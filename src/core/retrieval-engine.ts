@@ -93,6 +93,9 @@ export class RetrievalEngine {
     // === Step 3: Multi-signal search (parallel) ===
     const scopeTypes = scopes.map(s => s.type);
 
+    // Pre-resolve query entities once (shared between graph expansion + context)
+    const queryEntities = await this._resolveQueryEntities(query, scopes);
+
     const [vectorResults, graphExpanded] = await Promise.all([
       // 3a. Vector search
       this.graph.findSimilarMemories(queryEmbedding, 50, threshold * 0.8, {
@@ -100,9 +103,9 @@ export class RetrievalEngine {
         scopeTypes,
         activeOnly: true,
       }),
-      // 3b. Graph expansion (entity-based)
+      // 3b. Graph expansion (entity-based, reuses pre-resolved entities)
       options?.useGraphExpansion !== false
-        ? this._graphExpand(query, scopes)
+        ? this._graphExpandResolved(queryEntities)
         : Promise.resolve([]),
     ]);
 
@@ -179,8 +182,8 @@ export class RetrievalEngine {
       void this.graph.updateMemoryRetrieved(c.id).catch(() => { /* fire-and-forget */ });
     }
 
-    // === Step 9: Build entity context + DataStore hints ===
-    const entities = await this._extractQueryEntities(query, scopes);
+    // === Step 9: Build entity context + DataStore hints (reuses pre-resolved entities) ===
+    const entities = queryEntities;
     const contextGraph = await this._formatContextGraphWithData(entities);
 
     return {
@@ -293,28 +296,41 @@ export class RetrievalEngine {
   }
 
   /**
-   * Graph expansion: extract entities from query, find connected memories.
+   * Extract and resolve entities from query text (shared between graph expansion + context).
+   * Resolves once to avoid duplicate graph queries.
    */
-  private async _graphExpand(
+  private async _resolveQueryEntities(
     query: string,
     scopes: MemoryScopeRef[],
-  ): Promise<Record<string, LbugValue>[]> {
-    // Extract entities from the query text
+  ): Promise<EntityRecord[]> {
     const { entities } = extractEntitiesRegex(query);
-    if (entities.length === 0) return [];
+    const resolved: EntityRecord[] = [];
 
-    const results: Record<string, LbugValue>[] = [];
-    const seenIds = new Set<string>();
-
-    for (const entity of entities.slice(0, 5)) { // Max 5 entities to limit scope
-      const resolved = await this.entityResolver.resolve(
+    for (const entity of entities.slice(0, 5)) {
+      const record = await this.entityResolver.resolve(
         entity.name,
         entity.type,
         scopes,
         { createIfMissing: false },
       );
-      if (!resolved) continue;
+      if (record) resolved.push(record);
+    }
 
+    return resolved;
+  }
+
+  /**
+   * Graph expansion using pre-resolved entities. Finds connected memories.
+   */
+  private async _graphExpandResolved(
+    resolvedEntities: EntityRecord[],
+  ): Promise<Record<string, LbugValue>[]> {
+    if (resolvedEntities.length === 0) return [];
+
+    const results: Record<string, LbugValue>[] = [];
+    const seenIds = new Set<string>();
+
+    for (const resolved of resolvedEntities) {
       // 1-hop: memories directly mentioning this entity
       const direct = await this.graph.getMemoriesMentioningEntity(resolved.id, true, 5);
       for (const row of direct) {
@@ -399,29 +415,6 @@ export class RetrievalEngine {
     }
 
     return selected;
-  }
-
-  /**
-   * Extract and resolve entities mentioned in the query.
-   */
-  private async _extractQueryEntities(
-    query: string,
-    scopes: MemoryScopeRef[],
-  ): Promise<EntityRecord[]> {
-    const { entities } = extractEntitiesRegex(query);
-    const resolved: EntityRecord[] = [];
-
-    for (const entity of entities.slice(0, 5)) {
-      const record = await this.entityResolver.resolve(
-        entity.name,
-        entity.type,
-        scopes,
-        { createIfMissing: false },
-      );
-      if (record) resolved.push(record);
-    }
-
-    return resolved;
   }
 
   /**

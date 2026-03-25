@@ -329,6 +329,8 @@ export class Memory implements IMemory {
       this.cache.set(key, content);
       return content || null;
     } catch {
+      // Negative cache: avoid repeated filesystem access for non-existent files
+      this.cache.set(key, '');
       return null;
     }
   }
