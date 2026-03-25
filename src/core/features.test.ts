@@ -32,14 +32,13 @@ describe('features', () => {
 
   describe('isFeatureEnabled', () => {
     it('returns correct defaults for core flags', () => {
-      expect(isFeatureEnabled('triggers')).toBe(true);
       expect(isFeatureEnabled('plugins')).toBe(true);
       expect(isFeatureEnabled('worker-pool')).toBe(false);
     });
 
     it('returns true when env var set to "1"', () => {
-      process.env['NODYN_FEATURE_TRIGGERS'] = '1';
-      expect(isFeatureEnabled('triggers')).toBe(true);
+      process.env['NODYN_FEATURE_PLUGINS'] = '1';
+      expect(isFeatureEnabled('plugins')).toBe(true);
     });
 
     it('returns true when env var set to "true"', () => {
@@ -48,8 +47,8 @@ describe('features', () => {
     });
 
     it('returns false when env var set to "0"', () => {
-      process.env['NODYN_FEATURE_TRIGGERS'] = '0';
-      expect(isFeatureEnabled('triggers')).toBe(false);
+      process.env['NODYN_FEATURE_PLUGINS'] = '0';
+      expect(isFeatureEnabled('plugins')).toBe(false);
     });
 
     it('returns false when env var set to "false"', () => {
@@ -64,11 +63,9 @@ describe('features', () => {
 
   describe('getFeatureFlags', () => {
     it('returns all flags with their current state', () => {
-      process.env['NODYN_FEATURE_TRIGGERS'] = '1';
       process.env['NODYN_FEATURE_PLUGINS'] = '1';
 
       const flags = getFeatureFlags();
-      expect(flags['triggers']).toBe(true);
       expect(flags['plugins']).toBe(true);
       expect(flags['worker-pool']).toBe(false);
     });
@@ -84,7 +81,6 @@ describe('features', () => {
 
   describe('getFeatureEnvVar', () => {
     it('returns correct env var name for core flags', () => {
-      expect(getFeatureEnvVar('triggers')).toBe('NODYN_FEATURE_TRIGGERS');
       expect(getFeatureEnvVar('plugins')).toBe('NODYN_FEATURE_PLUGINS');
       expect(getFeatureEnvVar('worker-pool')).toBe('NODYN_FEATURE_WORKER_POOL');
     });

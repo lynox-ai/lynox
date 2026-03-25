@@ -9,19 +9,16 @@
  */
 
 export type FeatureFlag =
-  | 'triggers'
   | 'plugins'
   | 'worker-pool';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
-  'triggers': 'NODYN_FEATURE_TRIGGERS',
   'plugins': 'NODYN_FEATURE_PLUGINS',
   'worker-pool': 'NODYN_FEATURE_WORKER_POOL',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
-  'triggers': true,
   'plugins': true,
   'worker-pool': false,
 };

@@ -413,7 +413,6 @@ Entrypoint (`entrypoint.sh`): auto-loads `~/.nodyn/.env` (vault key), allows `--
 | `NODYN_EMBEDDING_PROVIDER` | Override: `onnx`, `voyage`, `local` |
 | `NODYN_USER` | User scope identity for multi-scope memory |
 | `NODYN_FEATURE_TENANTS` | Enable tenant isolation (off by default) |
-| `NODYN_FEATURE_TRIGGERS` | Enable triggers (off by default) |
 | `NODYN_FEATURE_PLUGINS` | Enable plugin loading (off by default) |
 | `NODYN_FEATURE_WORKER_POOL` | Enable worker pool (off by default) |
 | `NODYN_DEBUG` | Debug logging: `1`/`true`/`*` for all, or comma-separated groups (`tool,spawn,dag,trigger,cost,preapproval,memory,secret`). `memory` group also includes memory extraction success/error events. `tool` group includes content truncation events. `trigger` group includes file watcher fallback events |
