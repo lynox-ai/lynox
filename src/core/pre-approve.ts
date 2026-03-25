@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { PreApprovalPattern, PreApprovalSet, PreApproveAuditLike } from '../types/index.js';
 import { channels } from './observability.js';
+import { isCriticalTool } from '../tools/permission-guard.js';
 
 /**
  * Convert a glob pattern to a RegExp.
@@ -124,60 +125,8 @@ export function matchesPreApproval(
   return false;
 }
 
-/** Representative critical commands — mirrors CRITICAL_BASH from permission-guard */
-const CRITICAL_COMMAND_SAMPLES = [
-  'rm -rf /',
-  'sudo apt install x',
-  'git push --force main',
-  'mkfs.ext4 /dev/sda',
-  'shutdown -h now',
-  'reboot',
-  'halt',
-  'echo x > /dev/sda1',
-  'printenv',
-  'env',
-  'cat /proc/1/environ',
-  'declare -x',
-  'export -p',
-  'set',
-];
-
-/** Critical patterns as regexes — mirrors CRITICAL_BASH from permission-guard */
-const CRITICAL_REGEXES: RegExp[] = [
-  /\brm\s+-rf\s+\//i,
-  /\bsudo\b/i,
-  /\bgit\s+push\s+(?=.*--force)(?=.*main)/i,
-  /\bmkfs\b/i,
-  /\b(shutdown|reboot|halt)\b/i,
-  />\s*\/dev\/(?!null\b)/i,
-  /\bprintenv\b/i,
-  /^\s*env\s*$|\benv\b\s*[|>]/im,
-  /\/proc\/.*\/environ/i,
-  /\b(declare\s+-x|export\s+-p)\b/i,
-  /^\s*set\s*$|\bset\b\s*[|>]/im,
-];
-
-/**
- * Check if a pattern for a given tool would match any critical operation.
- * Used by `buildApprovalSet` to filter out dangerous patterns.
- */
-export function isCriticalTool(tool: string, pattern: string): boolean {
-  if (tool !== 'bash') return false;
-
-  const regex = globToRegex(pattern);
-
-  // Check against representative critical command samples
-  for (const sample of CRITICAL_COMMAND_SAMPLES) {
-    if (regex.test(sample)) return true;
-  }
-
-  // Also check if the glob text itself matches a critical regex
-  for (const critRegex of CRITICAL_REGEXES) {
-    if (critRegex.test(pattern)) return true;
-  }
-
-  return false;
-}
+// Re-export isCriticalTool from permission-guard (canonical location)
+export { isCriticalTool } from '../tools/permission-guard.js';
 
 /**
  * Build a PreApprovalSet from patterns, filtering out any that would

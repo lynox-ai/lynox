@@ -10,7 +10,7 @@ import { MODEL_MAP } from '../types/index.js';
 import type { RunHistory } from './run-history.js';
 import type { BatchIndex } from './batch-index.js';
 import { hashPrompt } from './prompt-hash.js';
-import { SYSTEM_PROMPT } from './orchestrator-prompts.js';
+import { SYSTEM_PROMPT } from './prompts.js';
 
 export function parseBatchItem(item: MessageBatchIndividualResponse): BatchResult {
   const { custom_id, result } = item;

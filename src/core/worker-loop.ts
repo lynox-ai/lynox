@@ -13,7 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TaskRecord } from '../types/index.js';
-import { WORKER_PROMPT_SUFFIX } from './orchestrator-prompts.js';
+import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications

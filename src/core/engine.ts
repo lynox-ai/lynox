@@ -66,8 +66,8 @@ import {
   initKnowledgeLayer,
   initDataStoreBridge,
   setupMemoryStoreSubscription,
-} from './orchestrator-init.js';
-import { submitBatch, pollBatch } from './orchestrator-batch.js';
+} from './engine-init.js';
+import { submitBatch, pollBatch } from './batch.js';
 import { DataStore } from './data-store.js';
 import { PluginManager } from './plugins.js';
 import { isFeatureEnabled } from './features.js';

@@ -45,7 +45,7 @@ vi.mock('./project.js', () => ({
   detectProjectRoot: vi.fn(),
 }));
 
-import { generateInitBriefing } from './orchestrator-init.js';
+import { generateInitBriefing } from './engine-init.js';
 import type { NodynContext } from '../types/index.js';
 
 const cliContext: NodynContext = {

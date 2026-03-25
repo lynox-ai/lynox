@@ -28,9 +28,9 @@ import {
   SYSTEM_PROMPT,
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
-} from './orchestrator-prompts.js';
+} from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, NodynHooks } from './engine.js';
-import { setupHistorySubscriptions } from './orchestrator-init.js';
+import { setupHistorySubscriptions } from './engine-init.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -71,8 +71,6 @@ export class Session {
     excludeTools?: string[] | undefined;
     systemPromptSuffix?: string | undefined;
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
-    preApproval?: import('../types/index.js').PreApprovalSet | undefined;
-    audit?: import('../types/index.js').PreApproveAuditLike | undefined;
   } = {};
   readonly sessionId: string;
   private briefing: string | undefined;
@@ -463,8 +461,6 @@ export class Session {
     excludeTools?: string[] | undefined;
     systemPromptSuffix?: string | undefined;
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
-    preApproval?: import('../types/index.js').PreApprovalSet | undefined;
-    audit?: import('../types/index.js').PreApproveAuditLike | undefined;
   }): void {
     this.agentOverrides = overrides ?? {};
     const messages = this.saveMessages();
@@ -556,8 +552,6 @@ export class Session {
       apiBaseURL: userConfig.api_base_url,
       briefing: this._briefingConsumed ? undefined : this.briefing,
       autonomy: this.agentOverrides.autonomy,
-      preApproval: this.agentOverrides.preApproval,
-      audit: this.agentOverrides.audit,
       secretStore: engine.getSecretStore() ?? undefined,
       userId: engine.getUserId() ?? undefined,
       activeScopes: engine.getActiveScopes().length > 0 ? engine.getActiveScopes() : undefined,

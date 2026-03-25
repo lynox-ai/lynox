@@ -49,9 +49,6 @@ export type {
 export { GateRejectedError, GateExpiredError } from './orchestrator/types.js';
 export { globToRegex, extractMatchString, matchesPreApproval, buildApprovalSet, isCriticalTool } from './core/pre-approve.js';
 
-export { PreApproveAudit } from './core/pre-approve-audit.js';
-export type { AuditEvent, AuditSummary } from './core/pre-approve-audit.js';
-
 export { planDAG, estimatePipelineCost } from './core/dag-planner.js';
 export type { DagPlanResult } from './core/dag-planner.js';
 export { spawnInline, spawnPipeline, resolveModel } from './orchestrator/runtime-adapter.js';
