@@ -62,6 +62,32 @@ else
   echo "✓ Debug subscriber masks token patterns"
 fi
 
+# Check HTTP redirect protection in worker-loop (SSRF via redirect)
+if ! grep -q "redirect.*error" src/core/worker-loop.ts; then
+  echo "❌ worker-loop.ts missing redirect protection on fetch (SSRF via redirect)"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "✓ Watch task fetch blocks redirects"
+fi
+
+# Check pipeline template resolution is single-pass (no recursive re-interpretation)
+if grep -q 'resolveTaskTemplate' src/orchestrator/context.ts && grep -q '\.replace(' src/orchestrator/context.ts; then
+  echo "✓ Pipeline template resolution uses single-pass replace"
+else
+  echo "❌ orchestrator/context.ts may use unsafe recursive template resolution"
+  ERRORS=$((ERRORS + 1))
+fi
+
+# npm audit — check for known CVEs in production dependencies
+echo ""
+echo "Running npm audit..."
+if npm audit --omit=dev --audit-level=high > /dev/null 2>&1; then
+  echo "✓ No high/critical vulnerabilities in production dependencies"
+else
+  echo "⚠ npm audit found high/critical vulnerabilities (review with: npm audit --omit=dev)"
+  # Don't increment ERRORS — advisory only, may have false positives or unfixable issues
+fi
+
 echo ""
 if [ $ERRORS -gt 0 ]; then
   echo "❌ Security scan failed with $ERRORS issues"

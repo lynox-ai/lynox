@@ -66,6 +66,20 @@ describe('Agent Security Audit', () => {
       const tgContent = readFileSync(join(SRC, 'integrations/telegram/telegram-bot.ts'), 'utf-8');
       expect(tgContent).toContain('wrapUntrustedData');
     });
+
+    it('HTTP redirect SSRF protection on watch fetch', () => {
+      const workerContent = readFileSync(join(SRC, 'core/worker-loop.ts'), 'utf-8');
+      // The fetch call in executeWatch must disable redirect following to prevent
+      // SSRF via redirect to internal endpoints (e.g. 169.254.169.254, localhost)
+      expect(workerContent, 'worker-loop.ts must set redirect option on fetch').toMatch(/redirect\s*:\s*['"]error['"]/);
+    });
+
+    it('memory extraction scans for injection', () => {
+      const memoryContent = readFileSync(join(SRC, 'core/memory.ts'), 'utf-8');
+      // Memory extraction must scan extracted entries before storing to prevent
+      // injected "Remember: [malicious instruction]" from external data
+      expect(memoryContent, 'memory.ts must use detectInjectionAttempt').toContain('detectInjectionAttempt');
+    });
   });
 
   describe('No Dangerous Patterns', () => {
@@ -151,6 +165,59 @@ describe('Agent Security Audit', () => {
       expect(workerContent).toContain('localhost');
       expect(workerContent).toContain('127.0.0.1');
       expect(workerContent).toContain('192.168.');
+    });
+
+    it('EXTERNAL_TOOLS covers all external tool handlers', () => {
+      const agentContent = readFileSync(join(SRC, 'core/agent.ts'), 'utf-8');
+      // Extract the EXTERNAL_TOOLS set members
+      const setMatch = agentContent.match(/EXTERNAL_TOOLS\s*=\s*new\s+Set\(\[([^\]]+)\]\)/);
+      expect(setMatch, 'EXTERNAL_TOOLS set must exist in agent.ts').toBeTruthy();
+      const toolList = setMatch![1]!;
+      // All tools that make external requests must be in EXTERNAL_TOOLS for scanToolResult
+      const requiredTools = [
+        'bash', 'http_request', 'web_research',
+        'google_gmail', 'google_sheets', 'google_drive', 'google_calendar', 'google_docs',
+      ];
+      for (const tool of requiredTools) {
+        expect(toolList, `EXTERNAL_TOOLS must include '${tool}'`).toContain(tool);
+      }
+    });
+  });
+
+  describe('File System Safety', () => {
+
+    it('write_file has path traversal protection', () => {
+      const fsContent = readFileSync(join(SRC, 'tools/builtin/fs.ts'), 'utf-8');
+      // write_file must detect symlink escape (path traversal via symlink)
+      expect(fsContent, 'fs.ts must use lstatSync for symlink detection').toContain('lstatSync');
+      expect(fsContent, 'fs.ts must check isSymbolicLink').toContain('isSymbolicLink');
+      // write_file must have workspace boundary check
+      const hasWorkspaceBoundary = fsContent.includes('validatePath')
+        || fsContent.includes('NODYN_WORKSPACE')
+        || fsContent.includes('isWorkspaceActive');
+      expect(hasWorkspaceBoundary, 'fs.ts must have workspace boundary validation').toBe(true);
+    });
+  });
+
+  describe('Pipeline Safety', () => {
+
+    it('pipeline template resolution is single-pass', () => {
+      const contextContent = readFileSync(join(SRC, 'orchestrator/context.ts'), 'utf-8');
+      // resolveTaskTemplate must use String.replace() (single-pass) — NOT a while loop
+      // that would re-interpret {{}} patterns injected by step results.
+      // Verify it uses .replace() with the template regex, not a recursive/iterative approach.
+      expect(contextContent, 'context.ts must contain resolveTaskTemplate').toContain('resolveTaskTemplate');
+      expect(contextContent, 'context.ts must use .replace() for template resolution').toMatch(/\.replace\(\s*\/\\\{\\{/);
+      // Ensure there is no recursive call or while loop for template resolution
+      const fnMatch = contextContent.match(/function resolveTaskTemplate[\s\S]*?^}/m);
+      if (fnMatch) {
+        const fnBody = fnMatch[0];
+        // Remove the function signature line, then check the body for recursive calls
+        const bodyOnly = fnBody.replace(/^function resolveTaskTemplate[^\n]*\n/, '');
+        expect(bodyOnly, 'resolveTaskTemplate must not call itself recursively').not.toContain('resolveTaskTemplate(');
+        // The function should not contain a while loop for re-resolution
+        expect(bodyOnly, 'resolveTaskTemplate must not use while loop').not.toMatch(/while\s*\(/);
+      }
     });
   });
 

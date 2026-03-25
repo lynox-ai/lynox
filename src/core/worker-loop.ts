@@ -336,6 +336,7 @@ export class WorkerLoop {
       const res = await fetch(config.url, {
         signal: AbortSignal.timeout(30_000),
         headers: { 'User-Agent': 'nodyn-watch/1.0' },
+        redirect: 'error',  // Prevent SSRF via redirect to internal endpoints
       });
       if (!res.ok) {
         throw new Error(`HTTP ${String(res.status)} ${res.statusText}`);
