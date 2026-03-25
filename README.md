@@ -5,72 +5,70 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
-**The AI that knows your business.** An AI agent that runs on your server, learns your business over time, and works in the background for you. Persistent knowledge, autonomous workflows, tool connections — running entirely in your own infrastructure.
+**The AI that knows your business.**
 
-## Get started
+An AI agent that runs on your infrastructure, learns your business over time, and works in the background — so you don't repeat yourself. Persistent knowledge, autonomous workflows, real tool connections. No cloud dependency, no vendor lock-in.
+
+## What it does
+
+- **"Run a competitive analysis on our top three accounts"** — nodyn fetches your data, cross-references competitors, stores the findings, and schedules the same analysis for next Monday.
+- **"Same analysis for this new client"** — No re-briefing. nodyn adapts the process it learned to the new account structure.
+- **"Monitor our pricing page and notify me if anything changes"** — Background task runs on schedule, sends you a Telegram message when it detects a change.
+- **"Summarize last week's emails and create a report in Google Docs"** — Connects to Gmail and Docs, writes the report, drops the link in your chat.
+- **"Every Monday at 9am, pull KPIs from our tracking sheet"** — Recurring workflow, fully autonomous, results delivered to Telegram.
+
+## Quick start
 
 ```bash
 npx @nodyn-ai/core
 ```
 
-Needs [Node.js 22+](https://nodejs.org) and an [Anthropic API key](https://console.anthropic.com/). The setup wizard handles everything else — encryption, integrations, business profile — then drops you straight into the REPL.
+Needs [Node.js 22+](https://nodejs.org) and an [Anthropic API key](https://console.anthropic.com/). The setup wizard handles everything else.
 
-## What can it do?
+### Docker
 
-```
-Monday, 09:12
-you ›  "Run a competitive analysis on our top three accounts"
-nodyn ›  fetching CRM → pulling Ads data → researching competitors → cross-referencing
-
-  Account A: ROAS declining vs. competitor shift in brand keywords
-  Account B: opportunity — competitor paused spend last week
-  Account C: strong. no action needed.
-
-  Stored to knowledge. Workflow scheduled for next Monday.
-
-Three weeks later — a new client
-
-you ›  "Same analysis for this new client"
-nodyn ›  loading your analysis template → adapting to new account structure → running
-  Done in 4 minutes. Report in /outputs/client-new-2026-03.md
+```bash
+docker run -it --rm \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -v ~/.nodyn:/home/nodyn/.nodyn \
+  ghcr.io/nodyn-ai/nodyn:latest
 ```
 
-No re-briefing. No copy-paste. nodyn picks up where you left off.
+## How it works
 
-## Who is this for?
+```
+┌──────────────────────────────────────┐
+│              You                     │
+│   Terminal · Telegram · MCP · SDK    │
+└──────────────┬───────────────────────┘
+               │
+┌──────────────▼───────────────────────┐
+│            nodyn                     │
+│                                      │
+│  Understands your business context   │
+│  Remembers what it learned           │
+│  Works autonomously in background    │
+└──────────────┬───────────────────────┘
+               │
+┌──────────────▼───────────────────────┐
+│          Your Data                   │
+│   Gmail · Sheets · Drive · Calendar  │
+│   Files · APIs · Databases           │
+└──────────────────────────────────────┘
+```
 
-- **Solopreneurs** running five clients alone — nodyn handles the Monday workflow, flags what changed, drops reports in your inbox
-- **Consultants** delivering audits at scale — teach nodyn your process once, it adapts to each client
-- **Developers** who want business AI they actually own — local, transparent, no vendor lock-in
+**BYOK** — You provide your Anthropic API key. nodyn calls the API directly. No proxy, no middleman, no data collection.
 
-## Features
+## Key capabilities
 
-### Knowledge that compounds
-
-- **Knowledge Graph** — Entities, relationships, contradiction detection, graph-augmented retrieval
-- **Three knowledge levels** — Organization, project, personal — each with its own scope
-- **100 languages** — Multilingual embeddings, fully local, no data leaves your machine
-
-### Autonomous workflows
-
-- **Multi-step automation** — Dependency graphs, conditions, parallel execution
-- **Workflow capture** — Teach nodyn your process once, save it as a reusable template
-- **Background tasks** — Schedule recurring work, monitor URLs, get notified when results are ready
-- **Task management** — Priority, due dates, assignees — nodyn proposes working on tasks assigned to it
-
-### Works where you work
-
-- **Telegram bot** — Your primary interface for daily use. Rich status, follow-up suggestions, voice, file uploads
-- **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0
-- **MCP server** — stdio + HTTP transport — connect to Claude Desktop, Cursor, or any MCP client
-- **Secret vault** — AES-256-GCM encrypted storage for API keys and credentials
-
-### You stay in control
-
-- **Supervised or Autonomous** — You steer step by step, or set a goal and let nodyn run
-- **4 specialized roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets
-- **Pre-approval** — Glob-based auto-approval with audit trail for autonomous operation
-- **Cost tracking** — Budget enforcement, cache accounting, daily and monthly caps
+- **Knowledge Graph** — Learns entities, relationships, and contradictions across your business. 100 languages, fully local.
+- **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows. Results delivered via Telegram.
+- **Telegram Bot** — Primary daily interface. Rich status, follow-up suggestions, voice messages, file uploads.
+- **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
+- **MCP Server** — Connect to Claude Desktop, Cursor, or any MCP client via stdio or HTTP.
+- **Process Capture** — Teach nodyn your workflow once, save it as a reusable template, schedule it.
+- **4 Specialized Roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets.
+- **Security** — AES-256 encrypted vault, permission guard, input/output scanning, SSRF protection.
 
 ## Install
 
@@ -99,27 +97,15 @@ npm run dev
 ### Docker
 
 ```bash
-# Set your API key, then:
 export ANTHROPIC_API_KEY=sk-ant-...
 docker compose up
-```
-
-Or without Compose:
-
-```bash
-docker run -it --rm \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  ghcr.io/nodyn-ai/nodyn:latest
 ```
 
 See [Docker docs](docs/docker.md) for Telegram, encryption, and production deployment.
 
 ## Your first run
 
-### Terminal
-
-After setup you're in the interactive REPL. Type a task, press Enter:
+After setup you're in the interactive REPL:
 
 ```
 ❯ What can you do?
@@ -133,44 +119,17 @@ npx @nodyn-ai/core "Summarize the last 5 commits in this repo"
 
 ### Telegram (recommended for daily use)
 
-The setup wizard can configure Telegram for you, or set it up manually. Create a bot via [@BotFather](https://t.me/BotFather), then:
+Create a bot via [@BotFather](https://t.me/BotFather), then:
 
 ```bash
 TELEGRAM_BOT_TOKEN=123:ABC... npx @nodyn-ai/core
 ```
 
-Send messages from your phone. Get results when they're ready. Telegram is the primary interface for working with nodyn day to day — rich status updates, follow-up suggestions, voice messages, file uploads.
-
-### Re-run setup
-
-Reconfigure at any time:
-
-```bash
-npx @nodyn-ai/core --init
-```
-
 For SDK usage, see [docs/sdk.md](docs/sdk.md) and [`examples/`](examples/).
 
-## How it works
+## Documentation
 
-```
-┌───────────────────────────────────────────────────┐
-│                   Your Input                      │
-│          Terminal · Telegram · MCP · SDK           │
-└─────────────────────┬─────────────────────────────┘
-                      │
-┌─────────────────────▼─────────────────────────────┐
-│                  nodyn Engine                      │
-│                                                    │
-│  Knowledge       Roles          Workflows          │
-│  (remembers)    (specializes)   (automates)        │
-│                                                    │
-│  Tasks           Tools          Security           │
-│  (schedules)    (acts)          (protects)         │
-└────────────────────────────────────────────────────┘
-```
-
-**BYOK** — You provide your Anthropic API key. nodyn calls the API directly. No proxy, no middleman, no data collection.
+Architecture, tools, integrations, security, and deployment details are in [`docs/`](docs/).
 
 ## Community
 
