@@ -193,10 +193,21 @@ Execute a multi-step workflow. Two modes: provide `steps[]` for inline execution
 | Property | Value |
 |----------|-------|
 | Source | `src/tools/builtin/task.ts` |
-| Input | `title`, `description?`, `priority?`, `due_date?`, `scope?`, `tags?`, `parent_task_id?` |
+| Input | `title`, `description?`, `priority?`, `due_date?`, `scope?`, `tags?`, `parent_task_id?`, `schedule?`, `watch_url?`, `watch_interval_minutes?`, `pipeline_id?` |
 | Eager streaming | Yes |
 
 Creates a task in the SQLite task store. Supports scope validation against active scopes, subtask creation via `parent_task_id`, and date validation (YYYY-MM-DD). Returns the created task summary.
+
+**Task types** determined by input fields:
+
+| Type | Created when | Behavior |
+|------|-------------|----------|
+| `manual` | Default (no scheduling fields) | Standard task, executed on demand |
+| `scheduled` | `schedule` field set (cron expression or shorthand like `every 5 minutes`) | WorkerLoop picks up at scheduled times |
+| `watch` | `watch_url` field set | WorkerLoop polls the URL at `watch_interval_minutes` (default: 60), triggers on content change |
+| `pipeline` | `pipeline_id` field set | WorkerLoop executes the stored pipeline workflow |
+
+Background tasks with `assignee='nodyn'` auto-trigger immediately (`nextRunAt=now`).
 
 ### `task_update` -- Update Task
 

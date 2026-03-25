@@ -26,7 +26,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { chatSessions, runQueue } from './telegram-session.js';
 import { t, type Lang } from './telegram-i18n.js';
 
-// Re-declare Nodyn as the orchestrator class with the methods we need
+// Duck-typed Session interface — avoids importing Session directly (circular)
 interface NodynInstance {
   run(task: string | unknown[]): Promise<string>;
   abort(): void;
@@ -254,7 +254,7 @@ export async function executeRun(
 
   // 2. Serialize via queue — prevents cross-chat handler corruption
   await runQueue.enqueue(async () => {
-    // Load this chat's conversation history into the shared nodyn instance
+    // Load this chat's conversation history into the shared session
     chatSessions.load(chatId, nodyn);
 
     await executeRunInner(bot, nodyn, chatId, task, run);

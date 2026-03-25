@@ -4,7 +4,7 @@
 
 import { createRequire } from 'node:module';
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import { MODEL_MAP } from '../../types/index.js';
 import { BOLD, DIM, BLUE, GREEN, RED, YELLOW, RESET } from '../ui.js';
 import { state } from '../cli-state.js';
@@ -15,7 +15,7 @@ const pkg = require('../../../package.json') as { version: string };
 
 export { pkg };
 
-export async function handleConfig(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleConfig(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const configKey = parts[1];
   const configValue = parts.slice(2).join(' ');
 
@@ -32,7 +32,7 @@ export async function handleConfig(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
     (current as Record<string, unknown>)[configKey] = parsed;
     saveCfg(current);
     reloadConfig();
-    nodyn.reloadUserConfig();
+    session.reloadUserConfig();
     ctx.stdout.write(`${GREEN}✓${RESET} ${configKey} = ${JSON.stringify(parsed)}\n`);
     const RESTART_KEYS = new Set(['api_key', 'api_base_url']);
     if (RESTART_KEYS.has(configKey)) {
@@ -43,7 +43,7 @@ export async function handleConfig(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
 
   // Direct key query: /config key
   if (configKey) {
-    const cfg = nodyn.getUserConfig();
+    const cfg = session.getUserConfig();
     const SENSITIVE = new Set(['api_key', 'voyage_api_key', 'search_api_key', 'telegram_bot_token', 'google_client_id', 'google_client_secret']);
     const val = (cfg as Record<string, unknown>)[configKey];
     if (val === undefined) {
@@ -104,7 +104,7 @@ export async function handleConfig(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
 
   if (!ctx.cliPrompt) {
     // Non-TTY fallback: show settings list
-    const cfg = nodyn.getUserConfig();
+    const cfg = session.getUserConfig();
     ctx.stdout.write(`${BOLD}Settings${RESET}\n`);
     for (const s of settings) {
       const val = (cfg as Record<string, unknown>)[s.key];
@@ -119,7 +119,7 @@ export async function handleConfig(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
 
    
   while (true) {
-    const cfg = nodyn.getUserConfig();
+    const cfg = session.getUserConfig();
     const settingsOptions = settings.map(s => {
       const val = (cfg as Record<string, unknown>)[s.key];
       const display = formatValue(s, val);
@@ -166,7 +166,7 @@ export async function handleConfig(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
     (current as Record<string, unknown>)[setting.key] = internalVal;
     saveCfg(current);
     reloadConfig();
-    nodyn.reloadUserConfig();
+    session.reloadUserConfig();
     ctx.stdout.write(`${GREEN}✓${RESET} ${setting.label} updated\n`);
     if (setting.key === 'api_key' || setting.key === 'api_base_url') {
       ctx.stdout.write(`${YELLOW}⚠${RESET} ${DIM}Restart nodyn for the new API credentials to take effect.${RESET}\n`);
@@ -175,23 +175,23 @@ export async function handleConfig(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
   return true;
 }
 
-export async function handleStatus(_parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  const model = MODEL_MAP[nodyn.getModelTier()];
-  const currentMode = nodyn.getMode();
-  const tier = nodyn.getModelTier();
-  const reg = nodyn.getRegistry();
+export async function handleStatus(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  const model = MODEL_MAP[session.getModelTier()];
+  const currentMode = session.getMode();
+  const tier = session.getModelTier();
+  const reg = session.getRegistry();
   const servers = reg.getMCPServers();
-  const mem = nodyn.getMemory();
-  const scopes = nodyn.getActiveScopes();
-  const goalState = nodyn.getGoalState();
-  const costSnap = nodyn.getCostSnapshot();
-  const secretStore = nodyn.getSecretStore();
-  const cfg = nodyn.getUserConfig();
+  const mem = session.getMemory();
+  const scopes = session.getActiveScopes();
+  const goalState = session.getGoalState();
+  const costSnap = session.getCostSnapshot();
+  const secretStore = session.getSecretStore();
+  const cfg = session.getUserConfig();
 
   ctx.stdout.write(`${BOLD}NODYN${RESET} v${pkg.version}\n\n`);
   ctx.stdout.write(`  ${DIM}Model:${RESET}      ${BLUE}${model}${RESET} (${tier})\n`);
   ctx.stdout.write(`  ${DIM}Mode:${RESET}       ${currentMode}\n`);
-  ctx.stdout.write(`  ${DIM}Effort:${RESET}     ${nodyn.getEffort()}\n`);
+  ctx.stdout.write(`  ${DIM}Effort:${RESET}     ${session.getEffort()}\n`);
   ctx.stdout.write(`  ${DIM}Tools:${RESET}      ${reg.getEntries().length} builtin\n`);
   ctx.stdout.write(`  ${DIM}MCP:${RESET}        ${servers.length > 0 ? `${servers.length} server${servers.length > 1 ? 's' : ''} (${servers.map(s => s.name).join(', ')})` : 'none'}\n`);
   ctx.stdout.write(`  ${DIM}Memory:${RESET}     ${mem ? 'active' : 'off'}\n`);
@@ -206,15 +206,15 @@ export async function handleStatus(_parts: string[], nodyn: Nodyn, ctx: CLICtx):
     ctx.stdout.write(`  ${DIM}Cost:${RESET}       $${costSnap.estimatedCostUSD.toFixed(4)} (${costSnap.budgetPercent}% budget)\n`);
   }
   // Session stats
-  const u = nodyn.usage;
+  const u = session.usage;
   if (u.input_tokens > 0 || u.output_tokens > 0) {
     ctx.stdout.write(`\n  ${DIM}Session:${RESET}    ${u.input_tokens.toLocaleString()} in / ${u.output_tokens.toLocaleString()} out (${state.turnCount} turns)\n`);
   }
   return true;
 }
 
-export async function handleHooks(_parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  const pm = nodyn.getPluginManager();
+export async function handleHooks(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  const pm = session.getPluginManager();
   const loadedPlugins = pm ? pm.getLoadedPluginNames() : [];
   ctx.stdout.write(`${BOLD}Hooks${RESET}\n`);
   if (loadedPlugins.length === 0) {
@@ -228,9 +228,9 @@ export async function handleHooks(_parts: string[], nodyn: Nodyn, ctx: CLICtx): 
   return true;
 }
 
-export async function handleApprovals(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleApprovals(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const sub = parts[1];
-  const history = nodyn.getRunHistory();
+  const history = session.getRunHistory();
 
   if (!history) {
     ctx.stdout.write(`${DIM}No run history available.${RESET}\n`);

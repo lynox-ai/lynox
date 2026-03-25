@@ -82,6 +82,9 @@ export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
 export type TaskAssignee = 'user' | 'nodyn' | string;
 
+export type TaskType = 'manual' | 'scheduled' | 'watch';
+export type TaskRunStatus = 'success' | 'failed' | 'timeout';
+
 export interface TaskRecord {
   id: string;
   title: string;
@@ -97,4 +100,15 @@ export interface TaskRecord {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  schedule_cron?: string | undefined;
+  next_run_at?: string | undefined;
+  last_run_at?: string | undefined;
+  last_run_result?: string | undefined;
+  last_run_status?: string | undefined;
+  task_type?: string | undefined;
+  watch_config?: string | undefined;
+  max_retries?: number | undefined;
+  retry_count?: number | undefined;
+  notification_channel?: string | undefined;
+  pipeline_id?: string | undefined;
 }

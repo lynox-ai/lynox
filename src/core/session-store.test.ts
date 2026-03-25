@@ -1,69 +1,75 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { AgentConfig } from '../types/index.js';
-
-vi.mock('./agent.js', () => {
-  return {
-    Agent: vi.fn().mockImplementation(function (this: Record<string, unknown>, config: AgentConfig) {
-      this.config = config;
-      this._isMockAgent = true;
-    }),
-  };
-});
-
 import { SessionStore } from './session-store.js';
+import type { Engine } from './engine.js';
+import type { Session } from './session.js';
 
-const makeConfig = (name: string): AgentConfig => ({
-  name,
-  model: 'claude-opus-4-6',
-});
+let sessionCounter = 0;
+
+function makeMockSession(): Session {
+  sessionCounter++;
+  return {
+    sessionId: `mock-session-${sessionCounter}`,
+    _isMockSession: true,
+  } as unknown as Session;
+}
+
+function makeMockEngine(): Engine {
+  return {
+    createSession: vi.fn().mockImplementation(() => makeMockSession()),
+  } as unknown as Engine;
+}
 
 describe('SessionStore', () => {
   describe('getOrCreate', () => {
-    it('creates a new agent for unknown session ID', () => {
+    it('creates a new session for unknown session ID', () => {
       const store = new SessionStore();
-      const config = makeConfig('agent-1');
-      const agent = store.getOrCreate('session-1', config);
-      expect(agent).toBeDefined();
-      expect((agent as unknown as { _isMockAgent: boolean })._isMockAgent).toBe(true);
+      const engine = makeMockEngine();
+      const session = store.getOrCreate('session-1', engine);
+      expect(session).toBeDefined();
+      expect((session as unknown as { _isMockSession: boolean })._isMockSession).toBe(true);
+      expect(engine.createSession).toHaveBeenCalledTimes(1);
     });
 
-    it('returns the same agent for the same session ID', () => {
+    it('returns the same session for the same session ID', () => {
       const store = new SessionStore();
-      const config = makeConfig('agent-1');
-      const agent1 = store.getOrCreate('session-1', config);
-      const agent2 = store.getOrCreate('session-1', config);
-      expect(agent1).toBe(agent2);
+      const engine = makeMockEngine();
+      const session1 = store.getOrCreate('session-1', engine);
+      const session2 = store.getOrCreate('session-1', engine);
+      expect(session1).toBe(session2);
+      // createSession should only be called once
+      expect(engine.createSession).toHaveBeenCalledTimes(1);
     });
 
-    it('does not create a new agent on second call with same ID', () => {
+    it('does not create a new session on second call with same ID', () => {
       const store = new SessionStore();
-      const config1 = makeConfig('first');
-      const config2 = makeConfig('second');
-      const agent1 = store.getOrCreate('s1', config1);
-      const agent2 = store.getOrCreate('s1', config2);
-      expect(agent1).toBe(agent2);
-      // Config from first call is used, second is ignored
-      expect((agent1 as unknown as { config: AgentConfig }).config.name).toBe('first');
+      const engine = makeMockEngine();
+      const session1 = store.getOrCreate('s1', engine, { briefing: 'first' });
+      const session2 = store.getOrCreate('s1', engine, { briefing: 'second' });
+      expect(session1).toBe(session2);
+      // Opts from second call are ignored since session already exists
+      expect(engine.createSession).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('reset', () => {
-    it('removes session so next getOrCreate creates fresh agent', () => {
+    it('removes session so next getOrCreate creates fresh session', () => {
       const store = new SessionStore();
-      const config = makeConfig('agent-1');
-      const agent1 = store.getOrCreate('session-1', config);
+      const engine = makeMockEngine();
+      const session1 = store.getOrCreate('session-1', engine);
       store.reset('session-1');
-      const agent2 = store.getOrCreate('session-1', config);
-      expect(agent2).not.toBe(agent1);
+      const session2 = store.getOrCreate('session-1', engine);
+      expect(session2).not.toBe(session1);
+      expect(engine.createSession).toHaveBeenCalledTimes(2);
     });
 
     it('does not affect other sessions', () => {
       const store = new SessionStore();
-      const agent1 = store.getOrCreate('s1', makeConfig('a'));
-      const agent2 = store.getOrCreate('s2', makeConfig('b'));
+      const engine = makeMockEngine();
+      store.getOrCreate('s1', engine);
+      const session2 = store.getOrCreate('s2', engine);
       store.reset('s1');
-      const agent2Again = store.getOrCreate('s2', makeConfig('b'));
-      expect(agent2Again).toBe(agent2);
+      const session2Again = store.getOrCreate('s2', engine);
+      expect(session2Again).toBe(session2);
     });
 
     it('is no-op for unknown session ID', () => {
@@ -74,11 +80,12 @@ describe('SessionStore', () => {
   });
 
   describe('different session IDs', () => {
-    it('get different agents', () => {
+    it('get different sessions', () => {
       const store = new SessionStore();
-      const agentA = store.getOrCreate('session-a', makeConfig('a'));
-      const agentB = store.getOrCreate('session-b', makeConfig('b'));
-      expect(agentA).not.toBe(agentB);
+      const engine = makeMockEngine();
+      const sessionA = store.getOrCreate('session-a', engine);
+      const sessionB = store.getOrCreate('session-b', engine);
+      expect(sessionA).not.toBe(sessionB);
     });
   });
 
@@ -88,15 +95,17 @@ describe('SessionStore', () => {
       expect(store.get('no-such-session')).toBeUndefined();
     });
 
-    it('returns the agent for an existing session', () => {
+    it('returns the session for an existing session', () => {
       const store = new SessionStore();
-      const agent = store.getOrCreate('session-x', makeConfig('x'));
-      expect(store.get('session-x')).toBe(agent);
+      const engine = makeMockEngine();
+      const session = store.getOrCreate('session-x', engine);
+      expect(store.get('session-x')).toBe(session);
     });
 
     it('returns undefined after reset', () => {
       const store = new SessionStore();
-      store.getOrCreate('session-y', makeConfig('y'));
+      const engine = makeMockEngine();
+      store.getOrCreate('session-y', engine);
       store.reset('session-y');
       expect(store.get('session-y')).toBeUndefined();
     });

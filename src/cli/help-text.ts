@@ -15,7 +15,7 @@ export const COMMANDS = [
   '/model', '/mode', '/roles', '/playbooks', '/plugin',
   '/pipeline', '/workflow', '/approvals', '/google', '/secret',
   '/status', '/config', '/context', '/hooks',
-  '/task', '/quickstart', '/help', '/exit', '/quit',
+  '/task', '/schedule', '/quickstart', '/help', '/exit', '/quit',
 ];
 
 export const COMMAND_ALIASES: Record<string, string> = {};
@@ -39,6 +39,7 @@ export const HELP_TEXT_BASICS = `${BOLD}Basics${RESET}
   ${BLUE}/cost${RESET}               Session token usage and cost
   ${BLUE}/knowledge${RESET} [sub]    Show or manage knowledge (prune)
   ${BLUE}/task${RESET} [sub]          Tasks (list/add/done/start/show/edit/delete)
+  ${BLUE}/schedule${RESET} [sub]      Scheduled & watch tasks (list/details/cancel/test)
   ${BLUE}/mode${RESET} [name]        Operational mode (assistant/autopilot)
   ${BLUE}/quickstart${RESET}          Guided first steps
   ${BLUE}/help${RESET} all           Show all commands
@@ -90,6 +91,7 @@ ${BOLD}Workflows${RESET}
 
 ${BOLD}Tasks${RESET}
   ${BLUE}/task${RESET} [sub]          Tasks (list/add/done/start/show/edit/delete)
+  ${BLUE}/schedule${RESET} [sub]      Manage scheduled & watch tasks (list/details/cancel/test)
 
 ${BOLD}History${RESET}
   ${BLUE}/runs${RESET} [sub]         Run history (list/search/<id>/tree/delete/purge/vacuum)

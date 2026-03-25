@@ -257,18 +257,29 @@ vi.mock('./run-history.js', () => ({
     this.getScope = vi.fn().mockReturnValue(null);
     // @ts-expect-error mock constructor
     this.listScopes = vi.fn().mockReturnValue([]);
+    // @ts-expect-error mock constructor
+    this.close = vi.fn();
   }),
 }));
 
-import { Nodyn } from './orchestrator.js';
+import { Engine } from './engine.js';
+import { Session } from './session.js';
 import { Agent } from './agent.js';
 import { Memory } from './memory.js';
 import { ModeController } from './mode-controller.js';
-import { channels } from './observability.js';
+
+// === Helper ===
+
+async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
+  const engine = new Engine(config as import('../types/index.js').NodynConfig);
+  await engine.init();
+  const session = engine.createSession();
+  return { engine, session };
+}
 
 // === Tests ===
 
-describe('Nodyn (Orchestrator)', () => {
+describe('Engine + Session (Orchestrator)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetMessages.mockReturnValue([]);
@@ -284,39 +295,37 @@ describe('Nodyn (Orchestrator)', () => {
   // -- init() --
 
   describe('init()', () => {
-    it('creates memory, registry, agent and registers builtin tools', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+    it('creates memory, registry, and registers builtin tools; session creates agent', async () => {
+      const { session } = await createEngineAndSession();
 
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool (23 core + 2 process tools = 25)
       expect(mockRegister).toHaveBeenCalledTimes(28);
 
-      // Agent should have been created
+      // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
-      expect(nodyn.getAgent()).toBeDefined();
+      expect(session.getAgent()).toBeDefined();
     });
 
     it('skips memory when config.memory is false', async () => {
-      const nodyn = new Nodyn({ memory: false });
-      await nodyn.init();
+      const { engine } = await createEngineAndSession({ memory: false });
 
-      expect(nodyn.getMemory()).toBeNull();
+      expect(engine.getMemory()).toBeNull();
     });
 
     it('registers MCP servers when provided', async () => {
       const server = { type: 'url' as const, url: 'http://localhost:3000', name: 'test-mcp' };
-      const nodyn = new Nodyn({ mcpServers: [server] });
-      await nodyn.init();
+      const engine = new Engine({ mcpServers: [server] } as import('../types/index.js').NodynConfig);
+      await engine.init();
 
       expect(mockRegisterMCP).toHaveBeenCalledWith(server);
     });
 
     it('returns itself for chaining', async () => {
-      const nodyn = new Nodyn({});
-      const result = await nodyn.init();
-      expect(result).toBe(nodyn);
+      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      const result = await engine.init();
+      expect(result).toBe(engine);
     });
   });
 
@@ -324,32 +333,30 @@ describe('Nodyn (Orchestrator)', () => {
 
   describe('run()', () => {
     it('delegates to agent.send()', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
 
       mockSend.mockResolvedValueOnce('agent response');
-      const result = await nodyn.run('Hello');
+      const result = await session.run('Hello');
       expect(result).toBe('agent response');
       expect(mockSend).toHaveBeenCalledWith('Hello');
     });
 
-    it('throws when not initialized', async () => {
-      const nodyn = new Nodyn({});
-      await expect(nodyn.run('Hello')).rejects.toThrow('Nodyn not initialized');
+    it('session always has an agent after construction', async () => {
+      const { session } = await createEngineAndSession();
+      expect(session.getAgent()).toBeDefined();
     });
 
     it('clears briefing after first successful turn', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
 
       // First run — briefing should be passed then cleared
       mockSend.mockResolvedValueOnce('first response');
-      await nodyn.run('first task');
+      await session.run('first task');
 
       // Agent constructor should have been called with briefing initially
       const firstCallConfig = vi.mocked(Agent).mock.calls[0]![0];
       // Briefing is set during init, we just verify setBriefing was called
-      const agent = nodyn.getAgent();
+      const agent = session.getAgent();
       expect(agent).toBeDefined();
     });
   });
@@ -358,30 +365,27 @@ describe('Nodyn (Orchestrator)', () => {
 
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      await createEngineAndSession();
       // 25 core tools (pipeline + process tools registered at init)
       expect(mockRegister).toHaveBeenCalledTimes(28);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { engine } = await createEngineAndSession();
       const countBefore = mockRegister.mock.calls.length;
 
-      nodyn.registerPipelineTools();
+      engine.registerPipelineTools();
       // No additional tools — already registered at init
       expect(mockRegister).toHaveBeenCalledTimes(countBefore);
     });
 
     it('is idempotent — second call is a no-op', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { engine } = await createEngineAndSession();
 
-      nodyn.registerPipelineTools();
+      engine.registerPipelineTools();
       const countAfterFirst = mockRegister.mock.calls.length;
 
-      nodyn.registerPipelineTools();
+      engine.registerPipelineTools();
       expect(mockRegister).toHaveBeenCalledTimes(countAfterFirst);
     });
   });
@@ -393,13 +397,12 @@ describe('Nodyn (Orchestrator)', () => {
       const savedMessages = [{ role: 'user', content: 'old' }];
       mockGetMessages.mockReturnValue(savedMessages);
 
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
 
       // Clear the initial Agent construction call
       vi.mocked(Agent).mockClear();
 
-      const modelId = nodyn.setModel('sonnet');
+      const modelId = session.setModel('sonnet');
       expect(modelId).toBe('claude-sonnet-4-6');
 
       // Agent should be recreated
@@ -410,12 +413,11 @@ describe('Nodyn (Orchestrator)', () => {
     });
 
     it('returns the resolved model ID', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
 
-      expect(nodyn.setModel('opus')).toBe('claude-opus-4-6');
-      expect(nodyn.setModel('sonnet')).toBe('claude-sonnet-4-6');
-      expect(nodyn.setModel('haiku')).toBe('claude-haiku-4-5-20251001');
+      expect(session.setModel('opus')).toBe('claude-opus-4-6');
+      expect(session.setModel('sonnet')).toBe('claude-sonnet-4-6');
+      expect(session.setModel('haiku')).toBe('claude-haiku-4-5-20251001');
     });
   });
 
@@ -424,15 +426,14 @@ describe('Nodyn (Orchestrator)', () => {
       const savedMessages = [{ role: 'user', content: 'keep' }];
       mockGetMessages.mockReturnValue(savedMessages);
 
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
       vi.mocked(Agent).mockClear();
 
-      nodyn.setEffort('max');
+      session.setEffort('max');
 
       expect(Agent).toHaveBeenCalledTimes(1);
       expect(mockLoadMessages).toHaveBeenCalledWith(savedMessages);
-      expect(nodyn.getEffort()).toBe('max');
+      expect(session.getEffort()).toBe('max');
     });
   });
 
@@ -441,16 +442,15 @@ describe('Nodyn (Orchestrator)', () => {
       const savedMessages = [{ role: 'user', content: 'think' }];
       mockGetMessages.mockReturnValue(savedMessages);
 
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
       vi.mocked(Agent).mockClear();
 
       const mode = { type: 'enabled' as const, budget_tokens: 5000 };
-      nodyn.setThinking(mode);
+      session.setThinking(mode);
 
       expect(Agent).toHaveBeenCalledTimes(1);
       expect(mockLoadMessages).toHaveBeenCalledWith(savedMessages);
-      expect(nodyn.getThinking()).toEqual(mode);
+      expect(session.getThinking()).toEqual(mode);
     });
   });
 
@@ -458,27 +458,25 @@ describe('Nodyn (Orchestrator)', () => {
 
   describe('setMode()', () => {
     it('creates ModeController for non-interactive modes', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
 
-      await nodyn.setMode({ mode: 'autopilot', goal: 'Build it' });
+      await session.setMode({ mode: 'autopilot', goal: 'Build it' });
 
       expect(ModeController).toHaveBeenCalledWith({ mode: 'autopilot', goal: 'Build it' });
       expect(mockApply).toHaveBeenCalled();
-      expect(nodyn.getMode()).toBe('autopilot');
+      expect(session.getMode()).toBe('autopilot');
     });
 
     it('resets to interactive mode without ModeController', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
 
       // First set a non-interactive mode
-      await nodyn.setMode({ mode: 'autopilot', goal: 'Do stuff' });
-      expect(nodyn.getMode()).toBe('autopilot');
+      await session.setMode({ mode: 'autopilot', goal: 'Do stuff' });
+      expect(session.getMode()).toBe('autopilot');
 
       // Switch back to interactive
       vi.mocked(Agent).mockClear();
-      await nodyn.setMode({ mode: 'interactive' });
+      await session.setMode({ mode: 'interactive' });
 
       // Should teardown previous controller
       expect(mockTeardown).toHaveBeenCalled();
@@ -487,16 +485,15 @@ describe('Nodyn (Orchestrator)', () => {
       expect(Agent).toHaveBeenCalled();
 
       // Mode should be interactive (no controller)
-      expect(nodyn.getMode()).toBe('interactive');
+      expect(session.getMode()).toBe('interactive');
     });
 
     it('tears down previous mode controller when switching modes', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
 
-      await nodyn.setMode({ mode: 'autopilot', goal: 'Goal 1' });
+      await session.setMode({ mode: 'autopilot', goal: 'Goal 1' });
 
-      await nodyn.setMode({ mode: 'sentinel', triggers: [{ type: 'cron', expression: '5m' }] });
+      await session.setMode({ mode: 'sentinel', triggers: [{ type: 'cron', expression: '5m' }] });
       expect(mockTeardown).toHaveBeenCalled();
     });
   });
@@ -505,16 +502,14 @@ describe('Nodyn (Orchestrator)', () => {
 
   describe('other methods', () => {
     it('reset() delegates to agent.reset()', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
-      nodyn.reset();
+      const { session } = await createEngineAndSession();
+      session.reset();
       expect(mockReset).toHaveBeenCalled();
     });
 
     it('abort() delegates to agent.abort()', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
-      nodyn.abort();
+      const { session } = await createEngineAndSession();
+      session.abort();
       expect(mockAbort).toHaveBeenCalled();
     });
 
@@ -522,70 +517,65 @@ describe('Nodyn (Orchestrator)', () => {
       const msgs = [{ role: 'user', content: 'hello' }];
       mockGetMessages.mockReturnValue(msgs);
 
-      const nodyn = new Nodyn({});
-      await nodyn.init();
-      expect(nodyn.saveMessages()).toEqual(msgs);
+      const { session } = await createEngineAndSession();
+      expect(session.saveMessages()).toEqual(msgs);
     });
 
     it('loadMessages() passes messages to agent', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
       const msgs = [{ role: 'user', content: 'restored' }];
-      nodyn.loadMessages(msgs);
+      session.loadMessages(msgs);
       expect(mockLoadMessages).toHaveBeenCalledWith(msgs);
     });
 
     it('shutdown() tears down mode controller and fires shutdown hooks', async () => {
       const mockShutdownHook = vi.fn().mockResolvedValue(undefined);
-      const nodyn = new Nodyn({});
-      await nodyn.init();
-      nodyn.registerHooks({ async onShutdown() { await mockShutdownHook(); } });
-      await nodyn.setMode({ mode: 'autopilot', goal: 'X' });
+      const { engine, session } = await createEngineAndSession();
+      engine.registerHooks({ async onShutdown() { await mockShutdownHook(); } });
+      await session.setMode({ mode: 'autopilot', goal: 'X' });
 
-      await nodyn.shutdown();
+      await session.shutdown();
 
       expect(mockTeardown).toHaveBeenCalled();
       expect(mockShutdownHook).toHaveBeenCalled();
     });
 
-    it('getModelTier() returns configured model', () => {
-      const nodyn = new Nodyn({ model: 'sonnet' });
-      expect(nodyn.getModelTier()).toBe('sonnet');
+    it('getModelTier() returns configured model', async () => {
+      const { session } = await createEngineAndSession({ model: 'sonnet' });
+      expect(session.getModelTier()).toBe('sonnet');
     });
 
     it('promptUser setter propagates to agent', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { session } = await createEngineAndSession();
 
       const fn = vi.fn().mockResolvedValue('yes');
-      nodyn.promptUser = fn;
-      expect(nodyn.promptUser).toBe(fn);
+      session.promptUser = fn;
+      expect(session.promptUser).toBe(fn);
     });
   });
 
   describe('session ID', () => {
-    it('generates a session ID on construction', () => {
-      const nodyn = new Nodyn({});
-      // Session ID is private, but we can verify it's a valid UUID via getSessionId if exposed
-      // For now, just verify the instance is created (sessionId is set in constructor)
-      expect(nodyn).toBeDefined();
+    it('generates a session ID on construction', async () => {
+      const { session } = await createEngineAndSession();
+      // sessionId is readonly on Session
+      expect(session.sessionId).toBeDefined();
+      expect(session.sessionId).toMatch(/^[0-9a-f-]{36}$/);
     });
 
-    it('different instances get different session IDs', () => {
-      const a = new Nodyn({});
-      const b = new Nodyn({});
-      // Both should exist without error — UUID collision is astronomically unlikely
-      expect(a).toBeDefined();
-      expect(b).toBeDefined();
+    it('different sessions get different session IDs', async () => {
+      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      await engine.init();
+      const a = engine.createSession();
+      const b = engine.createSession();
+      expect(a.sessionId).not.toBe(b.sessionId);
     });
   });
 
   describe('batch()', () => {
     it('inserts promptHash on parent run', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { engine } = await createEngineAndSession();
 
-      await nodyn.batch([{ id: 'r1', task: 'hello' }]);
+      await engine.batch([{ id: 'r1', task: 'hello' }]);
 
       // Parent insertRun should have been called with a non-empty promptHash
       expect(mockInsertRun).toHaveBeenCalledWith(
@@ -603,10 +593,9 @@ describe('Nodyn (Orchestrator)', () => {
     });
 
     it('inserts promptHash on child runs', async () => {
-      const nodyn = new Nodyn({});
-      await nodyn.init();
+      const { engine } = await createEngineAndSession();
 
-      await nodyn.batch([
+      await engine.batch([
         { id: 'r1', task: 'task one' },
         { id: 'r2', task: 'task two' },
       ]);
@@ -631,12 +620,12 @@ describe('Nodyn (Orchestrator)', () => {
   describe('registerHooks()', () => {
     it('calls onInit hook during init', async () => {
       const hook = { onInit: vi.fn().mockResolvedValue(undefined) };
-      const nodyn = new Nodyn({});
-      nodyn.registerHooks(hook);
-      await nodyn.init();
+      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      engine.registerHooks(hook);
+      await engine.init();
 
       expect(hook.onInit).toHaveBeenCalledTimes(1);
-      expect(hook.onInit).toHaveBeenCalledWith(nodyn);
+      expect(hook.onInit).toHaveBeenCalledWith(engine);
     });
 
     it('calls multiple hooks in registration order', async () => {
@@ -644,41 +633,41 @@ describe('Nodyn (Orchestrator)', () => {
       const hook1 = { onInit: vi.fn().mockImplementation(async () => { order.push(1); }) };
       const hook2 = { onInit: vi.fn().mockImplementation(async () => { order.push(2); }) };
 
-      const nodyn = new Nodyn({});
-      nodyn.registerHooks(hook1);
-      nodyn.registerHooks(hook2);
-      await nodyn.init();
+      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      engine.registerHooks(hook1);
+      engine.registerHooks(hook2);
+      await engine.init();
 
       expect(order).toEqual([1, 2]);
     });
 
     it('onInit error does not crash init', async () => {
       const hook = { onInit: vi.fn().mockRejectedValue(new Error('hook failed')) };
-      const nodyn = new Nodyn({});
-      nodyn.registerHooks(hook);
+      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      engine.registerHooks(hook);
 
       // Should not throw
-      await expect(nodyn.init()).resolves.toBe(nodyn);
+      await expect(engine.init()).resolves.toBe(engine);
     });
 
     it('calls onShutdown hook during shutdown', async () => {
       const hook = { onShutdown: vi.fn().mockResolvedValue(undefined) };
-      const nodyn = new Nodyn({});
-      nodyn.registerHooks(hook);
-      await nodyn.init();
-      await nodyn.shutdown();
+      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      engine.registerHooks(hook);
+      await engine.init();
+      await engine.shutdown();
 
       expect(hook.onShutdown).toHaveBeenCalledTimes(1);
     });
 
     it('onShutdown error does not crash shutdown', async () => {
       const hook = { onShutdown: vi.fn().mockRejectedValue(new Error('shutdown fail')) };
-      const nodyn = new Nodyn({});
-      nodyn.registerHooks(hook);
-      await nodyn.init();
+      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      engine.registerHooks(hook);
+      await engine.init();
 
       // Should not throw
-      await expect(nodyn.shutdown()).resolves.toBeUndefined();
+      await expect(engine.shutdown()).resolves.toBeUndefined();
     });
   });
 });

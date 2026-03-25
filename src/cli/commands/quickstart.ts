@@ -3,7 +3,7 @@
  * Shows 3 starter tasks to demonstrate nodyn's capabilities.
  */
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import { BOLD, DIM, BLUE, GREEN, RESET } from '../ui.js';
 import { spinner } from '../cli-state.js';
 import type { CLICtx } from './types.js';
@@ -26,7 +26,7 @@ const QUICKSTART_TASKS = [
   },
 ] as const;
 
-export async function handleQuickstart(_parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleQuickstart(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   ctx.stdout.write(`\n${BLUE}${BOLD}  Quick Start${RESET}\n`);
   ctx.stdout.write(`${DIM}  Try these to see what nodyn can do:${RESET}\n\n`);
 
@@ -63,7 +63,7 @@ export async function handleQuickstart(_parts: string[], nodyn: Nodyn, ctx: CLIC
 
   try {
     spinner.start('Working...');
-    await nodyn.run(selected.task);
+    await session.run(selected.task);
   } catch {
     spinner.stop();
   }

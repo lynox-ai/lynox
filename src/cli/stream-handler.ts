@@ -169,12 +169,12 @@ export function streamHandler(event: StreamEvent, stdout: NodeJS.WriteStream): v
           : '';
         // Mode indicator
         let modeSuffix = '';
-        if (state.activeNodyn) {
-          const mode = state.activeNodyn.getMode();
+        if (state.activeSession) {
+          const mode = state.activeSession.getMode();
           if (mode !== 'interactive') {
-            const goalState = state.activeNodyn.getGoalState();
+            const goalState = state.activeSession.getGoalState();
             if (goalState) {
-              const done = goalState.subtasks.filter(s => s.status === 'complete').length;
+              const done = goalState.subtasks.filter((s: { status: string }) => s.status === 'complete').length;
               modeSuffix = `  ${MAGENTA}${mode}${RESET} ${DIM}[${done}/${goalState.subtasks.length}]${RESET}`;
             } else {
               modeSuffix = `  ${MAGENTA}${mode}${RESET}`;

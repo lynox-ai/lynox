@@ -5,14 +5,14 @@
 import { resolve } from 'node:path';
 import { stderr } from 'node:process';
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { renderError, BOLD, DIM, BLUE, GREEN, RED, MAGENTA, RESET } from '../ui.js';
 import { spinner } from '../cli-state.js';
 import type { CLICtx } from './types.js';
 
-export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  nodyn.registerPipelineTools();
+export async function handlePipeline(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  session.registerPipelineTools();
   const pipelineSub = parts[1];
 
   if (!pipelineSub || pipelineSub === 'list') {
@@ -40,7 +40,7 @@ export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx)
     }
     ctx.stdout.write(`${BLUE}\u25B6${RESET} Planning pipeline...\n`);
     const { planDAG: pDAG, estimatePipelineCost: estCost } = await import('../../core/dag-planner.js');
-    const cfg = nodyn.getUserConfig();
+    const cfg = session.getUserConfig();
     const plan = await pDAG(goal, {
       apiKey: cfg.api_key,
       apiBaseURL: cfg.api_base_url,
@@ -77,7 +77,7 @@ export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx)
     const p = getPipeline(showId);
     if (!p) {
       // Try history
-      const history = nodyn.getRunHistory();
+      const history = session.getRunHistory();
       if (history) {
         const run = history.getPipelineRun(showId);
         if (run) {
@@ -117,7 +117,7 @@ export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx)
       return true;
     }
     ctx.stdout.write(`${BLUE}\u25B6${RESET} Executing pipeline: ${BOLD}${p.name}${RESET}\n`);
-    const response = await nodyn.run(`Execute pipeline ${p.id} using run_pipeline tool with pipeline_id.`);
+    const response = await session.run(`Execute pipeline ${p.id} using run_pipeline tool with pipeline_id.`);
     ctx.stdout.write(response + '\n');
     return true;
   }
@@ -129,13 +129,13 @@ export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx)
       return true;
     }
     ctx.stdout.write(`${BLUE}\u25B6${RESET} Retrying pipeline: ${retryId}\n`);
-    const response = await nodyn.run(`Retry the failed steps of pipeline ${retryId} using run_pipeline with pipeline_id and retry=true.`);
+    const response = await session.run(`Retry the failed steps of pipeline ${retryId} using run_pipeline with pipeline_id and retry=true.`);
     ctx.stdout.write(response + '\n');
     return true;
   }
 
   if (pipelineSub === 'history') {
-    const history = nodyn.getRunHistory();
+    const history = session.getRunHistory();
     if (!history) {
       ctx.stdout.write('Run history not available.\n');
       return true;
@@ -176,7 +176,7 @@ export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx)
       ctx.stdout.write(`\n${BLUE}[${i + 1}/${steps.length}]${RESET} ${BOLD}${step}${RESET}\n`);
       try {
         spinner.start(`Step ${i + 1}/${steps.length}...`);
-        await nodyn.run(step);
+        await session.run(step);
       } catch (err: unknown) {
         spinner.stop();
         stderr.write(renderError(`Chain failed at step ${i + 1}: ${getErrorMessage(err)}`));
@@ -211,7 +211,7 @@ export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx)
       }
       const { runManifest: runMf } = await import('../../orchestrator/runner.js');
       const { LocalGateAdapter: LocalAdapter } = await import('../../orchestrator/gates.js');
-      const cfg = nodyn.getUserConfig();
+      const cfg = session.getUserConfig();
       let gateAdapter: import('../../orchestrator/types.js').GateAdapter | undefined;
       if (ctx.cliPrompt) {
         gateAdapter = new LocalAdapter(ctx.cliPrompt);
@@ -242,7 +242,7 @@ export async function handlePipeline(parts: string[], nodyn: Nodyn, ctx: CLICtx)
 }
 
 // Standalone /chain command (alias behavior)
-export async function handleChain(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleChain(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const chainStr = parts.slice(1).join(' ');
   let steps = chainStr.split('->').map(s => s.trim().replace(/^["']|["']$/g, ''));
   if (steps.length === 0 || !steps[0]) {
@@ -265,7 +265,7 @@ export async function handleChain(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     ctx.stdout.write(`\n${BLUE}[${i + 1}/${steps.length}]${RESET} ${BOLD}${step}${RESET}\n`);
     try {
       spinner.start(`Step ${i + 1}/${steps.length}...`);
-      await nodyn.run(step);
+      await session.run(step);
     } catch (err: unknown) {
       spinner.stop();
       stderr.write(renderError(`Chain failed at step ${i + 1}: ${getErrorMessage(err)}`));
@@ -276,7 +276,7 @@ export async function handleChain(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
 }
 
 // Standalone /manifest command
-export async function handleManifest(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleManifest(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const manifestSub = parts[1];
   const manifestPath = parts[2];
 
@@ -306,7 +306,7 @@ export async function handleManifest(parts: string[], nodyn: Nodyn, ctx: CLICtx)
 
     const { runManifest: runMf } = await import('../../orchestrator/runner.js');
     const { LocalGateAdapter: LocalAdapter } = await import('../../orchestrator/gates.js');
-    const cfg = nodyn.getUserConfig();
+    const cfg = session.getUserConfig();
     let gateAdapter: import('../../orchestrator/types.js').GateAdapter | undefined;
     if (ctx.cliPrompt) {
       gateAdapter = new LocalAdapter(ctx.cliPrompt);
@@ -334,8 +334,8 @@ export async function handleManifest(parts: string[], nodyn: Nodyn, ctx: CLICtx)
 }
 
 // /tools and /mcp commands that were in the switch
-export async function handleTools(_parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  const reg = nodyn.getRegistry();
+export async function handleTools(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  const reg = session.getRegistry();
   const entries = reg.getEntries();
   const servers = reg.getMCPServers();
   ctx.stdout.write('Builtin tools:\n');
@@ -352,14 +352,14 @@ export async function handleTools(_parts: string[], nodyn: Nodyn, ctx: CLICtx): 
   return true;
 }
 
-export async function handleMcp(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleMcp(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const name = parts[1];
   const url = parts[2];
   if (!name || !url) {
     ctx.stdout.write('Usage: /mcp <name> <url>\n');
     return true;
   }
-  nodyn.addMCP({ type: 'url', name, url });
+  session.addMCP({ type: 'url', name, url });
   ctx.stdout.write(`MCP server "${name}" registered.\n`);
   return true;
 }

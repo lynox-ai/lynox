@@ -67,7 +67,7 @@ async function transcribeAudio(buffer: Buffer, filename: string): Promise<string
   }
 }
 
-// Re-declare Nodyn interface to avoid importing the class (circular)
+// Duck-typed Session interface — avoids importing Session directly (circular)
 interface NodynInstance {
   run(task: string | unknown[]): Promise<string>;
   abort(): void;
@@ -87,13 +87,14 @@ export interface TelegramBotOptions {
   token: string;
   allowedChatIds?: number[] | undefined;
   nodyn: NodynInstance;
+  engine?: { getWorkerLoop(): { resolveTaskInput(taskId: string, answer: string): boolean } | null } | undefined;
 }
 
 let bot: Telegraf | null = null;
 let signalHandler: (() => void) | null = null;
 
 export async function startTelegramBot(options: TelegramBotOptions): Promise<void> {
-  const { token, allowedChatIds, nodyn } = options;
+  const { token, allowedChatIds, nodyn, engine } = options;
 
   bot = new Telegraf(token);
 
@@ -359,16 +360,92 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       return;
     }
 
-    let parsed: { t: string; v?: string; i?: number };
-    try {
-      parsed = JSON.parse(data) as { t: string; v?: string; i?: number };
-    } catch {
+    const chatId = ctx.chat?.id;
+    if (chatId === undefined) {
       ack();
       return;
     }
 
-    const chatId = ctx.chat?.id;
-    if (chatId === undefined) {
+    // Inquiry callbacks: q:<taskId>:<optionIndex>
+    if (data.startsWith('q:')) {
+      const parts = data.split(':');
+      const taskId = parts[1];
+      const optionIndex = parseInt(parts[2] ?? '0', 10);
+      if (taskId && engine) {
+        void (async () => {
+          const { getTaskInquiry, clearTaskInquiry } = await import('./telegram-notification.js');
+          const { escapeHtml } = await import('./telegram-formatter.js');
+          const inquiry = getTaskInquiry(taskId);
+          if (inquiry) {
+            const answer = inquiry.options?.[optionIndex] ?? String(optionIndex);
+            const workerLoop = engine.getWorkerLoop();
+            if (workerLoop?.resolveTaskInput(taskId, answer)) {
+              clearTaskInquiry(taskId);
+              ack('Answered');
+              // Edit the question message to show it was answered
+              try {
+                const msg = ctx.callbackQuery.message;
+                if (msg) {
+                  await ctx.telegram.editMessageText(
+                    chatId, msg.message_id, undefined,
+                    `\u2705 <b>Answered:</b> ${escapeHtml(answer)}`,
+                    { parse_mode: 'HTML' },
+                  );
+                }
+              } catch { /* best-effort edit */ }
+            } else {
+              ack('Question expired');
+            }
+          } else {
+            ack('Question expired');
+          }
+        })();
+      } else {
+        ack();
+      }
+      return;
+    }
+
+    // Task follow-up callbacks use colon-delimited format: t:<taskId>:<index>
+    if (data.startsWith('t:')) {
+      const parts = data.split(':');
+      const taskId = parts[1];
+      const index = parseInt(parts[2] ?? '0', 10);
+      if (taskId) {
+        void (async () => {
+          const { getTaskFollowUp } = await import('./telegram-notification.js');
+          const followUp = getTaskFollowUp(taskId, index);
+          if (followUp) {
+            if (hasActiveRun(chatId)) {
+              ack('A task is already running.');
+              return;
+            }
+            const rl = rateLimiter.acquire(String(chatId));
+            if (!rl.allowed) {
+              ack(rl.reason ?? 'Rate limit reached.');
+              return;
+            }
+            ack('Starting…');
+            const contextualTask = `[Following up on background task "${taskId}"]\n\n${followUp.task}`;
+            const cbLang = detectLang(ctx.from?.language_code);
+            void executeRun(bot!, nodyn, chatId, contextualTask, cbLang).finally(() => {
+              rateLimiter.release(String(chatId));
+            });
+          } else {
+            ack(t('msg.followup_expired', detectLang(ctx.from?.language_code)));
+          }
+        })();
+      } else {
+        ack();
+      }
+      return;
+    }
+
+    // JSON-encoded callbacks (existing format)
+    let parsed: { t: string; v?: string; i?: number };
+    try {
+      parsed = JSON.parse(data) as { t: string; v?: string; i?: number };
+    } catch {
       ack();
       return;
     }
@@ -434,6 +511,11 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
   startEvictionTimer();
   await bot.launch();
   process.stderr.write('NODYN Telegram bot running.\n');
+}
+
+/** Return the live Telegraf instance (or null if not started). */
+export function getTelegramBot(): Telegraf | null {
+  return bot;
 }
 
 export async function stopTelegramBot(): Promise<void> {

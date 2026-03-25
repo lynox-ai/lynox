@@ -211,7 +211,7 @@ Without `NODYN_MCP_SECRET`, the HTTP transport is open and binds to `127.0.0.1` 
 
 ## Session Management
 
-The MCP server uses `SessionStore` (`src/core/session-store.ts`) to keep separate agent instances per `session_id`. Each session keeps its own conversation history and active run state.
+The MCP server uses `Engine` (not `Nodyn` directly) internally. `SessionStore` (`src/core/session-store.ts`) holds per-session `Session` instances (created via `engine.createSession()`), each with its own conversation history, mode, and active run state.
 
 Only one active async run is allowed per session at a time. Starting another one returns an error with the existing `run_id` when available.
 

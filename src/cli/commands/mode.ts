@@ -4,7 +4,7 @@
 
 import { stderr } from 'node:process';
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import type { ModeConfig, OperationalMode } from '../../types/index.js';
 import { MODEL_MAP, MODE_DISPLAY, MODE_FROM_DISPLAY } from '../../types/index.js';
 import { loadRole, listRoles, saveRole, exportRole, importRole, deleteRole } from '../../core/roles.js';
@@ -25,7 +25,7 @@ export function setGetValidModes(fn: () => string[]): void {
   _getValidModes = fn;
 }
 
-export async function handleMode(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleMode(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const line = parts.join(' ');
   // Accept both internal names (interactive, daemon) and display names (assistant, background)
   const rawName = parts[1]?.toLowerCase();
@@ -33,7 +33,7 @@ export async function handleMode(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
   const validModes = _getValidModes();
 
   if (!modeName) {
-    const currentMode = nodyn.getMode();
+    const currentMode = session.getMode();
 
     if (ctx.cliPrompt) {
       // Interactive mode selection
@@ -56,12 +56,12 @@ export async function handleMode(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
       if (idx < 0) return true;
       // Re-dispatch with selected mode name
       const selected = validModes[idx]!;
-      return handleMode(['/mode', selected], nodyn, ctx);
+      return handleMode(['/mode', selected], session, ctx);
     }
 
     // Non-TTY fallback: show current mode info
-    const goalState = nodyn.getGoalState();
-    const costSnap = nodyn.getCostSnapshot();
+    const goalState = session.getGoalState();
+    const costSnap = session.getCostSnapshot();
     const currentDisplay = MODE_DISPLAY[currentMode as OperationalMode] ?? currentMode;
     ctx.stdout.write(`${BOLD}Mode:${RESET} ${currentDisplay}\n`);
     if (goalState) {
@@ -81,7 +81,7 @@ export async function handleMode(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
   }
 
   if (modeName === 'interactive') {
-    await nodyn.setMode({ mode: 'interactive' });
+    await session.setMode({ mode: 'interactive' });
     ctx.stdout.write(`${GREEN}✓${RESET} Switched to assistant mode.\n`);
     return true;
   }
@@ -136,7 +136,7 @@ export async function handleMode(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
   }
 
   try {
-    await nodyn.setMode(modeConfig);
+    await session.setMode(modeConfig);
     const displayMode = MODE_DISPLAY[modeName as OperationalMode] ?? modeName;
     ctx.stdout.write(`${GREEN}✓${RESET} Mode: ${BOLD}${displayMode}${RESET}`);
     if (goal) ctx.stdout.write(` — ${DIM}${goal}${RESET}`);
@@ -148,7 +148,7 @@ export async function handleMode(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
       try {
         const spinnerLabel = MODE_DISPLAY[modeName as OperationalMode] ?? modeName;
         spinner.start(`${spinnerLabel} working...`);
-        await nodyn.run(goal);
+        await session.run(goal);
       } catch (err: unknown) {
         spinner.stop();
         stderr.write(renderError(getErrorMessage(err)));
@@ -160,7 +160,7 @@ export async function handleMode(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
   return true;
 }
 
-export async function handleRoles(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleRoles(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const sub = parts[1];
 
   if (!sub || sub === 'list') {
@@ -283,14 +283,14 @@ export async function handleRoles(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
 
   // Apply role overrides
   if (role.model && role.model in MODEL_MAP) {
-    const resolved = nodyn.setModel(role.model);
+    const resolved = session.setModel(role.model);
     state.currentModelId = resolved;
   }
   if (role.effort) {
-    nodyn.setEffort(role.effort);
+    session.setEffort(role.effort);
   }
   if (role.systemPrompt || role.deniedTools) {
-    nodyn._recreateAgent({
+    session._recreateAgent({
       systemPromptSuffix: role.systemPrompt ? `\n\n${role.systemPrompt}` : undefined,
       excludeTools: role.deniedTools,
       autonomy: role.autonomy,
@@ -304,7 +304,7 @@ export async function handleRoles(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
   return true;
 }
 
-export async function handlePlaybooks(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handlePlaybooks(parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   const sub = parts[1];
 
   if (!sub || sub === 'list') {
@@ -400,7 +400,7 @@ export async function handlePlaybooks(parts: string[], _nodyn: Nodyn, ctx: CLICt
   return true;
 }
 
-export async function handleProfile(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleProfile(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const profileName = parts[1];
   if (!profileName || profileName === 'list') {
     const profiles = listProfiles();
@@ -421,19 +421,19 @@ export async function handleProfile(parts: string[], nodyn: Nodyn, ctx: CLICtx):
       const skipped: string[] = [];
 
       if (profile.model) {
-        const resolved = nodyn.setModel(profile.model);
+        const resolved = session.setModel(profile.model);
         state.currentModelId = resolved;
         applied.push(`model=${profile.model}`);
       }
 
       if (profile.effort && ['low', 'medium', 'high', 'max'].includes(profile.effort)) {
-        nodyn.setEffort(profile.effort as 'low' | 'medium' | 'high' | 'max');
+        session.setEffort(profile.effort as 'low' | 'medium' | 'high' | 'max');
         applied.push(`effort=${profile.effort}`);
       }
 
       if (profile.systemPrompt) {
-        if (nodyn.getMode() === 'interactive') {
-          nodyn._recreateAgent({
+        if (session.getMode() === 'interactive') {
+          session._recreateAgent({
             systemPromptSuffix: `\n\n${profile.systemPrompt}`,
           });
           applied.push('systemPrompt');

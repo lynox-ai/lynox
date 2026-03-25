@@ -494,16 +494,27 @@ export function insertTask(db: Database.Database, params: {
   dueDate?: string | undefined;
   tags?: string | undefined;
   parentTaskId?: string | undefined;
+  scheduleCron?: string | undefined;
+  nextRunAt?: string | undefined;
+  taskType?: string | undefined;
+  watchConfig?: string | undefined;
+  maxRetries?: number | undefined;
+  notificationChannel?: string | undefined;
+  pipelineId?: string | undefined;
 }): void {
   db.prepare(`
-    INSERT INTO tasks (id, title, description, status, priority, assignee, scope_type, scope_id, due_date, tags, parent_task_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, title, description, status, priority, assignee, scope_type, scope_id, due_date, tags, parent_task_id, schedule_cron, next_run_at, task_type, watch_config, max_retries, notification_channel, pipeline_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.title, params.description ?? '',
     params.status ?? 'open', params.priority ?? 'medium',
     params.assignee ?? null,
     params.scopeType ?? 'project', params.scopeId ?? '',
     params.dueDate ?? null, params.tags ?? null, params.parentTaskId ?? null,
+    params.scheduleCron ?? null, params.nextRunAt ?? null,
+    params.taskType ?? 'manual', params.watchConfig ?? null,
+    params.maxRetries ?? 0, params.notificationChannel ?? null,
+    params.pipelineId ?? null,
   );
 }
 
@@ -599,6 +610,49 @@ export function getOverdueTasks(db: Database.Database, scopes?: Array<{ type: st
   return db.prepare(
     `SELECT * FROM tasks WHERE due_date < ? AND status != 'completed' ORDER BY due_date ASC`
   ).all(now) as TaskRecord[];
+}
+
+/** Get tasks that are due for execution (next_run_at <= now, not completed). */
+export function getDueTasks(db: Database.Database): TaskRecord[] {
+  const now = new Date().toISOString();
+  return db.prepare(
+    `SELECT * FROM tasks WHERE next_run_at IS NOT NULL AND next_run_at <= ? AND status != 'completed' ORDER BY next_run_at ASC`
+  ).all(now) as TaskRecord[];
+}
+
+/** Update task after a run execution. */
+export function updateTaskRunResult(
+  db: Database.Database,
+  id: string,
+  update: {
+    lastRunAt: string;
+    lastRunResult: string;
+    lastRunStatus: string;
+    nextRunAt?: string | undefined;
+    retryCount?: number | undefined;
+  },
+): void {
+  const sets: string[] = [
+    'last_run_at = ?',
+    'last_run_result = ?',
+    'last_run_status = ?',
+  ];
+  const values: unknown[] = [
+    update.lastRunAt,
+    update.lastRunResult,
+    update.lastRunStatus,
+  ];
+  if (update.nextRunAt !== undefined) {
+    sets.push('next_run_at = ?');
+    values.push(update.nextRunAt);
+  }
+  if (update.retryCount !== undefined) {
+    sets.push('retry_count = ?');
+    values.push(update.retryCount);
+  }
+  sets.push("updated_at = datetime('now')");
+  values.push(id);
+  db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
 }
 
 // ============================================================

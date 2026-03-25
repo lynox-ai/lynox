@@ -42,7 +42,7 @@ interface PreApprovalSet {
 - **`src/tools/permission-guard.ts`** — `isDangerous()` 4th param `preApproval?`, inline matching (avoids circular dep)
 - **`src/core/mode-controller.ts`** — `_buildPreApproval()` constructs set from `ModeConfig.autoApprovePatterns`
 - **`src/core/agent.ts`** — `preApproval` field, passed to `isDangerous()`
-- **`src/core/orchestrator.ts`** — `agentOverrides.preApproval` passed through to Agent
+- **`src/core/session.ts`** — `agentOverrides.preApproval` passed through to Agent
 - **`src/index.ts`** — `--pre-approve <glob>` (repeatable)
 
 ### Security
@@ -110,7 +110,7 @@ async function showApprovalDialog(
 ### Modified Files
 
 - **`src/core/mode-controller.ts`** — In `_applyAutopilot/Daemon/Swarm`: if no `autoApprovePatterns` and TTY, run planner → show dialog → build set
-- **`src/core/orchestrator.ts`** — Pass `apiKey`/`apiBaseURL` to mode controller for planner
+- **`src/core/session.ts`** — Pass `apiKey`/`apiBaseURL` to mode controller for planner
 - **`src/index.ts`** — `--no-pre-approve` (skip planning), `--auto-approve-all` (approve low+medium without dialog)
 
 ### Security

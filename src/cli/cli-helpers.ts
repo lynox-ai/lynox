@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { stdout } from 'node:process';
 
-import type { Nodyn } from '../core/orchestrator.js';
+import type { Session } from '../core/session.js';
 import { getNodynDir } from '../core/config.js';
 import { writeFileAtomicSync, ensureDirSync } from '../core/atomic-write.js';
 
@@ -31,8 +31,8 @@ export const ALIASES_FILE = join(getNodynDir(), 'aliases.json');
 
 // ── Pricing display ────────────────────────────────────────────────────
 
-export function printCost(nodyn: Nodyn, model: string, out: NodeJS.WriteStream = stdout): void {
-  const u = nodyn.usage;
+export function printCost(session: Session, model: string, out: NodeJS.WriteStream = stdout): void {
+  const u = session.usage;
   const p = PRICING[model];
   if (!p) {
     out.write('Unknown model for pricing.\n');
@@ -54,16 +54,16 @@ export function printCost(nodyn: Nodyn, model: string, out: NodeJS.WriteStream =
 
 // ── Session management ─────────────────────────────────────────────────
 
-export function saveSession(nodyn: Nodyn): string {
+export function saveSession(session: Session): string {
   ensureDirSync(SESSIONS_DIR);
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const filePath = join(SESSIONS_DIR, `${ts}.json`);
-  const data = { timestamp: new Date().toISOString(), messages: nodyn.saveMessages() };
+  const data = { timestamp: new Date().toISOString(), messages: session.saveMessages() };
   writeFileAtomicSync(filePath, JSON.stringify(data, null, 2) + '\n');
   return filePath;
 }
 
-export function loadSessionFile(nodyn: Nodyn, name?: string): boolean {
+export function loadSessionFile(session: Session, name?: string): boolean {
   if (!existsSync(SESSIONS_DIR)) return false;
   const files = readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json')).sort();
   if (files.length === 0) return false;
@@ -87,7 +87,7 @@ export function loadSessionFile(nodyn: Nodyn, name?: string): boolean {
     if (!Array.isArray(messages)) {
       return false;
     }
-    nodyn.loadMessages(messages);
+    session.loadMessages(messages);
     return true;
   } catch {
     return false;

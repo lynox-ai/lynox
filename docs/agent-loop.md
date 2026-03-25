@@ -39,7 +39,7 @@ messages.push({ role: 'user', content: userMessage })
 
 ## Continuation & Iteration Limits
 
-When `continuationPrompt` is set (e.g., in autopilot/daemon modes via `ModeController`):
+When `continuationPrompt` is set (e.g., in autopilot/daemon modes via `ModeController`, applied through `Session`):
 
 - **Iteration limit exceeded**: Agent auto-recurses with the continuation prompt
 - **`max_tokens` stop reason**: Falls through to continuation logic (not silently truncated)
@@ -135,7 +135,7 @@ This means:
 
 ## Token Counting & Context Overflow
 
-The orchestrator accumulates token usage across turns:
+The Session accumulates token usage across turns:
 
 ```typescript
 usage: {

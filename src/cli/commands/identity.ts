@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { SecretVault } from '../../core/secret-vault.js';
 import { RunHistory } from '../../core/run-history.js';
@@ -18,7 +18,7 @@ import { spinner } from '../cli-state.js';
 import { loadAliases, saveAliases } from '../cli-helpers.js';
 import type { CLICtx } from './types.js';
 
-export async function handleAlias(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleAlias(parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   const aliasSub = parts[1];
 
   // /alias list (or no args)
@@ -65,10 +65,10 @@ export async function handleAlias(parts: string[], _nodyn: Nodyn, ctx: CLICtx): 
   return true;
 }
 
-export async function handleGoogle(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleGoogle(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const googleSub = parts[1];
   if (googleSub === 'auth') {
-    const googleAuth = nodyn.getGoogleAuth();
+    const googleAuth = session.getGoogleAuth();
     if (!googleAuth) {
       ctx.stdout.write(`${RED}Google Workspace not configured.${RESET}\n`);
       ctx.stdout.write(`${DIM}Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in env or ~/.nodyn/config.json${RESET}\n`);
@@ -92,7 +92,7 @@ export async function handleGoogle(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
       ctx.stdout.write(`${RED}Auth failed: ${getErrorMessage(e)}${RESET}\n`);
     }
   } else if (googleSub === 'status') {
-    const googleAuth = nodyn.getGoogleAuth();
+    const googleAuth = session.getGoogleAuth();
     if (!googleAuth) {
       ctx.stdout.write(`${DIM}Google Workspace not configured.${RESET}\n`);
       return true;
@@ -111,7 +111,7 @@ export async function handleGoogle(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
       }
     }
   } else if (googleSub === 'disconnect') {
-    const googleAuth = nodyn.getGoogleAuth();
+    const googleAuth = session.getGoogleAuth();
     if (!googleAuth) {
       ctx.stdout.write(`${DIM}Google Workspace not configured.${RESET}\n`);
       return true;
@@ -127,7 +127,7 @@ export async function handleGoogle(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
   return true;
 }
 
-export async function handleVault(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleVault(parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   const vaultSub = parts[1];
   if (!vaultSub || vaultSub === 'status') {
     const hasKey = !!process.env['NODYN_VAULT_KEY'];
@@ -262,9 +262,9 @@ export async function handleVault(parts: string[], _nodyn: Nodyn, ctx: CLICtx): 
   return true;
 }
 
-export async function handleSecret(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleSecret(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const secretSub = parts[1];
-  const store = nodyn.getSecretStore();
+  const store = session.getSecretStore();
   if (!store) {
     ctx.stdout.write(`${RED}SecretStore not initialized.${RESET}\n`);
     return true;
@@ -334,12 +334,12 @@ export async function handleSecret(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
   return true;
 }
 
-export async function handlePlugin(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handlePlugin(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const pluginSub = parts[1];
 
   if (!pluginSub || pluginSub === 'list') {
     const installed = PluginManager.listInstalled();
-    const pm = nodyn.getPluginManager();
+    const pm = session.getPluginManager();
     const loaded = pm ? pm.getLoadedPluginNames() : [];
     if (installed.length === 0 && loaded.length === 0) {
       ctx.stdout.write(`No plugins installed. Use ${BLUE}/plugin add <name>${RESET} to install one.\n`);

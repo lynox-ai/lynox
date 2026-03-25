@@ -5,7 +5,7 @@
  * extracted command modules can read/write them via a single import.
  */
 
-import type { Nodyn } from '../core/orchestrator.js';
+import type { Session } from '../core/session.js';
 import { MODEL_MAP } from '../types/index.js';
 import { Spinner, PROMPT_READY } from './spinner.js';
 import { MarkdownStreamer } from './markdown.js';
@@ -21,7 +21,7 @@ export const state = {
   responseStarted: false,
   currentModelId: MODEL_MAP['sonnet'],
   cliPrompt: null as ((question: string, options?: string[]) => Promise<string>) | null,
-  activeNodyn: null as InstanceType<typeof Nodyn> | null,
+  activeSession: null as Session | null,
   thinkingStarted: false,
   showThinkingRendered: false,
   pipeSummaryEnabled: false,

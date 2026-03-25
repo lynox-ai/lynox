@@ -1,8 +1,11 @@
 // === Telegram Session Store ===
 // Per-chat conversation persistence + serialized run queue.
 // Each chat maintains its own message history (sliding window),
-// swapped in/out of the shared Nodyn instance between runs.
+// swapped in/out of the shared Session instance between runs.
 // Runs are serialized across all chats to prevent handler corruption.
+//
+// Future: when Engine is passed to the bot directly, each chat
+// can have its own Session — eliminating the message swap pattern.
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -22,7 +25,7 @@ interface ChatSession {
   trimNotified: boolean;
 }
 
-/** Minimal interface for the Nodyn methods we need. */
+/** Minimal interface for the Session methods we need. */
 export interface SessionNodyn {
   reset(): void;
   saveMessages(): unknown[];

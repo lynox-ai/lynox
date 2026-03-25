@@ -249,10 +249,10 @@ All tools are available to the agent and sub-agents.
 
 ## Disabling Knowledge
 
-Pass `memory: false` in `NodynConfig`:
+Pass `memory: false` in `EngineConfig`:
 
 ```typescript
-const nodyn = new Nodyn({ memory: false });
+const engine = new Engine({ memory: false });
 ```
 
 ## Implementation Details
@@ -265,7 +265,7 @@ const nodyn = new Nodyn({ memory: false });
 - **`EntityExtractor`** (`src/core/entity-extractor.ts`) — Tier 1 regex (DE/EN), Tier 2 optional Haiku
 - **`EntityResolver`** (`src/core/entity-resolver.ts`) — Canonical name resolution, alias merge
 - **`ContradictionDetector`** (`src/core/contradiction-detector.ts`) — Heuristic contradiction checks for knowledge/learnings
-- **Wiring**: Orchestrator initializes `KnowledgeLayer` at startup, routes knowledge retrieval and `memoryStore` channel through it
+- **Wiring**: Engine initializes `KnowledgeLayer` at startup, routes knowledge retrieval and `memoryStore` channel through it
 
 ### Flat-file storage (dual-write)
 
@@ -279,6 +279,6 @@ const nodyn = new Nodyn({ memory: false });
 ### Shared infrastructure
 
 - **Embedding providers**: `src/core/embedding.ts` — `OnnxProvider` (model registry: multilingual-e5-small default), `VoyageProvider`, `LocalProvider`
-- **Embedding queue**: Orchestrator uses bounded concurrency (max 3 parallel) for stores, with failures logged
+- **Embedding queue**: Engine uses bounded concurrency (max 3 parallel) for stores, with failures logged
 - **Observability**: `nodyn:memory:store` (every write), `nodyn:knowledge:graph` (graph events), `nodyn:knowledge:entity` (entity events)
 - **Docker**: HF model cache persisted via `nodyn-hf-cache` volume at `/home/nodyn/.cache/huggingface`

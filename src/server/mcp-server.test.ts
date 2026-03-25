@@ -11,16 +11,24 @@ const mockConnect = vi.fn().mockResolvedValue(undefined);
 const mockRegisterTool = vi.fn();
 const mockSessionSend = vi.fn().mockResolvedValue('Agent response');
 const mockAbort = vi.fn();
-const mockAgentInstance = { send: mockSessionSend, abort: mockAbort, onStream: null as unknown, promptUser: undefined as unknown };
-const mockGetOrCreate = vi.fn().mockReturnValue(mockAgentInstance);
-const mockSessionGet = vi.fn().mockReturnValue(mockAgentInstance);
+const mockAgentInstance = { send: mockSessionSend, abort: mockAbort, onStream: null as unknown, promptUser: undefined as unknown, currentRunId: undefined as string | undefined };
+// Session mock — mcp-server.ts calls session.run(), session.getAgent(), session.onStream, session.promptUser, session.abort()
+const mockSessionInstance = {
+  run: mockSessionSend,
+  abort: mockAbort,
+  getAgent: vi.fn().mockReturnValue(mockAgentInstance),
+  onStream: null as unknown,
+  promptUser: null as unknown,
+};
+const mockGetOrCreate = vi.fn().mockReturnValue(mockSessionInstance);
+const mockSessionGet = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionReset = vi.fn();
 const mockBatchRetrieve = vi.fn().mockResolvedValue({
   processing_status: 'ended',
   request_counts: { processing: 0, succeeded: 5, errored: 0, canceled: 0, expired: 0 },
 });
-const mockNodynInit = vi.fn().mockResolvedValue(undefined);
-const mockNodynBatch = vi.fn().mockResolvedValue('batch-123');
+const mockEngineInit = vi.fn().mockResolvedValue(undefined);
+const mockEngineBatch = vi.fn().mockResolvedValue('batch-123');
 const mockMemoryLoad = vi.fn().mockResolvedValue('some memory content');
 
 vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => ({
@@ -44,10 +52,10 @@ vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
   }),
 }));
 
-vi.mock('../core/orchestrator.js', () => ({
-  Nodyn: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
-    this.init = mockNodynInit;
-    this.batch = mockNodynBatch;
+vi.mock('../core/engine.js', () => ({
+  Engine: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
+    this.init = mockEngineInit.mockReturnValue(Promise.resolve(this));
+    this.batch = mockEngineBatch;
     this.getMemory = vi.fn().mockReturnValue({ load: mockMemoryLoad });
     this.getRegistry = vi.fn().mockReturnValue({ getEntries: vi.fn().mockReturnValue([]) });
     this.getApiConfig = vi.fn().mockReturnValue({});
@@ -120,11 +128,11 @@ describe('NodynMCPServer', () => {
   });
 
   describe('init', () => {
-    it('creates and initializes Nodyn instance', async () => {
+    it('creates and initializes Engine instance', async () => {
       const server = new NodynMCPServer(makeConfig());
       await server.init();
-      const { Nodyn } = await import('../core/orchestrator.js');
-      expect(Nodyn).toHaveBeenCalled();
+      const { Engine } = await import('../core/engine.js');
+      expect(Engine).toHaveBeenCalled();
     });
   });
 
@@ -245,7 +253,7 @@ describe('NodynMCPServer', () => {
         await server.init();
         const handler = capturedHandlers.get('nodyn_run_start')!;
         await handler({ task: 'task' });
-        expect(mockAgentInstance.onStream).not.toBeNull();
+        expect(mockSessionInstance.onStream).not.toBeNull();
       });
 
       it('rejects a second active run for the same session', async () => {
@@ -299,7 +307,7 @@ describe('NodynMCPServer', () => {
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
 
         // Simulate onStream receiving text chunks
-        const streamFn = mockAgentInstance.onStream as (e: { type: string; text: string; agent: string }) => Promise<void>;
+        const streamFn = mockSessionInstance.onStream as (e: { type: string; text: string; agent: string }) => Promise<void>;
         await streamFn({ type: 'text', text: 'Hello ', agent: 'test' });
         await streamFn({ type: 'text', text: 'world', agent: 'test' });
 
@@ -337,7 +345,7 @@ describe('NodynMCPServer', () => {
         const startResult = await startHandler({ task: 'large stream', session_id: testSid }) as { content: { text: string }[] };
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
 
-        const streamFn = mockAgentInstance.onStream as (e: { type: string; text: string; agent: string }) => Promise<void>;
+        const streamFn = mockSessionInstance.onStream as (e: { type: string; text: string; agent: string }) => Promise<void>;
         const largeChunk = 'x'.repeat(900_000);
         await streamFn({ type: 'text', text: largeChunk, agent: 'test' });
         await streamFn({ type: 'text', text: largeChunk, agent: 'test' });
@@ -369,7 +377,7 @@ describe('NodynMCPServer', () => {
         const startResult = await start1({ task: 'persist me', session_id: 'sess-persisted' }) as { content: { text: string }[] };
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
 
-        const streamFn = mockAgentInstance.onStream as (e: { type: string; text: string; agent: string }) => Promise<void>;
+        const streamFn = mockSessionInstance.onStream as (e: { type: string; text: string; agent: string }) => Promise<void>;
         await streamFn({ type: 'text', text: 'persisted text', agent: 'test' });
         resolveRun();
         await new Promise((r) => setTimeout(r, 10));
@@ -457,7 +465,7 @@ describe('NodynMCPServer', () => {
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
 
         // Simulate agent calling promptUser with constrained options
-        const promptFn = mockAgentInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
+        const promptFn = mockSessionInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
         void promptFn('Allow?', ['Allow', 'Deny']);
 
         const replyHandler = capturedHandlers.get('nodyn_reply')!;
@@ -489,7 +497,7 @@ describe('NodynMCPServer', () => {
         await startHandler({ task: 'awaiting input', session_id: testSid1 });
 
         // Simulate agent calling promptUser
-        const promptFn = mockAgentInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
+        const promptFn = mockSessionInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
         const answerPromise = promptFn('Proceed?', ['yes', 'no']);
 
         const replyHandler = capturedHandlers.get('nodyn_reply')!;
@@ -499,7 +507,7 @@ describe('NodynMCPServer', () => {
         const { run_id } = JSON.parse(startResult2.content[0]!.text) as { run_id: string };
 
         // The second run has the pendingInput; set it up
-        const promptFn2 = mockAgentInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
+        const promptFn2 = mockSessionInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
         const answerPromise2 = promptFn2('Ready?', ['ok']);
 
         const replyResult = await replyHandler({ run_id, session_id: testSid2, answer: 'ok' }) as { content: { text: string }[] };
@@ -530,7 +538,7 @@ describe('NodynMCPServer', () => {
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
 
         // Simulate agent pausing via promptUser
-        const promptFn = mockAgentInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
+        const promptFn = mockSessionInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
         void promptFn('Allow bash command?', ['Allow', 'Deny']);
 
         const pollHandler = capturedHandlers.get('nodyn_poll')!;

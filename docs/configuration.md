@@ -60,9 +60,9 @@ On first run without an API key (TTY mode), a streamlined wizard guides through 
 
 After setup, a **business profile onboarding** asks 4 optional questions (business type, tools, reporting, pain points). Stored in `~/.nodyn/memory/_global/facts.txt`. Re-run with `/profile update`.
 
-## NodynConfig
+## NodynConfig (Engine)
 
-Top-level configuration for the `Nodyn` orchestrator:
+Top-level configuration for the `Engine` singleton:
 
 ```typescript
 interface NodynConfig {
@@ -77,6 +77,36 @@ interface NodynConfig {
   promptTabs?:   Function;        // Multi-question dialog callback
 }
 ```
+
+## SessionOptions
+
+Per-session configuration for `engine.createSession()`:
+
+```typescript
+interface SessionOptions {
+  model?:              ModelTier;       // Override engine default
+  effort?:             EffortLevel;     // Override engine default
+  thinking?:           ThinkingMode;    // Override engine default
+  autonomy?:           AutonomyLevel;   // 'supervised' | 'guided' | 'autonomous'
+  briefing?:           string;          // Initial session briefing
+  systemPromptSuffix?: string;          // Appended to system prompt
+}
+```
+
+Session-level settings mutated via `session.setModel()`, `session.setEffort()`, `session.setThinking()` only affect that session, not the engine or other sessions.
+
+## Worker Configuration
+
+The WorkerLoop runs automatically in server modes (Telegram, MCP) where an Engine is long-lived. It executes scheduled, watch, and pipeline background tasks.
+
+| Setting | Value | Location |
+|---------|-------|----------|
+| Tick interval | 60s | `core/worker-loop.ts` |
+| Task timeout | 5min (300,000ms) | `core/constants.ts` (`DEFAULT_TASK_TIMEOUT_MS`) |
+| Max iterations per task | 30 | `core/constants.ts` (`WORKER_MAX_ITERATIONS`) |
+| Retry backoff | 1min to 30min cap | exponential |
+
+The WorkerLoop is started on `engine.init()` and stopped on `engine.shutdown()`.
 
 ## AgentConfig
 
@@ -107,7 +137,7 @@ interface AgentConfig {
   autonomy?:         AutonomyLevel;  // 'supervised' | 'guided' | 'autonomous'
   preApproval?:      PreApprovalSet; // Pre-approval patterns for autonomous modes
   audit?:            PreApproveAuditLike; // Audit trail for pre-approval decisions
-  knowledgeContext?: string;         // Knowledge context (set by orchestrator, not user)
+  knowledgeContext?: string;         // Knowledge context (set by Session, not user)
   changesetManager?: ChangesetManagerLike; // Changeset manager for backup-before-write mode
 }
 ```
@@ -208,15 +238,15 @@ Manage via `/plugin add|remove|list`.
 Register external MCP servers either in config or at runtime:
 
 ```typescript
-// In NodynConfig
-const nodyn = new Nodyn({
+// In NodynConfig (passed to Engine)
+const engine = new Engine({
   mcpServers: [
     { type: 'url', name: 'my-server', url: 'http://localhost:8080' }
   ],
 });
 
 // At runtime
-nodyn.addMCP({ type: 'url', name: 'my-server', url: 'http://localhost:8080' });
+engine.addMCP({ type: 'url', name: 'my-server', url: 'http://localhost:8080' });
 ```
 
 Or via CLI:

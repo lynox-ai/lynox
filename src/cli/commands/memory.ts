@@ -2,7 +2,7 @@
  * Memory-related CLI commands: /memory, /scope, /knowledge
  */
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import type { MemoryNamespace } from '../../types/index.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { runMemoryGc } from '../../core/memory-gc.js';
@@ -10,10 +10,10 @@ import { renderTable, BOLD, DIM, GREEN, RED, RESET } from '../ui.js';
 import { VALID_NAMESPACES } from '../help-text.js';
 import type { CLICtx } from './types.js';
 
-export async function handleKnowledge(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleKnowledge(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const knowSub = parts[1];
-  const rh = nodyn.getRunHistory();
-  const ctxObj = nodyn.getContext();
+  const rh = session.getRunHistory();
+  const ctxObj = session.getContext();
   if (!rh) { ctx.stdout.write('Run history not available.\n'); return true; }
   const pid = ctxObj?.id ?? '';
 
@@ -37,9 +37,9 @@ export async function handleKnowledge(parts: string[], nodyn: Nodyn, ctx: CLICtx
   return true;
 }
 
-export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleScope(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const sub = parts[1];
-  const scopes = nodyn.getActiveScopes();
+  const scopes = session.getActiveScopes();
 
   if (!sub || sub === 'info') {
     // Show active scopes for current session
@@ -48,7 +48,7 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     } else {
       ctx.stdout.write(`${BOLD}Active memory scopes:${RESET}\n`);
       const { SCOPE_WEIGHTS: SW } = await import('../../types/index.js');
-      const history = nodyn.getRunHistory();
+      const history = session.getRunHistory();
       for (const s of scopes) {
         const label = s.type === 'global' ? 'global' : `${s.type}:${s.id}`;
         let parentInfo = '';
@@ -58,12 +58,12 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
         }
         ctx.stdout.write(`  ${GREEN}${label}${RESET} ${DIM}(weight: ${SW[s.type]}${parentInfo})${RESET}\n`);
       }
-      const uid = nodyn.getUserId();
+      const uid = session.getUserId();
       if (uid) ctx.stdout.write(`\n${DIM}User ID: ${uid}${RESET}\n`);
     }
   } else if (sub === 'list') {
     // List all registered scopes from SQLite
-    const history = nodyn.getRunHistory();
+    const history = session.getRunHistory();
     if (!history) {
       ctx.stdout.write(`${DIM}No run history available.${RESET}\n`);
     } else {
@@ -83,7 +83,7 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     if (!type || (type !== 'global' && !id)) {
       ctx.stdout.write(`Usage: /scope create <user|project|organization|client|global> [id] [--parent <id>]\n`);
     } else {
-      const history = nodyn.getRunHistory();
+      const history = session.getRunHistory();
       if (!history) {
         ctx.stdout.write(`${DIM}No run history available.${RESET}\n`);
       } else {
@@ -99,7 +99,7 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     }
   } else if (sub === 'tree') {
     const rootId = parts[2] ?? 'global';
-    const history = nodyn.getRunHistory();
+    const history = session.getRunHistory();
     if (!history) {
       ctx.stdout.write(`${DIM}No run history available.${RESET}\n`);
     } else {
@@ -115,7 +115,7 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
       }
     }
   } else if (sub === 'overrides') {
-    const mem = nodyn.getMemory();
+    const mem = session.getMemory();
     if (!mem) {
       ctx.stdout.write(`${DIM}Memory not configured.${RESET}\n`);
     } else {
@@ -154,7 +154,7 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
       if (!ref) {
         ctx.stdout.write(`${RED}Invalid scope format: ${scopeStr}${RESET}\n`);
       } else {
-        const mem = nodyn.getMemory();
+        const mem = session.getMemory();
         if (!mem) {
           ctx.stdout.write(`${DIM}Memory not configured.${RESET}\n`);
         } else {
@@ -175,7 +175,7 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     }
   } else if (sub === 'stats') {
     // Show per-scope memory counts, average age, last updated
-    const mem = nodyn.getMemory();
+    const mem = session.getMemory();
     if (!mem) {
       ctx.stdout.write(`${DIM}Memory not configured.${RESET}\n`);
     } else {
@@ -190,7 +190,7 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
           }
         }
         // Check embedding count from history
-        const history = nodyn.getRunHistory();
+        const history = session.getRunHistory();
         let embCount = 0;
         if (history) {
           const embs = history.getEmbeddingsByScope(s.type, s.id);
@@ -218,7 +218,7 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
       } else if (!imsCheck(fromRef.type, toRef.type)) {
         ctx.stdout.write(`${RED}Source must be more specific than target.${RESET}\n`);
       } else {
-        const mem = nodyn.getMemory();
+        const mem = session.getMemory();
         if (!mem) {
           ctx.stdout.write(`${DIM}Memory not configured.${RESET}\n`);
         } else {
@@ -243,17 +243,17 @@ export async function handleScope(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
   return true;
 }
 
-export async function handleMemory(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleMemory(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const ns = parts[1];
-  const mem = nodyn.getMemory();
+  const mem = session.getMemory();
   if (!mem) {
     ctx.stdout.write('Memory is not configured.\n');
     return true;
   }
   if (ns === 'cleanup' || ns === 'gc') {
-    const provider = nodyn.getEmbeddingProvider();
-    const history = nodyn.getRunHistory();
-    const scopes = nodyn.getActiveScopes();
+    const provider = session.getEmbeddingProvider();
+    const history = session.getRunHistory();
+    const scopes = session.getActiveScopes();
     if (!provider || !history) {
       ctx.stdout.write('Memory GC requires embedding provider and run history.\n');
       return true;
@@ -279,10 +279,10 @@ export async function handleMemory(parts: string[], nodyn: Nodyn, ctx: CLICtx): 
   }
   // Delegate to embedded subcommands
   if (ns === 'embeddings') {
-    return handleKnowledge(['', ...parts.slice(2)], nodyn, ctx);
+    return handleKnowledge(['', ...parts.slice(2)], session, ctx);
   }
   if (ns === 'scope') {
-    return handleScope(['', ...parts.slice(2)], nodyn, ctx);
+    return handleScope(['', ...parts.slice(2)], session, ctx);
   }
   if (ns && VALID_NAMESPACES.has(ns)) {
     const content = await mem.load(ns as MemoryNamespace);

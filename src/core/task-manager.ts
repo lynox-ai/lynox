@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TaskStatus, TaskPriority, MemoryScopeRef } from '../types/index.js';
+import { isValidCron, nextOccurrence } from './cron-parser.js';
 
 export interface TaskCreateParams {
   title: string;
@@ -12,6 +13,13 @@ export interface TaskCreateParams {
   dueDate?: string | undefined;
   tags?: string[] | undefined;
   parentTaskId?: string | undefined;
+  scheduleCron?: string | undefined;
+  nextRunAt?: string | undefined;
+  taskType?: string | undefined;
+  watchConfig?: string | undefined;
+  maxRetries?: number | undefined;
+  notificationChannel?: string | undefined;
+  pipelineId?: string | undefined;
 }
 
 export interface TaskUpdateParams {
@@ -55,6 +63,15 @@ export class TaskManager {
       throw new Error(`Invalid due_date format: ${params.dueDate}. Use YYYY-MM-DD.`);
     }
 
+    // Auto-trigger: if assigned to nodyn with no explicit schedule/watch,
+    // set nextRunAt = now so WorkerLoop picks it up immediately.
+    let resolvedNextRunAt = params.nextRunAt;
+    let resolvedTaskType = params.taskType;
+    if (params.assignee === 'nodyn' && !params.scheduleCron && !params.watchConfig && !params.nextRunAt) {
+      resolvedNextRunAt = new Date().toISOString();
+      resolvedTaskType = resolvedTaskType ?? 'manual';
+    }
+
     this.history.insertTask({
       id,
       title: params.title,
@@ -66,6 +83,13 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
+      scheduleCron: params.scheduleCron,
+      nextRunAt: resolvedNextRunAt,
+      taskType: resolvedTaskType,
+      watchConfig: params.watchConfig,
+      maxRetries: params.maxRetries,
+      notificationChannel: params.notificationChannel,
+      pipelineId: params.pipelineId,
     });
 
     return this.history.getTask(id)!;
@@ -243,4 +267,149 @@ export class TaskManager {
     const scopeArr = scopes?.map(s => ({ type: s.type, id: s.id }));
     return this.history.getTasksDueInRange(start, end, scopeArr);
   }
+
+  // ---------------------------------------------------------------------------
+  // Scheduling CRUD
+  // ---------------------------------------------------------------------------
+
+  /** Create a scheduled recurring task. Sets task_type='scheduled', assignee='nodyn', computes next_run_at. */
+  createScheduled(params: TaskCreateParams & {
+    scheduleCron: string;
+    maxRetries?: number | undefined;
+    notificationChannel?: string | undefined;
+  }): TaskRecord {
+    if (!isValidCron(params.scheduleCron)) {
+      throw new Error(`Invalid cron expression: ${params.scheduleCron}`);
+    }
+
+    const nextRun = nextOccurrence(params.scheduleCron);
+
+    return this.create({
+      ...params,
+      assignee: 'nodyn',
+      taskType: 'scheduled',
+      scheduleCron: params.scheduleCron,
+      nextRunAt: nextRun.toISOString(),
+      maxRetries: params.maxRetries,
+      notificationChannel: params.notificationChannel,
+    });
+  }
+
+  /** Create a pipeline task. Sets task_type='pipeline', assignee='nodyn'. Optionally recurring via scheduleCron. */
+  createPipelineTask(params: TaskCreateParams & {
+    pipelineId: string;
+    scheduleCron?: string | undefined;
+    maxRetries?: number | undefined;
+  }): TaskRecord {
+    if (params.scheduleCron) {
+      if (!isValidCron(params.scheduleCron)) {
+        throw new Error(`Invalid cron expression: ${params.scheduleCron}`);
+      }
+      const nextRun = nextOccurrence(params.scheduleCron);
+      return this.create({
+        ...params,
+        assignee: 'nodyn',
+        taskType: 'pipeline',
+        pipelineId: params.pipelineId,
+        scheduleCron: params.scheduleCron,
+        nextRunAt: nextRun.toISOString(),
+        maxRetries: params.maxRetries,
+      });
+    }
+
+    return this.create({
+      ...params,
+      assignee: 'nodyn',
+      taskType: 'pipeline',
+      pipelineId: params.pipelineId,
+      maxRetries: params.maxRetries,
+    });
+  }
+
+  /** Create a watch/monitor task. Sets task_type='watch', assignee='nodyn', computes next_run_at from interval. */
+  createWatch(params: TaskCreateParams & {
+    watchUrl: string;
+    watchIntervalMinutes?: number | undefined;
+    watchSelector?: string | undefined;
+    notificationChannel?: string | undefined;
+  }): TaskRecord {
+    const intervalMinutes = params.watchIntervalMinutes ?? 60;
+
+    const watchConfig = JSON.stringify({
+      url: params.watchUrl,
+      interval_minutes: intervalMinutes,
+      selector: params.watchSelector ?? null,
+    });
+
+    return this.create({
+      ...params,
+      assignee: 'nodyn',
+      taskType: 'watch',
+      watchConfig,
+      nextRunAt: new Date(Date.now() + intervalMinutes * 60_000).toISOString(),
+      notificationChannel: params.notificationChannel,
+    });
+  }
+
+  /** Get tasks due for execution (next_run_at <= now, not completed). */
+  getDueTasks(): TaskRecord[] {
+    return this.history.getDueTasks();
+  }
+
+  /** Update the watch_config JSON for a watch task (e.g. to store last_hash). */
+  updateWatchConfig(id: string, config: Record<string, unknown>): void {
+    this.history.updateTaskWatchConfig(id, JSON.stringify(config));
+  }
+
+  /** Record the result of a worker task execution. Updates last_run_at, result, status, and optionally next_run_at for recurring tasks. */
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout'): void {
+    const task = this.history.getTask(id);
+    if (!task) {
+      throw new Error(`Task not found: ${id}`);
+    }
+
+    const now = new Date();
+    const truncatedResult = result.length > MAX_RUN_RESULT_CHARS
+      ? result.slice(0, MAX_RUN_RESULT_CHARS)
+      : result;
+
+    // Determine next_run_at based on task type
+    let nextRunAt: string | undefined;
+    let retryCount: number | undefined;
+
+    if (task.schedule_cron) {
+      // Recurring cron task — always compute next run
+      nextRunAt = nextOccurrence(task.schedule_cron, now).toISOString();
+      // Reset retry count on success
+      if (status === 'success') retryCount = 0;
+    } else if (task.watch_config) {
+      // Watch task — compute next run from interval
+      const config = JSON.parse(task.watch_config) as { interval_minutes: number };
+      nextRunAt = new Date(now.getTime() + config.interval_minutes * 60_000).toISOString();
+      // Reset retry count on success
+      if (status === 'success') retryCount = 0;
+    } else if (
+      (status === 'failed' || status === 'timeout')
+      && task.max_retries
+      && (task.retry_count ?? 0) < task.max_retries
+    ) {
+      // Retry with exponential backoff if retries remaining
+      retryCount = (task.retry_count ?? 0) + 1;
+      const backoffMs = Math.min(60_000 * Math.pow(2, retryCount - 1), 30 * 60_000); // 1m, 2m, 4m... cap 30m
+      nextRunAt = new Date(now.getTime() + backoffMs).toISOString();
+    } else if (status === 'success') {
+      // One-shot background task — mark as completed on success
+      this.history.updateTask(id, { status: 'completed', completedAt: now.toISOString() });
+    }
+
+    this.history.updateTaskRunResult(id, {
+      lastRunAt: now.toISOString(),
+      lastRunResult: truncatedResult,
+      lastRunStatus: status,
+      nextRunAt,
+      retryCount,
+    });
+  }
 }
+
+const MAX_RUN_RESULT_CHARS = 10_000;
