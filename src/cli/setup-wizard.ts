@@ -297,15 +297,14 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<NodynUserC
         const chatId = await detectTelegramChatId(telegramToken);
         if (chatId !== null) {
           telegramChatIds = [chatId];
-          const moreIds = await rl.question(`  ${DIM}More chat IDs? (comma-separated, or Enter):${RESET} `);
-          if (moreIds.trim()) {
-            telegramChatIds.push(...moreIds.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n)));
-          }
           stdout.write(`  ${GREEN}✓${RESET} Telegram ready.\n`);
         } else {
-          const manual = await rl.question(`  ${BOLD}Chat ID:${RESET} `);
-          if (manual.trim()) {
-            telegramChatIds = manual.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n));
+          const manual = (await rl.question(`  ${BOLD}Chat ID:${RESET} `)).trim();
+          if (manual) {
+            const parsed = parseInt(manual, 10);
+            if (Number.isFinite(parsed)) {
+              telegramChatIds = [parsed];
+            }
           }
           stdout.write(telegramChatIds?.length
             ? `  ${GREEN}✓${RESET} Telegram ready.\n`
