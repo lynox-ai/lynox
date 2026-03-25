@@ -266,6 +266,8 @@ Switch modes at runtime with `/mode` (interactive select) or directly with `/mod
 
 Autopilot and background modes require `--goal` and `--budget`. Watchdog and background require triggers.
 
+> **Scheduling note:** For simple recurring or one-shot background work, use `task_create` with `schedule` (or `watch_url` / `pipeline_id`) — no mode switch needed. The agent recognizes natural language scheduling intents (e.g. "Every morning check...", "Research X and get back to me") and creates the appropriate background task automatically. `/mode background` is for complex daemon scenarios that require persistent triggers, heartbeat monitoring, and full mode configuration.
+
 ### Pre-Approval
 
 Use `--pre-approve` to auto-approve bash commands matching glob patterns in any mode:
@@ -422,7 +424,7 @@ Shows a week overview: overdue, due today, due this week, and in progress tasks.
 
 ### Agent Tools
 
-The agent has 3 task tools (`task_create`, `task_update`, `task_list`) and is instructed to use them when users mention tasks, deadlines, or deliverables. The system prompt guides proactive task creation.
+The agent has 3 task tools (`task_create`, `task_update`, `task_list`) and is instructed to use them when users mention tasks, deadlines, or deliverables. The system prompt includes intent recognition for background tasks — natural language triggers in DE/EN (e.g. "Do this and get back to me", "Every Monday at 9am...", "Watch this website", "Remind me next week") are mapped to `task_create` with the appropriate fields (`assignee`, `schedule`, `watch_url`, `pipeline_id`). The agent also proactively offers to run long tasks in the background. Background tasks can ask questions via `ask_user` — the user is notified and the task pauses until they respond.
 
 ### Briefing Integration
 
