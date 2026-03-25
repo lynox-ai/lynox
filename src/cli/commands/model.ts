@@ -2,7 +2,7 @@
  * Model-related CLI commands: /model, /accuracy, /cost, /context
  */
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import type { ModelTier } from '../../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../../types/index.js';
 import { renderTable, BOLD, DIM, GREEN, RED, RESET } from '../ui.js';
@@ -11,9 +11,9 @@ import { printCost } from '../cli-helpers.js';
 import { MODEL_ALIASES } from '../help-text.js';
 import type { CLICtx } from './types.js';
 
-export async function handleModel(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleModel(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const modelArg = parts[1]?.toLowerCase();
-  const currentTier = nodyn.getModelTier();
+  const currentTier = session.getModelTier();
   const tierLabels: Record<ModelTier, string> = {
     'opus': 'Opus', 'sonnet': 'Sonnet', 'haiku': 'Haiku',
   };
@@ -37,7 +37,7 @@ export async function handleModel(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
       const tier = idx >= 0 ? tiers[idx]! : MODEL_ALIASES[answer.toLowerCase()];
       const selected = tier ?? currentTier;
       if (selected !== currentTier) {
-        const resolved = nodyn.setModel(selected);
+        const resolved = session.setModel(selected);
         state.currentModelId = resolved;
         ctx.stdout.write(`${GREEN}✓${RESET} Switched to ${BOLD}${tierLabels[selected]}${RESET} (${resolved})\n`);
       } else {
@@ -54,7 +54,7 @@ export async function handleModel(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     } else if (tier === currentTier) {
       ctx.stdout.write(`Already using ${BOLD}${tierLabels[currentTier]}${RESET}.\n`);
     } else {
-      const resolved = nodyn.setModel(tier);
+      const resolved = session.setModel(tier);
       state.currentModelId = resolved;
       ctx.stdout.write(`${GREEN}✓${RESET} Switched to ${BOLD}${tierLabels[tier]}${RESET} (${resolved})\n`);
     }
@@ -62,13 +62,13 @@ export async function handleModel(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
   return true;
 }
 
-export async function handleAccuracy(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleAccuracy(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const sub = parts[1]?.toLowerCase();
   const effortLevels = ['low', 'medium', 'high', 'max'] as const;
 
   // Direct shorthand: /thinking low, /thinking max, etc.
   if (sub && effortLevels.includes(sub as typeof effortLevels[number])) {
-    nodyn.setEffort(sub as typeof effortLevels[number]);
+    session.setEffort(sub as typeof effortLevels[number]);
     ctx.stdout.write(`${GREEN}✓${RESET} Accuracy set to ${BOLD}${sub}${RESET}\n`);
     return true;
   }
@@ -79,7 +79,7 @@ export async function handleAccuracy(parts: string[], nodyn: Nodyn, ctx: CLICtx)
   }
 
   // No arg or unknown: interactive select
-  const currentEffort = nodyn.getEffort();
+  const currentEffort = session.getEffort();
   const options = effortLevels.map(l => {
     const desc = l === 'low' ? 'quick' : l === 'medium' ? 'balanced' : l === 'high' ? 'thorough' : 'exhaustive';
     return l === currentEffort ? `${l} — ${desc}  current` : `${l} — ${desc}`;
@@ -92,7 +92,7 @@ export async function handleAccuracy(parts: string[], nodyn: Nodyn, ctx: CLICtx)
     if (idx >= 0) {
       const selected = effortLevels[idx]!;
       if (selected !== currentEffort) {
-        nodyn.setEffort(selected);
+        session.setEffort(selected);
         ctx.stdout.write(`${GREEN}✓${RESET} Accuracy set to ${BOLD}${selected}${RESET}\n`);
       } else {
         ctx.stdout.write(`Already using ${BOLD}${currentEffort}${RESET}.\n`);
@@ -108,10 +108,10 @@ export async function handleAccuracy(parts: string[], nodyn: Nodyn, ctx: CLICtx)
   return true;
 }
 
-export async function handleCost(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleCost(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const costSub = parts[1];
-  const history = nodyn.getRunHistory();
-  const model = MODEL_MAP[nodyn.getModelTier()];
+  const history = session.getRunHistory();
+  const model = MODEL_MAP[session.getModelTier()];
 
   if (costSub === 'today' && history) {
     const days = history.getCostByDay(1);
@@ -134,14 +134,14 @@ export async function handleCost(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
       ctx.stdout.write(renderTable(['Model', 'Cost', 'Runs'], rows) + '\n');
     }
   } else {
-    printCost(nodyn, model, ctx.stdout);
+    printCost(session, model, ctx.stdout);
   }
   return true;
 }
 
-export async function handleContext(_parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleContext(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const maxCtx = CONTEXT_WINDOW[state.currentModelId] ?? 200_000;
-  const u = nodyn.usage;
+  const u = session.usage;
   const inTok = u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;
   const pctRaw = Math.min(100, (inTok / maxCtx) * 100);
   const pct = Math.round(pctRaw * 10) / 10;

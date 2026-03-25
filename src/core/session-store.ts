@@ -1,19 +1,20 @@
-import { Agent } from './agent.js';
-import type { AgentConfig } from '../types/index.js';
+import type { Session } from './session.js';
+import type { Engine } from './engine.js';
+import type { SessionOptions } from './session.js';
 
 export class SessionStore {
-  private readonly sessions = new Map<string, Agent>();
+  private readonly sessions = new Map<string, Session>();
 
-  getOrCreate(sessionId: string, config: AgentConfig): Agent {
-    let agent = this.sessions.get(sessionId);
-    if (!agent) {
-      agent = new Agent(config);
-      this.sessions.set(sessionId, agent);
+  getOrCreate(sessionId: string, engine: Engine, opts?: SessionOptions): Session {
+    let session = this.sessions.get(sessionId);
+    if (!session) {
+      session = engine.createSession(opts);
+      this.sessions.set(sessionId, session);
     }
-    return agent;
+    return session;
   }
 
-  get(sessionId: string): Agent | undefined {
+  get(sessionId: string): Session | undefined {
     return this.sessions.get(sessionId);
   }
 

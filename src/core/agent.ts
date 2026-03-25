@@ -184,9 +184,13 @@ export class Agent implements IAgent {
     return this._msgLenCache;
   }
 
-  async send(userMessage: string): Promise<string> {
+  async send(userMessage: string | unknown[]): Promise<string> {
     const snapshot = this.messages.length;
-    this.messages.push({ role: 'user', content: userMessage });
+    // Support multimodal content blocks (e.g. Telegram vision: image + text)
+    const content = Array.isArray(userMessage)
+      ? userMessage as BetaMessageParam['content']
+      : userMessage;
+    this.messages.push({ role: 'user', content });
     this.abortController = new AbortController();
     this.continuationCount = 0;
     this._loopToolCount = 0;

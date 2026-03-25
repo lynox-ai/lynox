@@ -11,7 +11,6 @@ import { BOLD, DIM, GREEN, RED, YELLOW, RESET } from './ansi.js';
 import { confirm, multiSelect } from './interactive.js';
 import { renderGradientArt } from './ui.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { hasBusinessProfile } from './onboarding.js';
 import { getErrorMessage } from '../core/utils.js';
 
 // ---------------------------------------------------------------------------

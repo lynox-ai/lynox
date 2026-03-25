@@ -67,7 +67,7 @@ async function transcribeAudio(buffer: Buffer, filename: string): Promise<string
   }
 }
 
-// Re-declare Nodyn interface to avoid importing the class (circular)
+// Duck-typed Session interface — avoids importing Session directly (circular)
 interface NodynInstance {
   run(task: string | unknown[]): Promise<string>;
   abort(): void;

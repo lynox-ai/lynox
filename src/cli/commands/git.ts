@@ -4,14 +4,14 @@
 
 import { stderr } from 'node:process';
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { renderError, BOLD, DIM, YELLOW, RESET } from '../ui.js';
 import { spinner } from '../cli-state.js';
 import { gitExec } from '../cli-helpers.js';
 import type { CLICtx } from './types.js';
 
-export async function handleGit(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleGit(parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   const sub = parts[1] ?? 'status';
   switch (sub) {
     case 'status': {
@@ -50,13 +50,13 @@ export async function handleGit(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Pr
   return true;
 }
 
-export async function handlePr(_parts: string[], nodyn: Nodyn, _ctx: CLICtx): Promise<boolean> {
+export async function handlePr(_parts: string[], session: Session, _ctx: CLICtx): Promise<boolean> {
   const diff = gitExec('diff main...HEAD --stat');
   const log = gitExec('log main...HEAD --oneline');
   const prompt = `Generate a concise PR description for these changes:\n\nCommits:\n${log}\n\nDiff summary:\n${diff}`;
   try {
     spinner.start('Generating PR description...');
-    await nodyn.run(prompt);
+    await session.run(prompt);
   } catch (err: unknown) {
     spinner.stop();
     stderr.write(renderError(getErrorMessage(err)));
@@ -64,7 +64,7 @@ export async function handlePr(_parts: string[], nodyn: Nodyn, _ctx: CLICtx): Pr
   return true;
 }
 
-export async function handleDiff(_parts: string[], _nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleDiff(_parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   const diffStat = gitExec('diff --stat');
   const diffFull = gitExec('diff');
   if (!diffStat && !diffFull) {

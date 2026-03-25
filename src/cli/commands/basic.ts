@@ -5,7 +5,7 @@
 import { resolve } from 'node:path';
 import { stderr } from 'node:process';
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import { writeFileAtomicSync } from '../../core/atomic-write.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { renderError, GREEN, DIM, RESET } from '../ui.js';
@@ -14,14 +14,14 @@ import { saveSession, loadSessionFile, loadHistory as loadHistoryFile } from '..
 import { HELP_TEXT_BASICS, HELP_TEXT_FULL } from '../help-text.js';
 import type { CLICtx } from './types.js';
 
-export async function handleClear(_parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  nodyn.reset();
+export async function handleClear(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  session.reset();
   state.lastResponse = '';
   ctx.stdout.write('Conversation reset. Memory preserved.\n');
   return true;
 }
 
-export async function handleCompact(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleCompact(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const focus = parts.slice(1).join(' ');
   const summaryPrompt = focus
     ? `Summarize the key points of our conversation so far, focusing on: ${focus}. Be extremely concise — bullet points only.`
@@ -29,15 +29,15 @@ export async function handleCompact(parts: string[], nodyn: Nodyn, ctx: CLICtx):
   let summary = '';
   try {
     spinner.start('Compacting conversation...');
-    summary = await nodyn.run(summaryPrompt);
+    summary = await session.run(summaryPrompt);
   } catch {
     spinner.stop();
   }
-  nodyn.reset();
+  session.reset();
   state.lastResponse = '';
   if (summary) {
     // Inject synthetic context so the agent has awareness of prior conversation
-    nodyn.loadMessages([
+    session.loadMessages([
       { role: 'user', content: 'What have we discussed so far?' },
       { role: 'assistant', content: `[Conversation summary]\n${summary}` },
     ]);
@@ -48,15 +48,15 @@ export async function handleCompact(parts: string[], nodyn: Nodyn, ctx: CLICtx):
   return true;
 }
 
-export async function handleSave(_parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  const path = saveSession(nodyn);
+export async function handleSave(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  const path = saveSession(session);
   ctx.stdout.write(`${GREEN}✓${RESET} Session saved: ${path}\n`);
   return true;
 }
 
-export async function handleLoad(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleLoad(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const sessionName = parts[1];
-  if (loadSessionFile(nodyn, sessionName)) {
+  if (loadSessionFile(session, sessionName)) {
     ctx.stdout.write(`${GREEN}✓${RESET} Session loaded.\n`);
   } else {
     ctx.stdout.write(renderError('No session found.'));
@@ -64,7 +64,7 @@ export async function handleLoad(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
   return true;
 }
 
-export async function handleExport(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleExport(parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   const format = parts[1];
   if (!state.lastResponse) {
     ctx.stdout.write('No response to export.\n');
@@ -86,7 +86,7 @@ export async function handleExport(parts: string[], _nodyn: Nodyn, ctx: CLICtx):
   return true;
 }
 
-export async function handleHistory(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleHistory(parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   const history = loadHistoryFile();
   const searchTerm = parts[1] === 'search'
     ? parts.slice(2).join(' ').toLowerCase()
@@ -114,11 +114,11 @@ export async function handleHistory(parts: string[], _nodyn: Nodyn, ctx: CLICtx)
   return true;
 }
 
-export async function handleHelp(parts: string[], _nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleHelp(parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   ctx.stdout.write(parts[1] === 'all' ? HELP_TEXT_FULL : HELP_TEXT_BASICS);
   return true;
 }
 
-export async function handleExit(_parts: string[], _nodyn: Nodyn, _ctx: CLICtx): Promise<boolean> {
+export async function handleExit(_parts: string[], _session: Session, _ctx: CLICtx): Promise<boolean> {
   return false;
 }

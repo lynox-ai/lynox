@@ -23,7 +23,8 @@ process.emit = function (event: string, ...args: unknown[]) {
 export { Agent } from './core/agent.js';
 export { StreamProcessor } from './core/stream.js';
 export { Memory } from './core/memory.js';
-export { Nodyn } from './core/orchestrator.js';
+export { Engine } from './core/engine.js';
+export { Session } from './core/session.js';
 export { BatchIndex } from './core/batch-index.js';
 export { SessionStore } from './core/session-store.js';
 export { channels, measureTool } from './core/observability.js';
@@ -90,7 +91,7 @@ export type { RoleSource, RoleListEntry } from './core/roles.js';
 export { isFeatureEnabled, getFeatureFlags, getFeatureEnvVar, registerFeature, clearDynamicFeatures } from './core/features.js';
 export type { FeatureFlag } from './core/features.js';
 export type { ModeHandler, ModeControllerContext, ModeOrchestrator } from './core/mode-controller.js';
-export type { NodynHooks, RunContext } from './core/orchestrator.js';
+export type { NodynHooks, RunContext, AccumulatedUsage } from './core/engine.js';
 export * from './types/index.js';
 
 // === Error hierarchy ===
@@ -117,7 +118,7 @@ export { setTenantWorkspace, clearTenantWorkspace, ensureContextWorkspace } from
 
 export type SlashCommandHandler = (
   parts: string[],
-  nodyn: import('./core/orchestrator.js').Nodyn,
+  session: import('./core/session.js').Session,
   ctx: { stdout: NodeJS.WriteStream; cliPrompt?: (prompt: string, options?: string[]) => Promise<string> },
 ) => Promise<boolean>;
 
@@ -148,7 +149,8 @@ import { resolve, join } from 'node:path';
 import { existsSync, readFileSync, statSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 
-import { Nodyn } from './core/orchestrator.js';
+import { Engine } from './core/engine.js';
+import type { Session } from './core/session.js';
 import type { StreamEvent, TabQuestion, OperationalMode, PreApprovalPattern } from './types/index.js';
 import { MODEL_MAP } from './types/index.js';
 import { hasApiKey } from './core/config.js';
@@ -243,7 +245,7 @@ function streamHandler(event: StreamEvent): void {
   _streamHandler(event, stdout);
 }
 
-async function handleCommand(line: string, nodyn: Nodyn): Promise<boolean> {
+async function handleCommand(line: string, session: Session): Promise<boolean> {
   const trimmedLine = line.trim();
   const firstWord = trimmedLine.split(/\s+/)[0]!;
 
@@ -252,7 +254,7 @@ async function handleCommand(line: string, nodyn: Nodyn): Promise<boolean> {
     const alias = COMMAND_ALIASES[firstWord]!;
     const rest = trimmedLine.slice(firstWord.length).trim();
     const resolved = rest ? `${alias} ${rest}` : alias;
-    return handleCommand(resolved, nodyn);
+    return handleCommand(resolved, session);
   }
 
   const parts = trimmedLine.split(/\s+/);
@@ -265,7 +267,7 @@ async function handleCommand(line: string, nodyn: Nodyn): Promise<boolean> {
   // Check dispatch map
   const handler = DISPATCH[cmd];
   if (handler) {
-    return handler(parts, nodyn, ctx);
+    return handler(parts, session, ctx);
   }
 
   // Check registered extension commands (Pro)
@@ -275,7 +277,7 @@ async function handleCommand(line: string, nodyn: Nodyn): Promise<boolean> {
     const regCtx = state.cliPrompt
       ? { stdout, cliPrompt: state.cliPrompt } as const
       : { stdout } as const;
-    return registeredHandler(parts, nodyn, regCtx);
+    return registeredHandler(parts, session, regCtx);
   }
 
   // Check user aliases
@@ -284,7 +286,7 @@ async function handleCommand(line: string, nodyn: Nodyn): Promise<boolean> {
   if (aliasKey && aliases[aliasKey]) {
     try {
       spinner.start('Running alias...');
-      await nodyn.run(aliases[aliasKey]!);
+      await session.run(aliases[aliasKey]!);
     } catch (err: unknown) {
       spinner.stop();
       stderr.write(renderError(getErrorMessage(err)));
@@ -471,9 +473,9 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       stderr.write('TELEGRAM_BOT_TOKEN required (env var or config)\n');
       process.exit(1);
     }
-    const tgNodyn = new Nodyn({});
-    await tgNodyn.init();
-    tgNodyn._recreateAgent({
+    const tgEngine = new Engine({});
+    await tgEngine.init();
+    const tgSession = tgEngine.createSession({
       systemPromptSuffix: '\n\n## Telegram Mode\nYou are running inside a Telegram bot. The user communicates with you via Telegram messages.\n- Files you create with write_file are automatically sent to the user as Telegram documents. Just write the file — no extra steps needed.\n- Voice messages from the user are automatically transcribed and sent to you as text.\n- You cannot send images or media directly — only text replies and files via write_file.\n- Keep responses concise — Telegram messages are split at 4096 characters.\n- Do NOT ask the user to set up Telegram, email, or other integrations — you are already connected.\n\n### Follow-up suggestions\nAt the very end of every response, include a `<follow_ups>` block with 2-4 contextual follow-up actions the user might want to take next. Use the user\'s language for labels.\n\nFormat:\n<follow_ups>[{"label":"Short label","task":"Full task description for the agent"}]</follow_ups>\n\nRules:\n- Labels: 2-4 words, max 20 characters (these become Telegram buttons)\n- Tasks: complete instructions that the agent can execute independently\n- Be contextual — suggest actions that make sense given what just happened\n- No filler — if nothing useful comes to mind, output an empty array\n- Always place the block as the very last thing in your response',
     });
 
@@ -486,26 +488,35 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
 
     const shutdown = async () => {
       await stopTgBot();
-      await tgNodyn.shutdown();
+      await tgEngine.shutdown();
       process.exit(0);
     };
     process.on('SIGINT', () => void shutdown());
     process.on('SIGTERM', () => void shutdown());
 
-    await startTgBot({ token, allowedChatIds, nodyn: tgNodyn });
+    await startTgBot({ token, allowedChatIds, nodyn: tgSession });
     return;
   }
 
-  const nodyn = new Nodyn({});
-  state.activeNodyn = nodyn;
-  state.currentModelId = MODEL_MAP[nodyn.getModelTier()];
-  nodyn.onStream = streamHandler;
-  const initPromise = nodyn.init();
+  const engine = new Engine({});
+  state.currentModelId = MODEL_MAP[engine.config.model ?? 'sonnet'];
+  const initPromise = engine.init();
+
+  let session: Session;
+  const ensureSession = async (): Promise<Session> => {
+    await initPromise;
+    if (!session) {
+      session = engine.createSession();
+      session.onStream = streamHandler;
+      state.activeSession = session;
+    }
+    return session;
+  };
 
   // === Sprint 2b: --resume flag ===
   if (args.includes('--resume')) {
-    await initPromise;
-    if (loadSessionFile(nodyn)) {
+    session = await ensureSession();
+    if (loadSessionFile(session)) {
       stderr.write(`${GREEN}✓${RESET} Resumed previous session.\n`);
     }
   }
@@ -514,7 +525,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
   const manifestIdx = args.indexOf('--manifest');
   const manifestFlag = manifestIdx !== -1 ? args[manifestIdx + 1] : undefined;
   if (manifestFlag) {
-    await initPromise;
+    session = await ensureSession();
     const { runManifest: runMf, loadManifestFile: loadMf } = await import('./orchestrator/runner.js');
     const { LocalGateAdapter: LocalAdapter } = await import('./orchestrator/gates.js');
     const { loadConfig: getConfig } = await import('./core/config.js');
@@ -563,7 +574,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       stderr.write(renderError(getErrorMessage(err)));
       process.exit(1);
     }
-    await nodyn.shutdown();
+    await engine.shutdown();
     return;
   }
 
@@ -617,7 +628,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       stderr.write(`${DIM}Set ANTHROPIC_API_KEY or run interactively: npx @nodyn-ai/core${RESET}\n`);
       process.exit(1);
     }
-    await initPromise;
+    session = await ensureSession();
     stderr.write(`${DIM}model: ${state.currentModelId}${RESET}\n`);
     state.pipeSummaryEnabled = true;
     toolsUsed.clear();
@@ -630,12 +641,12 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
 
     if (!task.trim()) {
       stderr.write(`${RED}✗${RESET} No input provided. Pass a task as argument or via stdin.\n`);
-      await nodyn.shutdown();
+      await engine.shutdown();
       process.exit(1);
     }
 
     try {
-      await nodyn.run(task);
+      await session.run(task);
     } finally {
       // === Pipe-mode JSON summary on stderr ===
       if (state.pipeSummaryEnabled && state.lastUsage) {
@@ -667,7 +678,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
           stderr.write(renderError(getErrorMessage(err)));
         }
       }
-      await nodyn.shutdown();
+      await engine.shutdown();
     }
     return;
   }
@@ -681,7 +692,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       stderr.write(`${RED}✗${RESET} Unknown mode: ${modeFlagValue}. Valid: ${validModes.join(', ')}\n`);
       process.exit(1);
     }
-    await initPromise;
+    session = await ensureSession();
     const goalIdx = args.indexOf('--goal');
     const goalFlag = goalIdx !== -1 ? args[goalIdx + 1] : undefined;
     const budgetIdx = args.indexOf('--budget');
@@ -720,7 +731,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       const sWatchDir = sWatchIdx !== -1 ? args[sWatchIdx + 1] : '.';
       const sOnChangeIdx = args.indexOf('--on-change');
       const sTask = sOnChangeIdx !== -1 ? args[sOnChangeIdx + 1] : goalFlag ?? 'Review changes in {files}';
-      await nodyn.setMode({
+      await session.setMode({
         mode: 'sentinel',
         autonomy: 'guided',
         triggers: [{ type: 'file', dir: sWatchDir ?? '.' }],
@@ -736,7 +747,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     }
 
     if (modeFlagValue === 'daemon') {
-      await nodyn.setMode({
+      await session.setMode({
         mode: 'daemon',
         goal: goalFlag,
         costGuard: { maxBudgetUSD: budgetFlag ?? 10 },
@@ -755,7 +766,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
         stderr.write(`${RED}✗${RESET} ${modeFlagValue} mode requires --goal "your goal"\n`);
         process.exit(1);
       }
-      await nodyn.setMode({
+      await session.setMode({
         mode: modeFlagValue,
         goal: goalFlag,
         costGuard: { maxBudgetUSD: budgetFlag ?? 5 },
@@ -768,9 +779,9 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       });
       stderr.write(`${GREEN}✓${RESET} ${modeFlagValue} mode — ${goalFlag}\n`);
       try {
-        await nodyn.run(goalFlag);
+        await session.run(goalFlag);
       } finally {
-        await nodyn.shutdown();
+        await engine.shutdown();
       }
       return;
     }
@@ -780,14 +791,14 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
   const watchIdx = args.indexOf('--watch');
   const watchDir = watchIdx !== -1 ? args[watchIdx + 1] : undefined;
   if (watchDir) {
-    await initPromise;
+    session = await ensureSession();
     const onChangeIdx = args.indexOf('--on-change');
     const onChangeTask = onChangeIdx !== -1 && args[onChangeIdx + 1] ? args[onChangeIdx + 1] : 'Review the changed files and suggest improvements';
     const watchdog = new Watchdog(watchDir, async (files) => {
       const task = `${onChangeTask}\n\nChanged files: ${files.join(', ')}`;
       try {
         spinner.start('Processing changes...');
-        await nodyn.run(task);
+        await session.run(task);
       } catch (err: unknown) {
         spinner.stop();
         stderr.write(renderError(getErrorMessage(err)));
@@ -801,14 +812,14 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
 
   // === Interactive REPL ===
   // Init must complete before reading tool counts
-  await initPromise;
-  const mcpCount = nodyn.getRegistry().getMCPServers().length;
-  const toolCount = nodyn.getRegistry().getEntries().length + 1; // +1 for web_search
+  session = await ensureSession();
+  const mcpCount = session.getRegistry().getMCPServers().length;
+  const toolCount = session.getRegistry().getEntries().length + 1; // +1 for web_search
 
-  const thinkingLabel = nodyn.getThinking() ? 'adaptive' : 'disabled';
-  const effortLabel = nodyn.getEffort() ?? 'high';
-  const memoryLabel = nodyn.getMemory() ? 'local' : 'none';
-  await animateBanner(stdout, MODEL_MAP[nodyn.getModelTier()], thinkingLabel, effortLabel, memoryLabel, mcpCount, toolCount, pkg.version);
+  const thinkingLabel = session.getThinking() ? 'adaptive' : 'disabled';
+  const effortLabel = session.getEffort() ?? 'high';
+  const memoryLabel = session.getMemory() ? 'local' : 'none';
+  await animateBanner(stdout, MODEL_MAP[session.getModelTier()], thinkingLabel, effortLabel, memoryLabel, mcpCount, toolCount, pkg.version);
 
   // === Footer bar (inline status after each response) ===
   if (stdout.isTTY) {
@@ -893,9 +904,9 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
             const cmd = result.trim();
             appendHistory(cmd);
             stdout.write(`${PROMPT_READY}${cmd}\n`);
-            void handleCommand(cmd, nodyn).then((shouldContinue) => {
+            void handleCommand(cmd, session).then((shouldContinue) => {
               if (!shouldContinue) {
-                void nodyn.shutdown().then(() => process.exit(0));
+                void engine.shutdown().then(() => process.exit(0));
                 return;
               }
               showPrompt();
@@ -914,7 +925,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
   if (stdin.isTTY) {
     const dialog = new InteractiveDialog(stdin, stdout);
 
-    nodyn.promptUser = async (question: string, options?: string[]): Promise<string> => {
+    session.promptUser = async (question: string, options?: string[]): Promise<string> => {
       spinner.stop();
       // Remove ESC handler first so it's not included in saved listeners
       if (activeEscHandler) {
@@ -930,12 +941,12 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       }
       // ESC pressed — abort the agent run so it stops asking
       if (!answer) {
-        nodyn.abort();
+        session.abort();
         return 'User canceled.';
       }
       return answer;
     };
-    nodyn.promptTabs = async (questions: TabQuestion[]): Promise<string[]> => {
+    session.promptTabs = async (questions: TabQuestion[]): Promise<string[]> => {
       spinner.stop();
       if (activeEscHandler) {
         stdin.removeListener('data', activeEscHandler);
@@ -949,7 +960,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       }
       // ESC on first tab — abort the agent run
       if (answers.length === 0) {
-        nodyn.abort();
+        session.abort();
       }
       return answers;
     };
@@ -980,7 +991,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
   });
 
   // === Initial greeting — nodyn introduces itself proactively ===
-  const userCfg = nodyn.getUserConfig();
+  const userCfg = session.getUserConfig();
   let greetingShown = false;
   if (stdin.isTTY && userCfg.greeting !== false) {
     const { hasBusinessProfile } = await import('./cli/onboarding.js');
@@ -988,7 +999,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
 
     let greetingText = '';
     spinner.start('...');
-    nodyn.onStream = (event: StreamEvent) => {
+    session.onStream = (event: StreamEvent) => {
       if (event.type === 'text') {
         greetingText += event.text;
       }
@@ -998,16 +1009,16 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       // First session: natural onboarding conversation — agent asks about the business.
       // Uses configured model with memory extraction so answers are remembered.
       // Ensure thinking is adaptive (wizard doesn't set it, default may be disabled).
-      nodyn.setThinking({ type: 'adaptive' });
-      const allToolNames = nodyn.getRegistry().getEntries().map(e => e.definition.name);
+      session.setThinking({ type: 'adaptive' });
+      const allToolNames = session.getRegistry().getEntries().map(e => e.definition.name);
       const memoryTools = ['memory_store', 'memory_recall'];
       const excludeTools = allToolNames.filter(n => !memoryTools.includes(n));
-      nodyn._recreateAgent({ maxIterations: 2, excludeTools });
+      session._recreateAgent({ maxIterations: 2, excludeTools });
       try {
         const timeout = new Promise<void>((_, reject) =>
           setTimeout(() => reject(new Error('Greeting timed out')), 30_000),
         );
-        await Promise.race([nodyn.run(
+        await Promise.race([session.run(
           'This is the user\'s very first session. Welcome them warmly in 3-4 sentences. ' +
           'Refer to yourself as "nodyn" (lowercase). ' +
           'Then ask 1-2 natural questions to learn about their business — what they do, ' +
@@ -1024,27 +1035,27 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
           stderr.write(renderWarning(`API error: ${msg}`));
         }
       }
-      nodyn._recreateAgent();
+      session._recreateAgent();
     } else {
       // Returning user: quick greeting via Haiku (cheap, fast, no tools)
-      const taskBriefing = nodyn.getTaskManager()?.getBriefingSummary(nodyn.getActiveScopes()) ?? '';
-      const memoryContent = nodyn.getAgent()?.memory?.render() ?? '';
+      const taskBriefing = session.getTaskManager()?.getBriefingSummary(session.getActiveScopes()) ?? '';
+      const memoryContent = session.getAgent()?.memory?.render() ?? '';
       const greetingContext = [taskBriefing, memoryContent].filter(Boolean).join('\n\n');
       const greetingPrompt = greetingContext
         ? `Context:\n${greetingContext}\n\nGreet the user in 1-2 short sentences. Mention the project name and any useful context from above. Do NOT describe what you are doing, do NOT report bugs or issues, do NOT give advice — just a friendly, brief welcome. No feature lists, no tool narration.`
         : 'Greet the user in 1-2 short sentences. Be brief and friendly. No feature lists, no tool narration.';
-      const savedTier = nodyn.getModelTier();
-      const savedThinking = nodyn.getThinking();
-      nodyn.setModel('haiku');
-      nodyn.setThinking({ type: 'disabled' });
-      nodyn.setSkipMemoryExtraction(true);
-      const allToolNames = nodyn.getRegistry().getEntries().map(e => e.definition.name);
-      nodyn._recreateAgent({ maxIterations: 1, excludeTools: allToolNames });
+      const savedTier = session.getModelTier();
+      const savedThinking = session.getThinking();
+      session.setModel('haiku');
+      session.setThinking({ type: 'disabled' });
+      session.setSkipMemoryExtraction(true);
+      const allToolNames = session.getRegistry().getEntries().map(e => e.definition.name);
+      session._recreateAgent({ maxIterations: 1, excludeTools: allToolNames });
       try {
         const timeout = new Promise<void>((_, reject) =>
           setTimeout(() => reject(new Error('Greeting timed out')), 15_000),
         );
-        await Promise.race([nodyn.run(greetingPrompt), timeout]);
+        await Promise.race([session.run(greetingPrompt), timeout]);
       } catch (err: unknown) {
         const msg = getErrorMessage(err);
         const isApiError = msg.includes('authentication') || msg.includes('invalid x-api-key')
@@ -1054,14 +1065,14 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
           stderr.write(renderWarning(`API error: ${msg}`));
         }
       }
-      nodyn.setSkipMemoryExtraction(false);
-      nodyn.setModel(savedTier);
-      nodyn.setThinking(savedThinking ?? { type: 'adaptive' });
-      nodyn._recreateAgent();
+      session.setSkipMemoryExtraction(false);
+      session.setModel(savedTier);
+      session.setThinking(savedThinking ?? { type: 'adaptive' });
+      session._recreateAgent();
     }
 
     spinner.stop();
-    nodyn.onStream = streamHandler;
+    session.onStream = streamHandler;
     if (greetingText.trim()) {
       stdout.write(`👾 `);
       stdout.write(md.push(greetingText));
@@ -1111,7 +1122,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
 
     if (trimmed.startsWith('/')) {
       rl.pause();
-      const shouldContinue = await handleCommand(trimmed, nodyn);
+      const shouldContinue = await handleCommand(trimmed, session);
       lastBusyEnd = Date.now();
       rl.resume();
       if (!shouldContinue) {
@@ -1145,7 +1156,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       }
       if (data[0] === 0x1b && data.length === 1 && !aborted) {
         aborted = true;
-        nodyn.abort();
+        session.abort();
         spinner.stop();
         stdout.write(md.flush());
         stdout.write(`\n  ${DIM}[interrupted]${RESET}\n`);
@@ -1165,10 +1176,10 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       state.responseStarted = false;
       state.turnStartMs = Date.now();
       spinner.start('Thinking...');
-      await nodyn.run(trimmed);
+      await session.run(trimmed);
 
       // Post-run changeset review
-      const changesetMgr = nodyn.getChangesetManager();
+      const changesetMgr = session.getChangesetManager();
       if (changesetMgr?.hasChanges()) {
         // Remove ESC handler temporarily so readKey works
         if (stdin.isTTY && activeEscHandler) {
@@ -1214,7 +1225,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
     showPrompt();
   }
 
-  await nodyn.shutdown();
+  await engine.shutdown();
   process.exit(0);
 }
 

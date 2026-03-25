@@ -8,7 +8,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod/v4';
 import type { NodynConfig, BatchRequest, MemoryNamespace, StreamEvent, RunEvent } from '../types/index.js';
-import { MODEL_MAP } from '../types/index.js';
 import { writeFileAtomicSync } from '../core/atomic-write.js';
 import { getWorkspaceDir } from '../core/workspace.js';
 import { getErrorMessage } from '../core/utils.js';
@@ -65,8 +64,7 @@ interface PersistedRunState {
   outputFiles?: OutputFile[] | undefined;
   updatedAt: string;
 }
-import { Nodyn } from '../core/orchestrator.js';
-import { SYSTEM_PROMPT } from '../core/orchestrator-prompts.js';
+import { Engine } from '../core/engine.js';
 import { SessionStore } from '../core/session-store.js';
 import { MAX_BUFFER_BYTES } from '../core/constants.js';
 
@@ -115,7 +113,7 @@ export class NodynMCPServer {
   private readonly runStore = new Map<string, RunState>();
   private readonly activeSessions = new Set<string>();
   private totalBufferedTextBytes = 0;
-  private nodyn: Nodyn | null = null;
+  private engine: Engine | null = null;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: NodynConfig) {
@@ -130,8 +128,8 @@ export class NodynMCPServer {
   }
 
   async init(): Promise<void> {
-    this.nodyn = new Nodyn(this.config);
-    await this.nodyn.init();
+    this.engine = new Engine(this.config);
+    await this.engine.init();
   }
 
   /** Clean up temp dirs older than 1 hour every 60 seconds, and GC completed runs older than 30 minutes */
@@ -411,7 +409,7 @@ export class NodynMCPServer {
         inputSchema: { task: z.string(), session_id: z.string().optional(), user_context: z.string().optional() },
       },
       async ({ task, session_id, user_context }) => {
-        if (!this.nodyn) throw new Error('NodynMCPServer not initialized');
+        if (!this.engine) throw new Error('NodynMCPServer not initialized');
         const sid = session_id ?? randomUUID();
         if (this.activeSessions.has(sid)) {
           return { content: [{ type: 'text' as const, text: `Session ${sid} already has an active run` }] };
@@ -420,26 +418,13 @@ export class NodynMCPServer {
         if (capacityError) {
           return { content: [{ type: 'text' as const, text: capacityError }] };
         }
-        const model = MODEL_MAP[this.config.model ?? 'opus'];
-        const basePrompt = this.config.systemPrompt || SYSTEM_PROMPT;
-        const systemPrompt = user_context
-          ? `${basePrompt}\n\n<user_context>\n${wrapUntrustedData(user_context, 'mcp:user_context')}\n</user_context>`.trim()
-          : basePrompt || undefined;
-        const agent = this.sessionStore.getOrCreate(sid, {
-          name: `nodyn-session-${sid.slice(0, 8)}`,
-          model,
-          systemPrompt,
-          thinking: this.config.thinking,
-          effort: this.config.effort,
-          maxTokens: this.config.maxTokens,
-          tools: this.nodyn.getRegistry().getEntries(),
-          memory: this.nodyn.getMemory() ?? undefined,
-          autonomy: 'guided',
-          costGuard: { maxBudgetUSD: 20, maxIterations: 50 },
-        });
+        const systemPromptSuffix = user_context
+          ? `\n\n<user_context>\n${wrapUntrustedData(user_context, 'mcp:user_context')}\n</user_context>`
+          : undefined;
+        const session = this.sessionStore.getOrCreate(sid, this.engine, { systemPromptSuffix });
         this.activeSessions.add(sid);
         try {
-          const result = await agent.send(task);
+          const result = await session.run(task);
           return { content: [{ type: 'text' as const, text: result }] };
         } finally {
           this.activeSessions.delete(sid);
@@ -461,13 +446,13 @@ export class NodynMCPServer {
         },
       },
       async ({ requests }) => {
-        if (!this.nodyn) throw new Error('NodynMCPServer not initialized');
+        if (!this.engine) throw new Error('NodynMCPServer not initialized');
         const batchReqs: BatchRequest[] = requests.map(r => ({
           id: r.id,
           task: r.task,
           system: r.system,
         }));
-        const batchId = await this.nodyn.batch(batchReqs);
+        const batchId = await this.engine.batch(batchReqs);
         return { content: [{ type: 'text' as const, text: `Batch submitted: ${batchId}` }] };
       },
     );
@@ -480,8 +465,8 @@ export class NodynMCPServer {
         inputSchema: { batch_id: z.string() },
       },
       async ({ batch_id }) => {
-        if (!this.nodyn) throw new Error('NodynMCPServer not initialized');
-        const apiConfig = this.nodyn.getApiConfig();
+        if (!this.engine) throw new Error('NodynMCPServer not initialized');
+        const apiConfig = this.engine.getApiConfig();
         const client = apiConfig.apiKey
           ? new Anthropic({ apiKey: apiConfig.apiKey, baseURL: apiConfig.apiBaseURL })
           : apiConfig.apiBaseURL
@@ -508,8 +493,8 @@ export class NodynMCPServer {
         },
       },
       async ({ namespace }) => {
-        if (!this.nodyn) throw new Error('NodynMCPServer not initialized');
-        const mem = this.nodyn.getMemory();
+        if (!this.engine) throw new Error('NodynMCPServer not initialized');
+        const mem = this.engine.getMemory();
         if (!mem) {
           return { content: [{ type: 'text' as const, text: 'Memory is not configured.' }] };
         }
@@ -558,7 +543,7 @@ export class NodynMCPServer {
         },
       },
       async ({ task, session_id, user_context, files }) => {
-        if (!this.nodyn) throw new Error('NodynMCPServer not initialized');
+        if (!this.engine) throw new Error('NodynMCPServer not initialized');
         const sid = session_id ?? randomUUID();
         if (this.activeSessions.has(sid)) {
           return {
@@ -598,23 +583,10 @@ export class NodynMCPServer {
             }],
           };
         }
-        const model = MODEL_MAP[this.config.model ?? 'opus'];
-        const basePrompt = this.config.systemPrompt || SYSTEM_PROMPT;
-        const systemPrompt = user_context
-          ? `${basePrompt}\n\n<user_context>\n${wrapUntrustedData(user_context, 'mcp:user_context')}\n</user_context>`.trim()
-          : basePrompt || undefined;
-        const agent = this.sessionStore.getOrCreate(sid, {
-          name: `nodyn-session-${sid.slice(0, 8)}`,
-          model,
-          systemPrompt,
-          thinking: this.config.thinking,
-          effort: this.config.effort,
-          maxTokens: this.config.maxTokens,
-          tools: this.nodyn.getRegistry().getEntries(),
-          memory: this.nodyn.getMemory() ?? undefined,
-          autonomy: 'guided',
-          costGuard: { maxBudgetUSD: 20, maxIterations: 50 },
-        });
+        const systemPromptSuffix = user_context
+          ? `\n\n<user_context>\n${wrapUntrustedData(user_context, 'mcp:user_context')}\n</user_context>`
+          : undefined;
+        const session = this.sessionStore.getOrCreate(sid, this.engine, { systemPromptSuffix });
         const runId = randomUUID();
 
         // Process inbound files — write to temp dir, augment task prompt
@@ -690,10 +662,11 @@ export class NodynMCPServer {
         this.runStore.set(runId, runState);
         this.persistRunStore();
 
-        // Set currentRunId on agent so tools (e.g. send_voice) can scope temp files
-        agent.currentRunId = runId;
+        // Set currentRunId on underlying agent so tools (e.g. send_voice) can scope temp files
+        const agent = session.getAgent();
+        if (agent) agent.currentRunId = runId;
 
-        const previousOnStream = agent.onStream;
+        const previousOnStream = session.onStream;
         const pushEvent = (type: RunEvent['type'], data: Record<string, unknown>): void => {
           const id = ++runState.eventIdCounter;
           runState.eventLog.push({ id, type, timestamp: Date.now(), data });
@@ -779,7 +752,7 @@ export class NodynMCPServer {
             pushEvent('continuation', { iteration: event.iteration, max: event.max });
           }
         };
-        agent.onStream = streamHandler;
+        session.onStream = streamHandler;
 
         // Capture reference so the .then()/.catch() cleanup only clears promptUser
         // if a subsequent nodyn_run_start hasn't already replaced it with a new fn.
@@ -794,15 +767,16 @@ export class NodynMCPServer {
             runState.pendingInput = { question, options, resolve, timeout };
             // Auto-resolve with 'n' after 2 minutes so the agent never hangs
           });
-        agent.promptUser = promptFn;
+        session.promptUser = promptFn;
         this.activeSessions.add(sid);
 
-        agent.send(augmentedTask)
+        session.run(augmentedTask)
           .then(() => {
             runState.done = true;
-            if (agent.promptUser === promptFn) agent.promptUser = undefined;
-            if (agent.onStream === streamHandler) agent.onStream = previousOnStream;
-            if (agent.currentRunId === runId) agent.currentRunId = undefined;
+            if (session.promptUser === promptFn) session.promptUser = null;
+            if (session.onStream === streamHandler) session.onStream = previousOnStream;
+            const a = session.getAgent();
+            if (a?.currentRunId === runId) a.currentRunId = undefined;
             this.activeSessions.delete(sid);
             this.persistRunStore();
             this.scheduleRunCleanup(runId, runState, 10 * 60_000);
@@ -810,9 +784,10 @@ export class NodynMCPServer {
           .catch((err: unknown) => {
             runState.done = true;
             runState.error = getErrorMessage(err);
-            if (agent.promptUser === promptFn) agent.promptUser = undefined;
-            if (agent.onStream === streamHandler) agent.onStream = previousOnStream;
-            if (agent.currentRunId === runId) agent.currentRunId = undefined;
+            if (session.promptUser === promptFn) session.promptUser = null;
+            if (session.onStream === streamHandler) session.onStream = previousOnStream;
+            const a = session.getAgent();
+            if (a?.currentRunId === runId) a.currentRunId = undefined;
             this.activeSessions.delete(sid);
             this.resolvePendingInput(runState, 'n');
             this.persistRunStore();
@@ -959,11 +934,11 @@ export class NodynMCPServer {
         inputSchema: { session_id: z.string() },
       },
       async ({ session_id }) => {
-        const agent = this.sessionStore.get(session_id);
-        agent?.abort();
+        const session = this.sessionStore.get(session_id);
+        session?.abort();
         const abortedRuns = this.abortSessionRuns(session_id);
         this.activeSessions.delete(session_id);
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ aborted: agent !== undefined || abortedRuns > 0 }) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ aborted: session !== undefined || abortedRuns > 0 }) }] };
       },
     );
   }

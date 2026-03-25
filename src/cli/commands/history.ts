@@ -4,14 +4,14 @@
 
 import { readFileSync } from 'node:fs';
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import type { BatchRequest } from '../../types/index.js';
 import { renderTable, BOLD, DIM, BLUE, GREEN, RED, RESET } from '../ui.js';
 import type { CLICtx } from './types.js';
 
 // /tree is an internal command dispatched from /runs tree
-export async function handleTree(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  const tH = nodyn.getRunHistory();
+export async function handleTree(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  const tH = session.getRunHistory();
   if (!tH) { ctx.stdout.write('Run history not available.\n'); return true; }
   const tId = parts[1];
   if (!tId) { ctx.stdout.write('Usage: /tree <run_id>\n'); return true; }
@@ -52,14 +52,14 @@ export async function handleTree(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
   return true;
 }
 
-export async function handleRuns(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  const history = nodyn.getRunHistory();
+export async function handleRuns(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  const history = session.getRunHistory();
   if (!history) { ctx.stdout.write('Run history not available.\n'); return true; }
 
   const sub = parts[1];
   if (sub === 'tree') {
     // Delegate to handleTree with shifted parts
-    return handleTree(['', ...parts.slice(2)], nodyn, ctx);
+    return handleTree(['', ...parts.slice(2)], session, ctx);
   }
   if (sub === 'delete') {
     const runId = parts[2];
@@ -71,7 +71,7 @@ export async function handleRuns(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
     return true;
   }
   if (sub === 'purge') {
-    const ctxObj = nodyn.getContext();
+    const ctxObj = session.getContext();
     if (!ctxObj) { ctx.stdout.write('No active context.\n'); return true; }
     const count = history.deleteRunsByContext(ctxObj.id);
     history.vacuum();
@@ -84,7 +84,7 @@ export async function handleRuns(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
     return true;
   }
   if (sub === 'reset') {
-    const askUser = nodyn.promptUser;
+    const askUser = session.promptUser;
     const confirm = askUser
       ? await askUser('This will permanently delete ALL run history, pipelines, tasks, and embeddings. Type "yes" to confirm.')
       : '';
@@ -139,13 +139,13 @@ export async function handleRuns(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
   return true;
 }
 
-export async function handleStats(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
-  const history = nodyn.getRunHistory();
+export async function handleStats(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
+  const history = session.getRunHistory();
   if (!history) { ctx.stdout.write('Run history not available.\n'); return true; }
   const statsSub = parts[1];
 
   if (statsSub === 'tools') {
-    const ctxObj = nodyn.getContext();
+    const ctxObj = session.getContext();
     const ctxId = ctxObj?.id ?? '';
     const days = parts[2] && !isNaN(Number(parts[2])) ? Number(parts[2]) : 7;
     const toolStats = history.getToolStats(ctxId, days);
@@ -157,7 +157,7 @@ export async function handleStats(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     });
     ctx.stdout.write(renderTable(['Tool', 'Calls', 'Errors', 'Error%', 'Avg Time'], rows) + '\n');
   } else if (statsSub === 'export') {
-    const ctxObj = nodyn.getContext();
+    const ctxObj = session.getContext();
     const ctxId = ctxObj?.id ?? '';
     const exportDays = parts[2] && !isNaN(Number(parts[2])) ? Number(parts[2]) : 7;
     const stats = history.getStats();
@@ -173,7 +173,7 @@ export async function handleStats(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     };
     ctx.stdout.write(JSON.stringify(report, null, 2) + '\n');
   } else if (statsSub === 'prompts') {
-    const ctxObj = nodyn.getContext();
+    const ctxObj = session.getContext();
     const ctxId = ctxObj?.id ?? '';
     const days = parts[2] && !isNaN(Number(parts[2])) ? Number(parts[2]) : 7;
     const variants = history.getPromptVariantStats(ctxId, days);
@@ -211,9 +211,9 @@ export async function handleStats(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
   return true;
 }
 
-export async function handleBatch(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleBatch(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const batchSub = parts[1];
-  const runHist = nodyn.getRunHistory();
+  const runHist = session.getRunHistory();
 
   if (batchSub === 'list' && runHist) {
     // List recent batch parents from run history
@@ -240,7 +240,7 @@ export async function handleBatch(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
           id: `retry-${item.id.slice(0, 8)}`,
           task: item.task_text,
         }));
-        const newBatchId = await nodyn.batch(reqs);
+        const newBatchId = await session.batch(reqs);
         ctx.stdout.write(`Retrying ${items.length} failed items. New batch: ${newBatchId}\n`);
         return true;
       }
@@ -296,15 +296,15 @@ export async function handleBatch(parts: string[], nodyn: Nodyn, ctx: CLICtx): P
     ctx.stdout.write('Batch file has no valid requests.\n');
     return true;
   }
-  const batchId = await nodyn.batch(requests);
+  const batchId = await session.batch(requests);
   ctx.stdout.write(`Batch submitted: ${batchId}\n`);
   return true;
 }
 
-export async function handleBatchStatus(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleBatchStatus(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const batchId = parts[1];
   if (!batchId) { ctx.stdout.write('Usage: /batch-status <batch_id>\n'); return true; }
-  const entry = await nodyn.getBatchIndex().get(batchId);
+  const entry = await session.getBatchIndex().get(batchId);
   if (entry) {
     ctx.stdout.write(`Batch: ${batchId}\nSubmitted: ${entry.submitted_at}\nRequests: ${entry.request_count}\nLabel: ${entry.label}\n`);
   } else {

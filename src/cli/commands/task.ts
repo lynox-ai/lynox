@@ -2,13 +2,13 @@
  * Task and business CLI commands: /task, /business
  */
 
-import type { Nodyn } from '../../core/orchestrator.js';
+import type { Session } from '../../core/session.js';
 import { renderTable, BOLD, DIM, BLUE, GREEN, RED, MAGENTA, RESET } from '../ui.js';
 import type { CLICtx } from './types.js';
 
-export async function handleTask(parts: string[], nodyn: Nodyn, ctx: CLICtx): Promise<boolean> {
+export async function handleTask(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
   const line = parts.join(' ');
-  const history = nodyn.getRunHistory();
+  const history = session.getRunHistory();
   if (!history) { ctx.stdout.write('Run history not available.\n'); return true; }
   const { TaskManager } = await import('../../core/task-manager.js');
   const tm = new TaskManager(history);
@@ -16,7 +16,7 @@ export async function handleTask(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
 
   if (!sub) {
     // Default: week summary
-    const scopes = nodyn.getActiveScopes();
+    const scopes = session.getActiveScopes();
     const summary = tm.getWeekSummary(scopes.length > 0 ? scopes : undefined);
     const { overdue, dueToday, dueThisWeek, inProgress } = summary;
 
@@ -106,7 +106,7 @@ export async function handleTask(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
       scopeType = parsed.type;
       scopeId = parsed.id;
     } else {
-      const projectScope = nodyn.getActiveScopes().find(s => s.type === 'context');
+      const projectScope = session.getActiveScopes().find(s => s.type === 'context');
       if (projectScope) scopeId = projectScope.id;
     }
 
@@ -217,7 +217,7 @@ export async function handleTask(parts: string[], nodyn: Nodyn, ctx: CLICtx): Pr
   return true;
 }
 
-export async function handleBusiness(parts: string[], _nodyn: Nodyn, _ctx: CLICtx): Promise<boolean> {
+export async function handleBusiness(parts: string[], _session: Session, _ctx: CLICtx): Promise<boolean> {
   const { showProfile, runBusinessOnboarding, clearProfile } = await import('../onboarding.js');
   const sub = parts[1];
   if (sub === 'update') {
