@@ -6,7 +6,7 @@
  * Supports binary file upload (SQLite, encrypted files).
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import type { BackupManifest } from './backup.js';
 
@@ -85,7 +85,7 @@ export class GDriveBackupUploader {
    * Upload a local backup directory to Google Drive.
    * Creates: nodyn-backups/<timestamp>/manifest.json, history.db, etc.
    */
-  async upload(backupDir: string, manifest: BackupManifest): Promise<UploadResult> {
+  async upload(backupDir: string, _manifest: BackupManifest): Promise<UploadResult> {
     if (!this.auth.hasScope(DRIVE_FILE_SCOPE)) {
       return { success: false, folderId: '', filesUploaded: 0, error: 'Missing drive.file scope. Run /google auth to grant access.' };
     }

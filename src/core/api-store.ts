@@ -122,8 +122,6 @@ class PerApiRateLimiter {
 
 // ── Store ──
 
-const DEFAULT_APIS_DIR = 'apis';
-
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
   private readonly hostToProfile = new Map<string, string>(); // hostname → profile id
