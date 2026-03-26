@@ -22,12 +22,12 @@ npx vitest run tests/online/  # 22 real API tests
 Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 
 - `src/core/` — 66 modules: engine, session, agent, worker-loop, KG, memory, sentry, backup, api-store, crm, etc.
-- `src/cli/` — Terminal UI + 11 command handler modules
+- `src/cli/` — Terminal UI + 14 command handler modules
 - `src/tools/` — 14 builtin tools (incl. api_setup) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Telegram, Google Workspace, Web Search
 - `src/server/` — MCP server (stdio + HTTP SSE)
-- `src/types/` — 11 domain type files, barrel re-export via index.ts
+- `src/types/` — 12 domain type files, barrel re-export via index.ts
 
 See `docs/src/content/docs/` for documentation source (Astro Starlight site).
 
