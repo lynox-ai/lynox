@@ -120,25 +120,54 @@ npx @nodyn-ai/core "Summarize the last 5 commits in this repo"
 cat report.csv | npx @nodyn-ai/core "Find anomalies in this data"
 ```
 
-### Next step: Connect Telegram
+## From Try-Out to Daily Use
 
-The terminal is great for setup and development — but for daily use, Telegram is where nodyn shines. Rich status updates, follow-up suggestions, voice messages, file uploads — all from your phone.
+Running nodyn locally is great for trying it out — but the real power comes from **24/7 background operation**. Scheduled tasks, URL monitoring, proactive notifications, recurring workflows — all of this only works when nodyn is always on.
 
-If you skipped Telegram during the setup wizard, add it now:
+| Mode | What you get | What you miss |
+|------|-------------|---------------|
+| **Local** (terminal) | Interactive REPL, one-shot tasks, quick experiments | Background tasks stop when you close the terminal |
+| **Server** (Docker) | Everything — scheduled jobs, monitoring, Telegram from any device, background worker | Needs a server (VPS, homelab, old laptop) |
+
+### Next step: Deploy for daily use
+
+**1. Get a server.** Any always-on machine works — a cheap VPS ($5/month), a homelab, or an old laptop. You need Docker installed.
+
+**2. Set up Telegram.** This becomes your primary interface — work from your phone, get results when they're ready.
+- Create a bot: [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token
+- Message your bot once, then find your chat ID at `https://api.telegram.org/bot<TOKEN>/getUpdates`
+
+**3. Deploy with one file.** Create a `.env` file on your server:
 
 ```bash
-npx @nodyn-ai/core --init
+ANTHROPIC_API_KEY=sk-ant-...
+TELEGRAM_BOT_TOKEN=123456789:ABCdef...
+TELEGRAM_ALLOWED_CHAT_IDS=your-chat-id
 ```
 
-Or set the environment variable directly:
+Then start nodyn:
 
 ```bash
-TELEGRAM_BOT_TOKEN=123:ABC... npx @nodyn-ai/core
+docker run -d \
+  --name nodyn \
+  --restart unless-stopped \
+  --env-file .env \
+  -v ~/.nodyn:/home/nodyn/.nodyn \
+  --tmpfs /workspace:size=256M,uid=1001,gid=1001 \
+  ghcr.io/nodyn-ai/nodyn:latest
 ```
 
-Create a bot via [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token. See [Telegram Bot](/telegram/) for the full feature set.
+That's it. nodyn is now always on. Open Telegram, message your bot, and start working.
 
-## Docker
+**What 24/7 unlocks:**
+- *"Every Monday at 9am, pull KPIs from the tracking sheet"* — runs automatically
+- *"Monitor competitor pricing and notify me when it changes"* — checks in the background
+- *"Summarize all emails from this week every Friday at 5pm"* — delivered to Telegram
+- Your AI keeps learning — every conversation builds the knowledge graph
+
+See [Docker Deployment](/docker/) for production hardening, encryption, and multi-service setups.
+
+## Docker (local try-out)
 
 Use `docker compose` for the simplest setup (see [`docker-compose.yml`](../docker-compose.yml) in the repo root):
 
