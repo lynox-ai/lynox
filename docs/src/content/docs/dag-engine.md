@@ -1,4 +1,7 @@
-# DAG Engine
+---
+title: "DAG Engine"
+description: "Multi-step workflow automation with dependency graphs"
+---
 
 NODYN's DAG engine executes declarative JSON manifest files — graph-based workflows with parallel execution, conditions, context passing, and gate approval. Domain-agnostic: you supply agent definitions, NODYN handles orchestration.
 

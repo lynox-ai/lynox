@@ -1,4 +1,7 @@
-# CRM (Contact & Deal Management)
+---
+title: "CRM"
+description: "Contact and deal pipeline management"
+---
 
 nodyn includes a built-in CRM combining the Knowledge Graph (semantic understanding of people and companies) with DataStore tables (structured deal pipeline and interaction tracking).
 

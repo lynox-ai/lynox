@@ -1,0 +1,21 @@
+/* nodyn brand colors */
+/* Light mode: accent-low = light bg, accent-high = dark text */
+:root {
+  --sl-color-accent-low: #ede8ff;
+  --sl-color-accent: #6525EF;
+  --sl-color-accent-high: #21179B;
+  --sl-color-text-accent: #4a15c0;
+}
+
+/* Dark mode: accent-low = dark bg, accent-high = light text */
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #1e1660;
+  --sl-color-accent: #9B8AFF;
+  --sl-color-accent-high: #c4b8ff;
+  --sl-color-text-accent: #9B8AFF;
+}
+
+/* Slightly tighter content for readability */
+.sl-markdown-content {
+  max-width: 75ch;
+}

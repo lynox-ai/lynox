@@ -1,4 +1,7 @@
-# Getting Started
+---
+title: "Getting Started"
+description: "Install nodyn and run your first session"
+---
 
 ## What You Need
 
@@ -92,7 +95,7 @@ Or set the environment variable directly:
 TELEGRAM_BOT_TOKEN=123:ABC... npx @nodyn-ai/core
 ```
 
-Create a bot via [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token. See [Telegram Bot](telegram.md) for the full feature set.
+Create a bot via [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token. See [Telegram Bot](/telegram/) for the full feature set.
 
 ## Docker
 
@@ -114,7 +117,7 @@ docker run -it --rm \
 
 > **Important:** Always mount `~/.nodyn` — without it, all config, knowledge, and history are lost when the container exits.
 
-See [Docker](docker.md) for Telegram, encryption, production deployment, and all environment variables.
+See [Docker](/docker/) for Telegram, encryption, production deployment, and all environment variables.
 
 ---
 
@@ -240,7 +243,7 @@ nodyn works out of the box after the setup wizard. Customize further in `~/.nody
 }
 ```
 
-Or use `/config` in the REPL for an interactive settings pane. See [Configuration](configuration.md) for all options.
+Or use `/config` in the REPL for an interactive settings pane. See [Configuration](/configuration/) for all options.
 
 ## Changeset Review
 
@@ -307,12 +310,12 @@ This walks through all steps again. Existing config is overwritten.
 
 ## What's Next
 
-- [CLI Reference](cli.md) — all slash commands and flags
-- [Tools](tools.md) — available builtin tools
-- [Configuration](configuration.md) — accuracy, thinking, cost settings
-- [Knowledge](memory.md) — how nodyn remembers your business
-- [Docker](docker.md) — container deployment and credentials guide
-- [Telegram Bot](telegram.md) — hands-free mobile operation
-- [MCP Server](mcp-server.md) — expose nodyn as a tool server
-- [SDK](sdk.md) — use nodyn as a TypeScript library
-- [Architecture](architecture.md) — understand the module structure
+- [CLI Reference](/cli/) — all slash commands and flags
+- [Tools](/tools/) — available builtin tools
+- [Configuration](/configuration/) — accuracy, thinking, cost settings
+- [Knowledge](/memory/) — how nodyn remembers your business
+- [Docker](/docker/) — container deployment and credentials guide
+- [Telegram Bot](/telegram/) — hands-free mobile operation
+- [MCP Server](/mcp-server/) — expose nodyn as a tool server
+- [SDK](/sdk/) — use nodyn as a TypeScript library
+- [Architecture](/architecture/) — understand the module structure

@@ -191,6 +191,8 @@ export interface NodynUserConfig {
   backup_encrypt?: boolean | undefined;
   /** Upload backups to Google Drive. Default: true when Google auth is configured with drive.file scope. */
   backup_gdrive?: boolean | undefined;
+  /** Persistent MCP server connections. Loaded on every Engine.init(). */
+  mcp_servers?: Array<{ name: string; url: string }> | undefined;
 }
 
 // === DataStore ===

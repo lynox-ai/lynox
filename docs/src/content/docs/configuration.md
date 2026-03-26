@@ -1,4 +1,7 @@
-# Configuration Reference
+---
+title: "Configuration"
+description: "Config tiers, environment variables, and profiles"
+---
 
 ## Config System
 
@@ -41,6 +44,7 @@ interface NodynUserConfig {
   backup_retention_days?: number;                 // Days to keep old backups (default: 30)
   backup_encrypt?:       boolean;                 // Encrypt backups (default: true when vault key set)
   backup_gdrive?:        boolean;                 // Upload backups to Google Drive (default: true when Google auth has drive.file scope)
+  mcp_servers?:          [{name, url}];           // Persistent MCP server connections, loaded on every startup
 }
 ```
 
@@ -58,7 +62,7 @@ On first run without an API key (TTY mode), a streamlined wizard guides through 
 
 **Prerequisites check** runs before the wizard: Node.js version, `~/.nodyn` directory, network connectivity.
 
-**Security**: Vault key file written atomically with `0o600` permissions. Auto-load on startup validates: no symlinks, owner-only access, base64 format. Shell profile injection uses `basename($SHELL)`, append-only with duplicate guard, single quotes in fallback. Config written with `0o700` dir / `0o600` file. See [Security](security.md#vault-key-auto-load-security).
+**Security**: Vault key file written atomically with `0o600` permissions. Auto-load on startup validates: no symlinks, owner-only access, base64 format. Shell profile injection uses `basename($SHELL)`, append-only with duplicate guard, single quotes in fallback. Config written with `0o700` dir / `0o600` file. See [Security](/security/#vault-key-auto-load-security).
 
 **Seamless flow**: Vault key is set in `process.env` immediately, config cache invalidated — the REPL starts with encryption active, no restart needed. `--init` continues directly into the REPL instead of exiting.
 
@@ -107,7 +111,7 @@ These behaviors run automatically on `Engine.init()` without configuration:
 
 | Behavior | Trigger | Details |
 |----------|---------|---------|
-| **Pre-update backup** | Version change detected | Compares `~/.nodyn/.last_version` with current package version. Creates a full backup before anything else runs. See [Backup](backup.md#pre-update-backup) |
+| **Pre-update backup** | Version change detected | Compares `~/.nodyn/.last_version` with current package version. Creates a full backup before anything else runs. See [Backup](/backup/#pre-update-backup) |
 | **Debug logging** | `NODYN_DEBUG` env var | Activates diagnostic channel subscribers |
 | **Security audit** | Always (when run history available) | Subscribes to security channels, logs to `history.db` |
 
@@ -204,7 +208,7 @@ Controls the `output_config.effort` parameter (accuracy level). Set via config, 
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | -- | Path to service account JSON key file (headless/Docker) |
 | `TAVILY_API_KEY` | -- | Tavily API key for web search |
 | `BRAVE_API_KEY` | -- | Brave Search API key (alternative to Tavily) |
-| `NODYN_SENTRY_DSN` | -- | Sentry DSN for opt-in error reporting. See [Error Reporting](sentry.md) |
+| `NODYN_SENTRY_DSN` | -- | Sentry DSN for opt-in error reporting. See [Error Reporting](/sentry/) |
 
 ## Profiles
 

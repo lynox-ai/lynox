@@ -1,4 +1,7 @@
-# Google Workspace Integration
+---
+title: "Google Workspace"
+description: "Gmail, Sheets, Drive, Calendar, and Docs integration"
+---
 
 nodyn connects to Google Workspace (Gmail, Sheets, Drive, Calendar, Docs) via OAuth 2.0. No third-party packages required — uses native `fetch()` against Google REST APIs.
 
@@ -113,7 +116,7 @@ Service accounts don't require interactive authentication but need domain-wide d
 - `google_calendar` — Events: list, create, update, delete, free/busy
 - `google_docs` — Documents: read, create, append, find & replace
 
-See [tools.md](tools.md) for full action reference.
+See [tools.md](/tools/) for full action reference.
 
 ## Scopes
 

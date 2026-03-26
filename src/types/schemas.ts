@@ -129,4 +129,5 @@ export const NodynUserConfigSchema = z.object({
   backup_retention_days:   z.number().min(0).max(365).optional(),
   backup_encrypt:          z.boolean().optional(),
   backup_gdrive:           z.boolean().optional(),
+  mcp_servers:             z.array(z.object({ name: z.string(), url: z.string() })).optional(),
 }).passthrough(); // allow unknown keys for forward compat

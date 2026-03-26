@@ -1,4 +1,7 @@
-# Tool System
+---
+title: "Tool System"
+description: "14 builtin tools, ToolRegistry, and permission guards"
+---
 
 ## ToolRegistry
 
@@ -42,7 +45,7 @@ The handler receives the parsed input and a reference to the calling `IAgent` (f
 | Max buffer | 10MB |
 | Eager streaming | Yes |
 
-Executes shell commands via `execSync`. Returns stdout on success, combined stdout+stderr on failure. Uses an **env var allowlist** — only safe prefixes (PATH, HOME, NODE_*, GIT_*, etc.) are passed to subprocesses. All secrets and API keys are stripped. See [Security](security.md#env-var-allowlist).
+Executes shell commands via `execSync`. Returns stdout on success, combined stdout+stderr on failure. Uses an **env var allowlist** — only safe prefixes (PATH, HOME, NODE_*, GIT_*, etc.) are passed to subprocesses. All secrets and API keys are stripped. See [Security](/security/#env-var-allowlist).
 
 **Isolation env filtering** (`setIsolationEnv()`): Available as an extension point for Pro. When a tenant context is active (via `nodyn-pro`), the env passed to subprocesses is further restricted based on isolation level. Air-gapped tenants receive a minimal env (PATH, HOME, TMPDIR only). Sandboxed tenants can inject custom env vars via `IsolationConfig.envVars`. Shared and scoped levels use the default allowlist.
 
@@ -164,11 +167,11 @@ In Slack, questions with `options` render as interactive buttons. Questions with
 | Response limit | 100KB (configurable via `http_response_limit`, truncated with hint) |
 | SSRF protection | Yes |
 
-Makes HTTP requests with full SSRF protection (see [Security](security.md)). Returns status, headers, and body. JSON responses are pretty-printed.
+Makes HTTP requests with full SSRF protection (see [Security](/security/)). Returns status, headers, and body. JSON responses are pretty-printed.
 
-**Network policy enforcement** (`setNetworkPolicy()`): Available as an extension point for Pro. When a tenant context is active (via `nodyn-pro`), the http tool enforces the tenant's network policy. `allow-all` (default) permits any request. `allow-list` restricts requests to hostnames in `IsolationConfig.allowedHosts`. `deny-all` blocks all outbound HTTP requests. See [Security](security.md#isolation-levels).
+**Network policy enforcement** (`setNetworkPolicy()`): Available as an extension point for Pro. When a tenant context is active (via `nodyn-pro`), the http tool enforces the tenant's network policy. `allow-all` (default) permits any request. `allow-list` restricts requests to hostnames in `IsolationConfig.allowedHosts`. `deny-all` blocks all outbound HTTP requests. See [Security](/security/#isolation-levels).
 
-**API profile enforcement**: When API profiles are loaded (see [API Store](api-store.md)), requests to API-like URLs without a registered profile are blocked. Per-API rate limits from profiles are enforced automatically.
+**API profile enforcement**: When API profiles are loaded (see [API Store](/api-store/)), requests to API-like URLs without a registered profile are blocked. Per-API rate limits from profiles are enforced automatically.
 
 ### `api_setup` -- API Profile Management
 
@@ -177,7 +180,7 @@ Makes HTTP requests with full SSRF protection (see [Security](security.md)). Ret
 | Source | `src/tools/builtin/api-setup.ts` |
 | Actions | `create`, `update`, `delete`, `list` |
 
-Create and manage API profiles that teach the agent how to correctly use external APIs. Profiles include endpoints, auth method, rate limits, guidelines, and common mistakes. Created profiles are validated (must include endpoints, guidelines, avoid rules, and auth), written to `~/.nodyn/apis/`, and activated immediately (hot-reload). See [API Store](api-store.md).
+Create and manage API profiles that teach the agent how to correctly use external APIs. Profiles include endpoints, auth method, rate limits, guidelines, and common mistakes. Created profiles are validated (must include endpoints, guidelines, avoid rules, and auth), written to `~/.nodyn/apis/`, and activated immediately (hot-reload). See [API Store](/api-store/).
 
 ### `run_pipeline` -- Run Workflow
 
@@ -333,7 +336,7 @@ const result = this.workerPool && this.workerPool.isWorkerSafe(tc.name)
 
 Available when `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are configured. Users authenticate via `/google auth` (OAuth 2.0 device flow). Service account auth supported via `GOOGLE_SERVICE_ACCOUNT_KEY` for headless/Docker deployments. Default OAuth scopes are **read-only**; write scopes opt-in via `google_oauth_scopes` config or `requestScope()` at runtime.
 
-**Security**: All Google tool responses are scanned for prompt injection via `scanToolResult()`. All read handlers wrap external content with `wrapUntrustedData()` boundary markers. `ToolCallTracker` detects exfiltration patterns (Google read → email send, HTTP POST, or sensitive file read). Write actions require user confirmation and are blocked in autonomous mode. See [Security: Google Workspace Injection Hardening](security.md#google-workspace-injection-hardening-v4).
+**Security**: All Google tool responses are scanned for prompt injection via `scanToolResult()`. All read handlers wrap external content with `wrapUntrustedData()` boundary markers. `ToolCallTracker` detects exfiltration patterns (Google read → email send, HTTP POST, or sensitive file read). Write actions require user confirmation and are blocked in autonomous mode. See [Security: Google Workspace Injection Hardening](/security/#google-workspace-injection-hardening-v4).
 
 ### `google_gmail`
 

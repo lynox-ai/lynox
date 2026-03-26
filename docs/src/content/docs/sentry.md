@@ -1,4 +1,7 @@
-# Error Reporting (Sentry)
+---
+title: "Error Reporting"
+description: "Opt-in Sentry integration with PII protection"
+---
 
 nodyn includes opt-in error reporting via [Sentry](https://sentry.io). When configured, crashes, unhandled errors, and user-submitted bug reports are captured with structured context — without sending user prompts or response content.
 

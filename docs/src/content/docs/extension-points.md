@@ -1,4 +1,7 @@
-# NODYN Extension Points
+---
+title: "Extension Points"
+description: "Hooks, CLI commands, feature flags, and notification router"
+---
 
 Extension points allow `nodyn-pro` (or custom plugins) to hook into core functionality without modifying core source code. All extension points are additive — core works standalone without any extensions registered.
 

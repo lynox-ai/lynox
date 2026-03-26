@@ -418,6 +418,15 @@ export class Engine {
       }
     }
 
+    // Load persistent MCP servers from user config
+    if (this.userConfig.mcp_servers) {
+      for (const server of this.userConfig.mcp_servers) {
+        if (server.name && server.url) {
+          this.registry.registerMCP({ type: 'url', name: server.name, url: server.url });
+        }
+      }
+    }
+
     // Load plugins (best-effort — never fail init, gated behind feature flag)
     if (isFeatureEnabled('plugins')) {
       try {

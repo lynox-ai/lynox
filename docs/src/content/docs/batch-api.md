@@ -1,4 +1,7 @@
-# Batch Processing
+---
+title: "Batch Processing"
+description: "Batch API for handling multiple tasks"
+---
 
 ## Overview
 

@@ -1,4 +1,7 @@
-# Telegram Bot
+---
+title: "Telegram Bot"
+description: "Setup, commands, inline keyboards, and file handling"
+---
 
 nodyn includes a built-in Telegram bot for hands-free operation. Send tasks to your bot, get rich status updates with tool details, and interact via inline keyboards.
 
@@ -67,7 +70,7 @@ By default, anyone who finds your bot can use it. For production, restrict acces
 TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
 ```
 
-> **Shared knowledge:** All users on the same bot share the same knowledge, memory, and history. Add multiple chat IDs only for people who work on the same business. For separate businesses, deploy separate nodyn instances (see [Docker — One instance = one business](docker.md#one-instance--one-business)).
+> **Shared knowledge:** All users on the same bot share the same knowledge, memory, and history. Add multiple chat IDs only for people who work on the same business. For separate businesses, deploy separate nodyn instances (see [Docker — One instance = one business](/docker/#one-instance--one-business)).
 
 To find your chat ID: send a message to the bot without `TELEGRAM_ALLOWED_CHAT_IDS` set — the bot will reply with your chat ID in the "Unauthorized" message.
 
@@ -101,7 +104,7 @@ Every running task shows a Stop button. Tap it or send `/stop` to abort.
 | `/stop` | Abort the current running task |
 | `/clear` | Start a fresh conversation (knowledge preserved) |
 | `/status` | Show whether a task is running |
-| `/bug` | Report a bug or issue (sent to Sentry). See [Error Reporting](sentry.md) |
+| `/bug` | Report a bug or issue (sent to Sentry). See [Error Reporting](/sentry/) |
 | `/help` | List available commands |
 
 ## Rich Status Message

@@ -1,4 +1,7 @@
-# Pre-Approve System
+---
+title: "Pre-Approve System"
+description: "Glob-based auto-approval patterns and audit trail"
+---
 
 Reduces operator approval bottleneck in autonomous modes by auto-approving predictable operations via glob-based pattern matching.
 

@@ -1,4 +1,7 @@
-# Backup & Restore
+---
+title: "Backup & Restore"
+description: "Crash-safe backups, encryption, and scheduled backups"
+---
 
 nodyn stores all persistent data in `~/.nodyn/`. This includes run history, knowledge graph, memory, secrets vault, and configuration. The backup module provides crash-safe snapshots with optional encryption.
 

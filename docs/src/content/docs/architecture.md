@@ -1,4 +1,7 @@
-# Architecture
+---
+title: "Architecture"
+description: "Engine, Session, and module overview"
+---
 
 ## High-Level Overview
 
@@ -179,7 +182,7 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `runtime-adapter.ts` | `convertAgentTools()`, `wrapWithGate()`, `spawnViaAgent()`, `spawnInline()` (with role support), `spawnPipeline()` (propagates `role`), `spawnMock()` |
 | `runner.ts` | `runManifest()` — sequential DAG loop with conditions, gates, failure strategy |
 
-See [DAG Engine](dag-engine.md) for full documentation.
+See [DAG Engine](/dag-engine/) for full documentation.
 
 ### `src/integrations/telegram/` -- Telegram Bot
 
@@ -256,7 +259,7 @@ Agent.send(userMessage)
 - **3-tier config**: env vars > project `.nodyn/config.json` > user `~/.nodyn/config.json`.
 - **Security-first**: `PROJECT_SAFE_KEYS` allowlist, `NPM_NAME_RE`/`SAFE_ROLE_NAME_RE`/`SAFE_PROFILE_NAME_RE` validation, SSRF protection, XML escaping in RAG.
 - **DRY utilities**: Shared primitives in `src/core/utils.ts` (`sha256Short`, `getErrorMessage`, `sleep`) and `src/cli/ansi.ts` (`TBL`, `stripAnsi`, `wordWrap`). Constants like `ALL_NAMESPACES` live in `src/types/index.ts`.
-- **Open-core extensibility**: Core provides 4 extension points (Orchestrator Hooks, CLI Command Registry, Feature Flags, Notification Router) so Pro can integrate without modifying core source. See [Extension Points](extension-points.md).
+- **Open-core extensibility**: Core provides 4 extension points (Orchestrator Hooks, CLI Command Registry, Feature Flags, Notification Router) so Pro can integrate without modifying core source. See [Extension Points](/extension-points/).
 
 ## Error Handling
 
@@ -285,4 +288,4 @@ The thorough tier has a 1M token context window; balanced and fast tiers have 20
 
 ## Background Tasks
 
-ModeController, GoalTracker, and the 5-mode system have been removed. Background work is handled by `WorkerLoop` via `task_create` with scheduling fields. The `--task` CLI flag creates a background task directly. Pro's sentinel/daemon/swarm modes are deprecated. See [Extension Points](extension-points.md) for how Pro integrates via hooks.
+ModeController, GoalTracker, and the 5-mode system have been removed. Background work is handled by `WorkerLoop` via `task_create` with scheduling fields. The `--task` CLI flag creates a background task directly. Pro's sentinel/daemon/swarm modes are deprecated. See [Extension Points](/extension-points/) for how Pro integrates via hooks.

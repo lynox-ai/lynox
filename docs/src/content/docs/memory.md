@@ -1,4 +1,7 @@
-# Knowledge System
+---
+title: "Knowledge System"
+description: "Persistent memory, scopes, retrieval, and Knowledge Graph"
+---
 
 ## Overview
 

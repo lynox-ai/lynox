@@ -29,7 +29,7 @@ Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 - `src/server/` — MCP server (stdio + HTTP SSE)
 - `src/types/` — 11 domain type files, barrel re-export via index.ts
 
-See `docs/` for detailed documentation per topic.
+See `docs/src/content/docs/` for documentation source (Astro Starlight site).
 
 ## TypeScript Rules
 

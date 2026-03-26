@@ -1,4 +1,7 @@
-# SDK Usage
+---
+title: "SDK Usage"
+description: "Use nodyn as a TypeScript library"
+---
 
 Use nodyn as a library in your own TypeScript projects.
 

@@ -1,4 +1,7 @@
-# Security Model
+---
+title: "Security Model"
+description: "Permission guards, SSRF protection, and secret management"
+---
 
 ## Permission Guard
 
@@ -547,7 +550,7 @@ When set, all HTTP requests must include:
 Authorization: Bearer your-secret-token
 ```
 
-Token comparison uses `crypto.timingSafeEqual` to prevent timing attacks. Without `NODYN_MCP_SECRET`, the server runs without authentication. See [MCP Server docs](mcp-server.md) for details.
+Token comparison uses `crypto.timingSafeEqual` to prevent timing attacks. Without `NODYN_MCP_SECRET`, the server runs without authentication. See [MCP Server docs](/mcp-server/) for details.
 
 **Vault storage**: `NODYN_MCP_SECRET` can be stored in the encrypted vault (`nodyn vault set NODYN_MCP_SECRET <token>`). If the env var is not set, `initSecrets()` loads it from the vault and sets `process.env` transparently.
 
@@ -645,7 +648,7 @@ Requires user confirmation. If any step fails, the original key and data remain 
 |-----------|------|-----------|
 | MCP HTTP without `NODYN_MCP_SECRET` | Unauthenticated agent execution | Always set bearer token for network-exposed MCP |
 | Telegram without `TELEGRAM_ALLOWED_CHAT_IDS` | Any Telegram user can run commands | Restrict to known chat IDs |
-| Multiple businesses on one instance | All users share knowledge and history | One instance per business — separate instances for separate businesses (see [Docker](docker.md#one-instance--one-business)) |
+| Multiple businesses on one instance | All users share knowledge and history | One instance per business — separate instances for separate businesses (see [Docker](/docker/#one-instance--one-business)) |
 | `enforce_https: false` (default) | Plaintext HTTP to external APIs | Enable in production |
 | `NODYN_DEBUG` in production | Sensitive data in debug output | Never enable in production (warning emitted) |
 | MCP over plain HTTP (not HTTPS) | Bearer token transmitted in cleartext | Use reverse proxy with TLS termination |

@@ -1,4 +1,7 @@
-# CLI Reference
+---
+title: "CLI Reference"
+description: "Interactive REPL, slash commands, flags, and watch mode"
+---
 
 ## Modes
 
@@ -47,7 +50,7 @@ node dist/index.js --mcp-server                    # stdio transport
 node dist/index.js --mcp-server --transport sse     # SSE transport
 ```
 
-See [MCP Server](mcp-server.md) for details.
+See [MCP Server](/mcp-server/) for details.
 
 ## CLI Flags
 
@@ -104,7 +107,9 @@ All commands support tab autocomplete in the REPL.
 | Command | Description |
 |---------|-------------|
 | `/tools` | List available tools and MCP servers |
-| `/mcp <name> <url>` | Register an MCP server at runtime |
+| `/mcp` | List persistent MCP servers |
+| `/mcp add <name> <url>` | Add and persist an MCP server connection |
+| `/mcp remove <name>` | Remove an MCP server |
 | `/approvals [subcommand]` | Pre-approval management (`list`, `show`, `export`) |
 | `/hooks` | Show registered hooks and extension commands |
 | `/plugin [subcommand]` | Manage plugins (`add`, `remove`, `list`) |
@@ -488,7 +493,7 @@ On first run without an API key (TTY mode), an interactive 6-step setup wizard r
 
 Writes `~/.nodyn/config.json` with secure permissions (0o700 dir, 0o600 file). After setup, a business profile onboarding asks 4 optional questions about your business. Re-run with `/profile update`.
 
-See [Getting Started](getting-started.md) for a detailed walkthrough of each step.
+See [Getting Started](/getting-started/) for a detailed walkthrough of each step.
 
 ## Pipe Mode
 

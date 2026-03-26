@@ -1,6 +1,34 @@
-# MCP Server
+---
+title: "MCP Server"
+description: "Expose nodyn as an MCP server via stdio or HTTP"
+---
 
 NODYN can be exposed as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server so other MCP-compatible clients can use NODYN as a tool provider and async agent runtime.
+
+## Connecting to External MCP Servers
+
+nodyn can also connect to external MCP servers as a client, gaining access to their tools:
+
+```bash
+# CLI — persisted to ~/.nodyn/config.json
+/mcp add context7 https://context7.example.com
+/mcp add my-tools https://localhost:8080
+/mcp list         # Show all registered servers
+/mcp remove name  # Remove a server
+
+# Or in config directly
+```
+
+```json
+{
+  "mcp_servers": [
+    { "name": "context7", "url": "https://context7.example.com" },
+    { "name": "my-tools", "url": "http://localhost:8080" }
+  ]
+}
+```
+
+Connections are persistent — servers are reconnected on every startup. MCP servers are self-describing: their tool definitions are automatically available to the agent.
 
 ## Transports
 

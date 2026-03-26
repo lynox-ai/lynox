@@ -1,0 +1,39 @@
+---
+title: nodyn Documentation
+description: The AI that knows your business — persistent knowledge, autonomous workflows, tool connections.
+template: splash
+hero:
+  tagline: Persistent knowledge, autonomous workflows, tool connections. Open source.
+  actions:
+    - text: Get Started
+      link: /getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/nodyn-ai/nodyn
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid stagger>
+  <Card title="Getting Started" icon="rocket">
+    Install with `npx @nodyn-ai/core` and run your first session in under a minute.
+  </Card>
+  <Card title="Knowledge System" icon="document">
+    Persistent memory with Knowledge Graph, entity resolution, and contradiction detection.
+  </Card>
+  <Card title="14 Builtin Tools" icon="setting">
+    File operations, web search, API calls, SQL queries, bash — all with permission guards.
+  </Card>
+  <Card title="Integrations" icon="puzzle">
+    Telegram, Google Workspace, MCP Server — connect your existing tools.
+  </Card>
+  <Card title="DAG Workflows" icon="list-format">
+    Multi-step automation with dependency graphs, parallel execution, and conditional branches.
+  </Card>
+  <Card title="Self-Hosted" icon="laptop">
+    Docker-ready, encrypted secrets, scheduled backups. Your data stays yours.
+  </Card>
+</CardGrid>

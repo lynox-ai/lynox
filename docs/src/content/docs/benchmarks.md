@@ -1,4 +1,7 @@
-# Performance Benchmarks
+---
+title: "Performance Benchmarks"
+description: "Baselines, regression detection, and profiling"
+---
 
 ## Overview
 
