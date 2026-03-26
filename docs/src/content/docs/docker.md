@@ -161,6 +161,7 @@ docker run -d \
   --restart unless-stopped \
   --read-only \
   --tmpfs /tmp:size=512M \
+  --tmpfs /workspace:size=256M,uid=1001,gid=1001 \
   --security-opt no-new-privileges \
   --memory 2g \
   --cpus 2.0 \
@@ -177,6 +178,7 @@ docker run -d \
 |------|-----|
 | `--read-only` | Container filesystem can't be modified |
 | `--tmpfs /tmp:size=512M` | Temp files in memory only, capped |
+| `--tmpfs /workspace:size=256M` | Agent workspace (read-only root needs tmpfs) |
 | `--no-new-privileges` | Prevents privilege escalation |
 | `--memory 2g` / `--cpus 2.0` | Resource limits |
 | `--restart unless-stopped` | Auto-restart on crash |

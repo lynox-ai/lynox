@@ -18,6 +18,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=512M
+      - /workspace:size=256M,uid=1001,gid=1001
     security_opt:
       - no-new-privileges
     environment:

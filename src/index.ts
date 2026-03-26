@@ -683,7 +683,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       }
       await engine.shutdown();
     }
-    return;
+    process.exit(state.hadError ? 1 : 0);
   }
 
   // === --task flag: create background task and exit ===
