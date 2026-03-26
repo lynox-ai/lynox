@@ -41,16 +41,16 @@ if [ -z "${NODYN_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ]; then
   fi
 fi
 
-# Allow --init to run without API key (the wizard will ask for it)
-INIT_MODE=false
+# Allow --init, --version, --help to run without API key
+SKIP_KEY_CHECK=false
 for arg in "$@"; do
   case "$arg" in
-    --init|init) INIT_MODE=true ;;
+    --init|init|--version|-v|--help|-h) SKIP_KEY_CHECK=true ;;
   esac
 done
 
-# Require ANTHROPIC_API_KEY unless running setup wizard
-if [ "$INIT_MODE" = "false" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+# Require ANTHROPIC_API_KEY unless running a no-key command
+if [ "$SKIP_KEY_CHECK" = "false" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   # Check if config has a key before failing
   CONFIG_FILE="$HOME/.nodyn/config.json"
   if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"api_key"' "$CONFIG_FILE" 2>/dev/null; then
