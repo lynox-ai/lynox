@@ -21,9 +21,9 @@ npx vitest run tests/online/  # 22 real API tests
 
 Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 
-- `src/core/` — 60 modules: engine, session, agent, worker-loop, KG, memory, etc.
+- `src/core/` — 66 modules: engine, session, agent, worker-loop, KG, memory, sentry, backup, api-store, crm, etc.
 - `src/cli/` — Terminal UI + 11 command handler modules
-- `src/tools/` — 14 builtin tools + permission guard
+- `src/tools/` — 14 builtin tools (incl. api_setup) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Telegram, Google Workspace, Web Search
 - `src/server/` — MCP server (stdio + HTTP SSE)
@@ -47,6 +47,10 @@ See `docs/src/content/docs/` for documentation source (Astro Starlight site).
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
 - KG: LadybugDB graph + ONNX embeddings + entity extraction + contradiction detection
+- Backup: VACUUM INTO + AES-256-GCM encryption + GDrive upload
+- API Store: profile-first enforcement, agent-driven setup
+- CRM: agent-driven contacts/deals, KG-primary, DataStore for structured tracking
+- Sentry: opt-in error reporting (NODYN_SENTRY_DSN), PII scrubbed
 
 ## Testing
 
@@ -63,5 +67,7 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/ (>=70%).
 
 ## Docker
 
-4-stage build on debian:trixie-slim. Non-root nodyn:1001.
-Entrypoint: entrypoint.sh (vault key auto-load).
+4-stage build on debian:trixie-slim (~523 MB). Non-root nodyn:1001.
+Entrypoint: entrypoint.sh (vault key auto-load, --version/--help without API key).
+Healthcheck: `GET /health` → `{"status":"ok"}` on MCP port.
+Hardened: no bash, no apt, no perl, no SUID, read-only root.
