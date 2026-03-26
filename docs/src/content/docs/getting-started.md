@@ -111,53 +111,39 @@ The local install is for trying things out. The real power comes when nodyn runs
 ### What you need
 
 - A server that's always on — a cheap VPS ($5/month), a homelab, or an old laptop
-- [Docker](https://docs.docker.com/get-started/get-docker/) installed on that server
+- An Anthropic API key (same one from your local install, or a new one)
+- A Telegram bot token (the script walks you through creating one)
 
-### Step 1: Create a Telegram bot
+### One command
 
-This becomes your daily interface — no terminal needed after setup.
-
-1. Open Telegram and message [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`, follow the prompts, copy the **bot token**
-
-### Step 2: Create a config file
-
-On your server, create a file called `.env` with your API key and bot token:
+SSH into your server and run:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
-TELEGRAM_BOT_TOKEN=123456789:ABCdef...
+curl -fsSL https://nodyn.dev/setup-server.sh | sh
 ```
 
-### Step 3: Start nodyn
+The script handles everything interactively:
 
-```bash
-docker run -d \
-  --name nodyn \
-  --restart unless-stopped \
-  --env-file .env \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  --tmpfs /workspace:size=256M,uid=1001,gid=1001 \
-  ghcr.io/nodyn-ai/nodyn:latest
-```
+1. Installs Docker if needed
+2. Asks for your API key (verified live)
+3. Walks you through creating a Telegram bot
+4. Waits for you to message your bot, auto-detects your chat ID
+5. Generates encryption key
+6. Starts nodyn in a hardened container
 
-### Step 4: Lock down your bot
+At the end, you see a summary of what's set up and your next steps. Open Telegram, message your bot, done.
 
-Message your bot in Telegram — just say "hi". nodyn responds with your **chat ID**:
+### What the script sets up
 
-```
-Your chat ID is: 123456789
-Add TELEGRAM_ALLOWED_CHAT_IDS=123456789 to your .env and restart.
-```
+- **Docker container** with production hardening (read-only root, no-new-privileges, resource limits)
+- **Auto-restart** — survives reboots and crashes
+- **Encryption** — AES-256-GCM vault key, auto-generated
+- **Telegram lockdown** — only your chat ID can talk to the bot
+- **All config in `~/.nodyn/`** — one directory to back up
 
-Add the ID to your `.env` file and restart:
-
-```bash
-echo "TELEGRAM_ALLOWED_CHAT_IDS=123456789" >> .env
-docker restart nodyn
-```
-
-Now only you can talk to the bot. Done — open Telegram and start working.
+:::tip[Prefer manual setup?]
+See [Docker Deployment](/docker/) for the full `docker run` command with all flags explained.
+:::
 
 ### What 24/7 unlocks
 
