@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { MODEL_MAP } from '../types/index.js';
-import type { ModelTier, NodynUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry } from '../types/index.js';
+import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry } from '../types/index.js';
 import { calculateCost } from '../core/pricing.js';
 import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js';
 import { buildApprovalSet } from '../core/pre-approve.js';
@@ -39,7 +39,7 @@ function getExecutionMode(m: Manifest): 'sequential' | 'parallel' {
 
 export async function runManifest(
   manifest: Manifest,
-  config: NodynUserConfig,
+  config: LynoxUserConfig,
   options: RunManifestOptions = {},
 ): Promise<RunState> {
   const depth = options.depth ?? 0;
@@ -87,7 +87,7 @@ export async function runManifest(
 export async function retryManifest(
   manifest: Manifest,
   previousState: RunState,
-  config: NodynUserConfig,
+  config: LynoxUserConfig,
   options: RunManifestOptions = {},
 ): Promise<RunState> {
   const cachedOutputs = new Map<string, AgentOutput>();
@@ -109,7 +109,7 @@ export async function retryManifest(
 async function runSequential(
   manifest: Manifest,
   state: RunState,
-  config: NodynUserConfig,
+  config: LynoxUserConfig,
   agentsDir: string,
   options: RunManifestOptions,
 ): Promise<void> {
@@ -124,7 +124,7 @@ async function runSequential(
 async function runParallel(
   manifest: Manifest,
   state: RunState,
-  config: NodynUserConfig,
+  config: LynoxUserConfig,
   agentsDir: string,
   options: RunManifestOptions,
 ): Promise<void> {
@@ -166,7 +166,7 @@ async function executeStep(
   step: ManifestStep,
   manifest: Manifest,
   state: RunState,
-  config: NodynUserConfig,
+  config: LynoxUserConfig,
   agentsDir: string,
   options: RunManifestOptions,
 ): Promise<StepResult> {

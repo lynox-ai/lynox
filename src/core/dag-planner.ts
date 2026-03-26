@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from '../types/index.js';
-import { MODEL_MAP, NODYN_BETAS } from '../types/index.js';
+import { MODEL_MAP, LYNOX_BETAS } from '../types/index.js';
 import { resolveModel } from '../orchestrator/runtime-adapter.js';
 
 export interface DagPlanResult {
@@ -86,7 +86,7 @@ export async function planDAG(
         {
           model,
           max_tokens: 4096,
-          betas: [...NODYN_BETAS],
+          betas: [...LYNOX_BETAS],
           system: systemText,
           tool_choice: { type: 'tool', name: 'propose_dag' },
           tools: [PROPOSE_DAG_TOOL],

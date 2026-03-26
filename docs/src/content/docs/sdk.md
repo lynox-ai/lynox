@@ -1,14 +1,14 @@
 ---
 title: "SDK Usage"
-description: "Use nodyn as a TypeScript library"
+description: "Use lynox as a TypeScript library"
 ---
 
-Use nodyn as a library in your own TypeScript projects.
+Use lynox as a library in your own TypeScript projects.
 
 ## Minimal example
 
 ```typescript
-import { Engine } from '@nodyn-ai/core';
+import { Engine } from '@lynox-ai/core';
 
 // Create the shared Engine singleton
 const engine = new Engine({ model: 'sonnet' });
@@ -22,12 +22,12 @@ console.log(result);
 await engine.shutdown();
 ```
 
-> **Note:** Use `Engine` + `Session` directly. The old `Nodyn` class no longer exists.
+> **Note:** Use `Engine` + `Session` directly. The old `Lynox` class no longer exists.
 
 ## Error handling
 
 ```typescript
-import { Engine, ValidationError, ExecutionError } from '@nodyn-ai/core';
+import { Engine, ValidationError, ExecutionError } from '@lynox-ai/core';
 
 const engine = new Engine({ model: 'sonnet' });
 await engine.init();
@@ -90,7 +90,7 @@ await session.run('Write a summary of this project');
 ## Run a workflow
 
 ```typescript
-import { loadManifestFile, runManifest, loadConfig } from '@nodyn-ai/core';
+import { loadManifestFile, runManifest, loadConfig } from '@lynox-ai/core';
 
 const manifest = loadManifestFile(new URL('./workflow.json', import.meta.url).pathname);
 const state = await runManifest(manifest, loadConfig(), {

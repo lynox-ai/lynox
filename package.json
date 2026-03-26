@@ -1,16 +1,16 @@
 {
-  "name": "@nodyn-ai/core",
+  "name": "@lynox-ai/core",
   "version": "1.0.0",
   "description": "The AI that knows your business — persistent knowledge, autonomous workflows, tool connections, MCP server",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
-  "homepage": "https://nodyn.dev",
+  "homepage": "https://lynox.ai",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nodyn-ai/nodyn.git"
+    "url": "git+https://github.com/lynox-ai/lynox.git"
   },
   "bugs": {
-    "url": "https://github.com/nodyn-ai/nodyn/issues"
+    "url": "https://github.com/lynox-ai/lynox/issues"
   },
   "keywords": [
     "ai-agent",
@@ -37,7 +37,7 @@
     }
   },
   "bin": {
-    "nodyn": "dist/index.js"
+    "lynox": "dist/index.js"
   },
   "files": [
     "dist/",

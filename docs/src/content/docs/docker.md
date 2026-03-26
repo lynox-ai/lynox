@@ -4,7 +4,7 @@ description: "Container setup, production hardening, and volumes"
 ---
 
 :::tip[Don't want to set up Docker manually?]
-Use the **[deploy page](https://nodyn.dev/deploy)** — enter your API key, pick a provider, get a running server in 5 minutes. No Docker, SSH, or terminal knowledge needed. Auto-updates included.
+Use the **[deploy page](https://lynox.ai/deploy)** — enter your API key, pick a provider, get a running server in 5 minutes. No Docker, SSH, or terminal knowledge needed. Auto-updates included.
 :::
 
 ## Quick Start
@@ -27,8 +27,8 @@ Enable features by uncommenting environment variables in `docker-compose.yml`. T
 ```bash
 docker run -it --rm \
   -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  ghcr.io/nodyn-ai/nodyn:latest
+  -v ~/.lynox:/home/lynox/.lynox \
+  ghcr.io/lynox-ai/lynox:latest
 ```
 
 Type your task, press Enter.
@@ -36,9 +36,9 @@ Type your task, press Enter.
 ### Shell alias (optional)
 
 ```bash
-alias nodyn='docker run -it --rm -e ANTHROPIC_API_KEY -v ~/.nodyn:/home/nodyn/.nodyn ghcr.io/nodyn-ai/nodyn:latest'
+alias lynox='docker run -it --rm -e ANTHROPIC_API_KEY -v ~/.lynox:/home/lynox/.lynox ghcr.io/lynox-ai/lynox:latest'
 
-nodyn "What can you do?"
+lynox "What can you do?"
 ```
 
 ---
@@ -49,14 +49,14 @@ All features are enabled by adding environment variables. Add any of these `-e` 
 
 ### Telegram Bot
 
-Use nodyn from your phone. Create a bot via [@BotFather](https://t.me/BotFather) → `/newbot` → copy token.
+Use lynox from your phone. Create a bot via [@BotFather](https://t.me/BotFather) → `/newbot` → copy token.
 
 ```bash
 docker run -d \
   -e ANTHROPIC_API_KEY \
   -e TELEGRAM_BOT_TOKEN=123456789:ABCdef... \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  ghcr.io/nodyn-ai/nodyn:latest
+  -v ~/.lynox:/home/lynox/.lynox \
+  ghcr.io/lynox-ai/lynox:latest
 ```
 
 Restrict to your chat (recommended): message your bot, open `https://api.telegram.org/bot<TOKEN>/getUpdates`, find your `chat.id`:
@@ -70,7 +70,7 @@ Restrict to your chat (recommended): message your bot, open `https://api.telegra
 Encrypt secrets, run history, and OAuth tokens at rest:
 
 ```bash
--e NODYN_VAULT_KEY=$(openssl rand -base64 48)
+-e LYNOX_VAULT_KEY=$(openssl rand -base64 48)
 ```
 
 Save this key in a password manager. If lost, encrypted data becomes unrecoverable.
@@ -103,33 +103,33 @@ Gmail, Sheets, Drive, Calendar, Docs. Create OAuth credentials at [GCP Console](
 Opt-in crash and error reporting to a Sentry instance (EU region recommended):
 
 ```bash
--e NODYN_SENTRY_DSN=https://...@....ingest.de.sentry.io/...
+-e LYNOX_SENTRY_DSN=https://...@....ingest.de.sentry.io/...
 ```
 
 PII is scrubbed automatically. No DSN is hardcoded — if absent, Sentry is completely disabled.
 
 ### MCP Server
 
-Expose nodyn as a tool server for Claude Desktop, Cursor, or other MCP clients.
+Expose lynox as a tool server for Claude Desktop, Cursor, or other MCP clients.
 
 ```bash
 # stdio (for Claude Desktop, Cursor)
-docker run -i --rm -e ANTHROPIC_API_KEY ghcr.io/nodyn-ai/nodyn:latest --mcp-server
+docker run -i --rm -e ANTHROPIC_API_KEY ghcr.io/lynox-ai/lynox:latest --mcp-server
 
 # HTTP (for web apps, Slack)
 docker run -d \
   -e ANTHROPIC_API_KEY \
-  -e NODYN_MCP_SECRET=$(openssl rand -hex 32) \
+  -e LYNOX_MCP_SECRET=$(openssl rand -hex 32) \
   -p 127.0.0.1:3042:3042 \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  ghcr.io/nodyn-ai/nodyn:latest --mcp-server --transport sse
+  -v ~/.lynox:/home/lynox/.lynox \
+  ghcr.io/lynox-ai/lynox:latest --mcp-server --transport sse
 ```
 
 ---
 
 ## One Image, All Modes
 
-The `ghcr.io/nodyn-ai/nodyn` image contains everything — CLI, Telegram bot, MCP server, voice transcription, embeddings. There are no separate images to choose from. The mode is determined by environment variables and flags:
+The `ghcr.io/lynox-ai/lynox` image contains everything — CLI, Telegram bot, MCP server, voice transcription, embeddings. There are no separate images to choose from. The mode is determined by environment variables and flags:
 
 | What you set | What runs |
 |--------------|-----------|
@@ -144,14 +144,14 @@ This keeps things simple: one image to pull, one image to update. The [docker-co
 
 ## Remote Access
 
-When nodyn runs on a server, there are several ways to interact with it:
+When lynox runs on a server, there are several ways to interact with it:
 
 | Channel | Best for | Setup |
 |---------|----------|-------|
 | **Telegram** | Daily use from phone/desktop | Add `TELEGRAM_BOT_TOKEN` env var |
-| **MCP HTTP** | Integrations (Slack, web apps) | Add `NODYN_MCP_SECRET`, expose port 3042 |
-| **SSH + CLI** | Admin/debugging | `docker exec -it nodyn node /app/dist/index.js` |
-| **Web UI** | Everyone (planned) | `@nodyn/web-ui` — not yet available |
+| **MCP HTTP** | Integrations (Slack, web apps) | Add `LYNOX_MCP_SECRET`, expose port 3042 |
+| **SSH + CLI** | Admin/debugging | `docker exec -it lynox node /app/dist/index.js` |
+| **Web UI** | Everyone (planned) | `@lynox/web-ui` — not yet available |
 
 **Telegram** is currently the easiest remote interface — works from any device, no setup beyond the bot token. See [Telegram Bot](/telegram/) for features and [differences from CLI](/telegram/#differences-from-cli).
 
@@ -165,7 +165,7 @@ For always-on deployments (server, VPS, homelab):
 
 ```bash
 docker run -d \
-  --name nodyn \
+  --name lynox \
   --restart unless-stopped \
   --read-only \
   --tmpfs /tmp:size=512M \
@@ -174,12 +174,12 @@ docker run -d \
   --memory 2g \
   --cpus 2.0 \
   -e ANTHROPIC_API_KEY \
-  -e NODYN_VAULT_KEY \
-  -e NODYN_MCP_SECRET \
+  -e LYNOX_VAULT_KEY \
+  -e LYNOX_MCP_SECRET \
   -e TELEGRAM_BOT_TOKEN \
   -e TELEGRAM_ALLOWED_CHAT_IDS \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  ghcr.io/nodyn-ai/nodyn:latest
+  -v ~/.lynox:/home/lynox/.lynox \
+  ghcr.io/lynox-ai/lynox:latest
 ```
 
 | Flag | Why |
@@ -195,9 +195,9 @@ docker run -d \
 
 | Variable | Without it |
 |----------|-----------|
-| `ANTHROPIC_API_KEY` | nodyn won't start |
-| `NODYN_VAULT_KEY` | Data stored in plaintext |
-| `NODYN_MCP_SECRET` | Anyone on the network can run agent tasks |
+| `ANTHROPIC_API_KEY` | lynox won't start |
+| `LYNOX_VAULT_KEY` | Data stored in plaintext |
+| `LYNOX_MCP_SECRET` | Anyone on the network can run agent tasks |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Anyone on Telegram can use your bot |
 
 ### One instance = one business
@@ -208,13 +208,13 @@ For **separate businesses**, deploy separate instances. Each gets its own Telegr
 
 ### Docker Compose
 
-For multi-service and multi-instance deployment, see `nodyn-pro/packages/deploy/`.
+For multi-service and multi-instance deployment, see `lynox-pro/packages/deploy/`.
 
 See [Security — Production Deployment](/security/#production-deployment-security) for vault key rotation and full hardening details.
 
 ### Automatic Updates with Watchtower
 
-To keep nodyn updated automatically, run [Watchtower](https://containrrr.dev/watchtower/) alongside your container:
+To keep lynox updated automatically, run [Watchtower](https://containrrr.dev/watchtower/) alongside your container:
 
 ```bash
 docker run -d \
@@ -223,21 +223,21 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower \
   --cleanup --interval 86400 \
-  nodyn
+  lynox
 ```
 
-This checks for new nodyn images once per day (86400 seconds) and restarts the container automatically. Your data is on a volume, so updates are safe and seamless.
+This checks for new lynox images once per day (86400 seconds) and restarts the container automatically. Your data is on a volume, so updates are safe and seamless.
 
 :::note
-The [deploy page](https://nodyn.dev/deploy) and the [setup script](https://nodyn.dev/setup-server.sh) both include Watchtower automatically.
+The [deploy page](https://lynox.ai/deploy) and the [setup script](https://lynox.ai/setup-server.sh) both include Watchtower automatically.
 :::
 
 **Security considerations:**
 
 - Watchtower requires Docker socket access (`/var/run/docker.sock`) to manage containers. This is standard for container management tools but grants full Docker API access.
-- Updates are pulled from the official nodyn image at `ghcr.io/nodyn-ai/nodyn`. If the image registry were compromised, a malicious image could be deployed automatically.
+- Updates are pulled from the official lynox image at `ghcr.io/lynox-ai/lynox`. If the image registry were compromised, a malicious image could be deployed automatically.
 - For most users, automatic updates are **safer than never updating** — running outdated software with known vulnerabilities is a greater risk than the supply chain trust model.
-- If you prefer manual control, omit Watchtower and update manually: `docker pull ghcr.io/nodyn-ai/nodyn:latest && docker restart nodyn`.
+- If you prefer manual control, omit Watchtower and update manually: `docker pull ghcr.io/lynox-ai/lynox:latest && docker restart lynox`.
 
 ---
 
@@ -247,11 +247,11 @@ The [deploy page](https://nodyn.dev/deploy) and the [setup script](https://nodyn
 
 | Mount | Purpose |
 |-------|---------|
-| `~/.nodyn` → `/home/nodyn/.nodyn` | Config, history, vault, memory, API profiles, backups, CRM |
+| `~/.lynox` → `/home/lynox/.lynox` | Config, history, vault, memory, API profiles, backups, CRM |
 | `/workspace` | Agent workspace sandbox |
 | `~/.cache/huggingface` | Embedding model cache (~118MB, downloaded once) |
 
-All persistent data lives inside `~/.nodyn/`: backups (`backups/`), API profiles (`apis/`), CRM data (SQLite), and Knowledge Graph. A single volume mount covers everything.
+All persistent data lives inside `~/.lynox/`: backups (`backups/`), API profiles (`apis/`), CRM data (SQLite), and Knowledge Graph. A single volume mount covers everything.
 
 ### All Environment Variables
 
@@ -259,11 +259,11 @@ All persistent data lives inside `~/.nodyn/`: backups (`backups/`), API profiles
 |----------|----------|---------|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
 | `ANTHROPIC_BASE_URL` | No | Custom API endpoint (proxies) |
-| `NODYN_VAULT_KEY` | Recommended | Encrypt data at rest |
-| `NODYN_MCP_SECRET` | Production | MCP HTTP bearer token |
-| `NODYN_MCP_PORT` | No | MCP port (default: 3042) |
-| `NODYN_WORKSPACE` | No | Workspace root (default: /workspace) |
-| `NODYN_EMBEDDING_PROVIDER` | No | `onnx` / `voyage` / `local` |
+| `LYNOX_VAULT_KEY` | Recommended | Encrypt data at rest |
+| `LYNOX_MCP_SECRET` | Production | MCP HTTP bearer token |
+| `LYNOX_MCP_PORT` | No | MCP port (default: 3042) |
+| `LYNOX_WORKSPACE` | No | Workspace root (default: /workspace) |
+| `LYNOX_EMBEDDING_PROVIDER` | No | `onnx` / `voyage` / `local` |
 | `TELEGRAM_BOT_TOKEN` | No | Enable Telegram bot |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Recommended | Restrict bot access |
 | `GOOGLE_CLIENT_ID` | No | Google OAuth |
@@ -271,30 +271,30 @@ All persistent data lives inside `~/.nodyn/`: backups (`backups/`), API profiles
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | No | Google service account (headless) |
 | `TAVILY_API_KEY` | No | Web search (Tavily) |
 | `BRAVE_API_KEY` | No | Web search (Brave) |
-| `NODYN_SENTRY_DSN` | No | Error reporting (opt-in, EU region) |
+| `LYNOX_SENTRY_DSN` | No | Error reporting (opt-in, EU region) |
 
 ### Version Pinning
 
 Pin to a specific version instead of `latest` for reproducible deployments:
 
 ```bash
-ghcr.io/nodyn-ai/nodyn:1.0.0    # semver — recommended for production
-ghcr.io/nodyn-ai/nodyn:latest    # always the newest release
+ghcr.io/lynox-ai/lynox:1.0.0    # semver — recommended for production
+ghcr.io/lynox-ai/lynox:latest    # always the newest release
 ```
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/nodyn-ai/nodyn.git && cd nodyn
-docker build -t nodyn .
-docker run -it --rm -e ANTHROPIC_API_KEY nodyn
+git clone https://github.com/lynox-ai/lynox.git && cd lynox
+docker build -t lynox .
+docker run -it --rm -e ANTHROPIC_API_KEY lynox
 ```
 
 ### Security
 
 The image is hardened for production by default:
 
-- **Non-root** — runs as `nodyn:1001`, not root
+- **Non-root** — runs as `lynox:1001`, not root
 - **No package manager** — `npm`/`npx` removed from production image
 - **Multi-stage build** — no source code, no build tools, production deps only
 - **Pinned dependencies** — base image digest, whisper.cpp release tag, model checksum verified
@@ -309,7 +309,7 @@ See [Security](/security/) for the full model.
 
 ### Network Egress
 
-nodyn blocks private IP ranges and non-HTTP(S) protocols at the application level. For defense-in-depth, restrict outbound traffic at your firewall to only the domains nodyn needs.
+lynox blocks private IP ranges and non-HTTP(S) protocols at the application level. For defense-in-depth, restrict outbound traffic at your firewall to only the domains lynox needs.
 
 **Always required:**
 
@@ -325,7 +325,7 @@ nodyn blocks private IP ranges and non-HTTP(S) protocols at the application leve
 | `api.tavily.com` | 443 | Web search (Tavily) | `TAVILY_API_KEY` |
 | `api.search.brave.com` | 443 | Web search (Brave) | `BRAVE_API_KEY` |
 | `huggingface.co` | 443 | Embedding model download (first run, cached after) | always |
-| `*.ingest.de.sentry.io` | 443 | Error reporting (EU region) | `NODYN_SENTRY_DSN` |
+| `*.ingest.de.sentry.io` | 443 | Error reporting (EU region) | `LYNOX_SENTRY_DSN` |
 | `accounts.google.com` | 443 | Google OAuth | `GOOGLE_CLIENT_ID` |
 | `oauth2.googleapis.com` | 443 | Google token exchange | `GOOGLE_CLIENT_ID` |
 | `*.googleapis.com` | 443 | Gmail, Sheets, Drive, Calendar, Docs | `GOOGLE_CLIENT_ID` |

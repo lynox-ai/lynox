@@ -23,7 +23,7 @@ export function getErrorMessageWithCause(err: unknown): string {
 }
 
 export function logErrorChain(context: string, err: unknown): void {
-  if (!process.env['NODYN_DEBUG']) return;
+  if (!process.env['LYNOX_DEBUG']) return;
   const parts = [context];
   let current: unknown = err;
   while (current instanceof Error) {

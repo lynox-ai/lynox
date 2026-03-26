@@ -103,11 +103,11 @@ describe('buildSafeEnv', () => {
     delete process.env['ANTHROPIC_API_KEY'];
   });
 
-  it('strips NODYN_VAULT_KEY from subprocess env', () => {
-    process.env['NODYN_VAULT_KEY'] = 'vault-key-123';
+  it('strips LYNOX_VAULT_KEY from subprocess env', () => {
+    process.env['LYNOX_VAULT_KEY'] = 'vault-key-123';
     const env = buildSafeEnv();
-    expect(env['NODYN_VAULT_KEY']).toBeUndefined();
-    delete process.env['NODYN_VAULT_KEY'];
+    expect(env['LYNOX_VAULT_KEY']).toBeUndefined();
+    delete process.env['LYNOX_VAULT_KEY'];
   });
 
   it('strips SLACK_BOT_TOKEN from subprocess env', () => {
@@ -126,10 +126,10 @@ describe('buildSafeEnv', () => {
     }
   });
 
-  it('passes NODYN_WORKSPACE through', () => {
-    process.env['NODYN_WORKSPACE'] = '/workspace';
+  it('passes LYNOX_WORKSPACE through', () => {
+    process.env['LYNOX_WORKSPACE'] = '/workspace';
     const env = buildSafeEnv();
-    expect(env['NODYN_WORKSPACE']).toBe('/workspace');
-    delete process.env['NODYN_WORKSPACE'];
+    expect(env['LYNOX_WORKSPACE']).toBe('/workspace');
+    delete process.env['LYNOX_WORKSPACE'];
   });
 });

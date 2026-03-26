@@ -11,7 +11,7 @@ Model
   /cost [today|week|by-model] Show token usage and cost
 System
   /help               Show this help
-  /exit               Exit NODYN
+  /exit               Exit LYNOX
 `;
 
   it('parses commands with descriptions and categories', () => {

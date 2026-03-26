@@ -7,7 +7,7 @@ import { ApiStore } from './api-store.js';
 import type { ApiProfile } from './api-store.js';
 
 function createTmpDir(): string {
-  return mkdtempSync(join(tmpdir(), 'nodyn-api-store-test-'));
+  return mkdtempSync(join(tmpdir(), 'lynox-api-store-test-'));
 }
 
 const SAMPLE_PROFILE: ApiProfile = {

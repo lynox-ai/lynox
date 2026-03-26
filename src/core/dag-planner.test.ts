@@ -147,7 +147,7 @@ describe('planDAG', () => {
     expect(system).toContain('Project context:');
   });
 
-  it('uses nodyn-micro model by default', async () => {
+  it('uses lynox-micro model by default', async () => {
     mockCreate.mockResolvedValueOnce(makeToolUseResponse({
       steps: [{ id: 's1', task: 'do it' }],
       reasoning: 'ok',
@@ -303,7 +303,7 @@ describe('planDAG', () => {
     expect(result!.estimatedCost).toBe(0);
   });
 
-  it('includes NODYN_BETAS in API call', async () => {
+  it('includes LYNOX_BETAS in API call', async () => {
     mockCreate.mockResolvedValueOnce(makeToolUseResponse({
       steps: [{ id: 's1', task: 'do it' }],
       reasoning: 'ok',

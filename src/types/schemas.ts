@@ -84,9 +84,9 @@ export const PlaybookSchema = z.object({
   source:         z.enum(['builtin', 'user', 'project']).optional(),
 });
 
-// === NodynUserConfig ===
+// === LynoxUserConfig ===
 
-export const NodynUserConfigSchema = z.object({
+export const LynoxUserConfigSchema = z.object({
   api_key:              z.string().optional(),
   api_base_url:         z.string().optional(),
   default_tier:         ModelTierSchema.optional(),

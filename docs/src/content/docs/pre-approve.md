@@ -57,7 +57,7 @@ interface PreApprovalSet {
 ### Usage
 
 ```bash
-nodyn --pre-approve "npm run *" \
+lynox --pre-approve "npm run *" \
   --pre-approve "rm dist/**"
 ```
 
@@ -138,7 +138,7 @@ All pre-approval decisions and usage are persisted to SQLite for compliance trac
 - **`src/core/agent.ts`** — `audit` field in AgentConfig, passed to `isDangerous()`
 - **DAG per-step pre-approval** — manifest steps can declare `pre_approve` patterns, built into per-step `PreApprovalSet`
 - **`/approvals` slash command** — list sets, show details, audit history, export
-- **Observability channels**: `nodyn:preapproval:match`, `nodyn:preapproval:exhausted`, `nodyn:preapproval:expired`
+- **Observability channels**: `lynox:preapproval:match`, `lynox:preapproval:exhausted`, `lynox:preapproval:expired`
 - **RunHistory** — `insertPreApprovalSet()`, `insertPreApprovalEvent()`, `getPreApprovalSets()`, `getPreApprovalEvents()`, `getPreApprovalSummary()`
 
 ### Tests

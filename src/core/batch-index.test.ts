@@ -9,7 +9,7 @@ describe('BatchIndex', () => {
   let dir: string;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'nodyn-batch-'));
+    dir = await mkdtemp(join(tmpdir(), 'lynox-batch-'));
   });
 
   afterEach(async () => {

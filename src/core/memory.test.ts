@@ -44,7 +44,7 @@ describe('Memory', () => {
   let dir: string;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'nodyn-mem-'));
+    dir = await mkdtemp(join(tmpdir(), 'lynox-mem-'));
   });
 
   afterEach(async () => {

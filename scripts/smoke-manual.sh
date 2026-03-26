@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-ONLINE_SMOKE="${NODYN_SMOKE_ONLINE:-0}"
-MCP_PORT="${NODYN_SMOKE_MCP_PORT:-3048}"
-MCP_SECRET="${NODYN_SMOKE_MCP_SECRET:-nodyn-smoke-secret}"
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nodyn-smoke.XXXXXX")"
+ONLINE_SMOKE="${LYNOX_SMOKE_ONLINE:-0}"
+MCP_PORT="${LYNOX_SMOKE_MCP_PORT:-3048}"
+MCP_SECRET="${LYNOX_SMOKE_MCP_SECRET:-lynox-smoke-secret}"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/lynox-smoke.XXXXXX")"
 STATE_DIR="$TMP_ROOT/state"
 SERVER_LOG="$TMP_ROOT/mcp-server.log"
 SERVER_PID=""
@@ -44,9 +44,9 @@ check_api_key() {
 
 call_mcp_tools() {
   local online="$1"
-  NODYN_SMOKE_ONLINE="$online" \
-  NODYN_MCP_URL="http://127.0.0.1:${MCP_PORT}" \
-  NODYN_MCP_SECRET="$MCP_SECRET" \
+  LYNOX_SMOKE_ONLINE="$online" \
+  LYNOX_MCP_URL="http://127.0.0.1:${MCP_PORT}" \
+  LYNOX_MCP_SECRET="$MCP_SECRET" \
   node --input-type=module <<'NODE'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -60,44 +60,44 @@ function textFrom(result) {
     : '';
 }
 
-const online = process.env['NODYN_SMOKE_ONLINE'] === '1';
-const url = new URL(process.env['NODYN_MCP_URL'] ?? 'http://127.0.0.1:3048');
-const secret = process.env['NODYN_MCP_SECRET'] ?? '';
+const online = process.env['LYNOX_SMOKE_ONLINE'] === '1';
+const url = new URL(process.env['LYNOX_MCP_URL'] ?? 'http://127.0.0.1:3048');
+const secret = process.env['LYNOX_MCP_SECRET'] ?? '';
 const transport = new StreamableHTTPClientTransport(url, {
   requestInit: {
     headers: secret ? { Authorization: `Bearer ${secret}` } : {},
   },
 });
-const client = new Client({ name: 'nodyn-smoke', version: '1.0.0' }, { capabilities: {} });
+const client = new Client({ name: 'lynox-smoke', version: '1.0.0' }, { capabilities: {} });
 try {
   await client.connect(transport);
 
-  const memory = await client.callTool({ name: 'nodyn_memory', arguments: { namespace: 'facts' } });
+  const memory = await client.callTool({ name: 'lynox_memory', arguments: { namespace: 'facts' } });
   const memoryText = textFrom(memory);
   if (typeof memoryText !== 'string') {
-    throw new Error('nodyn_memory returned no text payload');
+    throw new Error('lynox_memory returned no text payload');
   }
 
-  const reset = await client.callTool({ name: 'nodyn_reset', arguments: { session_id: 'smoke-session' } });
+  const reset = await client.callTool({ name: 'lynox_reset', arguments: { session_id: 'smoke-session' } });
   if (!textFrom(reset).includes('smoke-session')) {
-    throw new Error('nodyn_reset did not mention the session');
+    throw new Error('lynox_reset did not mention the session');
   }
 
-  const abort = await client.callTool({ name: 'nodyn_abort', arguments: { session_id: 'smoke-session' } });
+  const abort = await client.callTool({ name: 'lynox_abort', arguments: { session_id: 'smoke-session' } });
   const abortPayload = JSON.parse(textFrom(abort));
   if (typeof abortPayload.aborted !== 'boolean') {
-    throw new Error('nodyn_abort returned an invalid payload');
+    throw new Error('lynox_abort returned an invalid payload');
   }
 
-  const reply = await client.callTool({ name: 'nodyn_reply', arguments: { run_id: 'missing-run', answer: 'ok' } });
+  const reply = await client.callTool({ name: 'lynox_reply', arguments: { run_id: 'missing-run', answer: 'ok' } });
   const replyPayload = JSON.parse(textFrom(reply));
   if (typeof replyPayload.error !== 'string' || !replyPayload.error.includes('No pending input')) {
-    throw new Error('nodyn_reply missing-run path regressed');
+    throw new Error('lynox_reply missing-run path regressed');
   }
 
   if (online) {
     const started = await client.callTool({
-      name: 'nodyn_run_start',
+      name: 'lynox_run_start',
       arguments: {
         task: 'Reply with the single word OK.',
         session_id: 'smoke-online',
@@ -105,12 +105,12 @@ try {
     });
     const startPayload = JSON.parse(textFrom(started));
     if (typeof startPayload.run_id !== 'string') {
-      throw new Error('nodyn_run_start did not return a run_id');
+      throw new Error('lynox_run_start did not return a run_id');
     }
 
     let finalPayload = null;
     for (let i = 0; i < 60; i++) {
-      const poll = await client.callTool({ name: 'nodyn_poll', arguments: { run_id: startPayload.run_id } });
+      const poll = await client.callTool({ name: 'lynox_poll', arguments: { run_id: startPayload.run_id } });
       finalPayload = JSON.parse(textFrom(poll));
       if (finalPayload.done === true) break;
       await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -146,17 +146,17 @@ start_debug_server() {
   mkdir -p "$STATE_DIR"
   SERVER_LOG="$log"
   if [[ -n "$debug_file" ]]; then
-    NODYN_DEBUG="$debug_val" \
-    NODYN_DEBUG_FILE="$debug_file" \
-    NODYN_MCP_PORT="$MCP_PORT" \
-    NODYN_MCP_SECRET="$MCP_SECRET" \
-    NODYN_MCP_STATE_DIR="$STATE_DIR" \
+    LYNOX_DEBUG="$debug_val" \
+    LYNOX_DEBUG_FILE="$debug_file" \
+    LYNOX_MCP_PORT="$MCP_PORT" \
+    LYNOX_MCP_SECRET="$MCP_SECRET" \
+    LYNOX_MCP_STATE_DIR="$STATE_DIR" \
     node dist/index.js --mcp-server --transport sse </dev/null >"$log" 2>&1 &
   else
-    NODYN_DEBUG="$debug_val" \
-    NODYN_MCP_PORT="$MCP_PORT" \
-    NODYN_MCP_SECRET="$MCP_SECRET" \
-    NODYN_MCP_STATE_DIR="$STATE_DIR" \
+    LYNOX_DEBUG="$debug_val" \
+    LYNOX_MCP_PORT="$MCP_PORT" \
+    LYNOX_MCP_SECRET="$MCP_SECRET" \
+    LYNOX_MCP_STATE_DIR="$STATE_DIR" \
     node dist/index.js --mcp-server --transport sse </dev/null >"$log" 2>&1 &
   fi
   SERVER_PID="$!"
@@ -188,10 +188,10 @@ step "Debug subscriber activation"
 start_debug_server "tool,mode" "$TMP_ROOT/debug-server.log" "$TMP_ROOT/debug.log"
 call_mcp_tools 0
 stop_debug_server
-grep -q '\[nodyn:debug\]' "$TMP_ROOT/debug-server.log" \
+grep -q '\[lynox:debug\]' "$TMP_ROOT/debug-server.log" \
   || { echo "FAIL: debug activation message not found in server log" >&2; exit 1; }
 [[ -f "$TMP_ROOT/debug.log" ]] \
-  || { echo "FAIL: NODYN_DEBUG_FILE was not created" >&2; exit 1; }
+  || { echo "FAIL: LYNOX_DEBUG_FILE was not created" >&2; exit 1; }
 for p in 'sk-ant-' 'xoxb-' 'xapp-'; do
   if grep -q "$p" "$TMP_ROOT/debug.log" "$TMP_ROOT/debug-server.log" 2>/dev/null; then
     echo "FAIL: sensitive pattern '$p' leaked in debug output" >&2; exit 1
@@ -202,19 +202,19 @@ step "Debug filter validation"
 start_debug_server "secret" "$TMP_ROOT/debug-filter.log"
 call_mcp_tools 0
 stop_debug_server
-grep -q '\[nodyn:debug\] Active' "$TMP_ROOT/debug-filter.log" \
+grep -q '\[lynox:debug\] Active' "$TMP_ROOT/debug-filter.log" \
   || { echo "FAIL: debug activation not found for filtered run" >&2; exit 1; }
 grep -q 'subscribed: secretAccess' "$TMP_ROOT/debug-filter.log" \
-  || { echo "FAIL: secret channel not subscribed with NODYN_DEBUG=secret" >&2; exit 1; }
+  || { echo "FAIL: secret channel not subscribed with LYNOX_DEBUG=secret" >&2; exit 1; }
 if grep -q 'subscribed: toolStart' "$TMP_ROOT/debug-filter.log"; then
-  echo "FAIL: tool channel subscribed despite NODYN_DEBUG=secret filter" >&2; exit 1
+  echo "FAIL: tool channel subscribed despite LYNOX_DEBUG=secret filter" >&2; exit 1
 fi
 
 step "Start MCP server"
 mkdir -p "$STATE_DIR"
-NODYN_MCP_PORT="$MCP_PORT" \
-NODYN_MCP_SECRET="$MCP_SECRET" \
-NODYN_MCP_STATE_DIR="$STATE_DIR" \
+LYNOX_MCP_PORT="$MCP_PORT" \
+LYNOX_MCP_SECRET="$MCP_SECRET" \
+LYNOX_MCP_STATE_DIR="$STATE_DIR" \
 node dist/index.js --mcp-server --transport sse </dev/null >"$SERVER_LOG" 2>&1 &
 SERVER_PID="$!"
 wait_for_health
@@ -228,19 +228,19 @@ call_mcp_tools 0
 if [[ "$ONLINE_SMOKE" == "1" ]]; then
   step "Online MCP smoke"
   if ! check_api_key; then
-    echo "NODYN_SMOKE_ONLINE=1 requires an API key in env or ~/.nodyn/config.json" >&2
+    echo "LYNOX_SMOKE_ONLINE=1 requires an API key in env or ~/.lynox/config.json" >&2
     exit 1
   fi
   call_mcp_tools 1
 else
   step "Online MCP smoke skipped"
-  echo "Set NODYN_SMOKE_ONLINE=1 to run a real agent round-trip."
+  echo "Set LYNOX_SMOKE_ONLINE=1 to run a real agent round-trip."
 fi
 
 step "Slack checklist"
 cat <<'EOF'
 Manual Slack follow-up:
-1. Start the Slack bot with valid SLACK_BOT_TOKEN, SLACK_APP_TOKEN, NODYN_MCP_URL, NODYN_MCP_SECRET.
+1. Start the Slack bot with valid SLACK_BOT_TOKEN, SLACK_APP_TOKEN, LYNOX_MCP_URL, LYNOX_MCP_SECRET.
 2. Post a thread message and confirm a single active run per thread.
 3. Trigger ask_user and verify button reply plus free-text reply both resume the run.
 4. Click Stop during a long run and verify the thread settles on "Stopped.".

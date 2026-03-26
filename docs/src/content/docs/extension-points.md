@@ -3,19 +3,19 @@ title: "Extension Points"
 description: "Hooks, CLI commands, feature flags, and notification router"
 ---
 
-Extension points allow `nodyn-pro` (or custom plugins) to hook into core functionality without modifying core source code. All extension points are additive — core works standalone without any extensions registered.
+Extension points allow `lynox-pro` (or custom plugins) to hook into core functionality without modifying core source code. All extension points are additive — core works standalone without any extensions registered.
 
 ## 1. Orchestrator Hooks
 
 Lifecycle hooks for extending the Engine's init, agent creation, run, and shutdown phases.
 
 ```typescript
-import type { NodynHooks, RunContext } from 'nodyn';
+import type { LynoxHooks, RunContext } from 'lynox';
 
-const hooks: NodynHooks = {
+const hooks: LynoxHooks = {
   async onInit(engine) {
     // Called after core init (Engine created, memory loaded, WorkerLoop started)
-    // Receives Engine (not Nodyn/Session). Use for tenant setup, license validation, etc.
+    // Receives Engine (not Lynox/Session). Use for tenant setup, license validation, etc.
   },
 
   onBeforeCreateAgent(tools) {
@@ -44,8 +44,8 @@ All hook methods are optional. Hook errors are logged to the `costWarning` debug
 Register custom slash commands without modifying the core REPL.
 
 ```typescript
-import { registerCommand } from 'nodyn';
-import type { SlashCommandHandler } from 'nodyn';
+import { registerCommand } from 'lynox';
+import type { SlashCommandHandler } from 'lynox';
 
 const tenantCommand: SlashCommandHandler = async (parts, session, ctx) => {
   const sub = parts[1];
@@ -65,9 +65,9 @@ Registered commands are checked before aliases in the REPL dispatch.
 Register dynamic feature flags for Pro features.
 
 ```typescript
-import { registerFeature, isFeatureEnabled } from 'nodyn';
+import { registerFeature, isFeatureEnabled } from 'lynox';
 
-registerFeature('advanced-analytics', 'NODYN_FEATURE_ANALYTICS', false);
+registerFeature('advanced-analytics', 'LYNOX_FEATURE_ANALYTICS', false);
 
 if (isFeatureEnabled('advanced-analytics')) {
   // Load analytics module
@@ -81,7 +81,7 @@ Core flags (`tenants`, `triggers`, `plugins`, `worker-pool`) are immutable. Dyna
 Register custom notification channels for background task results and inquiries.
 
 ```typescript
-import type { NotificationChannel, NotificationMessage } from 'nodyn';
+import type { NotificationChannel, NotificationMessage } from 'lynox';
 
 class SlackNotificationChannel implements NotificationChannel {
   readonly id = 'slack';
@@ -102,33 +102,33 @@ The `NotificationRouter` is available on the `Engine` instance after `init()`. C
 
 ## Pro Code (Extracted)
 
-Pro code lives in the separate `nodyn-pro` repository. Pro registers externally via the extension points listed above:
+Pro code lives in the separate `lynox-pro` repository. Pro registers externally via the extension points listed above:
 
 - **Tenant CLI** (`/tenant`): Registered via `registerCommand()`.
 - **Tenant cost tracking**: Registered as an `onAfterRun` hook via `engine.registerHooks()`.
 - **Worker pool lifecycle**: Registered as `onInit`/`onShutdown` hooks via `engine.registerHooks()`.
-- **Slack integration**: Lives in `nodyn-pro` as a separate service.
+- **Slack integration**: Lives in `lynox-pro` as a separate service.
 
 ## Registration Pattern
 
 Pro extensions (or custom plugins) register at import time:
 
 ```typescript
-// nodyn-pro/src/index.ts
-import { registerCommand, registerFeature, Engine } from 'nodyn';
-import { createTenantHook, createWorkerPoolHook } from 'nodyn';
+// lynox-pro/src/index.ts
+import { registerCommand, registerFeature, Engine } from 'lynox';
+import { createTenantHook, createWorkerPoolHook } from 'lynox';
 
 // Register Pro commands
 registerCommand('/tenant', tenantCommand);
 
 // Register Pro feature flags
-registerFeature('advanced-analytics', 'NODYN_FEATURE_ANALYTICS', false);
+registerFeature('advanced-analytics', 'LYNOX_FEATURE_ANALYTICS', false);
 ```
 
 Then in the entry point:
 ```typescript
-import 'nodyn-pro'; // side-effect: registers commands, feature flags
-import { Engine } from 'nodyn';
+import 'lynox-pro'; // side-effect: registers commands, feature flags
+import { Engine } from 'lynox';
 
 const engine = new Engine({});
 engine.registerHooks(createTenantHook()); // Reads RunContext.tenantId

@@ -1,23 +1,23 @@
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
-import type { NodynConfig, NodynContext } from '../types/index.js';
+import type { LynoxConfig, LynoxContext } from '../types/index.js';
 import { detectProjectRoot } from './project.js';
 import { sha256Short } from './utils.js';
 
 /**
- * Resolve the NodynContext for the current session.
+ * Resolve the LynoxContext for the current session.
  *
  * - If `config.context` is provided (Telegram, Slack, PWA, MCP): use it directly,
  *   ensuring workspaceDir is set.
  * - If not (CLI): detect project root, wrap the result.
  */
-export function resolveContext(config: NodynConfig): NodynContext {
+export function resolveContext(config: LynoxConfig): LynoxContext {
   // Explicit context from non-CLI sources
   if (config.context) {
     const ctx = config.context;
     return {
       ...ctx,
-      workspaceDir: ctx.workspaceDir || join(homedir(), '.nodyn', 'workspace', ctx.id),
+      workspaceDir: ctx.workspaceDir || join(homedir(), '.lynox', 'workspace', ctx.id),
     };
   }
 
@@ -30,7 +30,7 @@ export function resolveContext(config: NodynConfig): NodynContext {
       id: project.id,
       name: basename(project.root),
       source: 'cli',
-      workspaceDir: join(homedir(), '.nodyn', 'workspace', project.id),
+      workspaceDir: join(homedir(), '.lynox', 'workspace', project.id),
       localDir: project.root,
     };
   }
@@ -41,7 +41,7 @@ export function resolveContext(config: NodynConfig): NodynContext {
     id,
     name: basename(cwd),
     source: 'cli',
-    workspaceDir: join(homedir(), '.nodyn', 'workspace', id),
+    workspaceDir: join(homedir(), '.lynox', 'workspace', id),
     localDir: cwd,
   };
 }

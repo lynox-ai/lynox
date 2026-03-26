@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { IMemory, MemoryNamespace, MemoryScopeRef } from '../types/index.js';
-import { ALL_NAMESPACES, MODEL_MAP, NODYN_BETAS } from '../types/index.js';
+import { ALL_NAMESPACES, MODEL_MAP, LYNOX_BETAS } from '../types/index.js';
 import { channels } from './observability.js';
 import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
@@ -108,7 +108,7 @@ export class Memory implements IMemory {
         : new Anthropic();
     this.apiKey = apiKey;
     this.apiBaseURL = apiBaseURL;
-    this.baseDir = path.join(workingDir ?? path.join(homedir(), '.nodyn'), DEFAULT_DIR);
+    this.baseDir = path.join(workingDir ?? path.join(homedir(), '.lynox'), DEFAULT_DIR);
     this.contextId = contextId ?? null;
     this.maskFn = maskFn ?? null;
   }
@@ -404,7 +404,7 @@ export class Memory implements IMemory {
       const stream = this.client.beta.messages.stream({
         model: MODEL_MAP['haiku'],
         max_tokens: 1024,
-        betas: [...NODYN_BETAS],
+        betas: [...LYNOX_BETAS],
         messages: [{
           role: 'user',
           content: EXTRACTION_PROMPT + truncated,

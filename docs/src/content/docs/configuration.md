@@ -5,7 +5,7 @@ description: "Config tiers, environment variables, and profiles"
 
 ## Quick Settings
 
-Most users only need these settings. Ask nodyn via Telegram or edit `~/.nodyn/config.json`:
+Most users only need these settings. Ask lynox via Telegram or edit `~/.lynox/config.json`:
 
 | Setting | What it does | Default |
 |---------|-------------|---------|
@@ -20,22 +20,22 @@ Send `/cost` in Telegram to check your current spending. Everything else works o
 
 ## Config System (Technical Reference)
 
-nodyn uses a 3-tier configuration merge (highest priority first):
+lynox uses a 3-tier configuration merge (highest priority first):
 
 1. **Environment variables** (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`)
-2. **Project config** (`.nodyn/config.json` in project root) -- restricted to `PROJECT_SAFE_KEYS`
-3. **User config** (`~/.nodyn/config.json`) -- full access
+2. **Project config** (`.lynox/config.json` in project root) -- restricted to `PROJECT_SAFE_KEYS`
+3. **User config** (`~/.lynox/config.json`) -- full access
 
 Project config cannot override sensitive keys (`api_key`, `api_base_url`) to prevent malicious project configs from exfiltrating credentials.
 
-Config is loaded by `loadConfig()` in `src/core/config.ts`. The canonical `~/.nodyn` path is provided by `getNodynDir()` — all modules use this instead of hardcoded `join(homedir(), '.nodyn')`.
+Config is loaded by `loadConfig()` in `src/core/config.ts`. The canonical `~/.lynox` path is provided by `getLynoxDir()` — all modules use this instead of hardcoded `join(homedir(), '.lynox')`.
 
-## NodynUserConfig
+## LynoxUserConfig
 
-User configuration stored at `~/.nodyn/config.json`:
+User configuration stored at `~/.lynox/config.json`:
 
 ```typescript
-interface NodynUserConfig {
+interface LynoxUserConfig {
   api_key?:              string;              // Anthropic API key
   api_base_url?:         string;              // Custom API endpoint (for proxies)
   default_tier?:         ModelTier;           // Default model tier
@@ -54,7 +54,7 @@ interface NodynUserConfig {
   google_oauth_scopes?:  string[];                // Google OAuth scopes (default: read-only). Add write scopes as needed
   enforce_https?:        boolean;                 // Block plain HTTP requests except localhost (default: false)
   sentry_dsn?:           string;                  // Sentry DSN for opt-in error reporting
-  backup_dir?:           string;                  // Backup storage directory (default: ~/.nodyn/backups)
+  backup_dir?:           string;                  // Backup storage directory (default: ~/.lynox/backups)
   backup_schedule?:      string;                  // Cron schedule for auto-backups (default: '0 3 * * *')
   backup_retention_days?: number;                 // Days to keep old backups (default: 30)
   backup_encrypt?:       boolean;                 // Encrypt backups (default: true when vault key set)
@@ -69,28 +69,28 @@ File permissions: directory created with `0o700`, file written with `0o600` (ato
 
 On first run without an API key (TTY mode), a streamlined wizard guides through two interactions:
 
-1. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Invalid keys rejected with retry. Network errors produce a warning but the key is accepted. Encryption is enabled automatically (vault key generated and saved to `~/.nodyn/.env` with mode `0o600`). Accuracy defaults to Balanced (sonnet)
+1. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Invalid keys rejected with retry. Network errors produce a warning but the key is accepted. Encryption is enabled automatically (vault key generated and saved to `~/.lynox/.env` with mode `0o600`). Accuracy defaults to Balanced (sonnet)
 2. **Integrations checklist** — interactive multi-select (arrow keys + Space to toggle + Enter to confirm). Three options, all optional:
    - **Google Workspace** — OAuth 2.0 client ID + secret for Gmail, Sheets, Drive, Calendar, Docs. Actual auth deferred to `/google auth` command
    - **Telegram** — bot token + auto-detect chat ID by spinning up the bot and waiting for a message. Falls back to manual entry
    - **Web Research** — Tavily API key for the `web_research` tool (free tier: 1K/month)
 
-**Prerequisites check** runs before the wizard: Node.js version, `~/.nodyn` directory, network connectivity.
+**Prerequisites check** runs before the wizard: Node.js version, `~/.lynox` directory, network connectivity.
 
 **Security**: Vault key file written atomically with `0o600` permissions. Auto-load on startup validates: no symlinks, owner-only access, base64 format. Shell profile injection uses `basename($SHELL)`, append-only with duplicate guard, single quotes in fallback. Config written with `0o700` dir / `0o600` file. See [Security](/security/#vault-key-auto-load-security).
 
 **Seamless flow**: Vault key is set in `process.env` immediately, config cache invalidated — the REPL starts with encryption active, no restart needed. `--init` continues directly into the REPL instead of exiting.
 
-**Docker**: The entrypoint auto-loads `~/.nodyn/.env` on startup. Run `docker run -it ... --init` to use the wizard in a container.
+**Docker**: The entrypoint auto-loads `~/.lynox/.env` on startup. Run `docker run -it ... --init` to use the wizard in a container.
 
-After setup, nodyn starts a natural conversation to learn about your business. Everything is stored in the knowledge graph automatically.
+After setup, lynox starts a natural conversation to learn about your business. Everything is stored in the knowledge graph automatically.
 
-## NodynConfig (Engine)
+## LynoxConfig (Engine)
 
 Top-level configuration for the `Engine` singleton:
 
 ```typescript
-interface NodynConfig {
+interface LynoxConfig {
   model?:        ModelTier;       // Default: 'opus'
   systemPrompt?: string;          // Custom system prompt
   thinking?:     ThinkingMode;    // Default: { type: 'adaptive' }
@@ -126,8 +126,8 @@ These behaviors run automatically on `Engine.init()` without configuration:
 
 | Behavior | Trigger | Details |
 |----------|---------|---------|
-| **Pre-update backup** | Version change detected | Compares `~/.nodyn/.last_version` with current package version. Creates a full backup before anything else runs. See [Backup](/backup/#pre-update-backup) |
-| **Debug logging** | `NODYN_DEBUG` env var | Activates diagnostic channel subscribers |
+| **Pre-update backup** | Version change detected | Compares `~/.lynox/.last_version` with current package version. Creates a full backup before anything else runs. See [Backup](/backup/#pre-update-backup) |
+| **Debug logging** | `LYNOX_DEBUG` env var | Activates diagnostic channel subscribers |
 | **Security audit** | Always (when run history available) | Subscribes to security channels, logs to `history.db` |
 
 ## Worker Configuration
@@ -201,7 +201,7 @@ type ThinkingMode =
 type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 ```
 
-Controls the `output_config.effort` parameter (accuracy level). Set via config, `/accuracy` command, or `nodyn.setEffort()`.
+Controls the `output_config.effort` parameter (accuracy level). Set via config, `/accuracy` command, or `lynox.setEffort()`.
 
 ## Environment Variables
 
@@ -209,13 +209,13 @@ Controls the `output_config.effort` parameter (accuracy level). Set via config, 
 |----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | -- | Anthropic API key (required) |
 | `ANTHROPIC_BASE_URL` | -- | Custom API endpoint (for proxies) |
-| `NODYN_VAULT_KEY` | -- | Encrypts secrets vault, run history, and OAuth tokens at rest. Auto-loaded from `~/.nodyn/.env` on startup (with symlink, ownership, and permission validation). Generate: `openssl rand -base64 48` |
-| `NODYN_MCP_SECRET` | -- | Bearer token for MCP HTTP auth. Required for network-exposed deployments. Can also be stored in vault. Generate: `openssl rand -hex 32` |
-| `NODYN_MCP_PORT` | `3042` | MCP HTTP server port |
-| `NODYN_EMBEDDING_PROVIDER` | `onnx` | Override embedding provider (`onnx`, `voyage`, `local`) |
-| `NODYN_WORKSPACE` | -- | Workspace sandbox root (set in Docker) |
-| `NODYN_USER` | -- | User scope identity for multi-scope memory |
-| `NODYN_DEBUG` | -- | Debug logging: `1`/`true`/`*` for all, or comma-separated groups |
+| `LYNOX_VAULT_KEY` | -- | Encrypts secrets vault, run history, and OAuth tokens at rest. Auto-loaded from `~/.lynox/.env` on startup (with symlink, ownership, and permission validation). Generate: `openssl rand -base64 48` |
+| `LYNOX_MCP_SECRET` | -- | Bearer token for MCP HTTP auth. Required for network-exposed deployments. Can also be stored in vault. Generate: `openssl rand -hex 32` |
+| `LYNOX_MCP_PORT` | `3042` | MCP HTTP server port |
+| `LYNOX_EMBEDDING_PROVIDER` | `onnx` | Override embedding provider (`onnx`, `voyage`, `local`) |
+| `LYNOX_WORKSPACE` | -- | Workspace sandbox root (set in Docker) |
+| `LYNOX_USER` | -- | User scope identity for multi-scope memory |
+| `LYNOX_DEBUG` | -- | Debug logging: `1`/`true`/`*` for all, or comma-separated groups |
 | `TELEGRAM_BOT_TOKEN` | -- | Telegram bot token — auto-starts bot mode |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | -- | Comma-separated chat IDs to restrict bot access |
 | `GOOGLE_CLIENT_ID` | -- | Google OAuth client ID |
@@ -223,11 +223,11 @@ Controls the `output_config.effort` parameter (accuracy level). Set via config, 
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | -- | Path to service account JSON key file (headless/Docker) |
 | `TAVILY_API_KEY` | -- | Tavily API key for web search |
 | `BRAVE_API_KEY` | -- | Brave Search API key (alternative to Tavily) |
-| `NODYN_SENTRY_DSN` | -- | Sentry DSN for opt-in error reporting. See [Error Reporting](/sentry/) |
+| `LYNOX_SENTRY_DSN` | -- | Sentry DSN for opt-in error reporting. See [Error Reporting](/sentry/) |
 
 ## Profiles
 
-Profiles are JSON files in `~/.nodyn/profiles/{name}.json`:
+Profiles are JSON files in `~/.lynox/profiles/{name}.json`:
 
 ```json
 {
@@ -241,7 +241,7 @@ Load with `/profile <name>` in the CLI. List available profiles with `/profile l
 
 ## Aliases
 
-Aliases map custom commands to task strings, stored in `~/.nodyn/aliases.json`:
+Aliases map custom commands to task strings, stored in `~/.lynox/aliases.json`:
 
 ```json
 {
@@ -254,18 +254,18 @@ Create with `/alias <name> <command>`. Use with `/<name>` in the REPL.
 
 ## Plugins
 
-Plugins extend nodyn with custom tools and lifecycle hooks:
+Plugins extend lynox with custom tools and lifecycle hooks:
 
 ```json
 {
   "plugins": {
-    "nodyn-plugin-jira": true,
-    "nodyn-plugin-slack": false
+    "lynox-plugin-jira": true,
+    "lynox-plugin-slack": false
   }
 }
 ```
 
-Plugins are installed from npm into `~/.nodyn/plugins/node_modules/`. Plugin names validated against `NPM_NAME_RE`. Secrets (`api_key`, `api_base_url`) are stripped from the `PluginContext` passed to plugins.
+Plugins are installed from npm into `~/.lynox/plugins/node_modules/`. Plugin names validated against `NPM_NAME_RE`. Secrets (`api_key`, `api_base_url`) are stripped from the `PluginContext` passed to plugins.
 
 Manage via `/plugin add|remove|list`.
 
@@ -274,7 +274,7 @@ Manage via `/plugin add|remove|list`.
 Register external MCP servers either in config or at runtime:
 
 ```typescript
-// In NodynConfig (passed to Engine)
+// In LynoxConfig (passed to Engine)
 const engine = new Engine({
   mcpServers: [
     { type: 'url', name: 'my-server', url: 'http://localhost:8080' }
@@ -296,7 +296,7 @@ Or via CLI:
 All beta API calls include:
 
 ```typescript
-const NODYN_BETAS: AnthropicBeta[] = [
+const LYNOX_BETAS: AnthropicBeta[] = [
   'token-efficient-tools-2025-02-19',
 ];
 ```
@@ -311,4 +311,4 @@ Built-in cost tracking (per 1M tokens):
 | Balanced (`sonnet`) | $3 | $15 | $3.75 | $0.30 |
 | Fast (`haiku`) | $0.80 | $4 | $1.00 | $0.08 |
 
-View with `/cost` in the CLI. Costs shown in both USD and CHF. Optional pricing override via `~/.nodyn/pricing.json`.
+View with `/cost` in the CLI. Costs shown in both USD and CHF. Optional pricing override via `~/.lynox/pricing.json`.

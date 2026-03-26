@@ -5,7 +5,7 @@ description: "Batch API for handling multiple tasks"
 
 ## Overview
 
-NODYN supports the Anthropic Message Batches API for async processing at reduced cost. Batch requests are processed server-side and results are retrieved when ready.
+LYNOX supports the Anthropic Message Batches API for async processing at reduced cost. Batch requests are processed server-side and results are retrieved when ready.
 
 ## API Methods
 
@@ -14,7 +14,7 @@ NODYN supports the Anthropic Message Batches API for async processing at reduced
 Submit a batch of tasks. Returns the batch ID.
 
 ```typescript
-const batchId = await nodyn.batch([
+const batchId = await lynox.batch([
   { id: 'task-1', task: 'Summarize article A' },
   { id: 'task-2', task: 'Summarize article B' },
   { id: 'task-3', task: 'Summarize article C', system: 'Be concise.' },
@@ -27,7 +27,7 @@ const batchId = await nodyn.batch([
 Poll for batch completion and return results.
 
 ```typescript
-const results = await nodyn.awaitBatch(batchId);
+const results = await lynox.awaitBatch(batchId);
 // Returns: BatchResult[]
 ```
 
@@ -38,7 +38,7 @@ Polling starts at 30s intervals, doubling up to 5 minutes max.
 Convenience method: submit + wait in one call.
 
 ```typescript
-const results = await nodyn.batchAndAwait([
+const results = await lynox.batchAndAwait([
   { id: 'q1', task: 'What is 2+2?' },
   { id: 'q2', task: 'What is 3+3?' },
 ]);
@@ -70,7 +70,7 @@ interface BatchResult {
 
 ## Batch Index
 
-NODYN persists batch metadata locally in `~/.nodyn/batch-index.json`:
+LYNOX persists batch metadata locally in `~/.lynox/batch-index.json`:
 
 ```json
 {
@@ -85,7 +85,7 @@ NODYN persists batch metadata locally in `~/.nodyn/batch-index.json`:
 Access the index programmatically:
 
 ```typescript
-const index = nodyn.getBatchIndex();
+const index = lynox.getBatchIndex();
 const entry = await index.get('batch_abc123');
 ```
 
@@ -125,11 +125,11 @@ Check batch status from the local index:
 
 When running as an MCP server, batch operations are exposed as:
 
-- **`nodyn_batch`**: Submit a batch (input: `requests` array)
-- **`nodyn_status`**: Check batch status (input: `batch_id`)
+- **`lynox_batch`**: Submit a batch (input: `requests` array)
+- **`lynox_status`**: Check batch status (input: `batch_id`)
 
-The `nodyn_status` tool queries the Anthropic API directly and returns processing counts (processing, succeeded, errored, canceled, expired).
+The `lynox_status` tool queries the Anthropic API directly and returns processing counts (processing, succeeded, errored, canceled, expired).
 
 ## Configuration
 
-Batch requests use the current model and max tokens from `NodynConfig`. The system prompt defaults to NODYN's built-in prompt unless overridden per request.
+Batch requests use the current model and max tokens from `LynoxConfig`. The system prompt defaults to LYNOX's built-in prompt unless overridden per request.

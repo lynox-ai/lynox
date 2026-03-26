@@ -13,7 +13,7 @@ export interface Profile {
   tools?: string[] | undefined;
 }
 
-const PROFILES_DIR = join(homedir(), '.nodyn', 'profiles');
+const PROFILES_DIR = join(homedir(), '.lynox', 'profiles');
 const SAFE_PROFILE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
 function ensureDir(): void {

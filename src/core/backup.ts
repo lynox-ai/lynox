@@ -1,10 +1,10 @@
 /**
- * Backup manager — bulletproof backup and restore for ~/.nodyn/.
+ * Backup manager — bulletproof backup and restore for ~/.lynox/.
  *
  * Uses VACUUM INTO for crash-safe SQLite copies, recursive directory copy
  * for Knowledge Graph, and optional AES-256-GCM encryption.
  *
- * All operations are designed to be safe during concurrent nodyn operation.
+ * All operations are designed to be safe during concurrent lynox operation.
  */
 
 import { existsSync, mkdirSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
@@ -18,7 +18,7 @@ import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
 export interface BackupManifest {
   version: string;
   created_at: string;
-  nodyn_dir: string;
+  lynox_dir: string;
   encrypted: boolean;
   files: BackupFileEntry[];
   checksum: string;
@@ -54,15 +54,15 @@ const COPY_FILES = ['config.json'] as const;
 const KG_DIR = 'knowledge-graph';
 
 export class BackupManager {
-  private readonly nodynDir: string;
+  private readonly lynoxDir: string;
   private readonly backupDir: string;
   private readonly retentionDays: number;
   private readonly encrypt: boolean;
   private readonly vaultKey: string | null;
   private _gdriveUploader: import('./backup-upload-gdrive.js').GDriveBackupUploader | null;
 
-  constructor(nodynDir: string, config: BackupConfig, vaultKey: string | null) {
-    this.nodynDir = nodynDir;
+  constructor(lynoxDir: string, config: BackupConfig, vaultKey: string | null) {
+    this.lynoxDir = lynoxDir;
     this.backupDir = config.backupDir;
     this.retentionDays = config.retentionDays;
     this.encrypt = config.encrypt && vaultKey !== null;
@@ -102,7 +102,7 @@ export class BackupManager {
 
       // 1. SQLite databases — VACUUM INTO for crash-safe copies
       for (const dbName of SQLITE_DBS) {
-        const srcPath = join(this.nodynDir, dbName);
+        const srcPath = join(this.lynoxDir, dbName);
         if (!existsSync(srcPath)) continue;
 
         const destPath = join(tmpDir, dbName);
@@ -111,7 +111,7 @@ export class BackupManager {
       }
 
       // 2. Knowledge Graph — directory copy
-      const kgSrc = join(this.nodynDir, KG_DIR);
+      const kgSrc = join(this.lynoxDir, KG_DIR);
       if (existsSync(kgSrc) && statSync(kgSrc).isDirectory()) {
         const kgDest = join(tmpDir, KG_DIR);
         this.copyDirRecursive(kgSrc, kgDest);
@@ -126,7 +126,7 @@ export class BackupManager {
 
       // 3. Memory + Sessions — recursive copy
       for (const dirName of COPY_DIRS) {
-        const srcDir = join(this.nodynDir, dirName);
+        const srcDir = join(this.lynoxDir, dirName);
         if (!existsSync(srcDir) || !statSync(srcDir).isDirectory()) continue;
 
         const destDir = join(tmpDir, dirName);
@@ -140,7 +140,7 @@ export class BackupManager {
 
       // 4. Config file
       for (const fileName of COPY_FILES) {
-        const srcFile = join(this.nodynDir, fileName);
+        const srcFile = join(this.lynoxDir, fileName);
         if (!existsSync(srcFile)) continue;
         copyFileSync(srcFile, join(tmpDir, fileName));
         files.push(this.fileEntry(tmpDir, fileName, 'file'));
@@ -178,7 +178,7 @@ export class BackupManager {
       const manifest: BackupManifest = {
         version,
         created_at: new Date().toISOString(),
-        nodyn_dir: this.nodynDir,
+        lynox_dir: this.lynoxDir,
         encrypted: this.encrypt,
         files,
         checksum,
@@ -211,7 +211,7 @@ export class BackupManager {
           await this._gdriveUploader.upload(finalDir, manifest);
         } catch {
           // GDrive upload failure does not fail the backup
-          process.stderr.write('[nodyn:backup] Google Drive upload failed — local backup is intact\n');
+          process.stderr.write('[lynox:backup] Google Drive upload failed — local backup is intact\n');
         }
       }
 
@@ -223,7 +223,7 @@ export class BackupManager {
       return {
         success: false,
         path: '',
-        manifest: { version: 'unknown', created_at: '', nodyn_dir: this.nodynDir, encrypted: false, files: [], checksum: '' },
+        manifest: { version: 'unknown', created_at: '', lynox_dir: this.lynoxDir, encrypted: false, files: [], checksum: '' },
         duration_ms: Date.now() - start,
         error: msg,
       };
@@ -269,7 +269,7 @@ export class BackupManager {
         if (entry.type === 'directory' || entry.type === 'kuzu_dir') continue;
 
         const srcFile = join(backupPath, entry.path);
-        const destFile = join(this.nodynDir, entry.path);
+        const destFile = join(this.lynoxDir, entry.path);
 
         if (!existsSync(srcFile)) continue;
 
@@ -289,7 +289,7 @@ export class BackupManager {
       const kgEntry = manifest.files.find(f => f.type === 'kuzu_dir');
       if (kgEntry) {
         const kgSrc = join(backupPath, kgEntry.path);
-        const kgDest = join(this.nodynDir, kgEntry.path);
+        const kgDest = join(this.lynoxDir, kgEntry.path);
         if (existsSync(kgSrc)) {
           if (existsSync(kgDest)) {
             rmSync(kgDest, { recursive: true, force: true });

@@ -2,8 +2,8 @@
 
 ## Project
 
-nodyn — the AI that knows your business. ESM-only TypeScript, Node.js 22+.
-Public OSS repo (nodyn-ai/nodyn). Internal docs in private nodyn-pro repo.
+lynox — the AI that knows your business. ESM-only TypeScript, Node.js 22+.
+Public OSS repo (lynox-ai/lynox). Internal docs in private lynox-pro repo.
 
 ## Commands
 
@@ -50,7 +50,7 @@ See `docs/src/content/docs/` for documentation source (Astro Starlight site).
 - Backup: VACUUM INTO + AES-256-GCM encryption + GDrive upload
 - API Store: profile-first enforcement, agent-driven setup
 - CRM: agent-driven contacts/deals, KG-primary, DataStore for structured tracking
-- Sentry: opt-in error reporting (NODYN_SENTRY_DSN), PII scrubbed
+- Sentry: opt-in error reporting (LYNOX_SENTRY_DSN), PII scrubbed
 
 ## Testing
 
@@ -67,7 +67,7 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/ (>=70%).
 
 ## Docker
 
-4-stage build on debian:trixie-slim (~523 MB). Non-root nodyn:1001.
+4-stage build on debian:trixie-slim (~523 MB). Non-root lynox:1001.
 Entrypoint: entrypoint.sh (vault key auto-load, --version/--help without API key).
 Healthcheck: `GET /health` → `{"status":"ok"}` on MCP port.
 Hardened: no bash, no apt, no perl, no SUID, read-only root.

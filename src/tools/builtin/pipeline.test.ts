@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { RunState, AgentOutput } from '../../orchestrator/types.js';
-import type { ToolEntry, NodynUserConfig, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 
 // Mock DAG planner
 const mockEstimatePipelineCost = vi.fn().mockReturnValue({ steps: [], totalCostUsd: 0.02 });
@@ -30,7 +30,7 @@ import {
 import type { IAgent } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 
-const mockConfig: NodynUserConfig = {
+const mockConfig: LynoxUserConfig = {
   api_key: 'test-key',
   api_base_url: 'http://localhost:8317',
 };
@@ -42,7 +42,7 @@ const mockTools: ToolEntry[] = [
   },
 ];
 
-function makePipelineAgent(opts?: { config?: NodynUserConfig | null; tools?: ToolEntry[] }): IAgent {
+function makePipelineAgent(opts?: { config?: LynoxUserConfig | null; tools?: ToolEntry[] }): IAgent {
   const ctx = createToolContext(opts?.config ?? mockConfig);
   if (opts?.config === null) {
     (ctx as Record<string, unknown>)['userConfig'] = null;
@@ -240,7 +240,7 @@ describe('run_pipeline — inline steps', () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockResolvedValueOnce(makeRunState());
 
-    const context = { repo: 'nodyn', branch: 'main' };
+    const context = { repo: 'lynox', branch: 'main' };
     await runPipelineTool.handler(
       { name: 'test', steps: [makeStep('s1', 'do thing')], context },
       agent,

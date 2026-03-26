@@ -34,10 +34,10 @@ npm run smoke:manual
 Optional real API validation:
 
 ```bash
-ANTHROPIC_API_KEY=... NODYN_SMOKE_ONLINE=1 npm run smoke:manual
+ANTHROPIC_API_KEY=... LYNOX_SMOKE_ONLINE=1 npm run smoke:manual
 ```
 
-`npm run smoke:manual` starts a local MCP server, checks `/health`, verifies the auth guard, and runs an offline MCP client lifecycle. The online variant adds a real `nodyn_run_start` / `nodyn_poll` round-trip. On restricted desktop sandboxes, local port binding may require an unsandboxed shell.
+`npm run smoke:manual` starts a local MCP server, checks `/health`, verifies the auth guard, and runs an offline MCP client lifecycle. The online variant adds a real `lynox_run_start` / `lynox_poll` round-trip. On restricted desktop sandboxes, local port binding may require an unsandboxed shell.
 
 ## Workflow File
 
@@ -55,10 +55,10 @@ ANTHROPIC_API_KEY=... NODYN_SMOKE_ONLINE=1 npm run smoke:manual
 
 ```bash
 npx vitest run tests/online/         # run all online tests
-NODYN_DEBUG=1 npx vitest run tests/online/  # with debug output
+LYNOX_DEBUG=1 npx vitest run tests/online/  # with debug output
 ```
 
-**Not included in CI or `npx vitest run`** — must be run explicitly. Requires an API key via `~/.nodyn/config.json` or `ANTHROPIC_API_KEY` env var. Tests auto-skip when no key is available.
+**Not included in CI or `npx vitest run`** — must be run explicitly. Requires an API key via `~/.lynox/config.json` or `ANTHROPIC_API_KEY` env var. Tests auto-skip when no key is available.
 
 | File | Tests | What it verifies |
 |------|-------|------------------|
@@ -96,7 +96,7 @@ npm run smoke:manual
 pnpm bench
 
 # Optional online smoke:
-ANTHROPIC_API_KEY=... NODYN_SMOKE_ONLINE=1 npm run smoke:manual
+ANTHROPIC_API_KEY=... LYNOX_SMOKE_ONLINE=1 npm run smoke:manual
 
 # Online integration tests (real Haiku API, ~$0.02):
 npx vitest run tests/online/
@@ -105,5 +105,5 @@ npx vitest run tests/online/
 pnpm bench:online
 
 # Build Docker image locally:
-docker build -t nodyn .
+docker build -t lynox .
 ```

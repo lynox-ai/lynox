@@ -37,14 +37,14 @@ const MAX_MESSAGES_PER_CHAT = 20;
 // ---------------------------------------------------------------------------
 
 let _sentryPrompted = false;
-const SENTRY_FLAG_PATH = join(homedir(), '.nodyn', '.sentry-prompted');
+const SENTRY_FLAG_PATH = join(homedir(), '.lynox', '.sentry-prompted');
 
 function shouldPromptSentry(): boolean {
   if (_sentryPrompted) return false;
   try {
     if (existsSync(SENTRY_FLAG_PATH)) { _sentryPrompted = true; return false; }
     // Don't prompt if Sentry is already configured
-    if (process.env['NODYN_SENTRY_DSN']) { _sentryPrompted = true; return false; }
+    if (process.env['LYNOX_SENTRY_DSN']) { _sentryPrompted = true; return false; }
     return true;
   } catch { return false; }
 }
@@ -60,7 +60,7 @@ function markSentryPrompted(): void {
 
 const SUPPORT_URL = 'https://donate.stripe.com/eVq00ibbKemX61g5Mp8g000';
 const SUPPORT_THRESHOLD = 10; // show after 10 successful tasks
-const SUPPORT_FLAG_PATH = join(homedir(), '.nodyn', '.support-prompted');
+const SUPPORT_FLAG_PATH = join(homedir(), '.lynox', '.support-prompted');
 let _supportPrompted = false;
 let _successCount = 0;
 
@@ -181,9 +181,9 @@ async function editStatus(
     const retryAfterMs = getTelegramRetryAfterMs(err);
     if (retryAfterMs !== null) {
       run.backoffUntil = Date.now() + retryAfterMs;
-      process.stderr.write(`NODYN Telegram rate limited; backing off ${Math.ceil(retryAfterMs / 1000)}s\n`);
+      process.stderr.write(`LYNOX Telegram rate limited; backing off ${Math.ceil(retryAfterMs / 1000)}s\n`);
     } else {
-      process.stderr.write(`NODYN Telegram editStatus failed: ${getErrorMessage(err)}\n`);
+      process.stderr.write(`LYNOX Telegram editStatus failed: ${getErrorMessage(err)}\n`);
     }
   }
 }
@@ -323,7 +323,7 @@ async function executeRunInner(
   const staleTimer = setInterval(() => {
     if (Date.now() - run.lastActivityAt > STALE_TIMEOUT_MS) {
       clearInterval(staleTimer);
-      process.stderr.write(`NODYN Telegram: run stale for chat ${chatId}, aborting\n`);
+      process.stderr.write(`LYNOX Telegram: run stale for chat ${chatId}, aborting\n`);
       session.abort();
       void bot.telegram.sendMessage(chatId, t('msg.timeout', run.lang)).catch(() => {});
     }

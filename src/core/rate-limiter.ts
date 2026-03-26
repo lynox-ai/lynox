@@ -90,11 +90,11 @@ export class RateLimiter {
 
 /**
  * Create a RateLimiter from environment variables.
- * NODYN_RATE_LIMIT_CONCURRENT and NODYN_RATE_LIMIT_PER_HOUR override defaults.
+ * LYNOX_RATE_LIMIT_CONCURRENT and LYNOX_RATE_LIMIT_PER_HOUR override defaults.
  */
 export function createRateLimiterFromEnv(): RateLimiter {
-  const concurrent = parseInt(process.env['NODYN_RATE_LIMIT_CONCURRENT'] ?? '', 10);
-  const perHour = parseInt(process.env['NODYN_RATE_LIMIT_PER_HOUR'] ?? '', 10);
+  const concurrent = parseInt(process.env['LYNOX_RATE_LIMIT_CONCURRENT'] ?? '', 10);
+  const perHour = parseInt(process.env['LYNOX_RATE_LIMIT_PER_HOUR'] ?? '', 10);
   return new RateLimiter({
     maxConcurrent: Number.isFinite(concurrent) && concurrent > 0 ? concurrent : undefined,
     maxPerHour: Number.isFinite(perHour) && perHour > 0 ? perHour : undefined,

@@ -15,7 +15,7 @@ let memory: Memory;
 let cleanup: () => void;
 
 beforeAll(() => {
-  const tmp = createBenchDir('nodyn-bench-mem-');
+  const tmp = createBenchDir('lynox-bench-mem-');
   cleanup = tmp.cleanup;
   // API key is fake — no extraction calls happen during benchmarks
   memory = new Memory(tmp.path, 'sk-ant-bench-fake-key', undefined, 'bench-context');

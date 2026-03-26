@@ -46,7 +46,7 @@ describe('handleSchedule', () => {
   let session: Session;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'nodyn-schedule-test-'));
+    dir = mkdtempSync(join(tmpdir(), 'lynox-schedule-test-'));
     history = new RunHistory(join(dir, 'test.db'));
     tm = new TaskManager(history);
     session = makeSession(history);

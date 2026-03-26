@@ -36,7 +36,7 @@ No API key needed. Safe for CI. Located in `tests/performance/`.
 
 ## Online Benchmarks
 
-Require API key via `~/.nodyn/config.json` or `ANTHROPIC_API_KEY`. Auto-skip without key. Located in `tests/performance/online/`.
+Require API key via `~/.lynox/config.json` or `ANTHROPIC_API_KEY`. Auto-skip without key. Located in `tests/performance/online/`.
 
 | File | Module | What it measures | Cost |
 |------|--------|-----------------|------|
@@ -84,12 +84,12 @@ cp tests/performance/results.json tests/performance/baselines/v1.0.0.json
 Run with debug output to correlate benchmark timing with internal events:
 
 ```bash
-NODYN_DEBUG=1 pnpm bench 2>bench-debug.log
+LYNOX_DEBUG=1 pnpm bench 2>bench-debug.log
 ```
 
 Debug channels observed during benchmarks:
-- `nodyn:tool:start/end` — tool timing
-- `nodyn:knowledge:graph` — KG operations
-- `nodyn:datastore:insert` — DataStore writes
-- `nodyn:memory:store` — memory operations
-- `nodyn:security:*` — security scan events
+- `lynox:tool:start/end` — tool timing
+- `lynox:knowledge:graph` — KG operations
+- `lynox:datastore:insert` — DataStore writes
+- `lynox:memory:store` — memory operations
+- `lynox:security:*` — security scan events

@@ -72,11 +72,11 @@ function createMockEngine() {
 describe('telegram-bot', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env['NODYN_TELEGRAM_OPEN_ACCESS'] = 'true';
+    process.env['LYNOX_TELEGRAM_OPEN_ACCESS'] = 'true';
   });
 
   afterEach(() => {
-    delete process.env['NODYN_TELEGRAM_OPEN_ACCESS'];
+    delete process.env['LYNOX_TELEGRAM_OPEN_ACCESS'];
   });
 
   it('creates bot and registers handlers', async () => {
@@ -117,7 +117,7 @@ describe('telegram-bot', () => {
     await stopTelegramBot();
   });
 
-  it('does not set up allowlist middleware with NODYN_TELEGRAM_OPEN_ACCESS', async () => {
+  it('does not set up allowlist middleware with LYNOX_TELEGRAM_OPEN_ACCESS', async () => {
     const engine = createMockEngine();
 
     await startTelegramBot({ token: 'test-token', engine: engine as never });
@@ -129,7 +129,7 @@ describe('telegram-bot', () => {
   });
 
   it('starts in setup mode without allowedChatIds', async () => {
-    delete process.env['NODYN_TELEGRAM_OPEN_ACCESS'];
+    delete process.env['LYNOX_TELEGRAM_OPEN_ACCESS'];
     const engine = createMockEngine();
 
     // Should NOT throw — starts in setup mode instead

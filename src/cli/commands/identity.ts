@@ -71,7 +71,7 @@ export async function handleGoogle(parts: string[], session: Session, ctx: CLICt
     const googleAuth = session.getGoogleAuth();
     if (!googleAuth) {
       ctx.stdout.write(`${RED}Google Workspace not configured.${RESET}\n`);
-      ctx.stdout.write(`${DIM}Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in env or ~/.nodyn/config.json${RESET}\n`);
+      ctx.stdout.write(`${DIM}Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in env or ~/.lynox/config.json${RESET}\n`);
       ctx.stdout.write(`${DIM}See: https://console.cloud.google.com/apis/credentials${RESET}\n`);
       return true;
     }
@@ -130,9 +130,9 @@ export async function handleGoogle(parts: string[], session: Session, ctx: CLICt
 export async function handleVault(parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   const vaultSub = parts[1];
   if (!vaultSub || vaultSub === 'status') {
-    const hasKey = !!process.env['NODYN_VAULT_KEY'];
+    const hasKey = !!process.env['LYNOX_VAULT_KEY'];
     ctx.stdout.write(`${BOLD}Vault Status${RESET}\n`);
-    ctx.stdout.write(`  Key configured: ${hasKey ? `${GREEN}yes${RESET}` : `${RED}no${RESET} (set NODYN_VAULT_KEY)`}\n`);
+    ctx.stdout.write(`  Key configured: ${hasKey ? `${GREEN}yes${RESET}` : `${RED}no${RESET} (set LYNOX_VAULT_KEY)`}\n`);
     if (hasKey) {
       try {
         const vault = new SecretVault();
@@ -200,9 +200,9 @@ export async function handleVault(parts: string[], _session: Session, ctx: CLICt
       ctx.stdout.write(`${RED}Error: ${getErrorMessage(e)}${RESET}\n`);
     }
   } else if (vaultSub === 'rotate') {
-    const oldKey = process.env['NODYN_VAULT_KEY'];
+    const oldKey = process.env['LYNOX_VAULT_KEY'];
     if (!oldKey) {
-      ctx.stdout.write(`${RED}No vault key configured. Set NODYN_VAULT_KEY first.${RESET}\n`);
+      ctx.stdout.write(`${RED}No vault key configured. Set LYNOX_VAULT_KEY first.${RESET}\n`);
       return true;
     }
 
@@ -222,8 +222,8 @@ export async function handleVault(parts: string[], _session: Session, ctx: CLICt
 
       // Generate new key
       const newKey = randomBytes(36).toString('base64');
-      const nodynDir = join(homedir(), '.nodyn');
-      const vaultDbPath = join(nodynDir, 'vault.db');
+      const lynoxDir = join(homedir(), '.lynox');
+      const vaultDbPath = join(lynoxDir, 'vault.db');
 
       // Re-encrypt vault secrets
       const secretCount = SecretVault.rotateVault(vaultDbPath, oldKey, newKey);
@@ -238,18 +238,18 @@ export async function handleVault(parts: string[], _session: Session, ctx: CLICt
         // History re-encryption is best-effort — may not have encrypted rows
       }
 
-      // Save new key to ~/.nodyn/.env
-      const envPath = join(nodynDir, '.env');
-      writeFileAtomicSync(envPath, `NODYN_VAULT_KEY=${newKey}\n`);
+      // Save new key to ~/.lynox/.env
+      const envPath = join(lynoxDir, '.env');
+      writeFileAtomicSync(envPath, `LYNOX_VAULT_KEY=${newKey}\n`);
 
       // Update current process
-      process.env['NODYN_VAULT_KEY'] = newKey;
+      process.env['LYNOX_VAULT_KEY'] = newKey;
 
       spinner.stop();
       ctx.stdout.write(`${GREEN}✓${RESET} Vault key rotated successfully.\n`);
       ctx.stdout.write(`  Secrets re-encrypted: ${secretCount}\n`);
       ctx.stdout.write(`  History rows re-encrypted: ${historyCount}\n`);
-      ctx.stdout.write(`  ${DIM}New key saved to ~/.nodyn/.env${RESET}\n`);
+      ctx.stdout.write(`  ${DIM}New key saved to ~/.lynox/.env${RESET}\n`);
       ctx.stdout.write(`  ${YELLOW}⚠${RESET} Restart your shell to load the new key.\n`);
     } catch (e: unknown) {
       spinner.stop();
@@ -280,7 +280,7 @@ export async function handleSecret(parts: string[], session: Session, ctx: CLICt
         const consented = store.hasConsent(name) ? ` ${GREEN}(consented)${RESET}` : '';
         ctx.stdout.write(`  ${BOLD}${name}${RESET}: ${masked}${expired}${consented}\n`);
       }
-      ctx.stdout.write(`\n${DIM}Vault: ${store.hasVault ? 'enabled' : 'disabled (set NODYN_VAULT_KEY)'}${RESET}\n`);
+      ctx.stdout.write(`\n${DIM}Vault: ${store.hasVault ? 'enabled' : 'disabled (set LYNOX_VAULT_KEY)'}${RESET}\n`);
     }
   } else if (secretSub === 'set') {
     const name = parts[2];
@@ -305,9 +305,9 @@ export async function handleSecret(parts: string[], session: Session, ctx: CLICt
       ctx.stdout.write(deleted ? `${GREEN}Secret '${name}' deleted.${RESET}\n` : `${DIM}Secret '${name}' not found.${RESET}\n`);
     }
   } else if (secretSub === 'status') {
-    const hasKey = !!process.env['NODYN_VAULT_KEY'];
+    const hasKey = !!process.env['LYNOX_VAULT_KEY'];
     ctx.stdout.write(`${BOLD}Vault Status${RESET}\n`);
-    ctx.stdout.write(`  Key configured: ${hasKey ? `${GREEN}yes${RESET}` : `${RED}no${RESET} (set NODYN_VAULT_KEY)`}\n`);
+    ctx.stdout.write(`  Key configured: ${hasKey ? `${GREEN}yes${RESET}` : `${RED}no${RESET} (set LYNOX_VAULT_KEY)`}\n`);
     if (hasKey) {
       try {
         const vault = new SecretVault();

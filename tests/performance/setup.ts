@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /** Create an isolated temp directory for benchmark isolation. */
-export function createBenchDir(prefix = 'nodyn-bench-'): { path: string; cleanup: () => void } {
+export function createBenchDir(prefix = 'lynox-bench-'): { path: string; cleanup: () => void } {
   const path = mkdtempSync(join(tmpdir(), prefix));
   return {
     path,
@@ -18,7 +18,7 @@ export function createBenchDir(prefix = 'nodyn-bench-'): { path: string; cleanup
 /** Generate a realistic text payload of approximate character count. */
 export function generateText(chars: number): string {
   const words = [
-    'nodyn', 'agent', 'pipeline', 'knowledge', 'memory', 'workflow',
+    'lynox', 'agent', 'pipeline', 'knowledge', 'memory', 'workflow',
     'business', 'customer', 'project', 'analysis', 'report', 'data',
     'integration', 'automation', 'strategy', 'decision', 'process',
     'entity', 'relation', 'context', 'scope', 'retrieval', 'embedding',

@@ -30,9 +30,9 @@ export { SessionStore } from './core/session-store.js';
 export { channels, measureTool } from './core/observability.js';
 export { initDebugSubscriber, shutdownDebugSubscriber, parseDebugFilter } from './core/debug-subscriber.js';
 export { ToolRegistry } from './tools/registry.js';
-export { NodynMCPServer } from './server/mcp-server.js';
+export { LynoxMCPServer } from './server/mcp-server.js';
 export { CostGuard } from './core/cost-guard.js';
-export { loadConfig, saveUserConfig, hasApiKey, getNodynDir, ensureNodynDir } from './core/config.js';
+export { loadConfig, saveUserConfig, hasApiKey, getLynoxDir, ensureLynoxDir } from './core/config.js';
 export { RunHistory, hashTask } from './core/run-history.js';
 export { calculateCost, getPricing } from './core/pricing.js';
 export { createEmbeddingProvider, cosineSimilarity } from './core/embedding.js';
@@ -74,7 +74,7 @@ export type { ApprovalDialogResult } from './cli/approval-dialog.js';
 export { detectProjectRoot } from './core/project.js';
 export type { ProjectInfo } from './core/project.js';
 export { resolveContext } from './core/context.js';
-export type { NodynContext, ContextSource } from './types/index.js';
+export type { LynoxContext, ContextSource } from './types/index.js';
 export { runSetupWizard } from './cli/setup-wizard.js';
 export { startTelegramBot, stopTelegramBot, getTelegramBot } from './integrations/telegram/telegram-bot.js';
 export { TelegramNotificationChannel } from './integrations/telegram/telegram-notification.js';
@@ -84,14 +84,14 @@ export { getRole, getRoleNames, BUILTIN_ROLES } from './core/roles.js';
 export type { RoleConfig } from './core/roles.js';
 export { isFeatureEnabled, getFeatureFlags, getFeatureEnvVar, registerFeature, clearDynamicFeatures } from './core/features.js';
 export type { FeatureFlag } from './core/features.js';
-export type { NodynHooks, RunContext, AccumulatedUsage } from './core/engine.js';
+export type { LynoxHooks, RunContext, AccumulatedUsage } from './core/engine.js';
 export { NotificationRouter } from './core/notification-router.js';
 export type { NotificationChannel, NotificationMessage } from './core/notification-router.js';
 export { WorkerLoop } from './core/worker-loop.js';
 export * from './types/index.js';
 
 // === Error hierarchy ===
-export { NodynError, ValidationError, ConfigError, ExecutionError, ToolError, NotFoundError } from './core/errors.js';
+export { LynoxError, ValidationError, ConfigError, ExecutionError, ToolError, NotFoundError } from './core/errors.js';
 
 // === Backup ===
 export { BackupManager } from './core/backup.js';
@@ -110,7 +110,7 @@ export type { ApiProfile, ApiEndpoint, ApiAuth, ApiRateLimit } from './core/api-
 
 // === Sentry (opt-in error reporting) ===
 export {
-  initSentry, shutdownSentry, captureNodynError, captureError,
+  initSentry, shutdownSentry, captureLynoxError, captureError,
   captureUserFeedback, isSentryEnabled,
   addToolBreadcrumb, addLLMBreadcrumb,
 } from './core/sentry.js';
@@ -307,13 +307,13 @@ async function handleCommand(line: string, session: Session): Promise<boolean> {
 }
 
 /**
- * Load ~/.nodyn/.env if it exists and NODYN_VAULT_KEY is not already set.
+ * Load ~/.lynox/.env if it exists and LYNOX_VAULT_KEY is not already set.
  * This ensures the vault key survives restarts without requiring the user
  * to manually source the file. The entrypoint.sh does this for Docker;
  * this is the equivalent for local npm/npx usage.
  *
  * Security:
- * - Only reads NODYN_VAULT_KEY from the file (line-by-line parsing, no eval)
+ * - Only reads LYNOX_VAULT_KEY from the file (line-by-line parsing, no eval)
  * - Rejects symlinks (must be a regular file)
  * - Rejects files with group/other permissions (must be 0o600 or 0o400)
  * - Rejects files not owned by the current user (Unix only)
@@ -322,15 +322,15 @@ async function handleCommand(line: string, session: Session): Promise<boolean> {
 const VAULT_KEY_PATTERN = /^[A-Za-z0-9+/=]{32,128}$/;
 
 function loadDotEnv(): void {
-  if (process.env['NODYN_VAULT_KEY']) return; // already set
+  if (process.env['LYNOX_VAULT_KEY']) return; // already set
   try {
-    const envPath = join(homedir(), '.nodyn', '.env');
+    const envPath = join(homedir(), '.lynox', '.env');
     if (!existsSync(envPath)) return;
 
     // Security: reject symlinks
     const lstats = lstatSync(envPath);
     if (!lstats.isFile()) {
-      stderr.write(`${YELLOW}⚠${RESET} ~/.nodyn/.env is not a regular file — skipping\n`);
+      stderr.write(`${YELLOW}⚠${RESET} ~/.lynox/.env is not a regular file — skipping\n`);
       return;
     }
 
@@ -338,13 +338,13 @@ function loadDotEnv(): void {
     const stats = statSync(envPath);
     const uid = process.getuid?.();
     if (uid !== undefined && stats.uid !== uid) {
-      stderr.write(`${YELLOW}⚠${RESET} ~/.nodyn/.env is not owned by you — skipping\n`);
+      stderr.write(`${YELLOW}⚠${RESET} ~/.lynox/.env is not owned by you — skipping\n`);
       return;
     }
 
     // Security: reject group/other readable (must be 0o600 or stricter)
     if ((stats.mode & 0o077) !== 0) {
-      stderr.write(`${YELLOW}⚠${RESET} ~/.nodyn/.env has insecure permissions (${(stats.mode & 0o777).toString(8)}). Run: chmod 600 ~/.nodyn/.env\n`);
+      stderr.write(`${YELLOW}⚠${RESET} ~/.lynox/.env has insecure permissions (${(stats.mode & 0o777).toString(8)}). Run: chmod 600 ~/.lynox/.env\n`);
       return;
     }
 
@@ -357,10 +357,10 @@ function loadDotEnv(): void {
       const key = trimmed.slice(0, eqIdx).trim();
       const value = trimmed.slice(eqIdx + 1).trim();
       // Only load vault key — never auto-set API keys or other secrets from dotenv
-      if (key === 'NODYN_VAULT_KEY' && value) {
+      if (key === 'LYNOX_VAULT_KEY' && value) {
         // Validate format: base64 string, reasonable length (32-128 chars)
         if (!VAULT_KEY_PATTERN.test(value)) {
-          stderr.write(`${YELLOW}⚠${RESET} Invalid NODYN_VAULT_KEY format in ~/.nodyn/.env — skipping\n`);
+          stderr.write(`${YELLOW}⚠${RESET} Invalid LYNOX_VAULT_KEY format in ~/.lynox/.env — skipping\n`);
           return;
         }
         // Lightweight entropy check: warn if key has very few unique chars
@@ -368,7 +368,7 @@ function loadDotEnv(): void {
         if (uniqueChars < 10) {
           stderr.write(`${YELLOW}⚠${RESET} Vault key has low entropy (${uniqueChars} unique chars). Generate a strong key: openssl rand -base64 48\n`);
         }
-        process.env['NODYN_VAULT_KEY'] = value;
+        process.env['LYNOX_VAULT_KEY'] = value;
         return;
       }
     }
@@ -380,22 +380,22 @@ function loadDotEnv(): void {
 async function runCLI(): Promise<void> {
   const args = argv.slice(2);
 
-  // Load vault key from ~/.nodyn/.env before anything else
+  // Load vault key from ~/.lynox/.env before anything else
   loadDotEnv();
 
   // === --help flag ===
   if (args.includes('--help') || args.includes('-h')) {
-    stdout.write(`nodyn ${pkg.version} — Open Agent Runtime
+    stdout.write(`lynox ${pkg.version} — Open Agent Runtime
 
 Usage:
-  nodyn                         Interactive REPL (setup wizard on first run)
-  nodyn "<task>"                Run a single task and exit
-  cat file | nodyn "<task>"     Process piped input with a task
-  nodyn init                    Run the setup wizard
-  nodyn --mcp-server            Start as MCP server (stdio)
-  nodyn --mcp-server --transport sse   Start as MCP server (HTTP/SSE)
-  nodyn --telegram              Start Telegram bot mode
-  nodyn --watch <glob> --on-change "<task>"   Watch files and run task on change
+  lynox                         Interactive REPL (setup wizard on first run)
+  lynox "<task>"                Run a single task and exit
+  cat file | lynox "<task>"     Process piped input with a task
+  lynox init                    Run the setup wizard
+  lynox --mcp-server            Start as MCP server (stdio)
+  lynox --mcp-server --transport sse   Start as MCP server (HTTP/SSE)
+  lynox --telegram              Start Telegram bot mode
+  lynox --watch <glob> --on-change "<task>"   Watch files and run task on change
 
 Options:
   --help, -h                    Show this help
@@ -413,14 +413,14 @@ Environment:
   TELEGRAM_BOT_TOKEN            Auto-start Telegram bot mode
   TAVILY_API_KEY                Enable web search tool
 
-Docs: https://docs.nodyn.dev
+Docs: https://docs.lynox.dev
 `);
     return;
   }
 
   // === --version flag ===
   if (args.includes('--version') || args.includes('-v')) {
-    stdout.write(`nodyn ${pkg.version}\n`);
+    stdout.write(`lynox ${pkg.version}\n`);
     return;
   }
 
@@ -430,7 +430,7 @@ Docs: https://docs.nodyn.dev
   if (projectArg) {
     const projectDir = resolve(projectArg);
     process.chdir(projectDir);
-    const configPath = join(projectDir, '.nodyn', 'config.json');
+    const configPath = join(projectDir, '.lynox', 'config.json');
     if (existsSync(configPath)) {
       stderr.write(`${DIM}Project config loaded from ${configPath}${RESET}\n`);
     }
@@ -440,14 +440,14 @@ Docs: https://docs.nodyn.dev
   if (args.includes('--init') || args[0] === 'init') {
     const wizardResult = await runSetupWizard();
     if (!wizardResult) {
-      stderr.write('No API key configured. Run "nodyn init" to set up.\n');
+      stderr.write('No API key configured. Run "lynox init" to set up.\n');
       process.exit(1);
     }
     // Continue into REPL — vault key is already in process.env, config reloaded
   } else if (!hasApiKey() && stdin.isTTY) {
     const wizardResult = await runSetupWizard();
     if (!wizardResult) {
-      stderr.write('No API key configured. Run "nodyn init" to set up.\n');
+      stderr.write('No API key configured. Run "lynox init" to set up.\n');
       process.exit(1);
     }
     // Continue into REPL — vault key is already in process.env, config reloaded
@@ -455,12 +455,12 @@ Docs: https://docs.nodyn.dev
 
   // === MCP Server mode ===
   if (args.includes('--mcp-server')) {
-    const { NodynMCPServer } = await import('./server/mcp-server.js');
-    const mcpServer = new NodynMCPServer({});
+    const { LynoxMCPServer } = await import('./server/mcp-server.js');
+    const mcpServer = new LynoxMCPServer({});
     await mcpServer.init();
     const transportIdx = args.indexOf('--transport');
     if (transportIdx !== -1 && args[transportIdx + 1] === 'sse') {
-      const port = parseInt(process.env['NODYN_MCP_PORT'] ?? '3042', 10);
+      const port = parseInt(process.env['LYNOX_MCP_PORT'] ?? '3042', 10);
       await mcpServer.startHTTP(port);
     } else {
       await mcpServer.startStdio();
@@ -628,7 +628,7 @@ Docs: https://docs.nodyn.dev
   if (singleTask || pipedInput) {
     if (!hasApiKey()) {
       stderr.write(`${RED}✗${RESET} No API key configured.\n`);
-      stderr.write(`${DIM}Set ANTHROPIC_API_KEY or run interactively: npx @nodyn-ai/core${RESET}\n`);
+      stderr.write(`${DIM}Set ANTHROPIC_API_KEY or run interactively: npx @lynox-ai/core${RESET}\n`);
       process.exit(1);
     }
     session = await ensureSession();
@@ -667,7 +667,7 @@ Docs: https://docs.nodyn.dev
           tools: [...toolsUsed],
           error: state.hadError,
         };
-        stderr.write(`\n__NODYN_SUMMARY__${JSON.stringify(summary)}\n`);
+        stderr.write(`\n__LYNOX_SUMMARY__${JSON.stringify(summary)}\n`);
       }
       // === Sprint 8a: --output flag ===
       const outputIdx = args.indexOf('--output');
@@ -697,7 +697,7 @@ Docs: https://docs.nodyn.dev
       const task = taskManager.create({
         title: taskFlag,
         description: taskFlag,
-        assignee: 'nodyn',
+        assignee: 'lynox',
       });
       stderr.write(`${GREEN}\u2713${RESET} Background task created: ${task.id}\n`);
     }
@@ -908,12 +908,12 @@ Docs: https://docs.nodyn.dev
     process.kill(process.pid, 'SIGKILL');
   });
 
-  // === Initial greeting — nodyn introduces itself proactively ===
+  // === Initial greeting — lynox introduces itself proactively ===
   const userCfg = session.getUserConfig();
   let greetingShown = false;
   if (stdin.isTTY && userCfg.greeting !== false) {
     const { existsSync, readdirSync } = await import('node:fs');
-    const memDir = join(homedir(), '.nodyn', 'memory');
+    const memDir = join(homedir(), '.lynox', 'memory');
     const isFirstSession = !existsSync(memDir) || readdirSync(memDir).length === 0;
 
     let greetingText = '';
@@ -939,7 +939,7 @@ Docs: https://docs.nodyn.dev
         );
         await Promise.race([session.run(
           'This is the user\'s very first session. Welcome them warmly in 2-3 sentences. ' +
-          'Refer to yourself as "nodyn" (lowercase). ' +
+          'Refer to yourself as "lynox" (lowercase). ' +
           'Briefly say what you are (a digital coworker that learns their business over time). ' +
           'Then suggest something small and concrete to start with — like checking their emails, ' +
           'summarizing a file, or looking at recent git activity. ' +

@@ -63,11 +63,11 @@ export class TaskManager {
       throw new Error(`Invalid due_date format: ${params.dueDate}. Use YYYY-MM-DD.`);
     }
 
-    // Auto-trigger: if assigned to nodyn with no explicit schedule/watch,
+    // Auto-trigger: if assigned to lynox with no explicit schedule/watch,
     // set nextRunAt = now so WorkerLoop picks it up immediately.
     let resolvedNextRunAt = params.nextRunAt;
     let resolvedTaskType = params.taskType;
-    if (params.assignee === 'nodyn' && !params.scheduleCron && !params.watchConfig && !params.nextRunAt) {
+    if (params.assignee === 'lynox' && !params.scheduleCron && !params.watchConfig && !params.nextRunAt) {
       resolvedNextRunAt = new Date().toISOString();
       resolvedTaskType = resolvedTaskType ?? 'manual';
     }
@@ -170,18 +170,18 @@ export class TaskManager {
     });
   }
 
-  getAssignedToNodyn(scopes?: MemoryScopeRef[]): TaskRecord[] {
+  getAssignedToLynox(scopes?: MemoryScopeRef[]): TaskRecord[] {
     if (scopes && scopes.length > 0) {
       const all: TaskRecord[] = [];
       for (const scope of scopes) {
-        const tasks = this.history.getTasks({ assignee: 'nodyn', scopeType: scope.type, scopeId: scope.id });
+        const tasks = this.history.getTasks({ assignee: 'lynox', scopeType: scope.type, scopeId: scope.id });
         for (const t of tasks) {
           if (!all.some(existing => existing.id === t.id)) all.push(t);
         }
       }
       return all.filter(t => t.status !== 'completed');
     }
-    return this.history.getTasks({ assignee: 'nodyn' }).filter(t => t.status !== 'completed');
+    return this.history.getTasks({ assignee: 'lynox' }).filter(t => t.status !== 'completed');
   }
 
   getWeekSummary(scopes?: MemoryScopeRef[]): WeekSummary {
@@ -221,10 +221,10 @@ export class TaskManager {
 
   getBriefingSummary(scopes?: MemoryScopeRef[]): string {
     const summary = this.getWeekSummary(scopes);
-    const nodynTasks = this.getAssignedToNodyn(scopes);
+    const lynoxTasks = this.getAssignedToLynox(scopes);
     const parts: string[] = [];
 
-    const total = summary.overdue.length + summary.dueToday.length + summary.dueThisWeek.length + summary.inProgress.length + nodynTasks.length;
+    const total = summary.overdue.length + summary.dueToday.length + summary.dueThisWeek.length + summary.inProgress.length + lynoxTasks.length;
     if (total === 0) return '';
 
     const counts: string[] = [];
@@ -232,7 +232,7 @@ export class TaskManager {
     if (summary.overdue.length > 0) counts.push(`${summary.overdue.length} overdue`);
     if (summary.inProgress.length > 0) counts.push(`${summary.inProgress.length} in progress`);
     if (summary.dueThisWeek.length > 0) counts.push(`${summary.dueThisWeek.length} due this week`);
-    if (nodynTasks.length > 0) counts.push(`${nodynTasks.length} assigned to you`);
+    if (lynoxTasks.length > 0) counts.push(`${lynoxTasks.length} assigned to you`);
     parts.push(counts.join(', ') + '.');
 
     for (const t of summary.overdue) {
@@ -241,12 +241,12 @@ export class TaskManager {
       parts.push(`Overdue: "${t.title}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
     }
 
-    // Highlight tasks assigned to nodyn that aren't already shown as overdue
+    // Highlight tasks assigned to lynox that aren't already shown as overdue
     const overdueIds = new Set(summary.overdue.map(t => t.id));
-    const pendingNodyn = nodynTasks.filter(t => !overdueIds.has(t.id));
-    if (pendingNodyn.length > 0) {
-      parts.push('Your tasks (assigned to nodyn) — propose working on these:');
-      for (const t of pendingNodyn) {
+    const pendingLynox = lynoxTasks.filter(t => !overdueIds.has(t.id));
+    if (pendingLynox.length > 0) {
+      parts.push('Your tasks (assigned to lynox) — propose working on these:');
+      for (const t of pendingLynox) {
         const due = t.due_date ? `, due ${t.due_date}` : '';
         parts.push(`  - "${t.title}" [${t.status}]${due}`);
       }
@@ -272,7 +272,7 @@ export class TaskManager {
   // Scheduling CRUD
   // ---------------------------------------------------------------------------
 
-  /** Create a scheduled recurring task. Sets task_type='scheduled', assignee='nodyn', computes next_run_at. */
+  /** Create a scheduled recurring task. Sets task_type='scheduled', assignee='lynox', computes next_run_at. */
   createScheduled(params: TaskCreateParams & {
     scheduleCron: string;
     maxRetries?: number | undefined;
@@ -286,7 +286,7 @@ export class TaskManager {
 
     return this.create({
       ...params,
-      assignee: 'nodyn',
+      assignee: 'lynox',
       taskType: 'scheduled',
       scheduleCron: params.scheduleCron,
       nextRunAt: nextRun.toISOString(),
@@ -295,7 +295,7 @@ export class TaskManager {
     });
   }
 
-  /** Create a pipeline task. Sets task_type='pipeline', assignee='nodyn'. Optionally recurring via scheduleCron. */
+  /** Create a pipeline task. Sets task_type='pipeline', assignee='lynox'. Optionally recurring via scheduleCron. */
   createPipelineTask(params: TaskCreateParams & {
     pipelineId: string;
     scheduleCron?: string | undefined;
@@ -308,7 +308,7 @@ export class TaskManager {
       const nextRun = nextOccurrence(params.scheduleCron);
       return this.create({
         ...params,
-        assignee: 'nodyn',
+        assignee: 'lynox',
         taskType: 'pipeline',
         pipelineId: params.pipelineId,
         scheduleCron: params.scheduleCron,
@@ -319,14 +319,14 @@ export class TaskManager {
 
     return this.create({
       ...params,
-      assignee: 'nodyn',
+      assignee: 'lynox',
       taskType: 'pipeline',
       pipelineId: params.pipelineId,
       maxRetries: params.maxRetries,
     });
   }
 
-  /** Create a watch/monitor task. Sets task_type='watch', assignee='nodyn', computes next_run_at from interval. */
+  /** Create a watch/monitor task. Sets task_type='watch', assignee='lynox', computes next_run_at from interval. */
   createWatch(params: TaskCreateParams & {
     watchUrl: string;
     watchIntervalMinutes?: number | undefined;
@@ -343,7 +343,7 @@ export class TaskManager {
 
     return this.create({
       ...params,
-      assignee: 'nodyn',
+      assignee: 'lynox',
       taskType: 'watch',
       watchConfig,
       nextRunAt: new Date(Date.now() + intervalMinutes * 60_000).toISOString(),

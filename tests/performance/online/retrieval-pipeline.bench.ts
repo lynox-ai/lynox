@@ -28,7 +28,7 @@ describe.skipIf(SKIP)('Online: Retrieval Pipeline', () => {
   let cleanup: () => void;
 
   beforeAll(async () => {
-    const tmp = createBenchDir('nodyn-bench-retrieval-');
+    const tmp = createBenchDir('lynox-bench-retrieval-');
     cleanup = tmp.cleanup;
 
     graph = new KuzuGraph(join(tmp.path, 'kg'));
@@ -48,7 +48,7 @@ describe.skipIf(SKIP)('Online: Retrieval Pipeline', () => {
       { text: 'SvelteKit is the frontend framework, Tailwind CSS v4 for styling.', ns: 'knowledge' },
       { text: 'Auth uses Lucia v3 with Arctic and SvelteKit, no Clerk.', ns: 'knowledge' },
       { text: 'Knowledge Graph uses LadybugDB (Kuzu fork) with multilingual-e5-small embeddings.', ns: 'knowledge' },
-      { text: 'Always run tests with NODYN_DEBUG enabled for verification.', ns: 'methods' },
+      { text: 'Always run tests with LYNOX_DEBUG enabled for verification.', ns: 'methods' },
       { text: 'Never mock the database in integration tests.', ns: 'learnings' },
       { text: 'PRDs and business docs go to pro/docs/internal/, never public core.', ns: 'methods' },
       { text: 'Docker image uses node:22-slim for onnxruntime glibc compatibility.', ns: 'knowledge' },
@@ -70,7 +70,7 @@ describe.skipIf(SKIP)('Online: Retrieval Pipeline', () => {
       { name: 'LadybugDB', type: 'technology' },
       { name: 'Docker', type: 'technology' },
       { name: 'example-store.com', type: 'organization' },
-      { name: 'nodyn', type: 'project' },
+      { name: 'lynox', type: 'project' },
     ];
 
     for (const ent of entities) {

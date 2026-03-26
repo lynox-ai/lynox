@@ -7,21 +7,21 @@ import { getWorkspaceDir, isWorkspaceActive, getWorkspaceCwd, validatePath, _res
 describe('workspace', () => {
   let tmpDir: string;
   let realTmpDir: string;
-  const origEnv = process.env['NODYN_WORKSPACE'];
+  const origEnv = process.env['LYNOX_WORKSPACE'];
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'nodyn-ws-'));
+    tmpDir = mkdtempSync(join(tmpdir(), 'lynox-ws-'));
     realTmpDir = realpathSync(tmpDir);
     _resetCache();
-    delete process.env['NODYN_WORKSPACE'];
+    delete process.env['LYNOX_WORKSPACE'];
   });
 
   afterEach(() => {
     _resetCache();
     if (origEnv !== undefined) {
-      process.env['NODYN_WORKSPACE'] = origEnv;
+      process.env['LYNOX_WORKSPACE'] = origEnv;
     } else {
-      delete process.env['NODYN_WORKSPACE'];
+      delete process.env['LYNOX_WORKSPACE'];
     }
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -30,8 +30,8 @@ describe('workspace', () => {
     expect(getWorkspaceDir()).toBeNull();
   });
 
-  it('getWorkspaceDir returns real path when NODYN_WORKSPACE is set', () => {
-    process.env['NODYN_WORKSPACE'] = tmpDir;
+  it('getWorkspaceDir returns real path when LYNOX_WORKSPACE is set', () => {
+    process.env['LYNOX_WORKSPACE'] = tmpDir;
     expect(getWorkspaceDir()).toBe(realTmpDir);
   });
 
@@ -40,7 +40,7 @@ describe('workspace', () => {
   });
 
   it('isWorkspaceActive returns true when workspace set', () => {
-    process.env['NODYN_WORKSPACE'] = tmpDir;
+    process.env['LYNOX_WORKSPACE'] = tmpDir;
     expect(isWorkspaceActive()).toBe(true);
   });
 
@@ -49,13 +49,13 @@ describe('workspace', () => {
   });
 
   it('getWorkspaceCwd returns workspace dir when active', () => {
-    process.env['NODYN_WORKSPACE'] = tmpDir;
+    process.env['LYNOX_WORKSPACE'] = tmpDir;
     expect(getWorkspaceCwd()).toBe(realTmpDir);
   });
 
   describe('validatePath', () => {
     beforeEach(() => {
-      process.env['NODYN_WORKSPACE'] = tmpDir;
+      process.env['LYNOX_WORKSPACE'] = tmpDir;
       _resetCache();
     });
 
@@ -102,7 +102,7 @@ describe('workspace', () => {
     it('rejects write through symlink pointing outside workspace', () => {
       // Use cwd (repo root) for outside dir — NOT tmpdir() — because on Linux
       // both workspace and outside would be in /tmp, which is an allowed target.
-      const outsideDir = mkdtempSync(join(process.cwd(), '.nodyn-outside-'));
+      const outsideDir = mkdtempSync(join(process.cwd(), '.lynox-outside-'));
       try {
         const outsideFile = join(outsideDir, 'target.txt');
         writeFileSync(outsideFile, 'outside');
@@ -126,7 +126,7 @@ describe('workspace', () => {
 
     it('returns resolved path as-is when workspace inactive', () => {
       _resetCache();
-      delete process.env['NODYN_WORKSPACE'];
+      delete process.env['LYNOX_WORKSPACE'];
       _resetCache();
       const result = validatePath('/any/path', 'write');
       expect(result).toBe('/any/path');

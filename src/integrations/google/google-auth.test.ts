@@ -36,12 +36,12 @@ vi.mock('node:http', () => ({
 }));
 
 vi.mock('../../core/config.js', () => ({
-  getNodynDir: () => '/tmp/test-nodyn',
+  getLynoxDir: () => '/tmp/test-lynox',
 }));
 
 vi.mock('../../core/atomic-write.js', () => ({
   writeFileAtomicSync: vi.fn(),
-  ensureDirSync: vi.fn().mockReturnValue('/tmp/test-nodyn'),
+  ensureDirSync: vi.fn().mockReturnValue('/tmp/test-lynox'),
 }));
 
 describe('GoogleAuth', () => {

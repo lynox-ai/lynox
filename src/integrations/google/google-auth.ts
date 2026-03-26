@@ -143,7 +143,7 @@ function loadTokenData(vault?: SecretVault | undefined): TokenData | null {
 
 function saveTokenData(data: TokenData, vault?: SecretVault | undefined): void {
   if (!vault) {
-    throw new Error('Cannot save tokens without a vault. Set NODYN_VAULT_KEY to enable the vault.');
+    throw new Error('Cannot save tokens without a vault. Set LYNOX_VAULT_KEY to enable the vault.');
   }
   vault.set(VAULT_TOKEN_KEY, JSON.stringify(data), 'any');
 }
@@ -187,10 +187,10 @@ function createServiceAccountJWT(key: ServiceAccountKey, scopes: readonly string
 
 // === Success HTML ===
 
-const SUCCESS_HTML = `<!DOCTYPE html><html><head><title>NODYN</title>
+const SUCCESS_HTML = `<!DOCTYPE html><html><head><title>LYNOX</title>
 <style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0a0a0a;color:#e0e0e0}
 .box{text-align:center;padding:2rem}h1{color:#4ade80;margin-bottom:.5rem}p{color:#888}</style></head>
-<body><div class="box"><h1>Connected</h1><p>Google account linked to NODYN. You can close this tab.</p></div></body></html>`;
+<body><div class="box"><h1>Connected</h1><p>Google account linked to LYNOX. You can close this tab.</p></div></body></html>`;
 
 const ERROR_HTML = (msg: string) => {
   const escaped = msg
@@ -199,7 +199,7 @@ const ERROR_HTML = (msg: string) => {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
-  return `<!DOCTYPE html><html><head><title>NODYN</title>
+  return `<!DOCTYPE html><html><head><title>LYNOX</title>
 <style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0a0a0a;color:#e0e0e0}
 .box{text-align:center;padding:2rem}h1{color:#ef4444;margin-bottom:.5rem}p{color:#888}</style></head>
 <body><div class="box"><h1>Error</h1><p>${escaped}</p></div></body></html>`;

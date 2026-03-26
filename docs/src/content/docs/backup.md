@@ -3,9 +3,9 @@ title: "Backup & Restore"
 description: "Crash-safe backups, encryption, and scheduled backups"
 ---
 
-nodyn can automatically back up everything — your knowledge, history, contacts, and settings — to Google Drive. Backups are encrypted and run on schedule.
+lynox can automatically back up everything — your knowledge, history, contacts, and settings — to Google Drive. Backups are encrypted and run on schedule.
 
-**Quick start:** Tell nodyn via Telegram: *"Set up a backup to Google Drive"* or use the `/backup` command. Connect Google first with `/google` if you haven't already.
+**Quick start:** Tell lynox via Telegram: *"Set up a backup to Google Drive"* or use the `/backup` command. Connect Google first with `/google` if you haven't already.
 
 ---
 
@@ -21,7 +21,7 @@ nodyn can automatically back up everything — your knowledge, history, contacts
 | Config (`config.json`) | JSON | File copy |
 | Sessions (`sessions/`) | JSON files | Recursive copy |
 
-**VACUUM INTO** creates an atomic, consistent snapshot of each SQLite database — even while nodyn is running with active writes. No data corruption risk.
+**VACUUM INTO** creates an atomic, consistent snapshot of each SQLite database — even while lynox is running with active writes. No data corruption risk.
 
 ## CLI Commands
 
@@ -39,7 +39,7 @@ nodyn can automatically back up everything — your knowledge, history, contacts
 
 ```json
 {
-  "backup_dir": "~/.nodyn/backups",
+  "backup_dir": "~/.lynox/backups",
   "backup_schedule": "0 3 * * *",
   "backup_retention_days": 30,
   "backup_encrypt": true
@@ -48,16 +48,16 @@ nodyn can automatically back up everything — your knowledge, history, contacts
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `backup_dir` | `~/.nodyn/backups` | Where backups are stored |
+| `backup_dir` | `~/.lynox/backups` | Where backups are stored |
 | `backup_schedule` | `0 3 * * *` | Cron schedule for automatic backups (daily 3 AM) |
 | `backup_retention_days` | `30` | Days to keep old backups. `0` = never auto-delete |
 | `backup_encrypt` | `true` (if vault key set) | Encrypt backups with AES-256-GCM |
 
-All fields are `PROJECT_SAFE_KEYS` — can be set in project-level `.nodyn/config.json`.
+All fields are `PROJECT_SAFE_KEYS` — can be set in project-level `.lynox/config.json`.
 
 ## Encryption
 
-When `NODYN_VAULT_KEY` is set and `backup_encrypt` is not explicitly `false`, backups are encrypted:
+When `LYNOX_VAULT_KEY` is set and `backup_encrypt` is not explicitly `false`, backups are encrypted:
 
 - **Algorithm**: AES-256-GCM (same as vault and run history)
 - **Key derivation**: HKDF-SHA256 from vault key with backup-specific salt
@@ -70,7 +70,7 @@ Without a vault key, backups are unencrypted. The CLI warns about this.
 ## Backup Structure
 
 ```
-~/.nodyn/backups/
+~/.lynox/backups/
   20260325T030000Z/
     manifest.json       # Metadata, file list, checksums
     history.db          # VACUUM INTO copy (or encrypted)
@@ -89,7 +89,7 @@ Every backup includes a `manifest.json` with:
 {
   "version": "1.0.0",
   "created_at": "2026-03-25T03:00:00.000Z",
-  "nodyn_dir": "/home/user/.nodyn",
+  "lynox_dir": "/home/user/.lynox",
   "encrypted": true,
   "files": [
     {
@@ -116,24 +116,24 @@ Every backup includes a `manifest.json` with:
 
 Restore **always creates a safety backup first** before overwriting any data:
 
-1. Safety backup of current state → `~/.nodyn/backups/<timestamp>/`
+1. Safety backup of current state → `~/.lynox/backups/<timestamp>/`
 2. If encrypted: decrypt each file
 3. Replace current files with backup contents
-4. Prompt user to restart nodyn
+4. Prompt user to restart lynox
 
 If restore fails mid-way, the safety backup allows recovery. The safety backup path is shown in the output.
 
 ## Pre-Update Backup
 
-nodyn automatically creates a backup when it detects a version change on startup. This protects against update regressions — if a new version breaks something, the pre-update backup is already there.
+lynox automatically creates a backup when it detects a version change on startup. This protects against update regressions — if a new version breaks something, the pre-update backup is already there.
 
 ```
-[nodyn] Version changed (1.0.0 → 1.1.0) — creating pre-update backup...
-[nodyn] Pre-update backup created: /home/nodyn/.nodyn/backups/20260326T030000Z
+[lynox] Version changed (1.0.0 → 1.1.0) — creating pre-update backup...
+[lynox] Pre-update backup created: /home/lynox/.lynox/backups/20260326T030000Z
 ```
 
 **How it works:**
-- On `Engine.init()`, the current version is compared with `~/.nodyn/.last_version`
+- On `Engine.init()`, the current version is compared with `~/.lynox/.last_version`
 - If the version changed → backup before anything else runs
 - The version file is updated after the check
 - First-ever run writes the version file without triggering a backup
@@ -159,14 +159,14 @@ When `backup_schedule` is configured and the WorkerLoop is running (Telegram, MC
 ## SDK Usage
 
 ```typescript
-import { BackupManager } from '@nodyn-ai/core';
-import { getNodynDir } from '@nodyn-ai/core';
+import { BackupManager } from '@lynox-ai/core';
+import { getLynoxDir } from '@lynox-ai/core';
 
-const manager = new BackupManager(getNodynDir(), {
+const manager = new BackupManager(getLynoxDir(), {
   backupDir: '/path/to/backups',
   retentionDays: 30,
   encrypt: true,
-}, process.env['NODYN_VAULT_KEY'] ?? null);
+}, process.env['LYNOX_VAULT_KEY'] ?? null);
 
 // Create
 const result = await manager.createBackup();
@@ -193,7 +193,7 @@ When Google auth is configured with `drive.file` scope, backups are automaticall
 
 1. Configure Google OAuth: set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
 2. Run `/google auth` in the CLI and grant the `drive.file` scope
-3. Backups will auto-upload to a `nodyn-backups` folder on your Google Drive
+3. Backups will auto-upload to a `lynox-backups` folder on your Google Drive
 
 ### CLI Commands
 
@@ -205,7 +205,7 @@ When Google auth is configured with `drive.file` scope, backups are automaticall
 
 ### How It Works
 
-- A `nodyn-backups` folder is auto-created in your Google Drive root
+- A `lynox-backups` folder is auto-created in your Google Drive root
 - Each backup gets a subfolder named by timestamp
 - All files (encrypted or not) are uploaded as binary
 - Upload failures are logged but never fail the local backup
@@ -235,10 +235,10 @@ Mount a backup volume for persistent storage:
 ```bash
 docker run -d \
   -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e NODYN_VAULT_KEY=... \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  -v /mnt/backups:/home/nodyn/.nodyn/backups \
-  nodyn
+  -e LYNOX_VAULT_KEY=... \
+  -v ~/.lynox:/home/lynox/.lynox \
+  -v /mnt/backups:/home/lynox/.lynox/backups \
+  lynox
 ```
 
 Or configure `backup_dir` to an external path in config.

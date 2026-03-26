@@ -1,7 +1,7 @@
 /**
  * Google Drive backup upload adapter.
  *
- * Uploads backup files to a dedicated 'nodyn-backups' folder on Google Drive.
+ * Uploads backup files to a dedicated 'lynox-backups' folder on Google Drive.
  * Each backup gets its own subfolder named by timestamp.
  * Supports binary file upload (SQLite, encrypted files).
  */
@@ -12,7 +12,7 @@ import type { BackupManifest } from './backup.js';
 
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
-const BACKUP_FOLDER_NAME = 'nodyn-backups';
+const BACKUP_FOLDER_NAME = 'lynox-backups';
 const UPLOAD_TIMEOUT_MS = 120_000; // 2 minutes per file
 
 interface DriveFile {
@@ -71,7 +71,7 @@ async function driveFetch(auth: BackupAuthProvider, url: string, options?: Reque
 
 /**
  * Google Drive backup uploader.
- * Creates a folder structure: My Drive / nodyn-backups / <timestamp> / files...
+ * Creates a folder structure: My Drive / lynox-backups / <timestamp> / files...
  */
 export class GDriveBackupUploader {
   private readonly auth: BackupAuthProvider;
@@ -83,7 +83,7 @@ export class GDriveBackupUploader {
 
   /**
    * Upload a local backup directory to Google Drive.
-   * Creates: nodyn-backups/<timestamp>/manifest.json, history.db, etc.
+   * Creates: lynox-backups/<timestamp>/manifest.json, history.db, etc.
    */
   async upload(backupDir: string, _manifest: BackupManifest): Promise<UploadResult> {
     if (!this.auth.hasScope(DRIVE_FILE_SCOPE)) {
@@ -121,7 +121,7 @@ export class GDriveBackupUploader {
       const rootId = await this.findRootFolder();
       if (!rootId) return [];
 
-      // List subfolders in nodyn-backups
+      // List subfolders in lynox-backups
       const params = new URLSearchParams({
         q: `'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
         fields: 'files(id,name,modifiedTime)',
@@ -203,7 +203,7 @@ export class GDriveBackupUploader {
 
   // ── Private helpers ──
 
-  /** Find or create the root 'nodyn-backups' folder. */
+  /** Find or create the root 'lynox-backups' folder. */
   private async ensureRootFolder(): Promise<string> {
     if (this.rootFolderId) return this.rootFolderId;
 
@@ -232,7 +232,7 @@ export class GDriveBackupUploader {
     return folder.id;
   }
 
-  /** Find the root 'nodyn-backups' folder (returns null if not found). */
+  /** Find the root 'lynox-backups' folder (returns null if not found). */
   private async findRootFolder(): Promise<string | null> {
     if (this.rootFolderId) return this.rootFolderId;
 
@@ -283,7 +283,7 @@ export class GDriveBackupUploader {
     });
 
     // Build multipart body with binary content
-    const boundary = `---nodyn-backup-${Date.now()}---`;
+    const boundary = `---lynox-backup-${Date.now()}---`;
     const metadataPart = Buffer.from(
       `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`,
     );

@@ -1,5 +1,5 @@
 /**
- * Extracted batch processing functions for the Nodyn orchestrator.
+ * Extracted batch processing functions for the Lynox orchestrator.
  * Pure functions operating on explicit parameters — no class state.
  */
 import type Anthropic from '@anthropic-ai/sdk';

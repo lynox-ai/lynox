@@ -3,16 +3,16 @@ title: "API Store"
 description: "API profiles, rate limiting, and agent knowledge injection"
 ---
 
-The API Store teaches nodyn how to properly use external APIs. Instead of blind trial-and-error, the agent gets structured knowledge about each API before making requests — including endpoints, auth methods, rate limits, and common mistakes.
+The API Store teaches lynox how to properly use external APIs. Instead of blind trial-and-error, the agent gets structured knowledge about each API before making requests — including endpoints, auth methods, rate limits, and common mistakes.
 
 ## Conversational Setup
 
-The easiest way to add an API is to tell nodyn about it:
+The easiest way to add an API is to tell lynox about it:
 
 ```
 You: "I want to use the Stripe API"
 
-nodyn: → Searches Stripe API documentation
+lynox: → Searches Stripe API documentation
        → Creates a complete profile (endpoints, auth, rate limits, guidelines)
        → Asks for your API key
        → Stores credentials securely
@@ -28,10 +28,10 @@ You can also create profiles manually:
 
 1. Create the API profiles directory:
 ```bash
-mkdir -p ~/.nodyn/apis
+mkdir -p ~/.lynox/apis
 ```
 
-2. Add a profile (e.g. `~/.nodyn/apis/my-api.json`):
+2. Add a profile (e.g. `~/.lynox/apis/my-api.json`):
 ```json
 {
   "id": "my-api",
@@ -68,7 +68,7 @@ mkdir -p ~/.nodyn/apis
 }
 ```
 
-3. Start nodyn — the profile is automatically loaded and the agent knows how to use the API.
+3. Start lynox — the profile is automatically loaded and the agent knows how to use the API.
 
 ## Profile Format
 
@@ -113,7 +113,7 @@ Rate limits are **enforced automatically** by the `http_request` tool. When a li
 
 ## How It Works
 
-1. On `Engine.init()`, profiles are loaded from `~/.nodyn/apis/*.json`
+1. On `Engine.init()`, profiles are loaded from `~/.lynox/apis/*.json`
 2. Profile knowledge is injected into the agent's system prompt:
 
 ```
@@ -172,7 +172,7 @@ If any are missing, the agent is told to research the API documentation first.
 ## SDK Usage
 
 ```typescript
-import { ApiStore } from '@nodyn-ai/core';
+import { ApiStore } from '@lynox-ai/core';
 
 const store = new ApiStore();
 store.loadFromDirectory('/path/to/apis');

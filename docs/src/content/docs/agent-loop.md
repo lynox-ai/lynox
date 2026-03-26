@@ -63,7 +63,7 @@ Without `continuationPrompt`, the loop simply returns after `maxIterations`.
 
 ## Adaptive Thinking
 
-By default, NODYN uses **adaptive thinking**:
+By default, LYNOX uses **adaptive thinking**:
 
 ```typescript
 thinking: { type: 'adaptive' }
@@ -171,7 +171,7 @@ Multi-layered guards prevent context overflow and token waste:
 
 ## Prompt Caching
 
-Prompt caching is GA (no beta header needed). NODYN uses three cache control blocks:
+Prompt caching is GA (no beta header needed). LYNOX uses three cache control blocks:
 
 1. **System prompt** -- `cache_control: { type: 'ephemeral' }` on the static system prompt
 2. **Knowledge context or memory fallback** -- `cache_control: { type: 'ephemeral' }`. Primary path: Knowledge Graph retrieval (HyDE + vector + entity graph expansion + MMR) produces a `<relevant_context>` block with scope-grouped memories and entity subgraph. Legacy fallback: SQLite cosine search when `knowledge_graph_enabled: false`. Cold start fallback: full `<memory>` dump. Empty string = intentionally no block.

@@ -1,4 +1,4 @@
-import type { SecretScope, SecretStoreLike, NodynUserConfig } from '../types/index.js';
+import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/index.js';
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
 
@@ -23,7 +23,7 @@ export class SecretStore implements SecretStoreLike {
   private readonly consented = new Set<string>();
   private readonly vault: SecretVault | null;
 
-  constructor(config?: NodynUserConfig | undefined, vault?: SecretVault | undefined) {
+  constructor(config?: LynoxUserConfig | undefined, vault?: SecretVault | undefined) {
     this.vault = vault ?? null;
     this._loadFromEnv();
     if (this.vault) {
@@ -35,7 +35,7 @@ export class SecretStore implements SecretStoreLike {
   }
 
   private _loadFromEnv(): void {
-    const prefix = 'NODYN_SECRET_';
+    const prefix = 'LYNOX_SECRET_';
     for (const [key, value] of Object.entries(process.env)) {
       if (key.startsWith(prefix) && value) {
         const name = key.slice(prefix.length);
@@ -67,7 +67,7 @@ export class SecretStore implements SecretStoreLike {
     }
   }
 
-  private _loadFromConfig(config: NodynUserConfig): void {
+  private _loadFromConfig(config: LynoxUserConfig): void {
     const wellKnown: Array<[string, string | undefined]> = [
       ['ANTHROPIC_API_KEY', config.api_key],
       ['VOYAGE_API_KEY', config.voyage_api_key],
@@ -149,7 +149,7 @@ export class SecretStore implements SecretStoreLike {
    */
   set(name: string, value: string, scope?: SecretScope | undefined, ttlMs?: number | undefined): void {
     if (!this.vault) {
-      throw new Error('Cannot set secrets without a vault. Set NODYN_VAULT_KEY to enable the vault.');
+      throw new Error('Cannot set secrets without a vault. Set LYNOX_VAULT_KEY to enable the vault.');
     }
     this.vault.set(name, value, scope, ttlMs);
     this.secrets.set(name, {

@@ -4,9 +4,9 @@ import { readFileSync, appendFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { stdin, stdout } from 'node:process';
-import { saveUserConfig, getNodynDir, ensureNodynDir, reloadConfig } from '../core/config.js';
+import { saveUserConfig, getLynoxDir, ensureLynoxDir, reloadConfig } from '../core/config.js';
 import { writeFileAtomicSync } from '../core/atomic-write.js';
-import type { NodynUserConfig, ModelTier } from '../types/index.js';
+import type { LynoxUserConfig, ModelTier } from '../types/index.js';
 import { BOLD, DIM, GREEN, RED, YELLOW, RESET } from './ansi.js';
 import { confirm, multiSelect } from './interactive.js';
 import { renderGradientArt } from './ui.js';
@@ -33,11 +33,11 @@ async function checkPrerequisites(): Promise<PrereqResult> {
     errors.push(`Node.js 22+ required (found ${process.versions.node}). Update at nodejs.org`);
   }
 
-  // 2. Check ~/.nodyn directory is writable
+  // 2. Check ~/.lynox directory is writable
   try {
-    ensureNodynDir();
+    ensureLynoxDir();
   } catch {
-    errors.push('Cannot create ~/.nodyn directory — check permissions');
+    errors.push('Cannot create ~/.lynox directory — check permissions');
   }
 
   // 3. Check network connectivity (Anthropic API reachable)
@@ -60,8 +60,8 @@ async function checkPrerequisites(): Promise<PrereqResult> {
 // Shell profile injection (secure: append-only, with guard check)
 // ---------------------------------------------------------------------------
 
-const SHELL_PROFILE_MARKER = '# nodyn vault key';
-const SHELL_PROFILE_SOURCE = '[ -f "$HOME/.nodyn/.env" ] && . "$HOME/.nodyn/.env"';
+const SHELL_PROFILE_MARKER = '# lynox vault key';
+const SHELL_PROFILE_SOURCE = '[ -f "$HOME/.lynox/.env" ] && . "$HOME/.lynox/.env"';
 
 function getShellProfile(): string {
   const shell = process.env['SHELL'] ?? '/bin/bash';
@@ -77,7 +77,7 @@ function isShellProfileConfigured(): boolean {
   const profilePath = getShellProfile();
   try {
     const content = readFileSync(profilePath, 'utf-8');
-    return content.includes('.nodyn/.env') || content.includes('NODYN_VAULT_KEY');
+    return content.includes('.lynox/.env') || content.includes('LYNOX_VAULT_KEY');
   } catch {
     return false;
   }
@@ -103,7 +103,7 @@ async function offerShellProfileInjection(rl: ReadlineInterface): Promise<void> 
 
   try {
     const snippet = isFish
-      ? `\n${SHELL_PROFILE_MARKER}\nif test -f $HOME/.nodyn/.env; source $HOME/.nodyn/.env; end\n`
+      ? `\n${SHELL_PROFILE_MARKER}\nif test -f $HOME/.lynox/.env; source $HOME/.lynox/.env; end\n`
       : `\n${SHELL_PROFILE_MARKER}\n${SHELL_PROFILE_SOURCE}\n`;
     appendFileSync(profilePath, snippet);
     stdout.write(`  ${GREEN}✓${RESET} Added to ~/${profileName}\n`);
@@ -183,7 +183,7 @@ async function detectTelegramChatId(token: string): Promise<number | null> {
  * Accepts a readline interface for testability; creates one from stdin/stdout if not provided.
  * Returns the config that was saved, or null if the user aborted.
  */
-export async function runSetupWizard(rl?: ReadlineInterface): Promise<NodynUserConfig | null> {
+export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserConfig | null> {
   const ownRl = !rl;
   if (!rl) {
     rl = createInterface({ input: stdin, output: stdout, terminal: stdin.isTTY === true });
@@ -237,19 +237,19 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<NodynUserC
 
     // ── Encryption (always on, no prompt) ────────────────────────
     const vaultKey = randomBytes(36).toString('base64');
-    const envPath = join(getNodynDir(), '.env');
+    const envPath = join(getLynoxDir(), '.env');
     try {
-      writeFileAtomicSync(envPath, `NODYN_VAULT_KEY=${vaultKey}\n`);
-      process.env['NODYN_VAULT_KEY'] = vaultKey;
+      writeFileAtomicSync(envPath, `LYNOX_VAULT_KEY=${vaultKey}\n`);
+      process.env['LYNOX_VAULT_KEY'] = vaultKey;
       stdout.write(`  ${GREEN}✓${RESET} Encryption enabled.\n`);
 
       // Close readline before raw-mode prompts (confirm, multiSelect use stdin raw mode)
       if (stdin.isTTY) rl.close();
       await offerShellProfileInjection(rl);
     } catch {
-      process.env['NODYN_VAULT_KEY'] = vaultKey;
+      process.env['LYNOX_VAULT_KEY'] = vaultKey;
       stdout.write(`  ${GREEN}✓${RESET} Encryption enabled. Add to your shell profile:\n`);
-      stdout.write(`  ${BOLD}export NODYN_VAULT_KEY='${vaultKey}'${RESET}\n`);
+      stdout.write(`  ${BOLD}export LYNOX_VAULT_KEY='${vaultKey}'${RESET}\n`);
       if (stdin.isTTY) rl.close();
     }
 
@@ -261,7 +261,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<NodynUserC
     type Integration = 'google' | 'telegram' | 'websearch';
     const selected = await multiSelect<Integration>([
       { label: 'Google Workspace', value: 'google',    hint: 'Gmail, Sheets, Calendar' },
-      { label: 'Telegram',         value: 'telegram',  hint: 'use nodyn from your phone' },
+      { label: 'Telegram',         value: 'telegram',  hint: 'use lynox from your phone' },
       { label: 'Web Research',     value: 'websearch', hint: 'live research via Tavily' },
     ], stdin.isTTY ? undefined : { rl });
 
@@ -323,7 +323,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<NodynUserC
     }
 
     // ── Save ────────────────────────────────────────────────────
-    const config: NodynUserConfig = {
+    const config: LynoxUserConfig = {
       api_key: apiKey,
       default_tier: tier,
     };

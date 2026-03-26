@@ -193,7 +193,7 @@ describe('Agent Security Audit', () => {
       expect(fsContent, 'fs.ts must check isSymbolicLink').toContain('isSymbolicLink');
       // write_file must have workspace boundary check
       const hasWorkspaceBoundary = fsContent.includes('validatePath')
-        || fsContent.includes('NODYN_WORKSPACE')
+        || fsContent.includes('LYNOX_WORKSPACE')
         || fsContent.includes('isWorkspaceActive');
       expect(hasWorkspaceBoundary, 'fs.ts must have workspace boundary validation').toBe(true);
     });

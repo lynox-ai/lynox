@@ -69,7 +69,7 @@ async function fetchWithRedirects(url: string): Promise<Response> {
     const response = await fetch(currentUrl, {
       redirect: 'manual',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Nodyn/1.0; +https://nodyn.dev)',
+        'User-Agent': 'Mozilla/5.0 (compatible; Lynox/1.0; +https://lynox.ai)',
         Accept: 'text/html,application/xhtml+xml,*/*',
       },
       signal: AbortSignal.timeout(30_000),

@@ -5,7 +5,7 @@ description: "Get your AI agent running in 5 minutes — no technical skills nee
 
 ## Before You Start
 
-You need one thing: an **Anthropic API key**. This is how nodyn connects to Claude (the AI).
+You need one thing: an **Anthropic API key**. This is how lynox connects to Claude (the AI).
 
 1. Go to [console.anthropic.com](https://console.anthropic.com/) and create an account
 2. Click **API Keys** → **Create Key**
@@ -15,11 +15,11 @@ Anthropic charges per usage — a typical business day costs $1–5. You can set
 
 ---
 
-## Deploy nodyn
+## Deploy lynox
 
 ### The easy way — no technical skills needed
 
-Use the **[deploy page on nodyn.dev/deploy](https://nodyn.dev/deploy)**. It walks you through everything in your browser:
+Use the **[deploy page on lynox.ai/deploy](https://lynox.ai/deploy)**. It walks you through everything in your browser:
 
 1. **Enter your API key** — paste the key you just created
 2. **Set up Telegram** (optional) — create a bot in 2 minutes, the page detects your chat ID automatically
@@ -31,18 +31,18 @@ Your credentials never leave your browser — everything is generated client-sid
 After 2–3 minutes, your server is ready. Open Telegram, message your bot, done.
 
 :::tip[Just want to try it first?]
-Run nodyn on your own computer to explore what it can do:
+Run lynox on your own computer to explore what it can do:
 ```bash
-curl -fsSL https://nodyn.dev/install.sh | sh
+curl -fsSL https://lynox.ai/install.sh | sh
 ```
-A setup wizard walks you through the rest. When you're ready for 24/7, use the [deploy page](https://nodyn.dev/deploy) to move to a server. All your knowledge carries over.
+A setup wizard walks you through the rest. When you're ready for 24/7, use the [deploy page](https://lynox.ai/deploy) to move to a server. All your knowledge carries over.
 :::
 
 ---
 
 ## Your First Conversation
 
-Once nodyn is running, talk to it like you would to a colleague — via Telegram or the terminal.
+Once lynox is running, talk to it like you would to a colleague — via Telegram or the terminal.
 
 **Simple things to start with:**
 
@@ -51,26 +51,26 @@ Once nodyn is running, talk to it like you would to a colleague — via Telegram
 - *"Research [topic] and give me the key points"*
 - *"What meetings do I have this week?"* (after connecting Google)
 
-nodyn remembers everything in the [knowledge graph](/memory/) automatically. The more you use it, the more it knows about your business.
+lynox remembers everything in the [knowledge graph](/memory/) automatically. The more you use it, the more it knows about your business.
 
 :::note[Don't worry about automation yet]
-You don't need to plan workflows or set up automation right away. Just use nodyn for everyday tasks. After you've done something a few times, nodyn will suggest turning it into an automated workflow.
+You don't need to plan workflows or set up automation right away. Just use lynox for everyday tasks. After you've done something a few times, lynox will suggest turning it into an automated workflow.
 :::
 
 ---
 
 ## What Happens Automatically
 
-After setup, you don't need to manage anything. nodyn takes care of itself:
+After setup, you don't need to manage anything. lynox takes care of itself:
 
 | What | How | You need to do |
 |------|-----|---------------|
 | **Updates** | Checked daily, applied automatically via [Watchtower](https://containrrr.dev/watchtower/) | Nothing |
 | **Encryption** | AES-256-GCM, key generated during setup | Nothing |
 | **Restarts** | Auto-restart on crash or server reboot | Nothing |
-| **Knowledge** | Grows with every conversation | Just keep talking to nodyn |
+| **Knowledge** | Grows with every conversation | Just keep talking to lynox |
 | **Backups** | To Google Drive via `/backup` command | Set up once in Telegram |
-| **Bug reports** | Anonymized error reports to help improve nodyn | Opt-in after first task (one tap) |
+| **Bug reports** | Anonymized error reports to help improve lynox | Opt-in after first task (one tap) |
 
 Your server runs 24/7 with zero maintenance.
 
@@ -78,12 +78,12 @@ Your server runs 24/7 with zero maintenance.
 
 ## What 24/7 Unlocks
 
-Once nodyn runs on a server, it works in the background — even when you're not talking to it:
+Once lynox runs on a server, it works in the background — even when you're not talking to it:
 
 - *"Every Monday at 9am, summarize my emails from last week"* — runs automatically, delivered to Telegram
 - *"Monitor competitor.com for pricing changes"* — checks in the background, alerts you when something changes
 - *"Pull KPIs from the tracking sheet every Friday"* — scheduled, hands-free
-- Every conversation builds the knowledge graph — nodyn gets smarter over time
+- Every conversation builds the knowledge graph — lynox gets smarter over time
 
 ---
 
@@ -93,18 +93,18 @@ All integrations are optional. Add them whenever you're ready:
 
 | Integration | What it does | How to set up |
 |-------------|-------------|---------------|
-| **Telegram** | Use nodyn from your phone — voice, text, photos, documents | Set up during deploy, or see [Telegram Guide](/telegram/) |
+| **Telegram** | Use lynox from your phone — voice, text, photos, documents | Set up during deploy, or see [Telegram Guide](/telegram/) |
 | **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | Send `/google` in Telegram — authorize in your browser, done |
 | **Web Research** | Live web search for current information | Add [Tavily](https://tavily.com) API key during deploy (free: 1K searches/month). For privacy, disable "Allow use of query data" in Tavily settings. |
-| **Any REST API** | Connect nodyn to any service you use | [API Store](/api-store/) — describe the API, nodyn learns it |
+| **Any REST API** | Connect lynox to any service you use | [API Store](/api-store/) — describe the API, lynox learns it |
 
 ### Connecting Google Workspace
 
-Send `/google` to your bot in Telegram. nodyn will send you a link and a code:
+Send `/google` to your bot in Telegram. lynox will send you a link and a code:
 
 1. Open the link on your phone or computer
 2. Sign in with your Google account and enter the code
-3. Authorize access — nodyn confirms in Telegram when it's done
+3. Authorize access — lynox confirms in Telegram when it's done
 
 That's it — Gmail, Sheets, Drive, Calendar, and Docs are ready. No terminal needed.
 
@@ -112,11 +112,11 @@ That's it — Gmail, Sheets, Drive, Calendar, and Docs are ready. No terminal ne
 
 ## Moving from Local to Server
 
-Already tried nodyn locally? Everything you've built — knowledge, config, conversation history — lives in one folder. To move it to your server:
+Already tried lynox locally? Everything you've built — knowledge, config, conversation history — lives in one folder. To move it to your server:
 
 1. Use your provider's web console (browser-based terminal) to access your server
-2. Upload the `~/.nodyn/` folder from your computer
-3. Restart nodyn: the knowledge, config, and history are picked up automatically
+2. Upload the `~/.lynox/` folder from your computer
+3. Restart lynox: the knowledge, config, and history are picked up automatically
 
 See [Docker Deployment](/docker/) for details.
 
@@ -124,19 +124,19 @@ See [Docker Deployment](/docker/) for details.
 
 ## What's Next
 
-After setup, explore these features via Telegram — just ask nodyn or use the commands:
+After setup, explore these features via Telegram — just ask lynox or use the commands:
 
 | Feature | How to start | What it does |
 |---------|-------------|--------------|
 | **[Gmail & Calendar](/google-workspace/)** | Send `/google` in Telegram | Read emails, draft replies, check meetings |
-| **[Contacts & CRM](/crm/)** | Just mention people and deals | nodyn tracks clients, deals, and follow-ups automatically |
+| **[Contacts & CRM](/crm/)** | Just mention people and deals | lynox tracks clients, deals, and follow-ups automatically |
 | **[Web Research](/tools/)** | "Research [topic]" | Live web search, structured summaries |
 | **[Backups](/backup/)** | "Set up a backup" or `/backup` | Encrypted backups to Google Drive |
 | **[Scheduled Tasks](/tools/)** | "Do this every Monday at 9am" | Runs in the background, sends results to Telegram |
-| **[Connect any Service](/api-store/)** | "I use [service], here's the API docs" | nodyn learns any API from a description |
+| **[Connect any Service](/api-store/)** | "I use [service], here's the API docs" | lynox learns any API from a description |
 | **[Cost Limits](/configuration/)** | Send `/cost` in Telegram | See your spending, set daily limits |
 
-Everything builds on the knowledge graph — the more you use nodyn, the better it understands your business. Facts, relationships, preferences, and decisions are remembered automatically across every conversation.
+Everything builds on the knowledge graph — the more you use lynox, the better it understands your business. Facts, relationships, preferences, and decisions are remembered automatically across every conversation.
 
 ---
 
@@ -148,7 +148,7 @@ Everything below is optional reading for users who want to understand what happe
 
 ### Setup Wizard (local install)
 
-The wizard runs automatically when no API key is found. Re-run anytime with `npx @nodyn-ai/core --init`.
+The wizard runs automatically when no API key is found. Re-run anytime with `npx @lynox-ai/core --init`.
 
 **Step 1 — API Key**: Paste your Anthropic key. Verified live against the API. Encryption is enabled automatically (AES-256-GCM).
 
@@ -157,7 +157,7 @@ The wizard runs automatically when no API key is found. Re-run anytime with `npx
 | Integration | What it does |
 |-------------|-------------|
 | Google Workspace | Gmail, Sheets, Drive, Calendar, Docs via OAuth |
-| Telegram | Mobile access — use nodyn from your phone |
+| Telegram | Mobile access — use lynox from your phone |
 | Web Research | Live web research via [Tavily](https://tavily.com) (free: 1K/month) |
 
 Skip all with Enter or Esc — add anytime later via `/google`, `/telegram`, or `/config`.
@@ -167,34 +167,34 @@ Skip all with Enter or Esc — add anytime later via `/google`, `/telegram`, or 
 For users who already have a server and prefer the command line:
 
 ```bash
-curl -fsSL https://nodyn.dev/setup-server.sh | sh
+curl -fsSL https://lynox.ai/setup-server.sh | sh
 ```
 
-The script installs Docker, collects your API key and Telegram token interactively, generates an encryption key, and starts nodyn in a hardened container. See [Docker Deployment](/docker/) for manual setup options.
+The script installs Docker, collects your API key and Telegram token interactively, generates an encryption key, and starts lynox in a hardened container. See [Docker Deployment](/docker/) for manual setup options.
 
 ### Persistence
 
 | What | Where | Survives restart? |
 |------|-------|-------------------|
-| API key + config | `~/.nodyn/config.json` | Yes |
-| Vault key | `~/.nodyn/.env` | Yes (auto-loaded) |
-| Run history | `~/.nodyn/history.db` | Yes (encrypted) |
-| Knowledge | `~/.nodyn/memory/` | Yes |
+| API key + config | `~/.lynox/config.json` | Yes |
+| Vault key | `~/.lynox/.env` | Yes (auto-loaded) |
+| Run history | `~/.lynox/history.db` | Yes (encrypted) |
+| Knowledge | `~/.lynox/memory/` | Yes |
 
 ### CLI Quick Reference
 
 ```bash
 # Interactive REPL
-npx @nodyn-ai/core
+npx @lynox-ai/core
 
 # One-shot task
-npx @nodyn-ai/core "Summarize the last 5 commits"
+npx @lynox-ai/core "Summarize the last 5 commits"
 
 # Piped input
-cat report.csv | npx @nodyn-ai/core "Find anomalies"
+cat report.csv | npx @lynox-ai/core "Find anomalies"
 
 # Re-run setup
-npx @nodyn-ai/core --init
+npx @lynox-ai/core --init
 ```
 
 See [CLI Reference](/cli/) for all commands and flags.

@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 async function makeTempDir(): Promise<string> {
-  dir = await mkdtemp(join(tmpdir(), 'nodyn-fs-'));
+  dir = await mkdtemp(join(tmpdir(), 'lynox-fs-'));
   return dir;
 }
 

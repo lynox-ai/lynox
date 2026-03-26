@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nodyn-e2e-pipeline.XXXXXX")"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lynox-e2e-pipeline.XXXXXX")"
 PASS=0
 FAIL=0
 TOTAL=0
@@ -49,7 +49,7 @@ npm run build 2>&1 | tail -1
 echo "Build OK"
 
 if ! check_api_key; then
-  echo "ERROR: No API key found. Set ANTHROPIC_API_KEY or configure ~/.nodyn/config.json" >&2
+  echo "ERROR: No API key found. Set ANTHROPIC_API_KEY or configure ~/.lynox/config.json" >&2
   exit 1
 fi
 echo "API key OK"
@@ -183,8 +183,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// Use temp dir as home override (savePipelineTemplate uses ~/.nodyn/pipelines/)
-const tmpHome = mkdtempSync(join(tmpdir(), 'nodyn-e2e-'));
+// Use temp dir as home override (savePipelineTemplate uses ~/.lynox/pipelines/)
+const tmpHome = mkdtempSync(join(tmpdir(), 'lynox-e2e-'));
 const origHome = process.env['HOME'];
 process.env['HOME'] = tmpHome;
 
@@ -231,7 +231,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const tmpDir = mkdtempSync(join(tmpdir(), 'nodyn-e2e-db-'));
+const tmpDir = mkdtempSync(join(tmpdir(), 'lynox-e2e-db-'));
 const dbPath = join(tmpDir, 'test.db');
 
 try {

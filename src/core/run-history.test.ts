@@ -8,7 +8,7 @@ describe('RunHistory', () => {
   const tmpDirs: string[] = [];
 
   function createHistory(): RunHistory {
-    const dir = mkdtempSync(join(tmpdir(), 'nodyn-hist-'));
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-'));
     tmpDirs.push(dir);
     return new RunHistory(join(dir, 'test.db'));
   }
@@ -1112,7 +1112,7 @@ describe('RunHistory', () => {
 
   describe('encryption', () => {
     function createEncryptedHistory(): RunHistory {
-      const dir = mkdtempSync(join(tmpdir(), 'nodyn-hist-enc-'));
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-enc-'));
       tmpDirs.push(dir);
       return new RunHistory(join(dir, 'test.db'), 'test-vault-key-for-encryption');
     }

@@ -91,11 +91,11 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
   // --- Security: chat ID allowlist ---
   const setupMode = !allowedChatIds || allowedChatIds.length === 0;
   if (setupMode) {
-    if (process.env['NODYN_TELEGRAM_OPEN_ACCESS'] === 'true') {
-      process.stderr.write('\n⚠ SECURITY WARNING: NODYN_TELEGRAM_OPEN_ACCESS=true — bot is accessible to ALL Telegram users.\n  Set TELEGRAM_ALLOWED_CHAT_IDS env var to restrict access.\n\n');
+    if (process.env['LYNOX_TELEGRAM_OPEN_ACCESS'] === 'true') {
+      process.stderr.write('\n⚠ SECURITY WARNING: LYNOX_TELEGRAM_OPEN_ACCESS=true — bot is accessible to ALL Telegram users.\n  Set TELEGRAM_ALLOWED_CHAT_IDS env var to restrict access.\n\n');
     } else {
       // Setup mode: show chat ID to any user, don't process tasks
-      process.stderr.write('\nNODYN Telegram: Setup mode — no TELEGRAM_ALLOWED_CHAT_IDS configured.\n  Bot will show chat IDs to users. Set the IDs and restart.\n\n');
+      process.stderr.write('\nLYNOX Telegram: Setup mode — no TELEGRAM_ALLOWED_CHAT_IDS configured.\n  Bot will show chat IDs to users. Set the IDs and restart.\n\n');
       bot.use((ctx, next) => {
         const chatId = ctx.chat?.id;
         if (chatId !== undefined) {
@@ -104,7 +104,7 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
             + `Your chat ID is: <code>${chatId}</code>\n\n`
             + `Add this to your deployment:\n`
             + `<code>TELEGRAM_ALLOWED_CHAT_IDS=${chatId}</code>\n\n`
-            + `Then restart nodyn.`,
+            + `Then restart lynox.`,
             { parse_mode: 'HTML' },
           );
         }
@@ -113,7 +113,7 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       // Don't register any commands or handlers — just the setup middleware
       startEvictionTimer();
       await bot.launch();
-      process.stderr.write('NODYN Telegram bot running (setup mode).\n');
+      process.stderr.write('LYNOX Telegram bot running (setup mode).\n');
       return;
     }
   }
@@ -446,10 +446,10 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
             const { appendFileSync } = await import('node:fs');
             const { join } = await import('node:path');
             const { homedir } = await import('node:os');
-            const envPath = join(homedir(), '.nodyn', '.env');
-            // DSN for nodyn's shared Sentry project — only allows sending events, not reading
+            const envPath = join(homedir(), '.lynox', '.env');
+            // DSN for lynox's shared Sentry project — only allows sending events, not reading
             const SENTRY_DSN = 'https://21110d12849ca21ae1309b661ab3b603@o4511106815492096.ingest.de.sentry.io/4511106856976464';
-            appendFileSync(envPath, `\nNODYN_SENTRY_DSN=${SENTRY_DSN}\n`);
+            appendFileSync(envPath, `\nLYNOX_SENTRY_DSN=${SENTRY_DSN}\n`);
             const { initSentry } = await import('../../core/sentry.js');
             await initSentry();
           } catch { /* best-effort */ }
@@ -617,7 +617,7 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
   });
 
   // --- Launch (long polling) ---
-  process.stderr.write('NODYN Telegram bot starting (long polling)…\n');
+  process.stderr.write('LYNOX Telegram bot starting (long polling)…\n');
 
   // Graceful stop — store reference for cleanup
   signalHandler = () => {
@@ -628,7 +628,7 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
 
   startEvictionTimer();
   await bot.launch();
-  process.stderr.write('NODYN Telegram bot running.\n');
+  process.stderr.write('LYNOX Telegram bot running.\n');
 }
 
 /** Return the live Telegraf instance (or null if not started). */

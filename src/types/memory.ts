@@ -8,11 +8,11 @@ export const ALL_NAMESPACES: readonly MemoryNamespace[] = ['knowledge', 'methods
 
 export type ContextSource = 'cli' | 'telegram' | 'slack' | 'mcp' | 'pwa';
 
-export interface NodynContext {
+export interface LynoxContext {
   id: string;              // unique identifier (hash or explicit)
-  name?: string | undefined; // human label: "acme-shop.ch", "nodyn repo"
+  name?: string | undefined; // human label: "acme-shop.ch", "lynox repo"
   source: ContextSource;
-  workspaceDir: string;    // ~/.nodyn/workspace/<id>/
+  workspaceDir: string;    // ~/.lynox/workspace/<id>/
   localDir?: string | undefined; // original cwd (CLI only, for file access)
 }
 

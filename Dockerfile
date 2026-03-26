@@ -53,12 +53,12 @@ RUN mkdir -p /usr/share/whisper \
 # LadybugDB prebuilt binaries require glibc >=2.38, Bookworm only has 2.36
 FROM debian:trixie-slim
 
-LABEL org.opencontainers.image.title="nodyn" \
+LABEL org.opencontainers.image.title="lynox" \
       org.opencontainers.image.description="The AI that knows your business — built on Anthropic Claude" \
-      org.opencontainers.image.url="https://github.com/nodyn-ai/nodyn" \
-      org.opencontainers.image.source="https://github.com/nodyn-ai/nodyn" \
+      org.opencontainers.image.url="https://github.com/lynox-ai/lynox" \
+      org.opencontainers.image.source="https://github.com/lynox-ai/lynox" \
       org.opencontainers.image.licenses="ELv2" \
-      org.opencontainers.image.vendor="nodyn-ai"
+      org.opencontainers.image.vendor="lynox-ai"
 
 WORKDIR /app
 
@@ -97,17 +97,17 @@ RUN \
     # Set login shells to nologin for unused accounts
     && sed -i 's|root:/bin/bash|root:/usr/sbin/nologin|' /etc/passwd
 
-RUN groupadd -g 1001 nodyn && useradd -u 1001 -g nodyn -m -s /bin/sh nodyn \
-    && mkdir -p /home/nodyn/.nodyn/memory /workspace /home/nodyn/.cache/huggingface \
-    && chown -R nodyn:nodyn /tmp /home/nodyn/.nodyn /workspace /home/nodyn/.cache/huggingface
+RUN groupadd -g 1001 lynox && useradd -u 1001 -g nodyn -m -s /bin/sh nodyn \
+    && mkdir -p /home/lynox/.lynox/memory /workspace /home/lynox/.cache/huggingface \
+    && chown -R lynox:lynox /tmp /home/lynox/.lynox /workspace /home/lynox/.cache/huggingface
 
-ENV NODYN_WORKSPACE=/workspace
+ENV LYNOX_WORKSPACE=/workspace
 WORKDIR /workspace
-USER nodyn
+USER lynox
 
 STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget -q -O /dev/null http://127.0.0.1:${NODYN_MCP_PORT:-3042}/health || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:${LYNOX_MCP_PORT:-3042}/health || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]

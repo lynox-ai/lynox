@@ -30,7 +30,7 @@ describe('Task Tools', () => {
   let tm: TaskManager;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'nodyn-task-tool-test-'));
+    dir = mkdtempSync(join(tmpdir(), 'lynox-task-tool-test-'));
     history = new RunHistory(join(dir, 'test.db'));
     tm = new TaskManager(history);
     sharedTaskManager = tm;
@@ -61,11 +61,11 @@ describe('Task Tools', () => {
 
     it('should create a task with assignee', async () => {
       const result = await taskCreateTool.handler(
-        { title: 'Agent task', assignee: 'nodyn' },
+        { title: 'Agent task', assignee: 'lynox' },
         makeAgent(),
       );
       expect(result).toContain('Task created');
-      expect(result).toContain('@nodyn');
+      expect(result).toContain('@lynox');
     });
 
     it('should reject unauthorized scope', async () => {
@@ -107,11 +107,11 @@ describe('Task Tools', () => {
     it('should update assignee', async () => {
       const task = tm.create({ title: 'Reassign' });
       const result = await taskUpdateTool.handler(
-        { task_id: task.id, assignee: 'nodyn' },
+        { task_id: task.id, assignee: 'lynox' },
         makeAgent(),
       );
       expect(result).toContain('Task updated');
-      expect(result).toContain('@nodyn');
+      expect(result).toContain('@lynox');
     });
 
     it('should handle missing task', async () => {
@@ -148,8 +148,8 @@ describe('Task Tools', () => {
 
     it('should filter by assignee', async () => {
       tm.create({ title: 'User task', assignee: 'user' });
-      tm.create({ title: 'Agent task', assignee: 'nodyn' });
-      const result = await taskListTool.handler({ assignee: 'nodyn' }, makeAgent());
+      tm.create({ title: 'Agent task', assignee: 'lynox' });
+      const result = await taskListTool.handler({ assignee: 'lynox' }, makeAgent());
       expect(result).toContain('Agent task');
       expect(result).not.toContain('User task');
     });

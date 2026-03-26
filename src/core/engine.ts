@@ -1,8 +1,8 @@
 import { join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import type {
-  NodynConfig,
-  NodynUserConfig,
+  LynoxConfig,
+  LynoxUserConfig,
   ToolEntry,
   MCPServer,
   BatchRequest,
@@ -14,12 +14,12 @@ import { MODEL_MAP } from '../types/index.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
-import { loadConfig, getNodynDir } from './config.js';
+import { loadConfig, getLynoxDir } from './config.js';
 import { RunHistory } from './run-history.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
-import type { NodynContext } from '../types/index.js';
+import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
 
 import type { SecretStore } from './secret-store.js';
@@ -98,7 +98,7 @@ export interface RunContext {
  * Lifecycle hooks for extending the engine.
  * Pro packages register hooks to add tenant tracking, tool filtering, etc.
  */
-export interface NodynHooks {
+export interface LynoxHooks {
   onInit?(engine: Engine): Promise<void>;
   onBeforeRun?(runId: string, context: RunContext): void | Promise<void>;
   onBeforeCreateAgent?(tools: ToolEntry[]): ToolEntry[];
@@ -121,15 +121,15 @@ const AUTO_GC_INTERVAL = 50; // Run GC every N runs
  * Creates lightweight Sessions for per-conversation state.
  */
 export class Engine {
-  readonly config: NodynConfig;
-  private userConfig: NodynUserConfig;
+  readonly config: LynoxConfig;
+  private userConfig: LynoxUserConfig;
   readonly registry = new ToolRegistry();
   client: Anthropic;
   private readonly batchIndex = new BatchIndex();
   private memory: Memory | null = null;
   private runHistory: RunHistory | null = null;
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
-  private context: NodynContext | null = null;
+  private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
   private currentManifest: Map<string, number> | null = null;
   private pluginManager: PluginManager | null = null;
@@ -144,7 +144,7 @@ export class Engine {
   private _dataStoreEnabled = false;
   private _dataStore: DataStore | null = null;
   private _taskManager: import('./task-manager.js').TaskManager | null = null;
-  private _hooks: NodynHooks[] = [];
+  private _hooks: LynoxHooks[] = [];
   private _toolContext: ToolContext;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
   private _lastBatchParentId: string | null = null;
@@ -155,9 +155,9 @@ export class Engine {
   private _apiStore: import('./api-store.js').ApiStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
 
-  constructor(config: NodynConfig) {
+  constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
-    // Apply user config defaults if not already set in NodynConfig
+    // Apply user config defaults if not already set in LynoxConfig
     if (!config.model) {
       config.model = this.userConfig.default_tier ?? 'sonnet';
     }
@@ -184,7 +184,7 @@ export class Engine {
     this._toolContext = createToolContext(this.userConfig);
   }
 
-  getUserConfig(): NodynUserConfig {
+  getUserConfig(): LynoxUserConfig {
     return this.userConfig;
   }
 
@@ -208,7 +208,7 @@ export class Engine {
     initDebugSubscriber();
 
     // Initialize Sentry error reporting (opt-in — requires DSN env var or config field)
-    const sentryDsn = process.env['NODYN_SENTRY_DSN'] ?? this.userConfig.sentry_dsn;
+    const sentryDsn = process.env['LYNOX_SENTRY_DSN'] ?? this.userConfig.sentry_dsn;
     if (sentryDsn) {
       try {
         const { initSentry, installGlobalHandlers } = await import('./sentry.js');
@@ -314,7 +314,7 @@ export class Engine {
     try {
       const { ApiStore } = await import('./api-store.js');
       this._apiStore = new ApiStore();
-      const apisDir = join(getNodynDir(), 'apis');
+      const apisDir = join(getLynoxDir(), 'apis');
       const loaded = this._apiStore.loadFromDirectory(apisDir);
       if (loaded > 0) {
         // Inject API knowledge into briefing
@@ -457,12 +457,12 @@ export class Engine {
     // Initialize backup manager (always available — backup is essential)
     try {
       const { BackupManager } = await import('./backup.js');
-      const backupDir = this.userConfig.backup_dir ?? join(getNodynDir(), 'backups');
-      this._backupManager = new BackupManager(getNodynDir(), {
+      const backupDir = this.userConfig.backup_dir ?? join(getLynoxDir(), 'backups');
+      this._backupManager = new BackupManager(getLynoxDir(), {
         backupDir,
         retentionDays: this.userConfig.backup_retention_days ?? 30,
-        encrypt: this.userConfig.backup_encrypt ?? (!!process.env['NODYN_VAULT_KEY']),
-      }, process.env['NODYN_VAULT_KEY'] ?? null);
+        encrypt: this.userConfig.backup_encrypt ?? (!!process.env['LYNOX_VAULT_KEY']),
+      }, process.env['LYNOX_VAULT_KEY'] ?? null);
     } catch {
       this._backupManager = null;
     }
@@ -471,7 +471,7 @@ export class Engine {
     if (this._backupManager) {
       try {
         const { existsSync: exists, readFileSync: readF, writeFileSync: writeF } = await import('node:fs');
-        const versionFile = join(getNodynDir(), '.last_version');
+        const versionFile = join(getLynoxDir(), '.last_version');
         let currentVersion = 'unknown';
         try {
           const { fileURLToPath } = await import('node:url');
@@ -487,12 +487,12 @@ export class Engine {
         const lastVersion = exists(versionFile) ? readF(versionFile, 'utf-8').trim() : null;
 
         if (lastVersion && lastVersion !== currentVersion && currentVersion !== 'unknown') {
-          process.stderr.write(`[nodyn] Version changed (${lastVersion} → ${currentVersion}) — creating pre-update backup...\n`);
+          process.stderr.write(`[lynox] Version changed (${lastVersion} → ${currentVersion}) — creating pre-update backup...\n`);
           const result = await this._backupManager.createBackup();
           if (result.success) {
-            process.stderr.write(`[nodyn] Pre-update backup created: ${result.path}\n`);
+            process.stderr.write(`[lynox] Pre-update backup created: ${result.path}\n`);
           } else {
-            process.stderr.write(`[nodyn] Pre-update backup failed: ${result.error ?? 'unknown'}\n`);
+            process.stderr.write(`[lynox] Pre-update backup failed: ${result.error ?? 'unknown'}\n`);
           }
         }
 
@@ -578,7 +578,7 @@ export class Engine {
   getRegistry(): ToolRegistry { return this.registry; }
   getMemory(): Memory | null { return this.memory; }
   getRunHistory(): RunHistory | null { return this.runHistory; }
-  getContext(): NodynContext | null { return this.context; }
+  getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
   getActiveScopes(): MemoryScopeRef[] { return this.activeScopes; }
   getUserId(): string | null { return this.userId; }
@@ -595,7 +595,7 @@ export class Engine {
   }
   getBatchIndex(): BatchIndex { return this.batchIndex; }
   getLastBatchParentId(): string | null { return this._lastBatchParentId; }
-  getHooks(): NodynHooks[] { return this._hooks; }
+  getHooks(): LynoxHooks[] { return this._hooks; }
   getPipelinesEnabled(): boolean { return this._pipelinesEnabled; }
   getDataStoreEnabled(): boolean { return this._dataStoreEnabled; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
@@ -641,7 +641,7 @@ export class Engine {
 
   // ── Hooks ──
 
-  registerHooks(hooks: NodynHooks): void {
+  registerHooks(hooks: LynoxHooks): void {
     this._hooks.push(hooks);
   }
 
@@ -672,7 +672,7 @@ export class Engine {
     // Save file manifest for next session's diff
     if (this.context && this.currentManifest) {
       try {
-        saveManifest(getNodynDir(), this.context.id, this.currentManifest);
+        saveManifest(getLynoxDir(), this.context.id, this.currentManifest);
       } catch {
         // Best-effort — never fail shutdown
       }

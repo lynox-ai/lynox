@@ -1,4 +1,4 @@
-import type { ToolEntry, NodynUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler } from '../../types/index.js';
 import { validateManifest } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest } from '../../orchestrator/runner.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -340,7 +340,7 @@ function applyModifications(steps: InlinePipelineStep[], modifications: StepModi
 }
 
 interface PipelineDeps {
-  config: NodynUserConfig;
+  config: LynoxUserConfig;
   tools: ToolEntry[];
   streamHandler: StreamHandler | null;
   runHistory: RunHistory | null;

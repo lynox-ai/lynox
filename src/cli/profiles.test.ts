@@ -23,7 +23,7 @@ describe('profiles', () => {
   let saveProfile: typeof import('./profiles.js').saveProfile;
 
   beforeEach(async () => {
-    tempDir = mkdtempSync(join(tmpdir(), 'nodyn-profiles-test-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'lynox-profiles-test-'));
     vi.mocked(homedir).mockReturnValue(tempDir);
 
     // Re-import to pick up the new homedir value for PROFILES_DIR
@@ -101,8 +101,8 @@ describe('profiles', () => {
   });
 
   it('loadProfile() rejects invalid model values', () => {
-    mkdirSync(join(tempDir, '.nodyn', 'profiles'), { recursive: true });
-    const filePath = join(tempDir, '.nodyn', 'profiles', 'invalid.json');
+    mkdirSync(join(tempDir, '.lynox', 'profiles'), { recursive: true });
+    const filePath = join(tempDir, '.lynox', 'profiles', 'invalid.json');
     writeFileSync(filePath, JSON.stringify({
       name: 'invalid',
       model: 'broken-tier',

@@ -139,7 +139,7 @@ export async function handleBackup(parts: string[], session: Session, ctx: CLICt
         `${GREEN}${BOLD}Restore complete${RESET}\n`
         + `  Files restored: ${String(result.files_restored)}\n`
         + `  Safety backup: ${result.pre_restore_backup_path}\n`
-        + `  ${YELLOW}Please restart nodyn to apply restored data.${RESET}\n`,
+        + `  ${YELLOW}Please restart lynox to apply restored data.${RESET}\n`,
       );
     } else {
       ctx.stdout.write(
@@ -221,7 +221,7 @@ export async function handleBackup(parts: string[], session: Session, ctx: CLICt
       const { mkdtempSync } = await import('node:fs');
       const { tmpdir } = await import('node:os');
       const { join } = await import('node:path');
-      const tempDir = mkdtempSync(join(tmpdir(), 'nodyn-gdrive-restore-'));
+      const tempDir = mkdtempSync(join(tmpdir(), 'lynox-gdrive-restore-'));
 
       ctx.stdout.write(`${DIM}Downloading...${RESET}\n`);
       const dlResult = await uploader.download(target.id, tempDir);
@@ -237,7 +237,7 @@ export async function handleBackup(parts: string[], session: Session, ctx: CLICt
           `${GREEN}${BOLD}Restore complete${RESET}\n`
           + `  Files restored: ${String(restoreResult.files_restored)}\n`
           + `  Safety backup: ${restoreResult.pre_restore_backup_path}\n`
-          + `  ${YELLOW}Please restart nodyn to apply restored data.${RESET}\n`,
+          + `  ${YELLOW}Please restart lynox to apply restored data.${RESET}\n`,
         );
       } else {
         ctx.stdout.write(`${RED}${BOLD}Restore failed:${RESET} ${restoreResult.error ?? 'unknown'}\n`);

@@ -3,13 +3,13 @@ import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync, createHash, 
 import { existsSync, readFileSync, renameSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SecretScope } from '../types/index.js';
-import { getNodynDir } from './config.js';
+import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { FILE_MODE_PRIVATE } from './constants.js';
 import { ensureDirSync } from './atomic-write.js';
 
-const NODYN_DIR = getNodynDir();
-const VAULT_DB_PATH = join(NODYN_DIR, 'vault.db');
+const LYNOX_DIR = getLynoxDir();
+const VAULT_DB_PATH = join(LYNOX_DIR, 'vault.db');
 
 /**
  * Estimate Shannon entropy of a string in bits per character.
@@ -49,7 +49,7 @@ export interface VaultEntry {
 
 export interface VaultOptions {
   path?: string | undefined;
-  masterKey?: string | undefined; // Raw key or from NODYN_VAULT_KEY env
+  masterKey?: string | undefined; // Raw key or from LYNOX_VAULT_KEY env
 }
 
 interface RawRow {
@@ -107,10 +107,10 @@ export class SecretVault {
     this._migrate();
 
     // Derive encryption key
-    const passphrase = options?.masterKey ?? process.env['NODYN_VAULT_KEY'] ?? '';
+    const passphrase = options?.masterKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (!passphrase) {
       throw new Error(
-        'Vault master key required. Set NODYN_VAULT_KEY env var or pass masterKey option.',
+        'Vault master key required. Set LYNOX_VAULT_KEY env var or pass masterKey option.',
       );
     }
 
@@ -282,12 +282,12 @@ export class SecretVault {
   }
 
   /**
-   * Migrate secrets from ~/.nodyn/secrets.json into the vault.
+   * Migrate secrets from ~/.lynox/secrets.json into the vault.
    * Does NOT overwrite existing vault entries.
    * Returns number of secrets migrated.
    */
   migrateFromFile(filePath?: string | undefined): number {
-    const path = filePath ?? join(getNodynDir(), 'secrets.json');
+    const path = filePath ?? join(getLynoxDir(), 'secrets.json');
     if (!existsSync(path)) return 0;
 
     try {
@@ -393,7 +393,7 @@ export class SecretVault {
   static deriveTenantKey(masterKey: string, tenantId: string): string {
     if (!masterKey) throw new Error('masterKey is required for tenant key derivation');
     if (!tenantId) throw new Error('tenantId is required for tenant key derivation');
-    const derived = hkdfSync('sha256', masterKey, tenantId, 'nodyn-tenant-vault', CRYPTO_KEY_LENGTH);
+    const derived = hkdfSync('sha256', masterKey, tenantId, 'lynox-tenant-vault', CRYPTO_KEY_LENGTH);
     return Buffer.from(derived).toString('hex');
   }
 

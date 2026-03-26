@@ -12,7 +12,7 @@ export async function handleApi(parts: string[], session: Session, ctx: CLICtx):
   if (!apiStore || apiStore.size === 0) {
     ctx.stdout.write(
       `${DIM}No API profiles loaded.${RESET}\n\n`
-      + `Add profiles to ${BOLD}~/.nodyn/apis/${RESET} as JSON files.\n`
+      + `Add profiles to ${BOLD}~/.lynox/apis/${RESET} as JSON files.\n`
       + `Example:\n`
       + `${DIM}{\n`
       + `  "id": "my-api",\n`

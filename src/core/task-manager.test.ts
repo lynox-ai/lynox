@@ -11,7 +11,7 @@ describe('TaskManager', () => {
   let tm: TaskManager;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'nodyn-task-test-'));
+    dir = mkdtempSync(join(tmpdir(), 'lynox-task-test-'));
     history = new RunHistory(join(dir, 'test.db'));
     tm = new TaskManager(history);
   });
@@ -52,9 +52,9 @@ describe('TaskManager', () => {
       expect(JSON.parse(task.tags!)).toEqual(['design', 'urgent']);
     });
 
-    it('should create a task with nodyn assignee', () => {
-      const task = tm.create({ title: 'Agent work', assignee: 'nodyn' });
-      expect(task.assignee).toBe('nodyn');
+    it('should create a task with lynox assignee', () => {
+      const task = tm.create({ title: 'Agent work', assignee: 'lynox' });
+      expect(task.assignee).toBe('lynox');
     });
 
     it('should create a task with custom assignee', () => {
@@ -130,8 +130,8 @@ describe('TaskManager', () => {
 
     it('should update assignee', () => {
       const task = tm.create({ title: 'Reassign me' });
-      const updated = tm.update(task.id, { assignee: 'nodyn' });
-      expect(updated?.assignee).toBe('nodyn');
+      const updated = tm.update(task.id, { assignee: 'lynox' });
+      expect(updated?.assignee).toBe('lynox');
     });
 
     it('should clear assignee with empty string', () => {
@@ -191,39 +191,39 @@ describe('TaskManager', () => {
 
     it('should filter by assignee', () => {
       tm.create({ title: 'My task', assignee: 'user' });
-      tm.create({ title: 'Agent task', assignee: 'nodyn' });
+      tm.create({ title: 'Agent task', assignee: 'lynox' });
       tm.create({ title: 'Unassigned' });
       const userTasks = tm.list({ assignee: 'user' });
       expect(userTasks).toHaveLength(1);
       expect(userTasks[0]!.title).toBe('My task');
-      const nodynTasks = tm.list({ assignee: 'nodyn' });
-      expect(nodynTasks).toHaveLength(1);
-      expect(nodynTasks[0]!.title).toBe('Agent task');
+      const lynoxTasks = tm.list({ assignee: 'lynox' });
+      expect(lynoxTasks).toHaveLength(1);
+      expect(lynoxTasks[0]!.title).toBe('Agent task');
     });
   });
 
-  describe('getAssignedToNodyn', () => {
-    it('should return open tasks assigned to nodyn', () => {
-      tm.create({ title: 'Agent task 1', assignee: 'nodyn' });
-      tm.create({ title: 'Agent task 2', assignee: 'nodyn' });
+  describe('getAssignedToLynox', () => {
+    it('should return open tasks assigned to lynox', () => {
+      tm.create({ title: 'Agent task 1', assignee: 'lynox' });
+      tm.create({ title: 'Agent task 2', assignee: 'lynox' });
       tm.create({ title: 'User task', assignee: 'user' });
-      const tasks = tm.getAssignedToNodyn();
+      const tasks = tm.getAssignedToLynox();
       expect(tasks).toHaveLength(2);
     });
 
     it('should exclude completed tasks', () => {
-      const task = tm.create({ title: 'Done agent task', assignee: 'nodyn' });
+      const task = tm.create({ title: 'Done agent task', assignee: 'lynox' });
       tm.complete(task.id);
-      tm.create({ title: 'Open agent task', assignee: 'nodyn' });
-      const tasks = tm.getAssignedToNodyn();
+      tm.create({ title: 'Open agent task', assignee: 'lynox' });
+      const tasks = tm.getAssignedToLynox();
       expect(tasks).toHaveLength(1);
       expect(tasks[0]!.title).toBe('Open agent task');
     });
 
     it('should filter by scopes', () => {
-      tm.create({ title: 'Context task', assignee: 'nodyn', scopeType: 'context', scopeId: 'acme' });
-      tm.create({ title: 'User task', assignee: 'nodyn', scopeType: 'user', scopeId: 'xyz' });
-      const tasks = tm.getAssignedToNodyn([{ type: 'context', id: 'acme' }]);
+      tm.create({ title: 'Context task', assignee: 'lynox', scopeType: 'context', scopeId: 'acme' });
+      tm.create({ title: 'User task', assignee: 'lynox', scopeType: 'user', scopeId: 'xyz' });
+      const tasks = tm.getAssignedToLynox([{ type: 'context', id: 'acme' }]);
       expect(tasks).toHaveLength(1);
       expect(tasks[0]!.title).toBe('Context task');
     });
@@ -263,19 +263,19 @@ describe('TaskManager', () => {
       expect(briefing).toContain('Overdue task');
     });
 
-    it('should highlight nodyn-assigned tasks', () => {
-      tm.create({ title: 'Agent work', assignee: 'nodyn' });
+    it('should highlight lynox-assigned tasks', () => {
+      tm.create({ title: 'Agent work', assignee: 'lynox' });
       const briefing = tm.getBriefingSummary();
       expect(briefing).toContain('assigned to you');
       expect(briefing).toContain('Agent work');
-      expect(briefing).toContain('assigned to nodyn');
+      expect(briefing).toContain('assigned to lynox');
     });
 
     it('should show assignee on overdue tasks', () => {
       const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      tm.create({ title: 'Overdue agent', dueDate: yesterday, assignee: 'nodyn' });
+      tm.create({ title: 'Overdue agent', dueDate: yesterday, assignee: 'lynox' });
       const briefing = tm.getBriefingSummary();
-      expect(briefing).toContain('[nodyn]');
+      expect(briefing).toContain('[lynox]');
     });
   });
 

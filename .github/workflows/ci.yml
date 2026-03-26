@@ -47,10 +47,10 @@ jobs:
         with:
           context: .
           push: false
-          tags: nodyn:ci-scan
+          tags: lynox:ci-scan
       - uses: aquasecurity/trivy-action@0.35.0
         with:
-          image-ref: nodyn:ci-scan
+          image-ref: lynox:ci-scan
           format: table
           exit-code: 1
           severity: CRITICAL,HIGH

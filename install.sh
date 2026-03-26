@@ -1,13 +1,13 @@
 #!/bin/sh
-# nodyn — local install script
-# Usage: curl -fsSL https://nodyn.dev/install.sh | sh
+# lynox — local install script
+# Usage: curl -fsSL https://lynox.ai/install.sh | sh
 #
 # Installs Node.js 22+ (via nvm) if needed, then starts the setup wizard.
-# Inspect before running: curl -fsSL https://nodyn.dev/install.sh | less
+# Inspect before running: curl -fsSL https://lynox.ai/install.sh | less
 #
 # What this script does:
 #   1. Checks for Node.js 22+ (installs via nvm if missing — no sudo needed)
-#   2. Runs npx @nodyn-ai/core --init (the interactive setup wizard)
+#   2. Runs npx @lynox-ai/core --init (the interactive setup wizard)
 #   3. The wizard handles: API key, encryption, integrations, everything
 
 SCRIPT_VERSION="2.0.0"
@@ -122,8 +122,8 @@ install_node() {
 # --- Main ---
 
 printf "\n"
-printf "  %snodyn%s — the AI that knows your business\n" "$BOLD" "$RESET"
-printf "  %shttps://nodyn.dev%s\n" "$DIM" "$RESET"
+printf "  %slynox%s — the AI that knows your business\n" "$BOLD" "$RESET"
+printf "  %shttps://lynox.ai%s\n" "$DIM" "$RESET"
 
 detect_os
 check_node
@@ -141,4 +141,4 @@ printf "  %s→ Encryption (automatic)%s\n" "$DIM" "$RESET"
 printf "  %s→ Integrations (Telegram, Google, Web Search)%s\n" "$DIM" "$RESET"
 printf "\n"
 
-exec npx @nodyn-ai/core --init
+exec npx @lynox-ai/core --init

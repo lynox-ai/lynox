@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
-import { NodynError } from './errors.js';
+import { LynoxError } from './errors.js';
 import type {
-  NodynUserConfig,
+  LynoxUserConfig,
   ToolEntry,
   MCPServer,
   BatchRequest,
@@ -30,13 +30,13 @@ import {
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
 } from './prompts.js';
-import type { Engine, RunContext, AccumulatedUsage, NodynHooks } from './engine.js';
+import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { RunHistory } from './run-history.js';
-import type { NodynContext, MemoryScopeRef } from '../types/index.js';
+import type { LynoxContext, MemoryScopeRef } from '../types/index.js';
 import type { SecretStore } from './secret-store.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
@@ -370,9 +370,9 @@ export class Session {
       return result;
     } catch (err: unknown) {
       // Sentry capture — structured error with tags
-      void import('./sentry.js').then(({ captureNodynError, captureError: captureSentryError }) => {
-        if (err instanceof NodynError) {
-          captureNodynError(err);
+      void import('./sentry.js').then(({ captureLynoxError, captureError: captureSentryError }) => {
+        if (err instanceof LynoxError) {
+          captureLynoxError(err);
         } else {
           captureSentryError(err);
         }
@@ -543,7 +543,7 @@ export class Session {
     }
 
     this.agent = new Agent({
-      name: 'nodyn',
+      name: 'lynox',
       model,
       systemPrompt,
       tools: effectiveTools,
@@ -584,8 +584,8 @@ export class Session {
   getRegistry(): ToolRegistry { return this.engine.getRegistry(); }
   getMemory(): Memory | null { return this.engine.getMemory(); }
   getRunHistory(): RunHistory | null { return this.engine.getRunHistory(); }
-  getContext(): NodynContext | null { return this.engine.getContext(); }
-  getUserConfig(): NodynUserConfig { return this.engine.getUserConfig(); }
+  getContext(): LynoxContext | null { return this.engine.getContext(); }
+  getUserConfig(): LynoxUserConfig { return this.engine.getUserConfig(); }
   getKnowledgeLayer(): KnowledgeLayer | null { return this.engine.getKnowledgeLayer(); }
   getSecretStore(): SecretStore | null { return this.engine.getSecretStore(); }
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this.engine.getGoogleAuth(); }
@@ -608,7 +608,7 @@ export class Session {
   registerTool<T>(entry: ToolEntry<T>): void { this.engine.registerTool(entry); }
   registerPipelineTools(): void { this.engine.registerPipelineTools(); }
   registerDataStoreTools(): void { this.engine.registerDataStoreTools(); }
-  registerHooks(hooks: NodynHooks): void { this.engine.registerHooks(hooks); }
+  registerHooks(hooks: LynoxHooks): void { this.engine.registerHooks(hooks); }
   addTool<T>(entry: ToolEntry<T>): void {
     this.engine.addTool(entry);
     this._createAgent();

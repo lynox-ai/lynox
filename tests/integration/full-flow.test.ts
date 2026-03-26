@@ -9,7 +9,7 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
   const tmpDirs: string[] = [];
 
   function makeTmpDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), `nodyn-int-${prefix}-`));
+    const dir = mkdtempSync(join(tmpdir(), `lynox-int-${prefix}-`));
     tmpDirs.push(dir);
     return dir;
   }
@@ -66,7 +66,7 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
       const id = h.insertRun({
         sessionId: 'sess-001',
         taskText: 'Implement feature X',
-        modelTier: 'nodyn',
+        modelTier: 'lynox',
         modelId: 'claude-opus-4-6',
         promptHash: 'abc123',
         runType: 'single',
@@ -80,7 +80,7 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
       expect(run).toBeDefined();
       expect(run!.task_text).toBe('Implement feature X');
       expect(run!.session_id).toBe('sess-001');
-      expect(run!.model_tier).toBe('nodyn');
+      expect(run!.model_tier).toBe('lynox');
       expect(run!.model_id).toBe('claude-opus-4-6');
       expect(run!.status).toBe('running');
       expect(run!.run_type).toBe('single');
@@ -184,21 +184,21 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
       // Insert multiple runs and update with costs
       const id1 = h.insertRun({
         taskText: 'Task alpha',
-        modelTier: 'nodyn',
+        modelTier: 'lynox',
         modelId: 'claude-opus-4-6',
       });
       h.updateRun(id1, { costUsd: 0.05, status: 'completed' });
 
       const id2 = h.insertRun({
         taskText: 'Task beta',
-        modelTier: 'nodyn-fast',
+        modelTier: 'lynox-fast',
         modelId: 'claude-sonnet-4-6',
       });
       h.updateRun(id2, { costUsd: 0.03, status: 'completed' });
 
       const id3 = h.insertRun({
         taskText: 'Task gamma',
-        modelTier: 'nodyn',
+        modelTier: 'lynox',
         modelId: 'claude-opus-4-6',
       });
       h.updateRun(id3, { costUsd: 0.12, status: 'completed' });
@@ -226,7 +226,7 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
       // Insert and complete several runs with varying models and costs
       const id1 = h.insertRun({
         taskText: 'Build API endpoint',
-        modelTier: 'nodyn',
+        modelTier: 'lynox',
         modelId: 'claude-opus-4-6',
       });
       h.updateRun(id1, {
@@ -239,7 +239,7 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
 
       const id2 = h.insertRun({
         taskText: 'Write unit tests',
-        modelTier: 'nodyn-fast',
+        modelTier: 'lynox-fast',
         modelId: 'claude-sonnet-4-6',
       });
       h.updateRun(id2, {
@@ -252,7 +252,7 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
 
       const id3 = h.insertRun({
         taskText: 'Quick fix',
-        modelTier: 'nodyn-micro',
+        modelTier: 'lynox-micro',
         modelId: 'claude-haiku-4-5-20251001',
       });
       h.updateRun(id3, {
@@ -266,7 +266,7 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
       // Insert a still-running run (should NOT count in stats)
       h.insertRun({
         taskText: 'Running task',
-        modelTier: 'nodyn',
+        modelTier: 'lynox',
         modelId: 'claude-opus-4-6',
       });
 

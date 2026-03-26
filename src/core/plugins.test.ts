@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PluginManager } from './plugins.js';
-import type { NodynUserConfig, PluginContext, PluginExport, ToolEntry } from '../types/index.js';
+import type { LynoxUserConfig, PluginContext, PluginExport, ToolEntry } from '../types/index.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 // Helper to create a mock ToolEntry
@@ -22,7 +22,7 @@ describe('PluginManager', () => {
 
   describe('loadPlugins', () => {
     it('does nothing when no plugins are configured', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
       await pm.loadPlugins();
       expect(pm.getTools()).toEqual([]);
@@ -31,7 +31,7 @@ describe('PluginManager', () => {
     });
 
     it('does nothing when all plugins are disabled', async () => {
-      const config: NodynUserConfig = {
+      const config: LynoxUserConfig = {
         plugins: { 'some-plugin': false },
       };
       const pm = new PluginManager(config, log);
@@ -41,7 +41,7 @@ describe('PluginManager', () => {
     });
 
     it('logs error for missing plugin gracefully', async () => {
-      const config: NodynUserConfig = {
+      const config: LynoxUserConfig = {
         plugins: { 'nonexistent-plugin-xyz-12345': true },
       };
       const pm = new PluginManager(config, log);
@@ -60,7 +60,7 @@ describe('PluginManager', () => {
         tools: [tool],
       });
 
-      const config: NodynUserConfig = { plugins: { 'test-plugin': true } };
+      const config: LynoxUserConfig = { plugins: { 'test-plugin': true } };
       const pm = new PluginManager(config, log);
 
       // Manually inject plugin since we can't do a real dynamic import in test
@@ -77,7 +77,7 @@ describe('PluginManager', () => {
     });
 
     it('returns empty tools when plugin provides none', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -91,7 +91,7 @@ describe('PluginManager', () => {
     });
 
     it('merges tools from multiple plugins', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -108,7 +108,7 @@ describe('PluginManager', () => {
 
   describe('hooks lifecycle', () => {
     it('fires onSessionStart for all plugins', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       const onSessionStart1 = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
@@ -126,7 +126,7 @@ describe('PluginManager', () => {
     });
 
     it('fires onRunComplete with result string', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       const onRunComplete = vi.fn<(result: string) => Promise<void>>().mockResolvedValue(undefined);
@@ -141,7 +141,7 @@ describe('PluginManager', () => {
     });
 
     it('handles onSessionStart errors gracefully', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       const failHook = vi.fn<() => Promise<void>>().mockRejectedValue(new Error('hook fail'));
@@ -160,7 +160,7 @@ describe('PluginManager', () => {
     });
 
     it('handles onRunComplete errors gracefully', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       const failHook = vi.fn<(r: string) => Promise<void>>().mockRejectedValue(new Error('run fail'));
@@ -177,7 +177,7 @@ describe('PluginManager', () => {
 
   describe('fireToolGate', () => {
     it('returns undefined when no hooks veto', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       const gate = vi.fn<(name: string, input: unknown) => Promise<boolean | undefined>>()
@@ -194,7 +194,7 @@ describe('PluginManager', () => {
     });
 
     it('returns false when a plugin vetoes', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       const gate = vi.fn<(name: string, input: unknown) => Promise<boolean | undefined>>()
@@ -210,7 +210,7 @@ describe('PluginManager', () => {
     });
 
     it('handles gate errors gracefully', async () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       const gate = vi.fn<(name: string, input: unknown) => Promise<boolean | undefined>>()
@@ -229,7 +229,7 @@ describe('PluginManager', () => {
 
   describe('getLoadedPluginNames', () => {
     it('returns names of all loaded plugins', () => {
-      const config: NodynUserConfig = {};
+      const config: LynoxUserConfig = {};
       const pm = new PluginManager(config, log);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -246,34 +246,34 @@ describe('PluginManager', () => {
     it('getPluginsDir returns a path ending with plugins', () => {
       const dir = PluginManager.getPluginsDir();
       expect(dir).toContain('plugins');
-      expect(dir).toContain('.nodyn');
+      expect(dir).toContain('.lynox');
     });
   });
 
   describe('plugin name validation', () => {
     it('rejects path-like names with ./', async () => {
-      const config: NodynUserConfig = { plugins: { './exploit': true } };
+      const config: LynoxUserConfig = { plugins: { './exploit': true } };
       const pm = new PluginManager(config, log);
       await pm.loadPlugins();
       expect(logMock).toHaveBeenCalledWith(expect.stringContaining('Invalid plugin name'));
     });
 
     it('rejects path-like names with ../', async () => {
-      const config: NodynUserConfig = { plugins: { '../evil': true } };
+      const config: LynoxUserConfig = { plugins: { '../evil': true } };
       const pm = new PluginManager(config, log);
       await pm.loadPlugins();
       expect(logMock).toHaveBeenCalledWith(expect.stringContaining('Invalid plugin name'));
     });
 
     it('rejects absolute paths', async () => {
-      const config: NodynUserConfig = { plugins: { '/tmp/exploit': true } };
+      const config: LynoxUserConfig = { plugins: { '/tmp/exploit': true } };
       const pm = new PluginManager(config, log);
       await pm.loadPlugins();
       expect(logMock).toHaveBeenCalledWith(expect.stringContaining('Invalid plugin name'));
     });
 
     it('accepts valid scoped npm names', async () => {
-      const config: NodynUserConfig = { plugins: { '@scope/plugin-name': true } };
+      const config: LynoxUserConfig = { plugins: { '@scope/plugin-name': true } };
       const pm = new PluginManager(config, log);
       await pm.loadPlugins();
       // Should fail with "not installed", not "Invalid plugin name"
@@ -295,7 +295,7 @@ describe('PluginManager', () => {
 
   describe('config sanitization', () => {
     it('does not expose api_key to plugins', async () => {
-      const config: NodynUserConfig = {
+      const config: LynoxUserConfig = {
         api_key: 'sk-secret-key',
         api_base_url: 'https://api.example.com',
         plugins: { 'test-plugin': true },
@@ -304,7 +304,7 @@ describe('PluginManager', () => {
       const pm = new PluginManager(config, log);
 
       // Manually load a plugin to inspect the context it receives
-      let receivedConfig: NodynUserConfig | undefined;
+      let receivedConfig: LynoxUserConfig | undefined;
       const pluginFn: PluginExport = (ctx: PluginContext) => {
         receivedConfig = ctx.config;
         return { tools: [] };
@@ -326,7 +326,7 @@ describe('PluginManager', () => {
       const { api_key, api_base_url, ...safeConfig } = config;
       const safeCtx: PluginContext = {
         projectDir: process.cwd(),
-        config: safeConfig as NodynUserConfig,
+        config: safeConfig as LynoxUserConfig,
         log,
       };
 

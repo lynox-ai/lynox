@@ -3,16 +3,16 @@ title: "Google Workspace"
 description: "Gmail, Sheets, Drive, Calendar, and Docs integration"
 ---
 
-nodyn connects to Google Workspace (Gmail, Sheets, Drive, Calendar, Docs) via OAuth 2.0. No third-party packages required — uses native `fetch()` against Google REST APIs.
+lynox connects to Google Workspace (Gmail, Sheets, Drive, Calendar, Docs) via OAuth 2.0. No third-party packages required — uses native `fetch()` against Google REST APIs.
 
 ## Quick Setup (via Telegram)
 
 The easiest way to connect Google — no terminal needed:
 
-1. Send `/google` to your nodyn bot in Telegram
-2. Open the link nodyn sends you (works on phone or computer)
+1. Send `/google` to your lynox bot in Telegram
+2. Open the link lynox sends you (works on phone or computer)
 3. Sign in with your Google account and enter the code shown
-4. Authorize access — nodyn confirms in Telegram when connected
+4. Authorize access — lynox confirms in Telegram when connected
 
 That's it. Gmail, Sheets, Drive, Calendar, and Docs are ready to use.
 
@@ -48,20 +48,20 @@ You need OAuth credentials from Google before you can connect. This is a one-tim
 2. User type: **External** (or Internal for Google Workspace domains)
 3. Add test users (required while app is in "Testing" status — add your own email)
 
-### 4. Add Credentials to nodyn
+### 4. Add Credentials to lynox
 
 **Option A: Environment variables** (recommended for server deployments)
 
-Add to your server's `~/.nodyn/.env`:
+Add to your server's `~/.lynox/.env`:
 
 ```bash
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 ```
 
-Then restart nodyn (`docker restart nodyn`).
+Then restart lynox (`docker restart lynox`).
 
-**Option B: Config file** (`~/.nodyn/config.json`)
+**Option B: Config file** (`~/.lynox/config.json`)
 
 ```json
 {
@@ -74,7 +74,7 @@ Then restart nodyn (`docker restart nodyn`).
 
 **Via Telegram (recommended):**
 
-Send `/google` in Telegram. nodyn uses Google's Device Flow — you get a link and a code, authorize in any browser, and tokens are stored encrypted automatically.
+Send `/google` in Telegram. lynox uses Google's Device Flow — you get a link and a code, authorize in any browser, and tokens are stored encrypted automatically.
 
 **Via CLI:**
 
@@ -82,7 +82,7 @@ Send `/google` in Telegram. nodyn uses Google's Device Flow — you get a link a
 /google auth
 ```
 
-This starts a localhost redirect OAuth flow — nodyn opens the Google consent screen in your browser and handles the redirect automatically.
+This starts a localhost redirect OAuth flow — lynox opens the Google consent screen in your browser and handles the redirect automatically.
 
 Tokens auto-refresh. Run `/google status` to check connection.
 
@@ -157,7 +157,7 @@ Alternatively, the agent can request additional scopes at runtime via `requestSc
 
 ### Credential Protection
 
-- OAuth tokens encrypted in SecretVault (`GOOGLE_OAUTH_TOKENS` key, requires `NODYN_VAULT_KEY`)
+- OAuth tokens encrypted in SecretVault (`GOOGLE_OAUTH_TOKENS` key, requires `LYNOX_VAULT_KEY`)
 - Tokens auto-refresh via refresh token — no re-authentication needed
 - `/google disconnect` revokes tokens at Google and deletes vault entry
 - Service account key files validated: absolute path, 0o600/0o400 permissions, valid JSON structure

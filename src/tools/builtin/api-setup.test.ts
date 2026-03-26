@@ -7,14 +7,14 @@ import { apiSetupTool } from './api-setup.js';
 import { ApiStore } from '../../core/api-store.js';
 import type { ApiProfile } from '../../core/api-store.js';
 
-// Mock getNodynDir to use temp dir
-let mockNodynDir: string;
+// Mock getLynoxDir to use temp dir
+let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({
-  getNodynDir: () => mockNodynDir,
+  getLynoxDir: () => mockLynoxDir,
 }));
 
 function createTmpDir(): string {
-  return mkdtempSync(join(tmpdir(), 'nodyn-api-setup-test-'));
+  return mkdtempSync(join(tmpdir(), 'lynox-api-setup-test-'));
 }
 
 const SAMPLE_PROFILE: ApiProfile = {
@@ -56,11 +56,11 @@ function createMockAgent(apiStore?: ApiStore | null) {
 
 describe('api_setup tool', () => {
   beforeEach(() => {
-    mockNodynDir = createTmpDir();
+    mockLynoxDir = createTmpDir();
   });
 
   afterEach(() => {
-    rmSync(mockNodynDir, { recursive: true, force: true });
+    rmSync(mockLynoxDir, { recursive: true, force: true });
   });
 
   describe('create', () => {
@@ -73,7 +73,7 @@ describe('api_setup tool', () => {
       expect(result).toContain('Created API profile');
       expect(result).toContain('test-api');
 
-      const filePath = join(mockNodynDir, 'apis', 'test-api.json');
+      const filePath = join(mockLynoxDir, 'apis', 'test-api.json');
       expect(existsSync(filePath)).toBe(true);
 
       const saved = JSON.parse(readFileSync(filePath, 'utf-8')) as ApiProfile;
@@ -143,7 +143,7 @@ describe('api_setup tool', () => {
       const result = await apiSetupTool.handler({ action: 'update', profile: updated }, agent);
       expect(result).toContain('Updated API profile');
 
-      const saved = JSON.parse(readFileSync(join(mockNodynDir, 'apis', 'test-api.json'), 'utf-8')) as ApiProfile;
+      const saved = JSON.parse(readFileSync(join(mockLynoxDir, 'apis', 'test-api.json'), 'utf-8')) as ApiProfile;
       expect(saved.name).toBe('Updated API');
     });
   });
@@ -152,7 +152,7 @@ describe('api_setup tool', () => {
     it('deletes an existing profile', async () => {
       const agent = createMockAgent(new ApiStore());
       await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
-      const filePath = join(mockNodynDir, 'apis', 'test-api.json');
+      const filePath = join(mockLynoxDir, 'apis', 'test-api.json');
       expect(existsSync(filePath)).toBe(true);
 
       const result = await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, agent);

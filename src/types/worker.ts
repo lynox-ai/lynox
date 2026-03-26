@@ -1,4 +1,4 @@
-// === Worker Pool (used by nodyn-pro for parallel execution) ===
+// === Worker Pool (used by lynox-pro for parallel execution) ===
 
 export interface IWorkerPool {
   execute(toolName: string, input: unknown, signal?: AbortSignal): Promise<string>;

@@ -38,7 +38,7 @@ describe('wordWrap', () => {
 describe('renderBanner', () => {
   const banner = renderBanner('opus', 'adaptive', 'high', 'loaded', 2, 10, '1.0.0-rc.1');
 
-  it('contains NODYN ASCII art', () => {
+  it('contains LYNOX ASCII art', () => {
     // Each char is individually color-wrapped — strip ANSI to check
     const plain = banner.replace(/\x1b\[[0-9;]*m/g, '');
     expect(plain).toContain('███');

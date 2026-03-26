@@ -6,7 +6,7 @@ import type {
   EntityRecord,
   KnowledgeRetrievalResult,
 } from '../types/index.js';
-import { SCOPE_WEIGHTS, MODEL_MAP, NODYN_BETAS, NAMESPACE_HALF_LIFE } from '../types/index.js';
+import { SCOPE_WEIGHTS, MODEL_MAP, LYNOX_BETAS, NAMESPACE_HALF_LIFE } from '../types/index.js';
 import type { KuzuGraph } from './knowledge-graph.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { cosineSimilarity } from './embedding.js';
@@ -281,7 +281,7 @@ export class RetrievalEngine {
       const stream = this.anthropicClient.beta.messages.stream({
         model: MODEL_MAP['haiku'],
         max_tokens: 256,
-        betas: [...NODYN_BETAS],
+        betas: [...LYNOX_BETAS],
         messages: [{
           role: 'user',
           content: `Write a brief factual answer (1-2 sentences) to this question as if you already know the answer. Do not explain or add caveats.\n\nQuestion: ${query.slice(0, 500)}`,

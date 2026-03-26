@@ -119,7 +119,7 @@ export class WorkerLoop {
           if (delayMs > 10 * 60_000) {
             const delayMin = Math.round(delayMs / 60_000);
             process.stderr.write(
-              `[nodyn:worker] Missed run: "${task.title}" (${task.id}) was due ${String(delayMin)}min ago\n`,
+              `[lynox:worker] Missed run: "${task.title}" (${task.id}) was due ${String(delayMin)}min ago\n`,
             );
           }
         }
@@ -384,7 +384,7 @@ export class WorkerLoop {
     try {
       const res = await fetch(config.url, {
         signal: AbortSignal.timeout(30_000),
-        headers: { 'User-Agent': 'nodyn-watch/1.0' },
+        headers: { 'User-Agent': 'lynox-watch/1.0' },
         redirect: 'error',  // Prevent SSRF via redirect to internal endpoints
       });
       if (!res.ok) {

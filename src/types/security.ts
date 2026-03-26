@@ -48,7 +48,7 @@ export type IsolationLevel = 'shared' | 'scoped' | 'sandboxed' | 'air-gapped';
 export type NetworkPolicy = 'allow-all' | 'allow-list' | 'deny-all';
 export type HistoryAccess = 'none' | 'own' | 'all';
 
-// === Isolation (shared types — enforcement in nodyn-pro) ===
+// === Isolation (shared types — enforcement in lynox-pro) ===
 export interface IsolationConfig {
   level: IsolationLevel;
   memoryScopes?: MemoryScopeRef[] | undefined;

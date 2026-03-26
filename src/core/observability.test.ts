@@ -3,19 +3,19 @@ import { channels, measureTool } from './observability.js';
 
 describe('channels', () => {
   it('has toolStart channel with correct name', () => {
-    expect(channels.toolStart.name).toBe('nodyn:tool:start');
+    expect(channels.toolStart.name).toBe('lynox:tool:start');
   });
 
   it('has toolEnd channel with correct name', () => {
-    expect(channels.toolEnd.name).toBe('nodyn:tool:end');
+    expect(channels.toolEnd.name).toBe('lynox:tool:end');
   });
 
   it('has spawnStart channel with correct name', () => {
-    expect(channels.spawnStart.name).toBe('nodyn:spawn:start');
+    expect(channels.spawnStart.name).toBe('lynox:spawn:start');
   });
 
   it('has spawnEnd channel with correct name', () => {
-    expect(channels.spawnEnd.name).toBe('nodyn:spawn:end');
+    expect(channels.spawnEnd.name).toBe('lynox:spawn:end');
   });
 });
 

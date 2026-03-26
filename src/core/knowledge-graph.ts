@@ -6,7 +6,7 @@ import { channels } from './observability.js';
 /** Schema version for knowledge graph migrations. */
 const SCHEMA_VERSION = 1;
 
-/** Default path for the knowledge graph database relative to nodyn dir. */
+/** Default path for the knowledge graph database relative to lynox dir. */
 export const KNOWLEDGE_GRAPH_DB_NAME = 'knowledge-graph';
 
 /**

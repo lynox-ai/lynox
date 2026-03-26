@@ -16,7 +16,7 @@ import type {
   SecretStoreLike,
   ChangesetManagerLike,
 } from '../types/index.js';
-import { NODYN_BETAS, CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, MAX_CONTINUATIONS } from '../types/index.js';
+import { LYNOX_BETAS, CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, MAX_CONTINUATIONS } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -448,7 +448,7 @@ export class Agent implements IAgent {
           cache_control: { type: 'ephemeral' },
           system: systemBlocks,
           messages: this.messages,
-          betas: [...NODYN_BETAS],
+          betas: [...LYNOX_BETAS],
           tools: toolsDef,
           ...(this.mcpServers ? { mcp_servers: this.mcpServers } : {}),
         }, { signal });

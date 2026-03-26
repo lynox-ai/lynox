@@ -4,13 +4,13 @@
  * Usage:
  *   ANTHROPIC_API_KEY=sk-ant-... npx tsx examples/stream-events.ts
  */
-import { Nodyn } from '@nodyn-ai/core';
+import { Lynox } from '@lynox-ai/core';
 
-const nodyn = new Nodyn({ model: 'sonnet' });
-await nodyn.init();
+const lynox = new Lynox({ model: 'sonnet' });
+await lynox.init();
 
 // Listen to stream events
-nodyn.onStream = (event) => {
+lynox.onStream = (event) => {
   switch (event.type) {
     case 'text':
       process.stdout.write(event.text);
@@ -30,6 +30,6 @@ nodyn.onStream = (event) => {
   }
 };
 
-await nodyn.run('Write a haiku about programming.');
+await lynox.run('Write a haiku about programming.');
 
-await nodyn.shutdown();
+await lynox.shutdown();

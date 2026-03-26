@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug in nodyn
+description: Report a bug in lynox
 labels: ["bug"]
 body:
   - type: textarea
@@ -15,7 +15,7 @@ body:
       label: Steps to reproduce
       description: Minimal steps to reproduce the issue.
       placeholder: |
-        1. Run `npx @nodyn-ai/core`
+        1. Run `npx @lynox-ai/core`
         2. Type `...`
         3. See error
     validations:
@@ -30,7 +30,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: nodyn version
+      label: lynox version
       description: Output of `/status` or `package.json` version
       placeholder: "1.0.0-rc.1"
     validations:

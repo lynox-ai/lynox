@@ -1,12 +1,12 @@
 #!/bin/sh
-# Quick security pattern scan for nodyn source code.
+# Quick security pattern scan for lynox source code.
 # Run: ./scripts/security-scan.sh
 
 set -e
 ERRORS=0
 SRC="src"
 
-echo "🔒 nodyn security scan"
+echo "🔒 lynox security scan"
 echo ""
 
 # Check for dangerous code execution patterns — actual calls, not mentions in comments/regex/strings

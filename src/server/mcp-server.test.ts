@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { NodynMCPServer } from './mcp-server.js';
-import type { NodynConfig } from '../types/index.js';
+import { LynoxMCPServer } from './mcp-server.js';
+import type { LynoxConfig } from '../types/index.js';
 
 // === Mock dependencies (top-level fns for access in tests) ===
 
@@ -81,23 +81,23 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 // === Helpers ===
 
-function makeConfig(overrides?: Partial<NodynConfig>): NodynConfig {
+function makeConfig(overrides?: Partial<LynoxConfig>): LynoxConfig {
   return {
     model: 'opus',
-    systemPrompt: 'You are NODYN.',
+    systemPrompt: 'You are LYNOX.',
     ...overrides,
-  } as NodynConfig;
+  } as LynoxConfig;
 }
 
 // === Tests ===
 
-describe('NodynMCPServer', () => {
+describe('LynoxMCPServer', () => {
   let stateDir: string;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    stateDir = mkdtempSync(join(tmpdir(), 'nodyn-mcp-state-'));
-    vi.stubEnv('NODYN_MCP_STATE_DIR', stateDir);
+    stateDir = mkdtempSync(join(tmpdir(), 'lynox-mcp-state-'));
+    vi.stubEnv('LYNOX_MCP_STATE_DIR', stateDir);
   });
 
   afterEach(() => {
@@ -107,29 +107,29 @@ describe('NodynMCPServer', () => {
 
   describe('constructor', () => {
     it('creates MCP server and registers 10 tools', () => {
-      new NodynMCPServer(makeConfig());
+      new LynoxMCPServer(makeConfig());
       expect(mockRegisterTool).toHaveBeenCalledTimes(10);
     });
 
     it('registers all expected tool names', () => {
-      new NodynMCPServer(makeConfig());
+      new LynoxMCPServer(makeConfig());
       const toolNames = mockRegisterTool.mock.calls.map((c: unknown[]) => c[0]);
-      expect(toolNames).toContain('nodyn_run');
-      expect(toolNames).toContain('nodyn_batch');
-      expect(toolNames).toContain('nodyn_status');
-      expect(toolNames).toContain('nodyn_memory');
-      expect(toolNames).toContain('nodyn_reset');
-      expect(toolNames).toContain('nodyn_run_start');
-      expect(toolNames).toContain('nodyn_poll');
-      expect(toolNames).toContain('nodyn_read_file');
-      expect(toolNames).toContain('nodyn_abort');
-      expect(toolNames).toContain('nodyn_reply');
+      expect(toolNames).toContain('lynox_run');
+      expect(toolNames).toContain('lynox_batch');
+      expect(toolNames).toContain('lynox_status');
+      expect(toolNames).toContain('lynox_memory');
+      expect(toolNames).toContain('lynox_reset');
+      expect(toolNames).toContain('lynox_run_start');
+      expect(toolNames).toContain('lynox_poll');
+      expect(toolNames).toContain('lynox_read_file');
+      expect(toolNames).toContain('lynox_abort');
+      expect(toolNames).toContain('lynox_reply');
     });
   });
 
   describe('init', () => {
     it('creates and initializes Engine instance', async () => {
-      const server = new NodynMCPServer(makeConfig());
+      const server = new LynoxMCPServer(makeConfig());
       await server.init();
       const { Engine } = await import('../core/engine.js');
       expect(Engine).toHaveBeenCalled();
@@ -138,7 +138,7 @@ describe('NodynMCPServer', () => {
 
   describe('startStdio', () => {
     it('creates transport and connects', async () => {
-      const server = new NodynMCPServer(makeConfig());
+      const server = new LynoxMCPServer(makeConfig());
       await server.startStdio();
       expect(mockConnect).toHaveBeenCalled();
     });
@@ -153,13 +153,13 @@ describe('NodynMCPServer', () => {
         toolHandlers.set(name, handler);
       });
       // Re-create to capture handlers
-      new NodynMCPServer(makeConfig());
+      new LynoxMCPServer(makeConfig());
     });
 
-    describe('nodyn_run', () => {
+    describe('lynox_run', () => {
       it('throws when not initialized', async () => {
-        const handler = toolHandlers.get('nodyn_run')!;
-        await expect(handler({ task: 'test' })).rejects.toThrow('NodynMCPServer not initialized');
+        const handler = toolHandlers.get('lynox_run')!;
+        await expect(handler({ task: 'test' })).rejects.toThrow('LynoxMCPServer not initialized');
       });
 
       it('returns agent response after init', async () => {
@@ -169,31 +169,31 @@ describe('NodynMCPServer', () => {
         mockRegisterTool.mockImplementation((name: string, _schema: unknown, handler: (...args: unknown[]) => Promise<unknown>) => {
           capturedHandlers.set(name, handler);
         });
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
-        const handler = capturedHandlers.get('nodyn_run')!;
+        const handler = capturedHandlers.get('lynox_run')!;
         const result = await handler({ task: 'say hello' }) as { content: { text: string }[] };
         expect(result.content[0]!.text).toBe('Agent response');
       });
     });
 
-    describe('nodyn_batch', () => {
+    describe('lynox_batch', () => {
       it('throws when not initialized', async () => {
-        const handler = toolHandlers.get('nodyn_batch')!;
-        await expect(handler({ requests: [{ id: '1', task: 'test' }] })).rejects.toThrow('NodynMCPServer not initialized');
+        const handler = toolHandlers.get('lynox_batch')!;
+        await expect(handler({ requests: [{ id: '1', task: 'test' }] })).rejects.toThrow('LynoxMCPServer not initialized');
       });
     });
 
-    describe('nodyn_status', () => {
+    describe('lynox_status', () => {
       it('returns batch status', async () => {
         mockRegisterTool.mockClear();
         const capturedHandlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
         mockRegisterTool.mockImplementation((name: string, _schema: unknown, handler: (...args: unknown[]) => Promise<unknown>) => {
           capturedHandlers.set(name, handler);
         });
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
-        const handler = capturedHandlers.get('nodyn_status')!;
+        const handler = capturedHandlers.get('lynox_status')!;
         const result = await handler({ batch_id: 'batch-123' }) as { content: { text: string }[] };
         expect(result.content[0]!.text).toContain('batch-123');
         expect(result.content[0]!.text).toContain('ended');
@@ -201,26 +201,26 @@ describe('NodynMCPServer', () => {
       });
     });
 
-    describe('nodyn_memory', () => {
+    describe('lynox_memory', () => {
       it('throws when not initialized', async () => {
-        const handler = toolHandlers.get('nodyn_memory')!;
-        await expect(handler({ namespace: 'knowledge' })).rejects.toThrow('NodynMCPServer not initialized');
+        const handler = toolHandlers.get('lynox_memory')!;
+        await expect(handler({ namespace: 'knowledge' })).rejects.toThrow('LynoxMCPServer not initialized');
       });
     });
 
-    describe('nodyn_reset', () => {
+    describe('lynox_reset', () => {
       it('resets session and returns confirmation', async () => {
-        const handler = toolHandlers.get('nodyn_reset')!;
+        const handler = toolHandlers.get('lynox_reset')!;
         const result = await handler({ session_id: 'sess-abc' }) as { content: { text: string }[] };
         expect(result.content[0]!.text).toContain('sess-abc');
         expect(result.content[0]!.text).toContain('reset');
       });
     });
 
-    describe('nodyn_run_start', () => {
+    describe('lynox_run_start', () => {
       it('throws when not initialized', async () => {
-        const handler = toolHandlers.get('nodyn_run_start')!;
-        await expect(handler({ task: 'test' })).rejects.toThrow('NodynMCPServer not initialized');
+        const handler = toolHandlers.get('lynox_run_start')!;
+        await expect(handler({ task: 'test' })).rejects.toThrow('LynoxMCPServer not initialized');
       });
 
       it('returns run_id immediately without waiting for agent', async () => {
@@ -232,9 +232,9 @@ describe('NodynMCPServer', () => {
         });
         // Make send hang so we verify immediate return
         mockSessionSend.mockReturnValue(new Promise(() => {}));
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
-        const handler = capturedHandlers.get('nodyn_run_start')!;
+        const handler = capturedHandlers.get('lynox_run_start')!;
         const result = await handler({ task: 'do something', session_id: 'sess-1' }) as { content: { text: string }[] };
         const parsed = JSON.parse(result.content[0]!.text) as { run_id: string };
         expect(parsed.run_id).toMatch(/^[0-9a-f-]{36}$/);
@@ -249,9 +249,9 @@ describe('NodynMCPServer', () => {
           capturedHandlers.set(name, handler);
         });
         mockSessionSend.mockResolvedValue('done');
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
-        const handler = capturedHandlers.get('nodyn_run_start')!;
+        const handler = capturedHandlers.get('lynox_run_start')!;
         await handler({ task: 'task' });
         expect(mockSessionInstance.onStream).not.toBeNull();
       });
@@ -263,10 +263,10 @@ describe('NodynMCPServer', () => {
           capturedHandlers.set(name, handler);
         });
         mockSessionSend.mockReturnValue(new Promise(() => {}));
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
 
-        const handler = capturedHandlers.get('nodyn_run_start')!;
+        const handler = capturedHandlers.get('lynox_run_start')!;
         const first = await handler({ task: 'first', session_id: 'sess-shared' }) as { content: { text: string }[] };
         const firstPayload = JSON.parse(first.content[0]!.text) as { run_id: string };
         expect(firstPayload.run_id).toBeTruthy();
@@ -279,9 +279,9 @@ describe('NodynMCPServer', () => {
       });
     });
 
-    describe('nodyn_poll', () => {
+    describe('lynox_poll', () => {
       it('returns error payload for unknown run_id', async () => {
-        const handler = toolHandlers.get('nodyn_poll')!;
+        const handler = toolHandlers.get('lynox_poll')!;
         const result = await handler({ run_id: 'no-such-run' }) as { content: { text: string }[] };
         const parsed = JSON.parse(result.content[0]!.text) as { done: boolean; error: string };
         expect(parsed.done).toBe(true);
@@ -289,7 +289,7 @@ describe('NodynMCPServer', () => {
       });
 
       it('returns accumulated text and done=false while running', async () => {
-        // Setup: create a run via nodyn_run_start on a fresh server
+        // Setup: create a run via lynox_run_start on a fresh server
         mockRegisterTool.mockClear();
         const capturedHandlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
         mockRegisterTool.mockImplementation((name: string, _schema: unknown, handler: (...args: unknown[]) => Promise<unknown>) => {
@@ -298,10 +298,10 @@ describe('NodynMCPServer', () => {
         // Make send hang
         let resolveRun!: () => void;
         mockSessionSend.mockReturnValue(new Promise<void>(res => { resolveRun = res; }));
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
 
-        const startHandler = capturedHandlers.get('nodyn_run_start')!;
+        const startHandler = capturedHandlers.get('lynox_run_start')!;
         const testSid = 'test-session-stream';
         const startResult = await startHandler({ task: 'stream task', session_id: testSid }) as { content: { text: string }[] };
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
@@ -311,7 +311,7 @@ describe('NodynMCPServer', () => {
         await streamFn({ type: 'text', text: 'Hello ', agent: 'test' });
         await streamFn({ type: 'text', text: 'world', agent: 'test' });
 
-        const pollHandler = capturedHandlers.get('nodyn_poll')!;
+        const pollHandler = capturedHandlers.get('lynox_poll')!;
         const pollResult = await pollHandler({ run_id, session_id: testSid }) as { content: { text: string }[] };
         const payload = JSON.parse(pollResult.content[0]!.text) as { done: boolean; text: string };
         expect(payload.done).toBe(false);
@@ -337,10 +337,10 @@ describe('NodynMCPServer', () => {
           capturedHandlers.set(name, handler);
         });
         mockSessionSend.mockReturnValue(new Promise(() => {}));
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
 
-        const startHandler = capturedHandlers.get('nodyn_run_start')!;
+        const startHandler = capturedHandlers.get('lynox_run_start')!;
         const testSid = 'test-session-large';
         const startResult = await startHandler({ task: 'large stream', session_id: testSid }) as { content: { text: string }[] };
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
@@ -351,7 +351,7 @@ describe('NodynMCPServer', () => {
         await streamFn({ type: 'text', text: largeChunk, agent: 'test' });
         await streamFn({ type: 'text', text: largeChunk, agent: 'test' });
 
-        const pollHandler = capturedHandlers.get('nodyn_poll')!;
+        const pollHandler = capturedHandlers.get('lynox_poll')!;
         const pollResult = await pollHandler({ run_id, session_id: testSid }) as { content: { text: string }[] };
         const payload = JSON.parse(pollResult.content[0]!.text) as { truncated?: boolean; text: string };
         expect(payload.truncated).toBe(true);
@@ -369,11 +369,11 @@ describe('NodynMCPServer', () => {
 
         let resolveRun!: () => void;
         mockSessionSend.mockReturnValue(new Promise<void>((resolve) => { resolveRun = resolve; }));
-        const server1 = new NodynMCPServer(makeConfig());
+        const server1 = new LynoxMCPServer(makeConfig());
         await server1.init();
 
-        const start1 = handlers1.get('nodyn_run_start')!;
-        const poll1 = handlers1.get('nodyn_poll')!;
+        const start1 = handlers1.get('lynox_run_start')!;
+        const poll1 = handlers1.get('lynox_poll')!;
         const startResult = await start1({ task: 'persist me', session_id: 'sess-persisted' }) as { content: { text: string }[] };
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
 
@@ -392,8 +392,8 @@ describe('NodynMCPServer', () => {
         mockRegisterTool.mockImplementation((name: string, _schema: unknown, handler: (...args: unknown[]) => Promise<unknown>) => {
           handlers2.set(name, handler);
         });
-        const server2 = new NodynMCPServer(makeConfig());
-        const poll2 = handlers2.get('nodyn_poll')!;
+        const server2 = new LynoxMCPServer(makeConfig());
+        const poll2 = handlers2.get('lynox_poll')!;
 
         const restored = await poll2({ run_id, session_id: 'sess-persisted' }) as { content: { text: string }[] };
         const restoredPayload = JSON.parse(restored.content[0]!.text) as { done: boolean; text: string; error?: string };
@@ -413,10 +413,10 @@ describe('NodynMCPServer', () => {
 
         let resolveRun!: () => void;
         mockSessionSend.mockReturnValue(new Promise<void>((resolve) => { resolveRun = resolve; }));
-        const server1 = new NodynMCPServer(makeConfig());
+        const server1 = new LynoxMCPServer(makeConfig());
         await server1.init();
 
-        const start1 = handlers1.get('nodyn_run_start')!;
+        const start1 = handlers1.get('lynox_run_start')!;
         const startResult = await start1({ task: 'restart me', session_id: 'sess-restart' }) as { content: { text: string }[] };
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
 
@@ -425,8 +425,8 @@ describe('NodynMCPServer', () => {
         mockRegisterTool.mockImplementation((name: string, _schema: unknown, handler: (...args: unknown[]) => Promise<unknown>) => {
           handlers2.set(name, handler);
         });
-        const server2 = new NodynMCPServer(makeConfig());
-        const poll2 = handlers2.get('nodyn_poll')!;
+        const server2 = new LynoxMCPServer(makeConfig());
+        const poll2 = handlers2.get('lynox_poll')!;
 
         const restored = await poll2({ run_id, session_id: 'sess-restart' }) as { content: { text: string }[] };
         const payload = JSON.parse(restored.content[0]!.text) as { done: boolean; error?: string; text: string };
@@ -440,9 +440,9 @@ describe('NodynMCPServer', () => {
       });
     });
 
-    describe('nodyn_reply', () => {
+    describe('lynox_reply', () => {
       it('returns error payload for unknown run_id', async () => {
-        const handler = toolHandlers.get('nodyn_reply')!;
+        const handler = toolHandlers.get('lynox_reply')!;
         const result = await handler({ run_id: 'no-such-run', answer: 'yes' }) as { content: { text: string }[] };
         const parsed = JSON.parse(result.content[0]!.text) as { error: string };
         expect(parsed.error).toContain('No pending input');
@@ -456,10 +456,10 @@ describe('NodynMCPServer', () => {
         });
         let resolveRun!: () => void;
         mockSessionSend.mockReturnValue(new Promise<void>(res => { resolveRun = res; }));
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
 
-        const startHandler = capturedHandlers.get('nodyn_run_start')!;
+        const startHandler = capturedHandlers.get('lynox_run_start')!;
         const testSid = 'test-session-constrained';
         const startResult = await startHandler({ task: 'constrained question', session_id: testSid }) as { content: { text: string }[] };
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
@@ -468,7 +468,7 @@ describe('NodynMCPServer', () => {
         const promptFn = mockSessionInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
         void promptFn('Allow?', ['Allow', 'Deny']);
 
-        const replyHandler = capturedHandlers.get('nodyn_reply')!;
+        const replyHandler = capturedHandlers.get('lynox_reply')!;
         const result = await replyHandler({ run_id, session_id: testSid, answer: 'Sure' }) as { content: { text: string }[] };
         const parsed = JSON.parse(result.content[0]!.text) as { error: string };
         expect(parsed.error).toContain('Invalid answer');
@@ -489,10 +489,10 @@ describe('NodynMCPServer', () => {
         // Make send hang until we inject a reply
         let resolveRun!: () => void;
         mockSessionSend.mockReturnValue(new Promise<void>(res => { resolveRun = res; }));
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
 
-        const startHandler = capturedHandlers.get('nodyn_run_start')!;
+        const startHandler = capturedHandlers.get('lynox_run_start')!;
         const testSid1 = 'test-session-input1';
         await startHandler({ task: 'awaiting input', session_id: testSid1 });
 
@@ -500,7 +500,7 @@ describe('NodynMCPServer', () => {
         const promptFn = mockSessionInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
         const answerPromise = promptFn('Proceed?', ['yes', 'no']);
 
-        const replyHandler = capturedHandlers.get('nodyn_reply')!;
+        const replyHandler = capturedHandlers.get('lynox_reply')!;
         // Get the run_id — we need to find it; start returns it
         const testSid2 = 'test-session-input2';
         const startResult2 = await startHandler({ task: 'get run_id', session_id: testSid2 }) as { content: { text: string }[] };
@@ -521,7 +521,7 @@ describe('NodynMCPServer', () => {
         mockSessionSend.mockResolvedValue('Agent response');
       });
 
-      it('nodyn_poll exposes waiting_for_input when agent is paused', async () => {
+      it('lynox_poll exposes waiting_for_input when agent is paused', async () => {
         mockRegisterTool.mockClear();
         const capturedHandlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
         mockRegisterTool.mockImplementation((name: string, _schema: unknown, handler: (...args: unknown[]) => Promise<unknown>) => {
@@ -529,10 +529,10 @@ describe('NodynMCPServer', () => {
         });
         let resolveRun!: () => void;
         mockSessionSend.mockReturnValue(new Promise<void>(res => { resolveRun = res; }));
-        const server = new NodynMCPServer(makeConfig());
+        const server = new LynoxMCPServer(makeConfig());
         await server.init();
 
-        const startHandler = capturedHandlers.get('nodyn_run_start')!;
+        const startHandler = capturedHandlers.get('lynox_run_start')!;
         const testSid = 'test-session-approval';
         const startResult = await startHandler({ task: 'needs approval', session_id: testSid }) as { content: { text: string }[] };
         const { run_id } = JSON.parse(startResult.content[0]!.text) as { run_id: string };
@@ -541,7 +541,7 @@ describe('NodynMCPServer', () => {
         const promptFn = mockSessionInstance.promptUser as (q: string, opts?: string[]) => Promise<string>;
         void promptFn('Allow bash command?', ['Allow', 'Deny']);
 
-        const pollHandler = capturedHandlers.get('nodyn_poll')!;
+        const pollHandler = capturedHandlers.get('lynox_poll')!;
         const pollResult = await pollHandler({ run_id, session_id: testSid }) as { content: { text: string }[] };
         const payload = JSON.parse(pollResult.content[0]!.text) as {
           done: boolean;
@@ -558,10 +558,10 @@ describe('NodynMCPServer', () => {
       });
     });
 
-    describe('nodyn_abort', () => {
+    describe('lynox_abort', () => {
       it('aborts existing session and returns aborted=true', async () => {
         mockAbort.mockClear();
-        const handler = toolHandlers.get('nodyn_abort')!;
+        const handler = toolHandlers.get('lynox_abort')!;
         const result = await handler({ session_id: 'sess-to-abort' }) as { content: { text: string }[] };
         const payload = JSON.parse(result.content[0]!.text) as { aborted: boolean };
         expect(payload.aborted).toBe(true);
@@ -570,7 +570,7 @@ describe('NodynMCPServer', () => {
 
       it('returns aborted=false when session does not exist', async () => {
         mockSessionGet.mockReturnValueOnce(undefined);
-        const handler = toolHandlers.get('nodyn_abort')!;
+        const handler = toolHandlers.get('lynox_abort')!;
         const result = await handler({ session_id: 'ghost-session' }) as { content: { text: string }[] };
         const payload = JSON.parse(result.content[0]!.text) as { aborted: boolean };
         expect(payload.aborted).toBe(false);
@@ -580,9 +580,9 @@ describe('NodynMCPServer', () => {
 
   describe('completed run GC', () => {
     it('startTempCleanup is called during construction', () => {
-      // The fact that NodynMCPServer constructs without error confirms startTempCleanup runs.
+      // The fact that LynoxMCPServer constructs without error confirms startTempCleanup runs.
       // The GC logic is inside the interval callback — verify it doesn't crash on empty runStore.
-      const server = new NodynMCPServer(makeConfig());
+      const server = new LynoxMCPServer(makeConfig());
       expect(server).toBeDefined();
     });
   });

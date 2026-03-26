@@ -86,7 +86,7 @@ export async function handleTask(parts: string[], session: Session, ctx: CLICtx)
     // Parse: /task add "Title" [--due DATE] [--priority PRIO] [--scope SCOPE] [--assignee NAME]
     const titleMatch = line.match(/add\s+"([^"]+)"|add\s+(\S+)/);
     const title = titleMatch?.[1] ?? titleMatch?.[2];
-    if (!title) { ctx.stdout.write('Usage: /task add "Title" [--due YYYY-MM-DD] [--priority high] [--scope client:x] [--assignee user|nodyn|name]\n'); return true; }
+    if (!title) { ctx.stdout.write('Usage: /task add "Title" [--due YYYY-MM-DD] [--priority high] [--scope client:x] [--assignee user|lynox|name]\n'); return true; }
 
     const dueFlag = parts.indexOf('--due');
     const prioFlag = parts.indexOf('--priority');
@@ -226,7 +226,7 @@ export async function handleSchedule(parts: string[], session: Session, ctx: CLI
 
   // /schedule or /schedule list — list active scheduled/watch tasks
   if (!sub || sub === 'list') {
-    const allTasks = tm.list({ assignee: 'nodyn' });
+    const allTasks = tm.list({ assignee: 'lynox' });
     const scheduled = allTasks.filter(t => t.task_type !== 'manual' && t.task_type !== undefined && t.status !== 'completed');
 
     if (scheduled.length === 0) {

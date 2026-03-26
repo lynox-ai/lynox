@@ -1,14 +1,14 @@
 /**
  * Backup encryption/decryption — AES-256-GCM per file.
- * Key derived from NODYN_VAULT_KEY via HKDF (same pattern as run-history.ts).
+ * Key derived from LYNOX_VAULT_KEY via HKDF (same pattern as run-history.ts).
  */
 
 import { hkdfSync, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 
-const BACKUP_HKDF_INFO = 'nodyn-backup-encryption';
-const BACKUP_HKDF_SALT = 'nodyn-backup';
+const BACKUP_HKDF_INFO = 'lynox-backup-encryption';
+const BACKUP_HKDF_SALT = 'lynox-backup';
 
 /** File header: 'NBAK' + version byte (for future format changes). */
 const FILE_MAGIC = Buffer.from('NBAK');

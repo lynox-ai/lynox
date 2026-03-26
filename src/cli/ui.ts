@@ -4,7 +4,7 @@ import { sleep } from '../core/utils.js';
 import { TOOL_DISPLAY_NAMES } from '../types/index.js';
 
 // Bot icon with brand gradient (8 lines tall)
-const ASCII_NODYN = [
+const ASCII_LYNOX = [
   '       █            █',
   '    ▄██████████████████▄',
   '  ▄██████████████████████▄',
@@ -14,20 +14,20 @@ const ASCII_NODYN = [
   ' ██████████████████████████',
   ' ▀████████████████████████▀',
 ];
-const ASCII_MAX_COLS = Math.max(...ASCII_NODYN.map(r => r.length));
+const ASCII_MAX_COLS = Math.max(...ASCII_LYNOX.map(r => r.length));
 const INFO_COL = ASCII_MAX_COLS + 2;
 
 // Brand Purple: close to rgb(101,37,239) — #6525EF
 const BRAND_PALETTE = [93, 93, 99, 99, 135, 135, 99, 99, 93, 93];
-const BRAND_ROW_COLORS: number[][] = Array.from({ length: ASCII_NODYN.length }, (_, r) => {
+const BRAND_ROW_COLORS: number[][] = Array.from({ length: ASCII_LYNOX.length }, (_, r) => {
   const shift = r;
   return BRAND_PALETTE.map((_, i) => BRAND_PALETTE[(i + shift) % BRAND_PALETTE.length]!);
 });
 
 export function renderGradientArt(): string {
   let out = '';
-  for (let r = 0; r < ASCII_NODYN.length; r++) {
-    const row = ASCII_NODYN[r]!;
+  for (let r = 0; r < ASCII_LYNOX.length; r++) {
+    const row = ASCII_LYNOX[r]!;
     const palette = BRAND_ROW_COLORS[r]!;
     for (let col = 0; col < row.length; col++) {
       const ch = row[col]!;
@@ -50,7 +50,7 @@ function buildSideInfo(
 ): Record<number, string> {
   const version = `${DIM}v${versionStr ?? '0.0.0'}${RESET}`;
   return {
-    3: `\x1b[1m\x1b[38;5;99mnodyn\x1b[0m ${version}`,
+    3: `\x1b[1m\x1b[38;5;99mlynox\x1b[0m ${version}`,
     5: `${DIM}model:${RESET} ${BLUE}${model}${RESET}`,
     6: `${DIM}thinking:${RESET} ${thinking}  ${DIM}accuracy:${RESET} ${effort}`,
     7: `${DIM}knowledge:${RESET} ${memory}  ${DIM}tools:${RESET} ${toolCount}`,
@@ -152,7 +152,7 @@ export async function animateBanner(
     return;
   }
 
-  const rowCount = ASCII_NODYN.length;
+  const rowCount = ASCII_LYNOX.length;
   const sideInfo = buildSideInfo(model, thinking, effort, memory, mcpCount, toolCount, versionStr);
 
   // Per-character color: brand gradient for position (r, col)
@@ -164,7 +164,7 @@ export async function animateBanner(
 
   // Render a row with per-character color function
   const renderRow = (r: number, getColor: (r: number, col: number) => number): string => {
-    const row = ASCII_NODYN[r]!;
+    const row = ASCII_LYNOX[r]!;
     let line = '';
     for (let col = 0; col < row.length; col++) {
       const ch = row[col]!;

@@ -36,7 +36,7 @@ export async function handleConfig(parts: string[], session: Session, ctx: CLICt
     ctx.stdout.write(`${GREEN}✓${RESET} ${configKey} = ${JSON.stringify(parsed)}\n`);
     const RESTART_KEYS = new Set(['api_key', 'api_base_url']);
     if (RESTART_KEYS.has(configKey)) {
-      ctx.stdout.write(`${YELLOW}⚠${RESET} ${DIM}Restart nodyn for the new API credentials to take effect.${RESET}\n`);
+      ctx.stdout.write(`${YELLOW}⚠${RESET} ${DIM}Restart lynox for the new API credentials to take effect.${RESET}\n`);
     }
     return true;
   }
@@ -169,7 +169,7 @@ export async function handleConfig(parts: string[], session: Session, ctx: CLICt
     session.reloadUserConfig();
     ctx.stdout.write(`${GREEN}✓${RESET} ${setting.label} updated\n`);
     if (setting.key === 'api_key' || setting.key === 'api_base_url') {
-      ctx.stdout.write(`${YELLOW}⚠${RESET} ${DIM}Restart nodyn for the new API credentials to take effect.${RESET}\n`);
+      ctx.stdout.write(`${YELLOW}⚠${RESET} ${DIM}Restart lynox for the new API credentials to take effect.${RESET}\n`);
     }
   }
   return true;
@@ -185,7 +185,7 @@ export async function handleStatus(_parts: string[], session: Session, ctx: CLIC
   const secretStore = session.getSecretStore();
   const cfg = session.getUserConfig();
 
-  ctx.stdout.write(`${BOLD}NODYN${RESET} v${pkg.version}\n\n`);
+  ctx.stdout.write(`${BOLD}LYNOX${RESET} v${pkg.version}\n\n`);
   ctx.stdout.write(`  ${DIM}Model:${RESET}      ${BLUE}${model}${RESET} (${tier})\n`);
   ctx.stdout.write(`  ${DIM}Mode:${RESET}       interactive\n`);
   ctx.stdout.write(`  ${DIM}Effort:${RESET}     ${session.getEffort()}\n`);

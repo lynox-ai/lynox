@@ -11,7 +11,7 @@ function createAgentFile(agentsDir: string, name: string, content: string): void
 
 describe('loadAgentDef', () => {
   it('loads a valid agent definition', async () => {
-    const agentsDir = mkdtempSync(join(tmpdir(), 'nodyn-agents-'));
+    const agentsDir = mkdtempSync(join(tmpdir(), 'lynox-agents-'));
     const agentContent = `
 export default {
   name: 'test-agent',
@@ -30,31 +30,31 @@ export default {
   });
 
   it('throws when agent directory does not exist', async () => {
-    const agentsDir = mkdtempSync(join(tmpdir(), 'nodyn-agents-'));
+    const agentsDir = mkdtempSync(join(tmpdir(), 'lynox-agents-'));
     await expect(loadAgentDef('missing-agent', agentsDir))
       .rejects.toThrow('not found');
   });
 
   it('throws for invalid agent name with path traversal (../escape)', async () => {
-    const agentsDir = mkdtempSync(join(tmpdir(), 'nodyn-agents-'));
+    const agentsDir = mkdtempSync(join(tmpdir(), 'lynox-agents-'));
     await expect(loadAgentDef('../escape', agentsDir))
       .rejects.toThrow(/Invalid agent name/);
   });
 
   it('throws for agent name with slashes', async () => {
-    const agentsDir = mkdtempSync(join(tmpdir(), 'nodyn-agents-'));
+    const agentsDir = mkdtempSync(join(tmpdir(), 'lynox-agents-'));
     await expect(loadAgentDef('some/agent', agentsDir))
       .rejects.toThrow(/Invalid agent name/);
   });
 
   it('throws for agent name with special characters', async () => {
-    const agentsDir = mkdtempSync(join(tmpdir(), 'nodyn-agents-'));
+    const agentsDir = mkdtempSync(join(tmpdir(), 'lynox-agents-'));
     await expect(loadAgentDef('agent!@#', agentsDir))
       .rejects.toThrow(/Invalid agent name/);
   });
 
   it('accepts agent names with hyphens and underscores', async () => {
-    const agentsDir = mkdtempSync(join(tmpdir(), 'nodyn-agents-'));
+    const agentsDir = mkdtempSync(join(tmpdir(), 'lynox-agents-'));
     const content = `export default { name: 'my-agent_v2', version: '1.0', defaultTier: 'haiku', systemPrompt: 'x' };`;
     createAgentFile(agentsDir, 'my-agent_v2', content);
     const def = await loadAgentDef('my-agent_v2', agentsDir);
@@ -62,7 +62,7 @@ export default {
   });
 
   it('throws when module has no default export', async () => {
-    const agentsDir = mkdtempSync(join(tmpdir(), 'nodyn-agents-'));
+    const agentsDir = mkdtempSync(join(tmpdir(), 'lynox-agents-'));
     createAgentFile(agentsDir, 'no-default', 'export const foo = 1;');
     await expect(loadAgentDef('no-default', agentsDir))
       .rejects.toThrow('must have a default export');

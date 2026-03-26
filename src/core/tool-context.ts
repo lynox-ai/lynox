@@ -2,7 +2,7 @@
  * ToolContext — shared context for tool handlers.
  *
  * Replaces closure-based module-level state setters (setDataStore, etc.)
- * with a single context object scoped to the Nodyn orchestrator instance.
+ * with a single context object scoped to the Lynox orchestrator instance.
  *
  * The orchestrator creates one ToolContext and passes it to each Agent.
  * Tool handlers read from `agent.toolContext` instead of module-level variables.
@@ -13,7 +13,7 @@ import type { TaskManager } from './task-manager.js';
 import type { RunHistory } from './run-history.js';
 import type {
   IKnowledgeLayer,
-  NodynUserConfig,
+  LynoxUserConfig,
   ToolEntry,
   StreamHandler,
   NetworkPolicy,
@@ -30,7 +30,7 @@ export interface ToolContext {
   taskManager: TaskManager | null;
   knowledgeLayer: IKnowledgeLayer | null;
   runHistory: RunHistory | null;
-  userConfig: NodynUserConfig;
+  userConfig: LynoxUserConfig;
 
   // ── Pipeline / process ──
   tools: ToolEntry[];
@@ -53,7 +53,7 @@ export interface ToolContext {
 }
 
 /** Create a default (empty) ToolContext. */
-export function createToolContext(userConfig: NodynUserConfig): ToolContext {
+export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
   return {
     dataStore: null,
     taskManager: null,

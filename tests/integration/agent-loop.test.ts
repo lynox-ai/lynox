@@ -117,7 +117,7 @@ describe('Agent Loop Integration', () => {
   const tmpDirs: string[] = [];
 
   function makeTmpDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), `nodyn-agent-int-${prefix}-`));
+    const dir = mkdtempSync(join(tmpdir(), `lynox-agent-int-${prefix}-`));
     tmpDirs.push(dir);
     return dir;
   }

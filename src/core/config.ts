@@ -1,33 +1,33 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import type { NodynUserConfig } from '../types/index.js';
+import type { LynoxUserConfig } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
-import { NodynUserConfigSchema } from '../types/schemas.js';
+import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
 
 const CONFIG_FILENAME = 'config.json';
-const NODYN_DIR = '.nodyn';
+const LYNOX_DIR = '.lynox';
 
 function getUserConfigDir(): string {
-  return join(homedir(), NODYN_DIR);
+  return join(homedir(), LYNOX_DIR);
 }
 
 function getProjectConfigDir(): string {
-  return join(process.cwd(), NODYN_DIR);
+  return join(process.cwd(), LYNOX_DIR);
 }
 
-function readConfigFile(filePath: string): NodynUserConfig | null {
+function readConfigFile(filePath: string): LynoxUserConfig | null {
   if (!existsSync(filePath)) return null;
   try {
     const raw = readFileSync(filePath, 'utf-8');
     const parsed: unknown = JSON.parse(raw);
-    const result = NodynUserConfigSchema.safeParse(parsed);
+    const result = LynoxUserConfigSchema.safeParse(parsed);
     if (!result.success) {
       process.stderr.write(`⚠ Invalid config in ${filePath}: ${result.error.issues[0]?.message ?? 'unknown error'}\n`);
       return null;
     }
-    return result.data as NodynUserConfig;
+    return result.data as LynoxUserConfig;
   } catch (err: unknown) {
     const msg = getErrorMessage(err);
     process.stderr.write(`⚠ Failed to parse ${filePath}: ${msg}\n`);
@@ -35,18 +35,18 @@ function readConfigFile(filePath: string): NodynUserConfig | null {
   }
 }
 
-let _cachedConfig: NodynUserConfig | null = null;
+let _cachedConfig: LynoxUserConfig | null = null;
 
 /**
  * Merge configs: env > project > user.
  * Result is cached after first call. Use reloadConfig() to refresh.
  */
-export function loadConfig(): NodynUserConfig {
+export function loadConfig(): LynoxUserConfig {
   if (_cachedConfig) return _cachedConfig;
   const userConfig = readConfigFile(join(getUserConfigDir(), CONFIG_FILENAME));
   const projectConfig = readConfigFile(join(getProjectConfigDir(), CONFIG_FILENAME));
 
-  const merged: NodynUserConfig = { ...userConfig };
+  const merged: LynoxUserConfig = { ...userConfig };
 
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
@@ -79,26 +79,26 @@ export function loadConfig(): NodynUserConfig {
   if (process.env['ANTHROPIC_BASE_URL']) {
     merged.api_base_url = process.env['ANTHROPIC_BASE_URL'];
   }
-  if (process.env['NODYN_WORKSPACE']) {
-    merged.workspace_dir = process.env['NODYN_WORKSPACE'];
+  if (process.env['LYNOX_WORKSPACE']) {
+    merged.workspace_dir = process.env['LYNOX_WORKSPACE'];
   }
   if (process.env['VOYAGE_API_KEY']) {
     merged.voyage_api_key = process.env['VOYAGE_API_KEY'];
   }
-  if (process.env['NODYN_EMBEDDING_PROVIDER']) {
-    const ep = process.env['NODYN_EMBEDDING_PROVIDER'];
+  if (process.env['LYNOX_EMBEDDING_PROVIDER']) {
+    const ep = process.env['LYNOX_EMBEDDING_PROVIDER'];
     if (ep === 'voyage' || ep === 'onnx' || ep === 'local') {
       merged.embedding_provider = ep;
     }
   }
-  if (process.env['NODYN_USER']) {
-    merged.user_id = process.env['NODYN_USER'];
+  if (process.env['LYNOX_USER']) {
+    merged.user_id = process.env['LYNOX_USER'];
   }
-  if (process.env['NODYN_ORG']) {
-    merged.organization_id = process.env['NODYN_ORG'];
+  if (process.env['LYNOX_ORG']) {
+    merged.organization_id = process.env['LYNOX_ORG'];
   }
-  if (process.env['NODYN_CLIENT']) {
-    merged.client_id = process.env['NODYN_CLIENT'];
+  if (process.env['LYNOX_CLIENT']) {
+    merged.client_id = process.env['LYNOX_CLIENT'];
   }
   if (process.env['GOOGLE_CLIENT_ID']) {
     merged.google_client_id = process.env['GOOGLE_CLIENT_ID'];
@@ -126,9 +126,9 @@ export function reloadConfig(): void {
 }
 
 /**
- * Write config to ~/.nodyn/config.json with 0600 permissions.
+ * Write config to ~/.lynox/config.json with 0600 permissions.
  */
-export function saveUserConfig(config: NodynUserConfig): void {
+export function saveUserConfig(config: LynoxUserConfig): void {
   const dir = getUserConfigDir();
   const filePath = join(dir, CONFIG_FILENAME);
   writeFileAtomicSync(filePath, JSON.stringify(config, null, 2) + '\n');
@@ -139,7 +139,7 @@ export function saveUserConfig(config: NodynUserConfig): void {
  * Read only the user config file (no project/env merging).
  * Used by /config to modify user settings without leaking env vars into the file.
  */
-export function readUserConfig(): NodynUserConfig {
+export function readUserConfig(): LynoxUserConfig {
   const filePath = join(getUserConfigDir(), CONFIG_FILENAME);
   return readConfigFile(filePath) ?? {};
 }
@@ -151,7 +151,7 @@ export function hasApiKey(): boolean {
   const config = loadConfig();
   if (config.api_key !== undefined && config.api_key !== null && config.api_key !== '') return true;
   // Check vault (cached — avoids repeated SQLite opens)
-  if (process.env['NODYN_VAULT_KEY'] && _vaultApiKeyExists === null) {
+  if (process.env['LYNOX_VAULT_KEY'] && _vaultApiKeyExists === null) {
     // Dynamic import avoided — caller can set via setVaultApiKeyExists()
   }
   return _vaultApiKeyExists === true;
@@ -165,15 +165,15 @@ export function setVaultApiKeyExists(exists: boolean): void {
   _vaultApiKeyExists = exists;
 }
 
-export function getNodynDir(): string {
+export function getLynoxDir(): string {
   return getUserConfigDir();
 }
 
-export function getProjectNodynDir(): string {
+export function getProjectLynoxDir(): string {
   return getProjectConfigDir();
 }
 
-export function ensureNodynDir(): string {
+export function ensureLynoxDir(): string {
   const dir = getUserConfigDir();
   return ensureDirSync(dir);
 }

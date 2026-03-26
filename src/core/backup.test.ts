@@ -9,7 +9,7 @@ import { deriveBackupKey, encryptFile, decryptFile, isEncryptedBackupFile } from
 import { computeFileChecksum, verifySqliteIntegrity } from './backup-verify.js';
 
 function createTmpDir(): string {
-  return mkdtempSync(join(tmpdir(), 'nodyn-backup-test-'));
+  return mkdtempSync(join(tmpdir(), 'lynox-backup-test-'));
 }
 
 function createTestSqlite(path: string): void {
@@ -122,21 +122,21 @@ describe('backup-verify', () => {
 });
 
 describe('BackupManager', () => {
-  let nodynDir: string;
+  let lynoxDir: string;
   let backupDir: string;
   let manager: BackupManager;
 
   beforeEach(() => {
-    nodynDir = createTmpDir();
-    backupDir = join(nodynDir, 'backups');
+    lynoxDir = createTmpDir();
+    backupDir = join(lynoxDir, 'backups');
 
     // Create test data
-    createTestSqlite(join(nodynDir, 'history.db'));
-    mkdirSync(join(nodynDir, 'memory', '_global'), { recursive: true });
-    writeFileSync(join(nodynDir, 'memory', '_global', 'facts.txt'), 'User is a developer');
-    writeFileSync(join(nodynDir, 'config.json'), JSON.stringify({ default_tier: 'sonnet' }));
+    createTestSqlite(join(lynoxDir, 'history.db'));
+    mkdirSync(join(lynoxDir, 'memory', '_global'), { recursive: true });
+    writeFileSync(join(lynoxDir, 'memory', '_global', 'facts.txt'), 'User is a developer');
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'sonnet' }));
 
-    manager = new BackupManager(nodynDir, {
+    manager = new BackupManager(lynoxDir, {
       backupDir,
       retentionDays: 30,
       encrypt: false,
@@ -144,7 +144,7 @@ describe('BackupManager', () => {
   });
 
   afterEach(() => {
-    rmSync(nodynDir, { recursive: true, force: true });
+    rmSync(lynoxDir, { recursive: true, force: true });
   });
 
   it('createBackup produces a valid backup', async () => {
@@ -248,7 +248,7 @@ describe('BackupManager', () => {
     expect(backup.success).toBe(true);
 
     // Modify the source data
-    writeFileSync(join(nodynDir, 'config.json'), JSON.stringify({ default_tier: 'opus' }));
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'opus' }));
 
     const result = await manager.restoreBackup(backup.path);
     expect(result.success).toBe(true);
@@ -256,7 +256,7 @@ describe('BackupManager', () => {
     expect(existsSync(result.pre_restore_backup_path)).toBe(true);
 
     // Config should be restored to original
-    const config = JSON.parse(readFileSync(join(nodynDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
+    const config = JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
     expect(config['default_tier']).toBe('sonnet');
   });
 
@@ -270,19 +270,19 @@ describe('BackupManager', () => {
 });
 
 describe('BackupManager (encrypted)', () => {
-  let nodynDir: string;
+  let lynoxDir: string;
   let backupDir: string;
   let manager: BackupManager;
   const VAULT_KEY = 'test-vault-key-for-backup-encryption';
 
   beforeEach(() => {
-    nodynDir = createTmpDir();
-    backupDir = join(nodynDir, 'backups');
+    lynoxDir = createTmpDir();
+    backupDir = join(lynoxDir, 'backups');
 
-    createTestSqlite(join(nodynDir, 'history.db'));
-    writeFileSync(join(nodynDir, 'config.json'), '{"api_key":"secret"}');
+    createTestSqlite(join(lynoxDir, 'history.db'));
+    writeFileSync(join(lynoxDir, 'config.json'), '{"api_key":"secret"}');
 
-    manager = new BackupManager(nodynDir, {
+    manager = new BackupManager(lynoxDir, {
       backupDir,
       retentionDays: 30,
       encrypt: true,
@@ -290,7 +290,7 @@ describe('BackupManager (encrypted)', () => {
   });
 
   afterEach(() => {
-    rmSync(nodynDir, { recursive: true, force: true });
+    rmSync(lynoxDir, { recursive: true, force: true });
   });
 
   it('creates encrypted backup', async () => {
@@ -308,13 +308,13 @@ describe('BackupManager (encrypted)', () => {
     expect(backup.success).toBe(true);
 
     // Modify source
-    writeFileSync(join(nodynDir, 'config.json'), '{"api_key":"changed"}');
+    writeFileSync(join(lynoxDir, 'config.json'), '{"api_key":"changed"}');
 
     const result = await manager.restoreBackup(backup.path);
     expect(result.success).toBe(true);
 
     // Should be decrypted back to original
-    const config = JSON.parse(readFileSync(join(nodynDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
+    const config = JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
     expect(config['api_key']).toBe('secret');
   });
 });

@@ -187,7 +187,7 @@ export function streamHandler(event: StreamEvent, stdout: NodeJS.WriteStream): v
         const retryMatch = event.message.match(/attempt (\d+)\/(\d+)/);
         spinner.updateLabel(retryMatch ? `Retrying (${retryMatch[1]}/${retryMatch[2]})...` : 'Retrying...');
       } else {
-        const prefix = event.agent !== 'nodyn' ? `[${event.agent}] ` : '';
+        const prefix = event.agent !== 'lynox' ? `[${event.agent}] ` : '';
         stderr.write(renderError(`${prefix}${event.message}`));
       }
       break;

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { captureProcessTool, promoteProcessTool } from './process.js';
 import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
-import type { IAgent, ProcessRecord, NodynUserConfig } from '../../types/index.js';
+import type { IAgent, ProcessRecord, LynoxUserConfig } from '../../types/index.js';
 
 // Mock process-capture module
 vi.mock('../../core/process-capture.js', () => ({
@@ -41,9 +41,9 @@ function makeMockRunHistory() {
   };
 }
 
-const mockConfig = { api_key: 'test-key' } as NodynUserConfig;
+const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
 
-function makeAgent(overrides: Partial<IAgent> = {}, runHistory: unknown = null, userConfig: NodynUserConfig = mockConfig): IAgent {
+function makeAgent(overrides: Partial<IAgent> = {}, runHistory: unknown = null, userConfig: LynoxUserConfig = mockConfig): IAgent {
   const toolContext = createToolContext(userConfig);
   toolContext.runHistory = runHistory as never;
   return {

@@ -1,17 +1,17 @@
-# nodyn — single-instance Docker Compose setup
+# lynox — single-instance Docker Compose setup
 #
 # Quick start:
 #   export ANTHROPIC_API_KEY=sk-ant-...
 #   docker compose up
 #
 # For daily use, connect Telegram — it's your primary interface
-# for working with nodyn from any device. See "Telegram" below.
+# for working with lynox from any device. See "Telegram" below.
 #
 # Full docs: docs/docker.md
 
 services:
-  nodyn:
-    image: ghcr.io/nodyn-ai/nodyn:latest
+  lynox:
+    image: ghcr.io/lynox-ai/lynox:latest
     stdin_open: true
     tty: true
     restart: unless-stopped
@@ -33,10 +33,10 @@ services:
       - TELEGRAM_ALLOWED_CHAT_IDS
 
       # ── Optional features ─────────────────────────────
-      # - NODYN_VAULT_KEY           # Encrypt data at rest (generate: openssl rand -base64 48)
+      # - LYNOX_VAULT_KEY           # Encrypt data at rest (generate: openssl rand -base64 48)
       # - TAVILY_API_KEY            # Web search (free: tavily.com, 1K/month)
       # - GOOGLE_CLIENT_ID          # Google Workspace OAuth
       # - GOOGLE_CLIENT_SECRET      # Google Workspace OAuth
-      # - NODYN_SENTRY_DSN          # Error reporting (opt-in, EU region)
+      # - LYNOX_SENTRY_DSN          # Error reporting (opt-in, EU region)
     volumes:
-      - ${HOME}/.nodyn:/home/nodyn/.nodyn
+      - ${HOME}/.lynox:/home/lynox/.lynox

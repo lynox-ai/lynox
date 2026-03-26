@@ -18,7 +18,7 @@ describe('SecretStore + Vault integration', () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'nodyn-store-vault-'));
+    tmpDir = mkdtempSync(join(tmpdir(), 'lynox-store-vault-'));
   });
 
   afterEach(() => {
@@ -90,8 +90,8 @@ describe('SecretStore + Vault integration', () => {
   });
 
   it('env vars take precedence over vault', () => {
-    const origVal = process.env['NODYN_SECRET_OVERLAP'];
-    process.env['NODYN_SECRET_OVERLAP'] = 'from-env-value-1234';
+    const origVal = process.env['LYNOX_SECRET_OVERLAP'];
+    process.env['LYNOX_SECRET_OVERLAP'] = 'from-env-value-1234';
     try {
       const vault = createVault();
       vault.set('OVERLAP', 'from-vault-value-1234');
@@ -101,9 +101,9 @@ describe('SecretStore + Vault integration', () => {
       vault.close();
     } finally {
       if (origVal !== undefined) {
-        process.env['NODYN_SECRET_OVERLAP'] = origVal;
+        process.env['LYNOX_SECRET_OVERLAP'] = origVal;
       } else {
-        delete process.env['NODYN_SECRET_OVERLAP'];
+        delete process.env['LYNOX_SECRET_OVERLAP'];
       }
     }
   });

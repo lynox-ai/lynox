@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type {
-  NodynUserConfig,
+  LynoxUserConfig,
   PluginContext,
   PluginExport,
   PluginHooks,
@@ -12,7 +12,7 @@ import type {
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getErrorMessage } from './utils.js';
 
-const PLUGINS_DIR = join(homedir(), '.nodyn', 'plugins');
+const PLUGINS_DIR = join(homedir(), '.lynox', 'plugins');
 const NPM_NAME_RE = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
 function ensurePluginsDir(): void {
@@ -21,13 +21,13 @@ function ensurePluginsDir(): void {
   if (!existsSync(pkgPath)) {
     writeFileAtomicSync(
       pkgPath,
-      JSON.stringify({ name: 'nodyn-plugins', private: true, type: 'module' }, null, 2) + '\n',
+      JSON.stringify({ name: 'lynox-plugins', private: true, type: 'module' }, null, 2) + '\n',
     );
   }
 }
 
 function getConfigPath(): string {
-  return join(homedir(), '.nodyn', 'config.json');
+  return join(homedir(), '.lynox', 'config.json');
 }
 
 function writeConfigAtomic(configPath: string, config: Record<string, unknown>): void {
@@ -57,11 +57,11 @@ interface LoadedPlugin {
 }
 
 export class PluginManager {
-  private readonly config: NodynUserConfig;
+  private readonly config: LynoxUserConfig;
   private readonly loaded: LoadedPlugin[] = [];
   private readonly log: (msg: string) => void;
 
-  constructor(config: NodynUserConfig, log?: ((msg: string) => void) | undefined) {
+  constructor(config: LynoxUserConfig, log?: ((msg: string) => void) | undefined) {
     this.config = config;
     this.log = log ?? (() => {});
   }
@@ -78,7 +78,7 @@ export class PluginManager {
     const { api_key: _api_key, api_base_url: _api_base_url, ...safeConfig } = this.config;
     const ctx: PluginContext = {
       projectDir: process.cwd(),
-      config: safeConfig as NodynUserConfig,
+      config: safeConfig as LynoxUserConfig,
       log: this.log,
     };
 

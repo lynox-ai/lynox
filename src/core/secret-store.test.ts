@@ -7,7 +7,7 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { SecretStore, SECRET_REF_PATTERN } from './secret-store.js';
-import type { NodynUserConfig, SecretScope } from '../types/index.js';
+import type { LynoxUserConfig, SecretScope } from '../types/index.js';
 import type { SecretVault } from './secret-vault.js';
 
 /** Create a minimal mock vault with the given entries. */
@@ -22,9 +22,9 @@ describe('SecretStore', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    // Clear all NODYN_SECRET_ env vars
+    // Clear all LYNOX_SECRET_ env vars
     for (const key of Object.keys(process.env)) {
-      if (key.startsWith('NODYN_SECRET_')) {
+      if (key.startsWith('LYNOX_SECRET_')) {
         delete process.env[key];
       }
     }
@@ -33,7 +33,7 @@ describe('SecretStore', () => {
   afterEach(() => {
     // Restore original env
     for (const key of Object.keys(process.env)) {
-      if (key.startsWith('NODYN_SECRET_') && !(key in originalEnv)) {
+      if (key.startsWith('LYNOX_SECRET_') && !(key in originalEnv)) {
         delete process.env[key];
       }
     }
@@ -42,20 +42,20 @@ describe('SecretStore', () => {
   // === Loading ===
 
   describe('loading from env vars', () => {
-    it('loads secrets from NODYN_SECRET_ prefixed env vars', () => {
-      process.env['NODYN_SECRET_GITHUB_TOKEN'] = 'ghp_abc123def456';
+    it('loads secrets from LYNOX_SECRET_ prefixed env vars', () => {
+      process.env['LYNOX_SECRET_GITHUB_TOKEN'] = 'ghp_abc123def456';
       const store = new SecretStore();
       expect(store.listNames()).toContain('GITHUB_TOKEN');
     });
 
-    it('ignores empty NODYN_SECRET_ values', () => {
-      process.env['NODYN_SECRET_EMPTY'] = '';
+    it('ignores empty LYNOX_SECRET_ values', () => {
+      process.env['LYNOX_SECRET_EMPTY'] = '';
       const store = new SecretStore();
       expect(store.listNames()).not.toContain('EMPTY');
     });
 
-    it('ignores NODYN_SECRET_ with no suffix', () => {
-      process.env['NODYN_SECRET_'] = 'value';
+    it('ignores LYNOX_SECRET_ with no suffix', () => {
+      process.env['LYNOX_SECRET_'] = 'value';
       const store = new SecretStore();
       expect(store.size).toBe(0);
     });
@@ -71,7 +71,7 @@ describe('SecretStore', () => {
     });
 
     it('env vars take precedence over vault', () => {
-      process.env['NODYN_SECRET_OVERLAP'] = 'from-env-value';
+      process.env['LYNOX_SECRET_OVERLAP'] = 'from-env-value';
       const vault = mockVault([
         ['OVERLAP', { value: 'from-vault-value', scope: 'any', ttlMs: 0 }],
       ]);
@@ -83,7 +83,7 @@ describe('SecretStore', () => {
 
   describe('loading from config', () => {
     it('loads well-known config fields as secrets', () => {
-      const config: NodynUserConfig = {
+      const config: LynoxUserConfig = {
         api_key: 'sk-ant-config-key123',
         voyage_api_key: 'pa-voyage-key1234',
       };
@@ -93,7 +93,7 @@ describe('SecretStore', () => {
     });
 
     it('skips undefined config values', () => {
-      const config: NodynUserConfig = {
+      const config: LynoxUserConfig = {
         api_key: 'sk-ant-valid-key12',
         // voyage_api_key is undefined
       };
@@ -107,7 +107,7 @@ describe('SecretStore', () => {
 
   describe('masking', () => {
     it('getMasked returns masked version of secret', () => {
-      process.env['NODYN_SECRET_TOKEN'] = 'ghp_abc123def456';
+      process.env['LYNOX_SECRET_TOKEN'] = 'ghp_abc123def456';
       const store = new SecretStore();
       expect(store.getMasked('TOKEN')).toBe('***f456');
     });
@@ -118,7 +118,7 @@ describe('SecretStore', () => {
     });
 
     it('maskSecrets replaces all occurrences in text', () => {
-      process.env['NODYN_SECRET_KEY1'] = 'secret-value-1234';
+      process.env['LYNOX_SECRET_KEY1'] = 'secret-value-1234';
       const store = new SecretStore();
       const input = 'Key is secret-value-1234 and again secret-value-1234 here';
       const masked = store.maskSecrets(input);
@@ -127,42 +127,42 @@ describe('SecretStore', () => {
     });
 
     it('maskSecrets masks short secrets (>= 2 chars)', () => {
-      process.env['NODYN_SECRET_SHORT2'] = 'ab';
-      process.env['NODYN_SECRET_SHORT3'] = 'abc';
+      process.env['LYNOX_SECRET_SHORT2'] = 'ab';
+      process.env['LYNOX_SECRET_SHORT3'] = 'abc';
       const store = new SecretStore();
       expect(store.maskSecrets('has ab here')).not.toContain('ab');
       expect(store.maskSecrets('has abc here')).not.toContain('abc');
-      delete process.env['NODYN_SECRET_SHORT2'];
-      delete process.env['NODYN_SECRET_SHORT3'];
+      delete process.env['LYNOX_SECRET_SHORT2'];
+      delete process.env['LYNOX_SECRET_SHORT3'];
     });
 
     it('maskSecrets skips single-char secrets', () => {
-      process.env['NODYN_SECRET_TINY'] = 'x';
+      process.env['LYNOX_SECRET_TINY'] = 'x';
       const store = new SecretStore();
       const input = 'This contains x in the text';
       expect(store.maskSecrets(input)).toBe(input); // unchanged
-      delete process.env['NODYN_SECRET_TINY'];
+      delete process.env['LYNOX_SECRET_TINY'];
     });
 
     it('containsSecret detects secret values in text', () => {
-      process.env['NODYN_SECRET_TOKEN'] = 'mysecrettoken123';
+      process.env['LYNOX_SECRET_TOKEN'] = 'mysecrettoken123';
       const store = new SecretStore();
       expect(store.containsSecret('Here is mysecrettoken123 in text')).toBe(true);
       expect(store.containsSecret('No secrets here')).toBe(false);
     });
 
     it('containsSecret detects 2-char secrets', () => {
-      process.env['NODYN_SECRET_SHORT'] = 'ab';
+      process.env['LYNOX_SECRET_SHORT'] = 'ab';
       const store = new SecretStore();
       expect(store.containsSecret('has ab here')).toBe(true);
-      delete process.env['NODYN_SECRET_SHORT'];
+      delete process.env['LYNOX_SECRET_SHORT'];
     });
 
     it('containsSecret ignores single-char secrets', () => {
-      process.env['NODYN_SECRET_TINY'] = 'x';
+      process.env['LYNOX_SECRET_TINY'] = 'x';
       const store = new SecretStore();
       expect(store.containsSecret('x')).toBe(false);
-      delete process.env['NODYN_SECRET_TINY'];
+      delete process.env['LYNOX_SECRET_TINY'];
     });
   });
 
@@ -170,14 +170,14 @@ describe('SecretStore', () => {
 
   describe('resolution', () => {
     it('resolve returns value when consented and not expired', () => {
-      process.env['NODYN_SECRET_API'] = 'sk-test-api-key-val';
+      process.env['LYNOX_SECRET_API'] = 'sk-test-api-key-val';
       const store = new SecretStore();
       store.recordConsent('API');
       expect(store.resolve('API')).toBe('sk-test-api-key-val');
     });
 
     it('resolve returns null when not consented', () => {
-      process.env['NODYN_SECRET_API'] = 'sk-test-api-key-val';
+      process.env['LYNOX_SECRET_API'] = 'sk-test-api-key-val';
       const store = new SecretStore();
       expect(store.resolve('API')).toBeNull();
     });
@@ -217,21 +217,21 @@ describe('SecretStore', () => {
 
   describe('consent', () => {
     it('hasConsent returns false initially', () => {
-      process.env['NODYN_SECRET_KEY'] = 'secret-value-1234';
+      process.env['LYNOX_SECRET_KEY'] = 'secret-value-1234';
       const store = new SecretStore();
       expect(store.hasConsent('KEY')).toBe(false);
     });
 
     it('recordConsent enables resolution', () => {
-      process.env['NODYN_SECRET_KEY'] = 'secret-value-1234';
+      process.env['LYNOX_SECRET_KEY'] = 'secret-value-1234';
       const store = new SecretStore();
       store.recordConsent('KEY');
       expect(store.hasConsent('KEY')).toBe(true);
     });
 
     it('consent is per-secret isolated', () => {
-      process.env['NODYN_SECRET_A'] = 'value-a-123456789';
-      process.env['NODYN_SECRET_B'] = 'value-b-987654321';
+      process.env['LYNOX_SECRET_A'] = 'value-a-123456789';
+      process.env['LYNOX_SECRET_B'] = 'value-b-987654321';
       const store = new SecretStore();
       store.recordConsent('A');
       expect(store.hasConsent('A')).toBe(true);
@@ -239,8 +239,8 @@ describe('SecretStore', () => {
     });
 
     it('listNames returns all loaded secret names', () => {
-      process.env['NODYN_SECRET_X'] = 'secret-x-value123';
-      process.env['NODYN_SECRET_Y'] = 'secret-y-value456';
+      process.env['LYNOX_SECRET_X'] = 'secret-x-value123';
+      process.env['LYNOX_SECRET_Y'] = 'secret-y-value456';
       const store = new SecretStore();
       const names = store.listNames();
       expect(names).toContain('X');
@@ -252,7 +252,7 @@ describe('SecretStore', () => {
 
   describe('TTL', () => {
     it('no TTL means never expired', () => {
-      process.env['NODYN_SECRET_PERM'] = 'permanent-secret1';
+      process.env['LYNOX_SECRET_PERM'] = 'permanent-secret1';
       const store = new SecretStore();
       expect(store.isExpired('PERM')).toBe(false);
     });

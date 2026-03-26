@@ -9,7 +9,7 @@ export class ChangesetManager {
   private readonly backupDir: string;
 
   constructor(private readonly cwd: string, _runId: string) {
-    this.backupDir = mkdtempSync(join(tmpdir(), 'nodyn-changeset-'));
+    this.backupDir = mkdtempSync(join(tmpdir(), 'lynox-changeset-'));
   }
 
   /**

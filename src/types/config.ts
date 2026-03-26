@@ -5,7 +5,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 import type { ModelTier, ThinkingMode, EffortLevel } from './models.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
 import type { TabQuestion } from './agent.js';
-import type { IMemory, MemoryScopeRef, NodynContext } from './memory.js';
+import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
@@ -77,7 +77,7 @@ export interface MCPServer {
 
 // === 4.7 Beta Headers ===
 
-export const NODYN_BETAS: AnthropicBeta[] = [
+export const LYNOX_BETAS: AnthropicBeta[] = [
   'token-efficient-tools-2025-02-19',
 ];
 
@@ -100,7 +100,7 @@ export interface SpawnSpec {
   isolation?:        IsolationConfig | undefined;
 }
 
-export interface NodynConfig {
+export interface LynoxConfig {
   model?:          ModelTier | undefined;
   systemPrompt?:   string | undefined;
   thinking?:       ThinkingMode | undefined;
@@ -110,12 +110,12 @@ export interface NodynConfig {
   memory?:         boolean | undefined;
   promptUser?:     ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?:     ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
-  context?:        NodynContext | undefined;
+  context?:        LynoxContext | undefined;
 }
 
 // === User Config ===
 
-export interface NodynUserConfig {
+export interface LynoxUserConfig {
   api_key?: string | undefined;
   api_base_url?: string | undefined;
   default_tier?: ModelTier | undefined;
@@ -181,13 +181,13 @@ export interface NodynUserConfig {
   enforce_https?: boolean | undefined;
   /** Sentry DSN for opt-in error reporting. No data sent unless configured. */
   sentry_dsn?: string | undefined;
-  /** Directory for backup storage. Default: ~/.nodyn/backups */
+  /** Directory for backup storage. Default: ~/.lynox/backups */
   backup_dir?: string | undefined;
   /** Cron schedule for automatic backups. Default: '0 3 * * *' (daily 3 AM). */
   backup_schedule?: string | undefined;
   /** Days to retain old backups. Default: 30. Set 0 to disable auto-deletion. */
   backup_retention_days?: number | undefined;
-  /** Encrypt backups with vault key. Default: true when NODYN_VAULT_KEY is set. */
+  /** Encrypt backups with vault key. Default: true when LYNOX_VAULT_KEY is set. */
   backup_encrypt?: boolean | undefined;
   /** Upload backups to Google Drive. Default: true when Google auth is configured with drive.file scope. */
   backup_gdrive?: boolean | undefined;
@@ -238,7 +238,7 @@ export interface DataStoreSort {
 
 export interface PluginContext {
   projectDir: string;
-  config: NodynUserConfig;
+  config: LynoxUserConfig;
   log: (msg: string) => void;
 }
 

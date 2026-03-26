@@ -60,23 +60,23 @@ describe('initDebugSubscriber', () => {
     stderrSpy.mockRestore();
   });
 
-  it('returns false when NODYN_DEBUG is not set', () => {
-    delete process.env['NODYN_DEBUG'];
+  it('returns false when LYNOX_DEBUG is not set', () => {
+    delete process.env['LYNOX_DEBUG'];
     expect(initDebugSubscriber()).toBe(false);
     expect(stderrSpy).not.toHaveBeenCalled();
   });
 
-  it('returns true when NODYN_DEBUG=1', () => {
-    process.env['NODYN_DEBUG'] = '1';
+  it('returns true when LYNOX_DEBUG=1', () => {
+    process.env['LYNOX_DEBUG'] = '1';
     expect(initDebugSubscriber()).toBe(true);
     expect(stderrSpy).toHaveBeenCalled();
     // Check activation message
     const calls = stderrSpy.mock.calls.map(c => String(c[0]));
-    expect(calls.some(c => c.includes('[nodyn:debug] Active'))).toBe(true);
+    expect(calls.some(c => c.includes('[lynox:debug] Active'))).toBe(true);
   });
 
   it('only initializes once (idempotent)', () => {
-    process.env['NODYN_DEBUG'] = '1';
+    process.env['LYNOX_DEBUG'] = '1';
     initDebugSubscriber();
     const callCount = stderrSpy.mock.calls.length;
     initDebugSubscriber();
@@ -85,7 +85,7 @@ describe('initDebugSubscriber', () => {
   });
 
   it('logs subscription confirmations for each group channel', () => {
-    process.env['NODYN_DEBUG'] = 'tool';
+    process.env['LYNOX_DEBUG'] = 'tool';
     initDebugSubscriber();
     const calls = stderrSpy.mock.calls.map(c => String(c[0]));
     expect(calls.some(c => c.includes('subscribed: toolStart'))).toBe(true);
@@ -95,7 +95,7 @@ describe('initDebugSubscriber', () => {
   });
 
   it('warns in production environment', () => {
-    process.env['NODYN_DEBUG'] = '1';
+    process.env['LYNOX_DEBUG'] = '1';
     process.env['NODE_ENV'] = 'production';
     initDebugSubscriber();
     const calls = stderrSpy.mock.calls.map(c => String(c[0]));
@@ -103,7 +103,7 @@ describe('initDebugSubscriber', () => {
   });
 
   it('subscribes to channels and formats tool events', async () => {
-    process.env['NODYN_DEBUG'] = 'tool';
+    process.env['LYNOX_DEBUG'] = 'tool';
     initDebugSubscriber();
 
     // Trigger a channel event
@@ -111,11 +111,11 @@ describe('initDebugSubscriber', () => {
     ch.toolStart.publish({ name: 'bash', agent: 'main' });
 
     const calls = stderrSpy.mock.calls.map(c => String(c[0]));
-    expect(calls.some(c => c.includes('nodyn:tool:start') && c.includes('tool=bash') && c.includes('agent=main'))).toBe(true);
+    expect(calls.some(c => c.includes('lynox:tool:start') && c.includes('tool=bash') && c.includes('agent=main'))).toBe(true);
   });
 
   it('formats spawn events correctly', async () => {
-    process.env['NODYN_DEBUG'] = 'spawn';
+    process.env['LYNOX_DEBUG'] = 'spawn';
     initDebugSubscriber();
 
     const { channels: ch } = await import('./observability.js');
@@ -126,14 +126,14 @@ describe('initDebugSubscriber', () => {
   });
 
   it('formats secret access without leaking values', async () => {
-    process.env['NODYN_DEBUG'] = 'secret';
+    process.env['LYNOX_DEBUG'] = 'secret';
     initDebugSubscriber();
 
     const { channels: ch } = await import('./observability.js');
     ch.secretAccess.publish({ name: 'MY_API_KEY', action: 'resolve' });
 
     const calls = stderrSpy.mock.calls.map(c => String(c[0]));
-    const secretLine = calls.find(c => c.includes('nodyn:secret:access'));
+    const secretLine = calls.find(c => c.includes('lynox:secret:access'));
     expect(secretLine).toBeDefined();
     expect(secretLine).toContain('name=MY_API_KEY');
     expect(secretLine).toContain('action=resolve');
@@ -142,7 +142,7 @@ describe('initDebugSubscriber', () => {
   });
 
   it('production warning mentions sensitive data', () => {
-    process.env['NODYN_DEBUG'] = '1';
+    process.env['LYNOX_DEBUG'] = '1';
     process.env['NODE_ENV'] = 'production';
     initDebugSubscriber();
     const calls = stderrSpy.mock.calls.map(c => String(c[0]));
@@ -150,7 +150,7 @@ describe('initDebugSubscriber', () => {
   });
 
   it('truncates long memory content', async () => {
-    process.env['NODYN_DEBUG'] = 'memory';
+    process.env['LYNOX_DEBUG'] = 'memory';
     initDebugSubscriber();
 
     const { channels: ch } = await import('./observability.js');
@@ -158,7 +158,7 @@ describe('initDebugSubscriber', () => {
     ch.memoryStore.publish({ namespace: 'context', content: longContent });
 
     const calls = stderrSpy.mock.calls.map(c => String(c[0]));
-    const memLine = calls.find(c => c.includes('nodyn:memory:store'));
+    const memLine = calls.find(c => c.includes('lynox:memory:store'));
     expect(memLine).toBeDefined();
     // Content should be truncated (80 chars + ellipsis)
     expect(memLine!.length).toBeLessThan(250);

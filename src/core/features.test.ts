@@ -5,10 +5,10 @@ import type { FeatureFlag } from './features.js';
 describe('features', () => {
   const savedEnv: Record<string, string | undefined> = {};
   const envVars = [
-    'NODYN_FEATURE_TRIGGERS',
-    'NODYN_FEATURE_PLUGINS',
-    'NODYN_FEATURE_WORKER_POOL',
-    'NODYN_FEATURE_CUSTOM',
+    'LYNOX_FEATURE_TRIGGERS',
+    'LYNOX_FEATURE_PLUGINS',
+    'LYNOX_FEATURE_WORKER_POOL',
+    'LYNOX_FEATURE_CUSTOM',
   ];
 
   beforeEach(() => {
@@ -37,22 +37,22 @@ describe('features', () => {
     });
 
     it('returns true when env var set to "1"', () => {
-      process.env['NODYN_FEATURE_PLUGINS'] = '1';
+      process.env['LYNOX_FEATURE_PLUGINS'] = '1';
       expect(isFeatureEnabled('plugins')).toBe(true);
     });
 
     it('returns true when env var set to "true"', () => {
-      process.env['NODYN_FEATURE_PLUGINS'] = 'true';
+      process.env['LYNOX_FEATURE_PLUGINS'] = 'true';
       expect(isFeatureEnabled('plugins')).toBe(true);
     });
 
     it('returns false when env var set to "0"', () => {
-      process.env['NODYN_FEATURE_PLUGINS'] = '0';
+      process.env['LYNOX_FEATURE_PLUGINS'] = '0';
       expect(isFeatureEnabled('plugins')).toBe(false);
     });
 
     it('returns false when env var set to "false"', () => {
-      process.env['NODYN_FEATURE_WORKER_POOL'] = 'false';
+      process.env['LYNOX_FEATURE_WORKER_POOL'] = 'false';
       expect(isFeatureEnabled('worker-pool')).toBe(false);
     });
 
@@ -63,7 +63,7 @@ describe('features', () => {
 
   describe('getFeatureFlags', () => {
     it('returns all flags with their current state', () => {
-      process.env['NODYN_FEATURE_PLUGINS'] = '1';
+      process.env['LYNOX_FEATURE_PLUGINS'] = '1';
 
       const flags = getFeatureFlags();
       expect(flags['plugins']).toBe(true);
@@ -71,8 +71,8 @@ describe('features', () => {
     });
 
     it('includes dynamic flags', () => {
-      registerFeature('custom', 'NODYN_FEATURE_CUSTOM', false);
-      process.env['NODYN_FEATURE_CUSTOM'] = '1';
+      registerFeature('custom', 'LYNOX_FEATURE_CUSTOM', false);
+      process.env['LYNOX_FEATURE_CUSTOM'] = '1';
 
       const flags = getFeatureFlags();
       expect(flags['custom']).toBe(true);
@@ -81,8 +81,8 @@ describe('features', () => {
 
   describe('getFeatureEnvVar', () => {
     it('returns correct env var name for core flags', () => {
-      expect(getFeatureEnvVar('plugins')).toBe('NODYN_FEATURE_PLUGINS');
-      expect(getFeatureEnvVar('worker-pool')).toBe('NODYN_FEATURE_WORKER_POOL');
+      expect(getFeatureEnvVar('plugins')).toBe('LYNOX_FEATURE_PLUGINS');
+      expect(getFeatureEnvVar('worker-pool')).toBe('LYNOX_FEATURE_WORKER_POOL');
     });
 
     it('returns undefined for unknown flag', () => {
@@ -90,36 +90,36 @@ describe('features', () => {
     });
 
     it('returns env var for dynamic flag', () => {
-      registerFeature('custom', 'NODYN_FEATURE_CUSTOM', false);
-      expect(getFeatureEnvVar('custom')).toBe('NODYN_FEATURE_CUSTOM');
+      registerFeature('custom', 'LYNOX_FEATURE_CUSTOM', false);
+      expect(getFeatureEnvVar('custom')).toBe('LYNOX_FEATURE_CUSTOM');
     });
   });
 
   describe('registerFeature', () => {
     it('registers a dynamic feature flag', () => {
-      registerFeature('custom', 'NODYN_FEATURE_CUSTOM', false);
+      registerFeature('custom', 'LYNOX_FEATURE_CUSTOM', false);
       expect(isFeatureEnabled('custom')).toBe(false);
 
-      process.env['NODYN_FEATURE_CUSTOM'] = '1';
+      process.env['LYNOX_FEATURE_CUSTOM'] = '1';
       expect(isFeatureEnabled('custom')).toBe(true);
     });
 
     it('respects default value', () => {
-      registerFeature('on-by-default', 'NODYN_FEATURE_ON', true);
+      registerFeature('on-by-default', 'LYNOX_FEATURE_ON', true);
       expect(isFeatureEnabled('on-by-default')).toBe(true);
     });
 
     it('env var overrides default', () => {
-      registerFeature('on-by-default', 'NODYN_FEATURE_ON', true);
-      process.env['NODYN_FEATURE_ON'] = '0';
+      registerFeature('on-by-default', 'LYNOX_FEATURE_ON', true);
+      process.env['LYNOX_FEATURE_ON'] = '0';
       expect(isFeatureEnabled('on-by-default')).toBe(false);
-      delete process.env['NODYN_FEATURE_ON'];
+      delete process.env['LYNOX_FEATURE_ON'];
     });
   });
 
   describe('clearDynamicFeatures', () => {
     it('removes all dynamic flags', () => {
-      registerFeature('custom', 'NODYN_FEATURE_CUSTOM', true);
+      registerFeature('custom', 'LYNOX_FEATURE_CUSTOM', true);
       expect(isFeatureEnabled('custom')).toBe(true);
 
       clearDynamicFeatures();

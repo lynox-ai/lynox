@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { ToolEntry, NodynUserConfig } from '../types/index.js';
+import type { ToolEntry, LynoxUserConfig } from '../types/index.js';
 import type { RoleConfig } from '../core/roles.js';
 
 const mockSend = vi.fn().mockResolvedValue('mock result');
@@ -24,7 +24,7 @@ import { Agent } from '../core/agent.js';
 import { spawnInline, resolveModel } from './runtime-adapter.js';
 import type { ManifestStep } from './types.js';
 
-const mockConfig = { api_key: 'test-key' } as unknown as NodynUserConfig;
+const mockConfig = { api_key: 'test-key' } as unknown as LynoxUserConfig;
 
 const mockParentTools: ToolEntry[] = [
   {

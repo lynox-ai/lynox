@@ -19,7 +19,7 @@ describe('detectProjectRoot', () => {
   let dir: string;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'nodyn-proj-'));
+    dir = await mkdtemp(join(tmpdir(), 'lynox-proj-'));
   });
 
   afterEach(async () => {
@@ -58,8 +58,8 @@ describe('detectProjectRoot', () => {
     expect(result).toBeNull();
   });
 
-  it('detects .nodyn-project as project root', async () => {
-    await writeFile(join(dir, '.nodyn-project'), '');
+  it('detects .lynox-project as project root', async () => {
+    await writeFile(join(dir, '.lynox-project'), '');
     const result = detectProjectRoot(dir);
     expect(result).not.toBeNull();
     expect(result!.root).toBe(resolve(dir));
@@ -78,7 +78,7 @@ describe('detectProjectRoot', () => {
   it('returns null when no marker found', async () => {
     // Use a temp dir with no markers — walk up will hit filesystem root
     // Create an isolated dir with no markers at all
-    const isolated = await mkdtemp(join(tmpdir(), 'nodyn-noproj-'));
+    const isolated = await mkdtemp(join(tmpdir(), 'lynox-noproj-'));
     try {
       const result = detectProjectRoot(isolated);
       // Could be null or could find a marker in a parent (e.g. if tmpdir has .git)
@@ -148,7 +148,7 @@ describe('generateBriefing', () => {
   let history: RunHistory;
 
   beforeEach(async () => {
-    dbDir = await mkdtemp(join(tmpdir(), 'nodyn-briefing-'));
+    dbDir = await mkdtemp(join(tmpdir(), 'lynox-briefing-'));
     history = new RunHistory(join(dbDir, 'history.db'));
   });
 
@@ -253,7 +253,7 @@ describe('buildFileManifest', () => {
   let dir: string;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'nodyn-manifest-'));
+    dir = await mkdtemp(join(tmpdir(), 'lynox-manifest-'));
   });
 
   afterEach(async () => {
@@ -460,7 +460,7 @@ describe('saveManifest / loadManifest', () => {
   let dir: string;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'nodyn-manifest-io-'));
+    dir = await mkdtemp(join(tmpdir(), 'lynox-manifest-io-'));
   });
 
   afterEach(async () => {
@@ -499,7 +499,7 @@ describe('generateBriefing enrichments', () => {
   let history: RunHistory;
 
   beforeEach(async () => {
-    dbDir = await mkdtemp(join(tmpdir(), 'nodyn-brief-enrich-'));
+    dbDir = await mkdtemp(join(tmpdir(), 'lynox-brief-enrich-'));
     history = new RunHistory(join(dbDir, 'history.db'));
   });
 

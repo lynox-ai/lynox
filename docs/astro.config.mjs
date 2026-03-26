@@ -2,20 +2,20 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://docs.nodyn.dev',
+  site: 'https://docs.lynox.dev',
   integrations: [
     starlight({
-      title: 'nodyn',
+      title: 'lynox',
       description: 'The AI that knows your business — persistent knowledge, autonomous workflows, tool connections.',
       logo: {
         src: './src/assets/logo.svg',
         replacesTitle: false,
       },
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/nodyn-ai/nodyn' },
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/lynox-ai/lynox' },
       ],
       editLink: {
-        baseUrl: 'https://github.com/nodyn-ai/nodyn/edit/main/docs/',
+        baseUrl: 'https://github.com/lynox-ai/lynox/edit/main/docs/',
       },
       customCss: ['./src/styles/custom.css'],
       head: [
@@ -23,7 +23,7 @@ export default defineConfig({
           tag: 'script',
           content: `document.addEventListener('DOMContentLoaded', () => {
             const link = document.querySelector('.site-title');
-            if (link) link.href = 'https://nodyn.dev';
+            if (link) link.href = 'https://lynox.dev';
           });`,
         },
       ],

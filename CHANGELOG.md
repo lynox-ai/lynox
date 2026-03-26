@@ -46,7 +46,7 @@ The AI that knows your business. Persistent knowledge, autonomous workflows, too
 
 - **Telegram bot** — Primary mobile/async interface with rich status messages, inline keyboards, and follow-up suggestions
 - **MCP server** — stdio + HTTP SSE transport with sync and async lifecycle, Bearer token auth, and per-IP rate limiting
-- **Plugin system** — Validated plugin loading from `~/.nodyn/plugins/`
+- **Plugin system** — Validated plugin loading from `~/.lynox/plugins/`
 
 ### Security
 

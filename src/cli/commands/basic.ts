@@ -76,7 +76,7 @@ export async function handleExport(parts: string[], _session: Session, ctx: CLIC
       writeFileAtomicSync(exportTarget, state.lastResponse);
       ctx.stdout.write(`${GREEN}✓${RESET} Exported to ${exportTarget}\n`);
     } else {
-      const exportPath = `nodyn-export-${Date.now()}.md`;
+      const exportPath = `lynox-export-${Date.now()}.md`;
       writeFileAtomicSync(exportPath, state.lastResponse);
       ctx.stdout.write(`${GREEN}✓${RESET} Exported to ${exportPath}\n`);
     }

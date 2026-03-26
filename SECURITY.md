@@ -2,9 +2,9 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in nodyn, please report it responsibly:
+If you discover a security vulnerability in lynox, please report it responsibly:
 
-**Email:** security@nodyn.dev
+**Email:** security@lynox.ai
 
 Please include:
 - Description of the vulnerability
@@ -27,14 +27,14 @@ We will acknowledge your report within 48 hours and aim to provide a fix within 
 
 ### API Keys
 
-nodyn uses a Bring Your Own Key (BYOK) model. Your Anthropic API key is stored locally in `~/.nodyn/config.json` and never transmitted to any server other than the Anthropic API (or your configured `ANTHROPIC_BASE_URL`).
+lynox uses a Bring Your Own Key (BYOK) model. Your Anthropic API key is stored locally in `~/.lynox/config.json` and never transmitted to any server other than the Anthropic API (or your configured `ANTHROPIC_BASE_URL`).
 
 ### Secret Vault
 
-Sensitive values can be stored in an encrypted vault (`~/.nodyn/vault.db`):
+Sensitive values can be stored in an encrypted vault (`~/.lynox/vault.db`):
 - AES-256-GCM encryption
 - PBKDF2 with 600,000 iterations (SHA-512)
-- Requires `NODYN_VAULT_KEY` environment variable
+- Requires `LYNOX_VAULT_KEY` environment variable
 
 ### Bash Tool
 
@@ -49,7 +49,7 @@ The HTTP tool includes SSRF protection to prevent requests to internal networks 
 
 ### Workspace Sandbox
 
-When running in Docker, nodyn operates in a sandboxed workspace:
+When running in Docker, lynox operates in a sandboxed workspace:
 - Write access limited to `/workspace` and `/tmp`
 - Read-only root filesystem
 - Non-root user (uid 1001)
@@ -65,4 +65,4 @@ Tool execution can be controlled via pre-approval patterns:
 
 ### Plugin Isolation
 
-Plugins are loaded only from `~/.nodyn/plugins/node_modules/` with validated package names. Secret content is stripped from plugin context.
+Plugins are loaded only from `~/.lynox/plugins/node_modules/` with validated package names. Secret content is stripped from plugin context.

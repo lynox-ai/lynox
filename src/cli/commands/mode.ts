@@ -11,7 +11,7 @@ import type { CLICtx } from './types.js';
 
 export async function handleMode(_parts: string[], _session: Session, ctx: CLICtx): Promise<boolean> {
   ctx.stdout.write(`${BOLD}Mode:${RESET} interactive (assistant)\n`);
-  ctx.stdout.write(`${DIM}nodyn always runs in interactive mode. For background work, use task_create with assignee "nodyn".${RESET}\n`);
+  ctx.stdout.write(`${DIM}lynox always runs in interactive mode. For background work, use task_create with assignee "lynox".${RESET}\n`);
   return true;
 }
 
@@ -59,7 +59,7 @@ export async function handleProfile(parts: string[], session: Session, ctx: CLIC
   if (!profileName || profileName === 'list') {
     const profiles = listProfiles();
     if (profiles.length === 0) {
-      ctx.stdout.write(`No profiles found. Create them in ${DIM}~/.nodyn/profiles/{name}.json${RESET}\n`);
+      ctx.stdout.write(`No profiles found. Create them in ${DIM}~/.lynox/profiles/{name}.json${RESET}\n`);
     } else {
       ctx.stdout.write(`${BOLD}Profiles:${RESET}\n`);
       for (const p of profiles) {

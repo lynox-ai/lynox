@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { getNodynDir } from './config.js';
+import { getLynoxDir } from './config.js';
 import { getErrorMessage } from './utils.js';
 import type {
   DataStoreSchemaType,
@@ -47,7 +47,7 @@ export class DataStore {
   private db: Database.Database;
 
   constructor(dbPath?: string | undefined) {
-    const path = dbPath ?? join(getNodynDir(), 'datastore.db');
+    const path = dbPath ?? join(getLynoxDir(), 'datastore.db');
     mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');

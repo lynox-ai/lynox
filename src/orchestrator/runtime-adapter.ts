@@ -1,7 +1,7 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
 import { MODEL_MAP } from '../types/index.js';
-import type { IAgent, ToolEntry, NodynUserConfig, ModelTier, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
+import type { IAgent, ToolEntry, LynoxUserConfig, ModelTier, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from './types.js';
 import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
@@ -86,7 +86,7 @@ export async function spawnViaAgent(
   step: ManifestStep,
   agentDef: AgentDef,
   stepContext: Record<string, unknown>,
-  config: NodynUserConfig,
+  config: LynoxUserConfig,
   gateAdapter: GateAdapter | undefined,
   runId: string,
   preApproval?: PreApprovalSet | undefined,
@@ -160,7 +160,7 @@ export async function spawnViaAgent(
 export async function spawnInline(
   step: ManifestStep,
   stepContext: Record<string, unknown>,
-  config: NodynUserConfig,
+  config: LynoxUserConfig,
   parentTools: ToolEntry[],
   preApproval?: PreApprovalSet | undefined,
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
@@ -259,7 +259,7 @@ export async function spawnMock(
 export async function spawnPipeline(
   step: ManifestStep,
   stepContext: Record<string, unknown>,
-  config: NodynUserConfig,
+  config: LynoxUserConfig,
   parentTools: ToolEntry[],
   depth: number,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {

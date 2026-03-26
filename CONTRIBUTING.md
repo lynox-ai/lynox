@@ -1,12 +1,12 @@
-# Contributing to nodyn
+# Contributing to lynox
 
-Thanks for your interest in contributing to nodyn.
+Thanks for your interest in contributing to lynox.
 
 ## Getting Started
 
 ```bash
-git clone https://github.com/nodyn-ai/nodyn.git
-cd nodyn
+git clone https://github.com/lynox-ai/lynox.git
+cd lynox
 npm install
 npm run dev
 ```
@@ -32,7 +32,7 @@ npx vitest run src/core/memory.test.ts
 
 ### Git hooks
 
-nodyn uses [lefthook](https://github.com/evilmartians/lefthook) for pre-commit (typecheck) and pre-push (secret scanning via [gitleaks](https://github.com/gitleaks/gitleaks)). Install both before contributing:
+lynox uses [lefthook](https://github.com/evilmartians/lefthook) for pre-commit (typecheck) and pre-push (secret scanning via [gitleaks](https://github.com/gitleaks/gitleaks)). Install both before contributing:
 
 ```bash
 brew install lefthook gitleaks
@@ -71,7 +71,7 @@ See [docs/architecture.md](docs/architecture.md) for the module map, data flow, 
 
 ## Reporting Bugs
 
-Open a [GitHub issue](https://github.com/nodyn-ai/nodyn/issues) with:
+Open a [GitHub issue](https://github.com/lynox-ai/lynox/issues) with:
 - Steps to reproduce
 - Expected vs actual behavior
 - Node.js version and OS

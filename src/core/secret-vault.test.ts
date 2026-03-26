@@ -7,7 +7,7 @@ import { SecretVault, estimateKeyEntropy } from './secret-vault.js';
 const TEST_KEY = 'test-master-key-for-vault-testing-1234';
 
 function createTmpDir(): string {
-  return mkdtempSync(join(tmpdir(), 'nodyn-vault-test-'));
+  return mkdtempSync(join(tmpdir(), 'lynox-vault-test-'));
 }
 
 describe('SecretVault', () => {
@@ -38,8 +38,8 @@ describe('SecretVault', () => {
     });
 
     it('throws without master key', () => {
-      const origEnv = process.env['NODYN_VAULT_KEY'];
-      delete process.env['NODYN_VAULT_KEY'];
+      const origEnv = process.env['LYNOX_VAULT_KEY'];
+      delete process.env['LYNOX_VAULT_KEY'];
       try {
         expect(() => new SecretVault({
           path: join(tmpDir, 'vault.db'),
@@ -47,14 +47,14 @@ describe('SecretVault', () => {
         })).toThrow('Vault master key required');
       } finally {
         if (origEnv !== undefined) {
-          process.env['NODYN_VAULT_KEY'] = origEnv;
+          process.env['LYNOX_VAULT_KEY'] = origEnv;
         }
       }
     });
 
-    it('uses NODYN_VAULT_KEY env var when no masterKey option', () => {
-      const origEnv = process.env['NODYN_VAULT_KEY'];
-      process.env['NODYN_VAULT_KEY'] = 'env-based-key-1234567890';
+    it('uses LYNOX_VAULT_KEY env var when no masterKey option', () => {
+      const origEnv = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = 'env-based-key-1234567890';
       try {
         const vault = new SecretVault({ path: join(tmpDir, 'vault.db') });
         vault.set('TEST', 'hello-world-1234');
@@ -62,9 +62,9 @@ describe('SecretVault', () => {
         vault.close();
       } finally {
         if (origEnv !== undefined) {
-          process.env['NODYN_VAULT_KEY'] = origEnv;
+          process.env['LYNOX_VAULT_KEY'] = origEnv;
         } else {
-          delete process.env['NODYN_VAULT_KEY'];
+          delete process.env['LYNOX_VAULT_KEY'];
         }
       }
     });

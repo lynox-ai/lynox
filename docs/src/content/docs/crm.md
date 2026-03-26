@@ -3,9 +3,9 @@ title: "CRM"
 description: "Contact and deal pipeline management"
 ---
 
-nodyn remembers everyone you work with — clients, partners, contacts, and deals. Just mention people in conversation and nodyn tracks them automatically. Ask *"What's the status with [client]?"* or *"Show me my open deals"* anytime via Telegram.
+lynox remembers everyone you work with — clients, partners, contacts, and deals. Just mention people in conversation and lynox tracks them automatically. Ask *"What's the status with [client]?"* or *"Show me my open deals"* anytime via Telegram.
 
-No setup needed. No data entry. nodyn learns from your conversations and organizes contacts, companies, and deals automatically.
+No setup needed. No data entry. lynox learns from your conversations and organizes contacts, companies, and deals automatically.
 
 ## How It Works
 
@@ -107,7 +107,7 @@ The CRM data is automatically indexed in the Knowledge Graph:
 - Context: "Roland prefers email communication"
 - Deal history: "v-skin.ch Pro deal at CHF 4800 in negotiation"
 
-This means when you ask "What do I know about Roland?", nodyn combines structured CRM data with semantic knowledge.
+This means when you ask "What do I know about Roland?", lynox combines structured CRM data with semantic knowledge.
 
 ## CLI Access
 
@@ -122,7 +122,7 @@ Or ask the agent directly — it knows about the CRM tables and can query them.
 ## SDK Usage
 
 ```typescript
-import { Engine, CRM } from '@nodyn-ai/core';
+import { Engine, CRM } from '@lynox-ai/core';
 
 const engine = new Engine({});
 await engine.init();

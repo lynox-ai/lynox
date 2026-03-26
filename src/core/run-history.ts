@@ -2,18 +2,18 @@ import Database from 'better-sqlite3';
 import { join, dirname } from 'node:path';
 import { hkdfSync, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { sha256Short } from './utils.js';
-import { getNodynDir } from './config.js';
+import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
 import type { TaskRecord } from '../types/index.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 
-const HISTORY_HKDF_INFO = 'nodyn-history-encryption';
+const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 const ENCRYPTED_PREFIX = 'enc:'; // Marks encrypted text in DB
 
-const NODYN_DIR = getNodynDir();
-const DB_PATH = join(NODYN_DIR, 'history.db');
+const LYNOX_DIR = getLynoxDir();
+const DB_PATH = join(LYNOX_DIR, 'history.db');
 
 export interface RunRecord {
   id: string;
@@ -487,9 +487,9 @@ export class RunHistory {
     this._migrate();
 
     // Derive history encryption key via HKDF from vault key
-    const vaultKey = encryptionKey ?? process.env['NODYN_VAULT_KEY'] ?? '';
+    const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'nodyn-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
       this._encKey = null;
     }
@@ -1234,7 +1234,7 @@ export class RunHistory {
     if (!this._encKey) {
       throw new Error('Cannot re-encrypt: no current encryption key configured');
     }
-    const newEncKey = Buffer.from(hkdfSync('sha256', newVaultKey, 'nodyn-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
+    const newEncKey = Buffer.from(hkdfSync('sha256', newVaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
 
     const encWithKey = (text: string, key: Buffer): string => {
       if (!text) return text;

@@ -1,26 +1,26 @@
 import { createWriteStream, chmodSync, type WriteStream } from 'node:fs';
 import { channels } from './observability.js';
 
-// Channel name → group mapping for NODYN_DEBUG filtering
+// Channel name → group mapping for LYNOX_DEBUG filtering
 const CHANNEL_GROUPS: Record<string, string> = {
-  'nodyn:tool:start':              'tool',
-  'nodyn:tool:end':                'tool',
-  'nodyn:spawn:start':             'spawn',
-  'nodyn:spawn:end':               'spawn',
-  'nodyn:mode:change':             'mode',
-  'nodyn:trigger:fire':            'trigger',
-  'nodyn:cost:warning':            'cost',
-  'nodyn:goal:update':             'goal',
-  'nodyn:preapproval:match':       'preapproval',
-  'nodyn:preapproval:exhausted':   'preapproval',
-  'nodyn:preapproval:expired':     'preapproval',
-  'nodyn:dag:notify':              'dag',
+  'lynox:tool:start':              'tool',
+  'lynox:tool:end':                'tool',
+  'lynox:spawn:start':             'spawn',
+  'lynox:spawn:end':               'spawn',
+  'lynox:mode:change':             'mode',
+  'lynox:trigger:fire':            'trigger',
+  'lynox:cost:warning':            'cost',
+  'lynox:goal:update':             'goal',
+  'lynox:preapproval:match':       'preapproval',
+  'lynox:preapproval:exhausted':   'preapproval',
+  'lynox:preapproval:expired':     'preapproval',
+  'lynox:dag:notify':              'dag',
 
-  'nodyn:memory:store':            'memory',
-  'nodyn:memory:extraction':       'memory',
-  'nodyn:content:truncation':      'tool',
-  'nodyn:filewatcher:fallback':    'trigger',
-  'nodyn:secret:access':           'secret',
+  'lynox:memory:store':            'memory',
+  'lynox:memory:extraction':       'memory',
+  'lynox:content:truncation':      'tool',
+  'lynox:filewatcher:fallback':    'trigger',
+  'lynox:secret:access':           'secret',
 };
 
 // Env var patterns that must never appear in debug output
@@ -63,10 +63,10 @@ function formatMessage(channelName: string, msg: unknown): string {
 
   // Channel-specific formatting
   switch (channelName) {
-    case 'nodyn:tool:start':
+    case 'lynox:tool:start':
       return `[${ts}] ${padded}  agent=${s(data['agent'])} tool=${s(data['name'])}`;
 
-    case 'nodyn:tool:end': {
+    case 'lynox:tool:end': {
       const ok = data['success'] ? '✓' : '✗';
       const dur = typeof data['duration'] === 'number' ? `${Math.round(data['duration'] as number)}ms` : '?';
       const parts = [`agent=${s(data['agent'])}`, `tool=${s(data['name'])}`, `${dur}`, ok];
@@ -75,15 +75,15 @@ function formatMessage(channelName: string, msg: unknown): string {
       return `[${ts}] ${padded}  ${parts.join(' ')}`;
     }
 
-    case 'nodyn:spawn:start':
+    case 'lynox:spawn:start':
       return `[${ts}] ${padded}  parent=${s(data['parent'])} agents=[${Array.isArray(data['agents']) ? (data['agents'] as string[]).join(',') : '?'}] depth=${s(data['depth'])}`;
 
-    case 'nodyn:spawn:end': {
+    case 'lynox:spawn:end': {
       const errors = data['errors'] as number | undefined;
       return `[${ts}] ${padded}  parent=${s(data['parent'])} agents=[${Array.isArray(data['agents']) ? (data['agents'] as string[]).join(',') : '?'}] errors=${errors ?? 0}`;
     }
 
-    case 'nodyn:mode:change': {
+    case 'lynox:mode:change': {
       // Redact config — only show mode name, not full config with potential trigger URLs
       const config = data['config'] as Record<string, unknown> | undefined;
       const modeName = s(data['mode']);
@@ -91,46 +91,46 @@ function formatMessage(channelName: string, msg: unknown): string {
       return `[${ts}] ${padded}  mode=${modeName}${extra}`;
     }
 
-    case 'nodyn:trigger:fire': {
+    case 'lynox:trigger:fire': {
       const event = data['event'] as Record<string, unknown> | undefined;
       return `[${ts}] ${padded}  source=${s(event?.['source'])} ts=${s(event?.['timestamp'])}`;
     }
 
-    case 'nodyn:cost:warning':
+    case 'lynox:cost:warning':
       return `[${ts}] ${padded}  ${safeJson(data, 200)}`;
 
-    case 'nodyn:goal:update': {
+    case 'lynox:goal:update': {
       const goal = data['goal'] as Record<string, unknown> | undefined;
       return `[${ts}] ${padded}  status=${s(goal?.['status'])} completed=${s(goal?.['completedCount'])}/${s(goal?.['totalCount'] ?? '?')} cost=$${s(goal?.['totalCost'])}`;
     }
 
-    case 'nodyn:preapproval:match':
-    case 'nodyn:preapproval:exhausted':
-    case 'nodyn:preapproval:expired':
+    case 'lynox:preapproval:match':
+    case 'lynox:preapproval:exhausted':
+    case 'lynox:preapproval:expired':
       return `[${ts}] ${padded}  tool=${s(data['toolName'])} set=${s(data['setId'])} pattern=${s(data['pattern'] ?? 'n/a')}`;
 
-    case 'nodyn:dag:notify':
+    case 'lynox:dag:notify':
       return `[${ts}] ${padded}  manifest=${s(data['manifestName'])} step=${s(data['stepId'])} error=${trunc(s(data['error']), 200)}`;
 
-    case 'nodyn:memory:store': {
+    case 'lynox:memory:store': {
       // Truncate content heavily — could contain user data
       const content = typeof data['content'] === 'string' ? trunc(data['content'] as string, 80) : '';
       return `[${ts}] ${padded}  ns=${s(data['namespace'])} scope=${s(data['scopeType'] ?? 'default')} ${content}`;
     }
 
-    case 'nodyn:memory:extraction': {
+    case 'lynox:memory:extraction': {
       const status = s(data['status']);
       const extra = status === 'error' ? ` error=${trunc(s(data['error']), 200)}` : ` entries=${s(data['entries'])}`;
       return `[${ts}] ${padded}  status=${status}${extra}`;
     }
 
-    case 'nodyn:content:truncation':
+    case 'lynox:content:truncation':
       return `[${ts}] ${padded}  source=${s(data['source'])} original=${s(data['originalLength'])} truncated=${s(data['truncatedTo'])}`;
 
-    case 'nodyn:filewatcher:fallback':
+    case 'lynox:filewatcher:fallback':
       return `[${ts}] ${padded}  dir=${s(data['dir'])} reason=${trunc(s(data['reason']), 200)}`;
 
-    case 'nodyn:secret:access':
+    case 'lynox:secret:access':
       // Never log secret values — only name + action
       return `[${ts}] ${padded}  name=${s(data['name'])} action=${s(data['action'])}`;
 
@@ -163,7 +163,7 @@ let _initialized = false;
 let _fileStream: WriteStream | null = null;
 
 /**
- * Parse NODYN_DEBUG env var into a set of enabled groups.
+ * Parse LYNOX_DEBUG env var into a set of enabled groups.
  * - "1" or "true" or "*" → all groups
  * - "tool,spawn,dag" → specific groups only
  * - falsy → disabled
@@ -179,35 +179,35 @@ export function parseDebugFilter(value: string | undefined): Set<string> | null 
 
 /**
  * Initialize the debug subscriber.
- * Reads NODYN_DEBUG and NODYN_DEBUG_FILE from env.
+ * Reads LYNOX_DEBUG and LYNOX_DEBUG_FILE from env.
  * Safe to call multiple times — only the first call has effect.
  *
  * @returns true if debug logging was activated
  */
 export function initDebugSubscriber(): boolean {
-  if (_initialized) return _fileStream !== null || process.env['NODYN_DEBUG'] !== undefined;
+  if (_initialized) return _fileStream !== null || process.env['LYNOX_DEBUG'] !== undefined;
   _initialized = true;
 
-  const filter = parseDebugFilter(process.env['NODYN_DEBUG']);
+  const filter = parseDebugFilter(process.env['LYNOX_DEBUG']);
   if (!filter) return false;
 
   // Warn if running in a production-like environment
   if (process.env['NODE_ENV'] === 'production') {
-    process.stderr.write('⚠ NODYN_DEBUG is set in production — debug output may contain sensitive data and impact performance. Disable after debugging.\n');
+    process.stderr.write('⚠ LYNOX_DEBUG is set in production — debug output may contain sensitive data and impact performance. Disable after debugging.\n');
   }
 
   // Set up output writer
-  const debugFile = process.env['NODYN_DEBUG_FILE'];
+  const debugFile = process.env['LYNOX_DEBUG_FILE'];
   let write: WriteFn;
 
   if (debugFile) {
     _fileStream = createWriteStream(debugFile, { flags: 'a', mode: 0o600 });
     try { chmodSync(debugFile, 0o600); } catch { /* best-effort for existing files */ }
     write = (line: string) => { _fileStream!.write(line + '\n'); };
-    process.stderr.write(`[nodyn:debug] Logging to ${debugFile} (groups: ${[...filter].join(',')})\n`);
+    process.stderr.write(`[lynox:debug] Logging to ${debugFile} (groups: ${[...filter].join(',')})\n`);
   } else {
     write = (line: string) => { process.stderr.write(line + '\n'); };
-    process.stderr.write(`[nodyn:debug] Active (groups: ${[...filter].join(',')})\n`);
+    process.stderr.write(`[lynox:debug] Active (groups: ${[...filter].join(',')})\n`);
   }
 
   // Subscribe to all channels, filter by group
@@ -227,7 +227,7 @@ export function initDebugSubscriber(): boolean {
 
     // Log subscription for transparency (only key name, not channel name — shorter)
     if (!debugFile) {
-      write(`[nodyn:debug] ✓ subscribed: ${key}`);
+      write(`[lynox:debug] ✓ subscribed: ${key}`);
     }
   }
 

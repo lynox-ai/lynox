@@ -55,9 +55,9 @@ describe('extractEntitiesRegex', () => {
     });
 
     it('extracts domains with various TLDs', () => {
-      const result = extractEntitiesRegex('Visit nodyn.dev for more info.');
+      const result = extractEntitiesRegex('Visit lynox.ai for more info.');
       expect(result.entities).toContainEqual(
-        expect.objectContaining({ name: 'nodyn.dev', type: 'organization' }),
+        expect.objectContaining({ name: 'lynox.ai', type: 'organization' }),
       );
     });
 
@@ -100,16 +100,16 @@ describe('extractEntitiesRegex', () => {
 
   describe('project extraction', () => {
     it('extracts quoted project names', () => {
-      const result = extractEntitiesRegex('Working on project "nodyn-pro" now.');
+      const result = extractEntitiesRegex('Working on project "lynox-pro" now.');
       expect(result.entities).toContainEqual(
-        expect.objectContaining({ name: 'nodyn-pro', type: 'project' }),
+        expect.objectContaining({ name: 'lynox-pro', type: 'project' }),
       );
     });
 
     it('extracts org/repo format', () => {
-      const result = extractEntitiesRegex('Source at nodyn-ai/nodyn.');
+      const result = extractEntitiesRegex('Source at lynox-ai/lynox.');
       expect(result.entities).toContainEqual(
-        expect.objectContaining({ name: 'nodyn-ai/nodyn', type: 'project' }),
+        expect.objectContaining({ name: 'lynox-ai/lynox', type: 'project' }),
       );
     });
   });

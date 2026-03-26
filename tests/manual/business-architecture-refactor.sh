@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Manual verification tests for the Business Architecture Refactor
-# Run from nodyn repo root: bash tests/manual/business-architecture-refactor.sh
+# Run from lynox repo root: bash tests/manual/business-architecture-refactor.sh
 # Requires: ANTHROPIC_API_KEY set (for live agent tests)
 #
-# Tests: NodynContext, 3-scope model, context_id in SQL, workspace isolation,
+# Tests: LynoxContext, 3-scope model, context_id in SQL, workspace isolation,
 #        heuristic classifier, feature flags, project detection, system prompt
 
 set -uo pipefail
@@ -185,7 +185,7 @@ check_output "ensureContextWorkspace creates dir" "true" \
   node --import tsx -e "
     import { ensureContextWorkspace } from './src/core/workspace.js';
     import { existsSync, rmSync } from 'fs';
-    const d = ensureContextWorkspace({ id: 'ws-test', source: 'mcp', workspaceDir: '/tmp/nodyn-ws-verify' });
+    const d = ensureContextWorkspace({ id: 'ws-test', source: 'mcp', workspaceDir: '/tmp/lynox-ws-verify' });
     console.log(existsSync(d));
     rmSync(d, { recursive: true });
   "
@@ -335,7 +335,7 @@ check_output "agents_dir excluded from safe keys" "true" \
     import { loadConfig, reloadConfig } from './src/core/config.js';
     import { writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
     import { join } from 'path';
-    const d = join(process.cwd(), '.nodyn');
+    const d = join(process.cwd(), '.lynox');
     const existed = existsSync(d);
     mkdirSync(d, { recursive: true });
     writeFileSync(join(d, 'config.json'), JSON.stringify({ agents_dir: '/x', default_tier: 'haiku' }));

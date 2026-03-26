@@ -4,7 +4,7 @@
  * v1.0 — all flags OFF by default (core CLI only).
  * v1.1 — flip defaults to ON as features stabilize.
  *
- * Set via environment variables: NODYN_FEATURE_<FLAG>=1
+ * Set via environment variables: LYNOX_FEATURE_<FLAG>=1
  * Pro packages can register additional flags via registerFeature().
  */
 
@@ -14,8 +14,8 @@ export type FeatureFlag =
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
-  'plugins': 'NODYN_FEATURE_PLUGINS',
-  'worker-pool': 'NODYN_FEATURE_WORKER_POOL',
+  'plugins': 'LYNOX_FEATURE_PLUGINS',
+  'worker-pool': 'LYNOX_FEATURE_WORKER_POOL',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {

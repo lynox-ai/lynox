@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { EntityType, MemoryNamespace } from '../types/index.js';
-import { MODEL_MAP, NODYN_BETAS } from '../types/index.js';
+import { MODEL_MAP, LYNOX_BETAS } from '../types/index.js';
 
 export interface ExtractedEntity {
   name: string;
@@ -28,7 +28,7 @@ const TITLE_RE = /\b(?:Herr|Frau|Mr\.?|Mrs\.?|Ms\.?|Dr\.?)\s+([A-ZÄÖÜ][a-zä�
 /** "client Thomas", "user Alex", "partner Maria", "Kunde Thomas" */
 const ROLE_NAME_RE = /\b(?:client|user|partner|colleague|boss|contact|customer|Kunde|Kundin|Partnerin|Kollegin?)\s+([A-ZÄÖÜ][a-zäöüß]+)/gi;
 
-/** Domain names like "acme-shop.ch", "nodyn.dev" — excludes common false positives */
+/** Domain names like "acme-shop.ch", "lynox.ai" — excludes common false positives */
 const DOMAIN_RE = /\b([a-z0-9][-a-z0-9]{0,62}\.(?:com|org|net|dev|io|ch|de|at|fr|it|co|ai|app|cloud))\b/g;
 const COMMON_DOMAINS = new Set([
   'github.com', 'google.com', 'npm.org', 'nodejs.org', 'anthropic.com',
@@ -188,7 +188,7 @@ export async function extractEntitiesLLM(
     const stream = client.beta.messages.stream({
       model: MODEL_MAP['haiku'],
       max_tokens: 512,
-      betas: [...NODYN_BETAS],
+      betas: [...LYNOX_BETAS],
       messages: [{ role: 'user', content: ENTITY_EXTRACTION_PROMPT + text.slice(0, 2000) }],
     });
     const response = await stream.finalMessage();

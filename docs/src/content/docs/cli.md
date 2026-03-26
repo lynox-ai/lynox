@@ -80,7 +80,7 @@ All commands support tab autocomplete in the REPL.
 |---------|-------------|
 | `/clear` | Reset conversation (knowledge preserved). Alias: `/reset` |
 | `/compact [focus]` | Compress conversation with optional focus instructions |
-| `/save` | Save current session to `~/.nodyn/sessions/` |
+| `/save` | Save current session to `~/.lynox/sessions/` |
 | `/load [name]` | Load session (latest if no name given) |
 | `/export [md\|file path]` | Export last response to file |
 
@@ -162,9 +162,9 @@ All commands support tab autocomplete in the REPL.
 
 | Command | Description |
 |---------|-------------|
-| `/quickstart` | Guided first steps — 3 starter tasks to explore nodyn |
+| `/quickstart` | Guided first steps — 3 starter tasks to explore lynox |
 | `/help` | Show command help |
-| `/exit` | Exit NODYN. Alias: `/quit` |
+| `/exit` | Exit LYNOX. Alias: `/quit` |
 
 ### Changeset Review
 
@@ -204,10 +204,10 @@ Interactive settings pane or direct get/set:
 ```
 /config                  # Interactive settings pane (toggle, select, text input)
 /config default_tier     # Show specific key
-/config effort_level max # Set value in ~/.nodyn/config.json
+/config effort_level max # Set value in ~/.lynox/config.json
 ```
 
-The interactive pane shows all settings with current values, sensitive keys masked. Toggles flip directly, selects show options, text/number fields use freeform input. Changes are saved to `~/.nodyn/config.json` immediately. API key changes require a restart.
+The interactive pane shows all settings with current values, sensitive keys masked. Toggles flip directly, selects show options, text/number fields use freeform input. Changes are saved to `~/.lynox/config.json` immediately. API key changes require a restart.
 
 Values are parsed as JSON when possible (numbers, booleans, objects), otherwise stored as strings.
 
@@ -258,7 +258,7 @@ Aliases: `apex`=opus, `fast`=sonnet, `micro`=haiku.
 Use `--task` to create a background task processed by the WorkerLoop:
 
 ```bash
-nodyn --task "Check website status every hour"
+lynox --task "Check website status every hour"
 ```
 
 The agent recognizes natural language scheduling intents (e.g. "Every morning check...", "Research X and get back to me") and creates the appropriate background task automatically via `task_create`.
@@ -270,7 +270,7 @@ The agent recognizes natural language scheduling intents (e.g. "Every morning ch
 Use `--pre-approve` to auto-approve bash commands matching glob patterns:
 
 ```bash
-nodyn --pre-approve "npm run *" \
+lynox --pre-approve "npm run *" \
   --pre-approve "rm dist/**"
 ```
 
@@ -283,7 +283,7 @@ nodyn --pre-approve "npm run *" \
 ## Session Management
 
 ```
-/save              # Save session to ~/.nodyn/sessions/{timestamp}.json
+/save              # Save session to ~/.lynox/sessions/{timestamp}.json
 /load              # Load most recent session
 /load 2025-01-15   # Load session matching name fragment
 ```
@@ -292,11 +292,11 @@ Sessions store the full message history, enabling conversation resumption.
 
 ## Command History
 
-All user inputs are appended to `~/.nodyn/history`. View with `/history` or search with `/history <term>`.
+All user inputs are appended to `~/.lynox/history`. View with `/history` or search with `/history <term>`.
 
 ## Run History
 
-Run history is persisted in `~/.nodyn/history.db` (SQLite). View past runs:
+Run history is persisted in `~/.lynox/history.db` (SQLite). View past runs:
 
 ```
 /runs              # List recent runs
@@ -324,11 +324,11 @@ Cost subcommands query the history DB:
 /summarize                                             # Runs the aliased command
 ```
 
-Stored in `~/.nodyn/aliases.json`.
+Stored in `~/.lynox/aliases.json`.
 
 ## Profiles
 
-Profiles are reusable agent configurations stored in `~/.nodyn/profiles/{name}.json`:
+Profiles are reusable agent configurations stored in `~/.lynox/profiles/{name}.json`:
 
 ```json
 {
@@ -355,7 +355,7 @@ Built-in roles: `researcher`, `creator`, `operator`, `collector`.
 
 ## Workflows
 
-Workflows are multi-role, multi-step agent packages that orchestrate role-based agents in a dependency graph. 3-tier resolution: project `.nodyn/workflows/` > user `~/.nodyn/workflows/` > built-in. Managed via `/pipeline workflow`.
+Workflows are multi-role, multi-step agent packages that orchestrate role-based agents in a dependency graph. 3-tier resolution: project `.lynox/workflows/` > user `~/.lynox/workflows/` > built-in. Managed via `/pipeline workflow`.
 
 3 built-in workflow templates: `code-review`, `feedback`, `research-report`.
 
@@ -373,7 +373,7 @@ Running a workflow registers the `run_workflow` tool on demand, collects any mis
 
 ## Plugins
 
-Plugins extend NODYN with custom tools and lifecycle hooks. Installed from npm.
+Plugins extend LYNOX with custom tools and lifecycle hooks. Installed from npm.
 
 ```
 /plugin list           # List installed plugins
@@ -381,7 +381,7 @@ Plugins extend NODYN with custom tools and lifecycle hooks. Installed from npm.
 /plugin remove <name>  # Uninstall plugin
 ```
 
-Plugin config in `~/.nodyn/config.json` under `plugins`.
+Plugin config in `~/.lynox/config.json` under `plugins`.
 
 ## Knowledge Graph
 
@@ -394,7 +394,7 @@ Manage semantic knowledge with embeddings:
 
 ## Task Management
 
-Manage tasks with deadlines, priorities, and scopes. Tasks are stored in SQLite (`~/.nodyn/history.db`, v12 migration).
+Manage tasks with deadlines, priorities, and scopes. Tasks are stored in SQLite (`~/.lynox/history.db`, v12 migration).
 
 ### `/task` (no subcommand)
 
@@ -433,7 +433,7 @@ The agent proactively mentions overdue items based on this briefing.
 
 ### Banner
 
-Large bot icon rendered in brand purple gradient (256-color palette). The bot materializes bottom-to-top on startup, eyes flash white on "wake up", then the dashboard fades in beside the icon. Shows nodyn version, model, thinking mode, accuracy level, knowledge scope, tool count, and MCP server count. Response prefix uses 👾 emoji.
+Large bot icon rendered in brand purple gradient (256-color palette). The bot materializes bottom-to-top on startup, eyes flash white on "wake up", then the dashboard fades in beside the icon. Shows lynox version, model, thinking mode, accuracy level, knowledge scope, tool count, and MCP server count. Response prefix uses 👾 emoji.
 
 ### Spinner
 
@@ -482,16 +482,16 @@ Non-TTY graceful fallback for all modes.
 
 ## Setup Wizard
 
-On first run without an API key (TTY mode), an interactive 6-step setup wizard runs automatically. Re-run anytime with `nodyn --init` or `nodyn init`.
+On first run without an API key (TTY mode), an interactive 6-step setup wizard runs automatically. Re-run anytime with `lynox --init` or `lynox init`.
 
 1. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Invalid keys rejected with retry. Network errors warned but key accepted
-2. **Encryption** — optional vault key generation (AES-256-GCM). Saved atomically to `~/.nodyn/.env` (`0o600`). Auto-loaded on restart with symlink/ownership/permission validation
+2. **Encryption** — optional vault key generation (AES-256-GCM). Saved atomically to `~/.lynox/.env` (`0o600`). Auto-loaded on restart with symlink/ownership/permission validation
 3. **Accuracy level** — thorough, balanced (default), or fast
 4. **Telegram bot** — optional. Token + auto-detected chat ID (or manual entry)
 5. **Web search** — optional Tavily API key for `web_research` tool
 6. **Google Workspace** — optional OAuth 2.0 credentials. Auth completed later via `/google auth`
 
-Writes `~/.nodyn/config.json` with secure permissions (0o700 dir, 0o600 file). After setup, nodyn starts a conversation to learn about your business — stored in the knowledge graph.
+Writes `~/.lynox/config.json` with secure permissions (0o700 dir, 0o600 file). After setup, lynox starts a conversation to learn about your business — stored in the knowledge graph.
 
 See [Getting Started](/getting-started/) for a detailed walkthrough of each step.
 
@@ -501,7 +501,7 @@ When stdin is not a TTY (piped input or single-task mode):
 
 - **API key required** — exits with a clear error and setup instructions if no key is configured
 - **Model info** — prints the active model ID to stderr before execution
-- **Summary** — writes a JSON summary (`__NODYN_SUMMARY__`) to stderr after completion
+- **Summary** — writes a JSON summary (`__LYNOX_SUMMARY__`) to stderr after completion
 
 ## ESC Interrupt
 

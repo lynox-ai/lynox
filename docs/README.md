@@ -1,8 +1,8 @@
-# nodyn Documentation
+# lynox Documentation
 
 The AI that knows your business — persistent knowledge, autonomous workflows, tool connections.
 
-**Live site:** [docs.nodyn.dev](https://docs.nodyn.dev)
+**Live site:** [docs.lynox.ai](https://docs.lynox.ai)
 
 ## Development
 
@@ -28,7 +28,7 @@ docs/
 │   │       └── ...
 │   ├── assets/             # Logo, images
 │   └── styles/
-│       └── custom.css      # nodyn brand colors
+│       └── custom.css      # lynox brand colors
 └── public/                 # Static files (favicon, etc.)
 ```
 

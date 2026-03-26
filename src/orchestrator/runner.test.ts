@@ -2,9 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { channel } from 'node:diagnostics_channel';
 import { runManifest, retryManifest } from './runner.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from './types.js';
-import type { NodynUserConfig } from '../types/index.js';
+import type { LynoxUserConfig } from '../types/index.js';
 
-const CONFIG: NodynUserConfig = { api_key: 'test-key' };
+const CONFIG: LynoxUserConfig = { api_key: 'test-key' };
 
 const MANIFEST: Manifest = {
   manifest_version: '1.0',
@@ -445,7 +445,7 @@ describe('runManifest — v1.1 parallel execution', () => {
     const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
 
     const messages: unknown[] = [];
-    const ch = channel('nodyn:dag:notify');
+    const ch = channel('lynox:dag:notify');
     const handler = (msg: unknown) => { messages.push(msg); };
     ch.subscribe(handler);
 
@@ -546,7 +546,7 @@ describe('runManifest — on_failure: notify', () => {
     expect(onStepNotify).toHaveBeenCalledWith('step-1', expect.any(Error));
   });
 
-  it('publishes to nodyn:dag:notify diagnostics channel', async () => {
+  it('publishes to lynox:dag:notify diagnostics channel', async () => {
     const manifest: Manifest = {
       ...MANIFEST,
       on_failure: 'notify',
@@ -556,7 +556,7 @@ describe('runManifest — on_failure: notify', () => {
     };
 
     const messages: unknown[] = [];
-    const ch = channel('nodyn:dag:notify');
+    const ch = channel('lynox:dag:notify');
     const handler = (msg: unknown) => { messages.push(msg); };
     ch.subscribe(handler);
 

@@ -47,7 +47,7 @@ describe('DataStoreBridge', () => {
   const scope = { type: 'context' as const, id: 'test' };
 
   beforeAll(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), 'nodyn-bridge-test-'));
+    tempDir = await mkdtemp(join(tmpdir(), 'lynox-bridge-test-'));
     graph = new KuzuGraph(join(tempDir, 'test-graph'));
     await graph.init();
     mockStore = createMockDataStore();

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // We mock node:os and node:process to control homedir and cwd
-const tmpBase = mkdtempSync(join(tmpdir(), 'nodyn-config-'));
+const tmpBase = mkdtempSync(join(tmpdir(), 'lynox-config-'));
 const fakeHome = join(tmpBase, 'home');
 const fakeProject = join(tmpBase, 'project');
 mkdirSync(fakeHome, { recursive: true });
@@ -22,19 +22,19 @@ describe('Config', () => {
     process.cwd = () => fakeProject;
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['ANTHROPIC_BASE_URL'];
-    delete process.env['NODYN_WORKSPACE'];
+    delete process.env['LYNOX_WORKSPACE'];
     delete process.env['VOYAGE_API_KEY'];
-    delete process.env['NODYN_EMBEDDING_PROVIDER'];
-    delete process.env['NODYN_USER'];
-    delete process.env['NODYN_ORG'];
-    delete process.env['NODYN_CLIENT'];
+    delete process.env['LYNOX_EMBEDDING_PROVIDER'];
+    delete process.env['LYNOX_USER'];
+    delete process.env['LYNOX_ORG'];
+    delete process.env['LYNOX_CLIENT'];
     delete process.env['GOOGLE_CLIENT_ID'];
     delete process.env['GOOGLE_CLIENT_SECRET'];
     delete process.env['TAVILY_API_KEY'];
     delete process.env['BRAVE_API_KEY'];
     // Clean up any config files from previous tests
-    rmSync(join(fakeHome, '.nodyn'), { recursive: true, force: true });
-    rmSync(join(fakeProject, '.nodyn'), { recursive: true, force: true });
+    rmSync(join(fakeHome, '.lynox'), { recursive: true, force: true });
+    rmSync(join(fakeProject, '.lynox'), { recursive: true, force: true });
     vi.resetModules();
   });
 
@@ -49,7 +49,7 @@ describe('Config', () => {
   });
 
   it('loads user-level config', async () => {
-    const dir = join(fakeHome, '.nodyn');
+    const dir = join(fakeHome, '.lynox');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ default_tier: 'sonnet', effort_level: 'high' }));
 
@@ -60,8 +60,8 @@ describe('Config', () => {
   });
 
   it('project config overrides user config', async () => {
-    const userDir = join(fakeHome, '.nodyn');
-    const projectDir = join(fakeProject, '.nodyn');
+    const userDir = join(fakeHome, '.lynox');
+    const projectDir = join(fakeProject, '.lynox');
     mkdirSync(userDir, { recursive: true });
     mkdirSync(projectDir, { recursive: true });
 
@@ -75,7 +75,7 @@ describe('Config', () => {
   });
 
   it('env vars override config files', async () => {
-    const userDir = join(fakeHome, '.nodyn');
+    const userDir = join(fakeHome, '.lynox');
     mkdirSync(userDir, { recursive: true });
     writeFileSync(join(userDir, 'config.json'), JSON.stringify({ api_key: 'sk-from-file' }));
 
@@ -89,7 +89,7 @@ describe('Config', () => {
     const { saveUserConfig } = await import('./config.js');
     saveUserConfig({ api_key: 'sk-test-123', default_tier: 'haiku' });
 
-    const filePath = join(fakeHome, '.nodyn', 'config.json');
+    const filePath = join(fakeHome, '.lynox', 'config.json');
     const content = JSON.parse(readFileSync(filePath, 'utf-8'));
     expect(content.api_key).toBe('sk-test-123');
     expect(content.default_tier).toBe('haiku');
@@ -105,7 +105,7 @@ describe('Config', () => {
   });
 
   it('hasApiKey detects config file', async () => {
-    const dir = join(fakeHome, '.nodyn');
+    const dir = join(fakeHome, '.lynox');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ api_key: 'sk-test' }));
 
@@ -119,7 +119,7 @@ describe('Config', () => {
   });
 
   it('handles malformed JSON gracefully', async () => {
-    const dir = join(fakeHome, '.nodyn');
+    const dir = join(fakeHome, '.lynox');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'config.json'), 'not json');
 
@@ -136,8 +136,8 @@ describe('Config', () => {
   });
 
   it('project config cannot override api_key', async () => {
-    const userDir = join(fakeHome, '.nodyn');
-    const projectDir = join(fakeProject, '.nodyn');
+    const userDir = join(fakeHome, '.lynox');
+    const projectDir = join(fakeProject, '.lynox');
     mkdirSync(userDir, { recursive: true });
     mkdirSync(projectDir, { recursive: true });
 
@@ -150,8 +150,8 @@ describe('Config', () => {
   });
 
   it('project config cannot override api_base_url', async () => {
-    const userDir = join(fakeHome, '.nodyn');
-    const projectDir = join(fakeProject, '.nodyn');
+    const userDir = join(fakeHome, '.lynox');
+    const projectDir = join(fakeProject, '.lynox');
     mkdirSync(userDir, { recursive: true });
     mkdirSync(projectDir, { recursive: true });
 
@@ -164,8 +164,8 @@ describe('Config', () => {
   });
 
   it('project config can override safe fields', async () => {
-    const userDir = join(fakeHome, '.nodyn');
-    const projectDir = join(fakeProject, '.nodyn');
+    const userDir = join(fakeHome, '.lynox');
+    const projectDir = join(fakeProject, '.lynox');
     mkdirSync(userDir, { recursive: true });
     mkdirSync(projectDir, { recursive: true });
 
@@ -182,27 +182,27 @@ describe('Config', () => {
     const { saveUserConfig } = await import('./config.js');
     saveUserConfig({ default_tier: 'haiku' });
 
-    const dirStats = statSync(join(fakeHome, '.nodyn'));
+    const dirStats = statSync(join(fakeHome, '.lynox'));
     expect(dirStats.mode & 0o777).toBe(0o700);
   });
 
-  it('NODYN_ORG env sets organization_id', async () => {
-    process.env['NODYN_ORG'] = 'acme';
+  it('LYNOX_ORG env sets organization_id', async () => {
+    process.env['LYNOX_ORG'] = 'acme';
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
     expect(config.organization_id).toBe('acme');
   });
 
-  it('NODYN_CLIENT env sets client_id', async () => {
-    process.env['NODYN_CLIENT'] = 'client1';
+  it('LYNOX_CLIENT env sets client_id', async () => {
+    process.env['LYNOX_CLIENT'] = 'client1';
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
     expect(config.client_id).toBe('client1');
   });
 
   it('project config can override organization_id (safe key)', async () => {
-    const userDir = join(fakeHome, '.nodyn');
-    const projectDir = join(fakeProject, '.nodyn');
+    const userDir = join(fakeHome, '.lynox');
+    const projectDir = join(fakeProject, '.lynox');
     mkdirSync(userDir, { recursive: true });
     mkdirSync(projectDir, { recursive: true });
 
@@ -215,8 +215,8 @@ describe('Config', () => {
   });
 
   it('project config can override client_id (safe key)', async () => {
-    const userDir = join(fakeHome, '.nodyn');
-    const projectDir = join(fakeProject, '.nodyn');
+    const userDir = join(fakeHome, '.lynox');
+    const projectDir = join(fakeProject, '.lynox');
     mkdirSync(userDir, { recursive: true });
     mkdirSync(projectDir, { recursive: true });
 

@@ -5,7 +5,7 @@ dist
 *.md
 .env
 .env.*
-.nodyn/
+.lynox/
 *.db
 *.db-wal
 *.db-shm

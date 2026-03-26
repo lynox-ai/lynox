@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { stdout } from 'node:process';
 
 import type { Session } from '../core/session.js';
-import { getNodynDir } from '../core/config.js';
+import { getLynoxDir } from '../core/config.js';
 import { writeFileAtomicSync, ensureDirSync } from '../core/atomic-write.js';
 
 // ── Pricing constants ──────────────────────────────────────────────────
@@ -25,9 +25,9 @@ export const USD_TO_CHF = 0.88;
 
 // ── File paths ─────────────────────────────────────────────────────────
 
-export const SESSIONS_DIR = join(getNodynDir(), 'sessions');
-export const HISTORY_FILE = join(getNodynDir(), 'history');
-export const ALIASES_FILE = join(getNodynDir(), 'aliases.json');
+export const SESSIONS_DIR = join(getLynoxDir(), 'sessions');
+export const HISTORY_FILE = join(getLynoxDir(), 'history');
+export const ALIASES_FILE = join(getLynoxDir(), 'aliases.json');
 
 // ── Pricing display ────────────────────────────────────────────────────
 
@@ -121,7 +121,7 @@ export function loadAliases(): Record<string, string> {
 }
 
 export function saveAliases(aliases: Record<string, string>): void {
-  ensureDirSync(getNodynDir());
+  ensureDirSync(getLynoxDir());
   writeFileAtomicSync(ALIASES_FILE, JSON.stringify(aliases, null, 2) + '\n');
 }
 

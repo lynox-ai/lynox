@@ -80,7 +80,7 @@ export interface ProcessRecord {
 export type TaskStatus = 'open' | 'in_progress' | 'completed';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
-export type TaskAssignee = 'user' | 'nodyn' | string;
+export type TaskAssignee = 'user' | 'lynox' | string;
 
 export type TaskType = 'manual' | 'scheduled' | 'watch';
 export type TaskRunStatus = 'success' | 'failed' | 'timeout';
@@ -91,7 +91,7 @@ export interface TaskRecord {
   description: string;
   status: TaskStatus;
   priority: TaskPriority;
-  assignee: string | null;      // 'user', 'nodyn', or custom name
+  assignee: string | null;      // 'user', 'lynox', or custom name
   scope_type: string;
   scope_id: string;
   due_date: string | null;

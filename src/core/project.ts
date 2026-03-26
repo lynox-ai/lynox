@@ -7,7 +7,7 @@ import { detectInjectionAttempt } from './data-boundary.js';
 const PROJECT_MARKERS = [
   '.git',
   'package.json',
-  '.nodyn-project',
+  '.lynox-project',
 ] as const;
 
 const SKIP_DIRS = new Set([
@@ -117,7 +117,7 @@ ${lines.join('\n')}
 
 /**
  * Walk the directory tree and collect `relative_path → mtime_ms` pairs.
- * Skips node_modules, .git, dist, build, .nodyn-* directories.
+ * Skips node_modules, .git, dist, build, .lynox-* directories.
  */
 export function buildFileManifest(
   root: string,
@@ -198,10 +198,10 @@ export function diffManifest(
 
 /**
  * Save a file manifest to disk as JSON.
- * Stored at `<nodynDir>/memory/<projectId>/manifest.json`.
+ * Stored at `<lynoxDir>/memory/<projectId>/manifest.json`.
  */
-export function saveManifest(nodynDir: string, projectId: string, manifest: Map<string, number>): void {
-  const dir = join(nodynDir, 'memory', projectId);
+export function saveManifest(lynoxDir: string, projectId: string, manifest: Map<string, number>): void {
+  const dir = join(lynoxDir, 'memory', projectId);
   mkdirSync(dir, { recursive: true });
   const obj: Record<string, number> = {};
   for (const [k, v] of manifest) {
@@ -214,8 +214,8 @@ export function saveManifest(nodynDir: string, projectId: string, manifest: Map<
  * Load a previously saved file manifest from disk.
  * Returns null if no manifest exists.
  */
-export function loadManifest(nodynDir: string, projectId: string): Map<string, number> | null {
-  const filePath = join(nodynDir, 'memory', projectId, 'manifest.json');
+export function loadManifest(lynoxDir: string, projectId: string): Map<string, number> | null {
+  const filePath = join(lynoxDir, 'memory', projectId, 'manifest.json');
   try {
     const raw = readFileSync(filePath, 'utf-8');
     const obj: unknown = JSON.parse(raw);

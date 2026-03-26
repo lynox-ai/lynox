@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, lstatSync } from 'node:fs';
 import { resolve, dirname, basename, join, isAbsolute, relative } from 'node:path';
-import type { NodynContext } from '../types/index.js';
+import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync } from './atomic-write.js';
 
 let _cachedDir: string | null | undefined;
@@ -11,7 +11,7 @@ export function getWorkspaceDir(): string | null {
   // Tenant workspace override takes precedence
   if (_tenantOverride !== null) return _tenantOverride;
   if (_cachedDir !== undefined) return _cachedDir;
-  const env = process.env['NODYN_WORKSPACE'];
+  const env = process.env['LYNOX_WORKSPACE'];
   _cachedDir = env && existsSync(env) ? realpathSync(resolve(env)) : null;
   return _cachedDir;
 }
@@ -109,7 +109,7 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
  * Creates it with mode 0o700 if missing.
  * Returns the workspace directory path.
  */
-export function ensureContextWorkspace(context: NodynContext): string {
+export function ensureContextWorkspace(context: LynoxContext): string {
   const dir = context.workspaceDir;
   ensureDirSync(dir);
   return dir;

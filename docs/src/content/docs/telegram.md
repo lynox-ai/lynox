@@ -3,23 +3,23 @@ title: "Telegram Bot"
 description: "Setup, commands, inline keyboards, and file handling"
 ---
 
-Telegram is the primary way most users interact with nodyn. Send text, voice messages, photos, or documents — nodyn processes them and responds with structured results, follow-up suggestions, and live progress updates.
+Telegram is the primary way most users interact with lynox. Send text, voice messages, photos, or documents — lynox processes them and responds with structured results, follow-up suggestions, and live progress updates.
 
 **What you can do from Telegram:**
 - Ask questions, run tasks, manage your business
-- Send voice messages — nodyn transcribes and processes them
+- Send voice messages — lynox transcribes and processes them
 - Share files and photos for analysis
 - Connect Google Workspace: send `/google`
 - Check costs: send `/cost`
 
-> **How conversations work:** nodyn remembers the last ~10 messages for context. You can refer to previous messages naturally — "now do the same for the other client". Long-term knowledge (facts, preferences, decisions) is stored permanently in the knowledge graph and available across all conversations. Use `/clear` to start a fresh conversation.
+> **How conversations work:** lynox remembers the last ~10 messages for context. You can refer to previous messages naturally — "now do the same for the other client". Long-term knowledge (facts, preferences, decisions) is stored permanently in the knowledge graph and available across all conversations. Use `/clear` to start a fresh conversation.
 
 ## Architecture
 
 ```
 Telegram API (long polling)
     ↕  HTTPS (outbound only)
-nodyn process
+lynox process
     ├─ Engine (shared singleton)
     ├─ Session (per-conversation)
     ├─ Telegraf bot (message routing, commands)
@@ -36,7 +36,7 @@ The Telegram bot runs in-process using `session.run()` directly — no MCP serve
 2. Send `/newbot` and follow the prompts
 3. Copy the bot token (format: `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`)
 
-### 2. Start nodyn with Telegram
+### 2. Start lynox with Telegram
 
 ```bash
 # Via environment variable (recommended)
@@ -54,13 +54,13 @@ Auto-detection: if `TELEGRAM_BOT_TOKEN` is set, the bot starts automatically —
 docker run -d \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e TELEGRAM_BOT_TOKEN=123:ABC... \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  nodyn
+  -v ~/.lynox:/home/lynox/.lynox \
+  lynox
 ```
 
 ### 4. Setup Wizard
 
-The setup wizard (`nodyn --setup`) includes an optional Telegram step. The token is saved to `~/.nodyn/config.json` as `telegram_bot_token`.
+The setup wizard (`lynox --setup`) includes an optional Telegram step. The token is saved to `~/.lynox/config.json` as `telegram_bot_token`.
 
 ## Environment Variables
 
@@ -77,7 +77,7 @@ By default, anyone who finds your bot can use it. For production, restrict acces
 TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
 ```
 
-> **Shared knowledge:** All users on the same bot share the same knowledge, memory, and history. Add multiple chat IDs only for people who work on the same business. For separate businesses, deploy separate nodyn instances (see [Docker — One instance = one business](/docker/#one-instance--one-business)).
+> **Shared knowledge:** All users on the same bot share the same knowledge, memory, and history. Add multiple chat IDs only for people who work on the same business. For separate businesses, deploy separate lynox instances (see [Docker — One instance = one business](/docker/#one-instance--one-business)).
 
 To find your chat ID: send a message to the bot without `TELEGRAM_ALLOWED_CHAT_IDS` set — the bot will reply with your chat ID in the "Unauthorized" message.
 
@@ -85,7 +85,7 @@ To find your chat ID: send a message to the bot without `TELEGRAM_ALLOWED_CHAT_I
 
 ### Send a text message
 
-Just send any text message to your bot. nodyn processes it as a task.
+Just send any text message to your bot. lynox processes it as a task.
 
 ### File and image uploads
 

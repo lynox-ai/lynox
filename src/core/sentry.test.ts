@@ -4,7 +4,7 @@ import {
   shutdownSentry,
   addToolBreadcrumb,
   addLLMBreadcrumb,
-  captureNodynError,
+  captureLynoxError,
   captureError,
   captureUserFeedback,
   isSentryEnabled,
@@ -43,11 +43,11 @@ describe('sentry', () => {
   beforeEach(() => {
     _resetForTesting();
     vi.clearAllMocks();
-    delete process.env['NODYN_SENTRY_DSN'];
+    delete process.env['LYNOX_SENTRY_DSN'];
   });
 
   afterEach(() => {
-    delete process.env['NODYN_SENTRY_DSN'];
+    delete process.env['LYNOX_SENTRY_DSN'];
   });
 
   describe('initSentry', () => {
@@ -75,7 +75,7 @@ describe('sentry', () => {
     });
 
     it('reads DSN from env var', async () => {
-      process.env['NODYN_SENTRY_DSN'] = 'https://env@sentry.io/456';
+      process.env['LYNOX_SENTRY_DSN'] = 'https://env@sentry.io/456';
       const result = await initSentry();
       expect(result).toBe(true);
       expect(mockInit).toHaveBeenCalledWith(
@@ -89,11 +89,11 @@ describe('sentry', () => {
       expect(mockInit).toHaveBeenCalledOnce();
     });
 
-    it('sets release with nodyn@ prefix', async () => {
+    it('sets release with lynox@ prefix', async () => {
       await initSentry('https://key@sentry.io/123');
       expect(mockInit).toHaveBeenCalledWith(
         expect.objectContaining({
-          release: expect.stringMatching(/^nodyn@/),
+          release: expect.stringMatching(/^lynox@/),
         }),
       );
     });
@@ -182,7 +182,7 @@ describe('sentry', () => {
       expect(mockCaptureException).toHaveBeenCalledWith(err);
     });
 
-    it('captureNodynError sets tags and safe extras', async () => {
+    it('captureLynoxError sets tags and safe extras', async () => {
       await initSentry('https://key@sentry.io/123');
       const { ExecutionError } = await import('./errors.js');
       const err = new ExecutionError('Tool failed', {
@@ -191,7 +191,7 @@ describe('sentry', () => {
         // Unsafe key — should NOT be forwarded
         userInput: 'sensitive prompt',
       });
-      captureNodynError(err);
+      captureLynoxError(err);
 
       expect(mockWithScope).toHaveBeenCalledOnce();
       const scope = (mockWithScope.mock.results[0]!.value) as { setTag: ReturnType<typeof vi.fn>; setExtra: ReturnType<typeof vi.fn> };

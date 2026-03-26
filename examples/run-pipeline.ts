@@ -4,7 +4,7 @@
  * Usage:
  *   ANTHROPIC_API_KEY=sk-ant-... npx tsx examples/run-pipeline.ts
  */
-import { loadManifestFile, runManifest, loadConfig } from '@nodyn-ai/core';
+import { loadManifestFile, runManifest, loadConfig } from '@lynox-ai/core';
 
 const manifest = loadManifestFile(new URL('./pipeline.json', import.meta.url).pathname);
 const config = loadConfig();

@@ -14,7 +14,7 @@ export class BatchIndex {
   private loaded = false;
 
   constructor(dir?: string | undefined) {
-    this.path = join(dir ?? join(homedir(), '.nodyn'), 'batch-index.json');
+    this.path = join(dir ?? join(homedir(), '.lynox'), 'batch-index.json');
   }
 
   async load(): Promise<Record<string, BatchEntry>> {

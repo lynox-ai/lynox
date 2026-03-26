@@ -7,7 +7,7 @@ import { DataStore } from './data-store.js';
 import { CRM } from './crm.js';
 
 function createTmpDir(): string {
-  return mkdtempSync(join(tmpdir(), 'nodyn-crm-test-'));
+  return mkdtempSync(join(tmpdir(), 'lynox-crm-test-'));
 }
 
 describe('CRM', () => {

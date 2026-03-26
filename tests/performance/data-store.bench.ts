@@ -16,7 +16,7 @@ let counter = 0;
 const SCOPE = { type: 'context' as const, id: 'bench' };
 
 beforeAll(() => {
-  const tmp = createBenchDir('nodyn-bench-ds-');
+  const tmp = createBenchDir('lynox-bench-ds-');
   cleanup = tmp.cleanup;
   ds = new DataStore(join(tmp.path, 'bench.db'));
 
@@ -75,7 +75,7 @@ afterAll(() => {
 describe('DataStore — collection lifecycle', () => {
   bench('createCollection', () => {
     // Uses its own DataStore to avoid hitting the 100 collection limit
-    const tmp = createBenchDir('nodyn-bench-ds-coll-');
+    const tmp = createBenchDir('lynox-bench-ds-coll-');
     const localDs = new DataStore(join(tmp.path, 'bench.db'));
     localDs.createCollection({
       name: 'bench_coll',

@@ -3,12 +3,12 @@ title: "DAG Engine"
 description: "Multi-step workflow automation with dependency graphs"
 ---
 
-NODYN's DAG engine executes declarative JSON manifest files — graph-based workflows with parallel execution, conditions, context passing, and gate approval. Domain-agnostic: you supply agent definitions, NODYN handles orchestration.
+LYNOX's DAG engine executes declarative JSON manifest files — graph-based workflows with parallel execution, conditions, context passing, and gate approval. Domain-agnostic: you supply agent definitions, LYNOX handles orchestration.
 
 ## Quickstart
 
 ```typescript
-import { runManifest, loadManifestFile, loadConfig } from '@nodyn-ai/core';
+import { runManifest, loadManifestFile, loadConfig } from '@lynox-ai/core';
 
 const manifest = loadManifestFile('./my.manifest.json');
 const state = await runManifest(manifest, loadConfig());
@@ -21,8 +21,8 @@ for (const [stepId, output] of state.outputs) {
 
 ```bash
 # CLI
-nodyn --manifest ./my.manifest.json
-nodyn --manifest ./my.manifest.json  # uses LocalGateAdapter for gate points in TTY
+lynox --manifest ./my.manifest.json
+lynox --manifest ./my.manifest.json  # uses LocalGateAdapter for gate points in TTY
 ```
 
 ---
@@ -246,7 +246,7 @@ Gate points apply to **both** mock and real execution paths, making them testabl
 
 **`LocalGateAdapter`** — prompts via a custom function (used for TTY runs):
 ```typescript
-import { LocalGateAdapter } from '@nodyn-ai/core';
+import { LocalGateAdapter } from '@lynox-ai/core';
 
 const adapter = new LocalGateAdapter(async (question, options) => {
   // show question to user, return answer
@@ -280,7 +280,7 @@ Any call to `run_deployment` or `send_alert` during step `deploy` will submit a 
 |-------|----------|
 | `"stop"` | Return immediately with `status: 'failed'` and `error` set |
 | `"continue"` | Record the error in the step output, continue to next step |
-| `"notify"` | Record error, fire `onStepNotify` hook + `nodyn:dag:notify` channel, continue to next step |
+| `"notify"` | Record error, fire `onStepNotify` hook + `lynox:dag:notify` channel, continue to next step |
 
 Gate rejections and timeouts always set `status: 'rejected'` regardless of `on_failure`.
 
@@ -291,8 +291,8 @@ Gate rejections and timeouts always set `status: 'rejected'` regardless of `on_f
 ### `runManifest(manifest, config, options?)`
 
 ```typescript
-import { runManifest, loadManifestFile, validateManifest, loadConfig } from '@nodyn-ai/core';
-import type { RunManifestOptions, RunState, RunHooks } from '@nodyn-ai/core';
+import { runManifest, loadManifestFile, validateManifest, loadConfig } from '@lynox-ai/core';
+import type { RunManifestOptions, RunState, RunHooks } from '@lynox-ai/core';
 
 const hooks: RunHooks = {
   onStepStart: (stepId, agentName) => console.log(`▶ ${stepId} (${agentName})`),
@@ -361,7 +361,7 @@ interface AgentOutput {
 ## Validation
 
 ```typescript
-import { validateManifest, loadManifestFile } from '@nodyn-ai/core';
+import { validateManifest, loadManifestFile } from '@lynox-ai/core';
 
 // From object (throws on invalid)
 const manifest = validateManifest(rawObject);
@@ -381,7 +381,7 @@ Invalid manifest: agents.0.runtime: Invalid enum value. Expected 'agent' | 'mock
 
 ```bash
 # Run a manifest
-nodyn --manifest ./pipeline.json
+lynox --manifest ./pipeline.json
 
 # Slash commands in REPL
 /manifest run ./pipeline.json        # run with full CLI hooks
@@ -396,7 +396,7 @@ nodyn --manifest ./pipeline.json
 Use `mockResponses` to test pipelines without API calls:
 
 ```typescript
-import { runManifest } from '@nodyn-ai/core';
+import { runManifest } from '@lynox-ai/core';
 
 const state = await runManifest(manifest, config, {
   mockResponses: new Map([
@@ -415,10 +415,10 @@ When `mockResponses` is provided, all steps use mock execution regardless of the
 
 ## Configuration
 
-Add `agents_dir` and `manifests_dir` to your NODYN config:
+Add `agents_dir` and `manifests_dir` to your LYNOX config:
 
 ```json
-// .nodyn/config.json (project) or ~/.nodyn/config.json (user)
+// .lynox/config.json (project) or ~/.lynox/config.json (user)
 {
   "agents_dir": "./my-agents",
   "manifests_dir": "./pipelines"
@@ -474,7 +474,7 @@ The engine computes phases using Kahn's algorithm:
 
 - **`on_failure: 'stop'`**: all steps in the current phase complete, then execution halts before the next phase
 - **`on_failure: 'continue'`**: error is recorded, workflow continues to next phase
-- **`on_failure: 'notify'`**: error recorded + `onStepNotify` hook + `nodyn:dag:notify` channel, workflow continues
+- **`on_failure: 'notify'`**: error recorded + `onStepNotify` hook + `lynox:dag:notify` channel, workflow continues
 - **Gate rejections**: always halt after the current phase completes
 
 ### Migration from v1.0
@@ -486,8 +486,8 @@ v1.0 manifests continue to work unchanged — no graph validation, strict sequen
 ### Programmatic API
 
 ```typescript
-import { computePhases, validateGraph, CycleError } from '@nodyn-ai/core';
-import type { ExecutionPhase, GraphAnalysis } from '@nodyn-ai/core';
+import { computePhases, validateGraph, CycleError } from '@lynox-ai/core';
+import type { ExecutionPhase, GraphAnalysis } from '@lynox-ai/core';
 
 // Analyze dependency graph
 const analysis: GraphAnalysis = computePhases(manifest.agents);
@@ -620,7 +620,7 @@ Max nesting depth: 3 (prevents infinite recursion).
 `plan_task` and `run_pipeline` include cost estimates in their output. Simple per-step lookup by model tier:
 
 ```typescript
-import { estimatePipelineCost } from '@nodyn-ai/core';
+import { estimatePipelineCost } from '@lynox-ai/core';
 
 const estimate = estimatePipelineCost(steps);
 // { steps: [{ stepId, model, estimatedCostUsd }], totalCostUsd }
@@ -656,7 +656,7 @@ Status indicators: `○` pending, `◉` running (blue), `✓` done (green), `✗
 
 ### SQLite Workflow Persistence
 
-Workflow runs are persisted to `~/.nodyn/history.db` (v7 migration):
+Workflow runs are persisted to `~/.lynox/history.db` (v7 migration):
 - `pipeline_runs` — run metadata (status, duration, cost, tokens)
 - `pipeline_step_results` — per-step results (status, result, error, cost)
 
@@ -688,7 +688,7 @@ The planner (`src/core/dag-planner.ts`) uses a single fast-tier API call with fo
 `plan_task` auto-generates plans via `planDAG()` when the user provides no phases or steps — the planner decomposes the goal into workflow steps automatically.
 
 ```typescript
-import { planDAG } from '@nodyn-ai/core';
+import { planDAG } from '@lynox-ai/core';
 
 const plan = await planDAG('Migrate auth to sessions', {
   apiKey: process.env.ANTHROPIC_API_KEY,

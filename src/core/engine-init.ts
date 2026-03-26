@@ -1,5 +1,5 @@
 /**
- * Extracted init helpers for the Nodyn orchestrator.
+ * Extracted init helpers for the Lynox orchestrator.
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
@@ -10,9 +10,9 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { getErrorMessage } from './utils.js';
 import { writeFileAtomicSync } from './atomic-write.js';
 import type {
-  NodynConfig,
-  NodynUserConfig,
-  NodynContext,
+  LynoxConfig,
+  LynoxUserConfig,
+  LynoxContext,
   MemoryScopeRef,
   MemoryNamespace,
   MemoryScopeType,
@@ -33,7 +33,7 @@ import type { EmbeddingProvider, OnnxModelId } from './embedding.js';
 import { KnowledgeLayer } from './knowledge-layer.js';
 import { KNOWLEDGE_GRAPH_DB_NAME } from './knowledge-graph.js';
 import { DataStoreBridge } from './datastore-bridge.js';
-import { getNodynDir } from './config.js';
+import { getLynoxDir } from './config.js';
 import {
   generateBriefing,
   buildFileManifest,
@@ -48,7 +48,7 @@ import { getWorkspaceDir, isWorkspaceActive } from './workspace.js';
 
 export function configureBudgetAndRateLimits(
   runHistory: RunHistory,
-  userConfig: NodynUserConfig,
+  userConfig: LynoxUserConfig,
 ): void {
   configurePersistentBudget({
     costProvider: runHistory,
@@ -126,7 +126,7 @@ export interface BriefingResult {
 const MAX_BRIEFING_CHARS = 8_000;
 
 export async function generateInitBriefing(
-  context: NodynContext,
+  context: LynoxContext,
   runHistory: RunHistory | null,
   activeScopes: MemoryScopeRef[],
 ): Promise<BriefingResult> {
@@ -144,7 +144,7 @@ export async function generateInitBriefing(
     }
 
     // File change awareness: diff current manifest against saved
-    const prevManifest = loadManifest(getNodynDir(), context.id);
+    const prevManifest = loadManifest(getLynoxDir(), context.id);
     const manifest = buildFileManifest(context.localDir);
 
     let diffText: string | undefined;
@@ -212,7 +212,7 @@ export interface SecretResult {
   briefingParts: string[];
 }
 
-export function initSecrets(userConfig: NodynUserConfig): SecretResult {
+export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   const parts: string[] = [];
   let vault: SecretVault | null = null;
   let store: SecretStore | null = null;
@@ -249,10 +249,10 @@ export function initSecrets(userConfig: NodynUserConfig): SecretResult {
       }
 
       // Load MCP secret from vault if not set via env
-      if (!process.env['NODYN_MCP_SECRET']) {
-        const mcpSecret = vault.get('NODYN_MCP_SECRET');
+      if (!process.env['LYNOX_MCP_SECRET']) {
+        const mcpSecret = vault.get('LYNOX_MCP_SECRET');
         if (mcpSecret) {
-          process.env['NODYN_MCP_SECRET'] = mcpSecret;
+          process.env['LYNOX_MCP_SECRET'] = mcpSecret;
         }
       }
 
@@ -264,10 +264,10 @@ export function initSecrets(userConfig: NodynUserConfig): SecretResult {
     } catch {
       vault = null;
       // Warn if vault.db exists but vault key is missing
-      if (!process.env['NODYN_VAULT_KEY']) {
-        const vaultDbPath = join(homedir(), '.nodyn', 'vault.db');
+      if (!process.env['LYNOX_VAULT_KEY']) {
+        const vaultDbPath = join(homedir(), '.lynox', 'vault.db');
         if (existsSync(vaultDbPath)) {
-          process.stderr.write('⚠ Encrypted vault found but NODYN_VAULT_KEY is not set. Run: nodyn init\n');
+          process.stderr.write('⚠ Encrypted vault found but LYNOX_VAULT_KEY is not set. Run: lynox init\n');
         }
       }
     }
@@ -288,10 +288,10 @@ export function initSecrets(userConfig: NodynUserConfig): SecretResult {
  * Only runs once per secret: if vault has no entry and config has one.
  * After migration, removes the field from the config file.
  */
-function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: NodynUserConfig): void {
+function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserConfig): void {
   const migrations: Array<{
     vaultName: string;
-    configField: keyof NodynUserConfig;
+    configField: keyof LynoxUserConfig;
     envVar: string;
   }> = [
     { vaultName: 'ANTHROPIC_API_KEY', configField: 'api_key', envVar: 'ANTHROPIC_API_KEY' },
@@ -320,7 +320,7 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: NodynUserC
 
   // Remove migrated fields from plaintext config file
   try {
-    const configPath = join(homedir(), '.nodyn', 'config.json');
+    const configPath = join(homedir(), '.lynox', 'config.json');
     if (existsSync(configPath)) {
       const raw = readFileSync(configPath, 'utf-8');
       const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -347,8 +347,8 @@ const MCP_SECRET_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
  * Env-only secrets can't be age-checked — we just recommend vault storage.
  */
 function _warnStaleMcpSecret(vault: SecretVault): void {
-  if (!vault.has('NODYN_MCP_SECRET')) {
-    if (process.env['NODYN_MCP_SECRET']) {
+  if (!vault.has('LYNOX_MCP_SECRET')) {
+    if (process.env['LYNOX_MCP_SECRET']) {
       // Secret is env-only — can't track age, just hint
       // (no warning here, the TLS warning in mcp-server already covers exposure)
     }
@@ -356,7 +356,7 @@ function _warnStaleMcpSecret(vault: SecretVault): void {
   }
 
   const entries = vault.list();
-  const mcpEntry = entries.find(e => e.name === 'NODYN_MCP_SECRET');
+  const mcpEntry = entries.find(e => e.name === 'LYNOX_MCP_SECRET');
   if (!mcpEntry) return;
 
   const updatedAt = new Date(mcpEntry.updatedAt).getTime();
@@ -364,7 +364,7 @@ function _warnStaleMcpSecret(vault: SecretVault): void {
   if (ageMs > MCP_SECRET_MAX_AGE_MS) {
     const ageDays = Math.round(ageMs / (24 * 60 * 60 * 1000));
     process.stderr.write(
-      `⚠ MCP secret is ${ageDays} days old — consider rotating: nodyn vault set NODYN_MCP_SECRET <new-secret>\n`,
+      `⚠ MCP secret is ${ageDays} days old — consider rotating: lynox vault set LYNOX_MCP_SECRET <new-secret>\n`,
     );
   }
 }
@@ -378,8 +378,8 @@ export interface ScopeResult {
 }
 
 export function initScopes(
-  userConfig: NodynUserConfig,
-  context: NodynContext | null,
+  userConfig: LynoxUserConfig,
+  context: LynoxContext | null,
   runHistory: RunHistory | null,
   memory: Memory | null,
 ): ScopeResult {
@@ -428,8 +428,8 @@ export function initScopes(
 // ── Memory ──────────────────────────────────────────────────────
 
 export async function initMemoryInstance(
-  config: NodynConfig,
-  userConfig: NodynUserConfig,
+  config: LynoxConfig,
+  userConfig: LynoxUserConfig,
   activeScopes: MemoryScopeRef[],
   contextId: string | undefined,
   secretStore: SecretStore | null,
@@ -467,7 +467,7 @@ export async function initMemoryInstance(
 // ── Embeddings + Knowledge Graph ────────────────────────────────
 
 export function initEmbeddingProvider(
-  userConfig: NodynUserConfig,
+  userConfig: LynoxUserConfig,
   runHistory: RunHistory | null,
 ): EmbeddingProvider | null {
   if (!runHistory) return null;
@@ -483,19 +483,19 @@ export function initEmbeddingProvider(
 }
 
 export async function initKnowledgeLayer(
-  userConfig: NodynUserConfig,
+  userConfig: LynoxUserConfig,
   embeddingProvider: EmbeddingProvider | null,
   client: Anthropic,
 ): Promise<KnowledgeLayer | null> {
   if (userConfig.knowledge_graph_enabled === false || !embeddingProvider) return null;
   try {
-    const nodynDir = getNodynDir();
-    const graphPath = `${nodynDir}/${KNOWLEDGE_GRAPH_DB_NAME}`;
+    const lynoxDir = getLynoxDir();
+    const graphPath = `${lynoxDir}/${KNOWLEDGE_GRAPH_DB_NAME}`;
     const layer = new KnowledgeLayer(graphPath, embeddingProvider, client);
     await layer.init();
     return layer;
   } catch (err: unknown) {
-    process.stderr.write(`[nodyn:knowledge] Graph init failed: ${getErrorMessage(err)}\n`);
+    process.stderr.write(`[lynox:knowledge] Graph init failed: ${getErrorMessage(err)}\n`);
     return null;
   }
 }
@@ -570,7 +570,7 @@ export function setupMemoryStoreSubscription(
             { sourceRunId: getCurrentRunId() ?? undefined },
           );
         } catch (err: unknown) {
-          process.stderr.write(`[nodyn:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);
+          process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);
         }
       })();
 

@@ -7,13 +7,13 @@
  * 3. Ask user for credentials (ask_user)
  * 4. Test connection (http_request)
  *
- * Profiles are written to ~/.nodyn/apis/<id>.json and immediately activated.
+ * Profiles are written to ~/.lynox/apis/<id>.json and immediately activated.
  */
 
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import { getNodynDir } from '../../core/config.js';
+import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile } from '../../core/api-store.js';
 
 interface ApiSetupInput {
@@ -58,7 +58,7 @@ function validateProfile(profile: ApiProfile): string | null {
 }
 
 function getApisDir(): string {
-  return join(getNodynDir(), 'apis');
+  return join(getLynoxDir(), 'apis');
 }
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {

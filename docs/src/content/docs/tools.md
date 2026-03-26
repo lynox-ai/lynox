@@ -47,7 +47,7 @@ The handler receives the parsed input and a reference to the calling `IAgent` (f
 
 Executes shell commands via `execSync`. Returns stdout on success, combined stdout+stderr on failure. Uses an **env var allowlist** — only safe prefixes (PATH, HOME, NODE_*, GIT_*, etc.) are passed to subprocesses. All secrets and API keys are stripped. See [Security](/security/#env-var-allowlist).
 
-**Isolation env filtering** (`setIsolationEnv()`): Available as an extension point for Pro. When a tenant context is active (via `nodyn-pro`), the env passed to subprocesses is further restricted based on isolation level. Air-gapped tenants receive a minimal env (PATH, HOME, TMPDIR only). Sandboxed tenants can inject custom env vars via `IsolationConfig.envVars`. Shared and scoped levels use the default allowlist.
+**Isolation env filtering** (`setIsolationEnv()`): Available as an extension point for Pro. When a tenant context is active (via `lynox-pro`), the env passed to subprocesses is further restricted based on isolation level. Air-gapped tenants receive a minimal env (PATH, HOME, TMPDIR only). Sandboxed tenants can inject custom env vars via `IsolationConfig.envVars`. Shared and scoped levels use the default allowlist.
 
 ### `read_file` -- File Read
 
@@ -169,7 +169,7 @@ In Slack, questions with `options` render as interactive buttons. Questions with
 
 Makes HTTP requests with full SSRF protection (see [Security](/security/)). Returns status, headers, and body. JSON responses are pretty-printed.
 
-**Network policy enforcement** (`setNetworkPolicy()`): Available as an extension point for Pro. When a tenant context is active (via `nodyn-pro`), the http tool enforces the tenant's network policy. `allow-all` (default) permits any request. `allow-list` restricts requests to hostnames in `IsolationConfig.allowedHosts`. `deny-all` blocks all outbound HTTP requests. See [Security](/security/#isolation-levels).
+**Network policy enforcement** (`setNetworkPolicy()`): Available as an extension point for Pro. When a tenant context is active (via `lynox-pro`), the http tool enforces the tenant's network policy. `allow-all` (default) permits any request. `allow-list` restricts requests to hostnames in `IsolationConfig.allowedHosts`. `deny-all` blocks all outbound HTTP requests. See [Security](/security/#isolation-levels).
 
 **API profile enforcement**: When API profiles are loaded (see [API Store](/api-store/)), requests to API-like URLs without a registered profile are blocked. Per-API rate limits from profiles are enforced automatically.
 
@@ -180,7 +180,7 @@ Makes HTTP requests with full SSRF protection (see [Security](/security/)). Retu
 | Source | `src/tools/builtin/api-setup.ts` |
 | Actions | `create`, `update`, `delete`, `list` |
 
-Create and manage API profiles that teach the agent how to correctly use external APIs. Profiles include endpoints, auth method, rate limits, guidelines, and common mistakes. Created profiles are validated (must include endpoints, guidelines, avoid rules, and auth), written to `~/.nodyn/apis/`, and activated immediately (hot-reload). See [API Store](/api-store/).
+Create and manage API profiles that teach the agent how to correctly use external APIs. Profiles include endpoints, auth method, rate limits, guidelines, and common mistakes. Created profiles are validated (must include endpoints, guidelines, avoid rules, and auth), written to `~/.lynox/apis/`, and activated immediately (hot-reload). See [API Store](/api-store/).
 
 ### `run_pipeline` -- Run Workflow
 
@@ -212,7 +212,7 @@ Creates a task in the SQLite task store. Supports scope validation against activ
 | `watch` | `watch_url` field set | WorkerLoop polls the URL at `watch_interval_minutes` (default: 60), triggers on content change |
 | `pipeline` | `pipeline_id` field set | WorkerLoop executes the stored pipeline workflow |
 
-Background tasks with `assignee='nodyn'` auto-trigger immediately (`nextRunAt=now`).
+Background tasks with `assignee='lynox'` auto-trigger immediately (`nextRunAt=now`).
 
 ### `task_update` -- Update Task
 
@@ -292,7 +292,7 @@ Client-side web search and content extraction tool. Registered conditionally whe
 - **Tavily** (default): Free tier 1,000 searches/month. Returns AI-optimized parsed content. Key prefix: `tvly-`. **Privacy:** disable "Allow use of query data" in your [Tavily dashboard](https://tavily.com) to prevent Tavily from using your searches to improve their services.
 - **Brave**: Privacy-focused, own index. Requires `X-Subscription-Token` header.
 
-**Configuration:** `TAVILY_API_KEY` env var, or `search_api_key` + `search_provider` in `~/.nodyn/config.json`.
+**Configuration:** `TAVILY_API_KEY` env var, or `search_api_key` + `search_provider` in `~/.lynox/config.json`.
 
 ## Eager Input Streaming
 
@@ -310,7 +310,7 @@ This enables 5x faster delivery of the first tool parameter from the streaming A
 
 ## Worker Pool
 
-> **Note:** The worker pool is a Pro feature provided by `nodyn-pro`. It registers via Orchestrator Hooks (`onInit`/`onShutdown`).
+> **Note:** The worker pool is a Pro feature provided by `lynox-pro`. It registers via Orchestrator Hooks (`onInit`/`onShutdown`).
 
 The `WorkerPool` runs tools off the main thread using `node:worker_threads`:
 

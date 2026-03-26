@@ -1,23 +1,23 @@
 #!/bin/sh
-# nodyn — server deployment script
-# Usage: curl -fsSL https://nodyn.dev/setup-server.sh | sh
+# lynox — server deployment script
+# Usage: curl -fsSL https://lynox.ai/setup-server.sh | sh
 #
-# Sets up a 24/7 nodyn instance with Docker and Telegram.
-# Inspect before running: curl -fsSL https://nodyn.dev/setup-server.sh | less
+# Sets up a 24/7 lynox instance with Docker and Telegram.
+# Inspect before running: curl -fsSL https://lynox.ai/setup-server.sh | less
 #
 # What this script does:
 #   1. Checks/installs Docker
 #   2. Asks for your Anthropic API key
 #   3. Optionally sets up Telegram bot
 #   4. Generates encryption key
-#   5. Starts nodyn in a hardened Docker container
+#   5. Starts lynox in a hardened Docker container
 #   6. Verifies everything works
 
 SCRIPT_VERSION="1.0.0"
-NODYN_IMAGE="ghcr.io/nodyn-ai/nodyn:latest"
-NODYN_CONTAINER="nodyn"
-NODYN_DIR="$HOME/.nodyn"
-ENV_FILE="$NODYN_DIR/.env"
+LYNOX_IMAGE="ghcr.io/lynox-ai/lynox:latest"
+LYNOX_CONTAINER="lynox"
+LYNOX_DIR="$HOME/.lynox"
+ENV_FILE="$LYNOX_DIR/.env"
 
 set -eu
 
@@ -75,10 +75,10 @@ esac
 
 # --- Header ---
 printf "\n"
-printf "  %snodyn%s — server deployment\n" "$BOLD" "$RESET"
-printf "  %shttps://nodyn.dev%s\n" "$DIM" "$RESET"
+printf "  %slynox%s — server deployment\n" "$BOLD" "$RESET"
+printf "  %shttps://lynox.ai%s\n" "$DIM" "$RESET"
 printf "\n"
-printf "  This script sets up nodyn to run 24/7 on this server.\n"
+printf "  This script sets up lynox to run 24/7 on this server.\n"
 printf "  You'll need: an Anthropic API key and optionally a Telegram bot.\n"
 
 # --- Existing installation check ---
@@ -87,15 +87,15 @@ if [ -f "$ENV_FILE" ]; then
   EXISTING=1
 fi
 CONTAINER_EXISTS=0
-if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$NODYN_CONTAINER"; then
+if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$LYNOX_CONTAINER"; then
   CONTAINER_EXISTS=1
 fi
 
 if [ "$EXISTING" -eq 1 ] || [ "$CONTAINER_EXISTS" -eq 1 ]; then
   printf "\n  %sExisting installation detected.%s\n" "$YELLOW" "$RESET"
   if [ "$CONTAINER_EXISTS" -eq 1 ]; then
-    CSTATUS=$(docker inspect --format='{{.State.Status}}' "$NODYN_CONTAINER" 2>/dev/null || echo "unknown")
-    printf "  Container: %s (%s)\n" "$NODYN_CONTAINER" "$CSTATUS"
+    CSTATUS=$(docker inspect --format='{{.State.Status}}' "$LYNOX_CONTAINER" 2>/dev/null || echo "unknown")
+    printf "  Container: %s (%s)\n" "$LYNOX_CONTAINER" "$CSTATUS"
   fi
   [ "$EXISTING" -eq 1 ] && printf "  Config: %s\n" "$ENV_FILE"
   printf "\n  What would you like to do?\n"
@@ -107,12 +107,12 @@ if [ "$EXISTING" -eq 1 ] || [ "$CONTAINER_EXISTS" -eq 1 ]; then
   case "${ECHOICE:-1}" in
     1)
       step "1" "3" "Pulling latest image"
-      docker pull "$NODYN_IMAGE"
+      docker pull "$LYNOX_IMAGE"
       step "2" "3" "Restarting container"
-      docker stop "$NODYN_CONTAINER" 2>/dev/null || true
-      docker rm "$NODYN_CONTAINER" 2>/dev/null || true
+      docker stop "$LYNOX_CONTAINER" 2>/dev/null || true
+      docker rm "$LYNOX_CONTAINER" 2>/dev/null || true
       docker run -d \
-        --name "$NODYN_CONTAINER" \
+        --name "$LYNOX_CONTAINER" \
         --restart unless-stopped \
         --read-only \
         --tmpfs /tmp:size=512M \
@@ -120,14 +120,14 @@ if [ "$EXISTING" -eq 1 ] || [ "$CONTAINER_EXISTS" -eq 1 ]; then
         --security-opt no-new-privileges \
         --memory 2g --cpus 2.0 \
         --env-file "$ENV_FILE" \
-        -v "$NODYN_DIR:/home/nodyn/.nodyn" \
-        "$NODYN_IMAGE" >/dev/null
+        -v "$LYNOX_DIR:/home/lynox/.lynox" \
+        "$LYNOX_IMAGE" >/dev/null
       step "3" "3" "Verifying"
       sleep 3
-      if docker ps --format '{{.Names}}' | grep -qx "$NODYN_CONTAINER"; then
-        info "nodyn updated and running"
+      if docker ps --format '{{.Names}}' | grep -qx "$LYNOX_CONTAINER"; then
+        info "lynox updated and running"
       else
-        error "Container failed to start. Check: docker logs $NODYN_CONTAINER"
+        error "Container failed to start. Check: docker logs $LYNOX_CONTAINER"
         exit 1
       fi
       exit 0 ;;
@@ -238,7 +238,7 @@ step "3" "$TOTAL_STEPS" "Telegram Bot"
 TELEGRAM_TOKEN=""
 TELEGRAM_CHAT_ID=""
 
-printf "  Telegram is your daily interface — use nodyn from your phone.\n\n"
+printf "  Telegram is your daily interface — use lynox from your phone.\n\n"
 
 if confirm "Set up Telegram now?"; then
   printf "\n  %s1.%s Open Telegram → message %s@BotFather%s\n" "$BOLD" "$RESET" "$BOLD" "$RESET"
@@ -304,7 +304,7 @@ if confirm "Set up Telegram now?"; then
     else
       printf "\r  %s                                              %s\r" " " " "
       warn "No message received. You can add your chat ID later:"
-      printf "  %sAdd TELEGRAM_ALLOWED_CHAT_IDS=<your-id> to ~/.nodyn/.env%s\n" "$DIM" "$RESET"
+      printf "  %sAdd TELEGRAM_ALLOWED_CHAT_IDS=<your-id> to ~/.lynox/.env%s\n" "$DIM" "$RESET"
     fi
   fi
 else
@@ -323,27 +323,27 @@ else
 fi
 
 info "Encryption key generated (AES-256-GCM)"
-printf "  %sStored in ~/.nodyn/.env — keep a backup of this directory.%s\n" "$DIM" "$RESET"
+printf "  %sStored in ~/.lynox/.env — keep a backup of this directory.%s\n" "$DIM" "$RESET"
 
 # ============================================================
 # Step 5: Write configuration
 # ============================================================
 step "5" "$TOTAL_STEPS" "Saving configuration"
 
-mkdir -p "$NODYN_DIR"
-chmod 700 "$NODYN_DIR"
+mkdir -p "$LYNOX_DIR"
+chmod 700 "$LYNOX_DIR"
 
 # Atomic write: temp file → chmod → rename
-TMPFILE=$(mktemp "$NODYN_DIR/.env.XXXXXX")
+TMPFILE=$(mktemp "$LYNOX_DIR/.env.XXXXXX")
 _tmpfiles="$TMPFILE"
 
 cat > "$TMPFILE" << ENVEOF
-# nodyn server configuration
+# lynox server configuration
 # Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # DO NOT share this file — contains your encryption key and API credentials
 
 ANTHROPIC_API_KEY=${API_KEY}
-NODYN_VAULT_KEY=${VAULT_KEY}
+LYNOX_VAULT_KEY=${VAULT_KEY}
 ENVEOF
 
 [ -n "$TELEGRAM_TOKEN" ] && printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_TOKEN" >> "$TMPFILE"
@@ -353,7 +353,7 @@ chmod 600 "$TMPFILE"
 mv "$TMPFILE" "$ENV_FILE"
 _tmpfiles=""
 
-info "Configuration saved to ~/.nodyn/.env"
+info "Configuration saved to ~/.lynox/.env"
 
 # Clear secrets from memory
 unset API_KEY VAULT_KEY 2>/dev/null || true
@@ -361,21 +361,21 @@ unset API_KEY VAULT_KEY 2>/dev/null || true
 # ============================================================
 # Step 6: Pull image
 # ============================================================
-step "6" "$TOTAL_STEPS" "Downloading nodyn"
+step "6" "$TOTAL_STEPS" "Downloading lynox"
 
-docker pull "$NODYN_IMAGE"
+docker pull "$LYNOX_IMAGE"
 
 # ============================================================
 # Step 7: Start container
 # ============================================================
-step "7" "$TOTAL_STEPS" "Starting nodyn"
+step "7" "$TOTAL_STEPS" "Starting lynox"
 
 # Remove existing container if present
-docker stop "$NODYN_CONTAINER" 2>/dev/null || true
-docker rm "$NODYN_CONTAINER" 2>/dev/null || true
+docker stop "$LYNOX_CONTAINER" 2>/dev/null || true
+docker rm "$LYNOX_CONTAINER" 2>/dev/null || true
 
 docker run -d \
-  --name "$NODYN_CONTAINER" \
+  --name "$LYNOX_CONTAINER" \
   --restart unless-stopped \
   --read-only \
   --tmpfs /tmp:size=512M \
@@ -383,15 +383,15 @@ docker run -d \
   --security-opt no-new-privileges \
   --memory 2g --cpus 2.0 \
   --env-file "$ENV_FILE" \
-  -v "$NODYN_DIR:/home/nodyn/.nodyn" \
-  "$NODYN_IMAGE" >/dev/null
+  -v "$LYNOX_DIR:/home/lynox/.lynox" \
+  "$LYNOX_IMAGE" >/dev/null
 
 # Verify
 printf "  Waiting for startup..."
 HEALTHY=0
 for _ in $(seq 1 15); do
   sleep 2
-  if docker ps --format '{{.Names}}' | grep -qx "$NODYN_CONTAINER"; then
+  if docker ps --format '{{.Names}}' | grep -qx "$LYNOX_CONTAINER"; then
     HEALTHY=1
     break
   fi
@@ -401,15 +401,15 @@ printf "\r                          \r"
 
 if [ "$HEALTHY" -eq 1 ]; then
   # Check logs for errors
-  LOGS=$(docker logs "$NODYN_CONTAINER" 2>&1 | tail -5)
+  LOGS=$(docker logs "$LYNOX_CONTAINER" 2>&1 | tail -5)
   if printf '%s' "$LOGS" | grep -qi "error\|fatal"; then
-    warn "Container started with warnings. Check: docker logs $NODYN_CONTAINER"
+    warn "Container started with warnings. Check: docker logs $LYNOX_CONTAINER"
   else
-    info "nodyn is running"
+    info "lynox is running"
   fi
 else
   error "Container failed to start."
-  printf "  Check logs: %sdocker logs %s%s\n" "$BOLD" "$NODYN_CONTAINER" "$RESET"
+  printf "  Check logs: %sdocker logs %s%s\n" "$BOLD" "$LYNOX_CONTAINER" "$RESET"
   exit 1
 fi
 
@@ -428,13 +428,13 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower \
   --cleanup --interval 86400 \
-  "$NODYN_CONTAINER" >/dev/null
+  "$LYNOX_CONTAINER" >/dev/null
 
 if docker ps --format '{{.Names}}' | grep -qx watchtower; then
   info "Auto-updater active (checks daily)"
 else
-  warn "Auto-updater failed to start. nodyn works fine — but won't update automatically."
-  printf "  %sYou can add it later: see docs.nodyn.dev/docker%s\n" "$DIM" "$RESET"
+  warn "Auto-updater failed to start. lynox works fine — but won't update automatically."
+  printf "  %sYou can add it later: see docs.lynox.ai/docker%s\n" "$DIM" "$RESET"
 fi
 
 # ============================================================
@@ -442,7 +442,7 @@ fi
 # ============================================================
 printf "\n"
 printf "  %s╭──────────────────────────────────────╮%s\n" "$GREEN" "$RESET"
-printf "  %s│  ✓  nodyn is running                 │%s\n" "$GREEN" "$RESET"
+printf "  %s│  ✓  lynox is running                 │%s\n" "$GREEN" "$RESET"
 printf "  %s╰──────────────────────────────────────╯%s\n" "$GREEN" "$RESET"
 printf "\n"
 printf "  %sWhat's set up:%s\n" "$BOLD" "$RESET"
@@ -455,17 +455,17 @@ if [ -n "$TELEGRAM_TOKEN" ]; then
 else
   printf "    Telegram       –  %snot configured (re-run to add)%s\n" "$DIM" "$RESET"
 fi
-printf "    Container      ✓  %s (auto-restarts)\n" "$NODYN_CONTAINER"
+printf "    Container      ✓  %s (auto-restarts)\n" "$LYNOX_CONTAINER"
 if docker ps --format '{{.Names}}' | grep -qx watchtower; then
   printf "    Auto-update    ✓  checks daily\n"
 fi
 printf "\n"
 printf "  %sYour data:%s\n" "$BOLD" "$RESET"
-printf "    ~/.nodyn/        Config, knowledge, history, backups\n"
+printf "    ~/.lynox/        Config, knowledge, history, backups\n"
 printf "\n"
 printf "  %sUseful commands:%s\n" "$BOLD" "$RESET"
-printf "    %sdocker logs -f nodyn%s          View live logs\n" "$DIM" "$RESET"
-printf "    %sdocker restart nodyn%s          Restart\n" "$DIM" "$RESET"
+printf "    %sdocker logs -f lynox%s          View live logs\n" "$DIM" "$RESET"
+printf "    %sdocker restart lynox%s          Restart\n" "$DIM" "$RESET"
 printf "\n"
 
 if [ -n "$TELEGRAM_TOKEN" ]; then
@@ -475,7 +475,7 @@ if [ -n "$TELEGRAM_TOKEN" ]; then
 else
   printf "  %sGet started:%s\n" "$BOLD" "$RESET"
   printf "    → Connect interactively:\n"
-  printf "      %sdocker exec -it nodyn node /app/dist/index.js%s\n" "$DIM" "$RESET"
+  printf "      %sdocker exec -it lynox node /app/dist/index.js%s\n" "$DIM" "$RESET"
   printf "    → Or add Telegram later by re-running this script\n"
 fi
 

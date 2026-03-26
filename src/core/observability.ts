@@ -2,39 +2,39 @@ import { channel } from 'node:diagnostics_channel';
 import { performance } from 'node:perf_hooks';
 
 export const channels = {
-  toolStart:    channel('nodyn:tool:start'),
-  toolEnd:      channel('nodyn:tool:end'),
-  spawnStart:   channel('nodyn:spawn:start'),
-  spawnEnd:     channel('nodyn:spawn:end'),
-  costWarning:  channel('nodyn:cost:warning'),
-  preApprovalMatch:     channel('nodyn:preapproval:match'),
-  preApprovalExhausted: channel('nodyn:preapproval:exhausted'),
-  preApprovalExpired:   channel('nodyn:preapproval:expired'),
-  dagNotify:            channel('nodyn:dag:notify'),
+  toolStart:    channel('lynox:tool:start'),
+  toolEnd:      channel('lynox:tool:end'),
+  spawnStart:   channel('lynox:spawn:start'),
+  spawnEnd:     channel('lynox:spawn:end'),
+  costWarning:  channel('lynox:cost:warning'),
+  preApprovalMatch:     channel('lynox:preapproval:match'),
+  preApprovalExhausted: channel('lynox:preapproval:exhausted'),
+  preApprovalExpired:   channel('lynox:preapproval:expired'),
+  dagNotify:            channel('lynox:dag:notify'),
 
-  memoryStore:          channel('nodyn:memory:store'),
-  memoryExtraction:     channel('nodyn:memory:extraction'),
-  contentTruncation:    channel('nodyn:content:truncation'),
-  fileWatcherFallback:  channel('nodyn:filewatcher:fallback'),
-  secretAccess:         channel('nodyn:secret:access'),
-  guardBlock:           channel('nodyn:guard:block'),
-  securityBlocked:      channel('nodyn:security:blocked'),
-  securityFlagged:      channel('nodyn:security:flagged'),
-  securityInjection:    channel('nodyn:security:injection'),
+  memoryStore:          channel('lynox:memory:store'),
+  memoryExtraction:     channel('lynox:memory:extraction'),
+  contentTruncation:    channel('lynox:content:truncation'),
+  fileWatcherFallback:  channel('lynox:filewatcher:fallback'),
+  secretAccess:         channel('lynox:secret:access'),
+  guardBlock:           channel('lynox:guard:block'),
+  securityBlocked:      channel('lynox:security:blocked'),
+  securityFlagged:      channel('lynox:security:flagged'),
+  securityInjection:    channel('lynox:security:injection'),
 
-  knowledgeGraph:       channel('nodyn:knowledge:graph'),
-  knowledgeEntity:      channel('nodyn:knowledge:entity'),
-  dataStoreInsert:      channel('nodyn:datastore:insert'),
+  knowledgeGraph:       channel('lynox:knowledge:graph'),
+  knowledgeEntity:      channel('lynox:knowledge:entity'),
+  dataStoreInsert:      channel('lynox:datastore:insert'),
 };
 
 export function measureTool(name: string): { end(): number } {
-  const markName = `nodyn:tool:${name}:${performance.now()}`;
+  const markName = `lynox:tool:${name}:${performance.now()}`;
   performance.mark(markName);
   return {
     end(): number {
       const endMark = `${markName}:end`;
       performance.mark(endMark);
-      const measure = performance.measure(`nodyn:tool:${name}`, markName, endMark);
+      const measure = performance.measure(`lynox:tool:${name}`, markName, endMark);
       const duration = measure.duration;
       performance.clearMarks(markName);
       performance.clearMarks(endMark);

@@ -20,7 +20,7 @@ describe('KnowledgeLayer', () => {
   const scope: MemoryScopeRef = { type: 'context', id: 'test-project' };
 
   beforeAll(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), 'nodyn-kl-test-'));
+    tempDir = await mkdtemp(join(tmpdir(), 'lynox-kl-test-'));
     layer = new KnowledgeLayer(join(tempDir, 'test-graph'), new LocalProvider());
     await layer.init();
   });

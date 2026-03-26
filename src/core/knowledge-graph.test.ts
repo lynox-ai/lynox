@@ -9,7 +9,7 @@ describe('KuzuGraph', () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), 'nodyn-kg-test-'));
+    tempDir = await mkdtemp(join(tmpdir(), 'lynox-kg-test-'));
     graph = new KuzuGraph(join(tempDir, 'test-graph'));
     await graph.init();
   });

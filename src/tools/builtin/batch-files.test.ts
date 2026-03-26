@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 async function makeTempDir(): Promise<string> {
-  dir = await mkdtemp(join(tmpdir(), 'nodyn-batch-'));
+  dir = await mkdtemp(join(tmpdir(), 'lynox-batch-'));
   return dir;
 }
 

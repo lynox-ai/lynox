@@ -1,7 +1,7 @@
 /**
  * API Store — teaches the agent how to properly use external APIs.
  *
- * Loads API profiles from ~/.nodyn/apis/*.json. Each profile describes
+ * Loads API profiles from ~/.lynox/apis/*.json. Each profile describes
  * an API's capabilities, auth method, rate limits, endpoints, guidelines,
  * and common mistakes. This knowledge is injected into the system prompt
  * so the agent knows HOW to use an API before making any requests.
@@ -139,13 +139,13 @@ export class ApiStore {
         const raw = readFileSync(join(dir, file), 'utf-8');
         const profile = JSON.parse(raw) as ApiProfile;
         if (!profile.id || !profile.name || !profile.base_url || !profile.description) {
-          process.stderr.write(`[nodyn:api-store] Skipping ${file}: missing required fields (id, name, base_url, description)\n`);
+          process.stderr.write(`[lynox:api-store] Skipping ${file}: missing required fields (id, name, base_url, description)\n`);
           continue;
         }
         this.register(profile);
         loaded++;
       } catch (err: unknown) {
-        process.stderr.write(`[nodyn:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
     return loaded;

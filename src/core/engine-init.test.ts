@@ -8,7 +8,7 @@ vi.mock('./secret-vault.js', () => ({ SecretVault: vi.fn() }));
 vi.mock('./secret-store.js', () => ({ SecretStore: vi.fn() }));
 vi.mock('./config.js', () => ({
   setVaultApiKeyExists: vi.fn(),
-  getNodynDir: vi.fn().mockReturnValue('/tmp/.nodyn'),
+  getLynoxDir: vi.fn().mockReturnValue('/tmp/.lynox'),
 }));
 vi.mock('./session-budget.js', () => ({ configurePersistentBudget: vi.fn() }));
 vi.mock('../tools/builtin/http.js', () => ({
@@ -46,9 +46,9 @@ vi.mock('./project.js', () => ({
 }));
 
 import { generateInitBriefing } from './engine-init.js';
-import type { NodynContext } from '../types/index.js';
+import type { LynoxContext } from '../types/index.js';
 
-const cliContext: NodynContext = {
+const cliContext: LynoxContext = {
   id: 'test-ctx',
   source: 'cli',
   workspaceDir: '/tmp/test',

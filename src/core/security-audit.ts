@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { channels } from './observability.js';
-import { getNodynDir } from './config.js';
+import { getLynoxDir } from './config.js';
 
 export interface SecurityEvent {
   event_type: string;
@@ -32,7 +32,7 @@ export class SecurityAudit {
   private insertStmt: Database.Statement;
 
   constructor(dbPath?: string | undefined) {
-    const path = dbPath ?? join(getNodynDir(), 'history.db');
+    const path = dbPath ?? join(getLynoxDir(), 'history.db');
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
 

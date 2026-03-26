@@ -18,7 +18,7 @@ function makeTask(overrides?: Partial<TaskRecord>): TaskRecord {
     description: 'Generate the daily report',
     status: 'open',
     priority: 'medium',
-    assignee: 'nodyn',
+    assignee: 'lynox',
     scope_type: 'context',
     scope_id: '',
     due_date: null,

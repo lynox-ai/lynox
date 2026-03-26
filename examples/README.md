@@ -1,6 +1,6 @@
 # Examples
 
-Runnable examples demonstrating the nodyn SDK. Each file is self-contained.
+Runnable examples demonstrating the lynox SDK. Each file is self-contained.
 
 ## Prerequisites
 

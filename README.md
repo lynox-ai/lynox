@@ -1,7 +1,7 @@
-# nodyn
+# lynox
 
-[![npm version](https://img.shields.io/npm/v/@nodyn-ai/core)](https://www.npmjs.com/package/@nodyn-ai/core)
-[![CI](https://github.com/nodyn-ai/nodyn/actions/workflows/ci.yml/badge.svg)](https://github.com/nodyn-ai/nodyn/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@lynox-ai/core)](https://www.npmjs.com/package/@lynox-ai/core)
+[![CI](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml/badge.svg)](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
@@ -11,29 +11,29 @@ An AI agent that runs on your infrastructure, learns your business over time, an
 
 ## What it does
 
-- **"Check my emails and tell me what's important"** — nodyn reads your inbox, prioritizes, drafts replies in your tone. Tomorrow it remembers your style.
-- **"Summarize this PDF"** — Drop a file, get structured key points. nodyn saves the context for later.
+- **"Check my emails and tell me what's important"** — lynox reads your inbox, prioritizes, drafts replies in your tone. Tomorrow it remembers your style.
+- **"Summarize this PDF"** — Drop a file, get structured key points. lynox saves the context for later.
 - **"Research [topic] and give me the key points"** — Plans research phases, searches the web, cites sources, stores findings in the knowledge graph.
-- **"Same as last Monday"** — nodyn recognizes the pattern. "Want me to do this every Monday?" One tap, it's automated.
+- **"Same as last Monday"** — lynox recognizes the pattern. "Want me to do this every Monday?" One tap, it's automated.
 - **"What changed on competitor.com?"** — Started as a one-time check. Now runs weekly and alerts you via Telegram when something shifts.
 
 ## Quick start
 
 ```bash
-curl -fsSL https://nodyn.dev/install.sh | sh
+curl -fsSL https://lynox.ai/install.sh | sh
 ```
 
 You need an [Anthropic API key](https://console.anthropic.com/) — the setup wizard asks for it. That's all.
 
-Already have Node.js 22+? `npx @nodyn-ai/core` works too.
+Already have Node.js 22+? `npx @lynox-ai/core` works too.
 
 ### Docker
 
 ```bash
 docker run -it --rm \
   -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  ghcr.io/nodyn-ai/nodyn:latest
+  -v ~/.lynox:/home/lynox/.lynox \
+  ghcr.io/lynox-ai/lynox:latest
 ```
 
 ## How it works
@@ -45,7 +45,7 @@ docker run -it --rm \
 └──────────────┬───────────────────────┘
                │
 ┌──────────────▼───────────────────────┐
-│            nodyn                     │
+│            lynox                     │
 │                                      │
 │  Understands your business context   │
 │  Remembers what it learned           │
@@ -59,7 +59,7 @@ docker run -it --rm \
 └──────────────────────────────────────┘
 ```
 
-**BYOK** — You provide your Anthropic API key. nodyn calls the API directly. No proxy, no middleman, no data collection.
+**BYOK** — You provide your Anthropic API key. lynox calls the API directly. No proxy, no middleman, no data collection.
 
 ## Key capabilities
 
@@ -68,7 +68,7 @@ docker run -it --rm \
 - **Telegram Bot** — Primary daily interface. Rich status, follow-up suggestions, voice messages, file uploads.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
 - **MCP Server** — Connect to Claude Desktop, Cursor, or any MCP client via stdio or HTTP.
-- **Process Capture** — Teach nodyn your workflow once, save it as a reusable template, schedule it.
+- **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it.
 - **4 Specialized Roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets.
 - **Security** — AES-256 encrypted vault, permission guard, input/output scanning, SSRF protection.
 
@@ -77,13 +77,13 @@ docker run -it --rm \
 **Fastest** — open a terminal and paste:
 
 ```bash
-curl -fsSL https://nodyn.dev/install.sh | sh
+curl -fsSL https://lynox.ai/install.sh | sh
 ```
 
 **With Node.js 22+:**
 
 ```bash
-npx @nodyn-ai/core
+npx @lynox-ai/core
 ```
 
 > `better-sqlite3` needs C++ build tools. macOS: `xcode-select --install`. Ubuntu: `sudo apt-get install build-essential python3`.
@@ -91,8 +91,8 @@ npx @nodyn-ai/core
 ### Clone & run
 
 ```bash
-git clone https://github.com/nodyn-ai/nodyn.git
-cd nodyn && npm install
+git clone https://github.com/lynox-ai/lynox.git
+cd lynox && npm install
 npm run dev
 ```
 
@@ -116,7 +116,7 @@ After setup you're in the interactive REPL:
 One-shot mode — run a task and exit:
 
 ```bash
-npx @nodyn-ai/core "Summarize the last 5 commits in this repo"
+npx @lynox-ai/core "Summarize the last 5 commits in this repo"
 ```
 
 ### Telegram (recommended for daily use)
@@ -124,7 +124,7 @@ npx @nodyn-ai/core "Summarize the last 5 commits in this repo"
 Create a bot via [@BotFather](https://t.me/BotFather), then:
 
 ```bash
-TELEGRAM_BOT_TOKEN=123:ABC... npx @nodyn-ai/core
+TELEGRAM_BOT_TOKEN=123:ABC... npx @lynox-ai/core
 ```
 
 For SDK usage, see [docs/sdk.md](docs/sdk.md) and [`examples/`](examples/).
@@ -135,8 +135,8 @@ Architecture, tools, integrations, security, and deployment details are in [`doc
 
 ## Community
 
-- [GitHub Discussions](https://github.com/nodyn-ai/nodyn/discussions) — Questions, ideas, show & tell
-- [GitHub Issues](https://github.com/nodyn-ai/nodyn/issues) — Bug reports, feature requests
+- [GitHub Discussions](https://github.com/lynox-ai/lynox/discussions) — Questions, ideas, show & tell
+- [GitHub Issues](https://github.com/lynox-ai/lynox/issues) — Bug reports, feature requests
 - [Contributing](CONTRIBUTING.md) — Development setup and guidelines
 - [Security](SECURITY.md) — Responsible disclosure
 
@@ -146,13 +146,13 @@ Architecture, tools, integrations, security, and deployment details are in [`doc
 
 **What you can do:**
 - Read, modify, and redistribute the source code
-- Self-host nodyn for your business, your clients, or your team
-- Build commercial products and services on top of nodyn
+- Self-host lynox for your business, your clients, or your team
+- Build commercial products and services on top of lynox
 
-**The one restriction:** You may not offer nodyn as a hosted service to third parties.
+**The one restriction:** You may not offer lynox as a hosted service to third parties.
 
-This protects the project's sustainability while keeping the code fully open. The same approach is used by Elasticsearch and CockroachDB. Questions? [Open an issue](https://github.com/nodyn-ai/nodyn/issues).
+This protects the project's sustainability while keeping the code fully open. The same approach is used by Elasticsearch and CockroachDB. Questions? [Open an issue](https://github.com/lynox-ai/lynox/issues).
 
 ---
 
-**[nodyn.dev](https://nodyn.dev)** · **[npm](https://www.npmjs.com/package/@nodyn-ai/core)** · **[Changelog](CHANGELOG.md)**
+**[lynox.ai](https://lynox.ai)** · **[npm](https://www.npmjs.com/package/@lynox-ai/core)** · **[Changelog](CHANGELOG.md)**

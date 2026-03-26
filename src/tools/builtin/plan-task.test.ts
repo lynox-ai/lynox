@@ -10,11 +10,11 @@ vi.mock('../../core/dag-planner.js', () => ({
 import { planTaskTool, phasesToPipelineSteps } from './plan-task.js';
 import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
-import type { IAgent, NodynUserConfig } from '../../types/index.js';
+import type { IAgent, LynoxUserConfig } from '../../types/index.js';
 
-const mockConfig: NodynUserConfig = { api_key: 'test-key' };
+const mockConfig: LynoxUserConfig = { api_key: 'test-key' };
 
-function makeAgent(overrides: Partial<IAgent> = {}, userConfig: NodynUserConfig = {}): IAgent {
+function makeAgent(overrides: Partial<IAgent> = {}, userConfig: LynoxUserConfig = {}): IAgent {
   const toolContext = createToolContext(userConfig);
   return {
     name: 'test',

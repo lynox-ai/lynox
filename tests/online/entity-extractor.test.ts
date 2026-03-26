@@ -26,14 +26,14 @@ describe.skipIf(SKIP)('Online: Entity Extractor (LLM Tier 2)', () => {
   });
 
   it('extracts person and organization entities', async () => {
-    const text = 'Rafael Burlet founded nodyn in Switzerland to build AI infrastructure for small businesses.';
+    const text = 'Rafael Burlet founded lynox in Switzerland to build AI infrastructure for small businesses.';
 
     const result = await extractEntitiesLLM(text, client);
 
     expect(result.entities.length).toBeGreaterThan(0);
     const names = result.entities.map(e => e.name.toLowerCase());
     expect(names.some(n => n.includes('rafael') || n.includes('burlet'))).toBe(true);
-    expect(names.some(n => n.includes('nodyn'))).toBe(true);
+    expect(names.some(n => n.includes('lynox'))).toBe(true);
   }, 15_000);
 
   it('extracts relations between entities', async () => {

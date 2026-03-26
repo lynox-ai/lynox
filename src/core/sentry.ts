@@ -1,10 +1,10 @@
 /**
  * Sentry integration — opt-in error reporting.
- * Activated by NODYN_SENTRY_DSN env var or config.sentry_dsn.
+ * Activated by LYNOX_SENTRY_DSN env var or config.sentry_dsn.
  * No DSN is hardcoded — if absent, all functions are safe no-ops.
  */
 
-import type { NodynError } from './errors.js';
+import type { LynoxError } from './errors.js';
 
 let _initialized = false;
 let _enabled = false;
@@ -12,7 +12,7 @@ let _enabled = false;
 // Cached module reference to avoid repeated dynamic imports in hot paths
 let _sentry: typeof import('@sentry/node') | null = null;
 
-/** Keys in NodynError.context that are safe to send as extras (no PII). */
+/** Keys in LynoxError.context that are safe to send as extras (no PII). */
 const SAFE_CONTEXT_KEYS = new Set([
   'tool', 'toolName', 'model', 'tier', 'pipeline', 'stepId',
   'taskId', 'scopeType', 'scopeId', 'collection', 'status',
@@ -27,7 +27,7 @@ export async function initSentry(dsn?: string | undefined): Promise<boolean> {
   if (_initialized) return _enabled;
   _initialized = true;
 
-  const resolvedDsn = dsn ?? process.env['NODYN_SENTRY_DSN'];
+  const resolvedDsn = dsn ?? process.env['LYNOX_SENTRY_DSN'];
   if (!resolvedDsn) return false;
 
   try {
@@ -49,7 +49,7 @@ export async function initSentry(dsn?: string | undefined): Promise<boolean> {
 
     Sentry.init({
       dsn: resolvedDsn,
-      release: `nodyn@${version}`,
+      release: `lynox@${version}`,
       environment: process.env['NODE_ENV'] ?? 'production',
       sampleRate: 1.0,
       tracesSampleRate: 0,     // No performance tracing (cost + PII)
@@ -109,8 +109,8 @@ export function addLLMBreadcrumb(model: string, inputTokens: number, outputToken
 
 // ── Error capture ──
 
-/** Capture a NodynError with structured tags. */
-export function captureNodynError(error: NodynError): void {
+/** Capture a LynoxError with structured tags. */
+export function captureLynoxError(error: LynoxError): void {
   if (!_enabled || !_sentry) return;
   const Sentry = _sentry;
   Sentry.withScope((scope) => {

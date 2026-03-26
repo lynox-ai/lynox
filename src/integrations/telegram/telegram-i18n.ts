@@ -20,9 +20,9 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'status.earlier_many': 'earlier tools',
 
     // Commands
-    'cmd.start': '👋 <b>NODYN</b> — Your AI Business Assistant\n\nSend me any task and I\'ll work on it.\nUse /help for commands, /clear for a fresh start.',
-    'cmd.start_new': '👋 <b>Welcome to NODYN</b>\n\nI\'m your AI business assistant. I learn about your business and work for you autonomously.\n\n<b>What I can do:</b>\n• Research, analysis, writing, planning\n• Manage contacts and deals (built-in CRM)\n• Send and draft emails (Gmail)\n• Schedule meetings (Calendar)\n• Run background tasks and reminders\n• Connect to external APIs\n\nJust tell me what you need — for example:\n• <i>"Research competitors in my industry"</i>\n• <i>"Draft an email to a client"</i>\n• <i>"Show me my open deals"</i>\n\nWhat can I help you with?',
-    'cmd.help': '<b>NODYN Commands:</b>\n\n/google — Connect Google Workspace (Gmail, Sheets, Calendar)\n/clear — Fresh conversation (knowledge preserved)\n/stop — Abort current task\n/cost — Show costs\n/bug — Report a problem\n/help — This message\n\nJust chat naturally — send text, voice, photos, or files. No commands needed for most tasks.',
+    'cmd.start': '👋 <b>LYNOX</b> — Your AI Business Assistant\n\nSend me any task and I\'ll work on it.\nUse /help for commands, /clear for a fresh start.',
+    'cmd.start_new': '👋 <b>Welcome to LYNOX</b>\n\nI\'m your AI business assistant. I learn about your business and work for you autonomously.\n\n<b>What I can do:</b>\n• Research, analysis, writing, planning\n• Manage contacts and deals (built-in CRM)\n• Send and draft emails (Gmail)\n• Schedule meetings (Calendar)\n• Run background tasks and reminders\n• Connect to external APIs\n\nJust tell me what you need — for example:\n• <i>"Research competitors in my industry"</i>\n• <i>"Draft an email to a client"</i>\n• <i>"Show me my open deals"</i>\n\nWhat can I help you with?',
+    'cmd.help': '<b>LYNOX Commands:</b>\n\n/google — Connect Google Workspace (Gmail, Sheets, Calendar)\n/clear — Fresh conversation (knowledge preserved)\n/stop — Abort current task\n/cost — Show costs\n/bug — Report a problem\n/help — This message\n\nJust chat naturally — send text, voice, photos, or files. No commands needed for most tasks.',
     'cmd.secret': '\uD83D\uDD12 <b>Secrets</b>\n\nSecrets (API keys, passwords) are sensitive data. For security, they are configured by your admin in the deployment settings \u2014 not via Telegram.\n\nIf you need access to a service, ask your admin to add the credentials.',
     'cmd.clear': '\uD83D\uDD04 Conversation cleared — starting fresh.\nYour long-term knowledge is preserved.',
     'cmd.bug_usage': '\uD83D\uDC1E <b>Report a Bug</b>\n\nUsage: <code>/bug Your description here</code>\n\nDescribe what went wrong and it will be sent to the development team.',
@@ -62,15 +62,15 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'cost.today': 'Today',
 
     // Sentry opt-in
-    'sentry.prompt': '🛡️ <b>Help improve nodyn?</b>\n\nYou can send anonymized error reports so we can fix bugs faster.\n\n<b>What is sent:</b> error type, stack trace, nodyn version\n<b>What is never sent:</b> your messages, files, knowledge, or any personal data\n\nYou can disable this anytime in your server settings.',
+    'sentry.prompt': '🛡️ <b>Help improve lynox?</b>\n\nYou can send anonymized error reports so we can fix bugs faster.\n\n<b>What is sent:</b> error type, stack trace, lynox version\n<b>What is never sent:</b> your messages, files, knowledge, or any personal data\n\nYou can disable this anytime in your server settings.',
     'sentry.yes': '✓ Yes, help improve',
     'sentry.no': 'No thanks',
-    'sentry.thanks': '🛡️ Thank you! Anonymized error reports are now enabled. This helps us fix bugs faster.\n\n<i>Disable anytime by removing NODYN_SENTRY_DSN from your server config.</i>',
+    'sentry.thanks': '🛡️ Thank you! Anonymized error reports are now enabled. This helps us fix bugs faster.\n\n<i>Disable anytime by removing LYNOX_SENTRY_DSN from your server config.</i>',
     'sentry.declined': '👌 No problem. You can enable this later via /bug or in your server settings.',
 
     // Support prompt
-    'support.prompt': '💜 <b>nodyn is free and open.</b>\n\nIf it\'s saving you time, consider supporting the project so we can keep improving it.\n\nEvery contribution helps — no matter the amount.',
-    'support.yes': '💜 Support nodyn',
+    'support.prompt': '💜 <b>lynox is free and open.</b>\n\nIf it\'s saving you time, consider supporting the project so we can keep improving it.\n\nEvery contribution helps — no matter the amount.',
+    'support.yes': '💜 Support lynox',
     'support.no': 'Maybe later',
   },
   de: {
@@ -86,9 +86,9 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'status.earlier_many': 'vorherige Tools',
 
     // Commands
-    'cmd.start': '👋 <b>NODYN</b> — Dein KI-Business-Assistent\n\nSchick mir eine Aufgabe und ich erledige sie.\n/help f\u00FCr Befehle, /clear f\u00FCr ein neues Gespr\u00E4ch.',
-    'cmd.start_new': '👋 <b>Willkommen bei NODYN</b>\n\nIch bin dein KI-Business-Assistent. Ich lerne dein Business kennen und arbeite selbstständig für dich.\n\n<b>Was ich kann:</b>\n• Recherche, Analyse, Texte, Planung\n• Kontakte und Deals verwalten (CRM)\n• E-Mails senden und entwerfen (Gmail)\n• Termine planen (Kalender)\n• Aufgaben im Hintergrund erledigen\n• Externe APIs anbinden\n\nSag mir einfach, was du brauchst — zum Beispiel:\n• <i>\u201ERecherchiere meine Konkurrenz\u201C</i>\n• <i>\u201ESchreib eine E-Mail an einen Kunden\u201C</i>\n• <i>\u201EZeig mir meine offenen Deals\u201C</i>\n\nWomit kann ich dir helfen?',
-    'cmd.help': '<b>NODYN Befehle:</b>\n\n/google — Google Workspace verbinden (Gmail, Sheets, Kalender)\n/clear — Neues Gespr\u00E4ch (Wissen bleibt erhalten)\n/stop — Aufgabe abbrechen\n/cost — Kosten anzeigen\n/bug — Problem melden\n/help — Diese Hilfe\n\nEinfach chatten — Text, Sprache, Fotos oder Dateien senden. F\u00FCr die meisten Aufgaben brauchst du keine Befehle.',
+    'cmd.start': '👋 <b>LYNOX</b> — Dein KI-Business-Assistent\n\nSchick mir eine Aufgabe und ich erledige sie.\n/help f\u00FCr Befehle, /clear f\u00FCr ein neues Gespr\u00E4ch.',
+    'cmd.start_new': '👋 <b>Willkommen bei LYNOX</b>\n\nIch bin dein KI-Business-Assistent. Ich lerne dein Business kennen und arbeite selbstständig für dich.\n\n<b>Was ich kann:</b>\n• Recherche, Analyse, Texte, Planung\n• Kontakte und Deals verwalten (CRM)\n• E-Mails senden und entwerfen (Gmail)\n• Termine planen (Kalender)\n• Aufgaben im Hintergrund erledigen\n• Externe APIs anbinden\n\nSag mir einfach, was du brauchst — zum Beispiel:\n• <i>\u201ERecherchiere meine Konkurrenz\u201C</i>\n• <i>\u201ESchreib eine E-Mail an einen Kunden\u201C</i>\n• <i>\u201EZeig mir meine offenen Deals\u201C</i>\n\nWomit kann ich dir helfen?',
+    'cmd.help': '<b>LYNOX Befehle:</b>\n\n/google — Google Workspace verbinden (Gmail, Sheets, Kalender)\n/clear — Neues Gespr\u00E4ch (Wissen bleibt erhalten)\n/stop — Aufgabe abbrechen\n/cost — Kosten anzeigen\n/bug — Problem melden\n/help — Diese Hilfe\n\nEinfach chatten — Text, Sprache, Fotos oder Dateien senden. F\u00FCr die meisten Aufgaben brauchst du keine Befehle.',
     'cmd.secret': '\uD83D\uDD12 <b>Secrets</b>\n\nSecrets (API-Keys, Passw\u00F6rter) sind sensible Daten. Aus Sicherheitsgr\u00FCnden werden sie vom Admin in den Deployment-Einstellungen konfiguriert \u2014 nicht \u00FCber Telegram.\n\nWenn du Zugang zu einem Service brauchst, bitte deinen Admin, die Zugangsdaten hinzuzuf\u00FCgen.',
     'cmd.clear': '\uD83D\uDD04 Gespr\u00E4ch gel\u00F6scht — wir starten frisch.\nDein gespeichertes Wissen bleibt erhalten.',
     'cmd.bug_usage': '\uD83D\uDC1E <b>Fehler melden</b>\n\nVerwendung: <code>/bug Deine Beschreibung hier</code>\n\nBeschreibe was schiefgelaufen ist und es wird ans Entwicklungsteam gesendet.',
@@ -128,15 +128,15 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'cost.today': 'Heute',
 
     // Sentry opt-in
-    'sentry.prompt': '\uD83D\uDEE1\uFE0F <b>nodyn verbessern helfen?</b>\n\nDu kannst anonymisierte Fehlerberichte senden, damit wir Bugs schneller fixen k\u00F6nnen.\n\n<b>Was gesendet wird:</b> Fehlertyp, Stack Trace, nodyn-Version\n<b>Was nie gesendet wird:</b> Deine Nachrichten, Dateien, Wissen oder pers\u00F6nliche Daten\n\nDu kannst das jederzeit in den Server-Einstellungen deaktivieren.',
+    'sentry.prompt': '\uD83D\uDEE1\uFE0F <b>lynox verbessern helfen?</b>\n\nDu kannst anonymisierte Fehlerberichte senden, damit wir Bugs schneller fixen k\u00F6nnen.\n\n<b>Was gesendet wird:</b> Fehlertyp, Stack Trace, lynox-Version\n<b>Was nie gesendet wird:</b> Deine Nachrichten, Dateien, Wissen oder pers\u00F6nliche Daten\n\nDu kannst das jederzeit in den Server-Einstellungen deaktivieren.',
     'sentry.yes': '\u2713 Ja, helfen',
     'sentry.no': 'Nein danke',
-    'sentry.thanks': '\uD83D\uDEE1\uFE0F Danke! Anonymisierte Fehlerberichte sind jetzt aktiviert. Das hilft uns, Bugs schneller zu fixen.\n\n<i>Jederzeit deaktivieren: NODYN_SENTRY_DSN aus der Server-Konfiguration entfernen.</i>',
+    'sentry.thanks': '\uD83D\uDEE1\uFE0F Danke! Anonymisierte Fehlerberichte sind jetzt aktiviert. Das hilft uns, Bugs schneller zu fixen.\n\n<i>Jederzeit deaktivieren: LYNOX_SENTRY_DSN aus der Server-Konfiguration entfernen.</i>',
     'sentry.declined': '\uD83D\uDC4C Kein Problem. Du kannst das sp\u00E4ter \u00FCber /bug oder in den Server-Einstellungen aktivieren.',
 
     // Support prompt
-    'support.prompt': '\uD83D\uDC9C <b>nodyn ist frei und offen.</b>\n\nWenn es dir Zeit spart, unterst\u00FCtze das Projekt, damit wir es weiter verbessern k\u00F6nnen.\n\nJeder Beitrag hilft — egal wie gross.',
-    'support.yes': '\uD83D\uDC9C nodyn unterst\u00FCtzen',
+    'support.prompt': '\uD83D\uDC9C <b>lynox ist frei und offen.</b>\n\nWenn es dir Zeit spart, unterst\u00FCtze das Projekt, damit wir es weiter verbessern k\u00F6nnen.\n\nJeder Beitrag hilft — egal wie gross.',
+    'support.yes': '\uD83D\uDC9C lynox unterst\u00FCtzen',
     'support.no': 'Vielleicht sp\u00E4ter',
   },
 };

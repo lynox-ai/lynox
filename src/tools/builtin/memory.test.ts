@@ -44,7 +44,7 @@ beforeEach(() => {
 });
 
 describe('memoryStoreTool', () => {
-  it('publishes to nodyn:memory:store channel after storing', async () => {
+  it('publishes to lynox:memory:store channel after storing', async () => {
     const { channels } = await import('../../core/observability.js');
     const append = vi.fn().mockResolvedValue(undefined);
     const agent = makeAgent(makeMockMemory({ append }));

@@ -1,16 +1,16 @@
 ---
 title: "MCP Server"
-description: "Expose nodyn as an MCP server via stdio or HTTP"
+description: "Expose lynox as an MCP server via stdio or HTTP"
 ---
 
-NODYN can be exposed as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server so other MCP-compatible clients can use NODYN as a tool provider and async agent runtime.
+LYNOX can be exposed as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server so other MCP-compatible clients can use LYNOX as a tool provider and async agent runtime.
 
 ## Connecting to External MCP Servers
 
-nodyn can also connect to external MCP servers as a client, gaining access to their tools:
+lynox can also connect to external MCP servers as a client, gaining access to their tools:
 
 ```bash
-# CLI — persisted to ~/.nodyn/config.json
+# CLI — persisted to ~/.lynox/config.json
 /mcp add context7 https://context7.example.com
 /mcp add my-tools https://localhost:8080
 /mcp list         # Show all registered servers
@@ -46,7 +46,7 @@ Standard MCP stdio transport. Input/output on stdin/stdout, logs on stderr.
 node dist/index.js --mcp-server --transport sse
 ```
 
-Starts the HTTP transport on port `3042` by default (configurable via `NODYN_MCP_PORT`).
+Starts the HTTP transport on port `3042` by default (configurable via `LYNOX_MCP_PORT`).
 
 ## Exposed Tools
 
@@ -54,42 +54,42 @@ Starts the HTTP transport on port `3042` by default (configurable via `NODYN_MCP
 
 | Tool | Description |
 |------|-------------|
-| `nodyn_run` | Run a task synchronously and return the final text |
-| `nodyn_run_start` | Start an async run and return `run_id` immediately |
-| `nodyn_poll` | Poll accumulated output, status, errors, `waiting_for_input`, and `output_files` |
-| `nodyn_reply` | Resume a paused async run waiting for user input |
-| `nodyn_abort` | Abort in-flight work by `session_id` |
-| `nodyn_reset` | Reset a session and abort any active run in it |
+| `lynox_run` | Run a task synchronously and return the final text |
+| `lynox_run_start` | Start an async run and return `run_id` immediately |
+| `lynox_poll` | Poll accumulated output, status, errors, `waiting_for_input`, and `output_files` |
+| `lynox_reply` | Resume a paused async run waiting for user input |
+| `lynox_abort` | Abort in-flight work by `session_id` |
+| `lynox_reset` | Reset a session and abort any active run in it |
 
 ### Data access
 
 | Tool | Description |
 |------|-------------|
-| `nodyn_memory` | Read `facts`, `skills`, `context`, or `errors` memory |
-| `nodyn_read_file` | Read a produced file as base64 from the working dir or `/tmp/nodyn-files` |
+| `lynox_memory` | Read `facts`, `skills`, `context`, or `errors` memory |
+| `lynox_read_file` | Read a produced file as base64 from the working dir or `/tmp/lynox-files` |
 
 ### Batch
 
 | Tool | Description |
 |------|-------------|
-| `nodyn_batch` | Submit a reduced-cost async batch |
-| `nodyn_status` | Inspect a batch by `batch_id` |
+| `lynox_batch` | Submit a reduced-cost async batch |
+| `lynox_status` | Inspect a batch by `batch_id` |
 
 ## Async Run Lifecycle
 
-1. Call `nodyn_run_start` with `task` and optional `session_id`, `user_context`, and `files`.
-2. Poll with `nodyn_poll`. Pass `cursor` for incremental event streaming.
-3. If `waiting_for_input` is returned, answer with `nodyn_reply`.
+1. Call `lynox_run_start` with `task` and optional `session_id`, `user_context`, and `files`.
+2. Poll with `lynox_poll`. Pass `cursor` for incremental event streaming.
+3. If `waiting_for_input` is returned, answer with `lynox_reply`.
 4. When `done: true`, read `text`, `statusHistory`, `error`, and optional `output_files`.
-5. If files were produced, fetch them with `nodyn_read_file`.
+5. If files were produced, fetch them with `lynox_read_file`.
 
-Example `nodyn_run_start` response:
+Example `lynox_run_start` response:
 
 ```json
 { "run_id": "6af0d8d2-..." }
 ```
 
-Example `nodyn_poll` response while waiting on user input:
+Example `lynox_poll` response while waiting on user input:
 
 ```json
 {
@@ -103,7 +103,7 @@ Example `nodyn_poll` response while waiting on user input:
 }
 ```
 
-Example terminal `nodyn_poll` response:
+Example terminal `lynox_poll` response:
 
 ```json
 {
@@ -111,7 +111,7 @@ Example terminal `nodyn_poll` response:
   "text": "Finished.",
   "statusHistory": ["read_file", "write_file"],
   "output_files": [
-    { "name": "report.md", "path": "/tmp/nodyn-files/...", "type": "file" }
+    { "name": "report.md", "path": "/tmp/lynox-files/...", "type": "file" }
   ]
 }
 ```
@@ -121,7 +121,7 @@ Example terminal `nodyn_poll` response:
 The MCP server maintains an append-only event log per async run. Clients can poll with a `cursor` parameter to receive only new events since the last poll:
 
 ```json
-// Request: nodyn_poll({ run_id: "...", cursor: 5 })
+// Request: lynox_poll({ run_id: "...", cursor: 5 })
 // Response:
 {
   "done": false,
@@ -157,7 +157,7 @@ When `cursor` is omitted, the poll response is identical to the pre-event-log fo
 
 ## Attachments
 
-`nodyn_run_start` accepts optional `files` entries with:
+`lynox_run_start` accepts optional `files` entries with:
 
 ```json
 {
@@ -171,7 +171,7 @@ When `cursor` is omitted, the poll response is identical to the pre-event-log fo
 Behavior:
 
 - small text attachments can be safely inlined into the prompt
-- larger or binary attachments are written to `/tmp/nodyn-files/<run_id>/...`
+- larger or binary attachments are written to `/tmp/lynox-files/<run_id>/...`
 - attachment wrappers are XML-escaped before prompt injection
 - duplicate names are sanitized and de-conflicted
 
@@ -188,8 +188,8 @@ Current MCP safety limits:
 
 Async run metadata is persisted to:
 
-- `$NODYN_MCP_STATE_DIR/mcp-runs.json`, or
-- `.nodyn/mcp-runs.json` under the current working directory
+- `$LYNOX_MCP_STATE_DIR/mcp-runs.json`, or
+- `.lynox/mcp-runs.json` under the current working directory
 
 Restart behavior:
 
@@ -212,17 +212,17 @@ This endpoint is intentionally unauthenticated for health checks.
 
 ## Authentication
 
-Set `NODYN_MCP_SECRET` to enable bearer auth on the HTTP transport:
+Set `LYNOX_MCP_SECRET` to enable bearer auth on the HTTP transport:
 
 ```bash
-export NODYN_MCP_SECRET="your-secret-token"
+export LYNOX_MCP_SECRET="your-secret-token"
 node dist/index.js --mcp-server --transport sse
 ```
 
 Or store it in the encrypted vault (loaded automatically when env var is not set):
 
 ```bash
-nodyn vault set NODYN_MCP_SECRET "your-secret-token"
+lynox vault set LYNOX_MCP_SECRET "your-secret-token"
 ```
 
 Clients must send:
@@ -231,15 +231,15 @@ Clients must send:
 Authorization: Bearer your-secret-token
 ```
 
-Without `NODYN_MCP_SECRET`, the HTTP transport is open and binds to `127.0.0.1` only. Token comparison uses `crypto.timingSafeEqual`.
+Without `LYNOX_MCP_SECRET`, the HTTP transport is open and binds to `127.0.0.1` only. Token comparison uses `crypto.timingSafeEqual`.
 
 **Network exposure**: When auth is enabled, the server binds to `0.0.0.0`. A startup warning recommends TLS termination via reverse proxy since the Bearer token travels in cleartext over plain HTTP.
 
-**Secret rotation**: Vault-stored secrets older than 90 days trigger a startup warning. Rotate with `nodyn vault set NODYN_MCP_SECRET <new-token>`. Generate a strong token: `openssl rand -hex 32`.
+**Secret rotation**: Vault-stored secrets older than 90 days trigger a startup warning. Rotate with `lynox vault set LYNOX_MCP_SECRET <new-token>`. Generate a strong token: `openssl rand -hex 32`.
 
 ## Session Management
 
-The MCP server uses `Engine` (not `Nodyn` directly) internally. `SessionStore` (`src/core/session-store.ts`) holds per-session `Session` instances (created via `engine.createSession()`), each with its own conversation history, mode, and active run state.
+The MCP server uses `Engine` (not `Lynox` directly) internally. `SessionStore` (`src/core/session-store.ts`) holds per-session `Session` instances (created via `engine.createSession()`), each with its own conversation history, mode, and active run state.
 
 Only one active async run is allowed per session at a time. Starting another one returns an error with the existing `run_id` when available.
 
@@ -248,7 +248,7 @@ Only one active async run is allowed per session at a time. Starting another one
 ### stdio (Docker)
 
 ```bash
-docker run -i --rm -e ANTHROPIC_API_KEY=sk-ant-... nodyn --mcp-server
+docker run -i --rm -e ANTHROPIC_API_KEY=sk-ant-... lynox --mcp-server
 ```
 
 ### HTTP (Docker)
@@ -257,15 +257,15 @@ docker run -i --rm -e ANTHROPIC_API_KEY=sk-ant-... nodyn --mcp-server
 docker run -it --rm \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -p 3042:3042 \
-  nodyn --mcp-server --transport sse
+  lynox --mcp-server --transport sse
 ```
 
 ### Programmatic
 
 ```typescript
-import { NodynMCPServer } from '@nodyn-ai/core';
+import { LynoxMCPServer } from '@lynox-ai/core';
 
-const server = new NodynMCPServer({
+const server = new LynoxMCPServer({
   model: 'sonnet',
   effort: 'high',
 });
@@ -278,8 +278,8 @@ await server.startHTTP(3042);
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NODYN_MCP_PORT` | `3042` | HTTP server port |
-| `NODYN_MCP_SECRET` | *(none)* | Bearer token for HTTP auth. Can also be stored in vault |
-| `NODYN_MCP_STATE_DIR` | `.nodyn/` under cwd | Directory for persisted async run state |
+| `LYNOX_MCP_PORT` | `3042` | HTTP server port |
+| `LYNOX_MCP_SECRET` | *(none)* | Bearer token for HTTP auth. Can also be stored in vault |
+| `LYNOX_MCP_STATE_DIR` | `.lynox/` under cwd | Directory for persisted async run state |
 | `ANTHROPIC_API_KEY` | -- | API key |
 | `ANTHROPIC_BASE_URL` | -- | Custom API endpoint |

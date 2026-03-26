@@ -15,7 +15,7 @@ let entityIds: string[] = [];
 let memoryIds: string[] = [];
 
 beforeAll(async () => {
-  const tmp = createBenchDir('nodyn-bench-kg-');
+  const tmp = createBenchDir('lynox-bench-kg-');
   cleanup = tmp.cleanup;
   graph = new KuzuGraph(join(tmp.path, 'kg'));
   await graph.init();
@@ -63,7 +63,7 @@ afterAll(async () => {
 
 describe('Knowledge Graph — init', () => {
   bench('init fresh database', async () => {
-    const tmp = createBenchDir('nodyn-bench-kg-init-');
+    const tmp = createBenchDir('lynox-bench-kg-init-');
     const fresh = new KuzuGraph(join(tmp.path, 'kg'));
     await fresh.init();
     await fresh.close();

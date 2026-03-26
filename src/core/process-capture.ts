@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
-import { MODEL_MAP, NODYN_BETAS } from '../types/index.js';
+import { MODEL_MAP, LYNOX_BETAS } from '../types/index.js';
 import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
 
@@ -126,7 +126,7 @@ export async function captureProcess(
   const response = await client.beta.messages.create({
     model: MODEL_MAP.haiku,
     max_tokens: 4096,
-    betas: NODYN_BETAS,
+    betas: LYNOX_BETAS,
     system: EXTRACTION_SYSTEM,
     messages: [
       {

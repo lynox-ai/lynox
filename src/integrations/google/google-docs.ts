@@ -152,7 +152,7 @@ async function handleCreate(auth: GoogleAuth, input: DocsInput): Promise<string>
   const html = markdownToHtml(input.content);
   const title = input.title ?? 'Untitled Document';
 
-  const boundary = '---nodyn-doc-boundary---';
+  const boundary = '---lynox-doc-boundary---';
   const metadata = JSON.stringify({
     name: title,
     mimeType: 'application/vnd.google-apps.document',

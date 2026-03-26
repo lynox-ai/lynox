@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod/v4';
-import type { NodynConfig, BatchRequest, MemoryNamespace, StreamEvent, RunEvent } from '../types/index.js';
+import type { LynoxConfig, BatchRequest, MemoryNamespace, StreamEvent, RunEvent } from '../types/index.js';
 import { writeFileAtomicSync } from '../core/atomic-write.js';
 import { getWorkspaceDir } from '../core/workspace.js';
 import { getErrorMessage } from '../core/utils.js';
@@ -69,7 +69,7 @@ import { SessionStore } from '../core/session-store.js';
 import { MAX_BUFFER_BYTES } from '../core/constants.js';
 
 const VALID_NAMESPACES = new Set<MemoryNamespace>(['knowledge', 'methods', 'project-state', 'learnings']);
-const TEMP_BASE = '/tmp/nodyn-files';
+const TEMP_BASE = '/tmp/lynox-files';
 const MAX_READ_SIZE = MAX_BUFFER_BYTES;
 const MAX_ATTACHMENT_SIZE = MAX_BUFFER_BYTES;
 const MAX_ATTACHMENT_TOTAL = 25 * 1024 * 1024; // 25MB total per run
@@ -106,8 +106,8 @@ function escapeXml(value: string): string {
     .replaceAll('\'', '&apos;');
 }
 
-export class NodynMCPServer {
-  private readonly config: NodynConfig;
+export class LynoxMCPServer {
+  private readonly config: LynoxConfig;
   private readonly mcpServer: McpServer;
   private readonly sessionStore = new SessionStore();
   private readonly runStore = new Map<string, RunState>();
@@ -116,10 +116,10 @@ export class NodynMCPServer {
   private engine: Engine | null = null;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(config: NodynConfig) {
+  constructor(config: LynoxConfig) {
     this.config = config;
     this.mcpServer = new McpServer(
-      { name: 'nodyn', version: '1.0.0' },
+      { name: 'lynox', version: '1.0.0' },
       { capabilities: { tools: {} } },
     );
     this.loadPersistedRuns();
@@ -288,7 +288,7 @@ export class NodynMCPServer {
   }
 
   private getRunStateFilePath(): string {
-    const baseDir = process.env['NODYN_MCP_STATE_DIR'] ?? join(process.cwd(), '.nodyn');
+    const baseDir = process.env['LYNOX_MCP_STATE_DIR'] ?? join(process.cwd(), '.lynox');
     return join(baseDir, RUN_STATE_FILENAME);
   }
 
@@ -401,15 +401,15 @@ export class NodynMCPServer {
   }
 
   private registerTools(): void {
-    // nodyn_run — run a task, optionally in a persistent session
+    // lynox_run — run a task, optionally in a persistent session
     this.mcpServer.registerTool(
-      'nodyn_run',
+      'lynox_run',
       {
-        description: 'Run an autonomous task with NODYN agent',
+        description: 'Run an autonomous task with LYNOX agent',
         inputSchema: { task: z.string(), session_id: z.string().optional(), user_context: z.string().optional() },
       },
       async ({ task, session_id, user_context }) => {
-        if (!this.engine) throw new Error('NodynMCPServer not initialized');
+        if (!this.engine) throw new Error('LynoxMCPServer not initialized');
         const sid = session_id ?? randomUUID();
         if (this.activeSessions.has(sid)) {
           return { content: [{ type: 'text' as const, text: `Session ${sid} already has an active run` }] };
@@ -432,9 +432,9 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_batch — submit a batch of requests
+    // lynox_batch — submit a batch of requests
     this.mcpServer.registerTool(
-      'nodyn_batch',
+      'lynox_batch',
       {
         description: 'Submit a batch of tasks for async processing at reduced cost',
         inputSchema: {
@@ -446,7 +446,7 @@ export class NodynMCPServer {
         },
       },
       async ({ requests }) => {
-        if (!this.engine) throw new Error('NodynMCPServer not initialized');
+        if (!this.engine) throw new Error('LynoxMCPServer not initialized');
         const batchReqs: BatchRequest[] = requests.map(r => ({
           id: r.id,
           task: r.task,
@@ -457,15 +457,15 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_status — check batch status
+    // lynox_status — check batch status
     this.mcpServer.registerTool(
-      'nodyn_status',
+      'lynox_status',
       {
         description: 'Check the status of a batch by ID',
         inputSchema: { batch_id: z.string() },
       },
       async ({ batch_id }) => {
-        if (!this.engine) throw new Error('NodynMCPServer not initialized');
+        if (!this.engine) throw new Error('LynoxMCPServer not initialized');
         const apiConfig = this.engine.getApiConfig();
         const client = apiConfig.apiKey
           ? new Anthropic({ apiKey: apiConfig.apiKey, baseURL: apiConfig.apiBaseURL })
@@ -483,17 +483,17 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_memory — read memory namespace
+    // lynox_memory — read memory namespace
     this.mcpServer.registerTool(
-      'nodyn_memory',
+      'lynox_memory',
       {
-        description: 'Read NODYN agent memory by namespace',
+        description: 'Read LYNOX agent memory by namespace',
         inputSchema: {
           namespace: z.enum(['knowledge', 'methods', 'project-state', 'learnings']),
         },
       },
       async ({ namespace }) => {
-        if (!this.engine) throw new Error('NodynMCPServer not initialized');
+        if (!this.engine) throw new Error('LynoxMCPServer not initialized');
         const mem = this.engine.getMemory();
         if (!mem) {
           return { content: [{ type: 'text' as const, text: 'Memory is not configured.' }] };
@@ -507,11 +507,11 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_reset — clear a session
+    // lynox_reset — clear a session
     this.mcpServer.registerTool(
-      'nodyn_reset',
+      'lynox_reset',
       {
-        description: 'Reset a NODYN session by session ID',
+        description: 'Reset a LYNOX session by session ID',
         inputSchema: { session_id: z.string() },
       },
       async ({ session_id }) => {
@@ -525,11 +525,11 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_run_start — start an async run, returns run_id immediately
+    // lynox_run_start — start an async run, returns run_id immediately
     this.mcpServer.registerTool(
-      'nodyn_run_start',
+      'lynox_run_start',
       {
-        description: 'Start an async NODYN task and return a run_id for polling. Returns immediately before the task completes.',
+        description: 'Start an async LYNOX task and return a run_id for polling. Returns immediately before the task completes.',
         inputSchema: {
           task: z.string(),
           session_id: z.string().optional(),
@@ -543,7 +543,7 @@ export class NodynMCPServer {
         },
       },
       async ({ task, session_id, user_context, files }) => {
-        if (!this.engine) throw new Error('NodynMCPServer not initialized');
+        if (!this.engine) throw new Error('LynoxMCPServer not initialized');
         const sid = session_id ?? randomUUID();
         if (this.activeSessions.has(sid)) {
           return {
@@ -755,7 +755,7 @@ export class NodynMCPServer {
         session.onStream = streamHandler;
 
         // Capture reference so the .then()/.catch() cleanup only clears promptUser
-        // if a subsequent nodyn_run_start hasn't already replaced it with a new fn.
+        // if a subsequent lynox_run_start hasn't already replaced it with a new fn.
         const promptFn = (question: string, options?: string[] | undefined): Promise<string> =>
           new Promise((resolve) => {
             const timeout = setTimeout(() => {
@@ -798,11 +798,11 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_poll — poll for accumulated text from an async run
+    // lynox_poll — poll for accumulated text from an async run
     this.mcpServer.registerTool(
-      'nodyn_poll',
+      'lynox_poll',
       {
-        description: 'Poll the accumulated text from a running async NODYN task. Returns done=true when finished. Pass cursor to get incremental events.',
+        description: 'Poll the accumulated text from a running async LYNOX task. Returns done=true when finished. Pass cursor to get incremental events.',
         inputSchema: { run_id: z.string(), session_id: z.string(), cursor: z.number().optional() },
       },
       async ({ run_id, session_id, cursor }) => {
@@ -855,11 +855,11 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_read_file — read a file from the nodyn container, returned as base64
+    // lynox_read_file — read a file from the lynox container, returned as base64
     this.mcpServer.registerTool(
-      'nodyn_read_file',
+      'lynox_read_file',
       {
-        description: 'Read a file from the NODYN container and return its contents as base64. Path must be under /tmp/nodyn-files/ or the working directory.',
+        description: 'Read a file from the LYNOX container and return its contents as base64. Path must be under /tmp/lynox-files/ or the working directory.',
         inputSchema: { path: z.string() },
       },
       async ({ path: rawPath }) => {
@@ -901,11 +901,11 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_reply — send a reply to a run waiting for user input
+    // lynox_reply — send a reply to a run waiting for user input
     this.mcpServer.registerTool(
-      'nodyn_reply',
+      'lynox_reply',
       {
-        description: 'Send a user reply to a NODYN run waiting for input (approval or ask_user answer)',
+        description: 'Send a user reply to a LYNOX run waiting for input (approval or ask_user answer)',
         inputSchema: { run_id: z.string(), session_id: z.string(), answer: z.string() },
       },
       async ({ run_id, session_id, answer }) => {
@@ -926,11 +926,11 @@ export class NodynMCPServer {
       },
     );
 
-    // nodyn_abort — abort an in-flight agent run
+    // lynox_abort — abort an in-flight agent run
     this.mcpServer.registerTool(
-      'nodyn_abort',
+      'lynox_abort',
       {
-        description: 'Abort an in-flight NODYN agent run by session ID.',
+        description: 'Abort an in-flight LYNOX agent run by session ID.',
         inputSchema: { session_id: z.string() },
       },
       async ({ session_id }) => {
@@ -950,7 +950,7 @@ export class NodynMCPServer {
 
   async startHTTP(port: number): Promise<void> {
     const mcpServer = this.mcpServer;
-    const secret = process.env['NODYN_MCP_SECRET'];
+    const secret = process.env['LYNOX_MCP_SECRET'];
 
     // Active transport — replaced with a fresh one each time a session closes so that
     // reconnecting clients (e.g. slack-bot restart) can initialize a new session.
@@ -967,7 +967,7 @@ export class NodynMCPServer {
           if (activeTransport === t) {
             activeTransport = null;
             spawnTransport().catch((err: unknown) => {
-              process.stderr.write(`NODYN MCP transport respawn failed: ${String(err)}\n`);
+              process.stderr.write(`LYNOX MCP transport respawn failed: ${String(err)}\n`);
             });
           }
         },
@@ -979,7 +979,7 @@ export class NodynMCPServer {
 
     /** Force-close a stale session and spawn a fresh transport for a reconnecting client. */
     const recycleStaleSession = async (): Promise<void> => {
-      process.stderr.write('NODYN MCP: new client init detected — recycling stale session\n');
+      process.stderr.write('LYNOX MCP: new client init detected — recycling stale session\n');
       const old = activeTransport;
       activeTransport = null; // detach before close so onsessionclosed doesn't double-spawn
       if (old) {
@@ -1056,7 +1056,7 @@ export class NodynMCPServer {
         try {
           await recycleStaleSession();
         } catch (err: unknown) {
-          process.stderr.write(`NODYN MCP session recycle failed: ${String(err)}\n`);
+          process.stderr.write(`LYNOX MCP session recycle failed: ${String(err)}\n`);
         }
       }
 
@@ -1073,17 +1073,17 @@ export class NodynMCPServer {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Internal server error' }));
         }
-        process.stderr.write(`NODYN MCP request failed: ${msg}\n`);
+        process.stderr.write(`LYNOX MCP request failed: ${msg}\n`);
       }
     });
     server.on('error', (err: Error) => {
-      process.stderr.write(`NODYN MCP server error: ${err.message}\n`);
+      process.stderr.write(`LYNOX MCP server error: ${err.message}\n`);
     });
     // Bind to localhost when no auth secret is set to prevent unauthenticated network exposure
     const host = secret ? '0.0.0.0' : '127.0.0.1';
     server.listen(port, host, () => {
       const authStatus = secret ? '(auth enabled)' : '(localhost only — no auth)';
-      process.stderr.write(`NODYN MCP server listening on http://${host}:${port} ${authStatus}\n`);
+      process.stderr.write(`LYNOX MCP server listening on http://${host}:${port} ${authStatus}\n`);
       if (secret && host === '0.0.0.0') {
         process.stderr.write(
           '⚠ MCP is network-exposed over plain HTTP — Bearer token is sent unencrypted.\n' +

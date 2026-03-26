@@ -53,14 +53,14 @@ jobs:
         with:
           context: .
           load: true
-          tags: ghcr.io/nodyn-ai/nodyn:scan
+          tags: ghcr.io/lynox-ai/lynox:scan
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Scan image for vulnerabilities
         uses: aquasecurity/trivy-action@0.35.0
         with:
-          image-ref: ghcr.io/nodyn-ai/nodyn:scan
+          image-ref: ghcr.io/lynox-ai/lynox:scan
           format: table
           exit-code: '1'
           severity: CRITICAL,HIGH
@@ -71,9 +71,9 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/nodyn-ai/nodyn:latest
-            ghcr.io/nodyn-ai/nodyn:${{ steps.version.outputs.version }}
-            ghcr.io/nodyn-ai/nodyn:${{ github.sha }}
+            ghcr.io/lynox-ai/lynox:latest
+            ghcr.io/lynox-ai/lynox:${{ steps.version.outputs.version }}
+            ghcr.io/lynox-ai/lynox:${{ github.sha }}
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}

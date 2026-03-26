@@ -22,7 +22,7 @@ vi.mock('../core/config.js', async () => {
   return {
     ...actual,
     saveUserConfig: (cfg: unknown) => actual.saveUserConfig(cfg),
-    getNodynDir: () => join(fakeHome, '.nodyn'),
+    getLynoxDir: () => join(fakeHome, '.lynox'),
   };
 });
 
@@ -61,7 +61,7 @@ describe('setup-wizard', () => {
     vi.resetModules();
     mockCreate.mockReset();
     mockCreate.mockResolvedValue({ id: 'msg_ok' });
-    fakeHome = mkdtempSync(join(tmpdir(), 'nodyn-wizard-'));
+    fakeHome = mkdtempSync(join(tmpdir(), 'lynox-wizard-'));
     process.env['HOME'] = fakeHome;
   });
 
@@ -74,7 +74,7 @@ describe('setup-wizard', () => {
     expect(config).not.toBeNull();
     expect(config!.api_key).toBe('sk-ant-test-key-12345678');
     expect(config!.default_tier).toBe('sonnet');
-    const filePath = join(fakeHome, '.nodyn', 'config.json');
+    const filePath = join(fakeHome, '.lynox', 'config.json');
     const saved = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
     expect(saved['api_key']).toBe('sk-ant-test-key-12345678');
   });
@@ -96,7 +96,7 @@ describe('setup-wizard', () => {
     const config = await runSetupWizard(rl);
 
     expect(config).not.toBeNull();
-    expect(process.env['NODYN_VAULT_KEY']).toBeTruthy();
+    expect(process.env['LYNOX_VAULT_KEY']).toBeTruthy();
   });
 
   it('returns null when API key is empty', async () => {

@@ -52,7 +52,7 @@ vi.mock('./agent.js', () => ({
     // @ts-expect-error mock constructor
     this.onStream = null;
     // @ts-expect-error mock constructor
-    this.name = 'nodyn';
+    this.name = 'lynox';
     // @ts-expect-error mock constructor
     this.model = 'claude-opus-4-6';
     // @ts-expect-error mock constructor
@@ -241,7 +241,7 @@ import { Memory } from './memory.js';
 // === Helper ===
 
 async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
-  const engine = new Engine(config as import('../types/index.js').NodynConfig);
+  const engine = new Engine(config as import('../types/index.js').LynoxConfig);
   await engine.init();
   const session = engine.createSession();
   return { engine, session };
@@ -256,8 +256,8 @@ describe('Engine + Session (Orchestrator)', () => {
     mockRegister.mockReturnThis();
     mockRegisterMCP.mockReturnThis();
     // Enable feature flags for tests
-    process.env['NODYN_FEATURE_PLUGINS'] = '1';
-    process.env['NODYN_FEATURE_TRIGGERS'] = '1';
+    process.env['LYNOX_FEATURE_PLUGINS'] = '1';
+    process.env['LYNOX_FEATURE_TRIGGERS'] = '1';
   });
 
   // -- init() --
@@ -284,14 +284,14 @@ describe('Engine + Session (Orchestrator)', () => {
 
     it('registers MCP servers when provided', async () => {
       const server = { type: 'url' as const, url: 'http://localhost:3000', name: 'test-mcp' };
-      const engine = new Engine({ mcpServers: [server] } as import('../types/index.js').NodynConfig);
+      const engine = new Engine({ mcpServers: [server] } as import('../types/index.js').LynoxConfig);
       await engine.init();
 
       expect(mockRegisterMCP).toHaveBeenCalledWith(server);
     });
 
     it('returns itself for chaining', async () => {
-      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       const result = await engine.init();
       expect(result).toBe(engine);
     });
@@ -485,7 +485,7 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('different sessions get different session IDs', async () => {
-      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       await engine.init();
       const a = engine.createSession();
       const b = engine.createSession();
@@ -542,7 +542,7 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerHooks()', () => {
     it('calls onInit hook during init', async () => {
       const hook = { onInit: vi.fn().mockResolvedValue(undefined) };
-      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       engine.registerHooks(hook);
       await engine.init();
 
@@ -555,7 +555,7 @@ describe('Engine + Session (Orchestrator)', () => {
       const hook1 = { onInit: vi.fn().mockImplementation(async () => { order.push(1); }) };
       const hook2 = { onInit: vi.fn().mockImplementation(async () => { order.push(2); }) };
 
-      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       engine.registerHooks(hook1);
       engine.registerHooks(hook2);
       await engine.init();
@@ -565,7 +565,7 @@ describe('Engine + Session (Orchestrator)', () => {
 
     it('onInit error does not crash init', async () => {
       const hook = { onInit: vi.fn().mockRejectedValue(new Error('hook failed')) };
-      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       engine.registerHooks(hook);
 
       // Should not throw
@@ -574,7 +574,7 @@ describe('Engine + Session (Orchestrator)', () => {
 
     it('calls onShutdown hook during shutdown', async () => {
       const hook = { onShutdown: vi.fn().mockResolvedValue(undefined) };
-      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       engine.registerHooks(hook);
       await engine.init();
       await engine.shutdown();
@@ -584,7 +584,7 @@ describe('Engine + Session (Orchestrator)', () => {
 
     it('onShutdown error does not crash shutdown', async () => {
       const hook = { onShutdown: vi.fn().mockRejectedValue(new Error('shutdown fail')) };
-      const engine = new Engine({} as import('../types/index.js').NodynConfig);
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       engine.registerHooks(hook);
       await engine.init();
 

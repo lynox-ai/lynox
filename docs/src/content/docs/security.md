@@ -143,7 +143,7 @@ In autonomous mode, the `http_request` tool blocks write methods (POST, PUT, PAT
 - **POST/PUT/PATCH**: Blocked in autonomous mode but **pre-approvable** — operators can whitelist specific endpoints via `PreApprovalSet` patterns (e.g., `POST https://api.internal.com/*`)
 - **GET/HEAD**: Always allowed
 
-Guard blocks are published to the `nodyn:guard:block` diagnostic channel for observability and audit.
+Guard blocks are published to the `lynox:guard:block` diagnostic channel for observability and audit.
 
 ## Persistent Budget Caps
 
@@ -156,7 +156,7 @@ Cross-session spending limits prevent unbounded costs from long-running agents:
 | `max_http_requests_per_hour` | Block HTTP requests when hourly count exceeds this limit |
 | `max_http_requests_per_day` | Block HTTP requests when daily count exceeds this limit |
 
-All values are configurable via `~/.nodyn/config.json` or project `.nodyn/config.json`. Enforcement uses existing SQLite tables (`runs.cost_usd`, `run_tool_calls`) — no additional storage.
+All values are configurable via `~/.lynox/config.json` or project `.lynox/config.json`. Enforcement uses existing SQLite tables (`runs.cost_usd`, `run_tool_calls`) — no additional storage.
 
 ## Changeset Manager (Write Protection)
 
@@ -201,7 +201,7 @@ The `http_request` tool scans for data exfiltration attempts:
 
 All security events are persisted to SQLite (`security_events` table in `history.db`) via `SecurityAudit` class:
 
-- Subscribes to `nodyn:guard:block`, `nodyn:security:blocked`, `nodyn:security:flagged`, `nodyn:security:injection` channels
+- Subscribes to `lynox:guard:block`, `lynox:security:blocked`, `lynox:security:flagged`, `lynox:security:injection` channels
 - Masks secrets in `input_preview` before storage
 - Provides `getRecentEvents(hours)` and `getEventCounts(days)` for querying
 
@@ -273,7 +273,7 @@ The pre-approval system (`src/core/pre-approve.ts`) allows operators to pre-appr
 
 4. **Usage limits** — `maxUses: 10` default. After 10 matches, a pattern falls through to the normal permission prompt.
 
-5. **Project config exclusion** — `autoApprovePatterns` is NOT in `PROJECT_SAFE_KEYS`. A project-level `.nodyn/config.json` cannot inject pre-approvals — only the operator can via CLI flags or user config.
+5. **Project config exclusion** — `autoApprovePatterns` is NOT in `PROJECT_SAFE_KEYS`. A project-level `.lynox/config.json` cannot inject pre-approvals — only the operator can via CLI flags or user config.
 
 6. **[BLOCKED] marker guard** — `isDangerous()` checks for the `[BLOCKED` substring in the warning. Pre-approval only overrides non-critical warnings (those ending with `Allow? [y/N]`), never critical blocks.
 
@@ -291,7 +291,7 @@ The pre-approval system (`src/core/pre-approve.ts`) allows operators to pre-appr
 ### CLI Usage
 
 ```bash
-nodyn --pre-approve "npm run *" \
+lynox --pre-approve "npm run *" \
   --pre-approve "rm dist/**"
 ```
 
@@ -305,7 +305,7 @@ Only `http:` and `https:` are allowed. All other protocols (file:, ftp:, gopher:
 
 ### HTTPS Enforcement
 
-The `enforce_https` config flag blocks plain HTTP for external URLs (localhost exempted for development). When enabled, only HTTPS connections to non-localhost hosts are allowed. Enable via `~/.nodyn/config.json`:
+The `enforce_https` config flag blocks plain HTTP for external URLs (localhost exempted for development). When enabled, only HTTPS connections to non-localhost hosts are allowed. Enable via `~/.lynox/config.json`:
 
 ```json
 { "enforce_https": true }
@@ -341,10 +341,10 @@ TMPDIR, TMP, TEMP, NODE_*, NPM_*,
 EDITOR, VISUAL, PAGER, GIT_*, SSH_AUTH_SOCK,
 DISPLAY, XDG_*, HOSTNAME, PWD, OLDPWD, SHLVL,
 COLORTERM, FORCE_COLOR, NO_COLOR,
-NODYN_WORKSPACE, CI, GITHUB_*, DOCKER_*, COMPOSE_*
+LYNOX_WORKSPACE, CI, GITHUB_*, DOCKER_*, COMPOSE_*
 ```
 
-Everything else is stripped — including `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `NODYN_VAULT_KEY`, `NODYN_MCP_SECRET`, and all `NODYN_SECRET_*` vars.
+Everything else is stripped — including `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `LYNOX_VAULT_KEY`, `LYNOX_MCP_SECRET`, and all `LYNOX_SECRET_*` vars.
 
 ## System Prompt Security Boundaries
 
@@ -373,20 +373,20 @@ The prompt is English throughout. Business-friendly language — no model names,
 
 ## Vault Key Auto-Load Security
 
-The vault key (`NODYN_VAULT_KEY`) is stored in `~/.nodyn/.env` by the setup wizard and auto-loaded on startup by two independent paths:
+The vault key (`LYNOX_VAULT_KEY`) is stored in `~/.lynox/.env` by the setup wizard and auto-loaded on startup by two independent paths:
 
 **Local CLI** (`src/index.ts` `loadDotEnv()`):
 - **Symlink rejection**: `lstatSync()` checks the file is a regular file, not a symlink
 - **Ownership check**: `statSync().uid` compared to `process.getuid()` — rejects files owned by other users (Unix only)
 - **Permission check**: `(mode & 0o077) !== 0` rejects any group/other access — only `0o600` or `0o400` accepted
 - **Format validation**: Vault key must match `^[A-Za-z0-9+/=]{32,128}$` (base64, reasonable length)
-- **Single key extraction**: Only `NODYN_VAULT_KEY` is read — the file is never evaluated as code
+- **Single key extraction**: Only `LYNOX_VAULT_KEY` is read — the file is never evaluated as code
 
 **Docker** (`entrypoint.sh`):
 - **Symlink rejection**: `-L` check rejects symlinks with warning
 - **Permission check**: `stat` validates `600` or `400` — insecure permissions emit warning and skip loading
-- **Grep-only parsing**: Uses `grep '^NODYN_VAULT_KEY='` — the file is never sourced as a shell script
-- **Single key extraction**: Only `NODYN_VAULT_KEY` is extracted via `cut`
+- **Grep-only parsing**: Uses `grep '^LYNOX_VAULT_KEY='` — the file is never sourced as a shell script
+- **Single key extraction**: Only `LYNOX_VAULT_KEY` is extracted via `cut`
 
 **Setup wizard** (`src/cli/setup-wizard.ts`):
 - **Atomic write**: `writeFileAtomicSync()` writes the `.env` file with `0o600` permissions — no race window between create and chmod
@@ -396,7 +396,7 @@ The vault key (`NODYN_VAULT_KEY`) is stored in `~/.nodyn/.env` by the setup wiza
 
 ## Secret Vault Auto-Migration
 
-When a vault is available (`NODYN_VAULT_KEY` set), all config secrets are automatically migrated from plaintext `~/.nodyn/config.json` to the encrypted vault:
+When a vault is available (`LYNOX_VAULT_KEY` set), all config secrets are automatically migrated from plaintext `~/.lynox/config.json` to the encrypted vault:
 
 | Config Field | Vault Key | Env Var Override |
 |-------------|-----------|-----------------|
@@ -405,7 +405,7 @@ When a vault is available (`NODYN_VAULT_KEY` set), all config secrets are automa
 | `search_api_key` | `SEARCH_API_KEY` | `TAVILY_API_KEY` / `BRAVE_API_KEY` |
 | `voyage_api_key` | `VOYAGE_API_KEY` | `VOYAGE_API_KEY` |
 
-Additionally, `NODYN_MCP_SECRET` can be stored in the vault and is loaded automatically when the env var is not set.
+Additionally, `LYNOX_MCP_SECRET` can be stored in the vault and is loaded automatically when the env var is not set.
 
 **Migration behavior:**
 
@@ -424,8 +424,8 @@ The debug subscriber (`src/core/debug-subscriber.ts`) applies multi-layer redact
 - **Value-based**: Bare tokens (≥20 alphanumeric chars) → first 4 chars + `…***`
 - **Token patterns**: `ya29.*` (Google OAuth) and `eyJ*.*.*` (JWT) masked via `maskTokenPatterns()`
 - **Channel-specific**: Secret access channel logs only name + action, never values. Memory content truncated to 80 chars
-- **File permissions**: Debug file (`NODYN_DEBUG_FILE`) written with `0o600` permissions
-- **Production warning**: `NODYN_DEBUG` + `NODE_ENV=production` emits warning about sensitive data exposure
+- **File permissions**: Debug file (`LYNOX_DEBUG_FILE`) written with `0o600` permissions
+- **Production warning**: `LYNOX_DEBUG` + `NODE_ENV=production` emits warning about sensitive data exposure
 
 ## v2 Security Hardening
 
@@ -433,11 +433,11 @@ The debug subscriber (`src/core/debug-subscriber.ts`) applies multi-layer redact
 
 ### Plugin Security (`src/core/plugins.ts`)
 - **`NPM_NAME_RE` validation**: Plugin names must match npm naming conventions -- rejects git URLs, file: paths, and arbitrary strings
-- **No arbitrary `import()` fallback**: Plugins only loaded from `~/.nodyn/plugins/node_modules/` -- no global resolve
+- **No arbitrary `import()` fallback**: Plugins only loaded from `~/.lynox/plugins/node_modules/` -- no global resolve
 - **Secrets stripped**: `api_key`, `api_base_url` removed from `PluginContext.config`
 
 ### Config Security (`src/core/config.ts`)
-- **`PROJECT_SAFE_KEYS` allowlist**: Project-level `.nodyn/config.json` cannot override `api_key`, `api_base_url`
+- **`PROJECT_SAFE_KEYS` allowlist**: Project-level `.lynox/config.json` cannot override `api_key`, `api_base_url`
 - **Secure file permissions**: Directory created with `0o700`, file written with `0o600` (atomic write)
 
 ### Profile Security (`src/cli/profiles.ts`)
@@ -449,7 +449,7 @@ The debug subscriber (`src/core/debug-subscriber.ts`) applies multi-layer redact
 - Max spawn depth: 5 levels
 
 ### Workspace Sandbox (`src/core/workspace.ts`)
-- **`NODYN_WORKSPACE` env var** activates path sandboxing (opt-in, Docker only)
+- **`LYNOX_WORKSPACE` env var** activates path sandboxing (opt-in, Docker only)
 - **Write boundary**: workspace directory + `/tmp` only
 - **Read boundary**: workspace + `/tmp` + `/app` (read-only root)
 - **Symlink escape protection**: `realpathSync()` resolves all paths before boundary check
@@ -490,7 +490,7 @@ Additional security fixes across MCP server, Knowledge Graph, HTTP tool, and Tel
 
 1. **Cypher injection** (`knowledge-graph.ts`): All namespace/scopeType values now use parameterized queries (`$ns`, `$filterNs`, `$filterScopeTypes`) instead of string interpolation. LIMIT values validated with `Math.floor()`/`Math.min()` before interpolation
 2. **MCP user_context injection** (`mcp-server.ts`): `user_context` parameter wrapped via `wrapUntrustedData()` before injection into system prompt — prevents `</user_context>` tag breakout
-3. **MCP session ownership** (`mcp-server.ts`): `session_id` is now **mandatory** on `nodyn_poll` and `nodyn_reply` — prevents cross-session data access
+3. **MCP session ownership** (`mcp-server.ts`): `session_id` is now **mandatory** on `lynox_poll` and `lynox_reply` — prevents cross-session data access
 4. **MCP body size limit** (`mcp-server.ts`): HTTP request body size limited to 30MB via `Content-Length` header check — prevents large-payload DoS
 5. **HTTP header sanitization** (`http.ts`): Sensitive response headers (`Set-Cookie`, `Authorization`, `X-Auth-Token`, etc.) redacted as `[redacted]` before returning to agent — prevents credential leakage
 6. **Telegram voice injection** (`telegram-bot.ts`): Voice transcription text wrapped via `wrapUntrustedData()` — consistent with Google tool hardening
@@ -515,7 +515,7 @@ The `security-scan` command also runs automatically on every `git push` via left
 
 ## Isolation Levels
 
-> **Note:** Isolation enforcement is activated by Pro extensions (`nodyn-pro`). Core provides the extension points (`setIsolationEnv()`, `setNetworkPolicy()`, workspace sandbox) that Pro's tenant system uses to apply isolation levels.
+> **Note:** Isolation enforcement is activated by Pro extensions (`lynox-pro`). Core provides the extension points (`setIsolationEnv()`, `setNetworkPolicy()`, workspace sandbox) that Pro's tenant system uses to apply isolation levels.
 
 Context isolation restricts what agents can access based on the active tenant's `IsolationConfig.level`. Four levels are supported:
 
@@ -534,14 +534,14 @@ Context isolation restricts what agents can access based on the active tenant's 
 - **Environment**: `bash` tool uses `setIsolationEnv()` — minimal env for air-gapped, custom `envVars` for sandboxed
 - **History**: `run-history.ts` filters queries to tenant's own runs for scoped/sandboxed/air-gapped
 
-Isolation is configured per tenant via `TenantConfig.isolation` and activated with `/tenant use <id>` (provided by `nodyn-pro`).
+Isolation is configured per tenant via `TenantConfig.isolation` and activated with `/tenant use <id>` (provided by `lynox-pro`).
 
 ## MCP Server Authentication
 
-The MCP HTTP server supports bearer token authentication via `NODYN_MCP_SECRET`:
+The MCP HTTP server supports bearer token authentication via `LYNOX_MCP_SECRET`:
 
 ```bash
-export NODYN_MCP_SECRET="your-secret-token"
+export LYNOX_MCP_SECRET="your-secret-token"
 ```
 
 When set, all HTTP requests must include:
@@ -550,13 +550,13 @@ When set, all HTTP requests must include:
 Authorization: Bearer your-secret-token
 ```
 
-Token comparison uses `crypto.timingSafeEqual` to prevent timing attacks. Without `NODYN_MCP_SECRET`, the server runs without authentication. See [MCP Server docs](/mcp-server/) for details.
+Token comparison uses `crypto.timingSafeEqual` to prevent timing attacks. Without `LYNOX_MCP_SECRET`, the server runs without authentication. See [MCP Server docs](/mcp-server/) for details.
 
-**Vault storage**: `NODYN_MCP_SECRET` can be stored in the encrypted vault (`nodyn vault set NODYN_MCP_SECRET <token>`). If the env var is not set, `initSecrets()` loads it from the vault and sets `process.env` transparently.
+**Vault storage**: `LYNOX_MCP_SECRET` can be stored in the encrypted vault (`lynox vault set LYNOX_MCP_SECRET <token>`). If the env var is not set, `initSecrets()` loads it from the vault and sets `process.env` transparently.
 
 **TLS warning**: When the server binds to `0.0.0.0` (network-exposed with auth), a startup warning recommends using a TLS-terminating reverse proxy (Caddy, nginx, Cloudflare Tunnel) since the Bearer token is transmitted in cleartext over plain HTTP.
 
-**Rotation hint**: When `NODYN_MCP_SECRET` is stored in the vault and its `updatedAt` timestamp is older than 90 days, a startup warning recommends rotating the token.
+**Rotation hint**: When `LYNOX_MCP_SECRET` is stored in the vault and its `updatedAt` timestamp is older than 90 days, a startup warning recommends rotating the token.
 
 ## Production Deployment Security
 
@@ -566,8 +566,8 @@ Recommended configuration for network-exposed or production deployments.
 
 | Variable | Requirement | Why |
 |----------|------------|-----|
-| `NODYN_MCP_SECRET` | **Required** — random string, 32+ chars | Unauthenticated MCP endpoints allow any client to execute agent runs |
-| `NODYN_VAULT_KEY` | **Required** — random string, 32+ chars | Encrypts secrets vault, run history, and Google OAuth tokens at rest |
+| `LYNOX_MCP_SECRET` | **Required** — random string, 32+ chars | Unauthenticated MCP endpoints allow any client to execute agent runs |
+| `LYNOX_VAULT_KEY` | **Required** — random string, 32+ chars | Encrypts secrets vault, run history, and Google OAuth tokens at rest |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | **Required** if Telegram enabled | Without restriction, any Telegram user can interact with the bot |
 
 Generate strong secrets:
@@ -576,7 +576,7 @@ Generate strong secrets:
 openssl rand -base64 48  # 64-char base64 string
 ```
 
-### Recommended Config (`~/.nodyn/config.json`)
+### Recommended Config (`~/.lynox/config.json`)
 
 ```json
 {
@@ -599,7 +599,7 @@ openssl rand -base64 48  # 64-char base64 string
 
 ### Docker Hardening Checklist
 
-- [x] Non-root user (`nodyn:1001`)
+- [x] Non-root user (`lynox:1001`)
 - [x] Read-only root filesystem (`read_only: true`)
 - [x] tmpfs for `/tmp` with size limits (64–512MB)
 - [x] `no-new-privileges` security option
@@ -613,7 +613,7 @@ openssl rand -base64 48  # 64-char base64 string
 
 ### Vault Key Management
 
-The `NODYN_VAULT_KEY` derives encryption keys via PBKDF2 (600K iterations, SHA-512). Per-tenant keys are derived via HKDF-SHA256.
+The `LYNOX_VAULT_KEY` derives encryption keys via PBKDF2 (600K iterations, SHA-512). Per-tenant keys are derived via HKDF-SHA256.
 
 **Key requirements:**
 - Minimum 128 bits entropy (auto-generated keys have ~288 bits)
@@ -629,26 +629,26 @@ The `/vault rotate` command performs automated in-place rotation:
 2. Decrypts all vault secrets with the current key
 3. Re-encrypts all vault secrets with the new key (new PBKDF2 salt)
 4. Re-encrypts all run history encrypted columns (`history.db`)
-5. Updates `~/.nodyn/.env` with the new key (atomic write)
+5. Updates `~/.lynox/.env` with the new key (atomic write)
 6. Updates `process.env` for the current session
 
 Requires user confirmation. If any step fails, the original key and data remain unchanged.
 
 **Manual rotation (fallback):**
 1. Export all secrets: `/vault export` (decrypts with current key)
-2. Stop nodyn
+2. Stop lynox
 3. Delete `vault.db`, `vault.db-wal`, `vault.db-shm`
-4. Set new `NODYN_VAULT_KEY`
-5. Start nodyn
+4. Set new `LYNOX_VAULT_KEY`
+5. Start lynox
 6. Re-import secrets: `/vault import`
 
 ### Network Exposure Risks
 
 | Deployment | Risk | Mitigation |
 |-----------|------|-----------|
-| MCP HTTP without `NODYN_MCP_SECRET` | Unauthenticated agent execution | Always set bearer token for network-exposed MCP |
+| MCP HTTP without `LYNOX_MCP_SECRET` | Unauthenticated agent execution | Always set bearer token for network-exposed MCP |
 | Telegram without `TELEGRAM_ALLOWED_CHAT_IDS` | Any Telegram user can run commands | Restrict to known chat IDs |
 | Multiple businesses on one instance | All users share knowledge and history | One instance per business — separate instances for separate businesses (see [Docker](/docker/#one-instance--one-business)) |
 | `enforce_https: false` (default) | Plaintext HTTP to external APIs | Enable in production |
-| `NODYN_DEBUG` in production | Sensitive data in debug output | Never enable in production (warning emitted) |
+| `LYNOX_DEBUG` in production | Sensitive data in debug output | Never enable in production (warning emitted) |
 | MCP over plain HTTP (not HTTPS) | Bearer token transmitted in cleartext | Use reverse proxy with TLS termination |

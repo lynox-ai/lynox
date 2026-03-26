@@ -261,7 +261,7 @@ async function handleUpload(auth: GoogleAuth, input: DriveInput): Promise<string
   };
   if (input.folder_id) metadata['parents'] = [input.folder_id];
 
-  const boundary = '---nodyn-upload-boundary---';
+  const boundary = '---lynox-upload-boundary---';
   const body = [
     `--${boundary}`,
     'Content-Type: application/json; charset=UTF-8',
@@ -302,7 +302,7 @@ async function handleCreateDoc(auth: GoogleAuth, input: DriveInput): Promise<str
   if (input.folder_id) metadata['parents'] = [input.folder_id];
 
   // Upload as text/plain with conversion to Google Docs
-  const boundary = '---nodyn-upload-boundary---';
+  const boundary = '---lynox-upload-boundary---';
   const body = [
     `--${boundary}`,
     'Content-Type: application/json; charset=UTF-8',
