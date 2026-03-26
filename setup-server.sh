@@ -139,7 +139,7 @@ fi
 # ============================================================
 # Step 1: Docker
 # ============================================================
-TOTAL_STEPS=7
+TOTAL_STEPS=8
 step "1" "$TOTAL_STEPS" "Docker"
 
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -414,6 +414,30 @@ else
 fi
 
 # ============================================================
+# Step 8: Auto-updater
+# ============================================================
+step "8" "$TOTAL_STEPS" "Auto-updater"
+
+# Remove existing watchtower if present
+docker stop watchtower 2>/dev/null || true
+docker rm watchtower 2>/dev/null || true
+
+docker run -d \
+  --name watchtower \
+  --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  containrrr/watchtower \
+  --cleanup --interval 86400 \
+  "$NODYN_CONTAINER" >/dev/null
+
+if docker ps --format '{{.Names}}' | grep -qx watchtower; then
+  info "Auto-updater active (checks daily)"
+else
+  warn "Auto-updater failed to start. nodyn works fine — but won't update automatically."
+  printf "  %sYou can add it later: see docs.nodyn.dev/docker%s\n" "$DIM" "$RESET"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 printf "\n"
@@ -432,6 +456,9 @@ else
   printf "    Telegram       –  %snot configured (re-run to add)%s\n" "$DIM" "$RESET"
 fi
 printf "    Container      ✓  %s (auto-restarts)\n" "$NODYN_CONTAINER"
+if docker ps --format '{{.Names}}' | grep -qx watchtower; then
+  printf "    Auto-update    ✓  checks daily\n"
+fi
 printf "\n"
 printf "  %sYour data:%s\n" "$BOLD" "$RESET"
 printf "    ~/.nodyn/        Config, knowledge, history, backups\n"

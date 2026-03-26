@@ -225,8 +225,15 @@ docker run -d \
 This checks for new nodyn images once per day (86400 seconds) and restarts the container automatically. Your data is on a volume, so updates are safe and seamless.
 
 :::note
-The [deploy page](https://nodyn.dev/deploy) includes Watchtower automatically in the generated cloud-init script.
+The [deploy page](https://nodyn.dev/deploy) and the [setup script](https://nodyn.dev/setup-server.sh) both include Watchtower automatically.
 :::
+
+**Security considerations:**
+
+- Watchtower requires Docker socket access (`/var/run/docker.sock`) to manage containers. This is standard for container management tools but grants full Docker API access.
+- Updates are pulled from the official nodyn image at `ghcr.io/nodyn-ai/nodyn`. If the image registry were compromised, a malicious image could be deployed automatically.
+- For most users, automatic updates are **safer than never updating** — running outdated software with known vulnerabilities is a greater risk than the supply chain trust model.
+- If you prefer manual control, omit Watchtower and update manually: `docker pull ghcr.io/nodyn-ai/nodyn:latest && docker restart nodyn`.
 
 ---
 
