@@ -18,6 +18,15 @@ export default defineConfig({
         baseUrl: 'https://github.com/nodyn-ai/nodyn/edit/main/docs/',
       },
       customCss: ['./src/styles/custom.css'],
+      head: [
+        {
+          tag: 'script',
+          content: `document.addEventListener('DOMContentLoaded', () => {
+            const link = document.querySelector('.site-title');
+            if (link) link.href = 'https://nodyn.dev';
+          });`,
+        },
+      ],
       lastUpdated: true,
       pagination: true,
       sidebar: [
