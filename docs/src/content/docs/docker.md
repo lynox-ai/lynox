@@ -3,6 +3,10 @@ title: "Docker Deployment"
 description: "Container setup, production hardening, and volumes"
 ---
 
+:::tip[Don't want to set up Docker manually?]
+Use the **[deploy page](https://nodyn.dev/deploy)** — enter your API key, pick a provider, get a running server in 5 minutes. No Docker, SSH, or terminal knowledge needed. Auto-updates included.
+:::
+
 ## Quick Start
 
 Get an API key at [console.anthropic.com](https://console.anthropic.com/), then:
@@ -203,6 +207,26 @@ For **separate businesses**, deploy separate instances. Each gets its own Telegr
 For multi-service and multi-instance deployment, see `nodyn-pro/packages/deploy/`.
 
 See [Security — Production Deployment](/security/#production-deployment-security) for vault key rotation and full hardening details.
+
+### Automatic Updates with Watchtower
+
+To keep nodyn updated automatically, run [Watchtower](https://containrrr.dev/watchtower/) alongside your container:
+
+```bash
+docker run -d \
+  --name watchtower \
+  --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  containrrr/watchtower \
+  --cleanup --interval 86400 \
+  nodyn
+```
+
+This checks for new nodyn images once per day (86400 seconds) and restarts the container automatically. Your data is on a volume, so updates are safe and seamless.
+
+:::note
+The [deploy page](https://nodyn.dev/deploy) includes Watchtower automatically in the generated cloud-init script.
+:::
 
 ---
 

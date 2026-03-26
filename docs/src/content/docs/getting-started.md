@@ -1,6 +1,6 @@
 ---
 title: "Getting Started"
-description: "Install nodyn and run your first session"
+description: "Get your AI agent running in 5 minutes — no technical skills needed"
 ---
 
 ## Before You Start
@@ -13,35 +13,121 @@ You need one thing: an **Anthropic API key**. This is how nodyn connects to Clau
 
 Anthropic charges per usage — a typical business day costs $1–5. You can set a spending limit in their console.
 
-## Two Ways to Use nodyn
-
-| | **Try it out** | **Daily use** |
-|---|---|---|
-| **What** | Run on your computer, play with the REPL | Run on a server 24/7, use via Telegram |
-| **Best for** | Getting to know nodyn | Real business value |
-| **Setup** | One command in Terminal | Docker on a server |
-| **Background tasks** | Stop when you close Terminal | Run forever |
-| **Time** | 2 minutes | 10 minutes |
-
-**Start with "Try it out"** — when you're ready for 24/7, just copy one folder to a server ([see how](#upgrading-from-local-to-server)). All your knowledge carries over.
-
 ---
 
-## Try It Out (Local)
+## Deploy nodyn
 
-Open **Terminal** (Mac: Spotlight → "Terminal", Linux: Ctrl+Alt+T) and paste:
+### The easy way — no technical skills needed
 
+Use the **[deploy page on nodyn.dev/deploy](https://nodyn.dev/deploy)**. It walks you through everything in your browser:
+
+1. **Enter your API key** — paste the key you just created
+2. **Set up Telegram** (optional) — create a bot in 2 minutes, the page detects your chat ID automatically
+3. **Pick a provider** — Hetzner (€3.79/mo), DigitalOcean ($6/mo), or Vultr ($5/mo)
+4. **Copy the generated script** and paste it into your provider's setup page
+
+Your credentials never leave your browser — everything is generated client-side.
+
+After 2–3 minutes, your server is ready. Open Telegram, message your bot, done.
+
+:::tip[Just want to try it first?]
+Run nodyn on your own computer to explore what it can do:
 ```bash
 curl -fsSL https://nodyn.dev/install.sh | sh
 ```
-
-This installs everything needed and starts a **setup wizard** that walks you through the rest. No technical knowledge required.
-
-:::note[Already have Node.js 22+?]
-You can also run `npx @nodyn-ai/core` directly.
+A setup wizard walks you through the rest. When you're ready for 24/7, use the [deploy page](https://nodyn.dev/deploy) to move to a server. All your knowledge carries over.
 :::
 
-## Setup Wizard
+---
+
+## Your First Conversation
+
+Once nodyn is running, talk to it like you would to a colleague — via Telegram or the terminal.
+
+**Simple things to start with:**
+
+- *"Check my emails and tell me what's important"*
+- *"Summarize this document"* (attach a file in Telegram)
+- *"Research [topic] and give me the key points"*
+- *"What meetings do I have this week?"* (after connecting Google)
+
+nodyn remembers everything in the [knowledge graph](/memory/) automatically. The more you use it, the more it knows about your business.
+
+:::note[Don't worry about automation yet]
+You don't need to plan workflows or set up automation right away. Just use nodyn for everyday tasks. After you've done something a few times, nodyn will suggest turning it into an automated workflow.
+:::
+
+---
+
+## What Happens Automatically
+
+After setup, you don't need to manage anything. nodyn takes care of itself:
+
+| What | How | You need to do |
+|------|-----|---------------|
+| **Updates** | Checked daily, applied automatically via [Watchtower](https://containrrr.dev/watchtower/) | Nothing |
+| **Encryption** | AES-256-GCM, key generated during setup | Nothing |
+| **Restarts** | Auto-restart on crash or server reboot | Nothing |
+| **Knowledge** | Grows with every conversation | Just keep talking to nodyn |
+| **Backups** | To Google Drive via `/backup` command | Set up once in Telegram |
+
+Your server runs 24/7 with zero maintenance.
+
+---
+
+## What 24/7 Unlocks
+
+Once nodyn runs on a server, it works in the background — even when you're not talking to it:
+
+- *"Every Monday at 9am, summarize my emails from last week"* — runs automatically, delivered to Telegram
+- *"Monitor competitor.com for pricing changes"* — checks in the background, alerts you when something changes
+- *"Pull KPIs from the tracking sheet every Friday"* — scheduled, hands-free
+- Every conversation builds the knowledge graph — nodyn gets smarter over time
+
+---
+
+## Connect Your Tools
+
+All integrations are optional. Add them whenever you're ready:
+
+| Integration | What it does | How to set up |
+|-------------|-------------|---------------|
+| **Telegram** | Use nodyn from your phone — voice, text, photos, documents | Set up during deploy, or see [Telegram Guide](/telegram/) |
+| **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | [Google Workspace Guide](/google-workspace/) |
+| **Web Research** | Live web search for current information | Add a [Tavily](https://tavily.com) API key (free: 1K searches/month) |
+| **Any REST API** | Connect nodyn to any service you use | [API Store](/api-store/) — describe the API, nodyn learns it |
+
+---
+
+## Moving from Local to Server
+
+Already tried nodyn locally? Everything you've built — knowledge, config, conversation history — lives in one folder. To move it to your server:
+
+1. Use your provider's web console (browser-based terminal) to access your server
+2. Upload the `~/.nodyn/` folder from your computer
+3. Restart nodyn: the knowledge, config, and history are picked up automatically
+
+See [Docker Deployment](/docker/) for details.
+
+---
+
+## What's Next
+
+- **[Telegram Bot](/telegram/)** — voice messages, file sharing, follow-up suggestions
+- **[Google Workspace](/google-workspace/)** — connect Gmail, Sheets, Calendar
+- **[Knowledge](/memory/)** — how nodyn remembers your business
+- **[Backup](/backup/)** — automatic backups to Google Drive
+- **[Configuration](/configuration/)** — cost limits, accuracy, model settings
+
+---
+
+## Technical Reference
+
+:::note
+Everything below is optional reading for users who want to understand what happens under the hood.
+:::
+
+### Setup Wizard (local install)
 
 The wizard runs automatically when no API key is found. Re-run anytime with `npx @nodyn-ai/core --init`.
 
@@ -57,284 +143,49 @@ The wizard runs automatically when no API key is found. Re-run anytime with `npx
 
 Skip all with Enter or Esc — add anytime later via `/google`, `/telegram`, or `/config`.
 
-After setup, nodyn starts a natural conversation to learn about your business. Just talk — it remembers everything in the knowledge graph automatically.
+### SSH Setup Script
 
-## Your First Session
-
-After setup you're in the interactive REPL. Try `/quickstart` for a guided tour:
-
-```
-/quickstart
-
-  Quick Start
-  Try these to see what nodyn can do:
-
-  1. Explore this project
-     nodyn reads your files and explains the project
-
-  2. Summarize recent git activity
-     nodyn uses tools (git, file reading) autonomously
-
-  3. Ask a business question
-     type any question about your work — nodyn remembers the answer
-
-  Pick a number (1-3):
-```
-
-Or just start typing:
-
-```
-❯ Summarize my git log from this week
-❯ What files are in this project?
-❯ /help
-❯ /status
-```
-
-### One-shot mode
-
-Run a single task without entering the REPL:
-
-```bash
-npx @nodyn-ai/core "Summarize the last 5 commits in this repo"
-```
-
-### Piped input
-
-```bash
-cat report.csv | npx @nodyn-ai/core "Find anomalies in this data"
-```
-
-## Daily Use (Server + Telegram)
-
-The local install is for trying things out. The real power comes when nodyn runs **24/7 on a server** — scheduled tasks, monitoring, proactive notifications, all accessible from your phone via Telegram.
-
-### What you need
-
-- A server that's always on — a cheap VPS ($5/month), a homelab, or an old laptop
-- An Anthropic API key (same one from your local install, or a new one)
-- A Telegram bot token (the script walks you through creating one)
-
-### One command
-
-SSH into your server and run:
+For users who already have a server and prefer the command line:
 
 ```bash
 curl -fsSL https://nodyn.dev/setup-server.sh | sh
 ```
 
-The script handles everything interactively:
+The script installs Docker, collects your API key and Telegram token interactively, generates an encryption key, and starts nodyn in a hardened container. See [Docker Deployment](/docker/) for manual setup options.
 
-1. Installs Docker if needed
-2. Asks for your API key (verified live)
-3. Walks you through creating a Telegram bot
-4. Waits for you to message your bot, auto-detects your chat ID
-5. Generates encryption key
-6. Starts nodyn in a hardened container
-
-At the end, you see a summary of what's set up and your next steps. Open Telegram, message your bot, done.
-
-### What the script sets up
-
-- **Docker container** with production hardening (read-only root, no-new-privileges, resource limits)
-- **Auto-restart** — survives reboots and crashes
-- **Encryption** — AES-256-GCM vault key, auto-generated
-- **Telegram lockdown** — only your chat ID can talk to the bot
-- **All config in `~/.nodyn/`** — one directory to back up
-
-:::tip[Prefer manual setup?]
-See [Docker Deployment](/docker/) for the full `docker run` command with all flags explained.
-:::
-
-### What 24/7 unlocks
-
-- *"Every Monday at 9am, pull KPIs from the tracking sheet"* — runs automatically
-- *"Monitor competitor pricing and notify me if anything changes"* — checks in the background
-- *"Summarize all emails from this week every Friday at 5pm"* — delivered to Telegram
-- Your AI keeps learning — every conversation builds the knowledge graph
-
-### Upgrading from local to server
-
-Already tried nodyn locally? Everything you've built — knowledge, config, conversation history — lives in one folder (`~/.nodyn/`). To move it to your server:
-
-```bash
-# From your local machine:
-scp -r ~/.nodyn/ yourserver:~/.nodyn/
-```
-
-Then follow Steps 1–3 above. nodyn picks up exactly where you left off — same knowledge, same config, same settings. The only difference is that it now runs 24/7.
-
-See [Docker Deployment](/docker/) for encryption, production hardening, and multi-service setups.
-
----
-
-## Setup Reference
-
-:::note
-Everything below is optional reading. The setup wizard handles all of this automatically — this section is for users who want to understand what happens under the hood.
-:::
-
-### Prerequisites
-
-Before asking any questions, the wizard checks automatically:
-- **Node.js 22+** — exits with a clear message if your version is too old
-- **~/.nodyn directory** — verifiable and writable
-- **Network** — warns if api.anthropic.com is unreachable (API key verification may fail)
-
-### API Key
-
-```
-  API Key
-  console.anthropic.com → API Keys → Create Key
-  Key: sk-ant-...
-  ✓ Verified.
-  ✓ Encryption enabled.
-```
-
-Paste your Anthropic API key. nodyn validates the format (`sk-` prefix, 20+ characters) and makes a live API call to verify it works. Invalid keys are rejected with a retry prompt.
-
-**Encryption** is enabled automatically — a random vault key is generated and saved to `~/.nodyn/.env` (file permissions `0o600`). Your run history, secrets, and OAuth tokens are encrypted with AES-256-GCM at rest. The wizard offers to add a `source` line to your shell profile so future sessions load the key automatically.
-
-### Integrations
-
-```
-  Connect integrations
-  ↑↓ move · Space toggle · Enter continue
-
-  [ ] Google Workspace    Gmail, Sheets, Calendar
-  [ ] Telegram            use nodyn from your phone
-  [ ] Web Research        live research via Tavily
-```
-
-Use arrow keys to move, Space to toggle, Enter to confirm. All optional — skip with Enter or Esc. Credentials are collected only for selected integrations:
-
-**Google Workspace** — needs OAuth 2.0 credentials from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials). Create an OAuth 2.0 Client ID (Desktop app type), paste Client ID + Secret. Run `/google auth` in the REPL to complete the OAuth flow. Default permissions are read-only.
-
-**Telegram** — create a bot via [@BotFather](https://t.me/BotFather) → `/newbot` → paste the token. nodyn auto-detects your chat ID when you send a message to the bot. Add Telegram later via `TELEGRAM_BOT_TOKEN` env var.
-
-**Web Research** — [Tavily](https://tavily.com) offers 1,000 free searches per month. Paste your API key to enable.
-
-### Summary
-
-```
-  ✓ Setup complete
-
-  API Key        ✓
-  Encryption     ✓
-  Google         ✓ /google auth
-  Telegram       ✓
-```
-
-Only selected integrations are shown. If none were selected: `Add integrations anytime: /google, /telegram, /config`.
-
-The wizard continues directly into the REPL — no need to restart or source any files. Encryption is active immediately.
-
-## Persistence
-
-After the setup wizard, everything persists automatically:
+### Persistence
 
 | What | Where | Survives restart? |
 |------|-------|-------------------|
-| API key + config | `~/.nodyn/config.json` | Yes (read on startup) |
-| Vault key | `~/.nodyn/.env` | Yes (auto-loaded by CLI + Docker) |
-| Run history | `~/.nodyn/history.db` | Yes (encrypted if vault key set) |
+| API key + config | `~/.nodyn/config.json` | Yes |
+| Vault key | `~/.nodyn/.env` | Yes (auto-loaded) |
+| Run history | `~/.nodyn/history.db` | Yes (encrypted) |
 | Knowledge | `~/.nodyn/memory/` | Yes |
 
-**How the vault key survives restarts:**
-1. **Same terminal session**: Set in `process.env` immediately by the wizard
-2. **New terminal (local)**: The CLI auto-loads `~/.nodyn/.env` on startup — no manual `source` needed
-3. **Shell profile**: If you accepted the shell profile injection, the key is also sourced by your shell on login
-4. **Docker**: The entrypoint auto-loads `~/.nodyn/.env` before starting Node
-
-If the vault key is missing but encrypted data exists, nodyn warns:
-```
-⚠ Encrypted vault found but NODYN_VAULT_KEY is not set. Run: nodyn init
-```
-
-## Configuration
-
-nodyn works out of the box after the setup wizard. Customize further in `~/.nodyn/config.json`:
-
-```json
-{
-  "enforce_https": true,
-  "max_daily_cost_usd": 50
-}
-```
-
-Or use `/config` in the REPL for an interactive settings pane. See [Configuration](/configuration/) for all options.
-
-## Changeset Review
-
-nodyn backs up files before modifying them. After each run with file changes:
-
-```
-Changeset Review (2 files modified, 1 file added)
-
-  mod src/config.ts (+3 -1)
-  mod src/index.ts (+12 -4)
-  new src/utils.ts (+25 -0)
-
-  [A]ccept all  [R]ollback all  [P]artial review
-```
-
-## Troubleshooting
-
-### "Node.js 22+ required"
-
-The prerequisites check catches this automatically. Install or update via [nodejs.org](https://nodejs.org), [nvm](https://github.com/nvm-sh/nvm), or your package manager. Docker users don't need Node.js locally.
-
-### "Cannot reach api.anthropic.com"
-
-This is a warning, not a blocker. The wizard accepts your API key but can't verify it live. Check your network/proxy settings. The key is validated on first actual use.
-
-### API key rejected
-
-- Key must start with `sk-ant-` and be at least 20 characters
-- Make sure you copied the full key (no trailing spaces)
-- Check that the key is active in [console.anthropic.com](https://console.anthropic.com/)
-
-### Encryption in new shell sessions
-
-The wizard offers to add `source ~/.nodyn/.env` to your shell profile. If you declined, add manually:
+### CLI Quick Reference
 
 ```bash
-# ~/.zshrc or ~/.bashrc
-[ -f "$HOME/.nodyn/.env" ] && . "$HOME/.nodyn/.env"
-```
+# Interactive REPL
+npx @nodyn-ai/core
 
-The current session always works — the wizard sets the vault key in the running process immediately.
+# One-shot task
+npx @nodyn-ai/core "Summarize the last 5 commits"
 
-### Docker: vault key persistence
+# Piped input
+cat report.csv | npx @nodyn-ai/core "Find anomalies"
 
-The wizard saves the vault key to `~/.nodyn/.env` inside the container. If you mount `~/.nodyn/` as a volume (`-v ~/.nodyn:/home/nodyn/.nodyn`), it persists across container restarts. The entrypoint auto-loads `~/.nodyn/.env` on startup.
-
-### Re-run the setup wizard
-
-```bash
-# Local
+# Re-run setup
 npx @nodyn-ai/core --init
-
-# Docker
-docker run -it --rm -v ~/.nodyn:/home/nodyn/.nodyn ghcr.io/nodyn-ai/nodyn:latest --init
 ```
 
-This walks through all steps again. Existing config is overwritten.
+See [CLI Reference](/cli/) for all commands and flags.
 
-### Telegram bot not responding
+### Troubleshooting
 
-- Check `docker logs nodyn` for error messages
-- Make sure `TELEGRAM_ALLOWED_CHAT_IDS` includes your chat ID (start without it to see your ID)
-- Check that no other instance is running with the same bot token
-- Verify the token: `curl https://api.telegram.org/bot<TOKEN>/getMe`
+**"Node.js 22+ required"** — Install via [nodejs.org](https://nodejs.org) or [nvm](https://github.com/nvm-sh/nvm). Docker users don't need Node.js locally.
 
-## What's Next
+**"Cannot reach api.anthropic.com"** — Warning only. The key is validated on first actual use. Check network/proxy settings.
 
-- [CLI Reference](/cli/) — all slash commands and flags
-- [Tools](/tools/) — available builtin tools
-- [Configuration](/configuration/) — accuracy, thinking, cost settings
-- [Knowledge](/memory/) — how nodyn remembers your business
-- [Docker](/docker/) — container deployment and credentials guide
-- [Telegram Bot](/telegram/) — hands-free mobile operation
-- [MCP Server](/mcp-server/) — expose nodyn as a tool server
-- [SDK](/sdk/) — use nodyn as a TypeScript library
-- [Architecture](/architecture/) — understand the module structure
+**API key rejected** — Must start with `sk-ant-`, be at least 20 characters, and be active in [console.anthropic.com](https://console.anthropic.com/).
+
+**Telegram bot not responding** — Check that no other instance uses the same bot token. Use your provider's web console to check logs if needed.
