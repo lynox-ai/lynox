@@ -385,13 +385,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         if (apiBlock) {
           return friendlyBlockMessage(apiBlock);
         }
-        // Soft-gate: warn if no profile exists for this API host
-        // Skip for common non-API hosts (search engines, CDNs, generic websites)
+        // Soft-warning: note missing profile but let the request through
+        // The agent sees the warning in the response and can create a profile for next time
         const SKIP_PROFILE_CHECK = new Set(['www.google.com', 'google.com', 'github.com', 'raw.githubusercontent.com', 'cdn.jsdelivr.net', 'localhost', '127.0.0.1']);
         if (!toolContext.apiStore.getByHostname(reqHostname) && !SKIP_PROFILE_CHECK.has(reqHostname)) {
           const looksLikeApi = reqHostname.startsWith('api.') || input.url.includes('/v1') || input.url.includes('/v2') || input.url.includes('/v3') || input.url.includes('/api/');
           if (looksLikeApi) {
-            return `No API profile registered for "${reqHostname}". Create a profile first via api_setup (research the API docs, then register endpoints, auth method, rate limits, and guidelines). Blind API calls often fail or get blocked.\n\nAfter creating the profile, retry this request.`;
+            // Store warning — appended to response after the request completes
+            (input as unknown as Record<string, unknown>)['_profileWarning'] = `Note: No API profile for "${reqHostname}". After this task, create one via api_setup to ensure correct usage next time.`;
           }
         }
       } catch {
@@ -505,7 +506,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;
       // Wrap response in data boundary markers (prompt injection defense)
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
-      return wrapUntrustedData(rawResult, 'http_response');
+      const wrapped = wrapUntrustedData(rawResult, 'http_response');
+      // Append profile warning if this was an unregistered API
+      const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
+      return profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error(`HTTP request timed out after ${timeoutMs}ms`);
