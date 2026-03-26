@@ -5,15 +5,23 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@v2
+      - name: Install gitleaks
         env:
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_VERSION: '8.21.2'
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz
+          sudo mv gitleaks /usr/local/bin/
+      - name: Run gitleaks
+        run: gitleaks detect --source . --verbose --redact
 
   test:
     runs-on: ubuntu-latest
@@ -21,11 +29,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - run: npm ci
-      - run: npm audit --audit-level=moderate
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npx vitest run --coverage
+      - uses: pnpm/action-setup@v4
+        with: { version: 'latest' }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --audit-level=moderate
+      - run: pnpm run lint
+      - run: pnpm run typecheck
+      - run: pnpm exec vitest run --coverage
       - name: Check coverage threshold
         run: node --input-type=module -e "import{readFileSync}from'node:fs';const r=JSON.parse(readFileSync('./coverage/coverage-summary.json','utf8')).total;const p=r.lines.pct;console.log('Line coverage '+p+'%');if(p<80)process.exit(1)"
 
@@ -38,10 +48,9 @@ jobs:
           context: .
           push: false
           tags: nodyn:ci-scan
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: nodyn:ci-scan
           format: table
           exit-code: 1
           severity: CRITICAL,HIGH
-
