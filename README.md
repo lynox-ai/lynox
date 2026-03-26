@@ -20,10 +20,12 @@ An AI agent that runs on your infrastructure, learns your business over time, an
 ## Quick start
 
 ```bash
-npx @nodyn-ai/core
+curl -fsSL https://nodyn.dev/install.sh | sh
 ```
 
-Needs [Node.js 22+](https://nodejs.org) and an [Anthropic API key](https://console.anthropic.com/). The setup wizard handles everything else.
+You need an [Anthropic API key](https://console.anthropic.com/) — the setup wizard asks for it. That's all.
+
+Already have Node.js 22+? `npx @nodyn-ai/core` works too.
 
 ### Docker
 
@@ -72,19 +74,19 @@ docker run -it --rm \
 
 ## Install
 
-### Quick install (auto-detects Node.js or Docker)
+**Fastest** — open a terminal and paste:
 
 ```bash
 curl -fsSL https://nodyn.dev/install.sh | sh
 ```
 
-### npm (recommended)
+**With Node.js 22+:**
 
 ```bash
 npx @nodyn-ai/core
 ```
 
-> **Note:** `better-sqlite3` requires C++ build tools. macOS: `xcode-select --install`. Ubuntu/Debian: `sudo apt-get install build-essential python3`. Windows: [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/).
+> `better-sqlite3` needs C++ build tools. macOS: `xcode-select --install`. Ubuntu: `sudo apt-get install build-essential python3`.
 
 ### Clone & run
 

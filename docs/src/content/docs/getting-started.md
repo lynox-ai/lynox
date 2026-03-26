@@ -3,18 +3,59 @@ title: "Getting Started"
 description: "Install nodyn and run your first session"
 ---
 
-## What You Need
+## Before You Start
 
-- An **Anthropic API key** — [get one here](https://console.anthropic.com/) (starts with `sk-ant-`)
-- **Node.js 22+** (for local install) or **Docker** (no Node.js needed)
+You need one thing: an **Anthropic API key**. This is how nodyn connects to Claude (the AI).
 
-## Install & Run
+1. Go to [console.anthropic.com](https://console.anthropic.com/) and create an account
+2. Click **API Keys** → **Create Key**
+3. Copy the key (starts with `sk-ant-`)
+
+Anthropic charges per usage — a typical business day costs $1–5. You can set a spending limit in their console.
+
+## Choose Your Setup
+
+| If you... | Do this | Time |
+|-----------|---------|------|
+| Want the fastest start | [One-line install](#one-line-install) | 2 min |
+| Already have Node.js | [npx](#npx) | 1 min |
+| Prefer containers | [Docker](#docker) | 3 min |
+| Want always-on (server) | [Docker](/docker/) | 5 min |
+
+### One-line install
+
+Open **Terminal** (Mac: Spotlight → "Terminal", Linux: Ctrl+Alt+T) and paste:
+
+```bash
+curl -fsSL https://nodyn.dev/install.sh | sh
+```
+
+This installs Node.js if needed and sets up nodyn. A setup wizard walks you through the rest.
+
+### npx
+
+If you already have [Node.js 22+](https://nodejs.org):
 
 ```bash
 npx @nodyn-ai/core
 ```
 
-That's it. On first run, a setup wizard configures everything — then drops you straight into the REPL. No restart needed.
+### Docker
+
+If you have [Docker](https://docker.com/get-started/):
+
+```bash
+docker run -it --rm \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -v ~/.nodyn:/home/nodyn/.nodyn \
+  ghcr.io/nodyn-ai/nodyn:latest
+```
+
+See [Docker Deployment](/docker/) for Telegram, encryption, and production setup.
+
+---
+
+All three paths lead to the same **setup wizard** — it configures everything interactively. No manual config files needed.
 
 ## Setup Wizard
 
