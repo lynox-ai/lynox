@@ -589,7 +589,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       process.exit(1);
     }
     await engine.shutdown();
-    return;
+    process.exit(0);
   }
 
   // === Sprint 8b: Pipe detection ===
@@ -702,7 +702,7 @@ Docs: https://github.com/nodyn-ai/nodyn/tree/main/docs
       stderr.write(`${GREEN}\u2713${RESET} Background task created: ${task.id}\n`);
     }
     await engine.shutdown();
-    return;
+    process.exit(0);
   }
 
   // === --watch mode ===
