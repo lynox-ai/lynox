@@ -55,6 +55,30 @@ function markSentryPrompted(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Support prompt — shown once after N successful runs
+// ---------------------------------------------------------------------------
+
+const SUPPORT_URL = 'https://donate.stripe.com/test_7sY7sK1CBdoP5HI59m1Nu00';
+const SUPPORT_THRESHOLD = 10; // show after 10 successful tasks
+const SUPPORT_FLAG_PATH = join(homedir(), '.nodyn', '.support-prompted');
+let _supportPrompted = false;
+let _successCount = 0;
+
+function shouldPromptSupport(): boolean {
+  if (_supportPrompted) return false;
+  try {
+    if (existsSync(SUPPORT_FLAG_PATH)) { _supportPrompted = true; return false; }
+  } catch { return false; }
+  _successCount++;
+  return _successCount >= SUPPORT_THRESHOLD;
+}
+
+function markSupportPrompted(): void {
+  _supportPrompted = true;
+  try { writeFileSync(SUPPORT_FLAG_PATH, new Date().toISOString(), 'utf-8'); } catch { /* best-effort */ }
+}
+
+// ---------------------------------------------------------------------------
 // Telegram API error helpers
 // ---------------------------------------------------------------------------
 
@@ -512,6 +536,22 @@ async function executeRunInner(
               inline_keyboard: [[
                 { text: t('sentry.yes', run.lang), callback_data: 'sentry:yes' },
                 { text: t('sentry.no', run.lang), callback_data: 'sentry:no' },
+              ]],
+            },
+          });
+        } catch { /* non-critical */ }
+      }
+
+      // Support prompt — once, after N successful runs
+      if (shouldPromptSupport()) {
+        markSupportPrompted();
+        try {
+          await bot.telegram.sendMessage(chatId, t('support.prompt', run.lang), {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [[
+                { text: t('support.yes', run.lang), url: SUPPORT_URL },
+                { text: t('support.no', run.lang), callback_data: 'support:no' },
               ]],
             },
           });

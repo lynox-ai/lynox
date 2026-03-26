@@ -473,6 +473,16 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       return;
     }
 
+    // Support prompt callback: support:no (dismiss)
+    if (data === 'support:no') {
+      try {
+        const msg = ctx.callbackQuery.message;
+        if (msg) void ctx.deleteMessage(msg.message_id).catch(() => {});
+      } catch { /* ignore */ }
+      ack();
+      return;
+    }
+
     // Inquiry callbacks: q:<taskId>:<optionIndex>
     if (data.startsWith('q:')) {
       const parts = data.split(':');

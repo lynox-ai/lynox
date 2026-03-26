@@ -67,6 +67,11 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'sentry.no': 'No thanks',
     'sentry.thanks': '🛡️ Thank you! Anonymized error reports are now enabled. This helps us fix bugs faster.\n\n<i>Disable anytime by removing NODYN_SENTRY_DSN from your server config.</i>',
     'sentry.declined': '👌 No problem. You can enable this later via /bug or in your server settings.',
+
+    // Support prompt
+    'support.prompt': '💜 <b>nodyn is free and open.</b>\n\nIf it\'s saving you time, consider supporting the project so we can keep improving it.\n\nEvery contribution helps — no matter the amount.',
+    'support.yes': '💜 Support nodyn',
+    'support.no': 'Maybe later',
   },
   de: {
     // Status
@@ -128,6 +133,11 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'sentry.no': 'Nein danke',
     'sentry.thanks': '\uD83D\uDEE1\uFE0F Danke! Anonymisierte Fehlerberichte sind jetzt aktiviert. Das hilft uns, Bugs schneller zu fixen.\n\n<i>Jederzeit deaktivieren: NODYN_SENTRY_DSN aus der Server-Konfiguration entfernen.</i>',
     'sentry.declined': '\uD83D\uDC4C Kein Problem. Du kannst das sp\u00E4ter \u00FCber /bug oder in den Server-Einstellungen aktivieren.',
+
+    // Support prompt
+    'support.prompt': '\uD83D\uDC9C <b>nodyn ist frei und offen.</b>\n\nWenn es dir Zeit spart, unterst\u00FCtze das Projekt, damit wir es weiter verbessern k\u00F6nnen.\n\nJeder Beitrag hilft — egal wie gross.',
+    'support.yes': '\uD83D\uDC9C nodyn unterst\u00FCtzen',
+    'support.no': 'Vielleicht sp\u00E4ter',
   },
 };
 
