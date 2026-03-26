@@ -60,6 +60,13 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'cost.title': 'Cost Overview',
     'cost.session': 'This session',
     'cost.today': 'Today',
+
+    // Sentry opt-in
+    'sentry.prompt': '🛡️ <b>Help improve nodyn?</b>\n\nYou can send anonymized error reports so we can fix bugs faster.\n\n<b>What is sent:</b> error type, stack trace, nodyn version\n<b>What is never sent:</b> your messages, files, knowledge, or any personal data\n\nYou can disable this anytime in your server settings.',
+    'sentry.yes': '✓ Yes, help improve',
+    'sentry.no': 'No thanks',
+    'sentry.thanks': '🛡️ Thank you! Anonymized error reports are now enabled. This helps us fix bugs faster.\n\n<i>Disable anytime by removing NODYN_SENTRY_DSN from your server config.</i>',
+    'sentry.declined': '👌 No problem. You can enable this later via /bug or in your server settings.',
   },
   de: {
     // Status
@@ -114,6 +121,13 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'cost.title': 'Kosten\u00FCbersicht',
     'cost.session': 'Diese Session',
     'cost.today': 'Heute',
+
+    // Sentry opt-in
+    'sentry.prompt': '\uD83D\uDEE1\uFE0F <b>nodyn verbessern helfen?</b>\n\nDu kannst anonymisierte Fehlerberichte senden, damit wir Bugs schneller fixen k\u00F6nnen.\n\n<b>Was gesendet wird:</b> Fehlertyp, Stack Trace, nodyn-Version\n<b>Was nie gesendet wird:</b> Deine Nachrichten, Dateien, Wissen oder pers\u00F6nliche Daten\n\nDu kannst das jederzeit in den Server-Einstellungen deaktivieren.',
+    'sentry.yes': '\u2713 Ja, helfen',
+    'sentry.no': 'Nein danke',
+    'sentry.thanks': '\uD83D\uDEE1\uFE0F Danke! Anonymisierte Fehlerberichte sind jetzt aktiviert. Das hilft uns, Bugs schneller zu fixen.\n\n<i>Jederzeit deaktivieren: NODYN_SENTRY_DSN aus der Server-Konfiguration entfernen.</i>',
+    'sentry.declined': '\uD83D\uDC4C Kein Problem. Du kannst das sp\u00E4ter \u00FCber /bug oder in den Server-Einstellungen aktivieren.',
   },
 };
 

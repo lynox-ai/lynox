@@ -434,6 +434,45 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       return;
     }
 
+    // Sentry opt-in callback: sentry:yes / sentry:no
+    if (data.startsWith('sentry:')) {
+      const choice = data.split(':')[1];
+      const lang = detectLang(ctx.from?.language_code);
+
+      if (choice === 'yes') {
+        // Write DSN to .env so it persists across restarts
+        void (async () => {
+          try {
+            const { appendFileSync } = await import('node:fs');
+            const { join } = await import('node:path');
+            const { homedir } = await import('node:os');
+            const envPath = join(homedir(), '.nodyn', '.env');
+            // DSN for nodyn's shared Sentry project — only allows sending events, not reading
+            const SENTRY_DSN = 'https://c6e3b6758d18e5e0a5c5d6adbb1e4eab@o4509227159044096.ingest.de.sentry.io/4509227160748112';
+            appendFileSync(envPath, `\nNODYN_SENTRY_DSN=${SENTRY_DSN}\n`);
+            const { initSentry } = await import('../../core/sentry.js');
+            await initSentry();
+          } catch { /* best-effort */ }
+          // Remove the prompt message
+          try {
+            const msg = ctx.callbackQuery.message;
+            if (msg) await ctx.deleteMessage(msg.message_id);
+          } catch { /* ignore */ }
+          void ctx.reply(t('sentry.thanks', lang), { parse_mode: 'HTML' });
+        })();
+      } else {
+        // Remove the prompt message
+        try {
+          const msg = ctx.callbackQuery.message;
+          if (msg) void ctx.deleteMessage(msg.message_id).catch(() => {});
+        } catch { /* ignore */ }
+        void ctx.reply(t('sentry.declined', lang), { parse_mode: 'HTML' });
+      }
+
+      ack();
+      return;
+    }
+
     // Inquiry callbacks: q:<taskId>:<optionIndex>
     if (data.startsWith('q:')) {
       const parts = data.split(':');
