@@ -93,9 +93,19 @@ All integrations are optional. Add them whenever you're ready:
 | Integration | What it does | How to set up |
 |-------------|-------------|---------------|
 | **Telegram** | Use nodyn from your phone — voice, text, photos, documents | Set up during deploy, or see [Telegram Guide](/telegram/) |
-| **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | [Google Workspace Guide](/google-workspace/) |
-| **Web Research** | Live web search for current information | Add a [Tavily](https://tavily.com) API key (free: 1K searches/month). For privacy, disable "Allow use of query data" in Tavily settings. |
+| **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | Send `/google` in Telegram — authorize in your browser, done |
+| **Web Research** | Live web search for current information | Add [Tavily](https://tavily.com) API key during deploy (free: 1K searches/month). For privacy, disable "Allow use of query data" in Tavily settings. |
 | **Any REST API** | Connect nodyn to any service you use | [API Store](/api-store/) — describe the API, nodyn learns it |
+
+### Connecting Google Workspace
+
+Send `/google` to your bot in Telegram. nodyn will send you a link and a code:
+
+1. Open the link on your phone or computer
+2. Sign in with your Google account and enter the code
+3. Authorize access — nodyn confirms in Telegram when it's done
+
+That's it — Gmail, Sheets, Drive, Calendar, and Docs are ready. No terminal needed.
 
 ---
 

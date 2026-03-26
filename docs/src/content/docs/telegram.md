@@ -100,10 +100,12 @@ Every running task shows a Stop button. Tap it or send `/stop` to abort.
 
 | Command | Description |
 |---------|-------------|
+| `/google` | Connect Google Workspace (Gmail, Sheets, Calendar, Drive, Docs) via secure Device Flow |
 | `/start` | Welcome message with capabilities |
 | `/stop` | Abort the current running task |
 | `/clear` | Start a fresh conversation (knowledge preserved) |
 | `/status` | Show whether a task is running |
+| `/cost` | Show session costs |
 | `/bug` | Report a bug or issue (sent to Sentry). See [Error Reporting](/sentry/) |
 | `/help` | List available commands |
 

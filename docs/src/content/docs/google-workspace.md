@@ -5,7 +5,24 @@ description: "Gmail, Sheets, Drive, Calendar, and Docs integration"
 
 nodyn connects to Google Workspace (Gmail, Sheets, Drive, Calendar, Docs) via OAuth 2.0. No third-party packages required — uses native `fetch()` against Google REST APIs.
 
-## Setup
+## Quick Setup (via Telegram)
+
+The easiest way to connect Google — no terminal needed:
+
+1. Send `/google` to your nodyn bot in Telegram
+2. Open the link nodyn sends you (works on phone or computer)
+3. Sign in with your Google account and enter the code shown
+4. Authorize access — nodyn confirms in Telegram when connected
+
+That's it. Gmail, Sheets, Drive, Calendar, and Docs are ready to use.
+
+:::note[Prerequisites]
+Your deployment needs Google OAuth credentials (`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`). If you haven't set these up yet, follow the [credential setup](#credential-setup) below first.
+:::
+
+## Credential Setup
+
+You need OAuth credentials from Google before you can connect. This is a one-time setup.
 
 ### 1. Create a GCP Project
 
@@ -22,31 +39,27 @@ nodyn connects to Google Workspace (Gmail, Sheets, Drive, Calendar, Docs) via OA
 
 1. Go to **APIs & Services > Credentials**
 2. Click **Create Credentials > OAuth client ID**
-3. Application type: **Desktop app** (for CLI) or **Web application** (if using a proxy)
+3. Application type: **Desktop app**
 4. Note the **Client ID** and **Client Secret**
 
 ### 3. Configure OAuth Consent Screen
 
 1. Go to **APIs & Services > OAuth consent screen**
 2. User type: **External** (or Internal for Google Workspace domains)
-3. Add scopes:
-   - `https://www.googleapis.com/auth/gmail.readonly`
-   - `https://www.googleapis.com/auth/gmail.send`
-   - `https://www.googleapis.com/auth/gmail.modify`
-   - `https://www.googleapis.com/auth/spreadsheets`
-   - `https://www.googleapis.com/auth/drive`
-   - `https://www.googleapis.com/auth/calendar.events`
-   - `https://www.googleapis.com/auth/documents`
-4. Add test users (required while app is in "Testing" status)
+3. Add test users (required while app is in "Testing" status — add your own email)
 
-### 4. Configure nodyn
+### 4. Add Credentials to nodyn
 
-**Option A: Environment variables**
+**Option A: Environment variables** (recommended for server deployments)
+
+Add to your server's `~/.nodyn/.env`:
 
 ```bash
-export GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-export GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
 ```
+
+Then restart nodyn (`docker restart nodyn`).
 
 **Option B: Config file** (`~/.nodyn/config.json`)
 
@@ -57,30 +70,25 @@ export GOOGLE_CLIENT_SECRET=your-client-secret
 }
 ```
 
-**Option C: Setup wizard**
-
-```bash
-nodyn init
-# Follow prompts — Google section is step 5
-```
-
 ### 5. Authenticate
+
+**Via Telegram (recommended):**
+
+Send `/google` in Telegram. nodyn uses Google's Device Flow — you get a link and a code, authorize in any browser, and tokens are stored encrypted automatically.
+
+**Via CLI:**
 
 ```
 /google auth
 ```
 
-This starts a localhost redirect OAuth flow:
-1. nodyn opens a temporary local server and launches the Google consent screen in your browser
-2. Grant the requested permissions
-3. Google redirects back to localhost with the auth code
-4. nodyn exchanges the code for tokens and stores them encrypted in the vault (`NODYN_VAULT_KEY` required)
+This starts a localhost redirect OAuth flow — nodyn opens the Google consent screen in your browser and handles the redirect automatically.
 
 Tokens auto-refresh. Run `/google status` to check connection.
 
-## Service Account (Docker/Headless)
+## Service Account (Alternative)
 
-For headless deployments (Docker, background tasks), use a service account instead of OAuth:
+For automated environments without user interaction, use a service account:
 
 1. Go to **IAM & Admin > Service Accounts** in GCP Console
 2. Create a service account
