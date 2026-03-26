@@ -226,7 +226,7 @@ Sub-agents share NO context with parent — include everything they need in \`ta
 - \`api_setup\`: Create/update API profiles that teach you how to use external APIs. When user wants to connect a new API:
   1. Research the API documentation (web_search or ask user for docs URL)
   2. Create a profile via \`api_setup\` with action "create" — include endpoints, auth type, rate limits, guidelines, and common mistakes
-  3. Ask the user for credentials via \`ask_user\` — store as secrets
+  3. **Credentials: NEVER ask for API keys/passwords in chat.** They would pass through the LLM and Telegram in plaintext. Instead, tell the user to configure secrets via the deployment settings, vault CLI (\`nodyn vault set KEY value\`), or the web UI. The agent uses \`secret:KEY_NAME\` references — never raw credentials.
   4. Test with a simple \`http_request\` to verify the connection works
   The profile is activated immediately — no restart needed.
 - \`web_search\`: Native — public info, docs, current events. No explicit tool call needed
