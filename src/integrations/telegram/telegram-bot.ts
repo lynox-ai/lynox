@@ -206,6 +206,41 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
     );
   });
 
+  bot.command('google', (ctx) => {
+    const lang = detectLang(ctx.from?.language_code);
+    const googleAuth = engine.getGoogleAuth();
+
+    if (!googleAuth) {
+      void ctx.reply(t('cmd.google_no_creds', lang), { parse_mode: 'HTML' });
+      return;
+    }
+
+    // Check if already connected
+    if (googleAuth.isAuthenticated()) {
+      void ctx.reply(t('cmd.google_already', lang), { parse_mode: 'HTML' });
+      return;
+    }
+
+    // Start device flow
+    void (async () => {
+      try {
+        const { verificationUrl, userCode, waitForAuth } = await googleAuth.startDeviceFlow();
+
+        const msg = t('cmd.google_prompt', lang)
+          .replace(/{url}/g, verificationUrl)
+          .replace(/{code}/g, userCode);
+
+        await ctx.reply(msg, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+
+        await waitForAuth();
+
+        void ctx.reply(t('cmd.google_success', lang), { parse_mode: 'HTML' });
+      } catch {
+        void ctx.reply(t('cmd.google_failed', lang), { parse_mode: 'HTML' });
+      }
+    })();
+  });
+
   bot.command('status', (ctx) => {
     const lang = detectLang(ctx.from?.language_code);
     if (hasActiveRun(ctx.chat.id)) {

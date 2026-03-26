@@ -32,6 +32,7 @@ export interface TelegramSession {
 export interface TelegramEngine {
   createSession(opts?: Record<string, unknown>): TelegramSession;
   getWorkerLoop(): { resolveTaskInput(taskId: string, answer: string): boolean } | null;
+  getGoogleAuth(): import('../google/google-auth.js').GoogleAuth | null;
 }
 
 // ---------------------------------------------------------------------------
