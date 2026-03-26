@@ -13,16 +13,21 @@ You need one thing: an **Anthropic API key**. This is how nodyn connects to Clau
 
 Anthropic charges per usage — a typical business day costs $1–5. You can set a spending limit in their console.
 
-## Choose Your Setup
+## Two Ways to Use nodyn
 
-| If you... | Do this | Time |
-|-----------|---------|------|
-| Want the fastest start | [One-line install](#one-line-install) | 2 min |
-| Already have Node.js | [npx](#npx) | 1 min |
-| Prefer containers | [Docker](#docker) | 3 min |
-| Want always-on (server) | [Docker](/docker/) | 5 min |
+| | **Try it out** | **Daily use** |
+|---|---|---|
+| **What** | Run on your computer, play with the REPL | Run on a server 24/7, use via Telegram |
+| **Best for** | Getting to know nodyn | Real business value |
+| **Setup** | One command in Terminal | Docker on a server |
+| **Background tasks** | Stop when you close Terminal | Run forever |
+| **Time** | 2 minutes | 10 minutes |
 
-### One-line install
+**Start with "Try it out"** — you can always upgrade to daily use later. Your knowledge and settings carry over.
+
+---
+
+## Try It Out (Local)
 
 Open **Terminal** (Mac: Spotlight → "Terminal", Linux: Ctrl+Alt+T) and paste:
 
@@ -30,32 +35,11 @@ Open **Terminal** (Mac: Spotlight → "Terminal", Linux: Ctrl+Alt+T) and paste:
 curl -fsSL https://nodyn.dev/install.sh | sh
 ```
 
-This installs Node.js if needed and sets up nodyn. A setup wizard walks you through the rest.
+This installs everything needed and starts a **setup wizard** that walks you through the rest. No technical knowledge required.
 
-### npx
-
-If you already have [Node.js 22+](https://nodejs.org):
-
-```bash
-npx @nodyn-ai/core
-```
-
-### Docker
-
-If you have [Docker](https://docker.com/get-started/):
-
-```bash
-docker run -it --rm \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  ghcr.io/nodyn-ai/nodyn:latest
-```
-
-See [Docker Deployment](/docker/) for Telegram, encryption, and production setup.
-
----
-
-All three paths lead to the same **setup wizard** — it configures everything interactively. No manual config files needed.
+:::note[Already have Node.js 22+?]
+You can also run `npx @nodyn-ai/core` directly.
+:::
 
 ## Setup Wizard
 
@@ -120,32 +104,35 @@ npx @nodyn-ai/core "Summarize the last 5 commits in this repo"
 cat report.csv | npx @nodyn-ai/core "Find anomalies in this data"
 ```
 
-## From Try-Out to Daily Use
+## Daily Use (Server + Telegram)
 
-Running nodyn locally is great for trying it out — but the real power comes from **24/7 background operation**. Scheduled tasks, URL monitoring, proactive notifications, recurring workflows — all of this only works when nodyn is always on.
+The local install is for trying things out. The real power comes when nodyn runs **24/7 on a server** — scheduled tasks, monitoring, proactive notifications, all accessible from your phone via Telegram.
 
-| Mode | What you get | What you miss |
-|------|-------------|---------------|
-| **Local** (terminal) | Interactive REPL, one-shot tasks, quick experiments | Background tasks stop when you close the terminal |
-| **Server** (Docker) | Everything — scheduled jobs, monitoring, Telegram from any device, background worker | Needs a server (VPS, homelab, old laptop) |
+### What you need
 
-### Next step: Deploy for daily use
+- A server that's always on — a cheap VPS ($5/month), a homelab, or an old laptop
+- [Docker](https://docs.docker.com/get-started/get-docker/) installed on that server
 
-**1. Get a server.** Any always-on machine works — a cheap VPS ($5/month), a homelab, or an old laptop. You need Docker installed.
+### Step 1: Create a Telegram bot
 
-**2. Set up Telegram.** This becomes your primary interface — work from your phone, get results when they're ready.
-- Create a bot: [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token
-- Message your bot once, then find your chat ID at `https://api.telegram.org/bot<TOKEN>/getUpdates`
+This is your daily interface — no terminal needed after setup.
 
-**3. Deploy with one file.** Create a `.env` file on your server:
+1. Open Telegram and message [@BotFather](https://t.me/BotFather)
+2. Send `/newbot`, follow the prompts, copy the **bot token**
+3. Message your new bot (just say "hi")
+4. Open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser — find your **chat ID** (a number like `123456789`)
+
+### Step 2: Create a config file
+
+On your server, create a file called `.env`:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
 TELEGRAM_BOT_TOKEN=123456789:ABCdef...
-TELEGRAM_ALLOWED_CHAT_IDS=your-chat-id
+TELEGRAM_ALLOWED_CHAT_IDS=123456789
 ```
 
-Then start nodyn:
+### Step 3: Start nodyn
 
 ```bash
 docker run -d \
@@ -157,43 +144,28 @@ docker run -d \
   ghcr.io/nodyn-ai/nodyn:latest
 ```
 
-That's it. nodyn is now always on. Open Telegram, message your bot, and start working.
+That's it. Open Telegram, message your bot, and start working.
 
-**What 24/7 unlocks:**
+### What 24/7 unlocks
+
 - *"Every Monday at 9am, pull KPIs from the tracking sheet"* — runs automatically
-- *"Monitor competitor pricing and notify me when it changes"* — checks in the background
+- *"Monitor competitor pricing and notify me if anything changes"* — checks in the background
 - *"Summarize all emails from this week every Friday at 5pm"* — delivered to Telegram
 - Your AI keeps learning — every conversation builds the knowledge graph
 
-See [Docker Deployment](/docker/) for production hardening, encryption, and multi-service setups.
+:::tip[Already tried nodyn locally?]
+Copy your `~/.nodyn/` folder to the server — all your knowledge, config, and history carry over.
+:::
 
-## Docker (local try-out)
-
-Use `docker compose` for the simplest setup (see [`docker-compose.yml`](../docker-compose.yml) in the repo root):
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-docker compose up
-```
-
-Or use `docker run` directly:
-
-```bash
-docker run -it --rm \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v ~/.nodyn:/home/nodyn/.nodyn \
-  ghcr.io/nodyn-ai/nodyn:latest
-```
-
-> **Important:** Always mount `~/.nodyn` — without it, all config, knowledge, and history are lost when the container exits.
-
-See [Docker](/docker/) for Telegram, encryption, production deployment, and all environment variables.
+See [Docker Deployment](/docker/) for encryption, production hardening, and multi-service setups.
 
 ---
 
 ## Setup Reference
 
-Detailed walkthrough of each wizard step. The summary table above covers the essentials — this section is for users who want to understand what happens under the hood.
+:::note
+Everything below is optional reading. The setup wizard handles all of this automatically — this section is for users who want to understand what happens under the hood.
+:::
 
 ### Prerequisites
 
@@ -257,7 +229,7 @@ Right after setup, nodyn asks a few questions about your business:
 ```
 ── Business Profile ──────────────────────────────────────
 
-NODYN works better when it knows your business.
+nodyn works better when it knows your business.
 Answer a few quick questions — or press Enter to skip any.
 
 What does your business do?
