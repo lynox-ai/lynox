@@ -448,7 +448,7 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
             const { homedir } = await import('node:os');
             const envPath = join(homedir(), '.nodyn', '.env');
             // DSN for nodyn's shared Sentry project — only allows sending events, not reading
-            const SENTRY_DSN = 'https://c6e3b6758d18e5e0a5c5d6adbb1e4eab@o4509227159044096.ingest.de.sentry.io/4509227160748112';
+            const SENTRY_DSN = 'https://21110d12849ca21ae1309b661ab3b603@o4511106815492096.ingest.de.sentry.io/4511106856976464';
             appendFileSync(envPath, `\nNODYN_SENTRY_DSN=${SENTRY_DSN}\n`);
             const { initSentry } = await import('../../core/sentry.js');
             await initSentry();
