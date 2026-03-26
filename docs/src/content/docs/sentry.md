@@ -3,31 +3,45 @@ title: "Error Reporting"
 description: "Opt-in Sentry integration with PII protection"
 ---
 
-nodyn includes opt-in error reporting via [Sentry](https://sentry.io). When configured, crashes, unhandled errors, and user-submitted bug reports are captured with structured context — without sending user prompts or response content.
+nodyn includes opt-in error reporting to help improve the product. When enabled, crashes and errors are captured automatically — without sending your messages, files, knowledge, or personal data.
 
-## Setup
+## How to Enable
 
-### 1. Create a Sentry project
+**The easy way:** After your first successful task via Telegram, nodyn asks if you'd like to help improve the product. Tap "Yes" — done.
 
-1. Sign up at [sentry.io](https://sentry.io) (free tier: 5K events/month)
-2. Create a new **Node.js** project
-3. Select **EU region** (Frankfurt) for DSGVO/GDPR compliance
-4. Copy the DSN (format: `https://key@org.ingest.de.sentry.io/id`)
-
-### 2. Configure nodyn
+**Manual setup:** Add to your server's `~/.nodyn/.env`:
 
 ```bash
-# Environment variable (recommended for deployments)
 NODYN_SENTRY_DSN=https://key@org.ingest.de.sentry.io/id
-
-# Or in ~/.nodyn/config.json
-{ "sentry_dsn": "https://key@org.ingest.de.sentry.io/id" }
-
-# Or in project-level .nodyn/config.json (sentry_dsn is a PROJECT_SAFE_KEY)
-{ "sentry_dsn": "https://key@org.ingest.de.sentry.io/id" }
 ```
 
-Without a DSN, Sentry is completely inactive — zero overhead, no imports loaded.
+Without a DSN, error reporting is completely inactive — zero overhead, no code loaded.
+
+### What is sent
+
+- Error type and stack trace
+- nodyn version and Node.js version
+- Which tool was running when the error occurred
+
+### What is never sent
+
+- Your messages, prompts, or AI responses
+- Files, documents, or images
+- Knowledge graph content
+- API keys, tokens, or credentials
+- Any personal or business data
+
+All data is processed in the EU (Frankfurt) for GDPR compliance.
+
+### How to disable
+
+Remove `NODYN_SENTRY_DSN` from your `~/.nodyn/.env` file and restart nodyn.
+
+---
+
+## Self-Hosted Sentry (Advanced)
+
+If you want error reports sent to your own Sentry instance instead:
 
 ### 3. Docker
 

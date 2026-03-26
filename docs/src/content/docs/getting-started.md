@@ -70,6 +70,7 @@ After setup, you don't need to manage anything. nodyn takes care of itself:
 | **Restarts** | Auto-restart on crash or server reboot | Nothing |
 | **Knowledge** | Grows with every conversation | Just keep talking to nodyn |
 | **Backups** | To Google Drive via `/backup` command | Set up once in Telegram |
+| **Bug reports** | Anonymized error reports to help improve nodyn | Opt-in after first task (one tap) |
 
 Your server runs 24/7 with zero maintenance.
 
