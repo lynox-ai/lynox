@@ -90,6 +90,16 @@ Gmail, Sheets, Drive, Calendar, Docs. Create OAuth credentials at [GCP Console](
 -e GOOGLE_CLIENT_SECRET=GOCSPX-...
 ```
 
+### Error Reporting (Sentry)
+
+Opt-in crash and error reporting to a Sentry instance (EU region recommended):
+
+```bash
+-e NODYN_SENTRY_DSN=https://...@....ingest.de.sentry.io/...
+```
+
+PII is scrubbed automatically. No DSN is hardcoded — if absent, Sentry is completely disabled.
+
 ### MCP Server
 
 Expose nodyn as a tool server for Claude Desktop, Cursor, or other MCP clients.
@@ -200,9 +210,11 @@ See [Security — Production Deployment](/security/#production-deployment-securi
 
 | Mount | Purpose |
 |-------|---------|
-| `~/.nodyn` → `/home/nodyn/.nodyn` | Config, history, vault, memory, profiles |
+| `~/.nodyn` → `/home/nodyn/.nodyn` | Config, history, vault, memory, API profiles, backups, CRM |
 | `/workspace` | Agent workspace sandbox |
 | `~/.cache/huggingface` | Embedding model cache (~118MB, downloaded once) |
+
+All persistent data lives inside `~/.nodyn/`: backups (`backups/`), API profiles (`apis/`), CRM data (SQLite), and Knowledge Graph. A single volume mount covers everything.
 
 ### All Environment Variables
 
@@ -222,6 +234,7 @@ See [Security — Production Deployment](/security/#production-deployment-securi
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | No | Google service account (headless) |
 | `TAVILY_API_KEY` | No | Web search (Tavily) |
 | `BRAVE_API_KEY` | No | Web search (Brave) |
+| `NODYN_SENTRY_DSN` | No | Error reporting (opt-in, EU region) |
 
 ### Version Pinning
 
@@ -275,6 +288,7 @@ nodyn blocks private IP ranges and non-HTTP(S) protocols at the application leve
 | `api.tavily.com` | 443 | Web search (Tavily) | `TAVILY_API_KEY` |
 | `api.search.brave.com` | 443 | Web search (Brave) | `BRAVE_API_KEY` |
 | `huggingface.co` | 443 | Embedding model download (first run, cached after) | always |
+| `*.ingest.de.sentry.io` | 443 | Error reporting (EU region) | `NODYN_SENTRY_DSN` |
 | `accounts.google.com` | 443 | Google OAuth | `GOOGLE_CLIENT_ID` |
 | `oauth2.googleapis.com` | 443 | Google token exchange | `GOOGLE_CLIENT_ID` |
 | `*.googleapis.com` | 443 | Gmail, Sheets, Drive, Calendar, Docs | `GOOGLE_CLIENT_ID` |

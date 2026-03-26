@@ -36,5 +36,6 @@ services:
       # - TAVILY_API_KEY            # Web search (free: tavily.com, 1K/month)
       # - GOOGLE_CLIENT_ID          # Google Workspace OAuth
       # - GOOGLE_CLIENT_SECRET      # Google Workspace OAuth
+      # - NODYN_SENTRY_DSN          # Error reporting (opt-in, EU region)
     volumes:
       - ${HOME}/.nodyn:/home/nodyn/.nodyn
