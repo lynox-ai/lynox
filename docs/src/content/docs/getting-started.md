@@ -23,7 +23,7 @@ Anthropic charges per usage — a typical business day costs $1–5. You can set
 | **Background tasks** | Stop when you close Terminal | Run forever |
 | **Time** | 2 minutes | 10 minutes |
 
-**Start with "Try it out"** — you can always upgrade to daily use later. Your knowledge and settings carry over.
+**Start with "Try it out"** — when you're ready for 24/7, just copy one folder to a server ([see how](#upgrading-from-local-to-server)). All your knowledge carries over.
 
 ---
 
@@ -153,9 +153,16 @@ That's it. Open Telegram, message your bot, and start working.
 - *"Summarize all emails from this week every Friday at 5pm"* — delivered to Telegram
 - Your AI keeps learning — every conversation builds the knowledge graph
 
-:::tip[Already tried nodyn locally?]
-Copy your `~/.nodyn/` folder to the server — all your knowledge, config, and history carry over.
-:::
+### Upgrading from local to server
+
+Already tried nodyn locally? Everything you've built — knowledge, config, conversation history — lives in one folder (`~/.nodyn/`). To move it to your server:
+
+```bash
+# From your local machine:
+scp -r ~/.nodyn/ yourserver:~/.nodyn/
+```
+
+Then follow Steps 1–3 above. nodyn picks up exactly where you left off — same knowledge, same business profile, same settings. The only difference is that it now runs 24/7.
 
 See [Docker Deployment](/docker/) for encryption, production hardening, and multi-service setups.
 
