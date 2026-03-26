@@ -115,21 +115,18 @@ The local install is for trying things out. The real power comes when nodyn runs
 
 ### Step 1: Create a Telegram bot
 
-This is your daily interface — no terminal needed after setup.
+This becomes your daily interface — no terminal needed after setup.
 
 1. Open Telegram and message [@BotFather](https://t.me/BotFather)
 2. Send `/newbot`, follow the prompts, copy the **bot token**
-3. Message your new bot (just say "hi")
-4. Open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser — find your **chat ID** (a number like `123456789`)
 
 ### Step 2: Create a config file
 
-On your server, create a file called `.env`:
+On your server, create a file called `.env` with your API key and bot token:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
 TELEGRAM_BOT_TOKEN=123456789:ABCdef...
-TELEGRAM_ALLOWED_CHAT_IDS=123456789
 ```
 
 ### Step 3: Start nodyn
@@ -144,7 +141,23 @@ docker run -d \
   ghcr.io/nodyn-ai/nodyn:latest
 ```
 
-That's it. Open Telegram, message your bot, and start working.
+### Step 4: Lock down your bot
+
+Message your bot in Telegram — just say "hi". nodyn responds with your **chat ID**:
+
+```
+Your chat ID is: 123456789
+Add TELEGRAM_ALLOWED_CHAT_IDS=123456789 to your .env and restart.
+```
+
+Add the ID to your `.env` file and restart:
+
+```bash
+echo "TELEGRAM_ALLOWED_CHAT_IDS=123456789" >> .env
+docker restart nodyn
+```
+
+Now only you can talk to the bot. Done — open Telegram and start working.
 
 ### What 24/7 unlocks
 
@@ -323,9 +336,10 @@ This walks through all steps again. Existing config is overwritten.
 
 ### Telegram bot not responding
 
-- Verify the token with `curl https://api.telegram.org/bot<TOKEN>/getMe`
-- Make sure `TELEGRAM_ALLOWED_CHAT_IDS` includes your chat ID
-- Check that no other instance is running with the same token
+- Check `docker logs nodyn` for error messages
+- Make sure `TELEGRAM_ALLOWED_CHAT_IDS` includes your chat ID (start without it to see your ID)
+- Check that no other instance is running with the same bot token
+- Verify the token: `curl https://api.telegram.org/bot<TOKEN>/getMe`
 
 ## What's Next
 
