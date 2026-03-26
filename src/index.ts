@@ -938,11 +938,13 @@ Docs: https://docs.nodyn.dev
           setTimeout(() => reject(new Error('Greeting timed out')), 30_000),
         );
         await Promise.race([session.run(
-          'This is the user\'s very first session. Welcome them warmly in 3-4 sentences. ' +
+          'This is the user\'s very first session. Welcome them warmly in 2-3 sentences. ' +
           'Refer to yourself as "nodyn" (lowercase). ' +
-          'Then ask 1-2 natural questions to learn about their business — what they do, ' +
-          'what tools they use, or what they need help with. Be conversational, not like a form. ' +
-          'End with an open question so they feel invited to respond. ' +
+          'Briefly say what you are (a digital coworker that learns their business over time). ' +
+          'Then suggest something small and concrete to start with — like checking their emails, ' +
+          'summarizing a file, or looking at recent git activity. ' +
+          'Do NOT ask what they want to automate or what their biggest problem is — ' +
+          'they don\'t know what\'s possible yet. Let them experience it first. ' +
           'Write in the user\'s language (detect from system locale or default to English).',
         ), timeout]);
       } catch (err: unknown) {
