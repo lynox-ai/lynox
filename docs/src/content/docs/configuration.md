@@ -68,7 +68,7 @@ On first run without an API key (TTY mode), a streamlined wizard guides through 
 
 **Docker**: The entrypoint auto-loads `~/.nodyn/.env` on startup. Run `docker run -it ... --init` to use the wizard in a container.
 
-After setup, a **business profile onboarding** asks 4 optional questions (business type, tools, reporting, pain points). Stored in `~/.nodyn/memory/_global/facts.txt`. Re-run with `/profile update`.
+After setup, nodyn starts a natural conversation to learn about your business. Everything is stored in the knowledge graph automatically.
 
 ## NodynConfig (Engine)
 

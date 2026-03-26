@@ -181,7 +181,7 @@ import {
   handleClear, handleCompact, handleSave, handleLoad, handleExport,
   handleHistory, handleHelp, handleExit,
   handleGit, handlePr, handleDiff,
-  handleTask, handleSchedule, handleBusiness, handleBackup, handleApi,
+  handleTask, handleSchedule, handleBackup, handleApi,
   handleRuns, handleStats, handleBatch, handleBatchStatus, handleTree,
   handleAlias, handleGoogle, handleVault, handleSecret, handlePlugin,
   handleConfig, handleStatus, handleHooks, handleApprovals, pkg,
@@ -211,7 +211,7 @@ const DISPATCH: Record<string, InternalHandler> = {
   '/diff': handleDiff,
   '/task': handleTask,
   '/schedule': handleSchedule,
-  '/business': handleBusiness,
+
   '/runs': handleRuns,
   '/stats': handleStats,
   '/batch': handleBatch,
@@ -912,8 +912,9 @@ Docs: https://docs.nodyn.dev
   const userCfg = session.getUserConfig();
   let greetingShown = false;
   if (stdin.isTTY && userCfg.greeting !== false) {
-    const { hasBusinessProfile } = await import('./cli/onboarding.js');
-    const isFirstSession = !(await hasBusinessProfile());
+    const { existsSync, readdirSync } = await import('node:fs');
+    const memDir = join(homedir(), '.nodyn', 'memory');
+    const isFirstSession = !existsSync(memDir) || readdirSync(memDir).length === 0;
 
     let greetingText = '';
     spinner.start('...');

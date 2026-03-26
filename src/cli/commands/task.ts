@@ -1,5 +1,5 @@
 /**
- * Task and business CLI commands: /task, /business, /schedule
+ * Task and schedule CLI commands: /task, /schedule
  */
 
 import type { Session } from '../../core/session.js';
@@ -349,18 +349,5 @@ export async function handleSchedule(parts: string[], session: Session, ctx: CLI
   }
 
   ctx.stdout.write(`Unknown subcommand: ${sub}\nUsage: /schedule [list|details|cancel|test]\n`);
-  return true;
-}
-
-export async function handleBusiness(parts: string[], _session: Session, _ctx: CLICtx): Promise<boolean> {
-  const { showProfile, runBusinessOnboarding, clearProfile } = await import('../onboarding.js');
-  const sub = parts[1];
-  if (sub === 'update') {
-    await runBusinessOnboarding();
-  } else if (sub === 'clear') {
-    await clearProfile();
-  } else {
-    await showProfile();
-  }
   return true;
 }

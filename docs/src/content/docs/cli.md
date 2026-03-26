@@ -491,7 +491,7 @@ On first run without an API key (TTY mode), an interactive 6-step setup wizard r
 5. **Web search** — optional Tavily API key for `web_research` tool
 6. **Google Workspace** — optional OAuth 2.0 credentials. Auth completed later via `/google auth`
 
-Writes `~/.nodyn/config.json` with secure permissions (0o700 dir, 0o600 file). After setup, a business profile onboarding asks 4 optional questions about your business. Re-run with `/profile update`.
+Writes `~/.nodyn/config.json` with secure permissions (0o700 dir, 0o600 file). After setup, nodyn starts a conversation to learn about your business — stored in the knowledge graph.
 
 See [Getting Started](/getting-started/) for a detailed walkthrough of each step.
 

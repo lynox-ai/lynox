@@ -57,7 +57,7 @@ The wizard runs automatically when no API key is found. Re-run anytime with `npx
 
 Skip all with Enter or Esc — add anytime later via `/google`, `/telegram`, or `/config`.
 
-After setup, nodyn optionally asks about your business (4 quick questions) to give more relevant suggestions from the start. All skippable. Update later with `/profile update`.
+After setup, nodyn starts a natural conversation to learn about your business. Just talk — it remembers everything in the knowledge graph automatically.
 
 ## Your First Session
 
@@ -162,7 +162,7 @@ Already tried nodyn locally? Everything you've built — knowledge, config, conv
 scp -r ~/.nodyn/ yourserver:~/.nodyn/
 ```
 
-Then follow Steps 1–3 above. nodyn picks up exactly where you left off — same knowledge, same business profile, same settings. The only difference is that it now runs 24/7.
+Then follow Steps 1–3 above. nodyn picks up exactly where you left off — same knowledge, same config, same settings. The only difference is that it now runs 24/7.
 
 See [Docker Deployment](/docker/) for encryption, production hardening, and multi-service setups.
 
@@ -229,35 +229,6 @@ Only selected integrations are shown. If none were selected: `Add integrations a
 
 The wizard continues directly into the REPL — no need to restart or source any files. Encryption is active immediately.
 
-### Business Profile (optional)
-
-Right after setup, nodyn asks a few questions about your business:
-
-```
-── Business Profile ──────────────────────────────────────
-
-nodyn works better when it knows your business.
-Answer a few quick questions — or press Enter to skip any.
-
-What does your business do?
-  e.g., Digital marketing agency, 8 clients, Google Ads + SEO
-  ›
-
-What tools do you use daily?
-  e.g., Google Ads, Sheets, Slack, Shopify
-  ›
-
-How do you typically report to clients?
-  e.g., weekly PDF, monthly Google Doc
-  ›
-
-What's your biggest recurring time sink?
-  e.g., Monday morning data pull, manual invoice generation
-  ›
-```
-
-These answers are stored locally and help nodyn give more relevant suggestions from the start. All questions are optional — press Enter to skip any. Update later with `/profile update`.
-
 ## Persistence
 
 After the setup wizard, everything persists automatically:
@@ -268,7 +239,6 @@ After the setup wizard, everything persists automatically:
 | Vault key | `~/.nodyn/.env` | Yes (auto-loaded by CLI + Docker) |
 | Run history | `~/.nodyn/history.db` | Yes (encrypted if vault key set) |
 | Knowledge | `~/.nodyn/memory/` | Yes |
-| Business profile | `~/.nodyn/memory/_global/facts.txt` | Yes |
 
 **How the vault key survives restarts:**
 1. **Same terminal session**: Set in `process.env` immediately by the wizard
