@@ -13,6 +13,8 @@ secrets.json
 .DS_Store
 .claude/
 coverage/
+docs/
+scripts/
 cliproxyapi
 *.png
 *.pem
