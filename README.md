@@ -11,11 +11,11 @@ An AI agent that runs on your infrastructure, learns your business over time, an
 
 ## What it does
 
-- **"Run a competitive analysis on our top three accounts"** — nodyn fetches your data, cross-references competitors, stores the findings, and schedules the same analysis for next Monday.
-- **"Same analysis for this new client"** — No re-briefing. nodyn adapts the process it learned to the new account structure.
-- **"Monitor our pricing page and notify me if anything changes"** — Background task runs on schedule, sends you a Telegram message when it detects a change.
-- **"Summarize last week's emails and create a report in Google Docs"** — Connects to Gmail and Docs, writes the report, drops the link in your chat.
-- **"Every Monday at 9am, pull KPIs from our tracking sheet"** — Recurring workflow, fully autonomous, results delivered to Telegram.
+- **"Check my emails and tell me what's important"** — nodyn reads your inbox, prioritizes, drafts replies in your tone. Tomorrow it remembers your style.
+- **"Summarize this PDF"** — Drop a file, get structured key points. nodyn saves the context for later.
+- **"Research [topic] and give me the key points"** — Plans research phases, searches the web, cites sources, stores findings in the knowledge graph.
+- **"Same as last Monday"** — nodyn recognizes the pattern. "Want me to do this every Monday?" One tap, it's automated.
+- **"What changed on competitor.com?"** — Started as a one-time check. Now runs weekly and alerts you via Telegram when something shifts.
 
 ## Quick start
 
