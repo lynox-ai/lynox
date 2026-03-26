@@ -58,7 +58,7 @@ function markSentryPrompted(): void {
 // Support prompt — shown once after N successful runs
 // ---------------------------------------------------------------------------
 
-const SUPPORT_URL = 'https://donate.stripe.com/test_7sY7sK1CBdoP5HI59m1Nu00';
+const SUPPORT_URL = 'https://donate.stripe.com/eVq00ibbKemX61g5Mp8g000';
 const SUPPORT_THRESHOLD = 10; // show after 10 successful tasks
 const SUPPORT_FLAG_PATH = join(homedir(), '.nodyn', '.support-prompted');
 let _supportPrompted = false;
