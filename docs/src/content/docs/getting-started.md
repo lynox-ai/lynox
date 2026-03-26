@@ -94,7 +94,7 @@ All integrations are optional. Add them whenever you're ready:
 |-------------|-------------|---------------|
 | **Telegram** | Use nodyn from your phone — voice, text, photos, documents | Set up during deploy, or see [Telegram Guide](/telegram/) |
 | **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | [Google Workspace Guide](/google-workspace/) |
-| **Web Research** | Live web search for current information | Add a [Tavily](https://tavily.com) API key (free: 1K searches/month) |
+| **Web Research** | Live web search for current information | Add a [Tavily](https://tavily.com) API key (free: 1K searches/month). For privacy, disable "Allow use of query data" in Tavily settings. |
 | **Any REST API** | Connect nodyn to any service you use | [API Store](/api-store/) — describe the API, nodyn learns it |
 
 ---

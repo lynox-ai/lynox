@@ -289,7 +289,7 @@ Client-side web search and content extraction tool. Registered conditionally whe
 - `read` — Extract main content from a URL using Readability. Returns clean text with title, word count, and truncation indicator. SSRF-protected.
 
 **Providers:**
-- **Tavily** (default): Free tier 1,000 searches/month. Returns AI-optimized parsed content. Key prefix: `tvly-`.
+- **Tavily** (default): Free tier 1,000 searches/month. Returns AI-optimized parsed content. Key prefix: `tvly-`. **Privacy:** disable "Allow use of query data" in your [Tavily dashboard](https://tavily.com) to prevent Tavily from using your searches to improve their services.
 - **Brave**: Privacy-focused, own index. Requires `X-Subscription-Token` header.
 
 **Configuration:** `TAVILY_API_KEY` env var, or `search_api_key` + `search_provider` in `~/.nodyn/config.json`.
