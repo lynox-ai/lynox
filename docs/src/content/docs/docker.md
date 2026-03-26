@@ -85,6 +85,10 @@ Save this key in a password manager. If lost, encrypted data becomes unrecoverab
 -e BRAVE_API_KEY=BSA...
 ```
 
+:::tip[Privacy]
+For Tavily: disable "Allow use of query data" in your [Tavily dashboard](https://tavily.com) to prevent your searches from being used to improve their services.
+:::
+
 ### Google Workspace
 
 Gmail, Sheets, Drive, Calendar, Docs. Create OAuth credentials at [GCP Console](https://console.cloud.google.com/) → **APIs & Services** → **Credentials** → OAuth 2.0 Client ID (Desktop).

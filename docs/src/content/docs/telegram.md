@@ -3,9 +3,16 @@ title: "Telegram Bot"
 description: "Setup, commands, inline keyboards, and file handling"
 ---
 
-nodyn includes a built-in Telegram bot for hands-free operation. Send tasks to your bot, get rich status updates with tool details, and interact via inline keyboards.
+Telegram is the primary way most users interact with nodyn. Send text, voice messages, photos, or documents — nodyn processes them and responds with structured results, follow-up suggestions, and live progress updates.
 
-> **Conversation context:** The bot maintains a sliding conversation window (last ~10 exchanges). You can refer to previous messages naturally — "now write tests for that", "fix the error from before". Older messages are automatically dropped to keep responses fast and costs low. Long-term knowledge (facts, preferences, decisions) is stored permanently and available even after the conversation window resets. Use `/clear` to start a fresh conversation.
+**What you can do from Telegram:**
+- Ask questions, run tasks, manage your business
+- Send voice messages — nodyn transcribes and processes them
+- Share files and photos for analysis
+- Connect Google Workspace: send `/google`
+- Check costs: send `/cost`
+
+> **How conversations work:** nodyn remembers the last ~10 messages for context. You can refer to previous messages naturally — "now do the same for the other client". Long-term knowledge (facts, preferences, decisions) is stored permanently in the knowledge graph and available across all conversations. Use `/clear` to start a fresh conversation.
 
 ## Architecture
 

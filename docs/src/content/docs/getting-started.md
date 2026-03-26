@@ -123,11 +123,19 @@ See [Docker Deployment](/docker/) for details.
 
 ## What's Next
 
-- **[Telegram Bot](/telegram/)** — voice messages, file sharing, follow-up suggestions
-- **[Google Workspace](/google-workspace/)** — connect Gmail, Sheets, Calendar
-- **[Knowledge](/memory/)** — how nodyn remembers your business
-- **[Backup](/backup/)** — automatic backups to Google Drive
-- **[Configuration](/configuration/)** — cost limits, accuracy, model settings
+After setup, explore these features via Telegram — just ask nodyn or use the commands:
+
+| Feature | How to start | What it does |
+|---------|-------------|--------------|
+| **[Gmail & Calendar](/google-workspace/)** | Send `/google` in Telegram | Read emails, draft replies, check meetings |
+| **[Contacts & CRM](/crm/)** | Just mention people and deals | nodyn tracks clients, deals, and follow-ups automatically |
+| **[Web Research](/tools/)** | "Research [topic]" | Live web search, structured summaries |
+| **[Backups](/backup/)** | "Set up a backup" or `/backup` | Encrypted backups to Google Drive |
+| **[Scheduled Tasks](/tools/)** | "Do this every Monday at 9am" | Runs in the background, sends results to Telegram |
+| **[Connect any Service](/api-store/)** | "I use [service], here's the API docs" | nodyn learns any API from a description |
+| **[Cost Limits](/configuration/)** | Send `/cost` in Telegram | See your spending, set daily limits |
+
+Everything builds on the knowledge graph — the more you use nodyn, the better it understands your business. Facts, relationships, preferences, and decisions are remembered automatically across every conversation.
 
 ---
 

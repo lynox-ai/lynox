@@ -3,7 +3,9 @@ title: "CRM"
 description: "Contact and deal pipeline management"
 ---
 
-nodyn includes a built-in CRM combining the Knowledge Graph (semantic understanding of people and companies) with DataStore tables (structured deal pipeline and interaction tracking).
+nodyn remembers everyone you work with — clients, partners, contacts, and deals. Just mention people in conversation and nodyn tracks them automatically. Ask *"What's the status with [client]?"* or *"Show me my open deals"* anytime via Telegram.
+
+No setup needed. No data entry. nodyn learns from your conversations and organizes contacts, companies, and deals automatically.
 
 ## How It Works
 

@@ -3,7 +3,22 @@ title: "Configuration"
 description: "Config tiers, environment variables, and profiles"
 ---
 
-## Config System
+## Quick Settings
+
+Most users only need these settings. Ask nodyn via Telegram or edit `~/.nodyn/config.json`:
+
+| Setting | What it does | Default |
+|---------|-------------|---------|
+| `max_daily_cost_usd` | Daily spending limit for AI usage | No limit |
+| `default_tier` | AI quality: `"opus"` (best), `"sonnet"` (fast), `"haiku"` (cheapest) | `"sonnet"` |
+| `enforce_https` | Block unencrypted HTTP requests | `true` |
+| `backup_schedule` | Automatic backup frequency | Not set |
+
+Send `/cost` in Telegram to check your current spending. Everything else works out of the box.
+
+---
+
+## Config System (Technical Reference)
 
 nodyn uses a 3-tier configuration merge (highest priority first):
 

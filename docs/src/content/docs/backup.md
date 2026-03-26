@@ -3,7 +3,11 @@ title: "Backup & Restore"
 description: "Crash-safe backups, encryption, and scheduled backups"
 ---
 
-nodyn stores all persistent data in `~/.nodyn/`. This includes run history, knowledge graph, memory, secrets vault, and configuration. The backup module provides crash-safe snapshots with optional encryption.
+nodyn can automatically back up everything — your knowledge, history, contacts, and settings — to Google Drive. Backups are encrypted and run on schedule.
+
+**Quick start:** Tell nodyn via Telegram: *"Set up a backup to Google Drive"* or use the `/backup` command. Connect Google first with `/google` if you haven't already.
+
+---
 
 ## What Gets Backed Up
 

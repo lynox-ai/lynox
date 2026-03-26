@@ -5,7 +5,11 @@ description: "Persistent memory, scopes, retrieval, and Knowledge Graph"
 
 ## Overview
 
-NODYN's knowledge system persists information across sessions using local file storage. Knowledge is automatically populated by analyzing agent responses and can be manually managed via tools and CLI commands.
+nodyn remembers everything you tell it — facts about your business, client details, preferences, decisions, and workflows. This knowledge persists across all conversations and grows over time.
+
+**You don't need to do anything.** Just talk to nodyn normally. It automatically extracts and stores relevant information in the knowledge graph. Ask *"What do you know about [topic]?"* to see what nodyn remembers.
+
+### How it works (technical)
 
 ## Storage
 
