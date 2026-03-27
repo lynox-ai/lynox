@@ -2,7 +2,7 @@
 
 ## Project
 
-lynox — the AI that knows your business. ESM-only TypeScript, Node.js 22+.
+lynox — business runtime engine. ESM-only TypeScript, Node.js 22+.
 Public OSS repo (lynox-ai/lynox). Internal docs in private lynox-pro repo.
 
 ## Commands

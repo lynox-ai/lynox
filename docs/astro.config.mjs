@@ -6,7 +6,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'lynox',
-      description: 'The AI that knows your business — persistent knowledge, autonomous workflows, tool connections.',
+      description: 'One system that learns your business — replaces your CRM, workflows, outreach, and monitoring.',
       logo: {
         src: './src/assets/logo.svg',
         replacesTitle: false,

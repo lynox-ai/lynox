@@ -1,6 +1,6 @@
 # lynox Documentation
 
-The AI that knows your business — persistent knowledge, autonomous workflows, tool connections.
+One system that learns your business — replaces your CRM, workflows, outreach, and monitoring.
 
 **Live site:** [docs.lynox.ai](https://docs.lynox.ai)
 

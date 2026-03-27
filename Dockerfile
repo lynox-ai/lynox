@@ -54,7 +54,7 @@ RUN mkdir -p /usr/share/whisper \
 FROM debian:trixie-slim
 
 LABEL org.opencontainers.image.title="lynox" \
-      org.opencontainers.image.description="The AI that knows your business — built on Anthropic Claude" \
+      org.opencontainers.image.description="One system that learns your business — replaces your CRM, workflows, outreach, and monitoring" \
       org.opencontainers.image.url="https://github.com/lynox-ai/lynox" \
       org.opencontainers.image.source="https://github.com/lynox-ai/lynox" \
       org.opencontainers.image.licenses="ELv2" \
@@ -97,7 +97,7 @@ RUN \
     # Set login shells to nologin for unused accounts
     && sed -i 's|root:/bin/bash|root:/usr/sbin/nologin|' /etc/passwd
 
-RUN groupadd -g 1001 lynox && useradd -u 1001 -g nodyn -m -s /bin/sh nodyn \
+RUN groupadd -g 1001 lynox && useradd -u 1001 -g lynox -m -s /bin/sh lynox \
     && mkdir -p /home/lynox/.lynox/memory /workspace /home/lynox/.cache/huggingface \
     && chown -R lynox:lynox /tmp /home/lynox/.lynox /workspace /home/lynox/.cache/huggingface
 

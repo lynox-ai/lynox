@@ -2,7 +2,7 @@
 
 ## 1.0.0 — Initial Release
 
-The AI that knows your business. Persistent knowledge, autonomous workflows, tool connections — running entirely in your own infrastructure.
+One system that learns your business — replaces your CRM, workflows, outreach, and monitoring. Self-hosted, open, yours.
 
 ### Core
 

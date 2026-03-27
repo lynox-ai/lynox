@@ -385,7 +385,7 @@ async function runCLI(): Promise<void> {
 
   // === --help flag ===
   if (args.includes('--help') || args.includes('-h')) {
-    stdout.write(`lynox ${pkg.version} — Open Agent Runtime
+    stdout.write(`lynox ${pkg.version}
 
 Usage:
   lynox                         Interactive REPL (setup wizard on first run)

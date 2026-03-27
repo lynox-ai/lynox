@@ -5,9 +5,9 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
-**The AI that knows your business.**
+**Run your business. Not your tools.**
 
-An AI agent that runs on your infrastructure, learns your business over time, and works in the background — so you don't repeat yourself. Persistent knowledge, autonomous workflows, real tool connections. No cloud dependency, no vendor lock-in.
+One system that learns your business — replaces your CRM, workflows, outreach, and monitoring. Persistent knowledge graph, workflow capture, background worker. Open, self-hosted, no vendor lock-in.
 
 ## What it does
 
