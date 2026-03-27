@@ -1,6 +1,8 @@
 ---
 title: "Error Reporting"
 description: "Opt-in Sentry integration with PII protection"
+sidebar:
+  order: 12
 ---
 
 lynox includes opt-in error reporting to help improve the product. When enabled, crashes and errors are captured automatically — without sending your messages, files, knowledge, or personal data.

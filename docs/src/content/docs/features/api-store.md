@@ -1,6 +1,8 @@
 ---
 title: "API Store"
 description: "API profiles, rate limiting, and agent knowledge injection"
+sidebar:
+  order: 3
 ---
 
 The API Store teaches lynox how to properly use external APIs. Instead of blind trial-and-error, the agent gets structured knowledge about each API before making requests — including endpoints, auth methods, rate limits, and common mistakes.

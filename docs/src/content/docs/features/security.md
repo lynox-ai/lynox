@@ -1,11 +1,13 @@
 ---
 title: "Security Model"
 description: "Permission guards, SSRF protection, and secret management"
+sidebar:
+  order: 5
 ---
 
 ## Permission Guard
 
-The permission guard (`src/tools/permission-guard.ts`) intercepts dangerous tool calls before execution. It is **only active when `promptUser` is set** (interactive CLI mode). In non-interactive mode, dangerous operations are denied by default.
+The permission guard (`src/developers/tools/permission-guard.ts`) intercepts dangerous tool calls before execution. It is **only active when `promptUser` is set** (interactive CLI mode). In non-interactive mode, dangerous operations are denied by default.
 
 ### `isDangerous(toolName, input, autonomy?, preApproval?) -> string | null`
 
@@ -297,7 +299,7 @@ lynox --pre-approve "npm run *" \
 
 ## SSRF Protection
 
-The `http_request` tool (`src/tools/builtin/http.ts`) implements multi-layer SSRF protection:
+The `http_request` tool (`src/developers/tools/builtin/http.ts`) implements multi-layer SSRF protection:
 
 ### Protocol Whitelist
 
@@ -388,7 +390,7 @@ The vault key (`LYNOX_VAULT_KEY`) is stored in `~/.lynox/.env` by the setup wiza
 - **Grep-only parsing**: Uses `grep '^LYNOX_VAULT_KEY='` — the file is never sourced as a shell script
 - **Single key extraction**: Only `LYNOX_VAULT_KEY` is extracted via `cut`
 
-**Setup wizard** (`src/cli/setup-wizard.ts`):
+**Setup wizard** (`src/developers/cli/setup-wizard.ts`):
 - **Atomic write**: `writeFileAtomicSync()` writes the `.env` file with `0o600` permissions — no race window between create and chmod
 - **Shell profile injection**: Uses `basename()` on `$SHELL` (not raw `endsWith`) to prevent path manipulation. Append-only with duplicate guard. Single quotes in fallback instruction to prevent shell expansion
 - **Key generation**: `randomBytes(36)` from Node.js CSPRNG → base64 encoding (48 bytes entropy, ~256 bits security)
@@ -440,10 +442,10 @@ The debug subscriber (`src/core/debug-subscriber.ts`) applies multi-layer redact
 - **`PROJECT_SAFE_KEYS` allowlist**: Project-level `.lynox/config.json` cannot override `api_key`, `api_base_url`
 - **Secure file permissions**: Directory created with `0o700`, file written with `0o600` (atomic write)
 
-### Profile Security (`src/cli/profiles.ts`)
+### Profile Security (`src/developers/cli/profiles.ts`)
 - **`SAFE_PROFILE_NAME_RE`**: `/^[a-zA-Z0-9_-]+$/` prevents path traversal in profile names
 
-### Spawn Security (`src/tools/builtin/spawn.ts`)
+### Spawn Security (`src/developers/tools/builtin/spawn.ts`)
 - Sub-agents run in-process (single THINKER track) — no external CLI subprocess
 - `spawn_agent` tool filtered from sub-agent tool list to prevent recursion
 - Max spawn depth: 5 levels
@@ -507,7 +509,7 @@ Additional security fixes across MCP server, Knowledge Graph, HTTP tool, and Tel
 Runs the full security validation pipeline:
 
 1. **`scripts/security-scan.sh`** — Static analysis shell script (pattern scanning, dependency checks)
-2. **`vitest run tests/security/`** — 19 automated security tests (`tests/security/agent-security.test.ts`)
+2. **`vitest run tests/features/security/`** — 19 automated security tests (`tests/features/security/agent-security.test.ts`)
 
 ### Pre-Push Hook
 
@@ -550,7 +552,7 @@ When set, all HTTP requests must include:
 Authorization: Bearer your-secret-token
 ```
 
-Token comparison uses `crypto.timingSafeEqual` to prevent timing attacks. Without `LYNOX_MCP_SECRET`, the server runs without authentication. See [MCP Server docs](/mcp-server/) for details.
+Token comparison uses `crypto.timingSafeEqual` to prevent timing attacks. Without `LYNOX_MCP_SECRET`, the server runs without authentication. See [MCP Server docs](/developers/mcp-server/) for details.
 
 **Vault storage**: `LYNOX_MCP_SECRET` can be stored in the encrypted vault (`lynox vault set LYNOX_MCP_SECRET <token>`). If the env var is not set, `initSecrets()` loads it from the vault and sets `process.env` transparently.
 
@@ -648,7 +650,7 @@ Requires user confirmation. If any step fails, the original key and data remain 
 |-----------|------|-----------|
 | MCP HTTP without `LYNOX_MCP_SECRET` | Unauthenticated agent execution | Always set bearer token for network-exposed MCP |
 | Telegram without `TELEGRAM_ALLOWED_CHAT_IDS` | Any Telegram user can run commands | Restrict to known chat IDs |
-| Multiple businesses on one instance | All users share knowledge and history | One instance per business — separate instances for separate businesses (see [Docker](/docker/#one-instance--one-business)) |
+| Multiple businesses on one instance | All users share knowledge and history | One instance per business — separate instances for separate businesses (see [Docker](/daily-use/docker/#one-instance--one-business)) |
 | `enforce_https: false` (default) | Plaintext HTTP to external APIs | Enable in production |
 | `LYNOX_DEBUG` in production | Sensitive data in debug output | Never enable in production (warning emitted) |
 | MCP over plain HTTP (not HTTPS) | Bearer token transmitted in cleartext | Use reverse proxy with TLS termination |

@@ -1,11 +1,13 @@
 ---
 title: "Tool System"
 description: "14 builtin tools, ToolRegistry, and permission guards"
+sidebar:
+  order: 3
 ---
 
 ## ToolRegistry
 
-The `ToolRegistry` (`src/tools/registry.ts`) manages tool registration and lookup:
+The `ToolRegistry` (`src/developers/tools/registry.ts`) manages tool registration and lookup:
 
 ```typescript
 const registry = new ToolRegistry();
@@ -40,12 +42,12 @@ The handler receives the parsed input and a reference to the calling `IAgent` (f
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/bash.ts` |
+| Source | `src/developers/tools/builtin/bash.ts` |
 | Timeout | 120s (configurable via `timeout_ms`) |
 | Max buffer | 10MB |
 | Eager streaming | Yes |
 
-Executes shell commands via `execSync`. Returns stdout on success, combined stdout+stderr on failure. Uses an **env var allowlist** — only safe prefixes (PATH, HOME, NODE_*, GIT_*, etc.) are passed to subprocesses. All secrets and API keys are stripped. See [Security](/security/#env-var-allowlist).
+Executes shell commands via `execSync`. Returns stdout on success, combined stdout+stderr on failure. Uses an **env var allowlist** — only safe prefixes (PATH, HOME, NODE_*, GIT_*, etc.) are passed to subprocesses. All secrets and API keys are stripped. See [Security](/features/security/#env-var-allowlist).
 
 **Isolation env filtering** (`setIsolationEnv()`): Available as an extension point for Pro. When a tenant context is active (via `lynox-pro`), the env passed to subprocesses is further restricted based on isolation level. Air-gapped tenants receive a minimal env (PATH, HOME, TMPDIR only). Sandboxed tenants can inject custom env vars via `IsolationConfig.envVars`. Shared and scoped levels use the default allowlist.
 
@@ -53,7 +55,7 @@ Executes shell commands via `execSync`. Returns stdout on success, combined stdo
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/fs.ts` |
+| Source | `src/developers/tools/builtin/fs.ts` |
 | Input | `path` (absolute) |
 | Eager streaming | Yes |
 
@@ -63,7 +65,7 @@ Reads file contents as UTF-8.
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/fs.ts` |
+| Source | `src/developers/tools/builtin/fs.ts` |
 | Input | `path`, `content` |
 | Eager streaming | Yes |
 
@@ -73,7 +75,7 @@ Writes content to a file. Creates parent directories as needed. Resolves symlink
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/memory.ts` |
+| Source | `src/developers/tools/builtin/memory.ts` |
 | Input | `namespace` (knowledge/methods/project-state/learnings), `content` |
 | Eager streaming | Yes |
 
@@ -83,7 +85,7 @@ Appends content to a knowledge namespace. Deduplicates -- skips if content alrea
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/memory.ts` |
+| Source | `src/developers/tools/builtin/memory.ts` |
 | Input | `namespace` |
 | Eager streaming | Yes |
 
@@ -93,7 +95,7 @@ Returns the contents of a knowledge namespace.
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/spawn.ts` |
+| Source | `src/developers/tools/builtin/spawn.ts` |
 | Input | `agents` array of `SpawnSpec` |
 | Eager streaming | Yes |
 | Timeout | 10 minutes per agent |
@@ -133,7 +135,7 @@ Agents run in parallel via `Promise.allSettled`. If all fail, throws `AggregateE
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/ask-user.ts` |
+| Source | `src/developers/tools/builtin/ask-user.ts` |
 | Modes | Select, confirm, freeform, tabbed |
 
 The agent should use `ask_user` **proactively** — don't guess preferences or decisions. `options` should **always** be provided when the set of possible answers is finite (yes/no, file picks, deploy targets, approach selection). Free-text only for truly open-ended input.
@@ -150,7 +152,7 @@ In Slack, questions with `options` render as interactive buttons. Questions with
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/batch-files.ts` |
+| Source | `src/developers/tools/builtin/batch-files.ts` |
 | Operations | rename, move, transform |
 | Input | `pattern`, `directory`, `operation`, plus operation-specific fields |
 
@@ -162,31 +164,31 @@ In Slack, questions with `options` render as interactive buttons. Questions with
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/http.ts` |
+| Source | `src/developers/tools/builtin/http.ts` |
 | Methods | GET, POST, PUT, DELETE, PATCH, HEAD |
 | Response limit | 100KB (configurable via `http_response_limit`, truncated with hint) |
 | SSRF protection | Yes |
 
-Makes HTTP requests with full SSRF protection (see [Security](/security/)). Returns status, headers, and body. JSON responses are pretty-printed.
+Makes HTTP requests with full SSRF protection (see [Security](/features/security/)). Returns status, headers, and body. JSON responses are pretty-printed.
 
-**Network policy enforcement** (`setNetworkPolicy()`): Available as an extension point for Pro. When a tenant context is active (via `lynox-pro`), the http tool enforces the tenant's network policy. `allow-all` (default) permits any request. `allow-list` restricts requests to hostnames in `IsolationConfig.allowedHosts`. `deny-all` blocks all outbound HTTP requests. See [Security](/security/#isolation-levels).
+**Network policy enforcement** (`setNetworkPolicy()`): Available as an extension point for Pro. When a tenant context is active (via `lynox-pro`), the http tool enforces the tenant's network policy. `allow-all` (default) permits any request. `allow-list` restricts requests to hostnames in `IsolationConfig.allowedHosts`. `deny-all` blocks all outbound HTTP requests. See [Security](/features/security/#isolation-levels).
 
-**API profile enforcement**: When API profiles are loaded (see [API Store](/api-store/)), requests to API-like URLs without a registered profile are blocked. Per-API rate limits from profiles are enforced automatically.
+**API profile enforcement**: When API profiles are loaded (see [API Store](/features/api-store/)), requests to API-like URLs without a registered profile are blocked. Per-API rate limits from profiles are enforced automatically.
 
 ### `api_setup` -- API Profile Management
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/api-setup.ts` |
+| Source | `src/developers/tools/builtin/api-setup.ts` |
 | Actions | `create`, `update`, `delete`, `list` |
 
-Create and manage API profiles that teach the agent how to correctly use external APIs. Profiles include endpoints, auth method, rate limits, guidelines, and common mistakes. Created profiles are validated (must include endpoints, guidelines, avoid rules, and auth), written to `~/.lynox/apis/`, and activated immediately (hot-reload). See [API Store](/api-store/).
+Create and manage API profiles that teach the agent how to correctly use external APIs. Profiles include endpoints, auth method, rate limits, guidelines, and common mistakes. Created profiles are validated (must include endpoints, guidelines, avoid rules, and auth), written to `~/.lynox/apis/`, and activated immediately (hot-reload). See [API Store](/features/api-store/).
 
 ### `run_pipeline` -- Run Workflow
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/pipeline.ts` |
+| Source | `src/developers/tools/builtin/pipeline.ts` |
 | Input | `steps[]` or `pipeline_id`, `on_failure?`, `context?`, `retry?`, `modifications?` |
 | Eager streaming | Yes |
 | Max steps | 20 |
@@ -197,7 +199,7 @@ Execute a multi-step workflow. Two modes: provide `steps[]` for inline execution
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/task.ts` |
+| Source | `src/developers/tools/builtin/task.ts` |
 | Input | `title`, `description?`, `priority?`, `due_date?`, `scope?`, `tags?`, `parent_task_id?`, `schedule?`, `watch_url?`, `watch_interval_minutes?`, `pipeline_id?` |
 | Eager streaming | Yes |
 
@@ -218,7 +220,7 @@ Background tasks with `assignee='lynox'` auto-trigger immediately (`nextRunAt=no
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/task.ts` |
+| Source | `src/developers/tools/builtin/task.ts` |
 | Input | `task_id`, `status?`, `priority?`, `due_date?`, `title?`, `description?`, `tags?` |
 | Eager streaming | Yes |
 
@@ -228,7 +230,7 @@ Updates task fields. Setting `status: "completed"` also completes all subtasks a
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/task.ts` |
+| Source | `src/developers/tools/builtin/task.ts` |
 | Input | `scope?`, `status?`, `due?` (today/week/overdue), `limit?` |
 | Eager streaming | Yes |
 
@@ -238,7 +240,7 @@ Lists tasks filtered by scope, status, or due date range. Results are ordered by
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/plan-task.ts` |
+| Source | `src/developers/tools/builtin/plan-task.ts` |
 | Input | `summary`, `context?`, `phases?`, `steps?` |
 | Registration | At init (always available) |
 
@@ -258,7 +260,7 @@ Presents a structured plan to the user for approval before executing complex tas
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/process.ts` |
+| Source | `src/developers/tools/builtin/process.ts` |
 | Input | `name`, `description?` |
 | Registration | Dynamic (with workflow tools) |
 
@@ -270,7 +272,7 @@ Returns a `ProcessRecord` with typed steps, parameters (with source classificati
 
 | Property | Value |
 |----------|-------|
-| Source | `src/tools/builtin/process.ts` |
+| Source | `src/developers/tools/builtin/process.ts` |
 | Input | `process_id`, `parameter_values?` |
 | Registration | Dynamic (with workflow tools) |
 
@@ -336,7 +338,7 @@ const result = this.workerPool && this.workerPool.isWorkerSafe(tc.name)
 
 Available when `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are configured. Users authenticate via `/google auth` (OAuth 2.0 device flow). Service account auth supported via `GOOGLE_SERVICE_ACCOUNT_KEY` for headless/Docker deployments. Default OAuth scopes are **read-only**; write scopes opt-in via `google_oauth_scopes` config or `requestScope()` at runtime.
 
-**Security**: All Google tool responses are scanned for prompt injection via `scanToolResult()`. All read handlers wrap external content with `wrapUntrustedData()` boundary markers. `ToolCallTracker` detects exfiltration patterns (Google read → email send, HTTP POST, or sensitive file read). Write actions require user confirmation and are blocked in autonomous mode. See [Security: Google Workspace Injection Hardening](/security/#google-workspace-injection-hardening-v4).
+**Security**: All Google tool responses are scanned for prompt injection via `scanToolResult()`. All read handlers wrap external content with `wrapUntrustedData()` boundary markers. `ToolCallTracker` detects exfiltration patterns (Google read → email send, HTTP POST, or sensitive file read). Write actions require user confirmation and are blocked in autonomous mode. See [Security: Google Workspace Injection Hardening](/features/security/#google-workspace-injection-hardening-v4).
 
 ### `google_gmail`
 

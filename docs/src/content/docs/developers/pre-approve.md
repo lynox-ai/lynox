@@ -1,6 +1,8 @@
 ---
 title: "Pre-Approve System"
 description: "Glob-based auto-approval patterns and audit trail"
+sidebar:
+  order: 6
 ---
 
 Reduces operator approval bottleneck in autonomous modes by auto-approving predictable operations via glob-based pattern matching.
@@ -42,7 +44,7 @@ interface PreApprovalSet {
 ### Modules
 
 - **`src/core/pre-approve.ts`** — `globToRegex()`, `extractMatchString()`, `matchesPreApproval()`, `buildApprovalSet()`
-- **`src/tools/permission-guard.ts`** — `isDangerous()` 4th param `preApproval?`, inline matching (avoids circular dep)
+- **`src/developers/tools/permission-guard.ts`** — `isDangerous()` 4th param `preApproval?`, inline matching (avoids circular dep)
 - **`src/core/agent.ts`** — `preApproval` field, passed to `isDangerous()`
 - **`src/index.ts`** — `--pre-approve <glob>` (repeatable)
 
@@ -85,7 +87,7 @@ User: --approve "bash:npm run *" --approve "write_file:dist/**"
 
 ### Supporting Files
 
-#### `src/cli/approval-dialog.ts`
+#### `src/developers/cli/approval-dialog.ts`
 
 ```typescript
 interface ApprovalDialogResult {
@@ -134,7 +136,7 @@ All pre-approval decisions and usage are persisted to SQLite for compliance trac
 - **SQLite tables** (migration v4):
   - `pre_approval_sets` — set metadata (id, run_id, patterns JSON, approved_by, task_summary, etc.)
   - `pre_approval_events` — individual check decisions (set_id, tool, pattern, decision, timestamp)
-- **`src/tools/permission-guard.ts`** — 5th `audit` param on `isDangerous()`: records approval/exhausted/expired decisions via `PreApproveAuditLike`
+- **`src/developers/tools/permission-guard.ts`** — 5th `audit` param on `isDangerous()`: records approval/exhausted/expired decisions via `PreApproveAuditLike`
 - **`src/core/agent.ts`** — `audit` field in AgentConfig, passed to `isDangerous()`
 - **DAG per-step pre-approval** — manifest steps can declare `pre_approve` patterns, built into per-step `PreApprovalSet`
 - **`/approvals` slash command** — list sets, show details, audit history, export

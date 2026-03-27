@@ -1,6 +1,8 @@
 ---
 title: "CLI Reference"
 description: "Interactive REPL, slash commands, flags, and watch mode"
+sidebar:
+  order: 4
 ---
 
 ## Modes
@@ -50,7 +52,7 @@ node dist/index.js --mcp-server                    # stdio transport
 node dist/index.js --mcp-server --transport sse     # SSE transport
 ```
 
-See [MCP Server](/mcp-server/) for details.
+See [MCP Server](/developers/mcp-server/) for details.
 
 ## CLI Flags
 

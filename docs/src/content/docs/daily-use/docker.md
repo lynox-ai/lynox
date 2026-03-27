@@ -1,6 +1,8 @@
 ---
 title: "Docker Deployment"
 description: "Container setup, production hardening, and volumes"
+sidebar:
+  order: 3
 ---
 
 :::tip[Don't want to set up Docker manually?]
@@ -153,7 +155,7 @@ When lynox runs on a server, there are several ways to interact with it:
 | **SSH + CLI** | Admin/debugging | `docker exec -it lynox node /app/dist/index.js` |
 | **Web UI** | Everyone (planned) | `@lynox/web-ui` — not yet available |
 
-**Telegram** is currently the easiest remote interface — works from any device, no setup beyond the bot token. See [Telegram Bot](/telegram/) for features and [differences from CLI](/telegram/#differences-from-cli).
+**Telegram** is currently the easiest remote interface — works from any device, no setup beyond the bot token. See [Telegram Bot](/daily-use/telegram/) for features and [differences from CLI](/daily-use/telegram/#differences-from-cli).
 
 **SSH + CLI** gives full access to all 30+ commands, changeset review, and continuous conversation. Useful for administration or advanced tasks that need the full CLI.
 
@@ -210,7 +212,7 @@ For **separate businesses**, deploy separate instances. Each gets its own Telegr
 
 For multi-service and multi-instance deployment, see `lynox-pro/packages/deploy/`.
 
-See [Security — Production Deployment](/security/#production-deployment-security) for vault key rotation and full hardening details.
+See [Security — Production Deployment](/features/security/#production-deployment-security) for vault key rotation and full hardening details.
 
 ### Automatic Updates with Watchtower
 
@@ -305,7 +307,7 @@ The image is hardened for production by default:
 - **Minimal attack surface** — no bash, no perl, no SUID binaries, only `sh` (dash)
 - **Network egress** — see below for required domains and firewall rules
 
-See [Security](/security/) for the full model.
+See [Security](/features/security/) for the full model.
 
 ### Network Egress
 

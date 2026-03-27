@@ -1,6 +1,8 @@
 ---
 title: "Agent Loop & Streaming"
 description: "Agentic loop lifecycle, tool dispatch, and streaming"
+sidebar:
+  order: 2
 ---
 
 ## Agentic Loop Lifecycle

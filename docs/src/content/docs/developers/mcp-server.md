@@ -1,6 +1,8 @@
 ---
 title: "MCP Server"
 description: "Expose lynox as an MCP server via stdio or HTTP"
+sidebar:
+  order: 7
 ---
 
 LYNOX can be exposed as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server so other MCP-compatible clients can use LYNOX as a tool provider and async agent runtime.

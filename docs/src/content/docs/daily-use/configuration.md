@@ -1,6 +1,8 @@
 ---
 title: "Configuration"
 description: "Config tiers, environment variables, and profiles"
+sidebar:
+  order: 4
 ---
 
 ## Quick Settings
@@ -76,7 +78,7 @@ On first run without an API key (TTY mode), a streamlined wizard guides through 
    - **Telegram** — bot token + auto-detect chat ID by spinning up the bot and waiting for a message (30s progress hint, 2min timeout with manual `getUpdates` instructions). Falls back to manual entry
    - **Web Research** — Tavily API key for the `web_research` tool (free tier: 1K/month)
 
-**Security**: Vault key file written atomically with `0o600` permissions. Auto-load on startup validates: no symlinks, owner-only access, base64 format. Shell profile injection uses `basename($SHELL)`, append-only with duplicate guard, single quotes in fallback. Config written with `0o700` dir / `0o600` file. See [Security](/security/#vault-key-auto-load-security).
+**Security**: Vault key file written atomically with `0o600` permissions. Auto-load on startup validates: no symlinks, owner-only access, base64 format. Shell profile injection uses `basename($SHELL)`, append-only with duplicate guard, single quotes in fallback. Config written with `0o700` dir / `0o600` file. See [Security](/features/security/#vault-key-auto-load-security).
 
 **Seamless flow**: Vault key is set in `process.env` immediately, config cache invalidated — the REPL starts with encryption active, no restart needed. `--init` continues directly into the REPL instead of exiting.
 
@@ -125,7 +127,7 @@ These behaviors run automatically on `Engine.init()` without configuration:
 
 | Behavior | Trigger | Details |
 |----------|---------|---------|
-| **Pre-update backup** | Version change detected | Compares `~/.lynox/.last_version` with current package version. Creates a full backup before anything else runs. See [Backup](/backup/#pre-update-backup) |
+| **Pre-update backup** | Version change detected | Compares `~/.lynox/.last_version` with current package version. Creates a full backup before anything else runs. See [Backup](/features/backup/#pre-update-backup) |
 | **Debug logging** | `LYNOX_DEBUG` env var | Activates diagnostic channel subscribers |
 | **Security audit** | Always (when run history available) | Subscribes to security channels, logs to `history.db` |
 
@@ -222,7 +224,7 @@ Controls the `output_config.effort` parameter (accuracy level). Set via config, 
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | -- | Path to service account JSON key file (headless/Docker) |
 | `TAVILY_API_KEY` | -- | Tavily API key for web search |
 | `BRAVE_API_KEY` | -- | Brave Search API key (alternative to Tavily) |
-| `LYNOX_SENTRY_DSN` | -- | Sentry DSN for opt-in error reporting. See [Error Reporting](/sentry/) |
+| `LYNOX_SENTRY_DSN` | -- | Sentry DSN for opt-in error reporting. See [Error Reporting](/developers/sentry/) |
 
 ## Profiles
 

@@ -1,6 +1,8 @@
 ---
 title: "Backup & Restore"
 description: "Crash-safe backups, encryption, and scheduled backups"
+sidebar:
+  order: 4
 ---
 
 lynox can automatically back up everything — your knowledge, history, contacts, and settings — to Google Drive. Backups are encrypted and run on schedule.

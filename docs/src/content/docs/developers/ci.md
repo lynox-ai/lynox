@@ -1,6 +1,8 @@
 ---
 title: "CI/CD"
 description: "Test workflow, GitHub Actions, and local validation"
+sidebar:
+  order: 13
 ---
 
 ## Overview
@@ -72,7 +74,7 @@ Transient Anthropic 500/529 errors are caught and logged, not reported as test f
 
 ## Performance Benchmarks (`tests/performance/`)
 
-Vitest bench-based performance benchmarks. See [benchmarks.md](/benchmarks/) for full documentation.
+Vitest bench-based performance benchmarks. See [benchmarks.md](/developers/benchmarks/) for full documentation.
 
 ```bash
 pnpm bench              # offline benchmarks (~30s, no API key)

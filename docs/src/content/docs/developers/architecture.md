@@ -1,6 +1,8 @@
 ---
 title: "Architecture"
 description: "Engine, Session, and module overview"
+sidebar:
+  order: 1
 ---
 
 ## High-Level Overview
@@ -74,7 +76,7 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 |--------|-------|---------|
 | `agent.ts` | `Agent` | Agentic loop with streaming, tool dispatch, permission checks, retry with backoff, knowledge context support (`setKnowledgeContext()`) |
 | `stream.ts` | `StreamProcessor` | Assembles stream deltas into content blocks, emits `StreamEvent`s |
-| `memory.ts` | `Memory` | Context-scoped local file storage in `~/.lynox/memory/<contextId>/` with global fallback, `hasContent()`, publishes to `lynox:memory:store`. Unified scope-keyed cache (`${type}:${id}:${ns}`) covers global, project, and user scopes |
+| `memory.ts` | `Memory` | Context-scoped local file storage in `~/.lynox/features/memory/<contextId>/` with global fallback, `hasContent()`, publishes to `lynox:memory:store`. Unified scope-keyed cache (`${type}:${id}:${ns}`) covers global, project, and user scopes |
 | `engine.ts` | `Engine` | Shared singleton per process. Owns KG, Memory, DataStore, Secrets, Config, ToolRegistry, WorkerLoop, NotificationRouter. `init()` once, then `createSession()` for per-conversation state. `LynoxHooks.onAfterRun` receives `RunContext` (includes `runId`, `contextId`, `modelTier`, `durationMs`, `source`, `tenantId?`). Hook errors logged to `costWarning` debug channel |
 | `session.ts` | `Session` | Per-conversation state created via `engine.createSession()`. Implements `ModeOrchestrator`. Owns Agent, messages, mode, callbacks, run tracking. Entry point for `run()`, `batch()`, `shutdown()`. Per-session config isolation: `setModel()`, `setEffort()`, `setThinking()` mutate session-local fields, not `engine.config`. `SessionOptions`: `model`, `effort`, `thinking`, `autonomy`, `briefing`, `systemPromptSuffix` |
 | `session-store.ts` | `SessionStore` | Multi-turn MCP session management |
@@ -133,7 +135,7 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 
 > **Note:** `http-trigger.ts`, `cron-trigger.ts`, and `git-trigger.ts` have been removed. Cron scheduling is now handled by `WorkerLoop` + `cron-parser.ts`. Only `file-trigger` remains for filesystem watching (used by CLI `--watch` and `watchdog.ts`).
 
-### `src/tools/` -- Tool System
+### `src/developers/tools/` -- Tool System
 
 | Module | Purpose |
 |--------|---------|
@@ -152,7 +154,7 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `builtin/process.ts` | `capture_process` + `promote_process` — structured process capture from run_history, converts to parameterized workflows |
 | `resolve-tools.ts` | Shared `resolveTools()` — 3-tier tool resolution (explicit > role > parent) |
 
-### `src/cli/` -- CLI Interface
+### `src/developers/cli/` -- CLI Interface
 
 | Module | Purpose |
 |--------|---------|
@@ -182,9 +184,9 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `runtime-adapter.ts` | `convertAgentTools()`, `wrapWithGate()`, `spawnViaAgent()`, `spawnInline()` (with role support), `spawnPipeline()` (propagates `role`), `spawnMock()` |
 | `runner.ts` | `runManifest()` — sequential DAG loop with conditions, gates, failure strategy |
 
-See [DAG Engine](/dag-engine/) for full documentation.
+See [DAG Engine](/developers/dag-engine/) for full documentation.
 
-### `src/integrations/telegram/` -- Telegram Bot
+### `src/integrations/daily-use/telegram/` -- Telegram Bot
 
 In-process Telegram bot using Telegraf. Connects directly to `session.run()` (no MCP needed). Three modules: `telegram-bot.ts` (Telegraf setup, message routing, commands), `telegram-runner.ts` (run lifecycle, stream handling, status edits), `telegram-formatter.ts` (markdown→HTML, message splitting, inline keyboards). Also serves as a notification channel for background tasks via `TelegramNotificationChannel` (registered with `NotificationRouter`).
 
@@ -258,8 +260,8 @@ Agent.send(userMessage)
 - **Proxy-safe**: Thinking blocks stripped from message history (proxy signatures).
 - **3-tier config**: env vars > project `.lynox/config.json` > user `~/.lynox/config.json`.
 - **Security-first**: `PROJECT_SAFE_KEYS` allowlist, `NPM_NAME_RE`/`SAFE_ROLE_NAME_RE`/`SAFE_PROFILE_NAME_RE` validation, SSRF protection, XML escaping in RAG.
-- **DRY utilities**: Shared primitives in `src/core/utils.ts` (`sha256Short`, `getErrorMessage`, `sleep`) and `src/cli/ansi.ts` (`TBL`, `stripAnsi`, `wordWrap`). Constants like `ALL_NAMESPACES` live in `src/types/index.ts`.
-- **Open-core extensibility**: Core provides 4 extension points (Orchestrator Hooks, CLI Command Registry, Feature Flags, Notification Router) so Pro can integrate without modifying core source. See [Extension Points](/extension-points/).
+- **DRY utilities**: Shared primitives in `src/core/utils.ts` (`sha256Short`, `getErrorMessage`, `sleep`) and `src/developers/cli/ansi.ts` (`TBL`, `stripAnsi`, `wordWrap`). Constants like `ALL_NAMESPACES` live in `src/types/index.ts`.
+- **Open-core extensibility**: Core provides 4 extension points (Orchestrator Hooks, CLI Command Registry, Feature Flags, Notification Router) so Pro can integrate without modifying core source. See [Extension Points](/developers/extension-points/).
 
 ## Error Handling
 
@@ -288,4 +290,4 @@ The thorough tier has a 1M token context window; balanced and fast tiers have 20
 
 ## Background Tasks
 
-ModeController, GoalTracker, and the 5-mode system have been removed. Background work is handled by `WorkerLoop` via `task_create` with scheduling fields. The `--task` CLI flag creates a background task directly. Pro's sentinel/daemon/swarm modes are deprecated. See [Extension Points](/extension-points/) for how Pro integrates via hooks.
+ModeController, GoalTracker, and the 5-mode system have been removed. Background work is handled by `WorkerLoop` via `task_create` with scheduling fields. The `--task` CLI flag creates a background task directly. Pro's sentinel/daemon/swarm modes are deprecated. See [Extension Points](/developers/extension-points/) for how Pro integrates via hooks.

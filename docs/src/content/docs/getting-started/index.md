@@ -1,6 +1,8 @@
 ---
 title: "Getting Started"
 description: "Get your AI agent running in 5 minutes — no technical skills needed"
+sidebar:
+  order: 1
 ---
 
 ## Before You Start
@@ -54,7 +56,7 @@ Once lynox is running, talk to it like you would to a colleague — via Telegram
 - *"Research [topic] and give me the key points"*
 - *"What meetings do I have this week?"* (after connecting Google)
 
-lynox remembers everything in the [knowledge graph](/memory/) automatically. The more you use it, the more it knows about your business.
+lynox remembers everything in the [knowledge graph](/features/memory/) automatically. The more you use it, the more it knows about your business.
 
 :::note[Don't worry about automation yet]
 You don't need to plan workflows or set up automation right away. Just use lynox for everyday tasks. After you've done something a few times, lynox will suggest turning it into an automated workflow.
@@ -96,10 +98,10 @@ All integrations are optional. Add them whenever you're ready:
 
 | Integration | What it does | How to set up |
 |-------------|-------------|---------------|
-| **Telegram** | Use lynox from your phone — voice, text, photos, documents | Set up during deploy, or see [Telegram Guide](/telegram/) |
+| **Telegram** | Use lynox from your phone — voice, text, photos, documents | Set up during deploy, or see [Telegram Guide](/daily-use/telegram/) |
 | **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | Send `/google` in Telegram — authorize in your browser, done |
 | **Web Research** | Live web search for current information | Add [Tavily](https://tavily.com) API key during deploy (free: 1K searches/month). For privacy, disable "Allow use of query data" in Tavily settings. |
-| **Any REST API** | Connect lynox to any service you use | [API Store](/api-store/) — describe the API, lynox learns it |
+| **Any REST API** | Connect lynox to any service you use | [API Store](/features/api-store/) — describe the API, lynox learns it |
 
 ### Connecting Google Workspace
 
@@ -121,7 +123,7 @@ Already tried lynox locally? Everything you've built — knowledge, config, conv
 2. Upload the `~/.lynox/` folder from your computer
 3. Restart lynox: the knowledge, config, and history are picked up automatically
 
-See [Docker Deployment](/docker/) for details.
+See [Docker Deployment](/daily-use/docker/) for details.
 
 ---
 
@@ -131,13 +133,13 @@ After setup, explore these features via Telegram — just ask lynox or use the c
 
 | Feature | How to start | What it does |
 |---------|-------------|--------------|
-| **[Gmail & Calendar](/google-workspace/)** | Send `/google` in Telegram | Read emails, draft replies, check meetings |
-| **[Contacts & CRM](/crm/)** | Just mention people and deals | lynox tracks clients, deals, and follow-ups automatically |
-| **[Web Research](/tools/)** | "Research [topic]" | Live web search, structured summaries |
-| **[Backups](/backup/)** | "Set up a backup" or `/backup` | Encrypted backups to Google Drive |
-| **[Scheduled Tasks](/tools/)** | "Do this every Monday at 9am" | Runs in the background, sends results to Telegram |
-| **[Connect any Service](/api-store/)** | "I use [service], here's the API docs" | lynox learns any API from a description |
-| **[Cost Limits](/configuration/)** | Send `/cost` in Telegram | See your spending, set daily limits |
+| **[Gmail & Calendar](/daily-use/google-workspace/)** | Send `/google` in Telegram | Read emails, draft replies, check meetings |
+| **[Contacts & CRM](/features/crm/)** | Just mention people and deals | lynox tracks clients, deals, and follow-ups automatically |
+| **[Web Research](/developers/tools/)** | "Research [topic]" | Live web search, structured summaries |
+| **[Backups](/features/backup/)** | "Set up a backup" or `/backup` | Encrypted backups to Google Drive |
+| **[Scheduled Tasks](/developers/tools/)** | "Do this every Monday at 9am" | Runs in the background, sends results to Telegram |
+| **[Connect any Service](/features/api-store/)** | "I use [service], here's the API docs" | lynox learns any API from a description |
+| **[Cost Limits](/daily-use/configuration/)** | Send `/cost` in Telegram | See your spending, set daily limits |
 
 Everything builds on the knowledge graph — the more you use lynox, the better it understands your business. Facts, relationships, preferences, and decisions are remembered automatically across every conversation.
 
@@ -175,7 +177,7 @@ For users who already have a server and prefer the command line:
 curl -fsSL https://lynox.ai/setup-server.sh | sh
 ```
 
-The script installs Docker, collects your API key and Telegram token interactively, generates an encryption key, and starts lynox in a hardened container. See [Docker Deployment](/docker/) for manual setup options.
+The script installs Docker, collects your API key and Telegram token interactively, generates an encryption key, and starts lynox in a hardened container. See [Docker Deployment](/daily-use/docker/) for manual setup options.
 
 ### Deploy Page (browser-based)
 
@@ -193,7 +195,7 @@ All credentials stay client-side. See [Deploy lynox](#deploy-lynox) above.
 | API key + config | `~/.lynox/config.json` | Yes |
 | Vault key | `~/.lynox/.env` | Yes (auto-loaded) |
 | Run history | `~/.lynox/history.db` | Yes (encrypted) |
-| Knowledge | `~/.lynox/memory/` | Yes |
+| Knowledge | `~/.lynox/features/memory/` | Yes |
 
 ### CLI Quick Reference
 
@@ -211,7 +213,7 @@ cat report.csv | npx @lynox-ai/core "Find anomalies"
 npx @lynox-ai/core --init
 ```
 
-See [CLI Reference](/cli/) for all commands and flags.
+See [CLI Reference](/developers/cli/) for all commands and flags.
 
 ### Troubleshooting
 

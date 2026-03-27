@@ -1,6 +1,8 @@
 ---
 title: "CRM"
 description: "Contact and deal pipeline management"
+sidebar:
+  order: 2
 ---
 
 lynox remembers everyone you work with — clients, partners, contacts, and deals. Just mention people in conversation and lynox tracks them automatically. Ask *"What's the status with [client]?"* or *"Show me my open deals"* anytime via Telegram.

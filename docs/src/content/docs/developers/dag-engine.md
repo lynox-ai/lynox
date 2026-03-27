@@ -1,6 +1,8 @@
 ---
 title: "DAG Engine"
 description: "Multi-step workflow automation with dependency graphs"
+sidebar:
+  order: 5
 ---
 
 LYNOX's DAG engine executes declarative JSON manifest files — graph-based workflows with parallel execution, conditions, context passing, and gate approval. Domain-agnostic: you supply agent definitions, LYNOX handles orchestration.
@@ -725,9 +727,9 @@ src/core/
 ├── run-history-analytics.ts    9 read-only stats/advisor query functions
 └── run-history-persistence.ts  44 domain-specific persistence functions (scopes, embeddings, pipelines, tasks, processes)
 
-src/cli/
+src/developers/cli/
 └── dag-visualizer.ts   DagVisualizer — ASCII DAG rendering with ANSI colors + in-place TTY update
 
-src/tools/builtin/
+src/developers/tools/builtin/
 └── pipeline.ts         run_pipeline (workflow execution) + streaming + retry + persistence
 ```

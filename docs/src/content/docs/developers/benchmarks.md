@@ -1,6 +1,8 @@
 ---
 title: "Performance Benchmarks"
 description: "Baselines, regression detection, and profiling"
+sidebar:
+  order: 14
 ---
 
 ## Overview
@@ -31,7 +33,7 @@ No API key needed. Safe for CI. Located in `tests/performance/`.
 | `entity-extractor.bench.ts` | `core/entity-extractor.ts` | Regex Tier 1 extraction on short/medium/large/plain text |
 | `security.bench.ts` | `core/data-boundary.ts`, `core/output-guard.ts` | Injection detection, write content scanning, tool result scanning, data wrapping |
 | `memory.bench.ts` | `core/memory.ts` | Flat-file save/load/append/delete/render, loadAll |
-| `knowledge-graph.bench.ts` | `core/knowledge-graph.ts` | LadybugDB init, entity/memory/mention creation, Cypher queries (parameterized, 1-hop, scalar) |
+| `knowledge-graph.bench.ts` | `core/knowledge-graph.ts` | LadybugDB init, entity/features/memory/mention creation, Cypher queries (parameterized, 1-hop, scalar) |
 | `history-truncation.bench.ts` | `core/agent.ts` | Message count gate, token budget truncation, content block truncation |
 
 ## Online Benchmarks

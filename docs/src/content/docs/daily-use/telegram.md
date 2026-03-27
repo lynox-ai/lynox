@@ -1,6 +1,8 @@
 ---
 title: "Telegram Bot"
 description: "Setup, commands, inline keyboards, and file handling"
+sidebar:
+  order: 1
 ---
 
 Telegram is the primary way most users interact with lynox. Send text, voice messages, photos, or documents — lynox processes them and responds with structured results, follow-up suggestions, and live progress updates.
@@ -77,7 +79,7 @@ By default, anyone who finds your bot can use it. For production, restrict acces
 TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
 ```
 
-> **Shared knowledge:** All users on the same bot share the same knowledge, memory, and history. Add multiple chat IDs only for people who work on the same business. For separate businesses, deploy separate lynox instances (see [Docker — One instance = one business](/docker/#one-instance--one-business)).
+> **Shared knowledge:** All users on the same bot share the same knowledge, memory, and history. Add multiple chat IDs only for people who work on the same business. For separate businesses, deploy separate lynox instances (see [Docker — One instance = one business](/daily-use/docker/#one-instance--one-business)).
 
 To find your chat ID: send a message to the bot without `TELEGRAM_ALLOWED_CHAT_IDS` set — the bot will reply with your chat ID in the "Unauthorized" message.
 
@@ -113,7 +115,7 @@ Every running task shows a Stop button. Tap it or send `/stop` to abort.
 | `/clear` | Start a fresh conversation (knowledge preserved) |
 | `/status` | Show whether a task is running |
 | `/cost` | Show session costs |
-| `/bug` | Report a bug or issue (sent to Sentry). See [Error Reporting](/sentry/) |
+| `/bug` | Report a bug or issue (sent to Sentry). See [Error Reporting](/developers/sentry/) |
 | `/help` | List available commands |
 
 ## Rich Status Message
@@ -252,7 +254,7 @@ When a background task's agent needs user input (via `ask_user`), the question i
 
 | File | Purpose |
 |------|---------|
-| `src/integrations/telegram/telegram-bot.ts` | Telegraf setup, message routing, commands, follow-up callbacks |
-| `src/integrations/telegram/telegram-runner.ts` | Run lifecycle, rich status edits, follow-up suggestion state |
-| `src/integrations/telegram/telegram-formatter.ts` | Markdown→HTML, message splitting, `buildRichStatus`, `toolInputPreview`, `parseFollowUps`, inline keyboards |
+| `src/integrations/daily-use/telegram/telegram-bot.ts` | Telegraf setup, message routing, commands, follow-up callbacks |
+| `src/integrations/daily-use/telegram/telegram-runner.ts` | Run lifecycle, rich status edits, follow-up suggestion state |
+| `src/integrations/daily-use/telegram/telegram-formatter.ts` | Markdown→HTML, message splitting, `buildRichStatus`, `toolInputPreview`, `parseFollowUps`, inline keyboards |
 | `src/core/telegram-notification.ts` | `TelegramNotificationChannel` — push notifications from background tasks, follow-up buttons (`'t:'` prefix), inquiry responses (`'q:'` prefix) |

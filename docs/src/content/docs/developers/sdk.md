@@ -1,6 +1,8 @@
 ---
 title: "SDK Usage"
 description: "Use lynox as a TypeScript library"
+sidebar:
+  order: 10
 ---
 
 Use lynox as a library in your own TypeScript projects.
