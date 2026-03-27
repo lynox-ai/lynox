@@ -29,7 +29,10 @@ Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 - `src/server/` — MCP server (stdio + HTTP SSE)
 - `src/types/` — 12 domain type files, barrel re-export via index.ts
 
-See `docs/src/content/docs/` for documentation source (Astro Starlight site).
+Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by category:
+- `getting-started/`, `daily-use/`, `features/`, `developers/`
+- Sidebar uses `autogenerate` — add new page = drop `.md` file + set `sidebar.order` frontmatter
+- CI: `docs.yml` builds docs on `docs/**` changes; `ci.yml` ignores `docs/**`
 
 ## TypeScript Rules
 
