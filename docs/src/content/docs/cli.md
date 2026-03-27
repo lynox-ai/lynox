@@ -482,14 +482,14 @@ Non-TTY graceful fallback for all modes.
 
 ## Setup Wizard
 
-On first run without an API key (TTY mode), an interactive 6-step setup wizard runs automatically. Re-run anytime with `lynox --init` or `lynox init`.
+On first run without an API key (TTY mode), an interactive setup wizard runs automatically. Re-run anytime with `lynox --init` or `lynox init`.
 
-1. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Invalid keys rejected with retry. Network errors warned but key accepted
-2. **Encryption** — optional vault key generation (AES-256-GCM). Saved atomically to `~/.lynox/.env` (`0o600`). Auto-loaded on restart with symlink/ownership/permission validation
-3. **Accuracy level** — thorough, balanced (default), or fast
-4. **Telegram bot** — optional. Token + auto-detected chat ID (or manual entry)
-5. **Web search** — optional Tavily API key for `web_research` tool
-6. **Google Workspace** — optional OAuth 2.0 credentials. Auth completed later via `/google auth`
+1. **Prerequisites** — checks Node.js 22+, `~/.lynox` directory, network. Retries up to 3 times with actionable fix commands
+2. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Distinguishes invalid keys from rate limits and server errors. Up to 5 attempts with escalating hints. Encryption enabled automatically (AES-256-GCM vault key saved to `~/.lynox/.env` with `0o600`)
+3. **Integrations** — interactive multi-select checklist (all optional):
+   - **Google Workspace** — OAuth 2.0 credentials. Auth completed later via `/google auth`
+   - **Telegram** — bot token + auto-detected chat ID (30s progress hint, 2min timeout with manual instructions)
+   - **Web search** — Tavily API key for `web_research` tool
 
 Writes `~/.lynox/config.json` with secure permissions (0o700 dir, 0o600 file). After setup, lynox starts a conversation to learn about your business — stored in the knowledge graph.
 

@@ -67,15 +67,14 @@ File permissions: directory created with `0o700`, file written with `0o600` (ato
 
 ## Setup Wizard
 
-On first run without an API key (TTY mode), a streamlined wizard guides through two interactions:
+On first run without an API key (TTY mode), a streamlined wizard guides through the setup. Re-run anytime with `lynox --init`.
 
-1. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Invalid keys rejected with retry. Network errors produce a warning but the key is accepted. Encryption is enabled automatically (vault key generated and saved to `~/.lynox/.env` with mode `0o600`). Accuracy defaults to Balanced (sonnet)
-2. **Integrations checklist** — interactive multi-select (arrow keys + Space to toggle + Enter to confirm). Three options, all optional:
+1. **Prerequisites** — checks Node.js version, `~/.lynox` directory (with concrete fix commands on failure), and network connectivity. Retries up to 3 times — fix the issue, press Enter to retry
+2. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Distinguishes between invalid keys, rate limits (429), server errors (5xx), and connectivity issues. Up to 5 attempts with escalating hints (link to console, whitespace check). Only connectivity failures are accepted without verification. Encryption is enabled automatically (vault key generated and saved to `~/.lynox/.env` with mode `0o600`). Accuracy defaults to Balanced (sonnet)
+3. **Integrations checklist** — interactive multi-select (arrow keys + Space to toggle + Enter to confirm). Three options, all optional:
    - **Google Workspace** — OAuth 2.0 client ID + secret for Gmail, Sheets, Drive, Calendar, Docs. Actual auth deferred to `/google auth` command
-   - **Telegram** — bot token + auto-detect chat ID by spinning up the bot and waiting for a message. Falls back to manual entry
+   - **Telegram** — bot token + auto-detect chat ID by spinning up the bot and waiting for a message (30s progress hint, 2min timeout with manual `getUpdates` instructions). Falls back to manual entry
    - **Web Research** — Tavily API key for the `web_research` tool (free tier: 1K/month)
-
-**Prerequisites check** runs before the wizard: Node.js version, `~/.lynox` directory, network connectivity.
 
 **Security**: Vault key file written atomically with `0o600` permissions. Auto-load on startup validates: no symlinks, owner-only access, base64 format. Shell profile injection uses `basename($SHELL)`, append-only with duplicate guard, single quotes in fallback. Config written with `0o700` dir / `0o600` file. See [Security](/security/#vault-key-auto-load-security).
 

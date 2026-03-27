@@ -37,7 +37,12 @@ async function checkPrerequisites(): Promise<PrereqResult> {
   try {
     ensureLynoxDir();
   } catch {
-    errors.push('Cannot create ~/.lynox directory — check permissions');
+    const dir = getLynoxDir();
+    errors.push(
+      `Cannot create ${dir} directory.\n` +
+      `    Fix: mkdir -p ${dir} && chmod 700 ${dir}\n` +
+      `    If on a shared system, check disk quota: df -h ~`,
+    );
   }
 
   // 3. Check network connectivity (Anthropic API reachable)
@@ -131,7 +136,17 @@ async function validateApiKey(key: string): Promise<{ valid: boolean; error?: st
     if (msg.includes('authentication') || msg.includes('invalid') || msg.includes('401')) {
       return { valid: false, error: 'Invalid API key' };
     }
-    return { valid: true, error: `Could not verify (${msg.slice(0, 60)})` };
+    if (msg.includes('429') || msg.includes('rate')) {
+      return { valid: false, error: 'Rate limited — wait a moment and try again' };
+    }
+    if (msg.includes('500') || msg.includes('502') || msg.includes('503')) {
+      return { valid: false, error: 'Anthropic API is temporarily unavailable — try again shortly' };
+    }
+    // Only connectivity failures get the benefit of the doubt
+    if (msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('fetch') || msg.includes('network')) {
+      return { valid: true, error: `Could not verify (${msg.slice(0, 60)}) — will validate on first use` };
+    }
+    return { valid: false, error: `Verification failed: ${msg.slice(0, 80)}` };
   }
 }
 
@@ -152,14 +167,21 @@ async function detectTelegramChatId(token: string): Promise<number | null> {
 
   return new Promise<number | null>((resolve) => {
     const bot = new Telegraf(token);
+    const progressHint = setTimeout(() => {
+      stdout.write(`\r  ${DIM}Still waiting... make sure you sent a message to your bot in Telegram.${RESET}`);
+    }, 30_000);
     const timeout = setTimeout(() => {
-      stdout.write(`\r  ${YELLOW}⚠${RESET} Timeout (2 min). Enter manually below.\n`);
+      clearTimeout(progressHint);
+      stdout.write(`\r  ${YELLOW}⚠${RESET} Timeout (2 min). Enter your chat ID manually below.              \n`);
+      stdout.write(`  ${DIM}To find it: open https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates${RESET}\n`);
+      stdout.write(`  ${DIM}after messaging your bot. Look for "chat":{"id": YOUR_NUMBER }${RESET}\n`);
       bot.stop('timeout');
       resolve(null);
     }, 120_000);
 
     bot.on('message', (ctx) => {
       clearTimeout(timeout);
+      clearTimeout(progressHint);
       stdout.write(`\r  ${GREEN}✓${RESET} Chat ID: ${BOLD}${ctx.chat.id}${RESET}                    \n`);
       void ctx.reply('✓ Connected! Setup continues in the terminal.').catch(() => {});
       // Small delay so the reply is sent before the bot stops
@@ -168,6 +190,7 @@ async function detectTelegramChatId(token: string): Promise<number | null> {
 
     bot.launch().catch((err: unknown) => {
       clearTimeout(timeout);
+      clearTimeout(progressHint);
       stdout.write(`\r  ${RED}✗${RESET} ${getErrorMessage(err)}\n`);
       resolve(null);
     });
@@ -193,26 +216,36 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     stdout.write('\n' + renderGradientArt());
     stdout.write(`  ${BOLD}Setup${RESET}  ${DIM}Let's get you up and running.${RESET}\n`);
 
-    // ── Prerequisites ────────────────────────────────────────────
-    stdout.write(`\n${DIM}  Checking prerequisites...${RESET}`);
-    const prereq = await checkPrerequisites();
-    if (!prereq.ok) {
+    // ── Prerequisites (with retry) ──────────────────────────────
+    const MAX_PREREQ_RETRIES = 3;
+    for (let prereqAttempt = 1; prereqAttempt <= MAX_PREREQ_RETRIES; prereqAttempt++) {
+      stdout.write(`\n${DIM}  Checking prerequisites...${RESET}`);
+      const prereq = await checkPrerequisites();
+      if (prereq.ok) {
+        stdout.write(`\r  ${GREEN}✓${RESET} Prerequisites OK.     \n`);
+        for (const warn of prereq.warnings) {
+          stdout.write(`  ${YELLOW}⚠${RESET} ${warn}\n`);
+        }
+        break;
+      }
       stdout.write(`\r${RED}✗${RESET} Prerequisites failed:\n`);
       for (const err of prereq.errors) {
         stdout.write(`  ${RED}✗${RESET} ${err}\n`);
       }
-      return null;
-    }
-    stdout.write(`\r  ${GREEN}✓${RESET} Prerequisites OK.     \n`);
-    for (const warn of prereq.warnings) {
-      stdout.write(`  ${YELLOW}⚠${RESET} ${warn}\n`);
+      if (prereqAttempt >= MAX_PREREQ_RETRIES) {
+        stdout.write(`\n  ${RED}✗${RESET} Could not resolve prerequisites after ${MAX_PREREQ_RETRIES} attempts.\n`);
+        return null;
+      }
+      stdout.write(`\n  ${DIM}Fix the issues above, then press Enter to retry (${prereqAttempt}/${MAX_PREREQ_RETRIES})...${RESET}`);
+      await rl.question('');
     }
 
     // ── API Key ─────────────────────────────────────────────────
     stdout.write(`\n  ${BOLD}API Key${RESET}\n`);
     stdout.write(`${DIM}  console.anthropic.com → API Keys → Create Key${RESET}\n`);
     let apiKey = '';
-    for (;;) {
+    const MAX_KEY_ATTEMPTS = 5;
+    for (let keyAttempt = 1; keyAttempt <= MAX_KEY_ATTEMPTS; keyAttempt++) {
       const input = await rl.question(`  ${BOLD}Key:${RESET} `);
       if (!input.trim()) {
         stdout.write(`  ${DIM}Cancelled.${RESET}\n`);
@@ -220,12 +253,22 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       }
       if (!input.trim().startsWith('sk-') || input.trim().length < 20) {
         stdout.write(`  ${YELLOW}⚠${RESET} Should start with "sk-" (20+ chars).\n`);
+        if (keyAttempt >= 3) {
+          stdout.write(`  ${DIM}Get a key at: https://console.anthropic.com/settings/keys${RESET}\n`);
+        }
         continue;
       }
       stdout.write(`  ${DIM}Verifying...${RESET}`);
       const result = await validateApiKey(input.trim());
       if (!result.valid) {
-        stdout.write(`\r  ${RED}✗${RESET} ${result.error}. Try again.\n`);
+        stdout.write(`\r  ${RED}✗${RESET} ${result.error}.\n`);
+        if (keyAttempt >= 3) {
+          stdout.write(`  ${DIM}Hint: check for trailing spaces or line breaks in the copied key.${RESET}\n`);
+        }
+        if (keyAttempt >= MAX_KEY_ATTEMPTS) {
+          stdout.write(`  ${YELLOW}⚠${RESET} Max attempts reached. Run ${BOLD}lynox --init${RESET} to try again.\n`);
+          return null;
+        }
         continue;
       }
       stdout.write(result.error

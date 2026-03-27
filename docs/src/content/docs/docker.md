@@ -4,7 +4,7 @@ description: "Container setup, production hardening, and volumes"
 ---
 
 :::tip[Don't want to set up Docker manually?]
-Use the **[deploy page](https://lynox.ai/deploy)** — enter your API key, pick a provider, get a running server in 5 minutes. No Docker, SSH, or terminal knowledge needed. Auto-updates included.
+Use the **[deploy page](https://lynox.ai/deploy)** — enter your API key, choose "New cloud server" or "I already have a server", and get everything generated in your browser. The self-hosted path gives you a downloadable `.env` file, `docker run` command, and `docker-compose.yml`. Auto-updates included.
 :::
 
 ## Quick Start
@@ -229,7 +229,7 @@ docker run -d \
 This checks for new lynox images once per day (86400 seconds) and restarts the container automatically. Your data is on a volume, so updates are safe and seamless.
 
 :::note
-The [deploy page](https://lynox.ai/deploy) and the [setup script](https://lynox.ai/setup-server.sh) both include Watchtower automatically.
+The [deploy page](https://lynox.ai/deploy) (both cloud and self-hosted paths), the [setup script](https://lynox.ai/setup-server.sh), and the generated `docker-compose.yml` all include Watchtower automatically.
 :::
 
 **Security considerations:**
