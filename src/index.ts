@@ -32,7 +32,7 @@ export { initDebugSubscriber, shutdownDebugSubscriber, parseDebugFilter } from '
 export { ToolRegistry } from './tools/registry.js';
 export { LynoxMCPServer } from './server/mcp-server.js';
 export { CostGuard } from './core/cost-guard.js';
-export { loadConfig, saveUserConfig, hasApiKey, getLynoxDir, ensureLynoxDir } from './core/config.js';
+export { loadConfig, saveUserConfig, hasApiKey, getLynoxDir, ensureLynoxDir, setDataDir } from './core/config.js';
 export { RunHistory, hashTask } from './core/run-history.js';
 export { calculateCost, getPricing } from './core/pricing.js';
 export { createEmbeddingProvider, cosineSimilarity } from './core/embedding.js';
@@ -160,7 +160,7 @@ import { Engine } from './core/engine.js';
 import type { Session } from './core/session.js';
 import type { StreamEvent, TabQuestion } from './types/index.js';
 import { MODEL_MAP } from './types/index.js';
-import { hasApiKey } from './core/config.js';
+import { hasApiKey, setDataDir } from './core/config.js';
 import { runSetupWizard } from './cli/setup-wizard.js';
 
 import { animateBanner, renderError, renderWarning, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from './cli/ui.js';
@@ -392,6 +392,7 @@ Usage:
   lynox "<task>"                Run a single task and exit
   cat file | lynox "<task>"     Process piped input with a task
   lynox init                    Run the setup wizard
+  lynox --http-api              Start Engine HTTP API server
   lynox --mcp-server            Start as MCP server (stdio)
   lynox --mcp-server --transport sse   Start as MCP server (HTTP/SSE)
   lynox --telegram              Start Telegram bot mode
@@ -406,10 +407,14 @@ Options:
   --task "<title>"              Create a background task and exit
   --output <file>               Save output to file
   --resume                      Resume previous session
+  --data-dir <dir>              Override data directory (default: ~/.lynox)
 
 Environment:
   ANTHROPIC_API_KEY             Anthropic API key (required)
   ANTHROPIC_BASE_URL            Custom API endpoint (for proxies)
+  LYNOX_DATA_DIR                Override data directory (same as --data-dir)
+  LYNOX_HTTP_PORT               HTTP API port (default: 3100)
+  LYNOX_HTTP_SECRET             HTTP API Bearer token (enables network binding)
   TELEGRAM_BOT_TOKEN            Auto-start Telegram bot mode
   TAVILY_API_KEY                Enable web search tool
 
@@ -434,6 +439,23 @@ Docs: https://docs.lynox.dev
     if (existsSync(configPath)) {
       stderr.write(`${DIM}Project config loaded from ${configPath}${RESET}\n`);
     }
+  }
+
+  // === --data-dir flag ===
+  const dataDirIdx = args.indexOf('--data-dir');
+  const dataDirArg = dataDirIdx !== -1 ? args[dataDirIdx + 1] : undefined;
+  if (dataDirArg) {
+    setDataDir(resolve(dataDirArg));
+  }
+
+  // === HTTP API mode ===
+  if (args.includes('--http-api')) {
+    const { LynoxHTTPApi } = await import('./server/http-api.js');
+    const port = parseInt(process.env['LYNOX_HTTP_PORT'] ?? '3100', 10);
+    const api = new LynoxHTTPApi();
+    await api.init();
+    await api.start(port);
+    return;
   }
 
   // === Setup wizard (explicit --init / "init" subcommand, or auto when no API key) ===
