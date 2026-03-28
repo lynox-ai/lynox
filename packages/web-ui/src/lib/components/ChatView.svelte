@@ -48,6 +48,7 @@
 	interface BatchQuestion { question: string; options: string[]; header?: string; }
 	let batchQuestions = $state<BatchQuestion[]>([]);
 	let batchAnswers = $state<string[]>([]);
+	let batchSelections = $state<string[][]>([]);
 	let batchFocusIdx = $state(0);
 	let inBatchMode = $state(false);
 	let batchFreetext = $state('');
@@ -222,6 +223,7 @@
 				header: q.header,
 			}));
 			batchAnswers = new Array(questions.length).fill('');
+			batchSelections = questions.map(() => [] as string[]);
 			batchFocusIdx = 0;
 			inBatchMode = true;
 		}
@@ -490,20 +492,22 @@
 								<div class="flex flex-wrap gap-1.5">
 									{#each q.options as option}
 										<button onclick={() => {
-											const current = (batchAnswers[i] ?? '').split(', ').filter(Boolean);
-											if (current.includes(option)) {
-												batchAnswers[i] = current.filter(o => o !== option).join(', ');
+											const sel = batchSelections[i] ?? [];
+											if (sel.includes(option)) {
+												batchSelections[i] = sel.filter(o => o !== option);
 											} else {
-												batchAnswers[i] = [...current, option].join(', ');
+												batchSelections[i] = [...sel, option];
 											}
+											batchSelections = [...batchSelections];
+											batchAnswers[i] = (batchSelections[i] ?? []).join(', ');
 											batchAnswers = [...batchAnswers];
 										}}
-											class="rounded-[var(--radius-sm)] border px-2 py-0.5 text-xs transition-all {(batchAnswers[i] ?? '').split(', ').includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
+											class="rounded-[var(--radius-sm)] border px-2 py-0.5 text-xs transition-all {(batchSelections[i] ?? []).includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
 										>{option}</button>
 									{/each}
 								</div>
 								<button onclick={() => { if (batchAnswers[i]) answerPrompt(batchAnswers[i]!); }}
-									disabled={!batchAnswers[i]}
+									disabled={!(batchSelections[i] ?? []).length}
 									class="mt-1.5 rounded-[var(--radius-sm)] bg-accent px-3 py-0.5 text-xs text-text hover:opacity-90 disabled:opacity-30"
 								>{t('chat.send')}</button>
 							{:else}
@@ -515,7 +519,7 @@
 						</div>
 					{:else}
 						<!-- Compact: answered or unanswered -->
-						<button onclick={() => { if (batchAnswers[i]) { batchAnswers[i] = ''; batchAnswers = [...batchAnswers]; } batchFocusIdx = i; }}
+						<button onclick={() => { if (batchAnswers[i]) { batchAnswers[i] = ''; batchSelections[i] = []; batchAnswers = [...batchAnswers]; batchSelections = [...batchSelections]; } batchFocusIdx = i; }}
 							class="w-full flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-1 text-xs text-left transition-all {batchAnswers[i] ? 'text-text-muted hover:bg-bg-muted' : 'text-text-subtle italic hover:bg-bg'}">
 							<span class="font-medium shrink-0 w-20 truncate">{q.header ?? '?'}</span>
 							<span class="{batchAnswers[i] ? 'text-accent-text' : ''} truncate">{batchAnswers[i] || q.question}</span>
