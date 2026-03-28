@@ -363,8 +363,9 @@
 
 	<!-- Permission / Ask User prompt -->
 	{#if pendingPermission}
-		{@const isPermissionGuard = pendingPermission.options?.includes('\x00') ?? false}
-		{@const visibleOptions = (pendingPermission.options ?? []).filter(o => o !== '\x00')}
+		{@const opts = pendingPermission.options ?? []}
+		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
+		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-2">
 				<p class="text-sm text-text-muted">{pendingPermission.question}</p>
