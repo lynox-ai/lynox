@@ -731,6 +731,12 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     });
 
+    // Reload Google integration after credentials change
+    this.staticRoutes.set('POST /api/google/reload', async (_req, res) => {
+      const ok = await engine.reloadGoogle();
+      jsonResponse(res, 200, { ok });
+    });
+
     // ── Knowledge Graph ──────────────────────────────────────────
 
     this.staticRoutes.set('GET /api/kg/stats', async (_req, res) => {

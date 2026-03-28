@@ -58,7 +58,11 @@
 			googleClientId = '';
 			googleClientSecret = '';
 			googleCredSaved = true;
-			setTimeout(() => (googleCredSaved = false), 2000);
+			addToast(t('integrations.credentials_saved'), 'success');
+			// Reload Google integration in the running Engine (no restart needed)
+			await fetch(`${getApiBase()}/google/reload`, { method: 'POST' });
+			await new Promise((r) => setTimeout(r, 500));
+			googleCredSaved = false;
 			await loadGoogleStatus();
 		} catch {
 			addToast(t('common.save_failed'), 'error');

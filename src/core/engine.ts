@@ -603,6 +603,34 @@ export class Engine {
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
+
+  /** Re-initialize Google Workspace integration after credentials change. */
+  async reloadGoogle(): Promise<boolean> {
+    const clientId = this.secretStore?.resolve('GOOGLE_CLIENT_ID')
+      ?? process.env['GOOGLE_CLIENT_ID']
+      ?? this.userConfig.google_client_id;
+    const clientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
+      ?? process.env['GOOGLE_CLIENT_SECRET']
+      ?? this.userConfig.google_client_secret;
+    if (!clientId || !clientSecret) return false;
+    try {
+      const { createGoogleTools } = await import('../integrations/google/index.js');
+      const { tools: googleTools, auth: googleAuth } = createGoogleTools({
+        clientId,
+        clientSecret,
+        serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
+        vault: this.secretVault ?? undefined,
+        scopes: this.userConfig.google_oauth_scopes,
+      });
+      for (const tool of googleTools) {
+        this.registry.register(tool);
+      }
+      this._googleAuth = googleAuth;
+      return true;
+    } catch {
+      return false;
+    }
+  }
   getTaskManager(): import('./task-manager.js').TaskManager | null { return this._taskManager; }
   getDataStore(): DataStore | null { return this._dataStore; }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
