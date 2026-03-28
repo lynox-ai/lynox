@@ -13,7 +13,7 @@ npm run lint        # eslint src/
 npm run build       # tsc → dist/
 npm run dev         # watch mode with tsx
 npm run security    # security scan + vitest security tests
-npx vitest run      # 113 test files / ~2601 tests
+npx vitest run      # 114 test files / ~2639 tests
 npx vitest run tests/online/  # 22 real API tests
 ```
 
@@ -26,7 +26,7 @@ Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 - `src/tools/` — 14 builtin tools (incl. api_setup) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Telegram, Google Workspace, Web Search
-- `src/server/` — MCP server (stdio + HTTP SSE)
+- `src/server/` — MCP server (stdio + HTTP SSE), Engine HTTP API (REST + SSE for PWA)
 - `src/types/` — 12 domain type files, barrel re-export via index.ts
 
 Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by category:
