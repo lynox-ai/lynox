@@ -208,12 +208,29 @@
 	}
 
 	// Detect multi-question ask_user from tool_call input
+	let lastBatchToolId = $state('');
+
 	$effect(() => {
-		if (!pendingPermission || inBatchMode) return;
+		if (!pendingPermission) {
+			// No prompt active — clear stale batch if streaming ended
+			if (!isStreaming && inBatchMode) {
+				inBatchMode = false;
+				batchQuestions = [];
+				batchAnswers = [];
+				batchSelections = [];
+				lastBatchToolId = '';
+			}
+			return;
+		}
 		const lastMsg = messages[messages.length - 1];
 		if (!lastMsg?.toolCalls) return;
 		const askUserTc = lastMsg.toolCalls.findLast(tc => tc.name === 'ask_user' && tc.status === 'running');
 		if (!askUserTc) return;
+
+		// Check if this is a NEW ask_user (different from the one we already batched)
+		const tcId = JSON.stringify(askUserTc.input).slice(0, 100);
+		if (inBatchMode && tcId === lastBatchToolId) return; // same batch, skip
+
 		const input = askUserTc.input as Record<string, unknown> | null;
 		const questions = input?.['questions'] as BatchQuestion[] | undefined;
 		if (questions && questions.length > 1) {
@@ -226,6 +243,7 @@
 			batchSelections = questions.map(() => [] as string[]);
 			batchFocusIdx = 0;
 			inBatchMode = true;
+			lastBatchToolId = tcId;
 		}
 	});
 
