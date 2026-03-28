@@ -41,7 +41,7 @@ docker run -it --rm \
 ```
 ┌──────────────────────────────────────┐
 │              You                     │
-│   Terminal · Telegram · MCP · SDK    │
+│  Web UI · Telegram · CLI · MCP      │
 └──────────────┬───────────────────────┘
                │
 ┌──────────────▼───────────────────────┐
@@ -64,8 +64,9 @@ docker run -it --rm \
 ## Key capabilities
 
 - **Knowledge Graph** — Learns entities, relationships, and contradictions across your business. 100 languages, fully local.
-- **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows. Results delivered via Telegram.
-- **Telegram Bot** — Primary daily interface. Rich status, follow-up suggestions, voice messages, file uploads.
+- **Web UI** — Primary interface. Chat, knowledge browser, run history, settings, integrations. Installable as PWA.
+- **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
+- **Telegram Bot** — Secondary mobile interface. Voice, photos, files, follow-up suggestions.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
 - **MCP Server** — Connect to Claude Desktop, Cursor, or any MCP client via stdio or HTTP.
 - **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it.
@@ -119,13 +120,20 @@ One-shot mode — run a task and exit:
 npx @lynox-ai/core "Summarize the last 5 commits in this repo"
 ```
 
-### Telegram (recommended for daily use)
+### Web UI (recommended)
 
-Create a bot via [@BotFather](https://t.me/BotFather), then:
+Start the Engine with HTTP API, then open the Web UI:
 
 ```bash
-TELEGRAM_BOT_TOKEN=123:ABC... npx @lynox-ai/core
+npx @lynox-ai/core --http-api  # Engine on port 3100
+cd packages/web-ui && npm start # Web UI on port 3000
 ```
+
+Or use Docker: `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui`
+
+### Telegram (mobile)
+
+Create a bot via [@BotFather](https://t.me/BotFather), add the token in Web UI → Settings → Integrations.
 
 For SDK usage, see [docs/sdk.md](docs/sdk.md) and [`examples/`](examples/).
 

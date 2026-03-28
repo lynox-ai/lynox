@@ -150,14 +150,18 @@ When lynox runs on a server, there are several ways to interact with it:
 
 | Channel | Best for | Setup |
 |---------|----------|-------|
-| **Telegram** | Daily use from phone/desktop | Add `TELEGRAM_BOT_TOKEN` env var |
-| **MCP HTTP** | Integrations (Slack, web apps) | Add `LYNOX_MCP_SECRET`, expose port 3042 |
+| **Web UI** | Primary interface for everyone | Use `Dockerfile.web-ui`, port 3000 |
+| **Telegram** | Mobile / on-the-go tasks | Add bot token in Web UI → Settings → Integrations |
+| **MCP HTTP** | External integrations (IDE, SDK) | Add `LYNOX_MCP_SECRET`, expose port 3042 |
 | **SSH + CLI** | Admin/debugging | `docker exec -it lynox node /app/dist/index.js` |
-| **Web UI** | Everyone (planned) | `@lynox/web-ui` — not yet available |
 
-**Telegram** is currently the easiest remote interface — works from any device, no setup beyond the bot token. See [Telegram Bot](/daily-use/telegram/) for features and [differences from CLI](/daily-use/telegram/#differences-from-cli).
+**Web UI** is the primary interface — chat, settings, integrations, run history, knowledge browser. Use `Dockerfile.web-ui` for the combined Engine + Web UI image:
 
-**SSH + CLI** gives full access to all 30+ commands, changeset review, and continuous conversation. Useful for administration or advanced tasks that need the full CLI.
+```bash
+docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui
+```
+
+**Telegram** is a secondary channel for mobile use. Configure it in Web UI → Settings → Integrations.
 
 ---
 

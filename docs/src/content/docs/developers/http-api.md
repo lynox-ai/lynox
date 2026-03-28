@@ -1,11 +1,11 @@
 ---
 title: "HTTP API"
-description: "REST + SSE API for the PWA and programmatic access"
+description: "REST + SSE API powering the Web UI and programmatic access"
 sidebar:
   order: 8
 ---
 
-The Engine HTTP API exposes lynox as a REST + SSE server for the PWA frontend and programmatic access. Unlike the [MCP server](/developers/mcp-server/), which is designed for agent-to-agent tool use, the HTTP API provides full CRUD access to all Engine subsystems.
+The Engine HTTP API exposes lynox as a REST + SSE server. It powers the [Web UI](/daily-use/web-ui/) (`packages/web-ui/`) and is available for programmatic access. Unlike the [MCP server](/developers/mcp-server/), which is designed for agent-to-agent tool use, the HTTP API provides full CRUD access to all Engine subsystems.
 
 ## Starting
 

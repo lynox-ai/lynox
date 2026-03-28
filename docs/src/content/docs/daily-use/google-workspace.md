@@ -7,19 +7,16 @@ sidebar:
 
 lynox connects to Google Workspace (Gmail, Sheets, Drive, Calendar, Docs) via OAuth 2.0. No third-party packages required — uses native `fetch()` against Google REST APIs.
 
-## Quick Setup (via Telegram)
+## Quick Setup (via Web UI)
 
-The easiest way to connect Google — no terminal needed:
+1. Go to **Settings → Integrations → Google Workspace** in the Web UI
+2. Enter your Google Cloud **Client ID** and **Client Secret** (see [credential setup](#credential-setup) below)
+3. Click **"Connect with Google"** — lynox shows a verification link and code
+4. Open the link, sign in with your Google account, enter the code
+5. Done — Gmail, Sheets, Drive, Calendar, and Docs are ready
 
-1. Send `/google` to your lynox bot in Telegram
-2. Open the link lynox sends you (works on phone or computer)
-3. Sign in with your Google account and enter the code shown
-4. Authorize access — lynox confirms in Telegram when connected
-
-That's it. Gmail, Sheets, Drive, Calendar, and Docs are ready to use.
-
-:::note[Prerequisites]
-Your deployment needs Google OAuth credentials (`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`). If you haven't set these up yet, follow the [credential setup](#credential-setup) below first.
+:::note[First time?]
+You need OAuth credentials from Google Cloud Console before connecting. Follow the [credential setup](#credential-setup) below — it's a one-time process.
 :::
 
 ## Credential Setup

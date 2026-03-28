@@ -47,12 +47,12 @@ A setup wizard walks you through the rest. When you're ready for 24/7, use the [
 
 ## Your First Conversation
 
-Once lynox is running, talk to it like you would to a colleague — via Telegram or the terminal.
+Once lynox is running, open the Web UI and talk to it like you would to a colleague.
 
 **Simple things to start with:**
 
 - *"Check my emails and tell me what's important"*
-- *"Summarize this document"* (attach a file in Telegram)
+- *"Summarize this document"* (drag and drop a file)
 - *"Research [topic] and give me the key points"*
 - *"What meetings do I have this week?"* (after connecting Google)
 
@@ -98,20 +98,19 @@ All integrations are optional. Add them whenever you're ready:
 
 | Integration | What it does | How to set up |
 |-------------|-------------|---------------|
-| **Telegram** | Use lynox from your phone — voice, text, photos, documents | Set up during deploy, or see [Telegram Guide](/daily-use/telegram/) |
-| **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | Send `/google` in Telegram — authorize in your browser, done |
-| **Web Research** | Live web search for current information | Add [Tavily](https://tavily.com) API key during deploy (free: 1K searches/month). For privacy, disable "Allow use of query data" in Tavily settings. |
+| **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | Web UI → Settings → Integrations → Google |
+| **Telegram** | Use lynox from your phone — voice, text, photos | Web UI → Settings → Integrations → Telegram |
+| **Web Research** | Live web search for current information | Web UI → Settings → Integrations → Web Search ([Tavily](https://tavily.com), free: 1K searches/month) |
 | **Any REST API** | Connect lynox to any service you use | [API Store](/features/api-store/) — describe the API, lynox learns it |
 
 ### Connecting Google Workspace
 
-Send `/google` to your bot in Telegram. lynox will send you a link and a code:
+Go to Web UI → Settings → Integrations → Google Workspace:
 
-1. Open the link on your phone or computer
-2. Sign in with your Google account and enter the code
-3. Authorize access — lynox confirms in Telegram when it's done
-
-That's it — Gmail, Sheets, Drive, Calendar, and Docs are ready. No terminal needed.
+1. Enter your Google Cloud Client ID and Client Secret
+2. Click "Connect with Google" — lynox shows a link and a code
+3. Open the link, sign in, enter the code
+4. Done — Gmail, Sheets, Drive, Calendar, and Docs are ready.
 
 ---
 
@@ -129,17 +128,18 @@ See [Docker Deployment](/daily-use/docker/) for details.
 
 ## What's Next
 
-After setup, explore these features via Telegram — just ask lynox or use the commands:
+After setup, explore these features — just ask lynox in the Web UI:
 
 | Feature | How to start | What it does |
 |---------|-------------|--------------|
-| **[Gmail & Calendar](/daily-use/google-workspace/)** | Send `/google` in Telegram | Read emails, draft replies, check meetings |
+| **[Gmail & Calendar](/daily-use/google-workspace/)** | Settings → Integrations → Google | Read emails, draft replies, check meetings |
 | **[Contacts & CRM](/features/crm/)** | Just mention people and deals | lynox tracks clients, deals, and follow-ups automatically |
 | **[Web Research](/developers/tools/)** | "Research [topic]" | Live web search, structured summaries |
-| **[Backups](/features/backup/)** | "Set up a backup" or `/backup` | Encrypted backups to Google Drive |
-| **[Scheduled Tasks](/developers/tools/)** | "Do this every Monday at 9am" | Runs in the background, sends results to Telegram |
+| **[Knowledge](/features/memory/)** | Sidebar → Knowledge | Browse and edit what lynox remembers |
+| **[Run History](/daily-use/configuration/)** | Sidebar → History | See past runs, costs, tool calls |
+| **[Scheduled Tasks](/developers/tools/)** | "Do this every Monday at 9am" | Runs in the background autonomously |
+| **[Backups](/features/backup/)** | "Set up a backup" | Encrypted backups to Google Drive |
 | **[Connect any Service](/features/api-store/)** | "I use [service], here's the API docs" | lynox learns any API from a description |
-| **[Cost Limits](/daily-use/configuration/)** | Send `/cost` in Telegram | See your spending, set daily limits |
 
 Everything builds on the knowledge graph — the more you use lynox, the better it understands your business. Facts, relationships, preferences, and decisions are remembered automatically across every conversation.
 

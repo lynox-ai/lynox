@@ -9,8 +9,8 @@ sidebar:
 
 ```
                          ┌──────────────────────────────┐
-                         │  CLI / Telegram / MCP /       │
-                         │  HTTP API   (src/index.ts)    │
+                         │  Web UI / CLI / Telegram /    │
+                         │  MCP / HTTP API               │
                          └────────────┬──────────────────┘
                                       │
                          ┌────────────▼─────────────┐

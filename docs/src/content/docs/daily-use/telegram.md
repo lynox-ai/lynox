@@ -5,14 +5,15 @@ sidebar:
   order: 1
 ---
 
-Telegram is the primary way most users interact with lynox. Send text, voice messages, photos, or documents — lynox processes them and responds with structured results, follow-up suggestions, and live progress updates.
+Telegram is a secondary interface for mobile and on-the-go use. The [Web UI](/daily-use/web-ui/) is the primary interface for chat, setup, and administration.
 
 **What you can do from Telegram:**
-- Ask questions, run tasks, manage your business
+- Ask questions, run tasks — same agent as the Web UI
 - Send voice messages — lynox transcribes and processes them
 - Share files and photos for analysis
-- Connect Google Workspace: send `/google`
-- Check costs: send `/cost`
+- Quick follow-up actions via inline buttons
+
+**Setup and integrations** (Google, Tavily, API keys) are managed in the Web UI → Settings → Integrations.
 
 > **How conversations work:** lynox remembers the last ~10 messages for context. You can refer to previous messages naturally — "now do the same for the other client". Long-term knowledge (facts, preferences, decisions) is stored permanently in the knowledge graph and available across all conversations. Use `/clear` to start a fresh conversation.
 

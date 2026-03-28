@@ -7,7 +7,7 @@ sidebar:
 
 ## Quick Settings
 
-Most users only need these settings. Ask lynox via Telegram or edit `~/.lynox/config.json`:
+Most users only need these settings. Configure via **Web UI → Settings → Config**, or edit `~/.lynox/config.json`:
 
 | Setting | What it does | Default |
 |---------|-------------|---------|
@@ -16,7 +16,7 @@ Most users only need these settings. Ask lynox via Telegram or edit `~/.lynox/co
 | `enforce_https` | Block unencrypted HTTP requests | `true` |
 | `backup_schedule` | Automatic backup frequency | Not set |
 
-Send `/cost` in Telegram to check your current spending. Everything else works out of the box.
+Check your spending in **Web UI → History**. Everything else works out of the box.
 
 ---
 
