@@ -82,6 +82,10 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	'common.ok': { de: 'OK', en: 'OK' },
 
+	// Chat errors
+	'chat.error_start': { de: 'Run konnte nicht gestartet werden', en: 'Failed to start run' },
+	'chat.error_connection': { de: 'Verbindung unterbrochen', en: 'Connection lost' },
+
 	// Chat
 	'chat.welcome': { de: 'Was kann ich fuer dich tun?', en: 'What can I help you with?' },
 	'chat.placeholder': { de: 'Nachricht eingeben...', en: 'Type a message...' },

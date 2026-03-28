@@ -1,4 +1,5 @@
 import { getApiBase } from '../config.svelte.js';
+import { t } from '../i18n.svelte.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 
 export interface ChatMessage {
@@ -66,7 +67,7 @@ export async function sendMessage(task: string, files?: FileAttachment[]): Promi
 
 	if (!res.ok || !res.body) {
 		isStreaming = false;
-		chatError = 'Failed to start run';
+		chatError = t('chat.error_start');
 		return;
 	}
 
@@ -95,7 +96,7 @@ export async function sendMessage(task: string, files?: FileAttachment[]): Promi
 			}
 		}
 	} catch {
-		chatError = 'Connection lost';
+		chatError = t('chat.error_connection');
 	}
 
 	isStreaming = false;
