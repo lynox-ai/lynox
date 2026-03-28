@@ -44,6 +44,7 @@ const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const PROMPT_TIMEOUT_MS = 2 * 60_000; // 2 minutes
+const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -180,10 +181,15 @@ export class LynoxHTTPApi {
       return;
     }
 
-    // CORS preflight
+    // CORS — restrict to allowed origins (or allow all for localhost-only mode)
+    const requestOrigin = req.headers['origin'] ?? '';
+    const corsOrigin = ALLOWED_ORIGINS.length > 0
+      ? (ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
+      : (secret ? '' : '*'); // no secret = localhost-only = allow all; with secret = require explicit whitelist
+
     if (method === 'OPTIONS') {
       res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
+        ...(corsOrigin ? { 'Access-Control-Allow-Origin': corsOrigin } : {}),
         'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Max-Age': '86400',
@@ -192,8 +198,9 @@ export class LynoxHTTPApi {
       return;
     }
 
-    // CORS headers for all responses
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
 
     // Auth
     if (secret) {
