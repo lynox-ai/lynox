@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { t } from '../i18n.js';
+	import { t } from '../i18n.svelte.js';
 
 	interface SettingsItem {
 		href: string;

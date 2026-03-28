@@ -2,7 +2,7 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { newChat } from '../stores/chat.svelte.js';
-	import { t, getLocale, setLocale } from '../i18n.js';
+	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import type { Snippet } from 'svelte';
 
 	let { children, userSlot }: { children: Snippet; userSlot?: Snippet } = $props();
@@ -85,7 +85,7 @@
 					{@render userSlot()}
 				{/if}
 				<button
-					onclick={() => { setLocale(getLocale() === 'de' ? 'en' : 'de'); location.reload(); }}
+					onclick={() => setLocale(getLocale() === 'de' ? 'en' : 'de')}
 					class="text-xs font-mono text-text-subtle hover:text-text transition-colors ml-auto"
 					aria-label="Switch language"
 				>

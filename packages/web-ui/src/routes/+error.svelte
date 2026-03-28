@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { t } from '$lib/i18n.js';
+	import { t } from '$lib/i18n.svelte.js';
 </script>
 
 <div class="flex h-screen items-center justify-center">

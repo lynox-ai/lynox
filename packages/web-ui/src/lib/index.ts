@@ -14,8 +14,8 @@ export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelt
 export { configure, getApiBase } from './config.svelte.js';
 
 // i18n
-export { t, setLocale, getLocale, initLocale } from './i18n.js';
-export type { Locale } from './i18n.js';
+export { t, setLocale, getLocale, initLocale } from './i18n.svelte.js';
+export type { Locale } from './i18n.svelte.js';
 
 // Chat store
 export {

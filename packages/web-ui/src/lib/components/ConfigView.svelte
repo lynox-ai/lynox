@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.js';
+	import { t } from '../i18n.svelte.js';
 
 	interface Config {
 		default_tier?: string;
@@ -14,24 +14,37 @@
 	let loading = $state(true);
 	let saving = $state(false);
 	let saved = $state(false);
+	let error = $state('');
 
 	async function loadConfig() {
 		loading = true;
-		const res = await fetch(`${getApiBase()}/config`);
-		config = (await res.json()) as Config;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/config`);
+			if (!res.ok) throw new Error();
+			config = (await res.json()) as Config;
+		} catch {
+			error = t('common.load_failed');
+		}
 		loading = false;
 	}
 
 	async function saveConfig() {
 		saving = true;
-		await fetch(`${getApiBase()}/config`, {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(config)
-		});
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/config`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(config)
+			});
+			if (!res.ok) throw new Error();
+			saved = true;
+			setTimeout(() => (saved = false), 2000);
+		} catch {
+			error = t('common.save_failed');
+		}
 		saving = false;
-		saved = true;
-		setTimeout(() => (saved = false), 2000);
 	}
 
 	$effect(() => {
@@ -40,18 +53,19 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
-	<h1 class="text-xl font-bold mb-4">{t('config.title')}</h1>
+	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
+	<h1 class="text-xl font-light tracking-tight mb-4 mt-2">{t('config.title')}</h1>
 
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else}
 		<div class="space-y-6">
-			<div class="rounded-lg border border-border bg-bg-subtle p-4">
+			<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 				<label for="model" class="block text-sm font-medium mb-2">{t('config.model')}</label>
 				<select
 					id="model"
 					bind:value={config.default_tier}
-					class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none"
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none"
 				>
 					<option value="haiku">{t('config.model_haiku')}</option>
 					<option value="sonnet">{t('config.model_sonnet')}</option>
@@ -59,32 +73,32 @@
 				</select>
 			</div>
 
-			<div class="rounded-lg border border-border bg-bg-subtle p-4">
+			<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 				<label for="effort" class="block text-sm font-medium mb-2">{t('config.effort')}</label>
 				<select
 					id="effort"
 					bind:value={config.effort_level}
-					class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none"
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none"
 				>
-					<option value="low">Low</option>
-					<option value="medium">Medium</option>
-					<option value="high">High</option>
+					<option value="low">{t('config.effort_low')}</option>
+					<option value="medium">{t('config.effort_medium')}</option>
+					<option value="high">{t('config.effort_high')}</option>
 				</select>
 			</div>
 
-			<div class="rounded-lg border border-border bg-bg-subtle p-4">
+			<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 				<label for="thinking" class="block text-sm font-medium mb-2">{t('config.thinking')}</label>
 				<select
 					id="thinking"
 					bind:value={config.thinking_mode}
-					class="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none"
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none"
 				>
 					<option value="disabled">{t('config.thinking_disabled')}</option>
 					<option value="adaptive">{t('config.thinking_adaptive')}</option>
 				</select>
 			</div>
 
-			<div class="rounded-lg border border-border bg-bg-subtle p-4 flex items-center justify-between">
+			<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 flex items-center justify-between">
 				<div>
 					<p class="text-sm font-medium">{t('config.memory_extraction')}</p>
 					<p class="text-xs text-text-muted mt-1">{t('config.memory_extraction_desc')}</p>
@@ -96,11 +110,15 @@
 				/>
 			</div>
 
+			{#if error}
+				<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error}</div>
+			{/if}
+
 			<div class="flex items-center gap-3">
 				<button
 					onclick={saveConfig}
 					disabled={saving}
-					class="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-50"
 				>
 					{saving ? t('settings.saving') : t('settings.save')}
 				</button>

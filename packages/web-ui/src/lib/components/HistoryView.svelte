@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
-	import { t } from '../i18n.js';
+	import { t, getLocale } from '../i18n.svelte.js';
 
 	interface RunRecord {
 		id: string;
@@ -60,7 +60,7 @@
 
 <div class="p-6 max-w-4xl mx-auto">
 	<div class="flex items-center justify-between mb-4">
-		<h1 class="text-xl font-bold">{t('history.title')}</h1>
+		<h1 class="text-xl font-light tracking-tight">{t('history.title')}</h1>
 		{#if stats}
 			<div class="flex gap-4 text-xs text-text-muted">
 				<span>{stats.total_runs ?? 0} {t('history.runs')}</span>
@@ -76,14 +76,14 @@
 	{:else}
 		<div class="space-y-2">
 			{#each runs as run}
-				<div class="rounded-lg border border-border bg-bg-subtle overflow-hidden">
+				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 					<button
 						onclick={() => toggleRun(run.id)}
 						class="w-full p-3 text-left hover:bg-bg-muted transition-colors"
 					>
 						<div class="flex items-center justify-between">
 							<p class="text-sm font-medium truncate max-w-[60%]">{run.task_text}</p>
-							<span class="text-xs text-text-subtle">{new Date(run.created_at).toLocaleDateString('de-CH')}</span>
+							<span class="text-xs text-text-subtle">{new Date(run.created_at).toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US')}</span>
 						</div>
 						<div class="flex gap-3 mt-1 text-xs text-text-muted">
 							<span class="rounded bg-bg-muted px-1.5 py-0.5 {run.status === 'completed' ? 'text-success' : run.status === 'failed' ? 'text-danger' : ''}">{run.status}</span>

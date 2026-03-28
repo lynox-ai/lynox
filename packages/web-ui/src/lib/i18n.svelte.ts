@@ -1,6 +1,6 @@
 export type Locale = 'de' | 'en';
 
-let current: Locale = 'de';
+let current = $state<Locale>('de');
 
 const translations: Record<string, Record<Locale, string>> = {
 	// Nav
@@ -23,12 +23,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.voice_unsupported': { de: '[Spracheingabe nicht verfuegbar]', en: '[Voice input not available]' },
 	'chat.analyze_files': { de: 'Analysiere diese Dateien.', en: 'Analyze these files.' },
 	'chat.mic_unavailable': { de: '[Mikrofon nicht verfuegbar]', en: '[Microphone not available]' },
-	'chat.attach_file': { de: 'Datei anhaengen', en: 'Attach file' },
+	'chat.attach_file': { de: 'Datei anhaengen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
 	'chat.thinking_label': { de: 'Thinking', en: 'Thinking' },
 
 	// Onboarding (kept for web-ui setup hints)
 	'onboard.welcome': { de: 'Willkommen bei lynox', en: 'Welcome to lynox' },
+	'onboard.standalone_hint': { de: 'Richte deinen API Key ein, um loszulegen.', en: 'Set up your API key to get started.' },
+	'onboard.go_to_keys': { de: 'API Key einrichten', en: 'Set up API Key' },
 	'onboard.api_key_needed': { de: 'Um loszulegen, brauchst du einen Anthropic API Key.', en: 'To get started, you need an Anthropic API key.' },
 	'onboard.api_key_label': { de: 'Anthropic API Key', en: 'Anthropic API Key' },
 	'onboard.api_key_hint': { de: 'Erstelle einen Key auf', en: 'Create a key at' },
@@ -60,6 +62,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
 	'settings.saved': { de: 'Gespeichert', en: 'Saved' },
 	'settings.delete': { de: 'Loeschen', en: 'Delete' },
+	'settings.back': { de: 'Settings', en: 'Settings' },
 
 	// Config
 	'config.title': { de: 'Konfiguration', en: 'Configuration' },
@@ -68,6 +71,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.model_sonnet': { de: 'Sonnet (balanciert)', en: 'Sonnet (balanced)' },
 	'config.model_opus': { de: 'Opus (staerkstes Modell)', en: 'Opus (most capable)' },
 	'config.effort': { de: 'Effort Level', en: 'Effort Level' },
+	'config.effort_low': { de: 'Niedrig', en: 'Low' },
+	'config.effort_medium': { de: 'Mittel', en: 'Medium' },
+	'config.effort_high': { de: 'Hoch', en: 'High' },
 	'config.thinking': { de: 'Thinking Mode', en: 'Thinking Mode' },
 	'config.thinking_disabled': { de: 'Deaktiviert', en: 'Disabled' },
 	'config.thinking_adaptive': { de: 'Adaptiv (empfohlen)', en: 'Adaptive (recommended)' },
@@ -126,6 +132,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.search_configured': { de: 'Konfiguriert', en: 'Configured' },
 	'integrations.search_not_configured': { de: 'Nicht konfiguriert', en: 'Not configured' },
 	'integrations.search_saved': { de: 'Key gespeichert. Engine wird neu gestartet...', en: 'Key saved. Restarting engine...' },
+	'integrations.tavily_label': { de: 'Tavily API Key', en: 'Tavily API Key' },
 
 	// Memory
 	'memory.title': { de: 'Knowledge', en: 'Knowledge' },
@@ -156,6 +163,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'common.loading': { de: 'Laden...', en: 'Loading...' },
 	'common.back_to_chat': { de: 'Zurueck zum Chat', en: 'Back to chat' },
 	'common.error': { de: 'Etwas ist schiefgelaufen.', en: 'Something went wrong.' },
+	'common.save_failed': { de: 'Speichern fehlgeschlagen. Bitte erneut versuchen.', en: 'Save failed. Please try again.' },
+	'common.load_failed': { de: 'Laden fehlgeschlagen. Ist die Engine erreichbar?', en: 'Failed to load. Is the engine reachable?' },
 };
 
 export function setLocale(locale: Locale): void {

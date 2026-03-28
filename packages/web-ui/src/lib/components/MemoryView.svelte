@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.js';
+	import { t } from '../i18n.svelte.js';
 
 	const namespaces = ['knowledge', 'methods', 'project-state', 'learnings'] as const;
 	let selectedNs = $state<(typeof namespaces)[number]>('knowledge');
@@ -11,12 +11,19 @@
 	let saving = $state(false);
 	let appendText = $state('');
 	let deletePattern = $state('');
+	let error = $state('');
 
 	async function loadNamespace() {
 		loading = true;
-		const res = await fetch(`${getApiBase()}/memory/${selectedNs}`);
-		const data = (await res.json()) as { content: string | null };
-		content = data.content;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/memory/${selectedNs}`);
+			if (!res.ok) throw new Error();
+			const data = (await res.json()) as { content: string | null };
+			content = data.content;
+		} catch {
+			error = t('common.load_failed');
+		}
 		loading = false;
 		editing = false;
 	}
@@ -85,6 +92,10 @@
 			</button>
 		{/each}
 	</div>
+
+	{#if error}
+		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
 
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>

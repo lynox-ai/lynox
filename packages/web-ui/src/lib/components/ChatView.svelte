@@ -12,7 +12,7 @@
 	} from '../stores/chat.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
-	import { t } from '../i18n.js';
+	import { t } from '../i18n.svelte.js';
 
 	let inputText = $state('');
 	let messagesEl: HTMLDivElement;
@@ -82,14 +82,30 @@
 		}
 	}
 
+	// Standalone onboarding: check if API key is configured
+	let hasApiKey = $state<boolean | null>(null);
+
+	async function checkApiKey() {
+		try {
+			const res = await fetch(`${getApiBase()}/secrets`);
+			const data = (await res.json()) as { names: string[] };
+			hasApiKey = data.names.includes('ANTHROPIC_API_KEY');
+		} catch {
+			hasApiKey = null; // Engine not reachable
+		}
+	}
+
+	$effect(() => { checkApiKey(); });
+
 	const messages = $derived(getMessages());
 	const isStreaming = $derived(getIsStreaming());
 	const pendingPermission = $derived(getPendingPermission());
 	const chatError = $derived(getChatError());
+	const ready = $derived(hasApiKey !== false);
 
 	async function handleSend() {
 		const task = inputText.trim();
-		if ((!task && pendingFiles.length === 0) || isStreaming) return;
+		if ((!task && pendingFiles.length === 0) || isStreaming || !ready) return;
 		const files = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
 		inputText = '';
 		pendingFiles = [];
@@ -127,10 +143,26 @@
 	<div class="flex-1 overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl}>
 		{#if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
-				<div class="text-center">
-					<h2 class="text-2xl font-light tracking-tight text-text-muted mb-2">lynox</h2>
-					<p class="text-sm text-text-subtle">{t('chat.welcome')}</p>
-				</div>
+				{#if hasApiKey === false}
+					<div class="w-full max-w-md space-y-6 px-4 text-center">
+						<h2 class="text-2xl font-light tracking-tight text-text mb-2">{t('onboard.welcome')}</h2>
+						<p class="text-sm text-text-muted">{t('onboard.standalone_hint')}</p>
+						<a
+							href="/app/settings/keys"
+							class="inline-block rounded-[var(--radius-sm)] bg-accent px-5 py-2.5 text-sm font-medium text-text hover:opacity-90 transition-opacity"
+						>
+							{t('onboard.go_to_keys')}
+						</a>
+						<p class="text-xs text-text-subtle">
+							{t('onboard.api_key_hint')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">console.anthropic.com</a>
+						</p>
+					</div>
+				{:else}
+					<div class="text-center">
+						<h2 class="text-2xl font-light tracking-tight text-text-muted mb-2">lynox</h2>
+						<p class="text-sm text-text-subtle">{t('chat.welcome')}</p>
+					</div>
+				{/if}
 			</div>
 		{/if}
 
@@ -161,6 +193,9 @@
 									<pre class="whitespace-pre-wrap font-mono text-xs text-text-subtle">{JSON.stringify(tc.input, null, 2)}</pre>
 									{#if tc.result}
 										<pre class="whitespace-pre-wrap font-mono text-xs text-text-muted mt-2 max-h-40 overflow-y-auto">{tc.result.slice(0, 2000)}</pre>
+										{#if tc.result.length > 2000}
+											<p class="text-xs text-text-subtle mt-1">[... {(tc.result.length - 2000).toLocaleString()} more chars]</p>
+										{/if}
 									{/if}
 								</div>
 							</details>
@@ -229,7 +264,7 @@
 			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/*,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 			<button
 				onclick={() => fileInputEl.click()}
-				disabled={isStreaming}
+				disabled={isStreaming || !ready}
 				class="shrink-0 rounded-[var(--radius-sm)] p-2.5 text-text-subtle hover:text-text disabled:opacity-30 transition-opacity"
 				aria-label={t('chat.attach_file')}
 			>
@@ -241,7 +276,7 @@
 			<!-- Voice -->
 			<button
 				onclick={toggleVoice}
-				disabled={isStreaming}
+				disabled={isStreaming || !ready}
 				class="shrink-0 rounded-[var(--radius-sm)] p-2.5 transition-opacity {recording ? 'text-danger animate-pulse' : 'text-text-subtle hover:text-text'} disabled:opacity-30"
 				aria-label={t('chat.voice_input')}
 			>
@@ -257,7 +292,7 @@
 				oninput={autoResize}
 				placeholder={t('chat.placeholder')}
 				rows="1"
-				disabled={isStreaming}
+				disabled={isStreaming || !ready}
 				class="flex-1 resize-none rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text placeholder:text-text-subtle focus:border-border-hover outline-none disabled:opacity-50 overflow-hidden"
 			></textarea>
 			{#if isStreaming}
@@ -270,7 +305,7 @@
 			{:else}
 				<button
 					onclick={handleSend}
-					disabled={!inputText.trim() && pendingFiles.length === 0}
+					disabled={(!inputText.trim() && pendingFiles.length === 0) || !ready}
 					class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
 				>
 					{t('chat.send')}

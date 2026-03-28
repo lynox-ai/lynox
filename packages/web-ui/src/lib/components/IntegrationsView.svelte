@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.js';
+	import { t } from '../i18n.svelte.js';
 
 	// --- Google OAuth ---
 	interface GoogleStatus {
@@ -147,7 +147,8 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
-	<h1 class="text-xl font-light tracking-tight mb-6">{t('integrations.title')}</h1>
+	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
+	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('integrations.title')}</h1>
 
 	<!-- Google Workspace -->
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
@@ -324,7 +325,7 @@
 		{:else}
 			<div class="space-y-3">
 				<div>
-					<label for="search-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">Tavily API Key</label>
+					<label for="search-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.tavily_label')}</label>
 					<input
 						id="search-key"
 						bind:value={searchKey}
