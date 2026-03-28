@@ -43,6 +43,13 @@
 	let promptAnswer = $state('');
 	let selectedOptions = $state<string[]>([]);
 	let answeredPrompts = $state<{ question: string; answer: string }[]>([]);
+
+	// Multi-question batch mode: collect all answers before sending
+	interface BatchQuestion { question: string; options: string[]; header?: string; }
+	let batchQuestions = $state<BatchQuestion[]>([]);
+	let batchAnswers = $state<string[]>([]);
+	let batchFocusIdx = $state(0);
+	let inBatchMode = $state(false);
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -149,11 +156,75 @@
 
 	function answerPrompt(answer: string) {
 		if (!pendingPermission) return;
+
+		// Batch mode: collect answer, advance to next or submit all
+		if (inBatchMode) {
+			batchAnswers[batchFocusIdx] = answer;
+			batchAnswers = [...batchAnswers]; // trigger reactivity
+			selectedOptions = [];
+
+			// Find next unanswered
+			const nextEmpty = batchAnswers.findIndex((a, i) => i > batchFocusIdx && !a);
+			if (nextEmpty !== -1) {
+				batchFocusIdx = nextEmpty;
+			} else {
+				// All answered — check if any still empty
+				const firstEmpty = batchAnswers.findIndex(a => !a);
+				if (firstEmpty !== -1) {
+					batchFocusIdx = firstEmpty;
+				} else {
+					// All filled — submit all
+					submitBatch();
+				}
+			}
+			return;
+		}
+
 		answeredPrompts = [...answeredPrompts, { question: pendingPermission.question, answer }];
 		selectedOptions = [];
 		promptAnswer = '';
 		replyPermission(answer);
 	}
+
+	function submitBatch() {
+		// Send answers one by one (Engine expects sequential replies)
+		let idx = 0;
+		function sendNext() {
+			if (idx >= batchAnswers.length) {
+				inBatchMode = false;
+				batchQuestions = [];
+				batchAnswers = [];
+				batchFocusIdx = 0;
+				return;
+			}
+			replyPermission(batchAnswers[idx]!);
+			idx++;
+			// Small delay between replies so Engine can process
+			setTimeout(sendNext, 200);
+		}
+		sendNext();
+	}
+
+	// Detect multi-question ask_user from tool_call input
+	$effect(() => {
+		if (!pendingPermission || inBatchMode) return;
+		const lastMsg = messages[messages.length - 1];
+		if (!lastMsg?.toolCalls) return;
+		const askUserTc = lastMsg.toolCalls.findLast(tc => tc.name === 'ask_user' && tc.status === 'running');
+		if (!askUserTc) return;
+		const input = askUserTc.input as Record<string, unknown> | null;
+		const questions = input?.['questions'] as BatchQuestion[] | undefined;
+		if (questions && questions.length > 1) {
+			batchQuestions = questions.map(q => ({
+				question: q.question,
+				options: (q.options ?? []).filter((o: string) => o !== '\x00'),
+				header: q.header,
+			}));
+			batchAnswers = new Array(questions.length).fill('');
+			batchFocusIdx = 0;
+			inBatchMode = true;
+		}
+	});
 
 	function sendExample(prompt: string) {
 		inputText = prompt;
@@ -405,8 +476,45 @@
 		</div>
 	</div>
 
-	<!-- Answered prompts stack -->
-	{#if answeredPrompts.length > 0 && pendingPermission}
+	<!-- Batch mode: all questions as form -->
+	{#if inBatchMode && pendingPermission}
+		<div class="border-t border-border bg-bg-subtle px-4 py-3">
+			<div class="max-w-3xl mx-auto space-y-3">
+				{#each batchQuestions as q, i}
+					<div class="rounded-[var(--radius-md)] border px-3 py-2 transition-all {batchFocusIdx === i ? 'border-accent/30 bg-accent/5' : batchAnswers[i] ? 'border-border bg-bg-subtle/50' : 'border-border/50 bg-bg'}">
+						<div class="flex items-center justify-between mb-1">
+							<p class="text-xs font-medium text-text-muted">{q.header ?? q.question}</p>
+							{#if batchAnswers[i]}
+								<button onclick={() => { batchAnswers[i] = ''; batchAnswers = [...batchAnswers]; batchFocusIdx = i; }} class="text-xs text-text-subtle hover:text-accent-text transition-colors" title={t('chat.edit_answer')}>
+									<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+								</button>
+							{/if}
+						</div>
+						{#if batchFocusIdx === i}
+							<p class="text-sm text-text-muted mb-2">{q.question}</p>
+							{#if q.options.length > 0}
+								<div class="flex flex-wrap gap-1.5">
+									{#each q.options as option}
+										<button
+											onclick={() => answerPrompt(option)}
+											class="rounded-[var(--radius-sm)] border px-2.5 py-1 text-xs transition-all {batchAnswers[i] === option ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
+										>{option}</button>
+									{/each}
+								</div>
+							{/if}
+						{:else if batchAnswers[i]}
+							<button onclick={() => { batchFocusIdx = i; }} class="text-xs text-accent-text">{batchAnswers[i]}</button>
+						{:else}
+							<button onclick={() => { batchFocusIdx = i; }} class="text-xs text-text-subtle italic">{q.question}</button>
+						{/if}
+					</div>
+				{/each}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Answered prompts stack (single-question mode only) -->
+	{#if answeredPrompts.length > 0 && pendingPermission && !inBatchMode}
 		<div class="border-t border-border bg-bg-subtle/50 px-4 py-2">
 			<div class="max-w-3xl mx-auto space-y-1">
 				{#each answeredPrompts as ap}
