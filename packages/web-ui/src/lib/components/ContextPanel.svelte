@@ -36,7 +36,7 @@
 </script>
 
 {#if ctx}
-	<aside class="w-80 shrink-0 border-l border-border bg-bg-subtle overflow-y-auto hidden lg:flex flex-col">
+	<aside class="w-80 shrink-0 border-l border-border bg-bg-subtle overflow-y-auto scrollbar-thin hidden lg:flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-4 py-2.5 border-b border-border">
 			<div class="flex items-center gap-2">
@@ -63,13 +63,13 @@
 			{#if ctx.type === 'file' && ctx.filePath}
 				<p class="text-xs font-mono text-accent-text break-all">{ctx.filePath}</p>
 				{#if ctx.toolResult}
-					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-96 overflow-y-auto rounded-[var(--radius-md)] bg-bg-muted p-3 border border-border">{ctx.toolResult.slice(0, 3000)}</pre>
+					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-96 overflow-y-auto scrollbar-thin rounded-[var(--radius-md)] bg-bg-muted p-3 border border-border">{ctx.toolResult.slice(0, 3000)}</pre>
 				{/if}
 
 			{:else if ctx.toolName === 'web_research'}
 				<p class="text-xs text-text-muted">{extractPreview(ctx.toolInput)}</p>
 				{#if ctx.toolResult}
-					<div class="text-xs text-text-muted whitespace-pre-wrap max-h-96 overflow-y-auto">{ctx.toolResult.slice(0, 3000)}</div>
+					<div class="text-xs text-text-muted whitespace-pre-wrap max-h-96 overflow-y-auto scrollbar-thin">{ctx.toolResult.slice(0, 3000)}</div>
 				{/if}
 
 			{:else if ctx.toolName?.startsWith('google_')}
@@ -78,16 +78,16 @@
 					<p class="text-xs text-text-muted">{extractPreview(ctx.toolInput)}</p>
 				</div>
 				{#if ctx.toolResult}
-					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-80 overflow-y-auto">{ctx.toolResult.slice(0, 2000)}</pre>
+					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-80 overflow-y-auto scrollbar-thin">{ctx.toolResult.slice(0, 2000)}</pre>
 				{/if}
 
 			{:else}
 				{#if ctx.toolInput}
-					<pre class="text-xs font-mono text-text-subtle whitespace-pre-wrap rounded-[var(--radius-md)] bg-bg-muted p-3 border border-border max-h-48 overflow-y-auto">{JSON.stringify(ctx.toolInput, null, 2).slice(0, 1000)}</pre>
+					<pre class="text-xs font-mono text-text-subtle whitespace-pre-wrap rounded-[var(--radius-md)] bg-bg-muted p-3 border border-border max-h-48 overflow-y-auto scrollbar-thin">{JSON.stringify(ctx.toolInput, null, 2).slice(0, 1000)}</pre>
 				{/if}
 				{#if ctx.toolResult}
 					<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mt-2">{t('panel.result')}</p>
-					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-80 overflow-y-auto">{ctx.toolResult.slice(0, 2000)}</pre>
+					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-80 overflow-y-auto scrollbar-thin">{ctx.toolResult.slice(0, 2000)}</pre>
 				{/if}
 			{/if}
 		</div>
