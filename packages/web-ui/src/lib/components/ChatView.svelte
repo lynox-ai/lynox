@@ -480,40 +480,38 @@
 	<!-- Batch mode: all questions as form -->
 	{#if inBatchMode && pendingPermission}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3">
-			<div class="max-w-3xl mx-auto space-y-3">
+			<div class="max-w-3xl mx-auto space-y-1">
 				{#each batchQuestions as q, i}
-					<div class="rounded-[var(--radius-md)] border px-3 py-2 transition-all {batchFocusIdx === i ? 'border-accent/30 bg-accent/5' : batchAnswers[i] ? 'border-border bg-bg-subtle/50' : 'border-border/50 bg-bg'}">
-						<div class="flex items-center justify-between mb-1">
-							<p class="text-xs font-medium text-text-muted">{q.header ?? q.question}</p>
-							{#if batchAnswers[i]}
-								<button onclick={() => { batchAnswers[i] = ''; batchAnswers = [...batchAnswers]; batchFocusIdx = i; }} class="text-xs text-text-subtle hover:text-accent-text transition-colors" title={t('chat.edit_answer')}>
-									<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
-								</button>
-							{/if}
-						</div>
-						{#if batchFocusIdx === i}
-							<p class="text-sm text-text-muted mb-2">{q.question}</p>
+					{#if batchFocusIdx === i}
+						<!-- Focused question: expanded -->
+						<div class="rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 px-3 py-2">
+							<p class="text-xs font-medium text-text-muted mb-1">{q.header ?? q.question}</p>
 							{#if q.options.length > 0}
 								<div class="flex flex-wrap gap-1.5">
 									{#each q.options as option}
-										<button
-											onclick={() => answerPrompt(option)}
-											class="rounded-[var(--radius-sm)] border px-2.5 py-1 text-xs transition-all {batchAnswers[i] === option ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
+										<button onclick={() => answerPrompt(option)}
+											class="rounded-[var(--radius-sm)] border px-2 py-0.5 text-xs transition-all {batchAnswers[i] === option ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
 										>{option}</button>
 									{/each}
 								</div>
 							{:else}
-								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex gap-2">
-									<input bind:value={batchFreetext} placeholder={q.question} class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-1.5 text-sm outline-none focus:border-border-hover" />
-									<button type="submit" disabled={!batchFreetext.trim()} class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
+								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex gap-1.5">
+									<input bind:value={batchFreetext} placeholder={q.question} class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-xs outline-none focus:border-border-hover" />
+									<button type="submit" disabled={!batchFreetext.trim()} class="rounded-[var(--radius-sm)] bg-accent px-2 py-1 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
 								</form>
 							{/if}
-						{:else if batchAnswers[i]}
-							<button onclick={() => { batchFocusIdx = i; }} class="text-xs text-accent-text">{batchAnswers[i]}</button>
-						{:else}
-							<button onclick={() => { batchFocusIdx = i; }} class="text-xs text-text-subtle italic">{q.question}</button>
-						{/if}
-					</div>
+						</div>
+					{:else}
+						<!-- Compact: answered or unanswered -->
+						<button onclick={() => { if (batchAnswers[i]) { batchAnswers[i] = ''; batchAnswers = [...batchAnswers]; } batchFocusIdx = i; }}
+							class="w-full flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-1 text-xs text-left transition-all {batchAnswers[i] ? 'text-text-muted hover:bg-bg-muted' : 'text-text-subtle italic hover:bg-bg'}">
+							<span class="font-medium shrink-0 w-20 truncate">{q.header ?? '?'}</span>
+							<span class="{batchAnswers[i] ? 'text-accent-text' : ''} truncate">{batchAnswers[i] || q.question}</span>
+							{#if batchAnswers[i]}
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 shrink-0 text-text-subtle hover:text-accent-text ml-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+							{/if}
+						</button>
+					{/if}
 				{/each}
 			</div>
 		</div>
