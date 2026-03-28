@@ -91,6 +91,21 @@ function isPathWithin(childPath: string, parentPath: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
+/** Blocklist for sensitive files that should never be read via MCP. */
+const BLOCKED_FILE_PATTERNS = [
+  /\.env$/i, /\.env\..+$/i,
+  /credentials\.\w+$/i,
+  /\.pem$/i, /\.key$/i, /\.p12$/i, /\.pfx$/i,
+  /secrets\.json$/i,
+  /vault\.db$/i,
+  /id_rsa$/, /id_ed25519$/,
+];
+
+function isBlockedFile(filePath: string): boolean {
+  const name = filePath.split('/').pop() ?? '';
+  return BLOCKED_FILE_PATTERNS.some(p => p.test(name));
+}
+
 function sanitizeAttachmentName(name: string): string {
   const cleaned = basename(name).replace(/[\0-\x1f\x7f]/g, '').trim();
   const safe = cleaned === '' || cleaned === '.' || cleaned === '..' ? 'attachment.bin' : cleaned;
@@ -110,6 +125,8 @@ export class LynoxMCPServer {
   private readonly config: LynoxConfig;
   private readonly mcpServer: McpServer;
   private readonly sessionStore = new SessionStore();
+  private readonly sessionLastActivity = new Map<string, number>(); // M10: track session usage
+  private readonly SESSION_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour
   private readonly runStore = new Map<string, RunState>();
   private readonly activeSessions = new Set<string>();
   private totalBufferedTextBytes = 0;
@@ -137,7 +154,7 @@ export class LynoxMCPServer {
     this.cleanupTimer = setInterval(() => {
       try {
         const entries = readdirSync(TEMP_BASE, { withFileTypes: true }).filter(e => e.isDirectory());
-        const cutoff = Date.now() - 60 * 60 * 1000;
+        const cutoff = Date.now() - 15 * 60 * 1000; // 15 min retention (was 60 min)
         for (const entry of entries) {
           const dirPath = join(TEMP_BASE, entry.name);
           try {
@@ -148,6 +165,15 @@ export class LynoxMCPServer {
           } catch { /* skip individual dir errors */ }
         }
       } catch { /* TEMP_BASE may not exist yet */ }
+
+      // M10: GC idle sessions older than 1 hour
+      const sessionCutoff = Date.now() - this.SESSION_TIMEOUT_MS;
+      for (const [sid, lastAccess] of this.sessionLastActivity) {
+        if (lastAccess < sessionCutoff) {
+          this.sessionStore.reset(sid);
+          this.sessionLastActivity.delete(sid);
+        }
+      }
 
       // GC completed runs older than 30 minutes
       const runCutoff = Date.now() - 30 * 60 * 1000;
@@ -503,6 +529,8 @@ export class LynoxMCPServer {
         }
         const content = await mem.load(namespace);
         const text = content ?? `No content in ${namespace}.`;
+        // M5: Audit log
+        process.stderr.write(`[audit] memory:read namespace=${namespace}\n`);
         return { content: [{ type: 'text' as const, text }] };
       },
     );
@@ -593,7 +621,7 @@ export class LynoxMCPServer {
         let augmentedTask = task;
         if (files && files.length > 0) {
           const dir = join(TEMP_BASE, runId);
-          mkdirSync(dir, { recursive: true });
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
           const fileNotes: string[] = [];
           const usedNames = new Set<string>();
           let totalAttachmentBytes = 0;
@@ -886,6 +914,16 @@ export class LynoxMCPServer {
             }],
           };
         }
+
+        // M2: Block sensitive files (secrets, keys, credentials)
+        if (isBlockedFile(canonicalPath)) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ error: `Access denied: ${basename(canonicalPath)} is a sensitive file` }),
+            }],
+          };
+        }
         try {
           const st = statSync(canonicalPath);
           if (st.size > MAX_READ_SIZE) {
@@ -990,23 +1028,31 @@ export class LynoxMCPServer {
 
     await spawnTransport();
 
-    // Simple per-IP rate limiter: max 60 requests per minute
+    // M6: Sliding window rate limiter — tracks individual request timestamps per IP
     const RATE_WINDOW_MS = 60_000;
     const RATE_MAX = 60;
-    const rateCounts = new Map<string, { count: number; resetAt: number }>();
+    const rateWindows = new Map<string, number[]>(); // IP → timestamps
 
-    // Periodic pruning of expired rate limiter entries
+    // Periodic pruning of expired entries
     const rateGcTimer = setInterval(() => {
-      const now = Date.now();
-      for (const [ip, bucket] of rateCounts) {
-        if (now >= bucket.resetAt) {
-          rateCounts.delete(ip);
+      const cutoff = Date.now() - RATE_WINDOW_MS;
+      for (const [ip, timestamps] of rateWindows) {
+        const filtered = timestamps.filter(t => t > cutoff);
+        if (filtered.length === 0) {
+          rateWindows.delete(ip);
+        } else {
+          rateWindows.set(ip, filtered);
         }
       }
     }, 5 * 60_000);
     rateGcTimer.unref();
 
     const server = createServer(async (req, res) => {
+      // M9: Security headers on all responses
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Content-Security-Policy', "default-src 'none'");
+
       // Health check endpoint — no auth required, no rate limit
       if (req.method === 'GET' && req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1026,28 +1072,43 @@ export class LynoxMCPServer {
         }
       }
 
-      // Reject oversized request bodies early via Content-Length header
+      // Reject oversized request bodies via Content-Length header AND actual byte tracking
       const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
       if (contentLength > MAX_REQUEST_BODY_BYTES) {
         res.writeHead(413, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Request body too large' }));
         return;
       }
+      // M7: Also enforce actual bytes received (Content-Length can be spoofed)
+      let receivedBytes = 0;
+      req.on('data', (chunk: Buffer) => {
+        receivedBytes += chunk.length;
+        if (receivedBytes > MAX_REQUEST_BODY_BYTES) {
+          req.destroy();
+        }
+      });
 
-      // Rate limiting per IP
+      // M6: Sliding window rate limiting per IP
       const ip = req.socket.remoteAddress ?? 'unknown';
       const now = Date.now();
-      let bucket = rateCounts.get(ip);
-      if (!bucket || now >= bucket.resetAt) {
-        bucket = { count: 0, resetAt: now + RATE_WINDOW_MS };
-        rateCounts.set(ip, bucket);
+      const cutoff = now - RATE_WINDOW_MS;
+      let timestamps = rateWindows.get(ip);
+      if (!timestamps) {
+        timestamps = [];
+        rateWindows.set(ip, timestamps);
       }
-      bucket.count++;
-      if (bucket.count > RATE_MAX) {
-        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(Math.ceil((bucket.resetAt - now) / 1000)) });
+      // Remove expired entries
+      while (timestamps.length > 0 && timestamps[0]! < cutoff) {
+        timestamps.shift();
+      }
+      if (timestamps.length >= RATE_MAX) {
+        const retryAfter = Math.ceil((timestamps[0]! + RATE_WINDOW_MS - now) / 1000);
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(retryAfter) });
         res.end(JSON.stringify({ error: 'Too many requests' }));
         return;
       }
+
+      timestamps.push(now);
 
       // Detect new-client initialization: POST without mcp-session-id header.
       // If the server already has an active session, the old client is stale
@@ -1079,12 +1140,27 @@ export class LynoxMCPServer {
     server.on('error', (err: Error) => {
       process.stderr.write(`LYNOX MCP server error: ${err.message}\n`);
     });
+    // M8: Warn if secret has low entropy
+    if (secret && secret.length < 32) {
+      process.stderr.write(
+        '⚠ LYNOX_MCP_SECRET is shorter than 32 characters. Use: openssl rand -hex 32\n',
+      );
+    }
+
     // Bind to localhost when no auth secret is set to prevent unauthenticated network exposure
     const host = secret ? '0.0.0.0' : '127.0.0.1';
     server.listen(port, host, () => {
       const authStatus = secret ? '(auth enabled)' : '(localhost only — no auth)';
       process.stderr.write(`LYNOX MCP server listening on http://${host}:${port} ${authStatus}\n`);
       if (secret && host === '0.0.0.0') {
+        if (process.env['NODE_ENV'] === 'production' && !process.env['LYNOX_MCP_ALLOW_HTTP']) {
+          process.stderr.write(
+            '✘ MCP is network-exposed over plain HTTP in production — refusing to start.\n' +
+            '  Set up a TLS-terminating reverse proxy (Caddy, nginx, Cloudflare Tunnel),\n' +
+            '  or set LYNOX_MCP_ALLOW_HTTP=1 to override (not recommended).\n',
+          );
+          process.exit(1);
+        }
         process.stderr.write(
           '⚠ MCP is network-exposed over plain HTTP — Bearer token is sent unencrypted.\n' +
           '  Use a TLS-terminating reverse proxy (Caddy, nginx, Cloudflare Tunnel) in production.\n',
