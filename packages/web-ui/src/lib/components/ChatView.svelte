@@ -169,8 +169,8 @@
 
 	$effect(() => { checkApiKey(); });
 
-	// Clear answered stack when all prompts are done
-	$effect(() => { if (!pendingPermission && answeredPrompts.length > 0) answeredPrompts = []; });
+	// Clear answered stack when streaming fully ends (not between sequential prompts)
+	$effect(() => { if (!isStreaming && !pendingPermission && answeredPrompts.length > 0) answeredPrompts = []; });
 
 	const messages = $derived(getMessages());
 	const isStreaming = $derived(getIsStreaming());
@@ -360,14 +360,14 @@
 				{/if}
 			{/each}
 
-			{#if isStreaming}
+			{#if isStreaming && !pendingPermission}
 				<div class="flex items-center gap-2 text-xs text-text-subtle">
 					<span class="inline-block h-2 w-2 animate-pulse rounded-full bg-accent"></span>
 					{t('chat.thinking')}
 				</div>
 			{/if}
 
-			{#if messages.length > 0 && !isStreaming}
+			{#if messages.length > 0 && (!isStreaming || pendingPermission)}
 				<div class="flex items-center gap-3">
 					{#if hasToolCalls}
 						<button onclick={toggleAllToolCalls} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">
