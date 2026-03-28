@@ -9,6 +9,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.history': { de: 'History', en: 'History' },
 	'nav.settings': { de: 'Settings', en: 'Settings' },
 	'nav.new_chat': { de: '+ Neuer Chat', en: '+ New Chat' },
+	'nav.tasks': { de: 'Tasks', en: 'Tasks' },
 
 	// Chat
 	'chat.welcome': { de: 'Was kann ich fuer dich tun?', en: 'What can I help you with?' },
@@ -125,6 +126,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.description_placeholder': { de: 'Task-Beschreibung', en: 'Task description' },
 	'tasks.cron_placeholder': { de: 'Cron (optional, z.B. 0 9 * * 1)', en: 'Cron (optional, e.g. 0 9 * * 1)' },
 	'tasks.create': { de: 'Erstellen', en: 'Create' },
+	'tasks.next_run': { de: 'Naechster Lauf', en: 'Next run' },
+	'tasks.last_run': { de: 'Letzter Lauf', en: 'Last run' },
 	'tasks.presets': { de: 'Vorlagen:', en: 'Presets:' },
 	'tasks.preset_daily': { de: 'Taeglich 9 Uhr', en: 'Daily 9 AM' },
 	'tasks.preset_weekly': { de: 'Jeden Montag', en: 'Every Monday' },
@@ -196,6 +199,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'history.tool_calls': { de: 'Tool Calls', en: 'Tool Calls' },
 	'history.response': { de: 'Antwort', en: 'Response' },
 	'history.load_more': { de: 'Mehr laden', en: 'Load more' },
+	'history.files_written': { de: 'Erstellte Dateien', en: 'Files written' },
+	'history.pipeline': { de: 'Pipeline', en: 'Pipeline' },
+	'history.spawned': { de: 'Sub-Agent', en: 'Sub-agent' },
 
 	// Error page
 	'error.fallback': { de: 'Etwas ist schiefgelaufen.', en: 'Something went wrong.' },

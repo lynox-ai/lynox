@@ -14,6 +14,9 @@
 		tokens_in: number;
 		tokens_out: number;
 		created_at: string;
+		run_type?: string;
+		spawn_depth?: number;
+		batch_parent_id?: string;
 	}
 
 	interface ToolCall {
@@ -28,6 +31,7 @@
 	let loadingMore = $state(false);
 	let expandedRun = $state<string | null>(null);
 	let toolCalls = $state<ToolCall[]>([]);
+	let writtenFiles = $derived(toolCalls.filter((tc) => tc.tool_name === 'write_file').map((tc) => { try { const p = JSON.parse(tc.input_json) as Record<string, unknown>; return String(p['path'] ?? p['file_path'] ?? ''); } catch { return ''; } }).filter(Boolean));
 	let stats = $state<{ total_runs?: number; total_cost_usd?: number } | null>(null);
 	let hasMore = $state(true);
 	const PAGE_SIZE = 50;
@@ -100,8 +104,13 @@
 							<p class="text-sm font-medium truncate max-w-[60%]">{run.task_text}</p>
 							<span class="text-xs text-text-subtle">{new Date(run.created_at).toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US')}</span>
 						</div>
-						<div class="flex gap-3 mt-1 text-xs text-text-muted">
-							<span class="rounded bg-bg-muted px-1.5 py-0.5 {run.status === 'completed' ? 'text-success' : run.status === 'failed' ? 'text-danger' : ''}">{run.status}</span>
+						<div class="flex gap-3 mt-1 text-xs text-text-muted flex-wrap">
+							<span class="rounded-[var(--radius-sm)] px-1.5 py-0.5 {run.status === 'completed' ? 'bg-success/15 text-success' : run.status === 'failed' ? 'bg-danger/15 text-danger' : 'bg-bg-muted'}">{run.status}</span>
+							{#if run.run_type === 'batch_parent'}
+								<span class="rounded-[var(--radius-sm)] bg-accent/10 text-accent-text px-1.5 py-0.5">{t('history.pipeline')}</span>
+							{:else if run.spawn_depth && run.spawn_depth > 0}
+								<span class="rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5">{t('history.spawned')}</span>
+							{/if}
 							<span>{run.model_id}</span>
 							<span>${run.cost_usd.toFixed(4)}</span>
 							<span>{(run.duration_ms / 1000).toFixed(1)}s</span>
@@ -125,6 +134,17 @@
 											</div>
 										</details>
 									{/each}
+								</div>
+							{/if}
+
+							{#if writtenFiles.length > 0}
+								<div>
+									<p class="text-xs font-medium text-text-muted mb-2">{t('history.files_written')} ({writtenFiles.length})</p>
+									<div class="space-y-1">
+										{#each writtenFiles as filePath}
+											<div class="rounded-[var(--radius-sm)] bg-bg-muted px-2 py-1 text-xs font-mono text-text-muted">{filePath}</div>
+										{/each}
+									</div>
 								</div>
 							{/if}
 

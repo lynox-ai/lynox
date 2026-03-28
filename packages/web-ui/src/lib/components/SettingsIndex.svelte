@@ -13,7 +13,7 @@
 		{ href: '/app/settings/config', titleKey: 'settings.config', descKey: 'settings.config_desc' },
 		{ href: '/app/settings/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc' },
 		{ href: '/app/settings/integrations', titleKey: 'settings.integrations', descKey: 'settings.integrations_desc' },
-		{ href: '/app/settings/tasks', titleKey: 'settings.tasks', descKey: 'settings.tasks_desc' },
+		{ href: '/app/tasks', titleKey: 'settings.tasks', descKey: 'settings.tasks_desc' },
 	];
 
 	const items = $derived([...baseItems, ...extraItems]);

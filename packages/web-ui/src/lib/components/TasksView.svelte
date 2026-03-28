@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, getLocale } from '../i18n.svelte.js';
 
 	interface TaskRecord {
 		id: string;
@@ -53,8 +53,7 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
-	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
-	<h1 class="text-xl font-light tracking-tight mb-4 mt-2">{t('tasks.title')}</h1>
+	<h1 class="text-xl font-light tracking-tight mb-4">{t('tasks.title')}</h1>
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
@@ -68,11 +67,19 @@
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
 					<div class="flex items-center justify-between">
 						<span class="text-sm font-medium">{task.title}</span>
-						<span class="text-xs rounded bg-bg-muted px-1.5 py-0.5 text-text-muted">{task.status}</span>
+						<span class="text-xs rounded-[var(--radius-sm)] px-1.5 py-0.5 {task.status === 'completed' ? 'bg-success/15 text-success' : task.status === 'in_progress' ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">{task.status}</span>
 					</div>
-					{#if task.schedule_cron}
-						<p class="text-xs text-text-subtle mt-1 font-mono">{task.schedule_cron}</p>
-					{/if}
+					<div class="flex flex-wrap gap-3 mt-1.5 text-xs text-text-subtle">
+						{#if task.schedule_cron}
+							<span class="font-mono">{task.schedule_cron}</span>
+						{/if}
+						{#if task.next_run_at}
+							<span>{t('tasks.next_run')}: {new Date(task.next_run_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { dateStyle: 'short', timeStyle: 'short' })}</span>
+						{/if}
+						{#if task.last_run_at}
+							<span>{t('tasks.last_run')}: {new Date(task.last_run_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { dateStyle: 'short', timeStyle: 'short' })}</span>
+						{/if}
+					</div>
 				</div>
 			{/each}
 		</div>
