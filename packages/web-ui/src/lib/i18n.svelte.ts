@@ -82,6 +82,35 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.memory_extraction': { de: 'Memory Extraction', en: 'Memory Extraction' },
 	'config.memory_extraction_desc': { de: 'Agent lernt automatisch aus Gespraechen', en: 'Agent learns automatically from conversations' },
 
+	// Budget
+	'config.budget': { de: 'Budget', en: 'Budget' },
+	'config.daily_limit': { de: 'Tageslimit (USD)', en: 'Daily limit (USD)' },
+	'config.daily_limit_desc': { de: 'Maximale API-Kosten pro Tag. Leer = kein Limit.', en: 'Max API cost per day. Empty = no limit.' },
+	'config.monthly_limit': { de: 'Monatslimit (USD)', en: 'Monthly limit (USD)' },
+	'config.monthly_limit_desc': { de: 'Maximale API-Kosten pro Monat. Leer = kein Limit.', en: 'Max API cost per month. Empty = no limit.' },
+
+	// Backup
+	'config.backup': { de: 'Backup', en: 'Backup' },
+	'config.backup_schedule': { de: 'Backup-Intervall', en: 'Backup schedule' },
+	'config.backup_schedule_desc': { de: 'Cron-Ausdruck fuer automatische Backups. Leer = deaktiviert.', en: 'Cron expression for auto-backups. Empty = disabled.' },
+	'config.backup_encrypt': { de: 'Backups verschluesseln', en: 'Encrypt backups' },
+	'config.backup_encrypt_desc': { de: 'AES-256-GCM Verschluesselung mit Vault Key', en: 'AES-256-GCM encryption with vault key' },
+	'config.backup_retention': { de: 'Aufbewahrung (Tage)', en: 'Retention (days)' },
+
+	// Knowledge
+	'config.knowledge': { de: 'Wissensmanagement', en: 'Knowledge' },
+	'config.memory_half_life': { de: 'Halbwertszeit (Tage)', en: 'Half-life (days)' },
+	'config.memory_half_life_desc': { de: 'Wie lange Wissen relevant bleibt (Default: 90 Tage)', en: 'How long knowledge stays relevant (default: 90 days)' },
+	'config.embedding_provider': { de: 'Embedding Provider', en: 'Embedding Provider' },
+	'config.embedding_onnx': { de: 'ONNX (lokal, kostenlos)', en: 'ONNX (local, free)' },
+	'config.embedding_voyage': { de: 'Voyage (Cloud, bessere Qualitaet)', en: 'Voyage (cloud, better quality)' },
+
+	// Limits
+	'config.limits': { de: 'Limits', en: 'Limits' },
+	'config.http_rate_limit': { de: 'HTTP Requests / Stunde', en: 'HTTP requests / hour' },
+	'config.http_rate_limit_desc': { de: 'Rate Limit fuer das HTTP Tool. Leer = kein Limit.', en: 'Rate limit for the HTTP tool. Empty = no limit.' },
+	'config.search_provider': { de: 'Suchmaschine', en: 'Search provider' },
+
 	// Keys
 	'keys.title': { de: 'API Keys', en: 'API Keys' },
 	'keys.no_keys': { de: 'Keine API Keys gespeichert. Fuege unten deinen Anthropic API Key hinzu.', en: 'No API keys stored. Add your Anthropic API key below.' },
