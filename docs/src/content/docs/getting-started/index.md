@@ -30,7 +30,7 @@ Use the **[deploy page on lynox.ai/deploy](https://lynox.ai/deploy)**. It walks 
 Both paths walk you through:
 
 1. **Enter your API key** — paste the key you just created
-2. **Set up Telegram** (optional) — create a bot in 2 minutes, the page detects your chat ID automatically
+2. **Connect integrations** (optional) — Telegram, Google Workspace, or web search. All can be added later in the Web UI
 3. **Download or copy** the generated config
 
 Your credentials never leave your browser — everything is generated client-side. Each step has a "What is this?" hint for non-technical users.
@@ -74,7 +74,7 @@ After setup, you don't need to manage anything. lynox takes care of itself:
 | **Encryption** | AES-256-GCM, key generated during setup | Nothing |
 | **Restarts** | Auto-restart on crash or server reboot | Nothing |
 | **Knowledge** | Grows with every conversation | Just keep talking to lynox |
-| **Backups** | To Google Drive via `/backup` command | Set up once in Telegram |
+| **Backups** | To Google Drive, configurable schedule | Set up in Web UI → Settings → Backups |
 | **Bug reports** | Anonymized error reports to help improve lynox | Opt-in after first task (one tap) |
 
 Your server runs 24/7 with zero maintenance.
@@ -85,7 +85,7 @@ Your server runs 24/7 with zero maintenance.
 
 Once lynox runs on a server, it works in the background — even when you're not talking to it:
 
-- *"Every Monday at 9am, summarize my emails from last week"* — runs automatically, delivered to Telegram
+- *"Every Monday at 9am, summarize my emails from last week"* — runs automatically, results in your run history
 - *"Monitor competitor.com for pricing changes"* — checks in the background, alerts you when something changes
 - *"Pull KPIs from the tracking sheet every Friday"* — scheduled, hands-free
 - Every conversation builds the knowledge graph — lynox gets smarter over time
