@@ -11,6 +11,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.new_chat': { de: '+ Neuer Chat', en: '+ New Chat' },
 	'nav.tasks': { de: 'Tasks', en: 'Tasks' },
 
+	// Command Palette
+	'cmd.placeholder': { de: 'Suche oder Aktion...', en: 'Search or action...' },
+	'cmd.no_results': { de: 'Keine Ergebnisse', en: 'No results' },
+	'cmd.new_chat': { de: 'Neuer Chat', en: 'New Chat' },
+	'cmd.nav': { de: 'Navigation', en: 'Navigation' },
+	'cmd.actions': { de: 'Aktionen', en: 'Actions' },
+
 	// Status Bar
 	'status.engine_ok': { de: 'Engine OK', en: 'Engine OK' },
 	'status.engine_error': { de: 'Engine Fehler', en: 'Engine Error' },

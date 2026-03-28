@@ -5,12 +5,12 @@
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import StatusBar from './StatusBar.svelte';
 	import ContextPanel from './ContextPanel.svelte';
+	import CommandPalette from './CommandPalette.svelte';
 	import type { Snippet } from 'svelte';
 
-	let { children, userSlot, panelContent }: {
+	let { children, userSlot }: {
 		children: Snippet;
 		userSlot?: Snippet;
-		panelContent?: Snippet;
 	} = $props();
 
 	let sidebarOpen = $state(false);
@@ -40,6 +40,13 @@
 			</button>
 			<img src="/logo-brand.svg" alt="lynox" class="h-5 w-auto" />
 		</div>
+
+		<!-- Center: Cmd+K hint -->
+		<button onclick={() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))} class="hidden md:flex items-center gap-2 text-xs text-text-subtle hover:text-text transition-colors rounded-[var(--radius-md)] border border-border px-3 py-1.5">
+			<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
+			<span>{t('cmd.placeholder')}</span>
+			<kbd class="text-[10px] font-mono bg-bg-muted px-1 py-0.5 rounded">⌘K</kbd>
+		</button>
 
 		<!-- Right: locale toggle + user -->
 		<div class="flex items-center gap-3">
@@ -135,12 +142,15 @@
 					{@render children()}
 				</div>
 
-				<!-- Context Panel (right sidebar) -->
-				<ContextPanel {panelContent} />
+				<!-- Context Panel (right sidebar, auto-fills from chat context) -->
+				<ContextPanel />
 			</div>
 		</main>
 	</div>
 
 	<!-- Status Bar -->
 	<StatusBar />
+
+	<!-- Command Palette -->
+	<CommandPalette />
 </div>

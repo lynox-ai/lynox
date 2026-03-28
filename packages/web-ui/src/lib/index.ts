@@ -3,6 +3,7 @@ export { default as ChatView } from './components/ChatView.svelte';
 export { default as AppShell } from './components/AppShell.svelte';
 export { default as StatusBar } from './components/StatusBar.svelte';
 export { default as ContextPanel } from './components/ContextPanel.svelte';
+export { default as CommandPalette } from './components/CommandPalette.svelte';
 /** @deprecated Use AppShell instead */
 export { default as AppLayout } from './components/AppLayout.svelte';
 export { default as MemoryView } from './components/MemoryView.svelte';
@@ -45,3 +46,7 @@ export type {
 	PermissionPrompt,
 	FileAttachment
 } from './stores/chat.svelte.js';
+
+// Context Panel
+export { setContext, clearContext, getContext, closePanel } from './stores/context-panel.svelte.js';
+export type { ContextType, ContextInfo } from './stores/context-panel.svelte.js';

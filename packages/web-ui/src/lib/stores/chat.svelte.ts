@@ -1,4 +1,5 @@
 import { getApiBase } from '../config.svelte.js';
+import { setContext, clearContext } from './context-panel.svelte.js';
 
 export interface ChatMessage {
 	role: 'user' | 'assistant';
@@ -112,19 +113,27 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'thinking':
 			msg.thinking = (msg.thinking ?? '') + String(data['thinking'] ?? '');
 			break;
-		case 'tool_call':
+		case 'tool_call': {
+			const toolName = String(data['name'] ?? '');
+			const toolInput = data['input'];
 			msg.toolCalls = msg.toolCalls ?? [];
-			msg.toolCalls.push({
-				name: String(data['name'] ?? ''),
-				input: data['input'],
-				status: 'running'
-			});
+			msg.toolCalls.push({ name: toolName, input: toolInput, status: 'running' });
+			setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			break;
+		}
 		case 'tool_result': {
 			const tc = msg.toolCalls?.findLast((t) => t.name === String(data['name'] ?? ''));
 			if (tc) {
 				tc.result = String(data['result'] ?? '');
 				tc.status = 'done';
+				setContext({
+					type: tc.name === 'write_file' ? 'file' : 'tool',
+					toolName: tc.name,
+					toolInput: tc.input,
+					toolResult: tc.result,
+					filePath: tc.name === 'write_file' ? String((tc.input as Record<string, unknown>)?.['path'] ?? '') : undefined,
+					title: tc.name,
+				});
 			}
 			break;
 		}
@@ -185,4 +194,5 @@ export function newChat() {
 	isStreaming = false;
 	pendingPermission = null;
 	chatError = null;
+	clearContext();
 }
