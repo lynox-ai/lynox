@@ -557,6 +557,23 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, task);
     }));
 
+    // ── Transcription ──
+    this.staticRoutes.set('POST /api/transcribe', async (_req, res, _params, body) => {
+      const { HAS_WHISPER, transcribeAudio } = await import('../core/transcribe.js');
+      if (!HAS_WHISPER) {
+        errorResponse(res, 503, 'Whisper not available (install whisper.cpp + ffmpeg)');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const audioData = b && typeof b['audio'] === 'string' ? b['audio'] : '';
+      const filename = b && typeof b['filename'] === 'string' ? b['filename'] : 'audio.webm';
+      if (!audioData) { errorResponse(res, 400, 'Missing audio (base64)'); return; }
+      const buffer = Buffer.from(audioData, 'base64');
+      const text = await transcribeAudio(buffer, filename);
+      if (!text) { errorResponse(res, 422, 'Transcription failed'); return; }
+      jsonResponse(res, 200, { text });
+    });
+
     // ── Google Auth ──
     this.staticRoutes.set('GET /api/google/status', async (_req, res) => {
       const google = engine.getGoogleAuth();
