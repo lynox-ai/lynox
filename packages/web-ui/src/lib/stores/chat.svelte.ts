@@ -36,8 +36,29 @@ interface QueuedMessage {
 	files?: FileAttachment[];
 }
 
-let messages = $state<ChatMessage[]>([]);
-let sessionId = $state<string | null>(null);
+// Restore from localStorage
+function loadPersistedChat(): { messages: ChatMessage[]; sessionId: string | null } {
+	if (typeof localStorage === 'undefined') return { messages: [], sessionId: null };
+	try {
+		const saved = localStorage.getItem('lynox-chat');
+		if (saved) {
+			const data = JSON.parse(saved) as { messages?: ChatMessage[]; sessionId?: string };
+			return { messages: data.messages ?? [], sessionId: data.sessionId ?? null };
+		}
+	} catch { /* corrupt data */ }
+	return { messages: [], sessionId: null };
+}
+
+function persistChat(): void {
+	if (typeof localStorage === 'undefined') return;
+	try {
+		localStorage.setItem('lynox-chat', JSON.stringify({ messages, sessionId }));
+	} catch { /* quota exceeded */ }
+}
+
+const persisted = loadPersistedChat();
+let messages = $state<ChatMessage[]>(persisted.messages);
+let sessionId = $state<string | null>(persisted.sessionId);
 let currentRunId = $state<string | null>(null);
 let isStreaming = $state(false);
 let pendingPermission = $state<PermissionPrompt | null>(null);
@@ -135,6 +156,7 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 
 	isStreaming = false;
 	pendingPermission = null;
+	persistChat();
 
 	// Process queue: send next queued message
 	if (messageQueue.length > 0) {
@@ -267,4 +289,5 @@ export function newChat() {
 	chatError = null;
 	messageQueue = [];
 	clearContext();
+	persistChat();
 }
