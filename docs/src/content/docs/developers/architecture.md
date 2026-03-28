@@ -8,10 +8,10 @@ sidebar:
 ## High-Level Overview
 
 ```
-                         ┌─────────────────────────┐
-                         │  CLI / Telegram / MCP    │
-                         │   (src/index.ts)         │
-                         └────────────┬─────────────┘
+                         ┌──────────────────────────────┐
+                         │  CLI / Telegram / MCP /       │
+                         │  HTTP API   (src/index.ts)    │
+                         └────────────┬──────────────────┘
                                       │
                          ┌────────────▼─────────────┐
                          │     Engine (singleton)    │
@@ -190,9 +190,13 @@ See [DAG Engine](/developers/dag-engine/) for full documentation.
 
 In-process Telegram bot using Telegraf. Connects directly to `session.run()` (no MCP needed). Three modules: `telegram-bot.ts` (Telegraf setup, message routing, commands), `telegram-runner.ts` (run lifecycle, stream handling, status edits), `telegram-formatter.ts` (markdown→HTML, message splitting, inline keyboards). Also serves as a notification channel for background tasks via `TelegramNotificationChannel` (registered with `NotificationRouter`).
 
+### `src/server/http-api.ts` -- Engine HTTP API
+
+REST + SSE server for the PWA and programmatic access. Provides full CRUD for all Engine subsystems (memory, secrets, config, history, tasks) plus SSE streaming for agent runs. Uses `Engine` directly (in-process). Started with `--http-api` flag, default port 3100. Bearer token auth, rate limiting (120 req/min/IP), CORS support. See [HTTP API docs](/developers/http-api/) for endpoint reference.
+
 ### `src/server/mcp-server.ts` -- MCP Server
 
-Exposes LYNOX as an MCP server with stdio and HTTP transport. Uses `Engine` internally — `SessionStore` holds per-session `Session` instances (not raw Agents). Includes async run polling with cursor-based event log, reply/abort flow, file attachments, buffered output limits, and persisted async run state for restart-resilient polling.
+Exposes LYNOX as an MCP server with stdio and HTTP transport for external tool integration (Claude Desktop, IDE plugins). Uses `Engine` internally — `SessionStore` holds per-session `Session` instances. Includes async run polling with cursor-based event log, reply/abort flow, file attachments, buffered output limits, and persisted async run state for restart-resilient polling.
 
 ### `src/index.ts` -- Entry Point
 
