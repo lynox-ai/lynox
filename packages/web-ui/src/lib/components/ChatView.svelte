@@ -489,11 +489,23 @@
 							{#if q.options.length > 0}
 								<div class="flex flex-wrap gap-1.5">
 									{#each q.options as option}
-										<button onclick={() => answerPrompt(option)}
-											class="rounded-[var(--radius-sm)] border px-2 py-0.5 text-xs transition-all {batchAnswers[i] === option ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
+										<button onclick={() => {
+											const current = (batchAnswers[i] ?? '').split(', ').filter(Boolean);
+											if (current.includes(option)) {
+												batchAnswers[i] = current.filter(o => o !== option).join(', ');
+											} else {
+												batchAnswers[i] = [...current, option].join(', ');
+											}
+											batchAnswers = [...batchAnswers];
+										}}
+											class="rounded-[var(--radius-sm)] border px-2 py-0.5 text-xs transition-all {(batchAnswers[i] ?? '').split(', ').includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
 										>{option}</button>
 									{/each}
 								</div>
+								<button onclick={() => { if (batchAnswers[i]) answerPrompt(batchAnswers[i]!); }}
+									disabled={!batchAnswers[i]}
+									class="mt-1.5 rounded-[var(--radius-sm)] bg-accent px-3 py-0.5 text-xs text-text hover:opacity-90 disabled:opacity-30"
+								>{t('chat.send')}</button>
 							{:else}
 								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex gap-1.5">
 									<input bind:value={batchFreetext} placeholder={q.question} class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-xs outline-none focus:border-border-hover" />
