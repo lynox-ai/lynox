@@ -247,6 +247,24 @@
 		}
 	});
 
+	function handlePaste(e: ClipboardEvent) {
+		const items = e.clipboardData?.items;
+		if (!items) return;
+		for (const item of items) {
+			if (item.kind === 'file') {
+				e.preventDefault();
+				const file = item.getAsFile();
+				if (!file) continue;
+				const reader = new FileReader();
+				reader.onload = () => {
+					const base64 = (reader.result as string).split(',')[1] ?? '';
+					pendingFiles = [...pendingFiles, { name: file.name || `paste-${Date.now()}.${file.type.split('/')[1] ?? 'png'}`, type: file.type, data: base64 }];
+				};
+				reader.readAsDataURL(file);
+			}
+		}
+	}
+
 	function sendExample(prompt: string) {
 		inputText = prompt;
 		handleSend();
@@ -653,6 +671,7 @@
 				bind:value={inputText}
 				onkeydown={handleKeydown}
 				oninput={autoResize}
+				onpaste={handlePaste}
 				placeholder={pendingPermission && !inBatchMode ? pendingPermission.question : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 				rows="1"
 				disabled={!ready && !pendingPermission}
