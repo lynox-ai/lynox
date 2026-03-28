@@ -284,15 +284,7 @@ export function exportAsMarkdown(): string {
 			lines.push(`## User\n\n${msg.content}\n`);
 		} else {
 			lines.push(`## lynox\n`);
-			if (msg.thinking) lines.push(`<details><summary>Thinking</summary>\n\n${msg.thinking}\n</details>\n`);
-			if (msg.toolCalls?.length) {
-				for (const tc of msg.toolCalls) {
-					lines.push(`> **${tc.name}**`);
-					if (tc.result) lines.push(`> ${tc.result.slice(0, 500)}\n`);
-				}
-			}
 			if (msg.content) lines.push(`${msg.content}\n`);
-			if (msg.usage) lines.push(`*${msg.usage.tokensIn + msg.usage.tokensOut} tokens · $${msg.usage.costUsd.toFixed(4)}*\n`);
 		}
 		lines.push('---\n');
 	}
