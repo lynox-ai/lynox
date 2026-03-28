@@ -254,7 +254,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.telegram_chat_id_hint': { de: 'Schicke dem Bot eine Nachricht, dann oeffne', en: 'Send the bot a message, then open' },
 	'integrations.telegram_configured': { de: 'Konfiguriert', en: 'Configured' },
 	'integrations.telegram_save': { de: 'Speichern', en: 'Save' },
-	'integrations.telegram_saved': { de: 'Gespeichert. Bot wird beim naechsten Engine-Start aktiv.', en: 'Saved. Bot will be active on next engine start.' },
+	'integrations.telegram_saved': { de: 'Gespeichert. Engine wird neu gestartet — Bot aktiviert sich automatisch.', en: 'Saved. Engine restarting — bot will activate automatically.' },
 
 	// Web Search
 	'integrations.search': { de: 'Web Search', en: 'Web Search' },

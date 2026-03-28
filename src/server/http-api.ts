@@ -117,6 +117,30 @@ export class LynoxHTTPApi {
     await this.engine.init();
     this.engine.startWorkerLoop();
     this._registerRoutes();
+    await this._tryStartTelegram(config);
+  }
+
+  private async _tryStartTelegram(config: ReturnType<typeof loadConfig>): Promise<void> {
+    const store = this.engine?.getSecretStore();
+    const token = process.env['TELEGRAM_BOT_TOKEN']
+      ?? store?.resolve('TELEGRAM_BOT_TOKEN')
+      ?? config.telegram_bot_token;
+    if (!token || !this.engine) return;
+
+    const allowedRaw = process.env['TELEGRAM_ALLOWED_CHAT_IDS']
+      ?? store?.resolve('TELEGRAM_ALLOWED_CHAT_IDS')
+      ?? '';
+    const allowedChatIds = allowedRaw
+      ? String(allowedRaw).split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
+      : config.telegram_allowed_chat_ids;
+
+    try {
+      const { startTelegramBot } = await import('../integrations/telegram/telegram-bot.js');
+      await startTelegramBot({ token, allowedChatIds, engine: this.engine });
+      process.stderr.write(`Telegram bot started (${allowedChatIds?.length ?? 0} allowed chat IDs)\n`);
+    } catch (err: unknown) {
+      process.stderr.write(`Telegram bot failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
   }
 
   async start(port: number): Promise<void> {
