@@ -5,9 +5,11 @@
 		replyPermission,
 		getMessages,
 		getIsStreaming,
+		getQueueLength,
 		getPendingPermission,
 		getChatError,
 		clearError,
+		cancelQueue,
 		type FileAttachment,
 		type UsageInfo
 	} from '../stores/chat.svelte.js';
@@ -122,13 +124,14 @@
 
 	const messages = $derived(getMessages());
 	const isStreaming = $derived(getIsStreaming());
+	const queueLength = $derived(getQueueLength());
 	const pendingPermission = $derived(getPendingPermission());
 	const chatError = $derived(getChatError());
 	const ready = $derived(hasApiKey !== false);
 
 	async function handleSend() {
 		const task = inputText.trim();
-		if ((!task && pendingFiles.length === 0) || isStreaming || !ready) return;
+		if ((!task && pendingFiles.length === 0) || !ready) return;
 		const files = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
 		inputText = '';
 		pendingFiles = [];
@@ -214,8 +217,11 @@
 			{#each messages as msg}
 				{#if msg.role === 'user'}
 					<div class="flex justify-end">
-						<div class="rounded-[var(--radius-md)] bg-accent/10 border border-accent/20 px-4 py-2.5 text-sm max-w-[80%]">
+						<div class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] {msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}">
 							{msg.content}
+							{#if msg.queued}
+								<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle ml-2">{t('chat.queued')}</span>
+							{/if}
 						</div>
 					</div>
 				{:else}
@@ -320,7 +326,7 @@
 			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/*,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 			<button
 				onclick={() => fileInputEl.click()}
-				disabled={isStreaming || !ready}
+				disabled={!ready}
 				class="shrink-0 rounded-[var(--radius-sm)] p-2.5 text-text-subtle hover:text-text disabled:opacity-30 transition-opacity"
 				aria-label={t('chat.attach_file')}
 			>
@@ -332,7 +338,7 @@
 			<!-- Voice -->
 			<button
 				onclick={toggleVoice}
-				disabled={isStreaming || !ready}
+				disabled={!ready}
 				class="shrink-0 rounded-[var(--radius-sm)] p-2.5 transition-opacity flex items-center gap-1 {recording ? 'text-danger animate-pulse' : 'text-text-subtle hover:text-text'} disabled:opacity-30"
 				aria-label={t('chat.voice_input')}
 			>
@@ -349,30 +355,37 @@
 				bind:value={inputText}
 				onkeydown={handleKeydown}
 				oninput={autoResize}
-				placeholder={t('chat.placeholder')}
+				placeholder={isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 				rows="1"
-				disabled={isStreaming || !ready}
+				disabled={!ready}
 				class="flex-1 resize-none rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text placeholder:text-text-subtle focus:border-border-hover outline-none disabled:opacity-50 overflow-hidden"
 			></textarea>
 			{#if isStreaming}
 				<button
 					onclick={() => abortRun()}
-					class="shrink-0 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-4 py-2.5 text-sm text-danger hover:bg-danger/25 transition-opacity"
+					class="shrink-0 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-3 py-2.5 text-sm text-danger hover:bg-danger/25 transition-opacity"
+					title={t('chat.stop')}
 				>
-					{t('chat.stop')}
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
 				</button>
-			{:else}
-				<button
-					onclick={handleSend}
-					disabled={(!inputText.trim() && pendingFiles.length === 0) || !ready}
-					class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
-				>
-					{t('chat.send')}
+			{/if}
+			<button
+				onclick={handleSend}
+				disabled={(!inputText.trim() && pendingFiles.length === 0) || !ready}
+				class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+			>
+				{isStreaming ? t('chat.queue') : t('chat.send')}
+			</button>
+		</div>
+		<div class="mt-1.5 max-w-3xl mx-auto flex items-center justify-between">
+			<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle">
+				{isStreaming ? (queueLength > 0 ? `${queueLength} ${t('chat.hint_queued')}` : t('chat.hint_streaming')) : t('chat.hint')}
+			</p>
+			{#if queueLength > 0}
+				<button onclick={cancelQueue} class="text-[11px] font-mono uppercase tracking-widest text-danger hover:text-danger/80 transition-colors">
+					{t('chat.cancel_queue')}
 				</button>
 			{/if}
 		</div>
-		<p class="mt-1.5 max-w-3xl mx-auto text-[11px] font-mono uppercase tracking-widest text-text-subtle">
-			{isStreaming ? t('chat.hint_streaming') : t('chat.hint')}
-		</p>
 	</div>
 </div>

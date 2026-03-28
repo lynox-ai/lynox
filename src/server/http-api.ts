@@ -106,6 +106,7 @@ export class LynoxHTTPApi {
   private server: Server | null = null;
   private readonly sessionStore = new SessionStore();
   private readonly pendingPrompts = new Map<string, PendingPrompt>();
+  private readonly runningSessions = new Set<string>();
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
@@ -390,6 +391,12 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
 
+      // Guard: reject concurrent runs on the same session
+      if (this.runningSessions.has(sessionId)) {
+        errorResponse(res, 409, 'A run is already in progress for this session');
+        return;
+      }
+
       const b = body as Record<string, unknown> | null;
       const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
@@ -459,6 +466,7 @@ export class LynoxHTTPApi {
       });
 
       // Run
+      this.runningSessions.add(sessionId);
       try {
         const result = await session.run(task);
         if (!aborted) {
@@ -471,6 +479,8 @@ export class LynoxHTTPApi {
           res.write(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`);
           res.end();
         }
+      } finally {
+        this.runningSessions.delete(sessionId);
       }
     }));
 

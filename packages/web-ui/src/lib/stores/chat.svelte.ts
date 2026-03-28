@@ -16,6 +16,7 @@ export interface ChatMessage {
 	toolCalls?: ToolCallInfo[];
 	thinking?: string;
 	usage?: UsageInfo;
+	queued?: boolean;
 }
 
 export interface ToolCallInfo {
@@ -30,12 +31,18 @@ export interface PermissionPrompt {
 	options?: string[];
 }
 
+interface QueuedMessage {
+	task: string;
+	files?: FileAttachment[];
+}
+
 let messages = $state<ChatMessage[]>([]);
 let sessionId = $state<string | null>(null);
 let currentRunId = $state<string | null>(null);
 let isStreaming = $state(false);
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let chatError = $state<string | null>(null);
+let messageQueue = $state<QueuedMessage[]>([]);
 
 async function ensureSession(): Promise<string> {
 	if (sessionId) return sessionId;
@@ -52,11 +59,30 @@ export interface FileAttachment {
 }
 
 export async function sendMessage(task: string, files?: FileAttachment[]): Promise<void> {
+	// Queue if a run is in progress
+	if (isStreaming) {
+		const fileNames = files?.map((f) => f.name).join(', ');
+		messages.push({ role: 'user', content: fileNames ? `${task}\n📎 ${fileNames}` : task, queued: true });
+		messageQueue.push({ task, files });
+		return;
+	}
+
+	await _executeRun(task, files);
+}
+
+async function _executeRun(task: string, files?: FileAttachment[]): Promise<void> {
 	chatError = null;
 	const sid = await ensureSession();
 
-	const fileNames = files?.map((f) => f.name).join(', ');
-	messages.push({ role: 'user', content: fileNames ? `${task}\n📎 ${fileNames}` : task });
+	// Find and un-queue if this message was already added as queued
+	const queuedIdx = messages.findIndex((m) => m.role === 'user' && m.queued && m.content.startsWith(task.slice(0, 50)));
+	if (queuedIdx !== -1) {
+		messages[queuedIdx]!.queued = false;
+	} else {
+		const fileNames = files?.map((f) => f.name).join(', ');
+		messages.push({ role: 'user', content: fileNames ? `${task}\n📎 ${fileNames}` : task });
+	}
+
 	const assistantIdx = messages.length;
 	messages.push({ role: 'assistant', content: '', toolCalls: [] });
 
@@ -75,7 +101,7 @@ export async function sendMessage(task: string, files?: FileAttachment[]): Promi
 
 	if (!res.ok || !res.body) {
 		isStreaming = false;
-		chatError = t('chat.error_start');
+		chatError = res.status === 409 ? t('chat.error_busy') : t('chat.error_start');
 		return;
 	}
 
@@ -109,6 +135,13 @@ export async function sendMessage(task: string, files?: FileAttachment[]): Promi
 
 	isStreaming = false;
 	pendingPermission = null;
+
+	// Process queue: send next queued message
+	if (messageQueue.length > 0) {
+		const next = messageQueue.shift()!;
+		// Small delay so the UI updates before next run starts
+		setTimeout(() => { _executeRun(next.task, next.files); }, 100);
+	}
 }
 
 function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number): void {
@@ -198,11 +231,20 @@ export async function abortRun(): Promise<void> {
 	isStreaming = false;
 }
 
+export function cancelQueue(): void {
+	// Remove queued user messages from chat
+	messages = messages.filter((m) => !m.queued);
+	messageQueue = [];
+}
+
 export function getMessages() {
 	return messages;
 }
 export function getIsStreaming() {
 	return isStreaming;
+}
+export function getQueueLength() {
+	return messageQueue.length;
 }
 export function getPendingPermission() {
 	return pendingPermission;
@@ -223,5 +265,6 @@ export function newChat() {
 	isStreaming = false;
 	pendingPermission = null;
 	chatError = null;
+	messageQueue = [];
 	clearContext();
 }
