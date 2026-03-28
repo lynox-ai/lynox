@@ -77,8 +77,15 @@
 		flow = null;
 		try {
 			const res = await fetch(`${getApiBase()}/google/auth`, { method: 'POST' });
-			if (res.ok) { flow = (await res.json()) as DeviceFlow; }
-		} catch { /* ignore */ }
+			if (res.ok) {
+				flow = (await res.json()) as DeviceFlow;
+			} else {
+				const err = (await res.json()) as { error?: string };
+				addToast(err.error ?? t('common.error'), 'error', 6000);
+			}
+		} catch {
+			addToast(t('common.error'), 'error');
+		}
 		connecting = false;
 		if (authPollInterval) clearInterval(authPollInterval);
 		authPollInterval = setInterval(async () => {
