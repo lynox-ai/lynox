@@ -375,7 +375,9 @@ export class Engine {
     // Web search tool (conditional — requires API key)
     const searchKey = process.env['TAVILY_API_KEY']
       ?? process.env['BRAVE_API_KEY']
-      ?? this.userConfig.search_api_key;
+      ?? this.userConfig.search_api_key
+      ?? this.secretStore?.resolve('TAVILY_API_KEY')
+      ?? this.secretStore?.resolve('SEARCH_API_KEY');
     if (searchKey) {
       try {
         const { createSearchProvider, detectProviderType, createWebSearchTool } = await import('../integrations/search/index.js');
@@ -388,8 +390,12 @@ export class Engine {
     }
 
     // Google Workspace tools (conditional — requires client ID + secret)
-    const googleClientId = process.env['GOOGLE_CLIENT_ID'] ?? this.userConfig.google_client_id;
-    const googleClientSecret = process.env['GOOGLE_CLIENT_SECRET'] ?? this.userConfig.google_client_secret;
+    const googleClientId = process.env['GOOGLE_CLIENT_ID']
+      ?? this.userConfig.google_client_id
+      ?? this.secretStore?.resolve('GOOGLE_CLIENT_ID');
+    const googleClientSecret = process.env['GOOGLE_CLIENT_SECRET']
+      ?? this.userConfig.google_client_secret
+      ?? this.secretStore?.resolve('GOOGLE_CLIENT_SECRET');
     if (googleClientId && googleClientSecret) {
       try {
         const { createGoogleTools } = await import('../integrations/google/index.js');

@@ -104,6 +104,28 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.waiting_auth': { de: 'Warte auf Autorisierung...', en: 'Waiting for authorization...' },
 	'integrations.connect_google': { de: 'Mit Google verbinden', en: 'Connect with Google' },
 	'integrations.connecting': { de: 'Verbinden...', en: 'Connecting...' },
+	'integrations.credentials_hint': { de: 'Erstelle OAuth-Credentials in der', en: 'Create OAuth credentials in the' },
+	'integrations.credentials_saved': { de: 'Credentials gespeichert. Engine wird neu gestartet...', en: 'Credentials saved. Restarting engine...' },
+	'integrations.save_credentials': { de: 'Credentials speichern', en: 'Save credentials' },
+
+	// Telegram
+	'integrations.telegram': { de: 'Telegram Bot', en: 'Telegram Bot' },
+	'integrations.telegram_desc': { de: 'Aufgaben per Telegram-Chat senden', en: 'Send tasks via Telegram chat' },
+	'integrations.telegram_token': { de: 'Bot Token', en: 'Bot Token' },
+	'integrations.telegram_token_hint': { de: 'Erstelle einen Bot bei', en: 'Create a bot at' },
+	'integrations.telegram_chat_id': { de: 'Chat ID', en: 'Chat ID' },
+	'integrations.telegram_chat_id_hint': { de: 'Schicke dem Bot eine Nachricht, dann oeffne', en: 'Send the bot a message, then open' },
+	'integrations.telegram_configured': { de: 'Konfiguriert', en: 'Configured' },
+	'integrations.telegram_save': { de: 'Speichern', en: 'Save' },
+	'integrations.telegram_saved': { de: 'Gespeichert. Bot wird beim naechsten Engine-Start aktiv.', en: 'Saved. Bot will be active on next engine start.' },
+
+	// Web Search
+	'integrations.search': { de: 'Web Search', en: 'Web Search' },
+	'integrations.search_desc': { de: 'Webrecherche fuer den Agent', en: 'Web research for the agent' },
+	'integrations.search_key_hint': { de: 'Gratis-Key auf', en: 'Free key at' },
+	'integrations.search_configured': { de: 'Konfiguriert', en: 'Configured' },
+	'integrations.search_not_configured': { de: 'Nicht konfiguriert', en: 'Not configured' },
+	'integrations.search_saved': { de: 'Key gespeichert. Engine wird neu gestartet...', en: 'Key saved. Restarting engine...' },
 
 	// Memory
 	'memory.title': { de: 'Knowledge', en: 'Knowledge' },

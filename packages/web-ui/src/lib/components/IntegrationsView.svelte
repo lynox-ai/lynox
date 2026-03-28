@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.js';
 
+	// --- Google OAuth ---
 	interface GoogleStatus {
 		available: boolean;
 		authenticated?: boolean;
@@ -9,90 +10,204 @@
 		expiresAt?: string | null;
 		hasRefreshToken?: boolean;
 	}
+	interface DeviceFlow { verificationUrl: string; userCode: string; }
 
-	interface DeviceFlow {
-		verificationUrl: string;
-		userCode: string;
-	}
-
-	let status = $state<GoogleStatus | null>(null);
-	let loading = $state(true);
+	let googleStatus = $state<GoogleStatus | null>(null);
+	let googleLoading = $state(true);
 	let flow = $state<DeviceFlow | null>(null);
 	let connecting = $state(false);
 	let revoking = $state(false);
+	let googleClientId = $state('');
+	let googleClientSecret = $state('');
+	let googleCredSaving = $state(false);
+	let googleCredSaved = $state(false);
 
-	async function loadStatus() {
-		loading = true;
+	async function loadGoogleStatus() {
+		googleLoading = true;
 		const res = await fetch(`${getApiBase()}/google/status`);
-		status = (await res.json()) as GoogleStatus;
-		loading = false;
+		googleStatus = (await res.json()) as GoogleStatus;
+		googleLoading = false;
 	}
 
-	async function startAuth() {
+	async function saveGoogleCredentials() {
+		if (!googleClientId.trim() || !googleClientSecret.trim()) return;
+		googleCredSaving = true;
+		await fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, {
+			method: 'PUT', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ value: googleClientId })
+		});
+		await fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, {
+			method: 'PUT', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ value: googleClientSecret })
+		});
+		googleClientId = '';
+		googleClientSecret = '';
+		googleCredSaving = false;
+		googleCredSaved = true;
+		await new Promise((r) => setTimeout(r, 3000));
+		googleCredSaved = false;
+		await loadGoogleStatus();
+	}
+
+	async function startGoogleAuth() {
 		connecting = true;
 		flow = null;
 		const res = await fetch(`${getApiBase()}/google/auth`, { method: 'POST' });
-		if (res.ok) {
-			flow = (await res.json()) as DeviceFlow;
-		}
+		if (res.ok) { flow = (await res.json()) as DeviceFlow; }
 		connecting = false;
 		const interval = setInterval(async () => {
 			const r = await fetch(`${getApiBase()}/google/status`);
 			const s = (await r.json()) as GoogleStatus;
-			if (s.authenticated) {
-				status = s;
-				flow = null;
-				clearInterval(interval);
-			}
+			if (s.authenticated) { googleStatus = s; flow = null; clearInterval(interval); }
 		}, 3000);
 		setTimeout(() => clearInterval(interval), 5 * 60_000);
 	}
 
-	async function revoke() {
+	async function revokeGoogle() {
 		revoking = true;
 		await fetch(`${getApiBase()}/google/revoke`, { method: 'POST' });
 		revoking = false;
-		await loadStatus();
+		await loadGoogleStatus();
 	}
 
+	// --- Telegram ---
+	let telegramToken = $state('');
+	let telegramChatId = $state('');
+	let telegramSaving = $state(false);
+	let telegramSaved = $state(false);
+	let telegramConfigured = $state(false);
+	let telegramLoading = $state(true);
+
+	async function loadTelegramStatus() {
+		telegramLoading = true;
+		const res = await fetch(`${getApiBase()}/secrets`);
+		const data = (await res.json()) as { names: string[] };
+		telegramConfigured = data.names.includes('TELEGRAM_BOT_TOKEN');
+		telegramLoading = false;
+	}
+
+	async function saveTelegram() {
+		if (!telegramToken.trim()) return;
+		telegramSaving = true;
+		await fetch(`${getApiBase()}/secrets/TELEGRAM_BOT_TOKEN`, {
+			method: 'PUT', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ value: telegramToken })
+		});
+		if (telegramChatId.trim()) {
+			await fetch(`${getApiBase()}/secrets/TELEGRAM_ALLOWED_CHAT_IDS`, {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: telegramChatId })
+			});
+		}
+		telegramToken = '';
+		telegramChatId = '';
+		telegramSaving = false;
+		telegramSaved = true;
+		await new Promise((r) => setTimeout(r, 3000));
+		telegramSaved = false;
+		await loadTelegramStatus();
+	}
+
+	// --- Web Search ---
+	let searchKey = $state('');
+	let searchSaving = $state(false);
+	let searchSaved = $state(false);
+	let searchConfigured = $state(false);
+	let searchLoading = $state(true);
+
+	async function loadSearchStatus() {
+		searchLoading = true;
+		const res = await fetch(`${getApiBase()}/secrets`);
+		const data = (await res.json()) as { names: string[] };
+		searchConfigured = data.names.includes('TAVILY_API_KEY') || data.names.includes('SEARCH_API_KEY');
+		searchLoading = false;
+	}
+
+	async function saveSearch() {
+		if (!searchKey.trim()) return;
+		searchSaving = true;
+		await fetch(`${getApiBase()}/secrets/TAVILY_API_KEY`, {
+			method: 'PUT', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ value: searchKey })
+		});
+		searchKey = '';
+		searchSaving = false;
+		searchSaved = true;
+		await new Promise((r) => setTimeout(r, 3000));
+		searchSaved = false;
+		await loadSearchStatus();
+	}
+
+	// Load all statuses on mount
 	$effect(() => {
-		loadStatus();
+		loadGoogleStatus();
+		loadTelegramStatus();
+		loadSearchStatus();
 	});
 </script>
 
-<div class="p-6 max-w-4xl mx-auto">
+<div class="p-6 max-w-4xl mx-auto space-y-4">
 	<h1 class="text-xl font-light tracking-tight mb-6">{t('integrations.title')}</h1>
 
+	<!-- Google Workspace -->
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">
 			<div>
 				<h2 class="font-medium">{t('integrations.google_workspace')}</h2>
 				<p class="text-xs text-text-muted mt-1">{t('integrations.google_services')}</p>
 			</div>
-			{#if loading}
+			{#if googleLoading}
 				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
-			{:else if status?.authenticated}
+			{:else if googleStatus?.authenticated}
 				<span class="text-xs text-success">{t('integrations.connected')}</span>
-			{:else if status?.available}
+			{:else if googleStatus?.available}
 				<span class="text-xs text-text-subtle">{t('integrations.not_connected')}</span>
 			{:else}
 				<span class="text-xs text-text-subtle">{t('integrations.not_configured')}</span>
 			{/if}
 		</div>
 
-		{#if loading}
+		{#if googleLoading}
 			<!-- loading -->
-		{:else if !status?.available}
-			<p class="text-sm text-text-muted">
-				{t('integrations.oauth_not_configured')}
-			</p>
-		{:else if status.authenticated}
+		{:else if !googleStatus?.available}
+			<!-- Credentials not set — show input -->
 			<div class="space-y-3">
-				{#if status.scopes && status.scopes.length > 0}
+				{#if googleCredSaved}
+					<p class="text-sm text-success">{t('integrations.credentials_saved')}</p>
+				{:else}
+					<p class="text-xs text-text-muted mb-2">
+						{t('integrations.credentials_hint')} <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">Google Cloud Console</a>
+					</p>
+					<div class="space-y-2">
+						<input
+							bind:value={googleClientId}
+							placeholder="Client ID"
+							class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
+						/>
+						<input
+							bind:value={googleClientSecret}
+							type="password"
+							placeholder="Client Secret"
+							class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
+						/>
+					</div>
+					<button
+						onclick={saveGoogleCredentials}
+						disabled={!googleClientId.trim() || !googleClientSecret.trim() || googleCredSaving}
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+					>
+						{googleCredSaving ? t('settings.saving') : t('integrations.save_credentials')}
+					</button>
+				{/if}
+			</div>
+		{:else if googleStatus.authenticated}
+			<!-- Connected -->
+			<div class="space-y-3">
+				{#if googleStatus.scopes && googleStatus.scopes.length > 0}
 					<div>
 						<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-1">{t('integrations.permissions')}</p>
 						<div class="flex flex-wrap gap-1">
-							{#each status.scopes as scope}
+							{#each googleStatus.scopes as scope}
 								<span class="rounded-[var(--radius-sm)] bg-bg-muted px-2 py-0.5 text-xs font-mono text-text-muted">
 									{scope.split('/').pop()}
 								</span>
@@ -101,7 +216,7 @@
 					</div>
 				{/if}
 				<button
-					onclick={revoke}
+					onclick={revokeGoogle}
 					disabled={revoking}
 					class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 disabled:opacity-50"
 				>
@@ -109,17 +224,11 @@
 				</button>
 			</div>
 		{:else if flow}
+			<!-- Device flow active -->
 			<div class="space-y-3">
-				<p class="text-sm text-text-muted">
-					{t('integrations.device_flow_hint')}
-				</p>
+				<p class="text-sm text-text-muted">{t('integrations.device_flow_hint')}</p>
 				<div class="rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 p-4 text-center space-y-2">
-					<a
-						href={flow.verificationUrl}
-						target="_blank"
-						rel="noopener noreferrer"
-						class="text-accent-text hover:opacity-80 text-sm break-all"
-					>
+					<a href={flow.verificationUrl} target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80 text-sm break-all">
 						{flow.verificationUrl}
 					</a>
 					<p class="text-2xl font-mono font-bold text-text tracking-widest">{flow.userCode}</p>
@@ -127,13 +236,114 @@
 				<p class="text-xs text-text-subtle">{t('integrations.waiting_auth')}</p>
 			</div>
 		{:else}
+			<!-- Credentials set, not connected -->
 			<button
-				onclick={startAuth}
+				onclick={startGoogleAuth}
 				disabled={connecting}
 				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
 			>
 				{connecting ? t('integrations.connecting') : t('integrations.connect_google')}
 			</button>
+		{/if}
+	</div>
+
+	<!-- Telegram -->
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+		<div class="flex items-center justify-between mb-4">
+			<div>
+				<h2 class="font-medium">{t('integrations.telegram')}</h2>
+				<p class="text-xs text-text-muted mt-1">{t('integrations.telegram_desc')}</p>
+			</div>
+			{#if telegramLoading}
+				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
+			{:else if telegramConfigured}
+				<span class="text-xs text-success">{t('integrations.telegram_configured')}</span>
+			{:else}
+				<span class="text-xs text-text-subtle">{t('integrations.not_configured')}</span>
+			{/if}
+		</div>
+
+		{#if telegramSaved}
+			<p class="text-sm text-success">{t('integrations.telegram_saved')}</p>
+		{:else}
+			<div class="space-y-3">
+				<div>
+					<label for="tg-token" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.telegram_token')}</label>
+					<input
+						id="tg-token"
+						bind:value={telegramToken}
+						type="password"
+						placeholder="123456:ABC-DEF..."
+						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
+					/>
+					<p class="text-xs text-text-subtle mt-1">
+						{t('integrations.telegram_token_hint')} <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">@BotFather</a>
+					</p>
+				</div>
+				<div>
+					<label for="tg-chat" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.telegram_chat_id')}</label>
+					<input
+						id="tg-chat"
+						bind:value={telegramChatId}
+						placeholder="123456789"
+						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
+					/>
+					<p class="text-xs text-text-subtle mt-1">
+						{t('integrations.telegram_chat_id_hint')} <code class="text-accent-text">https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code>
+					</p>
+				</div>
+				<button
+					onclick={saveTelegram}
+					disabled={!telegramToken.trim() || telegramSaving}
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+				>
+					{telegramSaving ? t('settings.saving') : t('integrations.telegram_save')}
+				</button>
+			</div>
+		{/if}
+	</div>
+
+	<!-- Web Search -->
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+		<div class="flex items-center justify-between mb-4">
+			<div>
+				<h2 class="font-medium">{t('integrations.search')}</h2>
+				<p class="text-xs text-text-muted mt-1">{t('integrations.search_desc')}</p>
+			</div>
+			{#if searchLoading}
+				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
+			{:else if searchConfigured}
+				<span class="text-xs text-success">{t('integrations.search_configured')}</span>
+			{:else}
+				<span class="text-xs text-text-subtle">{t('integrations.search_not_configured')}</span>
+			{/if}
+		</div>
+
+		{#if searchSaved}
+			<p class="text-sm text-success">{t('integrations.search_saved')}</p>
+		{:else}
+			<div class="space-y-3">
+				<div>
+					<label for="search-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">Tavily API Key</label>
+					<input
+						id="search-key"
+						bind:value={searchKey}
+						type="password"
+						placeholder="tvly-..."
+						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
+					/>
+					<p class="text-xs text-text-subtle mt-1">
+						{t('integrations.search_key_hint')} <a href="https://tavily.com" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">tavily.com</a>
+					</p>
+				</div>
+				<button
+					onclick={saveSearch}
+					disabled={!searchKey.trim() || searchSaving}
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+				>
+					{searchSaving ? t('settings.saving') : t('settings.save')}
+				</button>
+			</div>
 		{/if}
 	</div>
 </div>
