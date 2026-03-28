@@ -55,16 +55,41 @@
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 
-	function handleFiles(e: Event) {
-		const input = e.target as HTMLInputElement;
-		if (!input.files) return;
-		for (const file of input.files) {
+	function addFile(file: File) {
+		const needsConvert = file.type.startsWith('image/') && !SUPPORTED_IMAGE_TYPES.has(file.type);
+		if (needsConvert || file.type.startsWith('image/')) {
+			// Convert all images via Canvas (ensures compatible format)
+			const img = new Image();
+			const url = URL.createObjectURL(file);
+			img.onload = () => {
+				const canvas = document.createElement('canvas');
+				canvas.width = img.naturalWidth;
+				canvas.height = img.naturalHeight;
+				canvas.getContext('2d')!.drawImage(img, 0, 0);
+				const outType = SUPPORTED_IMAGE_TYPES.has(file.type) ? file.type : 'image/png';
+				const dataUrl = canvas.toDataURL(outType);
+				const base64 = dataUrl.split(',')[1] ?? '';
+				const ext = outType.split('/')[1] ?? 'png';
+				pendingFiles = [...pendingFiles, { name: file.name.replace(/\.\w+$/, `.${ext}`), type: outType, data: base64 }];
+				URL.revokeObjectURL(url);
+			};
+			img.onerror = () => { URL.revokeObjectURL(url); addToast(t('common.error'), 'error'); };
+			img.src = url;
+		} else {
 			const reader = new FileReader();
 			reader.onload = () => {
 				const base64 = (reader.result as string).split(',')[1] ?? '';
 				pendingFiles = [...pendingFiles, { name: file.name, type: file.type, data: base64 }];
 			};
 			reader.readAsDataURL(file);
+		}
+	}
+
+	function handleFiles(e: Event) {
+		const input = e.target as HTMLInputElement;
+		if (!input.files) return;
+		for (const file of input.files) {
+			addFile(file);
 		}
 		input.value = '';
 	}
@@ -263,32 +288,9 @@
 				e.preventDefault();
 				const file = item.getAsFile();
 				if (!file) continue;
-
-				if (file.type.startsWith('image/')) {
-					// Convert any image to PNG via Canvas (handles TIFF, BMP, etc.)
-					const img = new Image();
-					const url = URL.createObjectURL(file);
-					img.onload = () => {
-						const canvas = document.createElement('canvas');
-						canvas.width = img.naturalWidth;
-						canvas.height = img.naturalHeight;
-						canvas.getContext('2d')!.drawImage(img, 0, 0);
-						const dataUrl = canvas.toDataURL('image/png');
-						const base64 = dataUrl.split(',')[1] ?? '';
-						pendingFiles = [...pendingFiles, { name: file.name || `paste-${Date.now()}.png`, type: 'image/png', data: base64 }];
-						URL.revokeObjectURL(url);
-					};
-					img.onerror = () => { URL.revokeObjectURL(url); addToast(t('common.error'), 'error'); };
-					img.src = url;
-				} else {
-					// Non-image file: send as-is
-					const reader = new FileReader();
-					reader.onload = () => {
-						const base64 = (reader.result as string).split(',')[1] ?? '';
-						pendingFiles = [...pendingFiles, { name: file.name || `paste-${Date.now()}`, type: file.type, data: base64 }];
-					};
-					reader.readAsDataURL(file);
-				}
+				// Use addFile which handles image conversion
+				const name = file.name || `paste-${Date.now()}.${file.type.split('/')[1] ?? 'png'}`;
+				addFile(new File([file], name, { type: file.type }));
 			}
 		}
 	}
@@ -522,7 +524,7 @@
 				</div>
 			{/if}
 
-			{#if messages.length > 0 && (!isStreaming || pendingPermission)}
+			{#if messages.length > 0}
 				<div class="flex items-center gap-3">
 					{#if hasToolCalls}
 						<button onclick={toggleAllToolCalls} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">
