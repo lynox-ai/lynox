@@ -534,8 +534,8 @@
 		</div>
 	{/if}
 
-	<!-- Permission / Ask User prompt -->
-	{#if pendingPermission}
+	<!-- Permission / Ask User prompt (hidden in batch mode) -->
+	{#if pendingPermission && !inBatchMode}
 		{@const opts = pendingPermission.options ?? []}
 		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
 		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
