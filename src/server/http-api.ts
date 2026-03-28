@@ -865,21 +865,31 @@ export class LynoxHTTPApi {
 
     // ── Files (workspace) ────────────────────────────────────────
 
+    const HIDDEN_PATTERNS = new Set(['.git', '.env', '.DS_Store', 'node_modules', '.cache', '__pycache__', 'thumbs.db']);
+
     this.staticRoutes.set('GET /api/files', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const dirPath = url.searchParams.get('path') ?? '.';
+      const showHidden = url.searchParams.get('hidden') === '1';
       try {
-        const { readdirSync, statSync } = await import('node:fs');
+        const { readdirSync, statSync, existsSync: fsExists } = await import('node:fs');
         const { join, resolve } = await import('node:path');
-        const { getWorkspaceCwd } = await import('../core/workspace.js');
-        const base = getWorkspaceCwd();
+        const { getWorkspaceDir } = await import('../core/workspace.js');
+        const { getLynoxDir } = await import('../core/config.js');
+        const { ensureDirSync: ensureDir } = await import('../core/atomic-write.js');
+
+        // Use explicit workspace dir, or default to ~/.lynox/workspace/
+        const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+        if (!fsExists(base)) { ensureDir(base); }
         const target = resolve(base, dirPath);
         if (!target.startsWith(base)) { errorResponse(res, 403, 'Outside workspace'); return; }
-        const entries = readdirSync(target, { withFileTypes: true }).map(e => ({
-          name: e.name,
-          isDirectory: e.isDirectory(),
-          size: e.isFile() ? statSync(join(target, e.name)).size : 0,
-        }));
+        const entries = readdirSync(target, { withFileTypes: true })
+          .filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)))
+          .map(e => ({
+            name: e.name,
+            isDirectory: e.isDirectory(),
+            size: e.isFile() ? statSync(join(target, e.name)).size : 0,
+          }));
         jsonResponse(res, 200, { path: dirPath, entries });
       } catch {
         jsonResponse(res, 200, { path: dirPath, entries: [] });

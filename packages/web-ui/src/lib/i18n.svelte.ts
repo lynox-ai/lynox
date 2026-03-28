@@ -70,7 +70,10 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Files
 	'files.title': { de: 'Dateien', en: 'Files' },
-	'files.no_files': { de: 'Keine Dateien im Workspace.', en: 'No files in workspace.' },
+	'files.no_files': { de: 'Keine Dateien in diesem Ordner.', en: 'No files in this folder.' },
+	'files.empty_workspace': { de: 'Noch keine Dateien.', en: 'No files yet.' },
+	'files.empty_workspace_hint': { de: 'Der Agent erstellt hier Dateien fuer dich — Berichte, Exporte, Recherchen.', en: 'The agent creates files here for you — reports, exports, research.' },
+	'files.show_hidden': { de: 'Versteckte', en: 'Hidden' },
 
 	// Status Bar
 	'status.engine_ok': { de: 'Engine OK', en: 'Engine OK' },
