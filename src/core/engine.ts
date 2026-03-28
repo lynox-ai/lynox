@@ -195,12 +195,22 @@ export class Engine {
     this.userConfig = loadConfig();
     // Recreate API client if credentials changed
     if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase) {
-      this.client = this.userConfig.api_key
-        ? new Anthropic({ apiKey: this.userConfig.api_key, baseURL: this.userConfig.api_base_url })
-        : this.userConfig.api_base_url
-          ? new Anthropic({ baseURL: this.userConfig.api_base_url })
-          : new Anthropic();
+      this._recreateClient();
     }
+  }
+
+  /** Update API key at runtime (e.g. after saving via web UI) and recreate the client. */
+  setApiKey(key: string): void {
+    this.userConfig.api_key = key;
+    this._recreateClient();
+  }
+
+  private _recreateClient(): void {
+    this.client = this.userConfig.api_key
+      ? new Anthropic({ apiKey: this.userConfig.api_key, baseURL: this.userConfig.api_base_url })
+      : this.userConfig.api_base_url
+        ? new Anthropic({ baseURL: this.userConfig.api_base_url })
+        : new Anthropic();
   }
 
   async init(): Promise<this> {

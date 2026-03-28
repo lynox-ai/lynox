@@ -260,7 +260,7 @@ export class LynoxHTTPApi {
     const pathname = url.pathname;
 
     // Health check (unauthenticated)
-    if (method === 'GET' && pathname === '/health') {
+    if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
       jsonResponse(res, 200, { status: 'ok' });
       return;
     }
@@ -555,7 +555,17 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const value = b && typeof b['value'] === 'string' ? b['value'] : '';
       if (!value) { errorResponse(res, 400, 'Missing value'); return; }
-      store.set(params['name']!, value);
+      try {
+        store.set(params['name']!, value);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to store secret';
+        errorResponse(res, 503, msg);
+        return;
+      }
+      // Hot-reload API key so new sessions use it immediately
+      if (params['name'] === 'ANTHROPIC_API_KEY') {
+        engine.setApiKey(value);
+      }
       jsonResponse(res, 200, { ok: true });
     }));
 

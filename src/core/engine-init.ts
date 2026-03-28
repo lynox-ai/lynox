@@ -3,7 +3,8 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -34,6 +35,7 @@ import { KnowledgeLayer } from './knowledge-layer.js';
 import { KNOWLEDGE_GRAPH_DB_NAME } from './knowledge-graph.js';
 import { DataStoreBridge } from './datastore-bridge.js';
 import { getLynoxDir } from './config.js';
+import { FILE_MODE_PRIVATE } from './constants.js';
 import {
   generateBriefing,
   buildFileManifest,
@@ -212,10 +214,51 @@ export interface SecretResult {
   briefingParts: string[];
 }
 
+/**
+ * Auto-generate and persist a vault key if none is configured.
+ * New users get a working vault out of the box.
+ *
+ * Priority: LYNOX_VAULT_KEY env > ~/.lynox/vault.key file > auto-generate (if no vault.db exists)
+ */
+function _ensureVaultKey(): void {
+  if (process.env['LYNOX_VAULT_KEY']) return;
+
+  const lynoxDir = getLynoxDir();
+  const keyFilePath = join(lynoxDir, 'vault.key');
+  const vaultDbPath = join(lynoxDir, 'vault.db');
+
+  // Try loading from persisted key file
+  if (existsSync(keyFilePath)) {
+    try {
+      const key = readFileSync(keyFilePath, 'utf-8').trim();
+      if (key) {
+        process.env['LYNOX_VAULT_KEY'] = key;
+        return;
+      }
+    } catch { /* fall through */ }
+  }
+
+  // vault.db exists but no key anywhere → user lost their key, don't overwrite
+  if (existsSync(vaultDbPath)) return;
+
+  // First run: generate key and persist
+  const key = randomBytes(48).toString('base64');
+  try {
+    writeFileSync(keyFilePath, key + '\n', { mode: FILE_MODE_PRIVATE });
+    process.env['LYNOX_VAULT_KEY'] = key;
+    process.stderr.write('Generated vault key → ~/.lynox/vault.key\n');
+  } catch {
+    process.stderr.write('⚠ Could not write vault key file. Secrets will not be persisted.\n');
+  }
+}
+
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   const parts: string[] = [];
   let vault: SecretVault | null = null;
   let store: SecretStore | null = null;
+
+  // Auto-generate vault key for new users
+  _ensureVaultKey();
 
   try {
     try {
