@@ -10,6 +10,7 @@
 		getChatError,
 		clearError,
 		cancelQueue,
+		downloadExport,
 		type FileAttachment,
 		type UsageInfo
 	} from '../stores/chat.svelte.js';
@@ -344,13 +345,16 @@
 				</div>
 			{/if}
 
-			{#if hasToolCalls && !isStreaming}
-				<button
-					onclick={toggleAllToolCalls}
-					class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest"
-				>
-					{toolCallsExpanded ? t('chat.collapse_all') : t('chat.expand_all')}
-				</button>
+			{#if messages.length > 0 && !isStreaming}
+				<div class="flex items-center gap-3">
+					{#if hasToolCalls}
+						<button onclick={toggleAllToolCalls} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">
+							{toolCallsExpanded ? t('chat.collapse_all') : t('chat.expand_all')}
+						</button>
+					{/if}
+					<button onclick={() => downloadExport('md')} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">↓ MD</button>
+					<button onclick={() => downloadExport('json')} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">↓ JSON</button>
+				</div>
 			{/if}
 
 			{#if chatError}

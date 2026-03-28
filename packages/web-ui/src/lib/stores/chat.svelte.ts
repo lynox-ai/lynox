@@ -277,6 +277,45 @@ export function getChatError() {
 export function clearError() {
 	chatError = null;
 }
+export function exportAsMarkdown(): string {
+	const lines: string[] = [];
+	for (const msg of messages) {
+		if (msg.role === 'user') {
+			lines.push(`## User\n\n${msg.content}\n`);
+		} else {
+			lines.push(`## lynox\n`);
+			if (msg.thinking) lines.push(`<details><summary>Thinking</summary>\n\n${msg.thinking}\n</details>\n`);
+			if (msg.toolCalls?.length) {
+				for (const tc of msg.toolCalls) {
+					lines.push(`> **${tc.name}**`);
+					if (tc.result) lines.push(`> ${tc.result.slice(0, 500)}\n`);
+				}
+			}
+			if (msg.content) lines.push(`${msg.content}\n`);
+			if (msg.usage) lines.push(`*${msg.usage.tokensIn + msg.usage.tokensOut} tokens · $${msg.usage.costUsd.toFixed(4)}*\n`);
+		}
+		lines.push('---\n');
+	}
+	return lines.join('\n');
+}
+
+export function exportAsJSON(): string {
+	return JSON.stringify({ exported: new Date().toISOString(), messages }, null, 2);
+}
+
+export function downloadExport(format: 'md' | 'json'): void {
+	const content = format === 'md' ? exportAsMarkdown() : exportAsJSON();
+	const type = format === 'md' ? 'text/markdown' : 'application/json';
+	const ext = format === 'md' ? 'md' : 'json';
+	const blob = new Blob([content], { type });
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = `lynox-chat-${new Date().toISOString().slice(0, 10)}.${ext}`;
+	a.click();
+	URL.revokeObjectURL(url);
+}
+
 export function newChat() {
 	if (sessionId) {
 		fetch(`${getApiBase()}/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
