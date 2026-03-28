@@ -112,6 +112,24 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.http_rate_limit_desc': { de: 'Rate Limit fuer das HTTP Tool. Leer = kein Limit.', en: 'Rate limit for the HTTP tool. Empty = no limit.' },
 	'config.search_provider': { de: 'Suchmaschine', en: 'Search provider' },
 
+	// Bug Reporting
+	'config.privacy': { de: 'Datenschutz', en: 'Privacy' },
+	'config.sentry': { de: 'Anonyme Fehlerberichte', en: 'Anonymous error reports' },
+	'config.sentry_desc': { de: 'Hilft Bugs schneller zu fixen. Gesendet: Fehlertyp, Stack Trace, Version. Nie gesendet: Nachrichten, Dateien, Wissen.', en: 'Helps fix bugs faster. Sent: error type, stack trace, version. Never sent: messages, files, knowledge.' },
+	'config.sentry_enabled': { de: 'Aktiviert', en: 'Enabled' },
+	'config.sentry_disabled': { de: 'Deaktiviert', en: 'Disabled' },
+
+	// Updates
+	'config.updates': { de: 'Updates', en: 'Updates' },
+	'config.update_check': { de: 'Automatisch auf Updates pruefen', en: 'Automatically check for updates' },
+	'config.update_check_desc': { de: 'Prueft beim Start ob eine neue Version verfuegbar ist.', en: 'Checks on startup if a new version is available.' },
+	'config.version_current': { de: 'Aktuelle Version', en: 'Current version' },
+	'config.version_latest': { de: 'Neueste Version', en: 'Latest version' },
+	'config.version_checking': { de: 'Pruefe...', en: 'Checking...' },
+	'config.version_up_to_date': { de: 'Aktuell', en: 'Up to date' },
+	'config.version_update_available': { de: 'Update verfuegbar', en: 'Update available' },
+	'config.check_now': { de: 'Jetzt pruefen', en: 'Check now' },
+
 	// Keys
 	'keys.title': { de: 'API Keys', en: 'API Keys' },
 	'keys.no_keys': { de: 'Keine API Keys gespeichert. Fuege unten deinen Anthropic API Key hinzu.', en: 'No API keys stored. Add your Anthropic API key below.' },

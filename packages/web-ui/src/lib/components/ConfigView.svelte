@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { addToast } from '../stores/toast.svelte.js';
+
+	const SENTRY_DSN = 'https://21110d12849ca21ae1309b661ab3b603@o4511106815492096.ingest.de.sentry.io/4511106856976464';
 
 	interface Config {
 		default_tier?: string;
@@ -16,6 +19,7 @@
 		embedding_provider?: string;
 		max_http_requests_per_hour?: number | undefined;
 		search_provider?: string;
+		update_check?: boolean;
 		[key: string]: unknown;
 	}
 
@@ -56,8 +60,64 @@
 		saving = false;
 	}
 
+	// Sentry opt-in
+	let sentryEnabled = $state(false);
+
+	async function loadSentryStatus() {
+		try {
+			const res = await fetch(`${getApiBase()}/secrets`);
+			const data = (await res.json()) as { names: string[] };
+			sentryEnabled = data.names.includes('LYNOX_SENTRY_DSN');
+		} catch { /* ignore */ }
+	}
+
+	async function toggleSentry() {
+		if (sentryEnabled) {
+			await fetch(`${getApiBase()}/secrets/LYNOX_SENTRY_DSN`, { method: 'DELETE' });
+			sentryEnabled = false;
+			addToast(t('config.sentry_disabled'), 'info');
+		} else {
+			await fetch(`${getApiBase()}/secrets/LYNOX_SENTRY_DSN`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: SENTRY_DSN })
+			});
+			sentryEnabled = true;
+			addToast(t('config.sentry_enabled'), 'success');
+		}
+	}
+
+	// Version check
+	let currentVersion = $state('');
+	let latestVersion = $state<string | null>(null);
+	let versionChecking = $state(false);
+
+	async function loadCurrentVersion() {
+		try {
+			const res = await fetch(`${getApiBase()}/health`);
+			const data = (await res.json()) as { version?: string };
+			currentVersion = data.version ?? '';
+		} catch { /* ignore */ }
+	}
+
+	async function checkForUpdates() {
+		versionChecking = true;
+		try {
+			const res = await fetch('https://registry.npmjs.org/@lynox-ai/core/latest');
+			const data = (await res.json()) as { version?: string };
+			latestVersion = data.version ?? null;
+		} catch {
+			latestVersion = null;
+		}
+		versionChecking = false;
+	}
+
+	const isUpToDate = $derived(latestVersion && currentVersion && latestVersion === currentVersion);
+
 	$effect(() => {
 		loadConfig();
+		loadSentryStatus();
+		loadCurrentVersion();
 	});
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
@@ -183,6 +243,59 @@
 					<option value="tavily">Tavily</option>
 					<option value="brave">Brave</option>
 				</select>
+			</div>
+
+			<!-- Privacy -->
+			<p class={sectionClass}>{t('config.privacy')}</p>
+
+			<div class="{cardClass} flex items-center justify-between">
+				<div>
+					<p class="text-sm font-medium">{t('config.sentry')}</p>
+					<p class="text-xs text-text-muted mt-1">{t('config.sentry_desc')}</p>
+				</div>
+				<button
+					onclick={toggleSentry}
+					class="rounded-[var(--radius-sm)] px-3 py-1.5 text-xs font-medium transition-all {sentryEnabled ? 'bg-success/15 border border-success/30 text-success' : 'bg-bg-muted border border-border text-text-muted hover:text-text'}"
+				>
+					{sentryEnabled ? t('config.sentry_enabled') : t('config.sentry_disabled')}
+				</button>
+			</div>
+
+			<!-- Updates -->
+			<p class={sectionClass}>{t('config.updates')}</p>
+
+			<div class="{cardClass} flex items-center justify-between">
+				<div>
+					<p class="text-sm font-medium">{t('config.update_check')}</p>
+					<p class="text-xs text-text-muted mt-1">{t('config.update_check_desc')}</p>
+				</div>
+				<input type="checkbox" bind:checked={config.update_check} class="h-4 w-4 rounded border-border accent-accent" />
+			</div>
+
+			<div class={cardClass}>
+				<div class="flex items-center justify-between">
+					<div class="space-y-1">
+						{#if currentVersion}
+							<p class="text-xs text-text-muted">{t('config.version_current')}: <span class="font-mono text-text">{currentVersion}</span></p>
+						{/if}
+						{#if latestVersion}
+							<p class="text-xs text-text-muted">{t('config.version_latest')}: <span class="font-mono {isUpToDate ? 'text-success' : 'text-warning'}">{latestVersion}</span>
+								{#if isUpToDate}
+									<span class="text-success ml-1">{t('config.version_up_to_date')}</span>
+								{:else}
+									<span class="text-warning ml-1">{t('config.version_update_available')}</span>
+								{/if}
+							</p>
+						{/if}
+					</div>
+					<button
+						onclick={checkForUpdates}
+						disabled={versionChecking}
+						class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50"
+					>
+						{versionChecking ? t('config.version_checking') : t('config.check_now')}
+					</button>
+				</div>
 			</div>
 
 			<!-- Error + Save -->
