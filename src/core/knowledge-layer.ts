@@ -266,11 +266,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   // === Entity Operations ===
 
   async listEntities(opts?: { type?: string; limit?: number }): Promise<EntityRecord[]> {
-    const limit = opts?.limit ?? 50;
+    const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
     const typeFilter = opts?.type ? `WHERE e.entity_type = $type` : '';
-    const params: Record<string, unknown> = opts?.type ? { type: opts.type } : {};
+    const params: Record<string, unknown> = { limit: BigInt(limit) };
+    if (opts?.type) params['type'] = opts.type;
     const rows = await this.graph.query(
-      `MATCH (e:Entity) ${typeFilter} RETURN e.id, e.canonical_name, e.entity_type, e.aliases, e.description, e.scope_type, e.scope_id, e.mention_count, e.first_seen_at, e.last_seen_at ORDER BY e.mention_count DESC LIMIT ${limit}`,
+      `MATCH (e:Entity) ${typeFilter} RETURN e.id, e.canonical_name, e.entity_type, e.aliases, e.description, e.scope_type, e.scope_id, e.mention_count, e.first_seen_at, e.last_seen_at ORDER BY e.mention_count DESC LIMIT $limit`,
       params as Record<string, import('@ladybugdb/core').LbugValue>,
     );
     return rows.map(r => this._rowToEntity(r));
@@ -312,8 +313,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
        WHERE a.id = $entityId
        RETURN a.id AS from_id, b.id AS to_id, r.relation_type, r.description,
               r.confidence, r.source_memory_id, r.created_at
-       LIMIT ${maxDepth * 20}`,
-      { entityId },
+       LIMIT $relLimit`,
+      { entityId, relLimit: BigInt(Math.min(maxDepth, 5) * 20) },
     );
 
     return rows.map(row => ({

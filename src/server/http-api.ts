@@ -122,21 +122,45 @@ export class LynoxHTTPApi {
   async start(port: number): Promise<void> {
     const secret = process.env['LYNOX_HTTP_SECRET'];
 
+    const trustProxy = process.env['LYNOX_TRUST_PROXY'] === 'true';
+
     const handler = async (req: IncomingMessage, res: ServerResponse) => {
       const start = Date.now();
 
+      // Security headers on ALL responses
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Content-Security-Policy', "default-src 'none'");
+      res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+      if (useTls) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+
+      // Method filtering
+      const method = req.method ?? 'GET';
+      if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'].includes(method)) {
+        errorResponse(res, 405, `Method ${method} not allowed`);
+        return;
+      }
+
+      // Resolve client IP (proxy-aware)
+      let clientIp = req.socket.remoteAddress ?? 'unknown';
+      if (trustProxy) {
+        const forwarded = req.headers['x-forwarded-for'];
+        if (typeof forwarded === 'string') {
+          clientIp = forwarded.split(',')[0]?.trim() ?? clientIp;
+        }
+      }
+      clientIp = clientIp.replace(/^::ffff:/, '');
+
       // IP allowlist check
       if (ALLOWED_IPS.length > 0) {
-        const clientIp = req.socket.remoteAddress ?? '';
-        const normalized = clientIp.replace(/^::ffff:/, '');
-        if (!ALLOWED_IPS.includes(normalized) && !ALLOWED_IPS.includes(clientIp)) {
+        if (!ALLOWED_IPS.includes(clientIp)) {
           errorResponse(res, 403, 'IP not allowed');
           return;
         }
       }
 
       try {
-        await this._handleRequest(req, res, secret);
+        await this._handleRequest(req, res, secret, clientIp);
       } catch (err: unknown) {
         if (!res.headersSent) {
           errorResponse(res, 500, 'Internal server error');
@@ -144,7 +168,6 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`HTTP API error: ${msg}\n`);
       }
-      const method = req.method ?? 'GET';
       const url = req.url ?? '/';
       const status = res.statusCode;
       const ms = Date.now() - start;
@@ -206,6 +229,7 @@ export class LynoxHTTPApi {
     req: IncomingMessage,
     res: ServerResponse,
     secret: string | undefined,
+    clientIp: string = 'unknown',
   ): Promise<void> {
     const method = req.method ?? 'GET';
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -257,8 +281,8 @@ export class LynoxHTTPApi {
       return;
     }
 
-    // Rate limiting
-    const ip = req.socket.remoteAddress ?? 'unknown';
+    // Rate limiting (uses resolved clientIp, proxy-aware)
+    const ip = clientIp;
     const now = Date.now();
     let rateEntry = this.rateCounts.get(ip);
     if (!rateEntry || rateEntry.resetAt < now) {
@@ -397,8 +421,15 @@ export class LynoxHTTPApi {
         });
       };
 
-      // Abort on client disconnect
+      // Abort on client disconnect or timeout (30 min max)
+      const streamTimeout = setTimeout(() => {
+        aborted = true;
+        session.abort();
+        if (!res.writableEnded) res.end();
+      }, 30 * 60_000);
+
       req.on('close', () => {
+        clearTimeout(streamTimeout);
         aborted = true;
         session.abort();
       });
