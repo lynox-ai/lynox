@@ -8,7 +8,9 @@
  */
 
 import { createServer } from 'node:http';
+import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
@@ -45,6 +47,9 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const PROMPT_TIMEOUT_MS = 2 * 60_000; // 2 minutes
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
+const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
+const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
+const TLS_KEY = process.env['LYNOX_TLS_KEY'] ?? '';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -117,8 +122,19 @@ export class LynoxHTTPApi {
   async start(port: number): Promise<void> {
     const secret = process.env['LYNOX_HTTP_SECRET'];
 
-    this.server = createServer(async (req, res) => {
+    const handler = async (req: IncomingMessage, res: ServerResponse) => {
       const start = Date.now();
+
+      // IP allowlist check
+      if (ALLOWED_IPS.length > 0) {
+        const clientIp = req.socket.remoteAddress ?? '';
+        const normalized = clientIp.replace(/^::ffff:/, '');
+        if (!ALLOWED_IPS.includes(normalized) && !ALLOWED_IPS.includes(clientIp)) {
+          errorResponse(res, 403, 'IP not allowed');
+          return;
+        }
+      }
+
       try {
         await this._handleRequest(req, res, secret);
       } catch (err: unknown) {
@@ -133,14 +149,34 @@ export class LynoxHTTPApi {
       const status = res.statusCode;
       const ms = Date.now() - start;
       process.stderr.write(`${method} ${url} ${status} ${ms}ms\n`);
-    });
+    };
+
+    // TLS support: use HTTPS if cert + key provided
+    const useTls = TLS_CERT && TLS_KEY;
+    if (useTls) {
+      try {
+        const cert = readFileSync(TLS_CERT);
+        const key = readFileSync(TLS_KEY);
+        this.server = createTlsServer({ cert, key }, handler) as unknown as Server;
+      } catch (err: unknown) {
+        process.stderr.write(`TLS setup failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`Falling back to plain HTTP.\n`);
+        this.server = createServer(handler);
+      }
+    } else {
+      this.server = createServer(handler);
+    }
 
     const host = secret ? '0.0.0.0' : '127.0.0.1';
+    const protocol = useTls ? 'https' : 'http';
     this.server.listen(port, host, () => {
       const authStatus = secret ? '(auth enabled)' : '(localhost only)';
-      process.stderr.write(`LYNOX HTTP API listening on http://${host}:${port} ${authStatus}\n`);
-      if (secret) {
-        process.stderr.write(`Warning: HTTP API exposed without TLS. Use a reverse proxy (nginx, caddy) with HTTPS in production.\n`);
+      process.stderr.write(`LYNOX HTTP API listening on ${protocol}://${host}:${port} ${authStatus}\n`);
+      if (ALLOWED_IPS.length > 0) {
+        process.stderr.write(`  IP allowlist: ${ALLOWED_IPS.join(', ')}\n`);
+      }
+      if (secret && !useTls) {
+        process.stderr.write(`Warning: HTTP API exposed without TLS. Use LYNOX_TLS_CERT + LYNOX_TLS_KEY or a reverse proxy.\n`);
       }
     });
 

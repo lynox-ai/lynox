@@ -188,7 +188,8 @@ describe('LynoxHTTPApi', () => {
     it('responds to OPTIONS preflight', async () => {
       const res = await fetch(`${baseUrl}/api/secrets`, { method: 'OPTIONS' });
       expect(res.status).toBe(204);
-      expect(res.headers.get('access-control-allow-origin')).toBe('*');
+      // With LYNOX_HTTP_SECRET set and no LYNOX_ALLOWED_ORIGINS, CORS is restricted (no wildcard)
+      expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, PUT, PATCH, DELETE, OPTIONS');
     });
   });
 
