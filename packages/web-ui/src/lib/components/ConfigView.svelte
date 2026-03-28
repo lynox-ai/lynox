@@ -36,7 +36,16 @@
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as Config;
-			config = { ...data, memory_extraction: data.memory_extraction ?? true };
+			// Apply defaults for undefined fields (Engine defaults: sonnet, high, adaptive)
+			config = {
+				default_tier: 'sonnet',
+				effort_level: 'high',
+				thinking_mode: 'adaptive',
+				memory_extraction: true,
+				embedding_provider: 'onnx',
+				search_provider: 'tavily',
+				...data,
+			};
 		} catch {
 			error = t('common.load_failed');
 		}
