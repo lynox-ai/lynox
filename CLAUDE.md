@@ -2,22 +2,34 @@
 
 ## Project
 
-lynox — business runtime engine. ESM-only TypeScript, Node.js 22+.
-Public OSS repo (lynox-ai/lynox). Internal docs in private lynox-pro repo.
+lynox — business runtime engine + web UI. ESM-only TypeScript, Node.js 22+.
+Public OSS repo (lynox-ai/lynox). pnpm workspace with 2 packages.
+Internal docs in private lynox-pro repo.
 
 ## Commands
 
 ```bash
-npm run typecheck   # tsc --noEmit
-npm run lint        # eslint src/
-npm run build       # tsc → dist/
-npm run dev         # watch mode with tsx
-npm run security    # security scan + vitest security tests
-npx vitest run      # 114 test files / ~2639 tests
+# Engine (@lynox-ai/core)
+pnpm run typecheck   # tsc --noEmit
+pnpm run lint        # eslint src/
+pnpm run build       # tsc → dist/
+pnpm run dev         # watch mode with tsx
+pnpm run security    # security scan + vitest security tests
+npx vitest run       # 114 test files / ~2639 tests
 npx vitest run tests/online/  # 22 real API tests
+
+# Web UI (@lynox-ai/web-ui)
+cd packages/web-ui && pnpm run dev        # standalone dev server (needs Engine --http-api running)
+cd packages/web-ui && pnpm run build      # build standalone SvelteKit app
+cd packages/web-ui && pnpm run package    # build library (dist/) for pro/pwa import
+cd packages/web-ui && pnpm run typecheck  # svelte-check
 ```
 
 ## Architecture
+
+pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-ai/web-ui` (standalone web UI).
+
+### Engine (`@lynox-ai/core`, root)
 
 Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 
@@ -28,6 +40,20 @@ Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 - `src/integrations/` — Telegram, Google Workspace, Web Search
 - `src/server/` — MCP server (stdio + HTTP SSE), Engine HTTP API (REST + SSE for PWA)
 - `src/types/` — 12 domain type files, barrel re-export via index.ts
+
+### Web UI (`@lynox-ai/web-ui`, packages/web-ui/)
+
+SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
+
+- `src/lib/components/` — 10 View components (ChatView, AppLayout, MemoryView, HistoryView, Settings...)
+- `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base
+- `src/lib/config.svelte.ts` — configurable `apiBase` (/api/engine for standalone, /api/proxy for cloud)
+- `src/lib/i18n.ts` — DE/EN translations
+- `src/lib/index.ts` — barrel export for library consumers
+- `src/routes/` — standalone app routes (thin wrappers around View components)
+- `src/routes/api/engine/[...path]/` — proxy to Engine HTTP API (single-user, no auth)
+
+Pro/pwa imports `@lynox-ai/web-ui` and wraps View components with Lucia auth + onboarding.
 
 Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by category:
 - `getting-started/`, `daily-use/`, `features/`, `developers/`
@@ -70,7 +96,11 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/ (>=70%).
 
 ## Docker
 
-4-stage build on debian:trixie-slim (~523 MB). Non-root lynox:1001.
+**Engine-only** (`Dockerfile`): 4-stage build on debian:trixie-slim (~523 MB). Non-root lynox:1001.
 Entrypoint: entrypoint.sh (vault key auto-load, --version/--help without API key).
 Healthcheck: `GET /health` → `{"status":"ok"}` on MCP port.
 Hardened: no bash, no apt, no perl, no SUID, read-only root.
+
+**Engine + Web UI** (`Dockerfile.web-ui`): Combined image for self-hosted single-user deployment.
+Entrypoint: entrypoint-webui.sh (starts Engine --http-api + SvelteKit web-ui).
+`docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui`
