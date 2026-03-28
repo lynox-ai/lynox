@@ -183,12 +183,17 @@
 		const task = inputText.trim();
 		if (!task && pendingFiles.length === 0) return;
 
-		// If a prompt is active, treat chat input as freeform answer
+		// If a freeform prompt is active (no options), treat chat input as answer
 		if (pendingPermission && task) {
-			inputText = '';
-			if (textareaEl) textareaEl.style.height = 'auto';
-			answerPrompt(task);
-			return;
+			const opts = (pendingPermission.options ?? []).filter(o => o !== '\x00');
+			const isPermGuard = opts.includes('Allow') && opts.includes('Deny');
+			const isFreeform = !isPermGuard && opts.length === 0;
+			if (isFreeform) {
+				inputText = '';
+				if (textareaEl) textareaEl.style.height = 'auto';
+				answerPrompt(task);
+				return;
+			}
 		}
 
 		if (!ready) return;

@@ -200,6 +200,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					filePath: tc.name === 'write_file' ? String((tc.input as Record<string, unknown>)?.['path'] ?? '') : undefined,
 					title: tc.name,
 				});
+				persistChat();
 			}
 			break;
 		}
