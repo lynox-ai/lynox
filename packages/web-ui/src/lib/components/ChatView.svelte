@@ -42,6 +42,7 @@
 	let recording = $state(false);
 	let promptAnswer = $state('');
 	let selectedOptions = $state<string[]>([]);
+	let answeredPrompts = $state<{ question: string; answer: string }[]>([]);
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -146,6 +147,14 @@
 		setupSaving = false;
 	}
 
+	function answerPrompt(answer: string) {
+		if (!pendingPermission) return;
+		answeredPrompts = [...answeredPrompts, { question: pendingPermission.question, answer }];
+		selectedOptions = [];
+		promptAnswer = '';
+		replyPermission(answer);
+	}
+
 	function sendExample(prompt: string) {
 		inputText = prompt;
 		handleSend();
@@ -160,6 +169,9 @@
 
 	$effect(() => { checkApiKey(); });
 
+	// Clear answered stack when all prompts are done
+	$effect(() => { if (!pendingPermission && answeredPrompts.length > 0) answeredPrompts = []; });
+
 	const messages = $derived(getMessages());
 	const isStreaming = $derived(getIsStreaming());
 	const queueLength = $derived(getQueueLength());
@@ -169,7 +181,17 @@
 
 	async function handleSend() {
 		const task = inputText.trim();
-		if ((!task && pendingFiles.length === 0) || !ready) return;
+		if (!task && pendingFiles.length === 0) return;
+
+		// If a prompt is active, treat chat input as freeform answer
+		if (pendingPermission && task) {
+			inputText = '';
+			if (textareaEl) textareaEl.style.height = 'auto';
+			answerPrompt(task);
+			return;
+		}
+
+		if (!ready) return;
 		const files = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
 		inputText = '';
 		pendingFiles = [];
@@ -366,6 +388,20 @@
 		</div>
 	</div>
 
+	<!-- Answered prompts stack -->
+	{#if answeredPrompts.length > 0 && pendingPermission}
+		<div class="border-t border-border bg-bg-subtle/50 px-4 py-2">
+			<div class="max-w-3xl mx-auto space-y-1">
+				{#each answeredPrompts as ap}
+					<div class="flex items-center gap-2 text-xs">
+						<span class="text-text-subtle">{ap.question}</span>
+						<span class="text-accent-text font-medium">{ap.answer}</span>
+					</div>
+				{/each}
+			</div>
+		</div>
+	{/if}
+
 	<!-- Permission / Ask User prompt -->
 	{#if pendingPermission}
 		{@const opts = pendingPermission.options ?? []}
@@ -376,62 +412,24 @@
 				<p class="text-sm text-text-muted">{pendingPermission.question}</p>
 
 				{#if isPermissionGuard}
-					<!-- Permission guard: Allow / Deny -->
 					<div class="flex flex-wrap gap-2">
-						<button
-							onclick={() => replyPermission('y')}
-							class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity"
-						>
-							{t('chat.allow')}
-						</button>
-						<button
-							onclick={() => replyPermission('n')}
-							class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity"
-						>
-							{t('chat.deny')}
-						</button>
+						<button onclick={() => answerPrompt('y')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
+						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
 					</div>
 				{:else if visibleOptions.length > 0}
-					<!-- Multiple choice from ask_user (toggleable + send) -->
 					<div class="flex flex-wrap gap-2">
 						{#each visibleOptions as option}
 							<button
-								onclick={() => {
-									if (selectedOptions.includes(option)) {
-										selectedOptions = selectedOptions.filter(o => o !== option);
-									} else {
-										selectedOptions = [...selectedOptions, option];
-									}
-								}}
+								onclick={() => { if (selectedOptions.includes(option)) { selectedOptions = selectedOptions.filter(o => o !== option); } else { selectedOptions = [...selectedOptions, option]; } }}
 								class="rounded-[var(--radius-sm)] border px-3 py-1.5 text-sm transition-all {selectedOptions.includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
-							>
-								{option}
-							</button>
+							>{option}</button>
 						{/each}
 					</div>
-					<button
-						onclick={() => { replyPermission(selectedOptions.join(', ')); selectedOptions = []; }}
-						disabled={selectedOptions.length === 0}
-						class="rounded-[var(--radius-sm)] bg-accent px-4 py-1.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
-					>
-						{t('chat.send')}
-					</button>
+					<button onclick={() => answerPrompt(selectedOptions.join(', '))} disabled={selectedOptions.length === 0}
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-1.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity">{t('chat.send')}</button>
 				{:else}
-					<!-- Open-ended question from ask_user — free text input -->
-					<form onsubmit={(e) => { e.preventDefault(); if (promptAnswer.trim()) { replyPermission(promptAnswer); promptAnswer = ''; } }} class="flex gap-2">
-						<input
-							bind:value={promptAnswer}
-							placeholder={t('chat.placeholder')}
-							class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-hover"
-						/>
-						<button
-							type="submit"
-							disabled={!promptAnswer.trim()}
-							class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
-						>
-							{t('chat.send')}
-						</button>
-					</form>
+					<!-- Open-ended: user types in normal chat input below -->
+					<p class="text-xs text-text-subtle">{t('chat.hint')}</p>
 				{/if}
 			</div>
 		</div>
