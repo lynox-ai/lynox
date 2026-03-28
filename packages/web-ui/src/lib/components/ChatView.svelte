@@ -483,9 +483,9 @@
 				bind:value={inputText}
 				onkeydown={handleKeydown}
 				oninput={autoResize}
-				placeholder={isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
+				placeholder={pendingPermission ? pendingPermission.question : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 				rows="1"
-				disabled={!ready}
+				disabled={!ready && !pendingPermission}
 				class="flex-1 resize-none rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text placeholder:text-text-subtle focus:border-border-hover outline-none disabled:opacity-50 overflow-hidden"
 			></textarea>
 			{#if isStreaming}
@@ -497,17 +497,27 @@
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
 				</button>
 			{/if}
-			<button
-				onclick={handleSend}
-				disabled={(!inputText.trim() && pendingFiles.length === 0) || !ready}
-				class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
-			>
-				{isStreaming ? t('chat.queue') : t('chat.send')}
-			</button>
+			{#if !isStreaming || pendingPermission}
+				<button
+					onclick={handleSend}
+					disabled={!inputText.trim() && pendingFiles.length === 0}
+					class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+				>
+					{pendingPermission ? t('chat.send') : t('chat.send')}
+				</button>
+			{:else}
+				<button
+					onclick={handleSend}
+					disabled={!inputText.trim() && pendingFiles.length === 0}
+					class="shrink-0 rounded-[var(--radius-sm)] border border-border bg-bg px-4 py-2.5 text-sm text-text-muted hover:text-text hover:border-border-hover disabled:opacity-30 transition-all"
+				>
+					{t('chat.queue')}
+				</button>
+			{/if}
 		</div>
 		<div class="mt-1.5 max-w-3xl mx-auto flex items-center justify-between">
 			<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle">
-				{isStreaming ? (queueLength > 0 ? `${queueLength} ${t('chat.hint_queued')}` : t('chat.hint_streaming')) : t('chat.hint')}
+				{pendingPermission ? t('chat.hint') : isStreaming ? (queueLength > 0 ? `${queueLength} ${t('chat.hint_queued')}` : t('chat.hint_streaming')) : t('chat.hint')}
 			</p>
 			{#if queueLength > 0}
 				<button onclick={cancelQueue} class="text-[11px] font-mono uppercase tracking-widest text-danger hover:text-danger/80 transition-colors">
