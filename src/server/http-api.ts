@@ -588,6 +588,7 @@ export class LynoxHTTPApi {
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       saveUserConfig(body as Record<string, unknown>);
       reloadConfig();
+      engine.reloadUserConfig();
       jsonResponse(res, 200, { ok: true });
     });
 
