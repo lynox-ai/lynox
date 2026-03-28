@@ -188,6 +188,7 @@
 					<div class="space-y-2">
 						<input
 							bind:value={googleClientId}
+							type="password"
 							placeholder="Client ID"
 							class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
 						/>

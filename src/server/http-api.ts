@@ -138,6 +138,9 @@ export class LynoxHTTPApi {
     this.server.listen(port, host, () => {
       const authStatus = secret ? '(auth enabled)' : '(localhost only)';
       process.stderr.write(`LYNOX HTTP API listening on http://${host}:${port} ${authStatus}\n`);
+      if (secret) {
+        process.stderr.write(`Warning: HTTP API exposed without TLS. Use a reverse proxy (nginx, caddy) with HTTPS in production.\n`);
+      }
     });
 
     // Rate limit GC

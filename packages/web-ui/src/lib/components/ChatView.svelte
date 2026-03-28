@@ -15,6 +15,21 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 
+	// Mask any secret-like patterns (API keys, tokens) that might leak into display
+	const SECRET_PATTERNS = [
+		/sk-ant-[a-zA-Z0-9_-]{20,}/g,
+		/sk-[a-zA-Z0-9_-]{20,}/g,
+		/tvly-[a-zA-Z0-9_-]{10,}/g,
+		/\d{5,}:[A-Za-z0-9_-]{30,}/g, // Telegram bot token
+	];
+	function maskText(text: string): string {
+		let result = text;
+		for (const pattern of SECRET_PATTERNS) {
+			result = result.replace(pattern, (match) => `***${match.slice(-4)}`);
+		}
+		return result;
+	}
+
 	let inputText = $state('');
 	let messagesEl: HTMLDivElement;
 	let textareaEl: HTMLTextAreaElement;
@@ -196,7 +211,7 @@
 						{#if msg.thinking}
 							<details class="text-xs text-text-subtle">
 								<summary class="cursor-pointer hover:text-text-muted font-mono uppercase tracking-widest text-[11px]">{t('chat.thinking_label')}</summary>
-								<pre class="mt-2 whitespace-pre-wrap font-mono text-xs text-text-subtle/70 border-l-2 border-accent/20 pl-3">{msg.thinking}</pre>
+								<pre class="mt-2 whitespace-pre-wrap font-mono text-xs text-text-subtle/70 border-l-2 border-accent/20 pl-3">{maskText(msg.thinking ?? '')}</pre>
 							</details>
 						{/if}
 
