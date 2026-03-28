@@ -535,5 +535,40 @@ export class LynoxHTTPApi {
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, task);
     }));
+
+    // ── Google Auth ──
+    this.staticRoutes.set('GET /api/google/status', async (_req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!google) { jsonResponse(res, 200, { available: false }); return; }
+      jsonResponse(res, 200, {
+        available: true,
+        authenticated: google.isAuthenticated(),
+        ...google.getAccountInfo(),
+      });
+    });
+
+    this.staticRoutes.set('POST /api/google/auth', async (_req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!google) { errorResponse(res, 503, 'Google auth not configured'); return; }
+      try {
+        const flow = await google.startDeviceFlow();
+        jsonResponse(res, 200, {
+          verificationUrl: flow.verificationUrl,
+          userCode: flow.userCode,
+        });
+        // Wait for auth in background — user opens URL and enters code
+        flow.waitForAuth().catch(() => {});
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errorResponse(res, 500, msg);
+      }
+    });
+
+    this.staticRoutes.set('POST /api/google/revoke', async (_req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!google) { errorResponse(res, 503, 'Google auth not configured'); return; }
+      await google.revoke();
+      jsonResponse(res, 200, { ok: true });
+    });
   }
 }
