@@ -109,6 +109,9 @@
 
 	// Standalone onboarding: check if API key is configured
 	let hasApiKey = $state<boolean | null>(null);
+	let setupKey = $state('');
+	let setupSaving = $state(false);
+	let justCompleted = $state(false);
 
 	async function checkApiKey() {
 		try {
@@ -119,6 +122,38 @@
 			hasApiKey = null; // Engine not reachable
 		}
 	}
+
+	async function saveInlineKey() {
+		if (!setupKey.trim()) return;
+		setupSaving = true;
+		try {
+			await fetch(`${getApiBase()}/secrets/ANTHROPIC_API_KEY`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: setupKey })
+			});
+			setupKey = '';
+			hasApiKey = true;
+			justCompleted = true;
+			addToast(t('onboard.key_saved'), 'success');
+			setTimeout(() => { justCompleted = false; }, 5000);
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
+		setupSaving = false;
+	}
+
+	function sendExample(prompt: string) {
+		inputText = prompt;
+		handleSend();
+	}
+
+	const examples = $derived([
+		t('onboard.example_emails'),
+		t('onboard.example_research'),
+		t('onboard.example_remember'),
+		t('onboard.example_task'),
+	]);
 
 	$effect(() => { checkApiKey(); });
 
@@ -191,23 +226,62 @@
 		{#if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
 				{#if hasApiKey === false}
-					<div class="w-full max-w-md space-y-6 px-4 text-center">
-						<h2 class="text-2xl font-light tracking-tight text-text mb-2">{t('onboard.welcome')}</h2>
-						<p class="text-sm text-text-muted">{t('onboard.standalone_hint')}</p>
-						<a
-							href="/app/settings/keys"
-							class="inline-block rounded-[var(--radius-sm)] bg-accent px-5 py-2.5 text-sm font-medium text-text hover:opacity-90 transition-opacity"
-						>
-							{t('onboard.go_to_keys')}
-						</a>
-						<p class="text-xs text-text-subtle">
+					<!-- Inline API Key Setup (no navigation away) -->
+					<div class="w-full max-w-md space-y-6 px-4">
+						<div class="text-center">
+							<h2 class="text-2xl font-light tracking-tight text-text mb-2">{t('onboard.welcome')}</h2>
+							<p class="text-sm text-text-muted">{t('onboard.standalone_hint')}</p>
+						</div>
+
+						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5 space-y-4">
+							<div>
+								<label for="inline-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('onboard.api_key_label')}</label>
+								<input
+									id="inline-key"
+									type="password"
+									bind:value={setupKey}
+									placeholder="sk-ant-..."
+									onkeydown={(e) => e.key === 'Enter' && saveInlineKey()}
+									class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm font-mono outline-none focus:border-border-hover"
+								/>
+							</div>
+							<button
+								onclick={saveInlineKey}
+								disabled={!setupKey.trim() || setupSaving}
+								class="w-full rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+							>
+								{setupSaving ? t('onboard.setting_up') : t('onboard.save_key')}
+							</button>
+						</div>
+
+						<p class="text-center text-xs text-text-subtle">
 							{t('onboard.api_key_hint')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">console.anthropic.com</a>
 						</p>
+						<p class="text-center text-xs text-text-subtle">{t('onboard.api_key_secure')}</p>
 					</div>
 				{:else}
-					<div class="text-center">
-						<h2 class="text-2xl font-light tracking-tight text-text-muted mb-2">lynox</h2>
-						<p class="text-sm text-text-subtle">{t('chat.welcome')}</p>
+					<!-- Ready state with example prompts -->
+					<div class="w-full max-w-lg px-4 space-y-6">
+						<div class="text-center">
+							{#if justCompleted}
+								<h2 class="text-2xl font-light tracking-tight text-text mb-2">{t('onboard.ready_title')}</h2>
+								<p class="text-sm text-text-muted">{t('onboard.ready_hint')}</p>
+							{:else}
+								<h2 class="text-2xl font-light tracking-tight text-text-muted mb-2">lynox</h2>
+								<p class="text-sm text-text-subtle">{t('chat.welcome')}</p>
+							{/if}
+						</div>
+
+						<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+							{#each examples as example}
+								<button
+									onclick={() => sendExample(example)}
+									class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 text-left text-sm text-text-muted hover:text-text hover:border-border-hover transition-all"
+								>
+									{example}
+								</button>
+							{/each}
+						</div>
 					</div>
 				{/if}
 			</div>

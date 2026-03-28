@@ -27,6 +27,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'nav.files': { de: 'Dateien', en: 'Files' },
 	'nav.graph': { de: 'Graph', en: 'Graph' },
+	'nav.desc.chat': { de: 'Dein KI-Assistent', en: 'Your AI assistant' },
+	'nav.desc.knowledge': { de: 'Was lynox sich merkt', en: 'What lynox remembers' },
+	'nav.desc.graph': { de: 'Personen, Firmen, Beziehungen', en: 'People, companies, relationships' },
+	'nav.desc.contacts': { de: 'Deine Kunden und Deals', en: 'Your clients and deals' },
+	'nav.desc.history': { de: 'Vergangene Aufgaben', en: 'Past runs' },
+	'nav.desc.tasks': { de: 'Geplante Aufgaben', en: 'Scheduled jobs' },
+	'nav.desc.files': { de: 'Erstellte Dateien', en: 'Created files' },
 
 	// Knowledge Graph
 	'kg.title': { de: 'Knowledge Graph', en: 'Knowledge Graph' },
@@ -116,8 +123,16 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Onboarding (kept for web-ui setup hints)
 	'onboard.welcome': { de: 'Willkommen bei lynox', en: 'Welcome to lynox' },
-	'onboard.standalone_hint': { de: 'Richte deinen API Key ein, um loszulegen.', en: 'Set up your API key to get started.' },
+	'onboard.standalone_hint': { de: 'Gib deinen Anthropic API Key ein, um loszulegen.', en: 'Enter your Anthropic API key to get started.' },
 	'onboard.go_to_keys': { de: 'API Key einrichten', en: 'Set up API Key' },
+	'onboard.key_saved': { de: 'Bereit zum Chatten!', en: 'Ready to chat!' },
+	'onboard.save_key': { de: 'Speichern & Starten', en: 'Save & Start' },
+	'onboard.ready_title': { de: 'Alles eingerichtet!', en: 'All set!' },
+	'onboard.ready_hint': { de: 'Probier eine der Vorschlaege oder schreib einfach los.', en: 'Try a suggestion below or just start typing.' },
+	'onboard.example_emails': { de: 'Fasse meine wichtigsten E-Mails zusammen', en: 'Summarize my important emails' },
+	'onboard.example_research': { de: 'Recherchiere [Thema] und fasse zusammen', en: 'Research [topic] and summarize' },
+	'onboard.example_remember': { de: 'Merke dir: mein Unternehmen heisst...', en: 'Remember: my company is called...' },
+	'onboard.example_task': { de: 'Erstelle einen woechentlichen Report-Task', en: 'Create a weekly report task' },
 	'onboard.api_key_needed': { de: 'Um loszulegen, brauchst du einen Anthropic API Key.', en: 'To get started, you need an Anthropic API key.' },
 	'onboard.api_key_label': { de: 'Anthropic API Key', en: 'Anthropic API Key' },
 	'onboard.api_key_hint': { de: 'Erstelle einen Key auf', en: 'Create a key at' },
