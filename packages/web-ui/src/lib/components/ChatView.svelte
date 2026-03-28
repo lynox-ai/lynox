@@ -55,7 +55,16 @@
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 
+	const UNSUPPORTED_FORMATS = new Set(['image/heic', 'image/heif']);
+
 	function addFile(file: File) {
+		// HEIC/HEIF can't be decoded by most browsers
+		const lowerName = file.name.toLowerCase();
+		if (UNSUPPORTED_FORMATS.has(file.type) || lowerName.endsWith('.heic') || lowerName.endsWith('.heif')) {
+			addToast('HEIC/HEIF nicht unterstützt. Bitte als JPEG oder PNG exportieren.', 'error', 5000);
+			return;
+		}
+
 		const needsConvert = file.type.startsWith('image/') && !SUPPORTED_IMAGE_TYPES.has(file.type);
 		if (needsConvert || file.type.startsWith('image/')) {
 			// Convert all images via Canvas (ensures compatible format)
@@ -669,7 +678,7 @@
 
 		<div class="max-w-3xl mx-auto flex items-end gap-2">
 			<!-- File upload -->
-			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/*,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
+			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 			<button
 				onclick={() => fileInputEl.click()}
 				disabled={!ready}
