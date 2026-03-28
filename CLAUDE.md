@@ -55,6 +55,9 @@ SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component l
 
 Pro/pwa imports `@lynox-ai/web-ui` and wraps View components with Lucia auth + onboarding.
 
+**Interface priority:** Web UI (primary) → Telegram (secondary, mobile) → CLI (developer).
+Telegram is pure task execution — setup/admin redirects to Web UI.
+
 Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by category:
 - `getting-started/`, `daily-use/`, `features/`, `developers/`
 - Sidebar uses `autogenerate` — add new page = drop `.md` file + set `sidebar.order` frontmatter
