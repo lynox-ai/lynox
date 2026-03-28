@@ -11,6 +11,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.new_chat': { de: '+ Neuer Chat', en: '+ New Chat' },
 	'nav.tasks': { de: 'Tasks', en: 'Tasks' },
 
+	// Status Bar
+	'status.engine_ok': { de: 'Engine OK', en: 'Engine OK' },
+	'status.engine_error': { de: 'Engine Fehler', en: 'Engine Error' },
+	'status.tasks_active': { de: 'aktiv', en: 'active' },
+	'status.entities': { de: 'Entities', en: 'Entities' },
+	'status.today': { de: 'heute', en: 'today' },
+
 	// Chat
 	'chat.welcome': { de: 'Was kann ich fuer dich tun?', en: 'What can I help you with?' },
 	'chat.placeholder': { de: 'Nachricht eingeben...', en: 'Type a message...' },

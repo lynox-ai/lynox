@@ -1,10 +1,10 @@
 <script lang="ts">
-	import AppLayout from '$lib/components/AppLayout.svelte';
+	import AppShell from '$lib/components/AppShell.svelte';
 	import type { Snippet } from 'svelte';
 
 	let { children }: { children: Snippet } = $props();
 </script>
 
-<AppLayout>
+<AppShell>
 	{@render children()}
-</AppLayout>
+</AppShell>
