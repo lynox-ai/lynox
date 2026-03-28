@@ -13,6 +13,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { t } from '../i18n.svelte.js';
+	import { addToast } from '../stores/toast.svelte.js';
 
 	let inputText = $state('');
 	let messagesEl: HTMLDivElement;
@@ -20,6 +21,8 @@
 	let fileInputEl: HTMLInputElement;
 	let pendingFiles = $state<FileAttachment[]>([]);
 	let recording = $state(false);
+	let recordingSeconds = $state(0);
+	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 
 	function handleFiles(e: Event) {
 		const input = e.target as HTMLInputElement;
@@ -55,6 +58,8 @@
 			recorder.onstop = async () => {
 				stream.getTracks().forEach((track) => track.stop());
 				recording = false;
+				recordingSeconds = 0;
+				if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
 				mediaRecorder = null;
 
 				const blob = new Blob(chunks, { type: 'audio/webm' });
@@ -76,9 +81,11 @@
 
 			recorder.start();
 			recording = true;
+			recordingSeconds = 0;
+			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
 			mediaRecorder = recorder;
 		} catch {
-			inputText += t('chat.mic_unavailable');
+			addToast(t('chat.mic_unavailable'), 'error');
 		}
 	}
 
@@ -128,6 +135,16 @@
 			abortRun();
 		}
 	}
+
+	let toolCallsExpanded = $state(false);
+
+	function toggleAllToolCalls() {
+		toolCallsExpanded = !toolCallsExpanded;
+		const details = document.querySelectorAll('.tool-call-details');
+		details.forEach((d) => { (d as HTMLDetailsElement).open = toolCallsExpanded; });
+	}
+
+	const hasToolCalls = $derived(messages.some((m) => m.toolCalls && m.toolCalls.length > 0));
 
 	function autoResize(e: Event) {
 		const el = e.target as HTMLTextAreaElement;
@@ -184,7 +201,7 @@
 						{/if}
 
 						{#each msg.toolCalls ?? [] as tc}
-							<details class="rounded-[var(--radius-md)] border border-border bg-bg-subtle text-sm group">
+							<details class="tool-call-details rounded-[var(--radius-md)] border border-border bg-bg-subtle text-sm group">
 								<summary class="cursor-pointer px-3 py-2 text-text-muted hover:text-text flex items-center gap-2">
 									<span class="inline-block h-1.5 w-1.5 rounded-full {tc.status === 'running' ? 'bg-warning animate-pulse' : tc.status === 'done' ? 'bg-success' : 'bg-danger'}"></span>
 									<span class="font-mono text-xs text-accent-text">{tc.name}</span>
@@ -213,6 +230,15 @@
 					<span class="inline-block h-2 w-2 animate-pulse rounded-full bg-accent"></span>
 					{t('chat.thinking')}
 				</div>
+			{/if}
+
+			{#if hasToolCalls && !isStreaming}
+				<button
+					onclick={toggleAllToolCalls}
+					class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest"
+				>
+					{toolCallsExpanded ? t('chat.collapse_all') : t('chat.expand_all')}
+				</button>
 			{/if}
 
 			{#if chatError}
@@ -277,12 +303,15 @@
 			<button
 				onclick={toggleVoice}
 				disabled={isStreaming || !ready}
-				class="shrink-0 rounded-[var(--radius-sm)] p-2.5 transition-opacity {recording ? 'text-danger animate-pulse' : 'text-text-subtle hover:text-text'} disabled:opacity-30"
+				class="shrink-0 rounded-[var(--radius-sm)] p-2.5 transition-opacity flex items-center gap-1 {recording ? 'text-danger animate-pulse' : 'text-text-subtle hover:text-text'} disabled:opacity-30"
 				aria-label={t('chat.voice_input')}
 			>
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
 				</svg>
+				{#if recording}
+					<span class="text-xs font-mono">{recordingSeconds}s</span>
+				{/if}
 			</button>
 
 			<textarea

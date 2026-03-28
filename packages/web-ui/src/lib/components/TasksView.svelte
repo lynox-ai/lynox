@@ -92,6 +92,12 @@
 			placeholder={t('tasks.cron_placeholder')}
 			class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 font-mono text-sm focus:border-accent focus:outline-none"
 		/>
+		<div class="flex items-center gap-2 flex-wrap">
+			<span class="text-xs text-text-subtle">{t('tasks.presets')}</span>
+			<button type="button" onclick={() => newSchedule = '0 9 * * *'} class="rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('tasks.preset_daily')}</button>
+			<button type="button" onclick={() => newSchedule = '0 9 * * 1'} class="rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('tasks.preset_weekly')}</button>
+			<button type="button" onclick={() => newSchedule = '0 * * * *'} class="rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('tasks.preset_hourly')}</button>
+		</div>
 		<button
 			onclick={createTask}
 			disabled={!newTitle.trim()}

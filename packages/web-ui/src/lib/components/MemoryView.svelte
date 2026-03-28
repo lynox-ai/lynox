@@ -84,6 +84,7 @@
 		{#each namespaces as ns}
 			<button
 				onclick={() => { selectedNs = ns; }}
+				title={t(`memory.ns.${ns}`)}
 				class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-all {selectedNs === ns
 					? 'bg-accent/10 text-accent-text border border-accent/30'
 					: 'text-text-muted hover:text-text border border-transparent'}"
@@ -91,6 +92,7 @@
 				{ns}
 			</button>
 		{/each}
+		<span class="text-xs text-text-subtle ml-1">{t(`memory.ns.${selectedNs}`)}</span>
 	</div>
 
 	{#if error}
@@ -133,7 +135,10 @@
 			</button>
 		</div>
 	{:else}
-		<p class="text-text-subtle text-sm">{t('memory.no_entries')} {selectedNs}.</p>
+		<div class="text-text-subtle text-sm space-y-1">
+			<p>{t('memory.no_entries')} {selectedNs}.</p>
+			<p class="text-xs">{t('memory.no_entries_hint')}</p>
+		</div>
 	{/if}
 
 	<div class="mt-6 space-y-3">

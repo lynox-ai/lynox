@@ -9,6 +9,11 @@ export { default as KeysView } from './components/KeysView.svelte';
 export { default as IntegrationsView } from './components/IntegrationsView.svelte';
 export { default as TasksView } from './components/TasksView.svelte';
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
+export { default as ToastContainer } from './components/ToastContainer.svelte';
+
+// Toast
+export { addToast, getToasts } from './stores/toast.svelte.js';
+export type { Toast } from './stores/toast.svelte.js';
 
 // Config
 export { configure, getApiBase } from './config.svelte.js';

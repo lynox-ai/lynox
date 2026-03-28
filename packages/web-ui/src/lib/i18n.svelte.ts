@@ -26,6 +26,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.attach_file': { de: 'Datei anhaengen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
 	'chat.thinking_label': { de: 'Thinking', en: 'Thinking' },
+	'chat.expand_all': { de: 'Alle aufklappen', en: 'Expand all' },
+	'chat.collapse_all': { de: 'Alle zuklappen', en: 'Collapse all' },
 
 	// Onboarding (kept for web-ui setup hints)
 	'onboard.welcome': { de: 'Willkommen bei lynox', en: 'Welcome to lynox' },
@@ -82,18 +84,22 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Keys
 	'keys.title': { de: 'API Keys', en: 'API Keys' },
-	'keys.no_keys': { de: 'Keine API Keys gespeichert.', en: 'No API keys stored.' },
+	'keys.no_keys': { de: 'Keine API Keys gespeichert. Fuege unten deinen Anthropic API Key hinzu.', en: 'No API keys stored. Add your Anthropic API key below.' },
 	'keys.add_title': { de: 'Neuen Key hinzufuegen', en: 'Add new key' },
 	'keys.name_label': { de: 'Name', en: 'Name' },
 	'keys.value_label': { de: 'Wert', en: 'Value' },
 
 	// Tasks
 	'tasks.title': { de: 'Scheduled Tasks', en: 'Scheduled Tasks' },
-	'tasks.no_tasks': { de: 'Keine Tasks.', en: 'No tasks.' },
+	'tasks.no_tasks': { de: 'Keine Tasks. Erstelle einen, um Aufgaben automatisch ausfuehren zu lassen.', en: 'No tasks. Create one to run jobs on a schedule.' },
 	'tasks.create_title': { de: 'Neuen Task erstellen', en: 'Create new task' },
 	'tasks.description_placeholder': { de: 'Task-Beschreibung', en: 'Task description' },
 	'tasks.cron_placeholder': { de: 'Cron (optional, z.B. 0 9 * * 1)', en: 'Cron (optional, e.g. 0 9 * * 1)' },
 	'tasks.create': { de: 'Erstellen', en: 'Create' },
+	'tasks.presets': { de: 'Vorlagen:', en: 'Presets:' },
+	'tasks.preset_daily': { de: 'Taeglich 9 Uhr', en: 'Daily 9 AM' },
+	'tasks.preset_weekly': { de: 'Jeden Montag', en: 'Every Monday' },
+	'tasks.preset_hourly': { de: 'Stuendlich', en: 'Every hour' },
 
 	// Integrations
 	'integrations.title': { de: 'Integrationen', en: 'Integrations' },
@@ -137,6 +143,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Memory
 	'memory.title': { de: 'Knowledge', en: 'Knowledge' },
 	'memory.no_entries': { de: 'Keine Eintraege in', en: 'No entries in' },
+	'memory.no_entries_hint': { de: 'Fuege oben einen Eintrag hinzu, oder chatte mit lynox — Wissen wird automatisch gespeichert.', en: 'Add an entry above, or chat with lynox — knowledge is stored automatically.' },
+	'memory.ns.knowledge': { de: 'Fakten, Kontakte, Geschaeftswissen', en: 'Facts, contacts, business knowledge' },
+	'memory.ns.methods': { de: 'Bewaeaehrte Vorgehensweisen und Workflows', en: 'Proven approaches and workflows' },
+	'memory.ns.project-state': { de: 'Laufende Projekte und deren Status', en: 'Active projects and their status' },
+	'memory.ns.learnings': { de: 'Erkenntnisse und Praeferenzen', en: 'Insights and preferences' },
 	'memory.edit': { de: 'Bearbeiten', en: 'Edit' },
 	'memory.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'memory.add_entry': { de: 'Eintrag hinzufuegen', en: 'Add entry' },
@@ -152,9 +163,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'history.title': { de: 'Run History', en: 'Run History' },
 	'history.runs': { de: 'Runs', en: 'Runs' },
 	'history.total': { de: 'Total', en: 'Total' },
-	'history.no_runs': { de: 'Noch keine Runs.', en: 'No runs yet.' },
+	'history.no_runs': { de: 'Noch keine Runs. Starte einen Chat, um deinen ersten Run zu erstellen.', en: 'No runs yet. Start a chat to create your first run.' },
 	'history.tool_calls': { de: 'Tool Calls', en: 'Tool Calls' },
 	'history.response': { de: 'Antwort', en: 'Response' },
+	'history.load_more': { de: 'Mehr laden', en: 'Load more' },
 
 	// Error page
 	'error.fallback': { de: 'Etwas ist schiefgelaufen.', en: 'Something went wrong.' },
@@ -165,6 +177,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'common.error': { de: 'Etwas ist schiefgelaufen.', en: 'Something went wrong.' },
 	'common.save_failed': { de: 'Speichern fehlgeschlagen. Bitte erneut versuchen.', en: 'Save failed. Please try again.' },
 	'common.load_failed': { de: 'Laden fehlgeschlagen. Ist die Engine erreichbar?', en: 'Failed to load. Is the engine reachable?' },
+	'common.copied': { de: 'Kopiert', en: 'Copied' },
+	'common.copy': { de: 'Kopieren', en: 'Copy' },
 };
 
 export function setLocale(locale: Locale): void {

@@ -1,6 +1,12 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { addToast } from '../stores/toast.svelte.js';
+
+	async function copyText(text: string) {
+		await navigator.clipboard.writeText(text);
+		addToast(t('common.copied'), 'success', 1500);
+	}
 
 	// --- Google OAuth ---
 	interface GoogleStatus {
@@ -232,7 +238,7 @@
 					<a href={flow.verificationUrl} target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80 text-sm break-all">
 						{flow.verificationUrl}
 					</a>
-					<p class="text-2xl font-mono font-bold text-text tracking-widest">{flow.userCode}</p>
+					<button onclick={() => copyText(flow?.userCode ?? '')} class="text-2xl font-mono font-bold text-text tracking-widest hover:text-accent-text transition-colors cursor-pointer" title={t('common.copy')}>{flow.userCode}</button>
 				</div>
 				<p class="text-xs text-text-subtle">{t('integrations.waiting_auth')}</p>
 			</div>

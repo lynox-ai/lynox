@@ -25,20 +25,35 @@
 
 	let runs = $state<RunRecord[]>([]);
 	let loading = $state(true);
+	let loadingMore = $state(false);
 	let expandedRun = $state<string | null>(null);
 	let toolCalls = $state<ToolCall[]>([]);
 	let stats = $state<{ total_runs?: number; total_cost_usd?: number } | null>(null);
+	let hasMore = $state(true);
+	const PAGE_SIZE = 50;
 
 	async function loadRuns() {
 		loading = true;
 		const [runsRes, statsRes] = await Promise.all([
-			fetch(`${getApiBase()}/history/runs?limit=50`),
+			fetch(`${getApiBase()}/history/runs?limit=${PAGE_SIZE}`),
 			fetch(`${getApiBase()}/history/stats`)
 		]);
 		const runsData = (await runsRes.json()) as { runs: RunRecord[] };
 		runs = runsData.runs;
+		hasMore = runsData.runs.length >= PAGE_SIZE;
 		stats = (await statsRes.json()) as typeof stats;
 		loading = false;
+	}
+
+	async function loadMore() {
+		if (!hasMore || loadingMore) return;
+		loadingMore = true;
+		const offset = runs.length;
+		const res = await fetch(`${getApiBase()}/history/runs?limit=${PAGE_SIZE}&offset=${offset}`);
+		const data = (await res.json()) as { runs: RunRecord[] };
+		runs = [...runs, ...data.runs];
+		hasMore = data.runs.length >= PAGE_SIZE;
+		loadingMore = false;
 	}
 
 	async function toggleRun(id: string) {
@@ -123,6 +138,15 @@
 					{/if}
 				</div>
 			{/each}
+			{#if hasMore}
+				<button
+					onclick={loadMore}
+					disabled={loadingMore}
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-2.5 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50"
+				>
+					{loadingMore ? t('common.loading') : t('history.load_more')}
+				</button>
+			{/if}
 		</div>
 	{/if}
 </div>
