@@ -360,23 +360,38 @@
 		</div>
 	</div>
 
-	<!-- Permission prompt -->
+	<!-- Permission / Ask User prompt -->
 	{#if pendingPermission}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3">
-			<div class="max-w-3xl mx-auto flex items-center gap-3">
-				<p class="flex-1 text-sm text-text-muted">{pendingPermission.question}</p>
-				<button
-					onclick={() => replyPermission('y')}
-					class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity"
-				>
-					{t('chat.allow')}
-				</button>
-				<button
-					onclick={() => replyPermission('n')}
-					class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity"
-				>
-					{t('chat.deny')}
-				</button>
+			<div class="max-w-3xl mx-auto space-y-2">
+				<p class="text-sm text-text-muted">{pendingPermission.question}</p>
+				<div class="flex flex-wrap gap-2">
+					{#if pendingPermission.options && pendingPermission.options.length > 0}
+						<!-- Multiple choice options from ask_user -->
+						{#each pendingPermission.options as option}
+							<button
+								onclick={() => replyPermission(option)}
+								class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all"
+							>
+								{option}
+							</button>
+						{/each}
+					{:else}
+						<!-- Permission guard: Allow / Deny -->
+						<button
+							onclick={() => replyPermission('y')}
+							class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity"
+						>
+							{t('chat.allow')}
+						</button>
+						<button
+							onclick={() => replyPermission('n')}
+							class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity"
+						>
+							{t('chat.deny')}
+						</button>
+					{/if}
+				</div>
 			</div>
 		</div>
 	{/if}
