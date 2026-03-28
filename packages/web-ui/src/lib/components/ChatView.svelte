@@ -353,7 +353,7 @@
 						</button>
 					{/if}
 					<button onclick={() => downloadExport('md')} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">↓ MD</button>
-					<button onclick={() => downloadExport('json')} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">↓ JSON</button>
+					<button onclick={async () => { const { exportAsJSON } = await import('../stores/chat.svelte.js'); await navigator.clipboard.writeText(exportAsJSON()); addToast(t('common.copied'), 'success', 1500); }} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">⎘ JSON</button>
 				</div>
 			{/if}
 
