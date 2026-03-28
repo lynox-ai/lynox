@@ -45,7 +45,24 @@
 		} catch { interactions = []; }
 	}
 
-	$effect(() => { if (tab === 'contacts') loadContacts(); else loadDeals(); });
+	let hasDeals = $state(false);
+
+	async function checkDeals() {
+		try {
+			const res = await fetch(`${getApiBase()}/crm/deals?limit=1`);
+			if (res.ok) {
+				const data = (await res.json()) as { deals: Deal[] };
+				hasDeals = data.deals.length > 0;
+			}
+		} catch { /* */ }
+	}
+
+	$effect(() => {
+		loadContacts();
+		checkDeals();
+	});
+
+	$effect(() => { if (tab === 'deals') loadDeals(); });
 
 	const stageColors: Record<string, string> = {
 		lead: 'bg-bg-muted text-text-muted', qualified: 'bg-accent/10 text-accent-text',
@@ -57,10 +74,12 @@
 <div class="p-6 max-w-5xl mx-auto">
 	<div class="flex items-center gap-4 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('crm.title')}</h1>
-		<div class="flex gap-1">
-			<button onclick={() => tab = 'contacts'} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'contacts' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.title')}</button>
-			<button onclick={() => tab = 'deals'} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'deals' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.deals')}</button>
-		</div>
+		{#if hasDeals}
+			<div class="flex gap-1">
+				<button onclick={() => tab = 'contacts'} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'contacts' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.title')}</button>
+				<button onclick={() => { tab = 'deals'; loadDeals(); }} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'deals' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.deals')}</button>
+			</div>
+		{/if}
 	</div>
 
 	{#if error}
