@@ -30,48 +30,76 @@
 
 	async function loadGoogleStatus() {
 		googleLoading = true;
-		const res = await fetch(`${getApiBase()}/google/status`);
-		googleStatus = (await res.json()) as GoogleStatus;
+		try {
+			const res = await fetch(`${getApiBase()}/google/status`);
+			if (!res.ok) throw new Error();
+			googleStatus = (await res.json()) as GoogleStatus;
+		} catch {
+			googleStatus = null;
+		}
 		googleLoading = false;
 	}
 
 	async function saveGoogleCredentials() {
 		if (!googleClientId.trim() || !googleClientSecret.trim()) return;
 		googleCredSaving = true;
-		await fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, {
-			method: 'PUT', headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ value: googleClientId })
-		});
-		await fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, {
-			method: 'PUT', headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ value: googleClientSecret })
-		});
-		googleClientId = '';
-		googleClientSecret = '';
+		try {
+			const [r1, r2] = await Promise.all([
+				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, {
+					method: 'PUT', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ value: googleClientId })
+				}),
+				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, {
+					method: 'PUT', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ value: googleClientSecret })
+				}),
+			]);
+			if (!r1.ok || !r2.ok) throw new Error();
+			googleClientId = '';
+			googleClientSecret = '';
+			googleCredSaved = true;
+			setTimeout(() => (googleCredSaved = false), 2000);
+			await loadGoogleStatus();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
 		googleCredSaving = false;
-		googleCredSaved = true;
-		await new Promise((r) => setTimeout(r, 3000));
-		googleCredSaved = false;
-		await loadGoogleStatus();
 	}
+
+	let authPollInterval: ReturnType<typeof setInterval> | null = null;
 
 	async function startGoogleAuth() {
 		connecting = true;
 		flow = null;
-		const res = await fetch(`${getApiBase()}/google/auth`, { method: 'POST' });
-		if (res.ok) { flow = (await res.json()) as DeviceFlow; }
+		try {
+			const res = await fetch(`${getApiBase()}/google/auth`, { method: 'POST' });
+			if (res.ok) { flow = (await res.json()) as DeviceFlow; }
+		} catch { /* ignore */ }
 		connecting = false;
-		const interval = setInterval(async () => {
-			const r = await fetch(`${getApiBase()}/google/status`);
-			const s = (await r.json()) as GoogleStatus;
-			if (s.authenticated) { googleStatus = s; flow = null; clearInterval(interval); }
+		if (authPollInterval) clearInterval(authPollInterval);
+		authPollInterval = setInterval(async () => {
+			try {
+				const r = await fetch(`${getApiBase()}/google/status`);
+				if (!r.ok) return;
+				const s = (await r.json()) as GoogleStatus;
+				if (s.authenticated) {
+					googleStatus = s;
+					flow = null;
+					if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null; }
+				}
+			} catch { /* ignore */ }
 		}, 3000);
-		setTimeout(() => clearInterval(interval), 5 * 60_000);
+		setTimeout(() => { if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null; } }, 5 * 60_000);
 	}
 
 	async function revokeGoogle() {
 		revoking = true;
-		await fetch(`${getApiBase()}/google/revoke`, { method: 'POST' });
+		try {
+			const res = await fetch(`${getApiBase()}/google/revoke`, { method: 'POST' });
+			if (!res.ok) throw new Error();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
 		revoking = false;
 		await loadGoogleStatus();
 	}
@@ -82,73 +110,83 @@
 	let telegramSaving = $state(false);
 	let telegramSaved = $state(false);
 	let telegramConfigured = $state(false);
-	let telegramLoading = $state(true);
-
-	async function loadTelegramStatus() {
-		telegramLoading = true;
-		const res = await fetch(`${getApiBase()}/secrets`);
-		const data = (await res.json()) as { names: string[] };
-		telegramConfigured = data.names.includes('TELEGRAM_BOT_TOKEN');
-		telegramLoading = false;
-	}
-
-	async function saveTelegram() {
-		if (!telegramToken.trim()) return;
-		telegramSaving = true;
-		await fetch(`${getApiBase()}/secrets/TELEGRAM_BOT_TOKEN`, {
-			method: 'PUT', headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ value: telegramToken })
-		});
-		if (telegramChatId.trim()) {
-			await fetch(`${getApiBase()}/secrets/TELEGRAM_ALLOWED_CHAT_IDS`, {
-				method: 'PUT', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ value: telegramChatId })
-			});
-		}
-		telegramToken = '';
-		telegramChatId = '';
-		telegramSaving = false;
-		telegramSaved = true;
-		await new Promise((r) => setTimeout(r, 3000));
-		telegramSaved = false;
-		await loadTelegramStatus();
-	}
 
 	// --- Web Search ---
 	let searchKey = $state('');
 	let searchSaving = $state(false);
 	let searchSaved = $state(false);
 	let searchConfigured = $state(false);
-	let searchLoading = $state(true);
 
-	async function loadSearchStatus() {
-		searchLoading = true;
-		const res = await fetch(`${getApiBase()}/secrets`);
-		const data = (await res.json()) as { names: string[] };
-		searchConfigured = data.names.includes('TAVILY_API_KEY') || data.names.includes('SEARCH_API_KEY');
-		searchLoading = false;
+	let secretsLoading = $state(true);
+
+	async function loadSecretStatuses() {
+		secretsLoading = true;
+		try {
+			const res = await fetch(`${getApiBase()}/secrets`);
+			if (!res.ok) throw new Error();
+			const data = (await res.json()) as { names: string[] };
+			telegramConfigured = data.names.includes('TELEGRAM_BOT_TOKEN');
+			searchConfigured = data.names.includes('TAVILY_API_KEY') || data.names.includes('SEARCH_API_KEY');
+		} catch { /* ignore */ }
+		secretsLoading = false;
+	}
+
+	async function saveTelegram() {
+		if (!telegramToken.trim()) return;
+		telegramSaving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/TELEGRAM_BOT_TOKEN`, {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: telegramToken })
+			});
+			if (!res.ok) throw new Error();
+			if (telegramChatId.trim()) {
+				const r2 = await fetch(`${getApiBase()}/secrets/TELEGRAM_ALLOWED_CHAT_IDS`, {
+					method: 'PUT', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ value: telegramChatId })
+				});
+				if (!r2.ok) throw new Error();
+			}
+			telegramToken = '';
+			telegramChatId = '';
+			telegramSaved = true;
+			setTimeout(() => (telegramSaved = false), 2000);
+			await loadSecretStatuses();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
+		telegramSaving = false;
 	}
 
 	async function saveSearch() {
 		if (!searchKey.trim()) return;
 		searchSaving = true;
-		await fetch(`${getApiBase()}/secrets/TAVILY_API_KEY`, {
-			method: 'PUT', headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ value: searchKey })
-		});
-		searchKey = '';
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/TAVILY_API_KEY`, {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: searchKey })
+			});
+			if (!res.ok) throw new Error();
+			searchKey = '';
+			searchSaved = true;
+			setTimeout(() => (searchSaved = false), 2000);
+			await loadSecretStatuses();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
 		searchSaving = false;
-		searchSaved = true;
-		await new Promise((r) => setTimeout(r, 3000));
-		searchSaved = false;
-		await loadSearchStatus();
 	}
 
 	// Load all statuses on mount
+	import { onDestroy } from 'svelte';
+
 	$effect(() => {
 		loadGoogleStatus();
-		loadTelegramStatus();
-		loadSearchStatus();
+		loadSecretStatuses();
+	});
+
+	onDestroy(() => {
+		if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null; }
 	});
 </script>
 
@@ -262,7 +300,7 @@
 				<h2 class="font-medium">{t('integrations.telegram')}</h2>
 				<p class="text-xs text-text-muted mt-1">{t('integrations.telegram_desc')}</p>
 			</div>
-			{#if telegramLoading}
+			{#if secretsLoading}
 				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
 			{:else if telegramConfigured}
 				<span class="text-xs text-success">{t('integrations.telegram_configured')}</span>
@@ -318,7 +356,7 @@
 				<h2 class="font-medium">{t('integrations.search')}</h2>
 				<p class="text-xs text-text-muted mt-1">{t('integrations.search_desc')}</p>
 			</div>
-			{#if searchLoading}
+			{#if secretsLoading}
 				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
 			{:else if searchConfigured}
 				<span class="text-xs text-success">{t('integrations.search_configured')}</span>

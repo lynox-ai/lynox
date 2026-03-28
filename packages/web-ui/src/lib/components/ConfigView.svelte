@@ -35,7 +35,8 @@
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error();
-			config = (await res.json()) as Config;
+			const data = (await res.json()) as Config;
+			config = { ...data, memory_extraction: data.memory_extraction ?? true };
 		} catch {
 			error = t('common.load_failed');
 		}

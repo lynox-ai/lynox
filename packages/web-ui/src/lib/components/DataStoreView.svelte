@@ -10,26 +10,37 @@
 	let rows = $state<Record<string, unknown>[]>([]);
 	let rowsLoading = $state(false);
 	let total = $state(0);
+	let error = $state('');
 
 	async function loadCollections() {
 		loading = true;
+		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/datastore/collections`);
+			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { collections: Collection[] };
 			collections = data.collections;
-		} catch { /* */ }
+		} catch {
+			error = t('common.load_failed');
+		}
 		loading = false;
 	}
 
 	async function loadRows(collection: string) {
 		selectedCollection = collection;
 		rowsLoading = true;
+		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/datastore/${encodeURIComponent(collection)}?limit=20`);
+			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { rows: Record<string, unknown>[]; total: number };
 			rows = data.rows;
 			total = data.total;
-		} catch { rows = []; total = 0; }
+		} catch {
+			error = t('common.load_failed');
+			rows = [];
+			total = 0;
+		}
 		rowsLoading = false;
 	}
 
@@ -42,6 +53,10 @@
 <div class="p-6 max-w-5xl mx-auto">
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-4 mt-2">{t('data.title')}</h1>
+
+	{#if error}
+		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
 
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>

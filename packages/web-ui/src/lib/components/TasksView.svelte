@@ -33,18 +33,24 @@
 
 	async function createTask() {
 		if (!newTitle.trim()) return;
-		await fetch(`${getApiBase()}/tasks`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				title: newTitle,
-				description: newTitle,
-				scheduleCron: newSchedule || undefined
-			})
-		});
-		newTitle = '';
-		newSchedule = '';
-		await loadTasks();
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/tasks`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					title: newTitle,
+					description: newTitle,
+					scheduleCron: newSchedule || undefined
+				})
+			});
+			if (!res.ok) throw new Error();
+			newTitle = '';
+			newSchedule = '';
+			await loadTasks();
+		} catch {
+			error = t('common.save_failed');
+		}
 	}
 
 	$effect(() => {

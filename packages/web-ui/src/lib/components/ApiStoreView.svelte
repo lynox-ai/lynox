@@ -8,14 +8,19 @@
 	let profiles = $state<ApiProfile[]>([]);
 	let loading = $state(true);
 	let expanded = $state<string | null>(null);
+	let error = $state('');
 
 	async function loadProfiles() {
 		loading = true;
+		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/api-profiles`);
+			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { profiles: ApiProfile[] };
 			profiles = data.profiles;
-		} catch { /* */ }
+		} catch {
+			error = t('common.load_failed');
+		}
 		loading = false;
 	}
 
@@ -25,6 +30,10 @@
 <div class="p-6 max-w-4xl mx-auto">
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-4 mt-2">{t('apis.title')}</h1>
+
+	{#if error}
+		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
 
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>

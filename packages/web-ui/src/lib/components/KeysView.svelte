@@ -27,21 +27,29 @@
 		if (!newValue.trim()) return;
 		saving = true;
 		error = '';
-		await fetch(`${getApiBase()}/secrets/${encodeURIComponent(newName)}`, {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ value: newValue })
-		});
-		newValue = '';
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(newName)}`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: newValue })
+			});
+			if (!res.ok) throw new Error();
+			newValue = '';
+			await loadSecrets();
+		} catch {
+			error = t('common.save_failed');
+		}
 		saving = false;
-		await new Promise((r) => setTimeout(r, 3000));
-		await loadSecrets();
 	}
 
 	async function deleteSecret(name: string) {
-		await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
-		await new Promise((r) => setTimeout(r, 3000));
-		await loadSecrets();
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
+			if (!res.ok) throw new Error();
+			await loadSecrets();
+		} catch {
+			error = t('common.save_failed');
+		}
 	}
 
 	$effect(() => {

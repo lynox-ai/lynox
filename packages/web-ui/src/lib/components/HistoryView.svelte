@@ -56,11 +56,16 @@
 	async function loadMore() {
 		if (!hasMore || loadingMore) return;
 		loadingMore = true;
-		const offset = runs.length;
-		const res = await fetch(`${getApiBase()}/history/runs?limit=${PAGE_SIZE}&offset=${offset}`);
-		const data = (await res.json()) as { runs: RunRecord[] };
-		runs = [...runs, ...data.runs];
-		hasMore = data.runs.length >= PAGE_SIZE;
+		try {
+			const offset = runs.length;
+			const res = await fetch(`${getApiBase()}/history/runs?limit=${PAGE_SIZE}&offset=${offset}`);
+			if (!res.ok) throw new Error();
+			const data = (await res.json()) as { runs: RunRecord[] };
+			runs = [...runs, ...data.runs];
+			hasMore = data.runs.length >= PAGE_SIZE;
+		} catch {
+			error = t('common.load_failed');
+		}
 		loadingMore = false;
 	}
 
@@ -71,9 +76,14 @@
 			return;
 		}
 		expandedRun = id;
-		const res = await fetch(`${getApiBase()}/history/runs/${id}/tool-calls`);
-		const data = (await res.json()) as { toolCalls: ToolCall[] };
-		toolCalls = data.toolCalls;
+		try {
+			const res = await fetch(`${getApiBase()}/history/runs/${id}/tool-calls`);
+			if (!res.ok) throw new Error();
+			const data = (await res.json()) as { toolCalls: ToolCall[] };
+			toolCalls = data.toolCalls;
+		} catch {
+			toolCalls = [];
+		}
 	}
 
 	$effect(() => {

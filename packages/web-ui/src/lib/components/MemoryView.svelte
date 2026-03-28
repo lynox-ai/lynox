@@ -35,26 +35,38 @@
 
 	async function saveEdit() {
 		saving = true;
-		await fetch(`${getApiBase()}/memory/${selectedNs}`, {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ content: editContent })
-		});
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/memory/${selectedNs}`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ content: editContent })
+			});
+			if (!res.ok) throw new Error();
+			await loadNamespace();
+		} catch {
+			error = t('common.save_failed');
+		}
 		saving = false;
-		await loadNamespace();
 	}
 
 	async function appendEntry() {
 		if (!appendText.trim()) return;
 		saving = true;
-		await fetch(`${getApiBase()}/memory/${selectedNs}/append`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ text: '\n' + appendText })
-		});
-		appendText = '';
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/memory/${selectedNs}/append`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ text: '\n' + appendText })
+			});
+			if (!res.ok) throw new Error();
+			appendText = '';
+			await loadNamespace();
+		} catch {
+			error = t('common.save_failed');
+		}
 		saving = false;
-		await loadNamespace();
 	}
 
 	async function deleteEntry() {
@@ -62,12 +74,18 @@
 		const confirmed = confirm(`${t('memory.delete_confirm_prefix')} "${deletePattern}" ${t('memory.delete_confirm_from')} ${selectedNs} ${t('memory.delete_confirm_suffix')}`);
 		if (!confirmed) return;
 		saving = true;
-		await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(deletePattern)}`, {
-			method: 'DELETE'
-		});
-		deletePattern = '';
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(deletePattern)}`, {
+				method: 'DELETE'
+			});
+			if (!res.ok) throw new Error();
+			deletePattern = '';
+			await loadNamespace();
+		} catch {
+			error = t('common.save_failed');
+		}
 		saving = false;
-		await loadNamespace();
 	}
 
 	$effect(() => {
