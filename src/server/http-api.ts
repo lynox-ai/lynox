@@ -608,5 +608,171 @@ export class LynoxHTTPApi {
       await google.revoke();
       jsonResponse(res, 200, { ok: true });
     });
+
+    // ── Knowledge Graph ──────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/kg/stats', async (_req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { entityCount: 0, relationCount: 0, memoryCount: 0, communityCount: 0 }); return; }
+      const stats = await kg.stats();
+      jsonResponse(res, 200, stats);
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { entities: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const typeFilter = url.searchParams.get('type') ?? '';
+      const query = url.searchParams.get('q') ?? '';
+      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      try {
+        if (query) {
+          const result = await kg.retrieve(query, [{ type: 'global', id: 'global' }], { topK: limit });
+          const entities = result.entities ?? [];
+          jsonResponse(res, 200, { entities });
+        } else {
+          const listOpts: { type?: string; limit?: number } = { limit };
+          if (typeFilter) listOpts.type = typeFilter;
+          const result = await kg.listEntities(listOpts);
+          jsonResponse(res, 200, { entities: result });
+        }
+      } catch {
+        jsonResponse(res, 200, { entities: [] });
+      }
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities/:id', async (_req, res, params) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { errorResponse(res, 503, 'Knowledge graph not available'); return; }
+      try {
+        const entity = await kg.getEntity(params['id']!);
+        if (!entity) { errorResponse(res, 404, 'Entity not found'); return; }
+        const relations = await kg.getEntityRelations(entity.id);
+        jsonResponse(res, 200, { entity, relations });
+      } catch {
+        errorResponse(res, 404, 'Entity not found');
+      }
+    }));
+
+    // ── CRM ──────────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/crm/contacts', async (req, res) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { contacts: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const typeFilter = url.searchParams.get('type') ?? '';
+      const filter: Record<string, unknown> = {};
+      if (typeFilter) filter['type'] = { $eq: typeFilter };
+      const contacts = crm.listContacts(Object.keys(filter).length > 0 ? filter : undefined, limit);
+      jsonResponse(res, 200, { contacts });
+    });
+
+    this.staticRoutes.set('GET /api/crm/deals', async (req, res) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const deals = crm.getOpenDeals(limit);
+      jsonResponse(res, 200, { deals });
+    });
+
+    this.staticRoutes.set('GET /api/crm/stats', async (_req, res) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { contacts: 0, pipeline: [] }); return; }
+      const stats = crm.getContactStats();
+      const pipeline = crm.getPipelineSummary();
+      jsonResponse(res, 200, { contacts: stats, pipeline });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/crm/contacts/:name/interactions', async (_req, res, params) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { interactions: [] }); return; }
+      const interactions = crm.getInteractions(decodeURIComponent(params['name']!), 50);
+      jsonResponse(res, 200, { interactions });
+    }));
+
+    // ── Backups ──────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/backups', async (_req, res) => {
+      const bm = engine.getBackupManager();
+      if (!bm) { jsonResponse(res, 200, { backups: [] }); return; }
+      const backups = bm.listBackups();
+      jsonResponse(res, 200, { backups });
+    });
+
+    this.staticRoutes.set('POST /api/backups', async (_req, res) => {
+      const bm = engine.getBackupManager();
+      if (!bm) { errorResponse(res, 503, 'Backup manager not available'); return; }
+      try {
+        const result = await bm.createBackup();
+        jsonResponse(res, 200, result);
+      } catch (err: unknown) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Backup failed');
+      }
+    });
+
+    // ── API Store ────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/api-profiles', async (_req, res) => {
+      const store = engine.getApiStore();
+      if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
+      const profiles = store.getAll();
+      jsonResponse(res, 200, { profiles });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/api-profiles/:id', async (_req, res, params) => {
+      const store = engine.getApiStore();
+      if (!store) { errorResponse(res, 503, 'API store not available'); return; }
+      const profile = store.get(params['id']!);
+      if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
+      jsonResponse(res, 200, { profile });
+    }));
+
+    // ── DataStore ────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/datastore/collections', async (_req, res) => {
+      const ds = engine.getDataStore();
+      if (!ds) { jsonResponse(res, 200, { collections: [] }); return; }
+      const collections = ds.listCollections();
+      jsonResponse(res, 200, { collections });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/datastore/:collection', async (req, res, params) => {
+      const ds = engine.getDataStore();
+      if (!ds) { errorResponse(res, 503, 'DataStore not available'); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
+      try {
+        const result = ds.queryRecords({ collection: params['collection']!, limit, offset });
+        jsonResponse(res, 200, result);
+      } catch (err: unknown) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Query failed');
+      }
+    }));
+
+    // ── Files (workspace) ────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/files', async (req, res) => {
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const dirPath = url.searchParams.get('path') ?? '.';
+      try {
+        const { readdirSync, statSync } = await import('node:fs');
+        const { join, resolve } = await import('node:path');
+        const { getWorkspaceCwd } = await import('../core/workspace.js');
+        const base = getWorkspaceCwd();
+        const target = resolve(base, dirPath);
+        if (!target.startsWith(base)) { errorResponse(res, 403, 'Outside workspace'); return; }
+        const entries = readdirSync(target, { withFileTypes: true }).map(e => ({
+          name: e.name,
+          isDirectory: e.isDirectory(),
+          size: e.isFile() ? statSync(join(target, e.name)).size : 0,
+        }));
+        jsonResponse(res, 200, { path: dirPath, entries });
+      } catch {
+        jsonResponse(res, 200, { path: dirPath, entries: [] });
+      }
+    });
   }
 }

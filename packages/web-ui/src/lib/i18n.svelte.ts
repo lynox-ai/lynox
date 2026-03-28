@@ -18,6 +18,55 @@ const translations: Record<string, Record<Locale, string>> = {
 	'cmd.nav': { de: 'Navigation', en: 'Navigation' },
 	'cmd.actions': { de: 'Aktionen', en: 'Actions' },
 
+	// Nav (extended)
+	'nav.contacts': { de: 'Kontakte', en: 'Contacts' },
+	'nav.files': { de: 'Dateien', en: 'Files' },
+	'nav.graph': { de: 'Graph', en: 'Graph' },
+
+	// Knowledge Graph
+	'kg.title': { de: 'Knowledge Graph', en: 'Knowledge Graph' },
+	'kg.search': { de: 'Entities suchen...', en: 'Search entities...' },
+	'kg.no_entities': { de: 'Keine Entities. Chatte mit lynox, um den Knowledge Graph aufzubauen.', en: 'No entities. Chat with lynox to build the knowledge graph.' },
+	'kg.mentions': { de: 'Erwaechnungen', en: 'mentions' },
+	'kg.relations': { de: 'Beziehungen', en: 'Relations' },
+	'kg.aliases': { de: 'Aliase', en: 'Aliases' },
+	'kg.first_seen': { de: 'Erstmals gesehen', en: 'First seen' },
+	'kg.all': { de: 'Alle', en: 'All' },
+	'kg.people': { de: 'Personen', en: 'People' },
+	'kg.orgs': { de: 'Organisationen', en: 'Organizations' },
+	'kg.projects': { de: 'Projekte', en: 'Projects' },
+
+	// CRM
+	'crm.title': { de: 'Kontakte', en: 'Contacts' },
+	'crm.deals': { de: 'Deals', en: 'Deals' },
+	'crm.no_contacts': { de: 'Keine Kontakte. Erwaehne Personen im Chat, um sie automatisch zu erfassen.', en: 'No contacts. Mention people in chat to track them automatically.' },
+	'crm.no_deals': { de: 'Keine Deals. Erwaehne Deals im Chat, um sie automatisch zu erfassen.', en: 'No deals. Mention deals in chat to track them automatically.' },
+	'crm.interactions': { de: 'Interaktionen', en: 'Interactions' },
+	'crm.stage': { de: 'Phase', en: 'Stage' },
+	'crm.value': { de: 'Wert', en: 'Value' },
+
+	// Backups
+	'backups.title': { de: 'Backups', en: 'Backups' },
+	'backups.no_backups': { de: 'Keine Backups. Erstelle dein erstes Backup.', en: 'No backups. Create your first backup.' },
+	'backups.create': { de: 'Backup erstellen', en: 'Create backup' },
+	'backups.creating': { de: 'Erstelle Backup...', en: 'Creating backup...' },
+	'backups.encrypted': { de: 'Verschluesselt', en: 'Encrypted' },
+	'backups.files': { de: 'Dateien', en: 'files' },
+
+	// API Store
+	'apis.title': { de: 'API Profiles', en: 'API Profiles' },
+	'apis.no_profiles': { de: 'Keine API-Profile registriert.', en: 'No API profiles registered.' },
+	'apis.endpoints': { de: 'Endpoints', en: 'Endpoints' },
+
+	// DataStore
+	'data.title': { de: 'Daten', en: 'Data' },
+	'data.no_collections': { de: 'Keine Tabellen. Der Agent erstellt sie automatisch.', en: 'No tables. The agent creates them automatically.' },
+	'data.rows': { de: 'Zeilen', en: 'rows' },
+
+	// Files
+	'files.title': { de: 'Dateien', en: 'Files' },
+	'files.no_files': { de: 'Keine Dateien im Workspace.', en: 'No files in workspace.' },
+
 	// Status Bar
 	'status.engine_ok': { de: 'Engine OK', en: 'Engine OK' },
 	'status.engine_error': { de: 'Engine Fehler', en: 'Engine Error' },

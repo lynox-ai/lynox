@@ -3,7 +3,9 @@ import type {
   IKnowledgeLayer,
   MemoryNamespace,
   MemoryScopeRef,
+  MemoryScopeType,
   EntityRecord,
+  EntityType,
   RelationRecord,
   ContradictionInfo,
   KnowledgeStoreResult,
@@ -262,6 +264,42 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   // === Entity Operations ===
+
+  async listEntities(opts?: { type?: string; limit?: number }): Promise<EntityRecord[]> {
+    const limit = opts?.limit ?? 50;
+    const typeFilter = opts?.type ? `WHERE e.entity_type = $type` : '';
+    const params: Record<string, unknown> = opts?.type ? { type: opts.type } : {};
+    const rows = await this.graph.query(
+      `MATCH (e:Entity) ${typeFilter} RETURN e.id, e.canonical_name, e.entity_type, e.aliases, e.description, e.scope_type, e.scope_id, e.mention_count, e.first_seen_at, e.last_seen_at ORDER BY e.mention_count DESC LIMIT ${limit}`,
+      params as Record<string, import('@ladybugdb/core').LbugValue>,
+    );
+    return rows.map(r => this._rowToEntity(r));
+  }
+
+  async getEntity(id: string): Promise<EntityRecord | null> {
+    const rows = await this.graph.query(
+      `MATCH (e:Entity) WHERE e.id = $id RETURN e.id, e.canonical_name, e.entity_type, e.aliases, e.description, e.scope_type, e.scope_id, e.mention_count, e.first_seen_at, e.last_seen_at`,
+      { id } as Record<string, import('@ladybugdb/core').LbugValue>,
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return this._rowToEntity(r);
+  }
+
+  private _rowToEntity(r: Record<string, import('@ladybugdb/core').LbugValue>): EntityRecord {
+    return {
+      id: String(r['e.id'] ?? ''),
+      canonicalName: String(r['e.canonical_name'] ?? ''),
+      entityType: (String(r['e.entity_type'] ?? 'concept')) as EntityType,
+      aliases: Array.isArray(r['e.aliases']) ? r['e.aliases'].map(String) : [],
+      description: String(r['e.description'] ?? ''),
+      scopeType: (String(r['e.scope_type'] ?? 'global')) as MemoryScopeType,
+      scopeId: String(r['e.scope_id'] ?? ''),
+      mentionCount: Number(r['e.mention_count'] ?? 0),
+      firstSeenAt: String(r['e.first_seen_at'] ?? ''),
+      lastSeenAt: String(r['e.last_seen_at'] ?? ''),
+    };
+  }
 
   async resolveEntity(name: string, scopes: MemoryScopeRef[]): Promise<EntityRecord | null> {
     return this.entityResolver.resolve(name, 'concept', scopes, { createIfMissing: false });

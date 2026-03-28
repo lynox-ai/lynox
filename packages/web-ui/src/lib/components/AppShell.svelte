@@ -18,8 +18,11 @@
 	const nav = [
 		{ href: '/app', labelKey: 'nav.chat', exact: true, icon: 'chat' },
 		{ href: '/app/memory', labelKey: 'nav.knowledge', exact: false, icon: 'brain' },
+		{ href: '/app/graph', labelKey: 'nav.graph', exact: false, icon: 'graph' },
+		{ href: '/app/contacts', labelKey: 'nav.contacts', exact: false, icon: 'contacts' },
 		{ href: '/app/history', labelKey: 'nav.history', exact: false, icon: 'clock' },
-		{ href: '/app/tasks', labelKey: 'nav.tasks', exact: false, icon: 'bolt' }
+		{ href: '/app/tasks', labelKey: 'nav.tasks', exact: false, icon: 'bolt' },
+		{ href: '/app/files', labelKey: 'nav.files', exact: false, icon: 'files' },
 	];
 
 	function isActive(href: string, exact: boolean): boolean {
@@ -112,6 +115,12 @@
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
 							{:else if item.icon === 'bolt'}
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" /></svg>
+							{:else if item.icon === 'graph'}
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /></svg>
+							{:else if item.icon === 'contacts'}
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" /></svg>
+							{:else if item.icon === 'files'}
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg>
 							{/if}
 							{t(item.labelKey)}
 						</a>

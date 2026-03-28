@@ -13,7 +13,9 @@
 		{ href: '/app/settings/config', titleKey: 'settings.config', descKey: 'settings.config_desc' },
 		{ href: '/app/settings/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc' },
 		{ href: '/app/settings/integrations', titleKey: 'settings.integrations', descKey: 'settings.integrations_desc' },
-		{ href: '/app/tasks', titleKey: 'settings.tasks', descKey: 'settings.tasks_desc' },
+		{ href: '/app/settings/apis', titleKey: 'apis.title', descKey: 'apis.no_profiles' },
+		{ href: '/app/settings/data', titleKey: 'data.title', descKey: 'data.no_collections' },
+		{ href: '/app/settings/backups', titleKey: 'backups.title', descKey: 'backups.no_backups' },
 	];
 
 	const items = $derived([...baseItems, ...extraItems]);
