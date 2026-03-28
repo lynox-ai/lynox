@@ -206,10 +206,14 @@ export class Engine {
   }
 
   private _recreateClient(): void {
-    this.client = this.userConfig.api_key
-      ? new Anthropic({ apiKey: this.userConfig.api_key, baseURL: this.userConfig.api_base_url })
-      : this.userConfig.api_base_url
-        ? new Anthropic({ baseURL: this.userConfig.api_base_url })
+    const apiKey = this.userConfig.api_key
+      ?? this.secretStore?.resolve('ANTHROPIC_API_KEY')
+      ?? process.env['ANTHROPIC_API_KEY'];
+    const baseUrl = this.userConfig.api_base_url;
+    this.client = apiKey
+      ? new Anthropic({ apiKey, baseURL: baseUrl })
+      : baseUrl
+        ? new Anthropic({ baseURL: baseUrl })
         : new Anthropic();
   }
 
