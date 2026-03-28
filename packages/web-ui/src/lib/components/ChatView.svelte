@@ -50,6 +50,7 @@
 	let batchAnswers = $state<string[]>([]);
 	let batchFocusIdx = $state(0);
 	let inBatchMode = $state(false);
+	let batchFreetext = $state('');
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -501,6 +502,11 @@
 										>{option}</button>
 									{/each}
 								</div>
+							{:else}
+								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex gap-2">
+									<input bind:value={batchFreetext} placeholder={q.question} class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-1.5 text-sm outline-none focus:border-border-hover" />
+									<button type="submit" disabled={!batchFreetext.trim()} class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
+								</form>
 							{/if}
 						{:else if batchAnswers[i]}
 							<button onclick={() => { batchFocusIdx = i; }} class="text-xs text-accent-text">{batchAnswers[i]}</button>
@@ -615,7 +621,7 @@
 				bind:value={inputText}
 				onkeydown={handleKeydown}
 				oninput={autoResize}
-				placeholder={pendingPermission ? pendingPermission.question : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
+				placeholder={pendingPermission && !inBatchMode ? pendingPermission.question : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 				rows="1"
 				disabled={!ready && !pendingPermission}
 				class="flex-1 resize-none rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text placeholder:text-text-subtle focus:border-border-hover outline-none disabled:opacity-50 overflow-hidden"
