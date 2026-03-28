@@ -296,8 +296,29 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
 
-      const task = body && typeof body === 'object' && 'task' in body ? String((body as Record<string, unknown>)['task']) : '';
-      if (!task) { errorResponse(res, 400, 'Missing task'); return; }
+      const b = body as Record<string, unknown> | null;
+      const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
+      if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
+
+      // Build multimodal content if files are attached
+      const files = Array.isArray(b?.['files']) ? b['files'] as { name: string; type: string; data: string }[] : [];
+      let task: string | unknown[];
+      if (files.length > 0) {
+        const content: unknown[] = [];
+        for (const file of files) {
+          if (file.type.startsWith('image/')) {
+            content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
+          } else {
+            // Non-image files: decode and include as text
+            const text = Buffer.from(file.data, 'base64').toString('utf-8');
+            content.push({ type: 'text', text: `[File: ${file.name}]\n${text}` });
+          }
+        }
+        content.push({ type: 'text', text: taskText });
+        task = content;
+      } else {
+        task = taskText;
+      }
 
       // SSE headers
       res.writeHead(200, {
