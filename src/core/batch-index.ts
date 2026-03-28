@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { getLynoxDir } from './config.js';
 
 export interface BatchEntry {
   submitted_at: string;
@@ -14,7 +14,7 @@ export class BatchIndex {
   private loaded = false;
 
   constructor(dir?: string | undefined) {
-    this.path = join(dir ?? join(homedir(), '.lynox'), 'batch-index.json');
+    this.path = join(dir ?? getLynoxDir(), 'batch-index.json');
   }
 
   async load(): Promise<Record<string, BatchEntry>> {

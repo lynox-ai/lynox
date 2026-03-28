@@ -12,8 +12,9 @@ import * as persistence from './run-history-persistence.js';
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 const ENCRYPTED_PREFIX = 'enc:'; // Marks encrypted text in DB
 
-const LYNOX_DIR = getLynoxDir();
-const DB_PATH = join(LYNOX_DIR, 'history.db');
+function getDefaultDbPath(): string {
+  return join(getLynoxDir(), 'history.db');
+}
 
 export interface RunRecord {
   id: string;
@@ -479,7 +480,7 @@ export class RunHistory {
   private _decWarnedFailCount = 0;
 
   constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
-    const path = dbPath ?? DB_PATH;
+    const path = dbPath ?? getDefaultDbPath();
     ensureDirSync(dirname(path));
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');

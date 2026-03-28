@@ -6,7 +6,7 @@ import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { scopeToDir } from './scope-resolver.js';
-import { homedir } from 'node:os';
+import { getLynoxDir } from './config.js';
 import { getErrorMessage } from './utils.js';
 import { ensureDir } from './atomic-write.js';
 import { detectInjectionAttempt } from './data-boundary.js';
@@ -108,7 +108,7 @@ export class Memory implements IMemory {
         : new Anthropic();
     this.apiKey = apiKey;
     this.apiBaseURL = apiBaseURL;
-    this.baseDir = path.join(workingDir ?? path.join(homedir(), '.lynox'), DEFAULT_DIR);
+    this.baseDir = path.join(workingDir ?? getLynoxDir(), DEFAULT_DIR);
     this.contextId = contextId ?? null;
     this.maskFn = maskFn ?? null;
   }

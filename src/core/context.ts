@@ -1,8 +1,8 @@
 import { join, basename } from 'node:path';
-import { homedir } from 'node:os';
 import type { LynoxConfig, LynoxContext } from '../types/index.js';
 import { detectProjectRoot } from './project.js';
 import { sha256Short } from './utils.js';
+import { getLynoxDir } from './config.js';
 
 /**
  * Resolve the LynoxContext for the current session.
@@ -17,7 +17,7 @@ export function resolveContext(config: LynoxConfig): LynoxContext {
     const ctx = config.context;
     return {
       ...ctx,
-      workspaceDir: ctx.workspaceDir || join(homedir(), '.lynox', 'workspace', ctx.id),
+      workspaceDir: ctx.workspaceDir || join(getLynoxDir(), 'workspace', ctx.id),
     };
   }
 
@@ -30,7 +30,7 @@ export function resolveContext(config: LynoxConfig): LynoxContext {
       id: project.id,
       name: basename(project.root),
       source: 'cli',
-      workspaceDir: join(homedir(), '.lynox', 'workspace', project.id),
+      workspaceDir: join(getLynoxDir(), 'workspace', project.id),
       localDir: project.root,
     };
   }
@@ -41,7 +41,7 @@ export function resolveContext(config: LynoxConfig): LynoxContext {
     id,
     name: basename(cwd),
     source: 'cli',
-    workspaceDir: join(homedir(), '.lynox', 'workspace', id),
+    workspaceDir: join(getLynoxDir(), 'workspace', id),
     localDir: cwd,
   };
 }

@@ -9,8 +9,19 @@ import { getErrorMessage } from './utils.js';
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
 
+/** Override for getLynoxDir(). Set via --data-dir or LYNOX_DATA_DIR. */
+let _dataDirOverride: string | null = null;
+
+/**
+ * Override the data directory for this process.
+ * Must be called before Engine.init().
+ */
+export function setDataDir(dir: string): void {
+  _dataDirOverride = dir;
+}
+
 function getUserConfigDir(): string {
-  return join(homedir(), LYNOX_DIR);
+  return _dataDirOverride ?? process.env['LYNOX_DATA_DIR'] ?? join(homedir(), LYNOX_DIR);
 }
 
 function getProjectConfigDir(): string {

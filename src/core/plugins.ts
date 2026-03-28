@@ -1,7 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import type {
   LynoxUserConfig,
   PluginContext,
@@ -11,13 +10,16 @@ import type {
 } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getErrorMessage } from './utils.js';
+import { getLynoxDir } from './config.js';
 
-const PLUGINS_DIR = join(homedir(), '.lynox', 'plugins');
+function getPluginsDir(): string {
+  return join(getLynoxDir(), 'plugins');
+}
 const NPM_NAME_RE = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
 function ensurePluginsDir(): void {
-  ensureDirSync(PLUGINS_DIR);
-  const pkgPath = join(PLUGINS_DIR, 'package.json');
+  ensureDirSync(getPluginsDir());
+  const pkgPath = join(getPluginsDir(), 'package.json');
   if (!existsSync(pkgPath)) {
     writeFileAtomicSync(
       pkgPath,
@@ -27,7 +29,7 @@ function ensurePluginsDir(): void {
 }
 
 function getConfigPath(): string {
-  return join(homedir(), '.lynox', 'config.json');
+  return join(getLynoxDir(), 'config.json');
 }
 
 function writeConfigAtomic(configPath: string, config: Record<string, unknown>): void {
@@ -97,7 +99,7 @@ export class PluginManager {
     }
 
     // Only import from the plugins directory — no arbitrary import() fallback
-    const modulePath = join(PLUGINS_DIR, 'node_modules', name);
+    const modulePath = join(getPluginsDir(), 'node_modules', name);
     if (!existsSync(modulePath)) {
       throw new Error(`Plugin "${name}" not installed. Run /plugin add ${name}`);
     }
@@ -173,7 +175,7 @@ export class PluginManager {
   }
 
   static getPluginsDir(): string {
-    return PLUGINS_DIR;
+    return getPluginsDir();
   }
 
   static install(packageName: string): string {
@@ -183,7 +185,7 @@ export class PluginManager {
     ensurePluginsDir();
     try {
       const output = execFileSync('npm', ['install', packageName], {
-        cwd: PLUGINS_DIR,
+        cwd: getPluginsDir(),
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 60_000,
@@ -204,7 +206,7 @@ export class PluginManager {
     ensurePluginsDir();
     try {
       const output = execFileSync('npm', ['uninstall', packageName], {
-        cwd: PLUGINS_DIR,
+        cwd: getPluginsDir(),
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 60_000,
@@ -219,11 +221,11 @@ export class PluginManager {
   }
 
   static listInstalled(): string[] {
-    const nodeModulesDir = join(PLUGINS_DIR, 'node_modules');
+    const nodeModulesDir = join(getPluginsDir(), 'node_modules');
     if (!existsSync(nodeModulesDir)) return [];
     try {
       const output = execFileSync('npm', ['ls', '--json', '--depth=0'], {
-        cwd: PLUGINS_DIR,
+        cwd: getPluginsDir(),
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 10_000,

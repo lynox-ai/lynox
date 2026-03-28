@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { getLynoxDir } from './config.js';
 
 export interface ModelPricing {
   input: number;
@@ -19,7 +19,7 @@ let overridePricing: Record<string, ModelPricing> | null = null;
 
 function loadPricingOverride(): Record<string, ModelPricing> | null {
   try {
-    const raw = readFileSync(join(homedir(), '.lynox', 'pricing.json'), 'utf-8');
+    const raw = readFileSync(join(getLynoxDir(), 'pricing.json'), 'utf-8');
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return null;
     return parsed as Record<string, ModelPricing>;
