@@ -22,8 +22,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     // Commands
     'cmd.start': '👋 <b>LYNOX</b> — Your AI Business Assistant\n\nSend me any task and I\'ll work on it.\nUse /help for commands, /clear for a fresh start.',
     'cmd.start_new': '👋 <b>Welcome to LYNOX</b>\n\nI\'m your AI business assistant. I learn about your business and work for you autonomously.\n\n<b>What I can do:</b>\n• Research, analysis, writing, planning\n• Manage contacts and deals (built-in CRM)\n• Send and draft emails (Gmail)\n• Schedule meetings (Calendar)\n• Run background tasks and reminders\n• Connect to external APIs\n\nJust tell me what you need — for example:\n• <i>"Research competitors in my industry"</i>\n• <i>"Draft an email to a client"</i>\n• <i>"Show me my open deals"</i>\n\nWhat can I help you with?',
-    'cmd.help': '<b>LYNOX Commands:</b>\n\n/google — Connect Google Workspace (Gmail, Sheets, Calendar)\n/clear — Fresh conversation (knowledge preserved)\n/stop — Abort current task\n/cost — Show costs\n/bug — Report a problem\n/help — This message\n\nJust chat naturally — send text, voice, photos, or files. No commands needed for most tasks.',
-    'cmd.secret': '\uD83D\uDD12 <b>Secrets</b>\n\nSecrets (API keys, passwords) are sensitive data. For security, they are configured by your admin in the deployment settings \u2014 not via Telegram.\n\nIf you need access to a service, ask your admin to add the credentials.',
+    'cmd.help': '<b>LYNOX Commands:</b>\n\n/clear — Fresh conversation (knowledge preserved)\n/stop — Abort current task\n/status — Check if a task is running\n/help — This message\n\nJust chat naturally — send text, voice, photos, or files.\n\n<b>Setup &amp; Settings:</b> Use the Web UI at your lynox instance for integrations, API keys, cost overview, and configuration.',
+    'cmd.use_webui': '🌐 Use the Web UI for this — go to Settings → Integrations in your lynox instance.',
     'cmd.clear': '\uD83D\uDD04 Conversation cleared — starting fresh.\nYour long-term knowledge is preserved.',
     'cmd.bug_usage': '\uD83D\uDC1E <b>Report a Bug</b>\n\nUsage: <code>/bug Your description here</code>\n\nDescribe what went wrong and it will be sent to the development team.',
     'cmd.bug_sent': '\uD83D\uDC1E Bug report sent. Thank you!',
@@ -32,12 +32,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'cmd.stop_none': 'No active task to stop.',
     'cmd.status_running': '\uD83D\uDFE1 A task is currently running. Send /stop to abort.',
     'cmd.status_idle': '\uD83D\uDCA4 Idle — send a message to start a task.',
-    'cmd.google_no_creds': '\u26A0\uFE0F Google Workspace is not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to your server configuration.',
-    'cmd.google_already': '\u2705 Google Workspace is already connected.',
-    'cmd.google_prompt': '\uD83D\uDD17 <b>Connect Google Workspace</b>\n\n1. Open this link on your phone or computer:\n<a href="{url}">{url}</a>\n\n2. Sign in and enter this code:\n<code>{code}</code>\n\n3. Authorize access — I\'ll confirm here when it\'s done.\n\n<i>The code expires in 5 minutes.</i>',
-    'cmd.google_success': '\u2705 <b>Google Workspace connected!</b>\n\nYou can now use Gmail, Sheets, Drive, Calendar, and Docs.\nTry: <i>"Check my emails"</i> or <i>"What meetings do I have this week?"</i>',
-    'cmd.google_failed': '\u274C Google authorization failed or timed out. Try again with /google.',
-    'cmd.google_status': '\uD83D\uDD17 <b>Google Workspace</b>\n\nStatus: {status}\n{details}',
+    'cmd.cost_webui': '💰 Use the Web UI to see your full cost overview — go to History in your lynox instance.',
 
     // Messages
     'msg.busy': '\u23F3 I\'m still working on your last request. I\'ll be ready for your next one shortly!',
@@ -61,17 +56,6 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'cost.session': 'This session',
     'cost.today': 'Today',
 
-    // Sentry opt-in
-    'sentry.prompt': '🛡️ <b>Help improve lynox?</b>\n\nYou can send anonymized error reports so we can fix bugs faster.\n\n<b>What is sent:</b> error type, stack trace, lynox version\n<b>What is never sent:</b> your messages, files, knowledge, or any personal data\n\nYou can disable this anytime in your server settings.',
-    'sentry.yes': '✓ Yes, help improve',
-    'sentry.no': 'No thanks',
-    'sentry.thanks': '🛡️ Thank you! Anonymized error reports are now enabled. This helps us fix bugs faster.\n\n<i>Disable anytime by removing LYNOX_SENTRY_DSN from your server config.</i>',
-    'sentry.declined': '👌 No problem. You can enable this later via /bug or in your server settings.',
-
-    // Support prompt
-    'support.prompt': '💜 <b>lynox is free and open.</b>\n\nIf it\'s saving you time, consider supporting the project so we can keep improving it.\n\nEvery contribution helps — no matter the amount.',
-    'support.yes': '💜 Support lynox',
-    'support.no': 'Maybe later',
   },
   de: {
     // Status
@@ -88,8 +72,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     // Commands
     'cmd.start': '👋 <b>LYNOX</b> — Dein KI-Business-Assistent\n\nSchick mir eine Aufgabe und ich erledige sie.\n/help f\u00FCr Befehle, /clear f\u00FCr ein neues Gespr\u00E4ch.',
     'cmd.start_new': '👋 <b>Willkommen bei LYNOX</b>\n\nIch bin dein KI-Business-Assistent. Ich lerne dein Business kennen und arbeite selbstständig für dich.\n\n<b>Was ich kann:</b>\n• Recherche, Analyse, Texte, Planung\n• Kontakte und Deals verwalten (CRM)\n• E-Mails senden und entwerfen (Gmail)\n• Termine planen (Kalender)\n• Aufgaben im Hintergrund erledigen\n• Externe APIs anbinden\n\nSag mir einfach, was du brauchst — zum Beispiel:\n• <i>\u201ERecherchiere meine Konkurrenz\u201C</i>\n• <i>\u201ESchreib eine E-Mail an einen Kunden\u201C</i>\n• <i>\u201EZeig mir meine offenen Deals\u201C</i>\n\nWomit kann ich dir helfen?',
-    'cmd.help': '<b>LYNOX Befehle:</b>\n\n/google — Google Workspace verbinden (Gmail, Sheets, Kalender)\n/clear — Neues Gespr\u00E4ch (Wissen bleibt erhalten)\n/stop — Aufgabe abbrechen\n/cost — Kosten anzeigen\n/bug — Problem melden\n/help — Diese Hilfe\n\nEinfach chatten — Text, Sprache, Fotos oder Dateien senden. F\u00FCr die meisten Aufgaben brauchst du keine Befehle.',
-    'cmd.secret': '\uD83D\uDD12 <b>Secrets</b>\n\nSecrets (API-Keys, Passw\u00F6rter) sind sensible Daten. Aus Sicherheitsgr\u00FCnden werden sie vom Admin in den Deployment-Einstellungen konfiguriert \u2014 nicht \u00FCber Telegram.\n\nWenn du Zugang zu einem Service brauchst, bitte deinen Admin, die Zugangsdaten hinzuzuf\u00FCgen.',
+    'cmd.help': '<b>LYNOX Befehle:</b>\n\n/clear — Neues Gespr\u00E4ch (Wissen bleibt erhalten)\n/stop — Aufgabe abbrechen\n/status — Pr\u00FCfen ob eine Aufgabe l\u00E4uft\n/help — Diese Hilfe\n\nEinfach chatten — Text, Sprache, Fotos oder Dateien senden.\n\n<b>Setup &amp; Einstellungen:</b> Nutze die Web UI deiner lynox-Instanz f\u00FCr Integrationen, API Keys, Kosten\u00FCbersicht und Konfiguration.',
+    'cmd.use_webui': '\uD83C\uDF10 Nutze die Web UI daf\u00FCr — gehe zu Settings \u2192 Integrationen in deiner lynox-Instanz.',
     'cmd.clear': '\uD83D\uDD04 Gespr\u00E4ch gel\u00F6scht — wir starten frisch.\nDein gespeichertes Wissen bleibt erhalten.',
     'cmd.bug_usage': '\uD83D\uDC1E <b>Fehler melden</b>\n\nVerwendung: <code>/bug Deine Beschreibung hier</code>\n\nBeschreibe was schiefgelaufen ist und es wird ans Entwicklungsteam gesendet.',
     'cmd.bug_sent': '\uD83D\uDC1E Fehlerbericht gesendet. Danke!',
@@ -98,12 +82,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'cmd.stop_none': 'Keine aktive Aufgabe zum Stoppen.',
     'cmd.status_running': '\uD83D\uDFE1 Eine Aufgabe l\u00E4uft gerade. Sende /stop zum Abbrechen.',
     'cmd.status_idle': '\uD83D\uDCA4 Bereit — schick mir eine Nachricht.',
-    'cmd.google_no_creds': '\u26A0\uFE0F Google Workspace ist nicht konfiguriert. F\u00FCge GOOGLE_CLIENT_ID und GOOGLE_CLIENT_SECRET zur Server-Konfiguration hinzu.',
-    'cmd.google_already': '\u2705 Google Workspace ist bereits verbunden.',
-    'cmd.google_prompt': '\uD83D\uDD17 <b>Google Workspace verbinden</b>\n\n1. \u00D6ffne diesen Link auf deinem Handy oder Computer:\n<a href="{url}">{url}</a>\n\n2. Melde dich an und gib diesen Code ein:\n<code>{code}</code>\n\n3. Zugriff erlauben — ich best\u00E4tige hier, sobald es geklappt hat.\n\n<i>Der Code l\u00E4uft in 5 Minuten ab.</i>',
-    'cmd.google_success': '\u2705 <b>Google Workspace verbunden!</b>\n\nDu kannst jetzt Gmail, Sheets, Drive, Calendar und Docs nutzen.\nProbier: <i>\u201ECheck meine Emails\u201C</i> oder <i>\u201EWelche Termine habe ich diese Woche?\u201C</i>',
-    'cmd.google_failed': '\u274C Google-Autorisierung fehlgeschlagen oder abgelaufen. Versuch es nochmal mit /google.',
-    'cmd.google_status': '\uD83D\uDD17 <b>Google Workspace</b>\n\nStatus: {status}\n{details}',
+    'cmd.cost_webui': '\uD83D\uDCB0 Nutze die Web UI f\u00FCr die Kosten\u00FCbersicht — gehe zu History in deiner lynox-Instanz.',
 
     // Messages
     'msg.busy': '\u23F3 Ich arbeite noch an deiner letzten Anfrage. Gleich bin ich wieder f\u00FCr dich da!',
@@ -127,17 +106,6 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     'cost.session': 'Diese Session',
     'cost.today': 'Heute',
 
-    // Sentry opt-in
-    'sentry.prompt': '\uD83D\uDEE1\uFE0F <b>lynox verbessern helfen?</b>\n\nDu kannst anonymisierte Fehlerberichte senden, damit wir Bugs schneller fixen k\u00F6nnen.\n\n<b>Was gesendet wird:</b> Fehlertyp, Stack Trace, lynox-Version\n<b>Was nie gesendet wird:</b> Deine Nachrichten, Dateien, Wissen oder pers\u00F6nliche Daten\n\nDu kannst das jederzeit in den Server-Einstellungen deaktivieren.',
-    'sentry.yes': '\u2713 Ja, helfen',
-    'sentry.no': 'Nein danke',
-    'sentry.thanks': '\uD83D\uDEE1\uFE0F Danke! Anonymisierte Fehlerberichte sind jetzt aktiviert. Das hilft uns, Bugs schneller zu fixen.\n\n<i>Jederzeit deaktivieren: LYNOX_SENTRY_DSN aus der Server-Konfiguration entfernen.</i>',
-    'sentry.declined': '\uD83D\uDC4C Kein Problem. Du kannst das sp\u00E4ter \u00FCber /bug oder in den Server-Einstellungen aktivieren.',
-
-    // Support prompt
-    'support.prompt': '\uD83D\uDC9C <b>lynox ist frei und offen.</b>\n\nWenn es dir Zeit spart, unterst\u00FCtze das Projekt, damit wir es weiter verbessern k\u00F6nnen.\n\nJeder Beitrag hilft — egal wie gross.',
-    'support.yes': '\uD83D\uDC9C lynox unterst\u00FCtzen',
-    'support.no': 'Vielleicht sp\u00E4ter',
   },
 };
 

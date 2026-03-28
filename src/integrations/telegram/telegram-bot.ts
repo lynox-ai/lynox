@@ -183,62 +183,14 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
     }
   });
 
-  bot.command('secret', (ctx) => {
-    const lang = detectLang(ctx.from?.language_code);
-    void ctx.reply(t('cmd.secret', lang), { parse_mode: 'HTML' });
-  });
-
   bot.command('cost', (ctx) => {
     const lang = detectLang(ctx.from?.language_code);
-    const chatId = ctx.chat.id;
-    if (!sessionMap.has(chatId)) {
-      void ctx.reply(`\uD83D\uDCB0 <b>${t('cost.session', lang)}:</b> $0.0000`, { parse_mode: 'HTML' });
-      return;
-    }
-    const session = sessionMap.getOrCreate(chatId, engine, TELEGRAM_SYSTEM_PROMPT_SUFFIX);
-    const u = session.usage;
-    const inputCost = (u.input_tokens * 15 + u.cache_creation_input_tokens * 18.75 + u.cache_read_input_tokens * 1.5) / 1_000_000;
-    const outputCost = (u.output_tokens * 75) / 1_000_000;
-    const total = inputCost + outputCost;
-    void ctx.reply(
-      `\uD83D\uDCB0 <b>${t('cost.session', lang)}:</b> $${total.toFixed(4)}`,
-      { parse_mode: 'HTML' },
-    );
+    void ctx.reply(t('cmd.cost_webui', lang), { parse_mode: 'HTML' });
   });
 
   bot.command('google', (ctx) => {
     const lang = detectLang(ctx.from?.language_code);
-    const googleAuth = engine.getGoogleAuth();
-
-    if (!googleAuth) {
-      void ctx.reply(t('cmd.google_no_creds', lang), { parse_mode: 'HTML' });
-      return;
-    }
-
-    // Check if already connected
-    if (googleAuth.isAuthenticated()) {
-      void ctx.reply(t('cmd.google_already', lang), { parse_mode: 'HTML' });
-      return;
-    }
-
-    // Start device flow
-    void (async () => {
-      try {
-        const { verificationUrl, userCode, waitForAuth } = await googleAuth.startDeviceFlow();
-
-        const msg = t('cmd.google_prompt', lang)
-          .replace(/{url}/g, verificationUrl)
-          .replace(/{code}/g, userCode);
-
-        await ctx.reply(msg, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
-
-        await waitForAuth();
-
-        void ctx.reply(t('cmd.google_success', lang), { parse_mode: 'HTML' });
-      } catch {
-        void ctx.reply(t('cmd.google_failed', lang), { parse_mode: 'HTML' });
-      }
-    })();
+    void ctx.reply(t('cmd.use_webui', lang), { parse_mode: 'HTML' });
   });
 
   bot.command('status', (ctx) => {
@@ -430,55 +382,6 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
 
     const chatId = ctx.chat?.id;
     if (chatId === undefined) {
-      ack();
-      return;
-    }
-
-    // Sentry opt-in callback: sentry:yes / sentry:no
-    if (data.startsWith('sentry:')) {
-      const choice = data.split(':')[1];
-      const lang = detectLang(ctx.from?.language_code);
-
-      if (choice === 'yes') {
-        // Write DSN to .env so it persists across restarts
-        void (async () => {
-          try {
-            const { appendFileSync } = await import('node:fs');
-            const { join } = await import('node:path');
-            const { homedir } = await import('node:os');
-            const envPath = join(homedir(), '.lynox', '.env');
-            // DSN for lynox's shared Sentry project — only allows sending events, not reading
-            const SENTRY_DSN = 'https://21110d12849ca21ae1309b661ab3b603@o4511106815492096.ingest.de.sentry.io/4511106856976464';
-            appendFileSync(envPath, `\nLYNOX_SENTRY_DSN=${SENTRY_DSN}\n`);
-            const { initSentry } = await import('../../core/sentry.js');
-            await initSentry();
-          } catch { /* best-effort */ }
-          // Remove the prompt message
-          try {
-            const msg = ctx.callbackQuery.message;
-            if (msg) await ctx.deleteMessage(msg.message_id);
-          } catch { /* ignore */ }
-          void ctx.reply(t('sentry.thanks', lang), { parse_mode: 'HTML' });
-        })();
-      } else {
-        // Remove the prompt message
-        try {
-          const msg = ctx.callbackQuery.message;
-          if (msg) void ctx.deleteMessage(msg.message_id).catch(() => {});
-        } catch { /* ignore */ }
-        void ctx.reply(t('sentry.declined', lang), { parse_mode: 'HTML' });
-      }
-
-      ack();
-      return;
-    }
-
-    // Support prompt callback: support:no (dismiss)
-    if (data === 'support:no') {
-      try {
-        const msg = ctx.callbackQuery.message;
-        if (msg) void ctx.deleteMessage(msg.message_id).catch(() => {});
-      } catch { /* ignore */ }
       ack();
       return;
     }

@@ -3,9 +3,8 @@
 // Rich status mode: thinking + tool details shown via status message edits.
 // Follow-up suggestion buttons after completion.
 
-import { createReadStream, existsSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { homedir } from 'node:os';
 import type { Telegraf } from 'telegraf';
 import type { StreamEvent } from '../../types/index.js';
 import {
@@ -31,52 +30,6 @@ import { setChatFollowUps, getChatFollowUp, clearChatFollowUps, clearAll as clea
 
 // Sliding window: keep last 20 messages per chat to prevent unbounded growth
 const MAX_MESSAGES_PER_CHAT = 20;
-
-// ---------------------------------------------------------------------------
-// Sentry opt-in prompt — shown once after first successful run
-// ---------------------------------------------------------------------------
-
-let _sentryPrompted = false;
-const SENTRY_FLAG_PATH = join(homedir(), '.lynox', '.sentry-prompted');
-
-function shouldPromptSentry(): boolean {
-  if (_sentryPrompted) return false;
-  try {
-    if (existsSync(SENTRY_FLAG_PATH)) { _sentryPrompted = true; return false; }
-    // Don't prompt if Sentry is already configured
-    if (process.env['LYNOX_SENTRY_DSN']) { _sentryPrompted = true; return false; }
-    return true;
-  } catch { return false; }
-}
-
-function markSentryPrompted(): void {
-  _sentryPrompted = true;
-  try { writeFileSync(SENTRY_FLAG_PATH, new Date().toISOString(), 'utf-8'); } catch { /* best-effort */ }
-}
-
-// ---------------------------------------------------------------------------
-// Support prompt — shown once after N successful runs
-// ---------------------------------------------------------------------------
-
-const SUPPORT_URL = 'https://donate.stripe.com/eVq00ibbKemX61g5Mp8g000';
-const SUPPORT_THRESHOLD = 10; // show after 10 successful tasks
-const SUPPORT_FLAG_PATH = join(homedir(), '.lynox', '.support-prompted');
-let _supportPrompted = false;
-let _successCount = 0;
-
-function shouldPromptSupport(): boolean {
-  if (_supportPrompted) return false;
-  try {
-    if (existsSync(SUPPORT_FLAG_PATH)) { _supportPrompted = true; return false; }
-  } catch { return false; }
-  _successCount++;
-  return _successCount >= SUPPORT_THRESHOLD;
-}
-
-function markSupportPrompted(): void {
-  _supportPrompted = true;
-  try { writeFileSync(SUPPORT_FLAG_PATH, new Date().toISOString(), 'utf-8'); } catch { /* best-effort */ }
-}
 
 // ---------------------------------------------------------------------------
 // Telegram API error helpers
@@ -524,38 +477,6 @@ async function executeRunInner(
         } catch {
           // ignore
         }
-      }
-
-      // Sentry opt-in prompt — once, after first successful run
-      if (shouldPromptSentry()) {
-        markSentryPrompted();
-        try {
-          await bot.telegram.sendMessage(chatId, t('sentry.prompt', run.lang), {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [[
-                { text: t('sentry.yes', run.lang), callback_data: 'sentry:yes' },
-                { text: t('sentry.no', run.lang), callback_data: 'sentry:no' },
-              ]],
-            },
-          });
-        } catch { /* non-critical */ }
-      }
-
-      // Support prompt — once, after N successful runs
-      if (shouldPromptSupport()) {
-        markSupportPrompted();
-        try {
-          await bot.telegram.sendMessage(chatId, t('support.prompt', run.lang), {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [[
-                { text: t('support.yes', run.lang), url: SUPPORT_URL },
-                { text: t('support.no', run.lang), callback_data: 'support:no' },
-              ]],
-            },
-          });
-        } catch { /* non-critical */ }
       }
 
       // Send written files as documents
