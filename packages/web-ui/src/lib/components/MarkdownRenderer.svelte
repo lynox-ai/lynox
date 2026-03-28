@@ -65,4 +65,66 @@
 		font-size: 0.75rem;
 		line-height: 1.6;
 	}
+
+	/* Tables */
+	div :global(table) {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.8125rem;
+		margin: 1rem 0;
+	}
+	div :global(th) {
+		text-align: left;
+		font-weight: 600;
+		color: var(--color-text);
+		padding: 0.5rem 0.75rem;
+		border-bottom: 1px solid var(--color-border);
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	div :global(td) {
+		padding: 0.4rem 0.75rem;
+		border-bottom: 1px solid var(--color-border);
+		color: var(--color-text-muted);
+	}
+	div :global(tr:last-child td) {
+		border-bottom: none;
+	}
+	div :global(tr:hover td) {
+		background-color: var(--color-bg-subtle);
+	}
+
+	/* Blockquotes */
+	div :global(blockquote) {
+		border-left: 3px solid var(--color-accent);
+		padding: 0.5rem 1rem;
+		margin: 1rem 0;
+		color: var(--color-text-muted);
+		background-color: var(--color-bg-subtle);
+		border-radius: 0 var(--radius-md) var(--radius-md) 0;
+	}
+	div :global(blockquote p) {
+		margin: 0;
+	}
+
+	/* Lists */
+	div :global(ul) {
+		list-style-type: disc;
+		padding-left: 1.5rem;
+	}
+	div :global(ol) {
+		list-style-type: decimal;
+		padding-left: 1.5rem;
+	}
+	div :global(li) {
+		margin: 0.25rem 0;
+	}
+
+	/* Horizontal rules */
+	div :global(hr) {
+		border: none;
+		border-top: 1px solid var(--color-border);
+		margin: 1.5rem 0;
+	}
 </style>
