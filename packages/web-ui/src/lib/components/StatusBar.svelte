@@ -36,7 +36,7 @@
 	onDestroy(() => clearInterval(interval));
 </script>
 
-<div class="flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle h-8 px-1 overflow-x-auto">
+<div class="flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle h-8 px-1 overflow-x-auto scrollbar-none">
 	<!-- Engine Status -->
 	<a href="/app" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
@@ -54,7 +54,7 @@
 
 	<!-- Total Runs -->
 	<a href="/app/history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
-		{totalRuns} runs
+		{totalRuns} {t('status.runs')}
 	</a>
 
 	<span class="text-border">|</span>

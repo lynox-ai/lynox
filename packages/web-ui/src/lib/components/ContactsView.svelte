@@ -12,24 +12,27 @@
 	let loading = $state(true);
 	let selected = $state<Contact | null>(null);
 	let interactions = $state<Interaction[]>([]);
+	let error = $state('');
 
 	async function loadContacts() {
-		loading = true;
+		loading = true; error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/crm/contacts?limit=50`);
+			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { contacts: Contact[] };
 			contacts = data.contacts;
-		} catch { /* */ }
+		} catch { error = t('common.load_failed'); }
 		loading = false;
 	}
 
 	async function loadDeals() {
-		loading = true;
+		loading = true; error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/crm/deals?limit=50`);
+			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { deals: Deal[] };
 			deals = data.deals;
-		} catch { /* */ }
+		} catch { error = t('common.load_failed'); }
 		loading = false;
 	}
 
@@ -59,6 +62,10 @@
 			<button onclick={() => tab = 'deals'} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'deals' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.deals')}</button>
 		</div>
 	</div>
+
+	{#if error}
+		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
 
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>

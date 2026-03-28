@@ -7,18 +7,20 @@
 	let entries = $state<FileEntry[]>([]);
 	let currentPath = $state('.');
 	let loading = $state(true);
+	let error = $state('');
 
 	async function loadDir(path: string) {
-		loading = true;
+		loading = true; error = '';
 		currentPath = path;
 		try {
 			const res = await fetch(`${getApiBase()}/files?path=${encodeURIComponent(path)}`);
+			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { path: string; entries: FileEntry[] };
 			entries = data.entries.sort((a, b) => {
 				if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
 				return a.name.localeCompare(b.name);
 			});
-		} catch { entries = []; }
+		} catch { error = t('common.load_failed'); entries = []; }
 		loading = false;
 	}
 
@@ -47,6 +49,10 @@
 
 <div class="p-6 max-w-4xl mx-auto">
 	<h1 class="text-xl font-light tracking-tight mb-4">{t('files.title')}</h1>
+
+	{#if error}
+		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
 
 	<!-- Breadcrumb -->
 	<div class="flex items-center gap-1 mb-4 text-xs font-mono text-text-subtle">

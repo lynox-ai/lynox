@@ -18,6 +18,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'cmd.nav': { de: 'Navigation', en: 'Navigation' },
 	'cmd.actions': { de: 'Aktionen', en: 'Actions' },
 
+	// Context Panel
+	'panel.pin': { de: 'Fixieren', en: 'Pin' },
+	'panel.pinned': { de: 'Fixiert', en: 'Pinned' },
+	'panel.result': { de: 'Ergebnis', en: 'Result' },
+
 	// Nav (extended)
 	'nav.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'nav.files': { de: 'Dateien', en: 'Files' },
@@ -27,7 +32,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'kg.title': { de: 'Knowledge Graph', en: 'Knowledge Graph' },
 	'kg.search': { de: 'Entities suchen...', en: 'Search entities...' },
 	'kg.no_entities': { de: 'Keine Entities. Chatte mit lynox, um den Knowledge Graph aufzubauen.', en: 'No entities. Chat with lynox to build the knowledge graph.' },
-	'kg.mentions': { de: 'Erwaechnungen', en: 'mentions' },
+	'kg.mentions': { de: 'Erwaehnungen', en: 'mentions' },
 	'kg.relations': { de: 'Beziehungen', en: 'Relations' },
 	'kg.aliases': { de: 'Aliase', en: 'Aliases' },
 	'kg.first_seen': { de: 'Erstmals gesehen', en: 'First seen' },
@@ -73,6 +78,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.tasks_active': { de: 'aktiv', en: 'active' },
 	'status.entities': { de: 'Entities', en: 'Entities' },
 	'status.today': { de: 'heute', en: 'today' },
+	'status.runs': { de: 'Runs', en: 'runs' },
+
+	'common.ok': { de: 'OK', en: 'OK' },
 
 	// Chat
 	'chat.welcome': { de: 'Was kann ich fuer dich tun?', en: 'What can I help you with?' },

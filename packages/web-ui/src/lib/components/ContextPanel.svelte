@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getContext, isPinned, togglePin, closePanel } from '../stores/context-panel.svelte.js';
+	import { t } from '../i18n.svelte.js';
 
 	const ctx = $derived(getContext());
 	const pinned = $derived(isPinned());
@@ -47,7 +48,7 @@
 					onclick={togglePin}
 					class="text-xs px-1.5 py-0.5 rounded-[var(--radius-sm)] transition-colors {pinned ? 'bg-accent/10 text-accent-text' : 'text-text-subtle hover:text-text'}"
 				>
-					{pinned ? 'Pinned' : 'Pin'}
+					{pinned ? t('panel.pinned') : t('panel.pin')}
 				</button>
 				<button onclick={closePanel} class="text-text-subtle hover:text-text transition-colors p-0.5" aria-label="Close">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -85,7 +86,7 @@
 					<pre class="text-xs font-mono text-text-subtle whitespace-pre-wrap rounded-[var(--radius-md)] bg-bg-muted p-3 border border-border max-h-48 overflow-y-auto">{JSON.stringify(ctx.toolInput, null, 2).slice(0, 1000)}</pre>
 				{/if}
 				{#if ctx.toolResult}
-					<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mt-2">Result</p>
+					<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mt-2">{t('panel.result')}</p>
 					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-80 overflow-y-auto">{ctx.toolResult.slice(0, 2000)}</pre>
 				{/if}
 			{/if}

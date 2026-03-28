@@ -34,18 +34,22 @@
 	let writtenFiles = $derived(toolCalls.filter((tc) => tc.tool_name === 'write_file').map((tc) => { try { const p = JSON.parse(tc.input_json) as Record<string, unknown>; return String(p['path'] ?? p['file_path'] ?? ''); } catch { return ''; } }).filter(Boolean));
 	let stats = $state<{ total_runs?: number; total_cost_usd?: number } | null>(null);
 	let hasMore = $state(true);
+	let error = $state('');
 	const PAGE_SIZE = 50;
 
 	async function loadRuns() {
-		loading = true;
-		const [runsRes, statsRes] = await Promise.all([
-			fetch(`${getApiBase()}/history/runs?limit=${PAGE_SIZE}`),
-			fetch(`${getApiBase()}/history/stats`)
-		]);
-		const runsData = (await runsRes.json()) as { runs: RunRecord[] };
-		runs = runsData.runs;
-		hasMore = runsData.runs.length >= PAGE_SIZE;
-		stats = (await statsRes.json()) as typeof stats;
+		loading = true; error = '';
+		try {
+			const [runsRes, statsRes] = await Promise.all([
+				fetch(`${getApiBase()}/history/runs?limit=${PAGE_SIZE}`),
+				fetch(`${getApiBase()}/history/stats`)
+			]);
+			if (!runsRes.ok) throw new Error();
+			const runsData = (await runsRes.json()) as { runs: RunRecord[] };
+			runs = runsData.runs;
+			hasMore = runsData.runs.length >= PAGE_SIZE;
+			stats = (await statsRes.json()) as typeof stats;
+		} catch { error = t('common.load_failed'); }
 		loading = false;
 	}
 
@@ -87,6 +91,10 @@
 			</div>
 		{/if}
 	</div>
+
+	{#if error}
+		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
 
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
