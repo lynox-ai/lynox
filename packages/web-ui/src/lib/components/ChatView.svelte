@@ -40,6 +40,7 @@
 	let pendingFiles = $state<FileAttachment[]>([]);
 	let recording = $state(false);
 	let promptAnswer = $state('');
+	let selectedOptions = $state<string[]>([]);
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -387,17 +388,30 @@
 						</button>
 					</div>
 				{:else if visibleOptions.length > 0}
-					<!-- Multiple choice from ask_user -->
+					<!-- Multiple choice from ask_user (toggleable + send) -->
 					<div class="flex flex-wrap gap-2">
 						{#each visibleOptions as option}
 							<button
-								onclick={() => replyPermission(option)}
-								class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all"
+								onclick={() => {
+									if (selectedOptions.includes(option)) {
+										selectedOptions = selectedOptions.filter(o => o !== option);
+									} else {
+										selectedOptions = [...selectedOptions, option];
+									}
+								}}
+								class="rounded-[var(--radius-sm)] border px-3 py-1.5 text-sm transition-all {selectedOptions.includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
 							>
 								{option}
 							</button>
 						{/each}
 					</div>
+					<button
+						onclick={() => { replyPermission(selectedOptions.join(', ')); selectedOptions = []; }}
+						disabled={selectedOptions.length === 0}
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-1.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+					>
+						{t('chat.send')}
+					</button>
 				{:else}
 					<!-- Open-ended question from ask_user — free text input -->
 					<form onsubmit={(e) => { e.preventDefault(); if (promptAnswer.trim()) { replyPermission(promptAnswer); promptAnswer = ''; } }} class="flex gap-2">
