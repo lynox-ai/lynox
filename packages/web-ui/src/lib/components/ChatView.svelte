@@ -39,6 +39,7 @@
 	let fileInputEl: HTMLInputElement;
 	let pendingFiles = $state<FileAttachment[]>([]);
 	let recording = $state(false);
+	let promptAnswer = $state('');
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -362,22 +363,15 @@
 
 	<!-- Permission / Ask User prompt -->
 	{#if pendingPermission}
+		{@const isPermissionGuard = pendingPermission.options?.includes('\x00') ?? false}
+		{@const visibleOptions = (pendingPermission.options ?? []).filter(o => o !== '\x00')}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-2">
 				<p class="text-sm text-text-muted">{pendingPermission.question}</p>
-				<div class="flex flex-wrap gap-2">
-					{#if pendingPermission.options && pendingPermission.options.length > 0}
-						<!-- Multiple choice options from ask_user -->
-						{#each pendingPermission.options as option}
-							<button
-								onclick={() => replyPermission(option)}
-								class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all"
-							>
-								{option}
-							</button>
-						{/each}
-					{:else}
-						<!-- Permission guard: Allow / Deny -->
+
+				{#if isPermissionGuard}
+					<!-- Permission guard: Allow / Deny -->
+					<div class="flex flex-wrap gap-2">
 						<button
 							onclick={() => replyPermission('y')}
 							class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity"
@@ -390,8 +384,36 @@
 						>
 							{t('chat.deny')}
 						</button>
-					{/if}
-				</div>
+					</div>
+				{:else if visibleOptions.length > 0}
+					<!-- Multiple choice from ask_user -->
+					<div class="flex flex-wrap gap-2">
+						{#each visibleOptions as option}
+							<button
+								onclick={() => replyPermission(option)}
+								class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all"
+							>
+								{option}
+							</button>
+						{/each}
+					</div>
+				{:else}
+					<!-- Open-ended question from ask_user — free text input -->
+					<form onsubmit={(e) => { e.preventDefault(); if (promptAnswer.trim()) { replyPermission(promptAnswer); promptAnswer = ''; } }} class="flex gap-2">
+						<input
+							bind:value={promptAnswer}
+							placeholder={t('chat.placeholder')}
+							class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-hover"
+						/>
+						<button
+							type="submit"
+							disabled={!promptAnswer.trim()}
+							class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+						>
+							{t('chat.send')}
+						</button>
+					</form>
+				{/if}
 			</div>
 		</div>
 	{/if}
