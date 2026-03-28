@@ -119,8 +119,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
 	'chat.thinking_label': { de: 'Thinking', en: 'Thinking' },
 	'chat.expand_all': { de: 'Alle aufklappen', en: 'Expand all' },
-	'chat.edit_answer': { de: 'Antwort aendern (startet neu)', en: 'Edit answer (restarts)' },
-	'chat.retry_hint': { de: 'Abgebrochen. Stell die Fragen erneut.', en: 'Aborted. Ask the questions again.' },
+	'chat.edit_answer': { de: 'Antworten verwerfen & neu starten', en: 'Discard answers & restart' },
+	'chat.retry_hint': { de: 'Antworten verworfen. Starte die Fragen erneut, z.B. \"stell mir die Fragen nochmal\".', en: 'Answers discarded. Start the questions again, e.g. "ask me those questions again".' },
 	'chat.collapse_all': { de: 'Alle zuklappen', en: 'Collapse all' },
 
 	// Onboarding (kept for web-ui setup hints)
