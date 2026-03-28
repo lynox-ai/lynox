@@ -1,12 +1,16 @@
 node_modules/
 dist/
+build/
 *.tsbuildinfo
+.svelte-kit/
 .astro/
 .env
 .env.*
+!.env.example
 .DS_Store
 .lynox/
 .lynox-*
+.nodyn/
 *.db
 *.db-wal
 *.db-shm

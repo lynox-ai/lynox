@@ -1,11 +1,15 @@
 node_modules
 dist
+build
+.svelte-kit
 .git
 .github
 *.md
+!README.md
 .env
 .env.*
 .lynox/
+.nodyn/
 *.db
 *.db-wal
 *.db-shm
@@ -26,5 +30,7 @@ id_ed25519*
 .gitleaks*
 lefthook.yml
 .npmrc
+.npmignore
 *.test.ts
 tests/
+examples/

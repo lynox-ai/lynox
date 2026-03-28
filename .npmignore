@@ -5,14 +5,35 @@
 **/*.test.js.map
 tests/
 
-# Source
+# Source (dist/ is published, not src/)
 src/
 tsconfig.json
 vitest.config.ts
+vitest.bench.config.ts
 
 # Dev files
 .github/
 .lynox/
+.nodyn/
+.claude/
 *.png
 docs/
 scripts/
+coverage/
+examples/
+
+# Web UI package (separate npm package)
+packages/
+pnpm-workspace.yaml
+
+# Docker
+Dockerfile
+Dockerfile.web-ui
+entrypoint.sh
+entrypoint-webui.sh
+docker-compose.yml
+
+# Config
+lefthook.yml
+eslint.config.js
+.gitleaksignore
