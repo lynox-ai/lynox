@@ -186,7 +186,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'tool_result': {
-			const tc = msg.toolCalls?.findLast((t) => t.name === String(data['name'] ?? ''));
+			const toolName = String(data['name'] ?? '');
+			const tc = msg.toolCalls?.find((t) => t.name === toolName && t.status === 'running')
+				?? msg.toolCalls?.findLast((t) => t.name === toolName);
 			if (tc) {
 				tc.result = String(data['result'] ?? '');
 				tc.status = 'done';
