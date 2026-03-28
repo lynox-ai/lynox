@@ -247,6 +247,14 @@
 		}
 	});
 
+	const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+	function normalizeImageType(type: string): string {
+		if (SUPPORTED_IMAGE_TYPES.has(type)) return type;
+		if (type.startsWith('image/')) return 'image/png'; // fallback: treat as PNG
+		return type;
+	}
+
 	function handlePaste(e: ClipboardEvent) {
 		const items = e.clipboardData?.items;
 		if (!items) return;
@@ -255,10 +263,12 @@
 				e.preventDefault();
 				const file = item.getAsFile();
 				if (!file) continue;
+				const mimeType = normalizeImageType(file.type);
+				const ext = mimeType.split('/')[1] ?? 'png';
 				const reader = new FileReader();
 				reader.onload = () => {
 					const base64 = (reader.result as string).split(',')[1] ?? '';
-					pendingFiles = [...pendingFiles, { name: file.name || `paste-${Date.now()}.${file.type.split('/')[1] ?? 'png'}`, type: file.type, data: base64 }];
+					pendingFiles = [...pendingFiles, { name: file.name || `paste-${Date.now()}.${ext}`, type: mimeType, data: base64 }];
 				};
 				reader.readAsDataURL(file);
 			}
