@@ -13,6 +13,8 @@
 		model_id: string;
 		tokens_in: number;
 		tokens_out: number;
+		tokens_cache_read: number;
+		tokens_cache_write: number;
 		created_at: string;
 		run_type?: string;
 		spawn_depth?: number;
@@ -132,7 +134,11 @@
 							<span>{run.model_id}</span>
 							<span>${run.cost_usd.toFixed(4)}</span>
 							<span>{(run.duration_ms / 1000).toFixed(1)}s</span>
-							<span>{run.tokens_in + run.tokens_out} tokens</span>
+							<span>{(run.tokens_in + run.tokens_out + (run.tokens_cache_read ?? 0) + (run.tokens_cache_write ?? 0)).toLocaleString()} tokens</span>
+							{#if (run.tokens_cache_read ?? 0) > 0}
+								{@const totalIn = run.tokens_in + (run.tokens_cache_read ?? 0) + (run.tokens_cache_write ?? 0)}
+								<span class="text-success">{Math.round(((run.tokens_cache_read ?? 0) / (totalIn || 1)) * 100)}% cache</span>
+							{/if}
 						</div>
 					</button>
 

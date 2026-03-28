@@ -8,7 +8,8 @@
 		getPendingPermission,
 		getChatError,
 		clearError,
-		type FileAttachment
+		type FileAttachment,
+		type UsageInfo
 	} from '../stores/chat.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -161,6 +162,17 @@
 
 	const hasToolCalls = $derived(messages.some((m) => m.toolCalls && m.toolCalls.length > 0));
 
+	function formatUsage(u: UsageInfo): string {
+		const totalIn = u.tokensIn;
+		const cachePct = totalIn > 0 ? Math.round((u.cacheRead / totalIn) * 100) : 0;
+		const parts = [
+			`${(totalIn + u.tokensOut).toLocaleString()} tokens`,
+			`$${u.costUsd.toFixed(4)}`,
+		];
+		if (cachePct > 0) parts.push(`${cachePct}% cache`);
+		return parts.join(' · ');
+	}
+
 	function autoResize(e: Event) {
 		const el = e.target as HTMLTextAreaElement;
 		el.style.height = 'auto';
@@ -235,6 +247,9 @@
 
 						{#if msg.content}
 							<MarkdownRenderer content={msg.content} />
+						{/if}
+						{#if msg.usage && !isStreaming}
+							<p class="text-[11px] font-mono text-text-subtle mt-1">{formatUsage(msg.usage)}</p>
 						{/if}
 					</div>
 				{/if}

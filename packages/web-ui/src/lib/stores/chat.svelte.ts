@@ -2,12 +2,20 @@ import { getApiBase } from '../config.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 
+export interface UsageInfo {
+	tokensIn: number;
+	tokensOut: number;
+	cacheRead: number;
+	cacheWrite: number;
+	costUsd: number;
+}
+
 export interface ChatMessage {
 	role: 'user' | 'assistant';
 	content: string;
 	toolCalls?: ToolCallInfo[];
 	thinking?: string;
-	costUsd?: number;
+	usage?: UsageInfo;
 }
 
 export interface ToolCallInfo {
@@ -144,8 +152,28 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				options: data['options'] as string[] | undefined
 			};
 			break;
-		case 'turn_end':
+		case 'turn_end': {
+			const usage = data['usage'] as Record<string, number> | undefined;
+			if (usage) {
+				const inTok = (usage['input_tokens'] ?? 0)
+					+ (usage['cache_creation_input_tokens'] ?? 0)
+					+ (usage['cache_read_input_tokens'] ?? 0);
+				const outTok = usage['output_tokens'] ?? 0;
+				const cacheRead = usage['cache_read_input_tokens'] ?? 0;
+				const cacheWrite = usage['cache_creation_input_tokens'] ?? 0;
+				// Rough cost estimate (Sonnet pricing as default)
+				const costUsd = (inTok * 3 + outTok * 15 + cacheWrite * 3.75 + cacheRead * 0.3) / 1_000_000;
+				const prev = msg.usage;
+				msg.usage = {
+					tokensIn: (prev?.tokensIn ?? 0) + inTok,
+					tokensOut: (prev?.tokensOut ?? 0) + outTok,
+					cacheRead: (prev?.cacheRead ?? 0) + cacheRead,
+					cacheWrite: (prev?.cacheWrite ?? 0) + cacheWrite,
+					costUsd: (prev?.costUsd ?? 0) + costUsd,
+				};
+			}
 			break;
+		}
 		case 'done':
 			break;
 		case 'error':
