@@ -48,10 +48,9 @@ export interface BackupConfig {
   gdriveUploader?: import('./backup-upload-gdrive.js').GDriveBackupUploader | undefined;
 }
 
-const SQLITE_DBS = ['history.db', 'vault.db', 'datastore.db'] as const;
+const SQLITE_DBS = ['history.db', 'vault.db', 'datastore.db', 'agent-memory.db'] as const;
 const COPY_DIRS = ['memory', 'sessions'] as const;
 const COPY_FILES = ['config.json'] as const;
-const KG_DIR = 'knowledge-graph';
 
 export class BackupManager {
   private readonly lynoxDir: string;
@@ -110,21 +109,7 @@ export class BackupManager {
         files.push(this.fileEntry(tmpDir, dbName, 'sqlite'));
       }
 
-      // 2. Knowledge Graph — directory copy
-      const kgSrc = join(this.lynoxDir, KG_DIR);
-      if (existsSync(kgSrc) && statSync(kgSrc).isDirectory()) {
-        const kgDest = join(tmpDir, KG_DIR);
-        this.copyDirRecursive(kgSrc, kgDest);
-        // Add directory entry
-        files.push({ path: KG_DIR, size_bytes: 0, checksum_sha256: '', type: 'kuzu_dir' });
-        // Add individual KG files for checksum verification
-        for (const entry of this.walkDir(kgDest)) {
-          const relPath = `${KG_DIR}/${relative(kgDest, entry)}`;
-          files.push(this.fileEntry(tmpDir, relPath, 'file'));
-        }
-      }
-
-      // 3. Memory + Sessions — recursive copy
+      // 2. Memory + Sessions — recursive copy
       for (const dirName of COPY_DIRS) {
         const srcDir = join(this.lynoxDir, dirName);
         if (!existsSync(srcDir) || !statSync(srcDir).isDirectory()) continue;
@@ -150,7 +135,7 @@ export class BackupManager {
       if (this.encrypt && this.vaultKey) {
         const key = deriveBackupKey(this.vaultKey);
         for (const entry of files) {
-          if (entry.type === 'directory' || entry.type === 'kuzu_dir') continue;
+          if (entry.type === 'directory') continue;
           const filePath = join(tmpDir, entry.path);
           if (!existsSync(filePath)) continue;
           encryptFile(filePath, filePath, key);
@@ -174,7 +159,7 @@ export class BackupManager {
       } catch { /* best effort */ }
 
       // 7. Build manifest
-      const checksum = computeManifestChecksum(files.filter(f => f.type !== 'directory' && f.type !== 'kuzu_dir'));
+      const checksum = computeManifestChecksum(files.filter(f => f.type !== 'directory'));
       const manifest: BackupManifest = {
         version,
         created_at: new Date().toISOString(),
@@ -285,20 +270,6 @@ export class BackupManager {
         filesRestored++;
       }
 
-      // Restore Knowledge Graph directory
-      const kgEntry = manifest.files.find(f => f.type === 'kuzu_dir');
-      if (kgEntry) {
-        const kgSrc = join(backupPath, kgEntry.path);
-        const kgDest = join(this.lynoxDir, kgEntry.path);
-        if (existsSync(kgSrc)) {
-          if (existsSync(kgDest)) {
-            rmSync(kgDest, { recursive: true, force: true });
-          }
-          this.copyDirRecursive(kgSrc, kgDest);
-          filesRestored++;
-        }
-      }
-
       return {
         success: true,
         pre_restore_backup_path: safetyBackup.path,
@@ -394,7 +365,7 @@ export class BackupManager {
     }
     try {
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
-      const verifiableFiles = manifest.files.filter(f => f.type !== 'directory' && f.type !== 'kuzu_dir');
+      const verifiableFiles = manifest.files.filter(f => f.type !== 'directory');
       return verifyBackup(backupPath, verifiableFiles);
     } catch (err: unknown) {
       return { valid: false, errors: [err instanceof Error ? err.message : String(err)], files_checked: 0 };

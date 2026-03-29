@@ -63,7 +63,6 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "@huggingface/transformers": "^3.8.1",
-    "@ladybugdb/core": "^0.15.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@mozilla/readability": "^0.6.0",
     "@sentry/node": "^10.46.0",
