@@ -110,7 +110,11 @@ export class Session {
     this._thinking = opts?.thinking ?? engine.config.thinking;
     this._maxTokens = engine.config.maxTokens;
     this._systemPrompt = engine.config.systemPrompt;
-    this.briefing = opts?.briefing ?? engine.getBriefing();
+    // Truncate briefing to prevent prompt bloat (~2K tokens max)
+    const rawBriefing = opts?.briefing ?? engine.getBriefing();
+    this.briefing = rawBriefing && rawBriefing.length > 8000
+      ? rawBriefing.slice(0, 8000) + '\n[...truncated]'
+      : rawBriefing;
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;

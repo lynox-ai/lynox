@@ -378,9 +378,8 @@ export class Memory implements IMemory {
 
       this._extractionTurnCount++;
 
-      // Throttle: skip extraction if recent extraction returned nothing
-      // Skip interval: 3 turns after empty extraction, 5 turns after 3+ consecutive empties
-      const skipInterval = this._emptyExtractionStreak >= 3 ? 5 : 3;
+      // Throttle: exponential backoff when extraction returns nothing (1, 2, 4, 8, max 16 turns)
+      const skipInterval = Math.min(2 ** this._emptyExtractionStreak, 16);
       const turnsSinceLast = this._extractionTurnCount - this._lastExtractionTurn;
       if (this._lastExtractionTurn >= 0 && this._emptyExtractionStreak > 0 && turnsSinceLast < skipInterval) {
         return;

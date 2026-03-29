@@ -664,22 +664,18 @@ describe('Memory', () => {
       mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{}' }] });
     });
 
-    it('skips extraction after empty result until skip interval expires', async () => {
+    it('skips extraction after empty result until skip interval expires (exponential backoff)', async () => {
       const mem = new Memory(dir, undefined, undefined, 'proj1');
 
       // Turn 1 — extraction happens, returns empty (via beforeEach default)
       await mem.maybeUpdate(LONG_ANSWER);
       expect(mockCreate).toHaveBeenCalledTimes(1);
 
-      // Turn 2 — should be skipped (empty streak = 1, skip interval = 3)
+      // Turn 2 — skipped (empty streak = 1, backoff = 2^1 = 2 turns)
       await mem.maybeUpdate(LONG_ANSWER);
       expect(mockCreate).toHaveBeenCalledTimes(1); // no new call
 
-      // Turn 3 — still skipped
-      await mem.maybeUpdate(LONG_ANSWER);
-      expect(mockCreate).toHaveBeenCalledTimes(1);
-
-      // Turn 4 — interval expired, extraction runs again
+      // Turn 3 — interval expired (2 turns since last), extraction runs again
       await mem.maybeUpdate(LONG_ANSWER);
       expect(mockCreate).toHaveBeenCalledTimes(2);
     });
