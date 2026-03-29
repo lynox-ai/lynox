@@ -51,6 +51,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.desc.graph': { de: 'Personen, Firmen, Beziehungen', en: 'People, companies, relationships' },
 	'nav.desc.insights': { de: 'Leistung, Muster, Episoden', en: 'Performance, patterns, episodes' },
 	'nav.desc.contacts': { de: 'Deine Kunden und Deals', en: 'Your clients and deals' },
+	'nav.desc.artifacts': { de: 'Dashboards, Diagramme, Reports', en: 'Dashboards, diagrams, reports' },
 	'nav.desc.history': { de: 'Vergangene Aufgaben', en: 'Past runs' },
 	'nav.desc.tasks': { de: 'Geplante Aufgaben', en: 'Scheduled jobs' },
 	'nav.desc.files': { de: 'Erstellte Dateien', en: 'Created files' },
