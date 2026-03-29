@@ -673,6 +673,14 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, task);
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/tasks/:id', async (_req, res, params) => {
+      const taskManager = engine.getTaskManager();
+      if (!taskManager) { errorResponse(res, 503, 'Task manager not initialized'); return; }
+      const task = taskManager.update(params['id']!, { status: 'done' });
+      if (!task) { errorResponse(res, 404, 'Task not found'); return; }
+      jsonResponse(res, 200, { deleted: true });
+    }));
+
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/tasks/:id/complete', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
       if (!taskManager) { errorResponse(res, 503, 'Task manager not initialized'); return; }

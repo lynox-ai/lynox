@@ -290,6 +290,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.friday': { de: 'Freitags', en: 'Fridays' },
 	'tasks.saturday': { de: 'Samstags', en: 'Saturdays' },
 	'tasks.sunday': { de: 'Sonntags', en: 'Sundays' },
+	'tasks.done': { de: 'Erledigt', en: 'Done' },
+	'tasks.delete': { de: 'Loeschen', en: 'Delete' },
 
 	// Integrations
 	'integrations.title': { de: 'Integrationen', en: 'Integrations' },

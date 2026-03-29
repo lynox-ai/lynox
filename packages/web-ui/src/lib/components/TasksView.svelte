@@ -56,6 +56,20 @@
 		}
 	}
 
+	async function deleteTask(id: string) {
+		try {
+			await fetch(`${getApiBase()}/tasks/${id}`, { method: 'DELETE' });
+			await loadTasks();
+		} catch { error = t('common.save_failed'); }
+	}
+
+	async function markDone(id: string) {
+		try {
+			await fetch(`${getApiBase()}/tasks/${id}/complete`, { method: 'POST' });
+			await loadTasks();
+		} catch { error = t('common.save_failed'); }
+	}
+
 	function cronToHuman(cron: string): string {
 		if (cron === '0 * * * *') return t('tasks.every_hour');
 		const m = cron.match(/^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/);
@@ -95,7 +109,7 @@
 	{:else if tasks.length > 0}
 		<div class="space-y-2 mb-6">
 			{#each tasks as task}
-				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
+				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 group">
 					<div class="flex items-center justify-between gap-3">
 						<div class="flex-1 min-w-0">
 							<p class="text-sm font-medium truncate">{task.title}</p>
@@ -114,7 +128,13 @@
 								{/if}
 							</div>
 						</div>
-						<span class="text-xs rounded-full px-2.5 py-0.5 shrink-0 {statusColor[task.status] ?? 'bg-bg-muted text-text-muted'}">{statusLabel[task.status] ?? task.status}</span>
+						<div class="flex items-center gap-2 shrink-0">
+							{#if task.status !== 'completed' && task.status !== 'done'}
+								<button onclick={() => markDone(task.id)} class="opacity-0 group-hover:opacity-100 rounded-[var(--radius-sm)] border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] text-success hover:bg-success/20 transition-all">{t('tasks.done')}</button>
+							{/if}
+							<button onclick={() => deleteTask(task.id)} class="opacity-0 group-hover:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-all">{t('tasks.delete')}</button>
+							<span class="text-xs rounded-full px-2.5 py-0.5 {statusColor[task.status] ?? 'bg-bg-muted text-text-muted'}">{statusLabel[task.status] ?? task.status}</span>
+						</div>
 					</div>
 				</div>
 			{/each}
