@@ -838,8 +838,12 @@ export class LynoxHTTPApi {
       if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
-      const deals = crm.getOpenDeals(limit);
-      jsonResponse(res, 200, { deals });
+      const stageFilter = url.searchParams.get('stage') ?? '';
+      // Show all deals by default (not just open ones)
+      const filter: Record<string, unknown> = {};
+      if (stageFilter) filter['stage'] = { $eq: stageFilter };
+      const result = crm.getAllDeals(filter, limit);
+      jsonResponse(res, 200, { deals: result });
     });
 
     this.staticRoutes.set('GET /api/crm/stats', async (_req, res) => {

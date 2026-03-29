@@ -227,6 +227,18 @@ export class CRM {
     return result.rows;
   }
 
+  /** Get all deals (optionally filtered by stage). */
+  getAllDeals(filter?: Record<string, unknown>, limit = 50): Array<Record<string, unknown>> {
+    this.ensureSchema();
+    const result = this.ds.queryRecords({
+      collection: 'deals',
+      filter: filter && Object.keys(filter).length > 0 ? filter : undefined,
+      sort: [{ field: '_updated_at', order: 'desc' }],
+      limit,
+    });
+    return result.rows;
+  }
+
   /** Get pipeline summary (deal count + total value per stage). */
   getPipelineSummary(): Array<Record<string, unknown>> {
     this.ensureSchema();
