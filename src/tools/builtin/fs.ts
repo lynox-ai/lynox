@@ -45,7 +45,7 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
         if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
           const realTarget = realpathSync(resolved);
           const parentDir = realpathSync(dirname(resolved));
-          if (!realTarget.startsWith(parentDir)) {
+          if (!realTarget.startsWith(parentDir + '/') && realTarget !== parentDir) {
             throw new Error(`Blocked: that file link points outside the allowed directory. This is a security restriction.`);
           }
         }
@@ -96,7 +96,7 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
         if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
           const realTarget = realpathSync(resolved);
           const parentDir = realpathSync(dirname(resolved));
-          if (!realTarget.startsWith(parentDir)) {
+          if (!realTarget.startsWith(parentDir + '/') && realTarget !== parentDir) {
             throw new Error(`Blocked: that file link points outside the allowed directory. This is a security restriction.`);
           }
         }

@@ -1081,7 +1081,7 @@ export class LynoxHTTPApi {
         const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
         if (!fsExists(base)) { ensureDir(base); }
         const target = resolve(base, dirPath);
-        if (!target.startsWith(base)) { errorResponse(res, 403, 'Outside workspace'); return; }
+        if (target !== base && !target.startsWith(base + '/')) { errorResponse(res, 403, 'Outside workspace'); return; }
         const entries = readdirSync(target, { withFileTypes: true })
           .filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)))
           .map(e => ({
@@ -1095,14 +1095,22 @@ export class LynoxHTTPApi {
       }
     });
 
-    /** Resolve a workspace-relative path, rejecting traversal. */
+    /** Resolve a workspace-relative path, rejecting traversal and symlink escape. */
     async function resolveWorkspacePath(filePath: string): Promise<string | null> {
       const { resolve, join } = await import('node:path');
+      const { existsSync, realpathSync } = await import('node:fs');
       const { getWorkspaceDir } = await import('../core/workspace.js');
       const { getLynoxDir } = await import('../core/config.js');
       const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
       const resolved = resolve(base, filePath);
-      return resolved.startsWith(base) ? resolved : null;
+      // Logical path must be within workspace
+      if (resolved !== base && !resolved.startsWith(base + '/')) return null;
+      // Real path (after symlink resolution) must also be within workspace
+      if (existsSync(resolved)) {
+        const real = realpathSync(resolved);
+        if (real !== base && !real.startsWith(base + '/')) return null;
+      }
+      return resolved;
     }
 
     this.staticRoutes.set('GET /api/files/download', async (req, res) => {
