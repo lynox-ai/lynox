@@ -87,6 +87,7 @@
 
 	// Threads (for grouping)
 	let threads = $state<ThreadInfo[]>([]);
+	let hasMoreThreads = $state(true);
 	let expandedThreads = $state<Set<string>>(new Set());
 
 	// Cost chart
@@ -155,7 +156,7 @@
 			const [runsRes, statsRes, threadsRes] = await Promise.all([
 				fetch(`${getApiBase()}/history/runs?${buildQueryParams()}`),
 				fetch(`${getApiBase()}/history/stats`),
-				fetch(`${getApiBase()}/threads?limit=200&includeArchived=true`),
+				fetch(`${getApiBase()}/threads?limit=50&includeArchived=true`),
 			]);
 			if (!runsRes.ok) throw new Error();
 			const runsData = (await runsRes.json()) as { runs: RunRecord[] };
@@ -165,6 +166,7 @@
 			if (threadsRes.ok) {
 				const td = (await threadsRes.json()) as { threads: ThreadInfo[] };
 				threads = td.threads;
+				hasMoreThreads = td.threads.length >= 50;
 			}
 		} catch {
 			error = t('common.load_failed');
@@ -186,6 +188,17 @@
 			error = t('common.load_failed');
 		}
 		loadingMore = false;
+	}
+
+	async function loadMoreThreads() {
+		if (!hasMoreThreads) return;
+		try {
+			const res = await fetch(`${getApiBase()}/threads?limit=50&offset=${threads.length}&includeArchived=true`);
+			if (!res.ok) return;
+			const data = (await res.json()) as { threads: ThreadInfo[] };
+			threads = [...threads, ...data.threads];
+			hasMoreThreads = data.threads.length >= 50;
+		} catch { /* silently fail */ }
 	}
 
 	async function toggleRun(id: string) {

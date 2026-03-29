@@ -25,6 +25,7 @@
     "self-hosted"
   ],
   "type": "module",
+  "sideEffects": false,
   "engines": {
     "node": ">=22"
   },
@@ -34,6 +35,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./types": {
+      "import": "./dist/types/index.js",
+      "types": "./dist/types/index.d.ts"
     }
   },
   "bin": {

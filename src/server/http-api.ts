@@ -1071,24 +1071,23 @@ export class LynoxHTTPApi {
       const dirPath = url.searchParams.get('path') ?? '.';
       const showHidden = url.searchParams.get('hidden') === '1';
       try {
-        const { readdirSync, statSync, existsSync: fsExists } = await import('node:fs');
+        const { readdir, stat, access } = (await import('node:fs/promises'));
         const { join, resolve } = await import('node:path');
         const { getWorkspaceDir } = await import('../core/workspace.js');
         const { getLynoxDir } = await import('../core/config.js');
         const { ensureDirSync: ensureDir } = await import('../core/atomic-write.js');
 
-        // Use explicit workspace dir, or default to ~/.lynox/workspace/
         const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
-        if (!fsExists(base)) { ensureDir(base); }
+        try { await access(base); } catch { ensureDir(base); }
         const target = resolve(base, dirPath);
         if (target !== base && !target.startsWith(base + '/')) { errorResponse(res, 403, 'Outside workspace'); return; }
-        const entries = readdirSync(target, { withFileTypes: true })
-          .filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)))
-          .map(e => ({
-            name: e.name,
-            isDirectory: e.isDirectory(),
-            size: e.isFile() ? statSync(join(target, e.name)).size : 0,
-          }));
+        const dirEntries = await readdir(target, { withFileTypes: true });
+        const filtered = dirEntries.filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)));
+        const entries = await Promise.all(filtered.map(async e => ({
+          name: e.name,
+          isDirectory: e.isDirectory(),
+          size: e.isFile() ? (await stat(join(target, e.name))).size : 0,
+        })));
         jsonResponse(res, 200, { path: dirPath, entries });
       } catch {
         jsonResponse(res, 200, { path: dirPath, entries: [] });
@@ -1118,11 +1117,12 @@ export class LynoxHTTPApi {
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
-        const { statSync, createReadStream } = await import('node:fs');
+        const { createReadStream } = await import('node:fs');
+        const { stat } = await import('node:fs/promises');
         const { basename } = await import('node:path');
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
-        const st = statSync(resolved);
+        const st = await stat(resolved);
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         if (st.size > 100 * 1024 * 1024) { errorResponse(res, 413, 'File too large'); return; }
         const name = basename(resolved);
@@ -1142,13 +1142,13 @@ export class LynoxHTTPApi {
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
-        const { readFileSync, statSync } = await import('node:fs');
+        const { readFile, stat } = await import('node:fs/promises');
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
-        const st = statSync(resolved);
+        const st = await stat(resolved);
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         if (st.size > 1024 * 1024) { errorResponse(res, 413, 'File too large for preview (max 1 MB)'); return; }
-        const content = readFileSync(resolved, 'utf-8');
+        const content = await readFile(resolved, 'utf-8');
         jsonResponse(res, 200, { content });
       } catch {
         errorResponse(res, 404, 'File not found');
@@ -1160,12 +1160,12 @@ export class LynoxHTTPApi {
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
-        const { unlinkSync, statSync } = await import('node:fs');
+        const { unlink, stat } = await import('node:fs/promises');
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
-        const st = statSync(resolved);
+        const st = await stat(resolved);
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
-        unlinkSync(resolved);
+        await unlink(resolved);
         jsonResponse(res, 200, { ok: true });
       } catch {
         errorResponse(res, 404, 'File not found');

@@ -56,6 +56,30 @@ interface ScoredCandidate {
   source: 'vector' | 'graph' | 'fts';
 }
 
+/** Simple LRU cache with max size. */
+class LruCache<V> {
+  private map = new Map<string, V>();
+  constructor(private readonly maxSize: number) {}
+  get(key: string): V | undefined {
+    const v = this.map.get(key);
+    if (v !== undefined) {
+      // Move to end (most recently used)
+      this.map.delete(key);
+      this.map.set(key, v);
+    }
+    return v;
+  }
+  set(key: string, value: V): void {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, value);
+    if (this.map.size > this.maxSize) {
+      // Delete oldest entry
+      const first = this.map.keys().next().value!;
+      this.map.delete(first);
+    }
+  }
+}
+
 /**
  * Graph-augmented retrieval engine.
  *
@@ -63,6 +87,8 @@ interface ScoredCandidate {
  */
 export class RetrievalEngine {
   private dataStoreBridge: DataStoreBridge | null = null;
+  private readonly _embeddingCache = new LruCache<number[]>(64);
+  private readonly _hydeCache = new LruCache<string>(32);
 
   constructor(
     private readonly db: AgentMemoryDb,
@@ -84,17 +110,27 @@ export class RetrievalEngine {
     const topK = options?.topK ?? DEFAULT_TOP_K;
     const threshold = options?.threshold ?? DEFAULT_THRESHOLD;
 
-    // === Step 1: HyDE ===
+    // === Step 1: HyDE (cached) ===
     let queryForEmbedding = query;
     if (options?.useHyDE && this.anthropicClient && query.length >= 20) {
-      const hypothetical = await this._generateHyDE(query);
-      if (hypothetical) {
-        queryForEmbedding = `${query} ${hypothetical}`;
+      const cachedHyDE = this._hydeCache.get(query);
+      if (cachedHyDE !== undefined) {
+        queryForEmbedding = `${query} ${cachedHyDE}`;
+      } else {
+        const hypothetical = await this._generateHyDE(query);
+        if (hypothetical) {
+          this._hydeCache.set(query, hypothetical);
+          queryForEmbedding = `${query} ${hypothetical}`;
+        }
       }
     }
 
-    // === Step 2: Embed query ===
-    const queryEmbedding = await this.embeddingProvider.embed(queryForEmbedding);
+    // === Step 2: Embed query (cached) ===
+    let queryEmbedding = this._embeddingCache.get(queryForEmbedding);
+    if (!queryEmbedding) {
+      queryEmbedding = await this.embeddingProvider.embed(queryForEmbedding);
+      this._embeddingCache.set(queryForEmbedding, queryEmbedding);
+    }
 
     // === Step 3: Multi-signal search ===
     const scopeTypes = scopes.map(s => s.type);

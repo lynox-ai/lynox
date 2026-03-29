@@ -150,13 +150,16 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       const entities: EntityRecord[] = [];
       const entityIdMap = new Map<string, string>();
 
+      // Batch lookup: resolve all entity names in one query
+      const entityNames = extraction.entities.map(e => e.name);
+      const existingEntities = this.db.findEntitiesByNames(entityNames);
+      const idsToIncrement: string[] = [];
+
       for (const ext of extraction.entities) {
-        // entityResolver.resolve is sync internally (all DB ops are sync)
-        const row = this.db.findEntityByCanonicalName(ext.name)
-          ?? this.db.findEntityByAlias(ext.name);
+        const row = existingEntities.get(ext.name.toLowerCase());
         let entity: EntityRecord | null = null;
         if (row) {
-          this.db.incrementEntityMentions(row.id);
+          idsToIncrement.push(row.id);
           entity = toEntityRecord(row);
         } else {
           const scopeRef = scope;
@@ -177,6 +180,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         }
       }
 
+      // Batch increment mentions for existing entities
+      this.db.incrementEntityMentionsBatch(idsToIncrement);
+
       const relations: RelationRecord[] = [];
       for (const rel of extraction.relations) {
         const fromId = entityIdMap.get(rel.from.toLowerCase());
@@ -191,12 +197,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         }
       }
 
-      const eIds = [...entityIdMap.values()];
-      for (let i = 0; i < eIds.length; i++) {
-        for (let j = i + 1; j < eIds.length; j++) {
-          this.db.updateCooccurrence(eIds[i]!, eIds[j]!);
-        }
-      }
+      // Batch cooccurrence upsert (single prepared statement reused for all pairs)
+      this.db.updateCooccurrencesBatch([...entityIdMap.values()]);
 
       return { resolvedEntities: entities, resolvedRelations: relations };
     });

@@ -500,7 +500,7 @@ export class AgentMemoryDb {
     return row.cnt;
   }
 
-  /** Brute-force cosine similarity search over memory embeddings. */
+  /** Cosine similarity search over memory embeddings with in-place scoring. */
   findSimilarMemories(
     embedding: number[],
     topK = 10,
@@ -525,27 +525,35 @@ export class AgentMemoryDb {
     }
 
     const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    // Cap SQL results to prevent loading unbounded rows into JS for brute-force cosine.
-    // 500 candidates is 3-10x typical topK, leaving room for threshold filtering.
     const sqlLimit = Math.min(Math.max(topK * 10, 100), 500);
-    clauses.length > 0
-      ? params.push(sqlLimit)
-      : params.push(sqlLimit);
+    params.push(sqlLimit);
     const rows = this.db.prepare(
       `SELECT * FROM memories ${whereClause} ORDER BY created_at DESC LIMIT ?`,
     ).all(...params) as MemoryRow[];
 
     const dim = this._embeddingDimensions ?? (embedding.length || 384);
+    const expectedBlobLen = dim * 8;
+
+    // Score in-place using a min-heap approach: keep only topK results
     const scored: ScoredMemoryRow[] = [];
+    let minScore = threshold;
 
     for (const row of rows) {
-      if (!row.embedding || row.embedding.length === 0) continue;
-      if (row.embedding.length !== dim * 8) continue;
+      if (!row.embedding || row.embedding.length !== expectedBlobLen) continue;
 
       const memEmb = blobToEmbed(row.embedding, dim);
       const sim = cosineSimilarity(embedding, memEmb);
-      if (sim >= threshold) {
-        scored.push({ ...row, _similarity: sim });
+      if (sim < minScore) continue;
+
+      // Assign _similarity directly on the row object to avoid spreading
+      (row as ScoredMemoryRow)._similarity = sim;
+      scored.push(row as ScoredMemoryRow);
+
+      // Once we have enough candidates, raise the floor to prune early
+      if (scored.length > topK * 2) {
+        scored.sort((a, b) => b._similarity - a._similarity);
+        scored.length = topK;
+        minScore = scored[scored.length - 1]!._similarity;
       }
     }
 
@@ -591,20 +599,64 @@ export class AgentMemoryDb {
   updateCooccurrence(entityAId: string, entityBId: string): void {
     const now = new Date().toISOString();
     const [a, b] = entityAId < entityBId ? [entityAId, entityBId] : [entityBId, entityAId];
-    const existing = this.db.prepare(`
-      SELECT count FROM cooccurrences WHERE entity_a_id = ? AND entity_b_id = ?
-    `).get(a, b) as { count: number } | undefined;
+    // Use INSERT OR REPLACE with COALESCE to handle both insert and update in one statement
+    this.db.prepare(`
+      INSERT INTO cooccurrences (entity_a_id, entity_b_id, count, last_seen_at)
+      VALUES (?, ?, 1, ?)
+      ON CONFLICT(entity_a_id, entity_b_id)
+      DO UPDATE SET count = count + 1, last_seen_at = excluded.last_seen_at
+    `).run(a, b, now);
+  }
 
-    if (existing) {
-      this.db.prepare(`
-        UPDATE cooccurrences SET count = count + 1, last_seen_at = ?
-        WHERE entity_a_id = ? AND entity_b_id = ?
-      `).run(now, a, b);
-    } else {
-      this.db.prepare(`
-        INSERT INTO cooccurrences (entity_a_id, entity_b_id, count, last_seen_at)
-        VALUES (?, ?, 1, ?)
-      `).run(a, b, now);
+  /** Batch upsert cooccurrences for a set of entity IDs. O(N²/2) pairs but single-statement each. */
+  updateCooccurrencesBatch(entityIds: string[]): void {
+    if (entityIds.length < 2) return;
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO cooccurrences (entity_a_id, entity_b_id, count, last_seen_at)
+      VALUES (?, ?, 1, ?)
+      ON CONFLICT(entity_a_id, entity_b_id)
+      DO UPDATE SET count = count + 1, last_seen_at = excluded.last_seen_at
+    `);
+    for (let i = 0; i < entityIds.length; i++) {
+      for (let j = i + 1; j < entityIds.length; j++) {
+        const [a, b] = entityIds[i]! < entityIds[j]! ? [entityIds[i]!, entityIds[j]!] : [entityIds[j]!, entityIds[i]!];
+        stmt.run(a, b, now);
+      }
+    }
+  }
+
+  /** Batch lookup entities by canonical names. Returns a Map of lowercase name → EntityRow. */
+  findEntitiesByNames(names: string[]): Map<string, EntityRow> {
+    if (names.length === 0) return new Map();
+    const result = new Map<string, EntityRow>();
+    // Use batched query with IN clause for canonical name lookup
+    const placeholders = names.map(() => '?').join(',');
+    const rows = this.db.prepare(`
+      SELECT * FROM entities WHERE canonical_name COLLATE NOCASE IN (${placeholders})
+    `).all(...names) as EntityRow[];
+    for (const row of rows) {
+      result.set(row.canonical_name.toLowerCase(), row);
+    }
+    // For names not found by canonical, try alias lookup individually (aliases are JSON arrays)
+    for (const name of names) {
+      if (!result.has(name.toLowerCase())) {
+        const aliasRow = this.findEntityByAlias(name);
+        if (aliasRow) result.set(name.toLowerCase(), aliasRow);
+      }
+    }
+    return result;
+  }
+
+  /** Batch increment mention counts for multiple entity IDs. */
+  incrementEntityMentionsBatch(entityIds: string[]): void {
+    if (entityIds.length === 0) return;
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      UPDATE entities SET mention_count = mention_count + 1, last_seen_at = ? WHERE id = ?
+    `);
+    for (const id of entityIds) {
+      stmt.run(now, id);
     }
   }
 
@@ -858,29 +910,38 @@ export class AgentMemoryDb {
 
     if (rows.length < 2) return 0;
 
+    const dim = this._embeddingDimensions ?? 384;
+    const expectedBlobLen = dim * 8;
+
+    // Pre-compute all embeddings once (O(N)) instead of re-decoding per pair
+    const embeddings: (number[] | null)[] = new Array(rows.length);
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]!;
+      embeddings[i] = (row.embedding && row.embedding.length === expectedBlobLen)
+        ? blobToEmbed(row.embedding, dim)
+        : null;
+    }
+
     // Wrap in transaction for atomicity
     return this.transaction(() => {
-    const dim = this._embeddingDimensions ?? 384;
-    const merged = new Set<string>();
+    const merged = new Set<number>(); // track by index to avoid Set<string> hashing
     let consolidatedCount = 0;
 
     for (let i = 0; i < rows.length; i++) {
-      const anchor = rows[i]!;
-      if (merged.has(anchor.id)) continue;
-      if (!anchor.embedding || anchor.embedding.length !== dim * 8) continue;
+      if (merged.has(i)) continue;
+      const anchorEmb = embeddings[i];
+      if (!anchorEmb) continue;
 
-      const anchorEmb = blobToEmbed(anchor.embedding, dim);
-      const cluster: MemoryRow[] = [anchor];
+      const cluster: number[] = [i];
 
       for (let j = i + 1; j < rows.length; j++) {
-        const candidate = rows[j]!;
-        if (merged.has(candidate.id)) continue;
-        if (!candidate.embedding || candidate.embedding.length !== dim * 8) continue;
+        if (merged.has(j)) continue;
+        const candEmb = embeddings[j];
+        if (!candEmb) continue;
 
-        const candEmb = blobToEmbed(candidate.embedding, dim);
         const sim = cosineSimilarity(anchorEmb, candEmb);
         if (sim >= threshold) {
-          cluster.push(candidate);
+          cluster.push(j);
         }
       }
 
@@ -888,22 +949,24 @@ export class AgentMemoryDb {
 
       // Keep the best memory: highest confirmation_count, then longest text
       cluster.sort((a, b) => {
-        if (b.confirmation_count !== a.confirmation_count) return b.confirmation_count - a.confirmation_count;
-        return b.text.length - a.text.length;
+        const ra = rows[a]!;
+        const rb = rows[b]!;
+        if (rb.confirmation_count !== ra.confirmation_count) return rb.confirmation_count - ra.confirmation_count;
+        return rb.text.length - ra.text.length;
       });
 
-      const keeper = cluster[0]!;
+      const keeper = rows[cluster[0]!]!;
+      const now = new Date().toISOString();
       for (let k = 1; k < cluster.length; k++) {
-        const victim = cluster[k]!;
+        const victim = rows[cluster[k]!]!;
         this.supersedMemory(victim.id, keeper.id);
         this.createSupersedes(keeper.id, victim.id, 'consolidation');
-        // Transfer confirmation count
         if (victim.confirmation_count > 0) {
           this.db.prepare(`
             UPDATE memories SET confirmation_count = confirmation_count + ?, updated_at = ? WHERE id = ?
-          `).run(victim.confirmation_count, new Date().toISOString(), keeper.id);
+          `).run(victim.confirmation_count, now, keeper.id);
         }
-        merged.add(victim.id);
+        merged.add(cluster[k]!);
         consolidatedCount++;
       }
     }

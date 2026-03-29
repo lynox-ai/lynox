@@ -100,15 +100,35 @@ export async function runMemoryGc(
         }),
       );
 
-      // Mark shorter duplicate in each near-duplicate pair
-      const dedupRemoved = new Set<number>(); // indices into indexedLines
+      // Mark shorter duplicate in each near-duplicate pair.
+      // Pre-compute norms to speed up cosine similarity (avoids re-computing per pair).
+      const norms: number[] = new Array(embeddings.length);
+      for (let i = 0; i < embeddings.length; i++) {
+        const emb = embeddings[i]!;
+        let sum = 0;
+        for (let d = 0; d < emb.length; d++) sum += emb[d]! * emb[d]!;
+        norms[i] = Math.sqrt(sum);
+      }
+
+      const dedupRemoved = new Set<number>();
       for (let i = 0; i < indexedLines.length; i++) {
         if (dedupRemoved.has(i)) continue;
+        const normI = norms[i]!;
+        if (normI === 0) continue;
+        const embI = embeddings[i]!;
+
         for (let j = i + 1; j < indexedLines.length; j++) {
           if (dedupRemoved.has(j)) continue;
-          const sim = cosineSimilarity(embeddings[i]!, embeddings[j]!);
+          const normJ = norms[j]!;
+          if (normJ === 0) continue;
+
+          // Fast dot product / (normI * normJ)
+          const embJ = embeddings[j]!;
+          let dot = 0;
+          for (let d = 0; d < embI.length; d++) dot += embI[d]! * embJ[d]!;
+          const sim = dot / (normI * normJ);
+
           if (sim > threshold) {
-            // Keep the longer line, remove the shorter
             const lineI = indexedLines[i]!;
             const lineJ = indexedLines[j]!;
             if (lineI.text.length >= lineJ.text.length) {
@@ -117,7 +137,7 @@ export async function runMemoryGc(
             } else {
               dedupRemoved.add(i);
               removeIndices.add(lineI.idx);
-              break; // i is removed, no need to compare further
+              break;
             }
           }
         }
@@ -160,9 +180,7 @@ export async function runMemoryGc(
           .map(idx => allLines[idx]!)
           .filter(line => line.length > 0);
 
-        for (const line of linesToRemove) {
-          await memory.deleteScoped(ns, line, scope);
-        }
+        await Promise.all(linesToRemove.map(line => memory.deleteScoped(ns, line, scope)));
       }
 
       if (removeIndices.size > 0 || staleTexts.size > 0) {

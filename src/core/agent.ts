@@ -94,8 +94,10 @@ export class Agent implements IAgent {
   private _msgLenCache = 0;
   private _msgLenVersion = -1;
   private _msgCount = 0;
+  private _runningMsgLen = 0;
   private _loopToolCount = 0;
   private _pendingMemory: Promise<void>[] = [];
+  private static readonly MAX_PENDING_MEMORY = 10;
   skipMemoryExtraction = false;
 
   constructor(config: AgentConfig) {
@@ -163,6 +165,23 @@ export class Agent implements IAgent {
     this.abortController?.abort();
   }
 
+  /** Schedule a memory extraction, draining oldest if at concurrency cap. */
+  private _scheduleMemoryExtraction(promise: Promise<void>): void {
+    // Drain completed promises
+    this._pendingMemory = this._pendingMemory.filter(p => {
+      let settled = false;
+      p.then(() => { settled = true; }, () => { settled = true; });
+      return !settled;
+    });
+    // If still at cap, wait for the oldest to complete before adding more
+    if (this._pendingMemory.length >= Agent.MAX_PENDING_MEMORY) {
+      const oldest = this._pendingMemory.shift()!;
+      this._pendingMemory.push(oldest.then(() => promise, () => promise));
+    } else {
+      this._pendingMemory.push(promise);
+    }
+  }
+
   setContinuationPrompt(prompt: string | undefined): void {
     this.continuationPrompt = prompt;
   }
@@ -175,12 +194,23 @@ export class Agent implements IAgent {
     this.knowledgeContext = text;
   }
 
-  /** Cached estimate of serialized message length. Recalculates only when messages array changes. */
+  /** Incremental estimate of serialized message length. Only serializes new messages. */
   private _estimateMsgLen(): number {
-    if (this._msgCount !== this.messages.length) {
-      this._msgLenCache = JSON.stringify(this.messages).length;
-      this._msgCount = this.messages.length;
+    if (this._msgCount === this.messages.length) return this._msgLenCache;
+    if (this._msgCount === 0 || this._msgCount > this.messages.length) {
+      // Full recalculation after reset/truncation
+      this._runningMsgLen = 0;
+      for (const msg of this.messages) {
+        this._runningMsgLen += JSON.stringify(msg).length;
+      }
+    } else {
+      // Incremental: only serialize newly added messages
+      for (let i = this._msgCount; i < this.messages.length; i++) {
+        this._runningMsgLen += JSON.stringify(this.messages[i]).length;
+      }
     }
+    this._msgCount = this.messages.length;
+    this._msgLenCache = this._runningMsgLen;
     return this._msgLenCache;
   }
 
@@ -244,7 +274,7 @@ export class Agent implements IAgent {
           const text = extractText(response.content);
           if (this.memory && !this.skipMemoryExtraction) {
             const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-            this._pendingMemory.push(this.memory.maybeUpdate(safeText, this._loopToolCount));
+            this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount));
           }
           return text;
         }
@@ -254,7 +284,7 @@ export class Agent implements IAgent {
         const text = extractText(response.content);
         if (this.memory && !this.skipMemoryExtraction) {
           const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-          this._pendingMemory.push(this.memory.maybeUpdate(safeText, this._loopToolCount));
+          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount));
         }
         return text;
       }
@@ -272,7 +302,7 @@ export class Agent implements IAgent {
         const text = extractText(response.content);
         if (this.memory && !this.skipMemoryExtraction) {
           const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-          this._pendingMemory.push(this.memory.maybeUpdate(safeText, this._loopToolCount));
+          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount));
         }
         return text;
       }
@@ -387,7 +417,8 @@ export class Agent implements IAgent {
         }
       }
       // Invalidate cached message length after in-place content truncation
-      this._msgCount = -1;
+      this._msgCount = 0;
+      this._runningMsgLen = 0;
     }
   }
 

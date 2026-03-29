@@ -49,7 +49,26 @@ function loadPersistedChat(): { messages: ChatMessage[]; sessionId: string | nul
 	return { messages: [], sessionId: null };
 }
 
+let _persistTimer: ReturnType<typeof setTimeout> | null = null;
+
 function persistChat(): void {
+	if (typeof localStorage === 'undefined') return;
+	// Debounce: collapse rapid writes (e.g. during streaming) into one
+	if (_persistTimer) clearTimeout(_persistTimer);
+	_persistTimer = setTimeout(() => {
+		_persistTimer = null;
+		try {
+			localStorage.setItem('lynox-chat', JSON.stringify({ messages, sessionId }));
+		} catch { /* quota exceeded */ }
+	}, 500);
+}
+
+/** Flush pending persist immediately (e.g. on newChat or page unload). */
+function persistChatNow(): void {
+	if (_persistTimer) {
+		clearTimeout(_persistTimer);
+		_persistTimer = null;
+	}
 	if (typeof localStorage === 'undefined') return;
 	try {
 		localStorage.setItem('lynox-chat', JSON.stringify({ messages, sessionId }));
@@ -155,14 +174,18 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 				if (line.startsWith('event: ')) {
 					eventType = line.slice(7);
 				} else if (line.startsWith('data: ') && eventType) {
-					const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
-					handleSSEEvent(eventType, data, assistantIdx);
+					try {
+						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+						handleSSEEvent(eventType, data, assistantIdx);
+					} catch { /* skip malformed SSE events */ }
 					eventType = '';
 				}
 			}
 		}
 	} catch {
 		chatError = t('chat.error_connection');
+	} finally {
+		try { reader.cancel(); } catch { /* already closed */ }
 	}
 
 	isStreaming = false;
@@ -363,7 +386,7 @@ export function newChat() {
 	sessionModel = null;
 	contextBudget = null;
 	clearContext();
-	persistChat();
+	persistChatNow();
 }
 
 export function getSessionId() {
@@ -399,7 +422,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	messageQueue = [];
 	contextBudget = null;
 	clearContext();
-	persistChat();
+	persistChatNow();
 }
 
 function extractContentText(content: unknown): string {
