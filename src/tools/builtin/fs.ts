@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
-import { dirname, resolve, basename, join } from 'node:path';
+import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry } from '../../types/index.js';
 import { isWorkspaceActive, validatePath } from '../../core/workspace.js';
+import { getLynoxDir } from '../../core/config.js';
 
 const MAX_WRITE_BYTES_PER_SESSION = 100 * 1024 * 1024; // 100MB
 let sessionWriteBytes = 0;
@@ -78,7 +79,10 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       if (sessionWriteBytes + contentBytes > MAX_WRITE_BYTES_PER_SESSION) {
         throw new Error(`Session write limit (${MAX_WRITE_BYTES_PER_SESSION} bytes) exceeded.`);
       }
-      const resolved = resolve(input.path);
+      // Relative paths → ~/.lynox/files/ (not process.cwd()) when no workspace is set
+      const resolved = (!isAbsolute(input.path) && !isWorkspaceActive())
+        ? resolve(join(getLynoxDir(), 'files'), input.path)
+        : resolve(input.path);
       let realPath: string;
       if (isWorkspaceActive()) {
         realPath = validatePath(resolved, 'write');
