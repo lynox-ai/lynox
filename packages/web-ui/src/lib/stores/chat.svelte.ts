@@ -192,7 +192,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const toolName = String(data['name'] ?? '');
 			const toolInput = data['input'];
 			msg.toolCalls = msg.toolCalls ?? [];
-			msg.toolCalls.push({ name: toolName, input: toolInput, status: 'running' });
+			// Dedup: skip if last tool call has same name and is still running
+			const lastTc = msg.toolCalls[msg.toolCalls.length - 1];
+			if (!(lastTc && lastTc.name === toolName && lastTc.status === 'running'
+				&& JSON.stringify(lastTc.input) === JSON.stringify(toolInput))) {
+				msg.toolCalls.push({ name: toolName, input: toolInput, status: 'running' });
+			}
 			setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			break;
 		}
