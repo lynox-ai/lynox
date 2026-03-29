@@ -24,6 +24,7 @@ import { channels } from './observability.js';
 import { abortSpawnedAgents } from '../tools/builtin/spawn.js';
 import { abortPipelineAgents } from '../orchestrator/runtime-adapter.js';
 import { ChangesetManager } from './changeset.js';
+import { isWorkspaceActive } from './workspace.js';
 import { checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,
@@ -206,8 +207,11 @@ export class Session {
     const threadStore = this.engine.getThreadStore();
 
     // Create changeset manager if enabled (backup-before-write mode).
+    // Only enable when workspace is active (real project files) — without workspace,
+    // writes go to ~/.lynox/workspace/ and the normal isDangerous() guard is sufficient.
     const isAutonomous = this.agentOverrides.autonomy === 'autonomous';
-    const changesetEnabled = isAutonomous || (this.engine.getUserConfig().changeset_review !== false);
+    const hasWorkspace = isWorkspaceActive();
+    const changesetEnabled = hasWorkspace && (isAutonomous || (this.engine.getUserConfig().changeset_review !== false));
     if (changesetEnabled) {
       const runId = randomUUID();
       this._changesetManager = new ChangesetManager(process.cwd(), runId);

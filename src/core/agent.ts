@@ -27,6 +27,7 @@ import { renderDiffHunks } from '../cli/diff.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
   BetaToolResultBlockParam,
@@ -621,10 +622,11 @@ export class Agent implements IAgent {
     }
 
     // Changeset mode: backup before write, skip permission prompt for write_file
+    // Only active when workspace is active (session.ts guards this).
     if (tc.name === 'write_file' && this.changesetManager?.active) {
       const input = tc.input as { path?: string };
       if (input.path) {
-        this.changesetManager.backupBeforeWrite(input.path);
+        this.changesetManager.backupBeforeWrite(resolve(input.path));
         // Skip diff preview and permission prompt — review happens post-run
       }
     } else if (tc.name === 'write_file' && this.promptUser) {

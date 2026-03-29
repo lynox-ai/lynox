@@ -180,6 +180,23 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.retry_hint': { de: 'Antworten verworfen. Starte die Fragen erneut, z.B. \"stell mir die Fragen nochmal\".', en: 'Answers discarded. Start the questions again, e.g. "ask me those questions again".' },
 	'chat.collapse_all': { de: 'Alle zuklappen', en: 'Collapse all' },
 
+	// Changeset review
+	'changeset.title': { de: 'Changeset Review', en: 'Changeset Review' },
+	'changeset.files_modified': { de: 'geaendert', en: 'modified' },
+	'changeset.files_added': { de: 'hinzugefuegt', en: 'added' },
+	'changeset.accept_all': { de: 'Alle akzeptieren', en: 'Accept all' },
+	'changeset.rollback_all': { de: 'Alle zuruecksetzen', en: 'Rollback all' },
+	'changeset.review_each': { de: 'Einzeln pruefen', en: 'Review each' },
+	'changeset.accept': { de: 'Akzeptieren', en: 'Accept' },
+	'changeset.rollback': { de: 'Zuruecksetzen', en: 'Rollback' },
+	'changeset.apply': { de: 'Anwenden', en: 'Apply' },
+	'changeset.cancel': { de: 'Abbrechen', en: 'Cancel' },
+	'changeset.new_file': { de: 'neu', en: 'new' },
+	'changeset.modified_file': { de: 'geaendert', en: 'modified' },
+	'changeset.loading': { de: 'Aenderungen laden...', en: 'Loading changes...' },
+	'changeset.sensitive_warning': { de: 'Sensitiver Pfad', en: 'Sensitive path' },
+	'changeset.review_pending': { de: 'Bitte pruefe die ausstehenden Aenderungen bevor du weiterschreibst.', en: 'Please review the pending changes before sending another message.' },
+
 	// Onboarding (kept for web-ui setup hints)
 	'onboard.welcome': { de: 'Willkommen bei lynox', en: 'Welcome to lynox' },
 	'onboard.standalone_hint': { de: 'Gib deinen Anthropic API Key ein, um loszulegen.', en: 'Enter your Anthropic API key to get started.' },

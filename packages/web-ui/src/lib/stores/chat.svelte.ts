@@ -81,6 +81,14 @@ export interface ContextBudget {
 	usagePercent: number;
 }
 
+export interface ChangesetFileInfo {
+	file: string;
+	status: 'added' | 'modified';
+	diff: string;
+	added: number;
+	removed: number;
+}
+
 const persisted = loadPersistedChat();
 let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
@@ -92,6 +100,8 @@ let messageQueue = $state<QueuedMessage[]>([]);
 let sessionModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
+let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
+let changesetLoading = $state(false);
 
 async function ensureSession(): Promise<string> {
 	if (sessionId) return sessionId;
@@ -110,6 +120,12 @@ export interface FileAttachment {
 }
 
 export async function sendMessage(task: string, files?: FileAttachment[]): Promise<void> {
+	// Block if changeset review is pending — user must review before next run
+	if (pendingChangeset) {
+		chatError = t('changeset.review_pending');
+		return;
+	}
+
 	// Queue if a run is in progress
 	if (isStreaming) {
 		const fileNames = files?.map((f) => f.name).join(', ');
@@ -291,6 +307,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'error':
 			chatError = String(data['error'] ?? 'Unknown error');
 			break;
+		case 'changeset_ready':
+			void fetchChangeset();
+			break;
 	}
 }
 
@@ -308,6 +327,40 @@ export async function abortRun(): Promise<void> {
 	if (!sessionId) return;
 	await fetch(`${getApiBase()}/sessions/${sessionId}/abort`, { method: 'POST' });
 	isStreaming = false;
+}
+
+async function fetchChangeset(): Promise<void> {
+	if (!sessionId) return;
+	changesetLoading = true;
+	try {
+		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
+		if (res.ok) {
+			const data = (await res.json()) as { hasChanges: boolean; files: ChangesetFileInfo[] };
+			if (data.hasChanges && data.files.length > 0) {
+				pendingChangeset = data.files;
+			}
+		}
+	} catch { /* best-effort — don't block UX */ }
+	finally { changesetLoading = false; }
+}
+
+export async function submitChangesetReview(
+	action: 'accept' | 'rollback' | 'partial',
+	rolledBackFiles?: string[],
+): Promise<void> {
+	if (!sessionId) return;
+	const body: Record<string, unknown> = { action };
+	if (action === 'partial' && rolledBackFiles) {
+		body['rolledBackFiles'] = rolledBackFiles;
+	}
+	try {
+		await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+	} catch { /* best-effort */ }
+	pendingChangeset = null;
 }
 
 export function cancelQueue(): void {
@@ -342,6 +395,12 @@ export function getContextBudget() {
 }
 export function clearError() {
 	chatError = null;
+}
+export function getPendingChangeset() {
+	return pendingChangeset;
+}
+export function getChangesetLoading() {
+	return changesetLoading;
 }
 export function exportAsMarkdown(): string {
 	const lines: string[] = [];
@@ -381,6 +440,8 @@ export function newChat() {
 	currentRunId = null;
 	isStreaming = false;
 	pendingPermission = null;
+	pendingChangeset = null;
+	changesetLoading = false;
 	chatError = null;
 	messageQueue = [];
 	sessionModel = null;
@@ -419,6 +480,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 
 	chatError = null;
 	pendingPermission = null;
+	pendingChangeset = null;
+	changesetLoading = false;
 	messageQueue = [];
 	contextBudget = null;
 	clearContext();

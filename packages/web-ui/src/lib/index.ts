@@ -23,6 +23,7 @@ export { default as KnowledgeHub } from './components/KnowledgeHub.svelte';
 export { default as ArtifactsHub } from './components/ArtifactsHub.svelte';
 export { default as ActivityHub } from './components/ActivityHub.svelte';
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
+export { default as ChangesetReview } from './components/ChangesetReview.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';
 export { default as ThreadList } from './components/ThreadList.svelte';
 
@@ -56,6 +57,9 @@ export {
 	getContextBudget,
 	getSessionId,
 	resumeThread,
+	submitChangesetReview,
+	getPendingChangeset,
+	getChangesetLoading,
 } from './stores/chat.svelte.js';
 
 export type {
@@ -64,6 +68,7 @@ export type {
 	PermissionPrompt,
 	FileAttachment,
 	ContextBudget,
+	ChangesetFileInfo,
 } from './stores/chat.svelte.js';
 
 // Thread store

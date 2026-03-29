@@ -14,12 +14,16 @@
 		getSessionModel,
 		getContextBudget,
 		getContextWindow,
+		getPendingChangeset,
+		getChangesetLoading,
+		submitChangesetReview,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
 	} from '../stores/chat.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
+	import ChangesetReview from './ChangesetReview.svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { goto } from '$app/navigation';
@@ -59,6 +63,9 @@
 	let batchFreetext = $state('');
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
+
+	const pendingChangeset = $derived(getPendingChangeset());
+	const changesetLoading = $derived(getChangesetLoading());
 
 	const UNSUPPORTED_FORMATS = new Set(['image/heic', 'image/heif']);
 
@@ -645,6 +652,22 @@
 		</div>
 	</div>
 
+	<!-- Changeset review: show after run completes with file changes -->
+	{#if !isStreaming && (pendingChangeset || changesetLoading)}
+		<div class="border-t border-border bg-bg-subtle px-4 py-3">
+			<div class="max-w-3xl mx-auto">
+				{#if changesetLoading}
+					<div class="text-xs text-text-muted font-mono animate-pulse">{t('changeset.loading')}</div>
+				{:else if pendingChangeset && pendingChangeset.length > 0}
+					<ChangesetReview
+						files={pendingChangeset}
+						onReview={(action, rolledBackFiles) => submitChangesetReview(action, rolledBackFiles)}
+					/>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
 	<!-- Batch mode: all questions as form -->
 	{#if inBatchMode && pendingPermission}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3">
@@ -835,7 +858,7 @@
 				{:else if inputText.trim() || pendingFiles.length > 0 || pendingPermission}
 					<button
 						onclick={handleSend}
-						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission)}
+						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
 						class="shrink-0 h-12 w-12 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>

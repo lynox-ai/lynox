@@ -11,6 +11,7 @@ import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import { readFileSync } from 'node:fs';
+import { relative, resolve } from 'node:path';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
@@ -484,6 +485,11 @@ export class LynoxHTTPApi {
       try {
         const result = await session.run(task);
         if (!aborted) {
+          // Notify client if changeset has pending file changes for review
+          const csm = session.getChangesetManager();
+          if (csm?.hasChanges()) {
+            res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size })}\n\n`);
+          }
           res.write(`event: done\ndata: ${JSON.stringify({ result })}\n\n`);
           res.end();
         }
@@ -515,6 +521,79 @@ export class LynoxHTTPApi {
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
       jsonResponse(res, 200, { ok: true });
+    }));
+
+    // ── Changeset review ──
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/sessions/:id/changeset', async (_req, res, params) => {
+      const session = this.sessionStore.get(params['id']!);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      const csm = session.getChangesetManager();
+      if (!csm || !csm.hasChanges()) {
+        jsonResponse(res, 200, { hasChanges: false, files: [] });
+        return;
+      }
+      const changes = csm.getChanges();
+      const files = changes.map(c => {
+        const lines = c.diff.split('\n');
+        let added = 0;
+        let removed = 0;
+        for (const line of lines) {
+          if (line.startsWith('+') && !line.startsWith('+++')) added++;
+          else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+        }
+        return { file: c.file, status: c.status, diff: c.diff, added, removed };
+      });
+      jsonResponse(res, 200, { hasChanges: true, files });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
+      const session = this.sessionStore.get(params['id']!);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      const csm = session.getChangesetManager();
+      if (!csm || !csm.hasChanges()) {
+        errorResponse(res, 400, 'No changeset to review');
+        return;
+      }
+
+      const b = body as Record<string, unknown> | null;
+      const action = typeof b?.['action'] === 'string' ? b['action'] : '';
+      if (!['accept', 'rollback', 'partial'].includes(action)) {
+        errorResponse(res, 400, 'Invalid action — must be accept, rollback, or partial');
+        return;
+      }
+
+      const changes = csm.getChanges();
+      let accepted = 0;
+      let rolledBack = 0;
+
+      if (action === 'accept') {
+        accepted = changes.length;
+        csm.acceptAll();
+      } else if (action === 'rollback') {
+        rolledBack = changes.length;
+        csm.rollbackAll();
+      } else {
+        // Partial: validate rolledBackFiles against changeset entries
+        const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
+        const validRelPaths = new Set(changes.map(c => c.file));
+        const toRollback: string[] = [];
+
+        for (const f of clientFiles) {
+          if (typeof f !== 'string' || !validRelPaths.has(f)) continue;
+          // Resolve relative path back to absolute via cwd
+          const abs = resolve(process.cwd(), f);
+          toRollback.push(abs);
+        }
+
+        if (toRollback.length > 0) {
+          csm.rollbackFiles(toRollback);
+        }
+        rolledBack = toRollback.length;
+        accepted = changes.length - rolledBack;
+      }
+
+      csm.cleanup();
+      jsonResponse(res, 200, { ok: true, accepted, rolledBack });
     }));
 
     // ── Threads ──

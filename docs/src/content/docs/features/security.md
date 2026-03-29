@@ -162,17 +162,21 @@ All values are configurable via `~/.lynox/config.json` or project `.lynox/config
 
 ## Changeset Manager (Write Protection)
 
-When `changeset_review` is enabled (default for all modes; mandatory for autonomous modes), `write_file` operations bypass the per-file permission prompt but are protected by a different mechanism:
+When `changeset_review` is enabled and a workspace is active, `write_file` operations bypass the per-file permission prompt but are protected by a different mechanism:
 
 1. **Backup on first write**: Original file content is copied to a temp dir (`os.tmpdir()`) before any modification
 2. **Post-run review**: After the agent finishes, all changes are presented as unified diffs for user review
 3. **Rollback**: User can restore any or all files to their pre-run state
 4. **New files**: Tracked in the changeset — rollback deletes them
 
+**Activation logic**: Changeset review requires an active workspace (`--workspace` flag or `LYNOX_WORKSPACE` env). Without workspace, writes go to `~/.lynox/workspace/` and the normal `isDangerous()` permission guard runs instead — no review needed since these are sandbox artifacts, not project files.
+
+**Interfaces**: CLI shows an interactive diff review (accept/rollback/partial). Web UI shows a `ChangesetReview` component with per-file diffs, sensitive path warnings, and accept/rollback controls via `GET/POST /api/sessions/:id/changeset`.
+
 This does **not** apply to:
 - **bash commands**: Still require normal permission guard approval (side effects can't be rolled back)
-- **Sensitive paths**: `write_file` to sensitive paths (`.env`, `/etc/`, SSH keys) is still blocked even with changeset active
-- **Non-interactive modes**: MCP server, Telegram, pipe mode use the normal permission guard (no human to review)
+- **No workspace**: Without workspace, `isDangerous()` runs normally for all `write_file` calls
+- **Non-interactive modes**: MCP server, Telegram use the normal permission guard (no human to review)
 
 Backup dir uses `mkdtempSync` — survives process crashes. OS cleans `tmpdir` on reboot.
 
