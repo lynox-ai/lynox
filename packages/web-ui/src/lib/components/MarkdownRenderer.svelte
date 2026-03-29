@@ -75,16 +75,15 @@
 	}
 
 	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
-	const RESIZE_SCRIPT = `<script>new ResizeObserver(()=>parent.postMessage({type:'artifact-resize',h:document.documentElement.scrollHeight},'*')).observe(document.body)<\/script>`;
 
 	function buildArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
-			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}`).replace(/<\/body>/i, `${RESIZE_SCRIPT}</body>`);
+			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}`);
 		} else {
-			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}</head><body>${clean}${RESIZE_SCRIPT}</body></html>`;
+			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}</head><body>${clean}</body></html>`;
 		}
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
@@ -298,22 +297,6 @@
 		}
 		window.addEventListener('keydown', handleEscape);
 		return () => window.removeEventListener('keydown', handleEscape);
-	});
-
-	// ── Auto-resize artifact iframes via postMessage ─────────
-	$effect(() => {
-		function handleResize(e: MessageEvent) {
-			if (e.data?.type !== 'artifact-resize' || typeof e.data.h !== 'number') return;
-			const iframes = document.querySelectorAll('.artifact-frame') as NodeListOf<HTMLIFrameElement>;
-			for (const iframe of iframes) {
-				if (iframe.contentWindow === e.source) {
-					iframe.style.height = Math.min(e.data.h + 16, 800) + 'px';
-					break;
-				}
-			}
-		}
-		window.addEventListener('message', handleResize);
-		return () => window.removeEventListener('message', handleResize);
 	});
 
 	// ── Code block processing ────────────────────────────────
@@ -567,13 +550,10 @@
 
 	div :global(.artifact-frame) {
 		width: 100%;
-		min-height: 120px;
-		max-height: 800px;
-		height: 200px;
+		height: 420px;
 		border: none;
 		display: block;
 		background: #0a0a1a;
-		transition: height 0.15s ease;
 	}
 	div :global(.artifact-close-btn) {
 		display: none;
