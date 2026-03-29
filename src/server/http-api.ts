@@ -676,7 +676,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/tasks/:id', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
       if (!taskManager) { errorResponse(res, 503, 'Task manager not initialized'); return; }
-      const task = taskManager.update(params['id']!, { status: 'done' });
+      const task = taskManager.update(params['id']!, { status: 'completed' });
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, { deleted: true });
     }));
