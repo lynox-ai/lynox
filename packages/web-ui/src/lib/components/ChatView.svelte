@@ -112,6 +112,24 @@
 	}
 
 	let mediaRecorder: MediaRecorder | null = null;
+	let audioAnalyser: AnalyserNode | null = null;
+	let waveformBars = $state<number[]>(new Array(24).fill(3));
+	let waveformRaf: number | null = null;
+
+	function updateWaveform() {
+		if (!audioAnalyser || !recording) return;
+		const data = new Uint8Array(audioAnalyser.frequencyBinCount);
+		audioAnalyser.getByteFrequencyData(data);
+		// Sample 24 bars from frequency data
+		const step = Math.floor(data.length / 24);
+		const bars: number[] = [];
+		for (let i = 0; i < 24; i++) {
+			const val = data[i * step] ?? 0;
+			bars.push(Math.max(3, Math.round((val / 255) * 28)));
+		}
+		waveformBars = bars;
+		waveformRaf = requestAnimationFrame(updateWaveform);
+	}
 
 	async function toggleVoice() {
 		if (recording && mediaRecorder) {
@@ -120,6 +138,15 @@
 		}
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+			// Set up audio analyser for waveform visualization
+			const audioCtx = new AudioContext();
+			const source = audioCtx.createMediaStreamSource(stream);
+			const analyser = audioCtx.createAnalyser();
+			analyser.fftSize = 128;
+			source.connect(analyser);
+			audioAnalyser = analyser;
+
 			const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
 			const chunks: Blob[] = [];
 
@@ -129,7 +156,11 @@
 				recording = false;
 				recordingSeconds = 0;
 				if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
+				if (waveformRaf) { cancelAnimationFrame(waveformRaf); waveformRaf = null; }
+				audioAnalyser = null;
+				void audioCtx.close();
 				mediaRecorder = null;
+				waveformBars = new Array(24).fill(3);
 
 				const blob = new Blob(chunks, { type: 'audio/webm' });
 				const reader = new FileReader();
@@ -143,7 +174,6 @@
 					if (res.ok) {
 						const data = (await res.json()) as { text: string };
 						if (data.text.trim()) {
-							// Auto-send voice message (WhatsApp-style)
 							await sendMessage(`🎤 ${data.text.trim()}`);
 						}
 					}
@@ -156,6 +186,7 @@
 			recordingSeconds = 0;
 			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
 			mediaRecorder = recorder;
+			waveformRaf = requestAnimationFrame(updateWaveform);
 		} catch {
 			addToast(t('chat.mic_unavailable'), 'error');
 		}
@@ -706,14 +737,20 @@
 
 			{#if recording}
 				<!-- Recording state: [🗑  ● 0:03 ━━━━━  ⬛]  [➤] -->
-				<div class="flex-1 flex items-center gap-3 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2.5">
-					<button onclick={() => { toggleVoice(); /* discard */ }} class="text-text-subtle hover:text-danger transition-colors shrink-0" aria-label="Discard">
+				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2">
+					<button onclick={() => { toggleVoice(); }} class="text-text-subtle hover:text-danger transition-colors shrink-0" aria-label="Discard">
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
 					</button>
 					<span class="h-2 w-2 rounded-full bg-danger animate-pulse shrink-0"></span>
-					<span class="text-sm font-mono text-text-subtle tabular-nums">{recordingSeconds}s</span>
-					<div class="flex-1 h-1 rounded-full bg-border overflow-hidden">
-						<div class="h-full bg-danger/60 rounded-full animate-pulse" style="width: {Math.min(recordingSeconds * 3, 100)}%"></div>
+					<span class="text-xs font-mono text-text-subtle tabular-nums shrink-0">{recordingSeconds}s</span>
+					<!-- Live waveform bars -->
+					<div class="flex-1 flex items-center justify-center gap-[2px] h-8">
+						{#each waveformBars as height}
+							<div
+								class="w-[3px] rounded-full bg-accent/70 transition-all duration-75"
+								style="height: {height}px;"
+							></div>
+						{/each}
 					</div>
 					<button onclick={toggleVoice} class="text-danger hover:text-text transition-colors shrink-0" aria-label="Stop">
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="2" /></svg>
