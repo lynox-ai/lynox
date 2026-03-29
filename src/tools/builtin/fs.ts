@@ -81,7 +81,7 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       }
       // Relative paths → ~/.lynox/files/ (not process.cwd()) when no workspace is set
       const resolved = (!isAbsolute(input.path) && !isWorkspaceActive())
-        ? resolve(join(getLynoxDir(), 'files'), input.path)
+        ? resolve(join(getLynoxDir(), 'workspace'), input.path)
         : resolve(input.path);
       let realPath: string;
       if (isWorkspaceActive()) {
