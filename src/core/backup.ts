@@ -251,7 +251,8 @@ export class BackupManager {
       const key = needsDecrypt ? deriveBackupKey(this.vaultKey!) : null;
 
       for (const entry of manifest.files) {
-        if (entry.type === 'directory') continue;
+        // Skip directory entries + legacy kuzu_dir from pre-SQLite backups
+        if (entry.type === 'directory' || entry.type as string === 'kuzu_dir') continue;
 
         const srcFile = join(backupPath, entry.path);
         const destFile = join(this.lynoxDir, entry.path);

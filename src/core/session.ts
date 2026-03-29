@@ -29,6 +29,7 @@ import {
   SYSTEM_PROMPT,
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
+  DEVELOPER_PROMPT_SUFFIX,
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
@@ -575,6 +576,10 @@ export class Session {
     // Append data store docs only when data store tools are registered
     if (engine.getDataStoreEnabled()) {
       basePrompt += DATASTORE_PROMPT_SUFFIX;
+    }
+    // Append developer mode suffix when experience is set to 'developer'
+    if (userConfig.experience === 'developer') {
+      basePrompt += DEVELOPER_PROMPT_SUFFIX;
     }
     const systemPrompt = this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix

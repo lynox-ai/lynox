@@ -108,7 +108,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     });
 
     if (similar.length > 0) {
-      return { memoryId: similar[0]!.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
+      // Boost confidence of the existing memory — repeated storage = confirmation
+      const existingId = similar[0]!.id;
+      this.db.confirmMemory(existingId);
+      return { memoryId: existingId, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
     }
 
     // 3. Contradiction detection

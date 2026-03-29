@@ -451,6 +451,15 @@ export class AgentMemoryDb {
     `).run(supersededById, new Date().toISOString(), memoryId);
   }
 
+  /** Increment confirmation count and boost confidence (capped at 1.0). Called on dedup match. */
+  confirmMemory(memoryId: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE memories SET confirmation_count = confirmation_count + 1,
+        confidence = MIN(confidence + 0.05, 1.0), updated_at = ? WHERE id = ?
+    `).run(now, memoryId);
+  }
+
   updateMemoryRetrieved(memoryId: string): void {
     const now = new Date().toISOString();
     this.db.prepare(`

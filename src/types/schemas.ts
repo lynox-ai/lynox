@@ -130,4 +130,5 @@ export const LynoxUserConfigSchema = z.object({
   backup_encrypt:          z.boolean().optional(),
   backup_gdrive:           z.boolean().optional(),
   mcp_servers:             z.array(z.object({ name: z.string(), url: z.string() })).optional(),
+  experience:              z.enum(['business', 'developer']).optional(),
 }).passthrough(); // allow unknown keys for forward compat
