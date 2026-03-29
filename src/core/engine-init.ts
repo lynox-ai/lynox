@@ -172,9 +172,6 @@ export async function generateInitBriefing(
       }
     }
 
-    // Agent performance summary from pattern engine + KPIs
-    // (generated later during Engine.init when KnowledgeLayer is available)
-
     if (parts.length === 0) {
       return { briefing: undefined, manifest };
     }

@@ -462,24 +462,24 @@ export class Session {
     const lower = task.toLowerCase();
     const len = task.length;
 
-    // Short, simple queries → haiku
-    const simplePatterns = [
-      /^(was|wer|wo|wann|wie viel|how|what|who|where|when)\b/i,
-      /^(zeig|list|show|check|status|prüf)/i,
-      /^(erinner|recall|remember|merke)/i,
-    ];
-
-    // Complex tasks → keep current model
+    // Complex tasks → always keep current model
     const complexPatterns = [
       /\b(implement|build|create|design|refactor|fix|debug|deploy|migrate)\b/i,
       /\b(schreib|entwickl|bau|erstell|analysier|optimier)\b/i,
-      /\b(code|function|class|component|api|database|test)\b/i,
+      /\b(code|function|class|component|api|database|test|schema|query)\b/i,
+      /\b(file|datei|config|server|docker|pipeline|workflow)\b/i,
     ];
-
     if (complexPatterns.some(p => p.test(lower))) return false;
-    if (len > 300) return false;
-    if (simplePatterns.some(p => p.test(lower)) && len < 150) return true;
-    if (len < 50) return true;
+    if (len > 200) return false;
+
+    // Short, simple queries → haiku
+    const simplePatterns = [
+      /^(was |wer |wo |wann |wie viel|how |what |who |where |when )/i,
+      /^(zeig |list |show |check |status |prüf)/i,
+      /^(erinner|recall|remember|merke)/i,
+    ];
+    if (simplePatterns.some(p => p.test(lower)) && len < 120) return true;
+    if (len < 40) return true;
 
     return false;
   }

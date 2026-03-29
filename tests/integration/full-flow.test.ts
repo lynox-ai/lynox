@@ -73,7 +73,7 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
         projectDir: '/test/project',
       });
 
-      expect(id).toHaveLength(16);
+      expect(id).toHaveLength(36); // UUID format
 
       // Verify initial state
       const run = h.getRun(id);

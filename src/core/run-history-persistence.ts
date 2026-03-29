@@ -1,10 +1,10 @@
 import type Database from 'better-sqlite3';
 import type { TaskRecord } from '../types/index.js';
 import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
-import { sha256Short } from './utils.js';
+import { randomUUID } from 'node:crypto';
 
 function generateId(): string {
-  return sha256Short(Date.now().toString() + Math.random().toString());
+  return randomUUID();
 }
 
 // Re-export locally for consumers that need the record type

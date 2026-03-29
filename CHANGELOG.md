@@ -14,11 +14,12 @@ One system that learns your business — replaces your CRM, workflows, outreach,
 
 ### Knowledge
 
-- **Knowledge Graph** — Embedded property graph (LadybugDB) with entity extraction, resolution, contradiction detection, and graph-augmented retrieval
+- **Unified Agent Memory** — SQLite-based (crash-safe, WAL mode) with 9 tables: semantic memories, entity graph, episodic log, pattern detection, KPI metrics. Confidence evolution, memory consolidation, retrieval feedback loop
+- **Knowledge Graph Retrieval** — HyDE query expansion, multi-signal search (vector 55% + graph 15% + episodic 10%), confidence multiplier with unconfirmed decay, MMR re-ranking, pattern + episode context injection
 - **Persistent business knowledge** — Context-scoped flat-file storage with auto-extraction and selective extraction prompts
 - **Knowledge levels** — Three tiers: organization, project, personal — with configurable relevance weights
-- **Smart retrieval** — HyDE query expansion, multi-signal search (vector + full-text + graph), namespace-specific decay, MMR re-ranking
 - **Embeddings** — Local ONNX (multilingual-e5-small, 384d, 100 languages), fully offline
+- **Auto role selection** — Simple tasks auto-downgrade to Haiku for cost optimization
 
 ### Tools (13 built-in)
 

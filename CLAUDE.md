@@ -33,7 +33,7 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 
-- `src/core/` — 66 modules: engine, session, agent, worker-loop, KG, memory, sentry, backup, api-store, crm, etc.
+- `src/core/` — 66 modules: engine, session, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
 - `src/cli/` — Terminal UI + 14 command handler modules
 - `src/tools/` — 14 builtin tools (incl. api_setup) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
@@ -45,7 +45,7 @@ Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 
 SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
 
-- `src/lib/components/` — 10 View components (ChatView, AppLayout, MemoryView, HistoryView, Settings...)
+- `src/lib/components/` — 11 View components (ChatView, AppLayout, MemoryView, HistoryView, KnowledgeGraphView, MemoryInsightsView, Settings...)
 - `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base
 - `src/lib/config.svelte.ts` — configurable `apiBase` (/api/engine for standalone, /api/proxy for cloud)
 - `src/lib/i18n.ts` — DE/EN translations

@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { join, dirname } from 'node:path';
-import { hkdfSync, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { hkdfSync, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
 import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
@@ -69,7 +69,7 @@ export interface PromptSnapshotRecord {
 }
 
 function generateId(): string {
-  return sha256Short(Date.now().toString() + Math.random().toString());
+  return randomUUID();
 }
 
 export function hashTask(text: string): string {

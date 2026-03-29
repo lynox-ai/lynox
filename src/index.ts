@@ -420,7 +420,8 @@ Docs: https://docs.lynox.dev
   // === HTTP API mode ===
   if (args.includes('--http-api')) {
     const { LynoxHTTPApi } = await import('./server/http-api.js');
-    const port = parseInt(process.env['LYNOX_HTTP_PORT'] ?? '3100', 10);
+    const rawPort = parseInt(process.env['LYNOX_HTTP_PORT'] ?? '3100', 10);
+    const port = Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : 3100;
     const api = new LynoxHTTPApi();
     await api.init();
     await api.start(port);

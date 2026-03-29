@@ -299,9 +299,9 @@ export class LynoxHTTPApi {
       }
     }
 
-    // Content-Length check
+    // Content-Length check (guard against NaN/negative from malformed headers)
     const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
-    if (contentLength > MAX_BODY_BYTES) {
+    if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > MAX_BODY_BYTES) {
       errorResponse(res, 413, 'Request body too large');
       return;
     }

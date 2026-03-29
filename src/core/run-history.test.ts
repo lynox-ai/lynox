@@ -33,7 +33,7 @@ describe('RunHistory', () => {
       modelTier: 'sonnet',
       modelId: 'claude-sonnet-4-6',
     });
-    expect(id).toHaveLength(16);
+    expect(id).toHaveLength(36); // UUID format
 
     const run = h.getRun(id);
     expect(run).toBeDefined();
