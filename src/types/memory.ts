@@ -146,29 +146,7 @@ export interface KnowledgeGraphStats {
   entityCount: number;
   relationCount: number;
   communityCount: number;
-  episodeCount: number;
   patternCount: number;
-}
-
-// === Episodic Memory ===
-
-export type EpisodeOutcomeSignal = 'success' | 'partial' | 'failed' | 'abandoned' | 'unknown';
-
-export interface EpisodeRecord {
-  id: string;
-  runId: string | null;
-  sessionId: string | null;
-  task: string;
-  approach: string | null;
-  outcome: string | null;
-  outcomeSignal: EpisodeOutcomeSignal;
-  toolsUsed: string[];
-  entitiesInvolved: string[];
-  memoriesCreated: string[];
-  durationMs: number | null;
-  tokenCost: number | null;
-  userFeedback: string | null;
-  createdAt: string;
 }
 
 // === Pattern Engine ===
@@ -259,34 +237,6 @@ export interface IKnowledgeLayer {
 
   gc(options?: { dryRun?: boolean | undefined }): Promise<KnowledgeGcResult>;
   stats(): Promise<KnowledgeGraphStats>;
-
-  // === Episodic Memory ===
-
-  createEpisode(params: {
-    runId?: string | undefined;
-    sessionId?: string | undefined;
-    task: string;
-    approach?: string | undefined;
-    outcome?: string | undefined;
-    outcomeSignal?: EpisodeOutcomeSignal | undefined;
-    toolsUsed?: string[] | undefined;
-    entitiesInvolved?: string[] | undefined;
-    durationMs?: number | undefined;
-    tokenCost?: number | undefined;
-  }): string;
-
-  updateEpisodeOutcome(id: string, params: {
-    outcome?: string | undefined;
-    outcomeSignal?: EpisodeOutcomeSignal | undefined;
-    userFeedback?: string | undefined;
-  }): void;
-
-  queryEpisodes(filters?: {
-    runId?: string | undefined;
-    sessionId?: string | undefined;
-    outcomeSignal?: EpisodeOutcomeSignal | undefined;
-    limit?: number | undefined;
-  }): EpisodeRecord[];
 
   // === Pattern Engine ===
 

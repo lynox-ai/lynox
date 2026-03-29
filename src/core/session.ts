@@ -391,22 +391,10 @@ export class Session {
         } catch { /* fire-and-forget */ }
       }
 
-      // Create episodic memory + auto-confirm retrieved memories on success
-      if (knowledgeLayer) {
+      // Auto-confirm retrieved memories on success
+      if (knowledgeLayer && this._retrievedMemoryIds.length > 0) {
         try {
-          knowledgeLayer.createEpisode({
-            runId: this.currentRunId ?? undefined,
-            sessionId: this.sessionId,
-            task: taskText,
-            outcome: result.slice(0, 500),
-            outcomeSignal: 'success',
-            toolsUsed: this._getToolsUsed(),
-            durationMs,
-            tokenCost: costUsd,
-          });
-          if (this._retrievedMemoryIds.length > 0) {
-            knowledgeLayer.feedbackOnRetrieval(this._retrievedMemoryIds, 'useful');
-          }
+          knowledgeLayer.feedbackOnRetrieval(this._retrievedMemoryIds, 'useful');
         } catch { /* fire-and-forget */ }
       }
 
@@ -479,21 +467,6 @@ export class Session {
             threadStore.appendMessages(this.sessionId, newMessages, existingCount);
             threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
           }
-        } catch { /* fire-and-forget */ }
-      }
-
-      // Create episodic memory entry for failed run
-      if (knowledgeLayer) {
-        try {
-          knowledgeLayer.createEpisode({
-            runId: this.currentRunId ?? undefined,
-            sessionId: this.sessionId,
-            task: taskText,
-            outcome: getErrorMessage(err).slice(0, 500),
-            outcomeSignal: 'failed',
-            toolsUsed: this._getToolsUsed(),
-            durationMs: Date.now() - startTime,
-          });
         } catch { /* fire-and-forget */ }
       }
 
@@ -659,7 +632,7 @@ export class Session {
           addLLMBreadcrumb(model, event.usage.input_tokens, event.usage.output_tokens);
         }).catch(() => {});
       }
-      // Track tool names for episodic memory
+      // Track tool names for thread insights
       if (event.type === 'tool_call' && 'name' in event) {
         this.recordToolName(event.name as string);
       }

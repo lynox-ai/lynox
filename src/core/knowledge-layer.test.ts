@@ -79,7 +79,6 @@ describe('KnowledgeLayer', () => {
     const stats = await layer.stats();
     expect(stats.memoryCount).toBeGreaterThanOrEqual(1);
     expect(stats.entityCount).toBeGreaterThanOrEqual(0);
-    expect(typeof stats.episodeCount).toBe('number');
     expect(typeof stats.patternCount).toBe('number');
   });
 
@@ -114,30 +113,6 @@ describe('KnowledgeLayer', () => {
   it('resolves entity after store', async () => {
     const entity = await layer.resolveEntity('Thomas', [scope]);
     expect(entity === null || typeof entity.canonicalName === 'string').toBe(true);
-  });
-
-  // --- Episodes ---
-
-  it('creates and queries episodes', () => {
-    const id = layer.createEpisode({
-      task: 'Fix the API bug',
-      outcomeSignal: 'success',
-      toolsUsed: ['file_write', 'bash'],
-      durationMs: 5000,
-    });
-    expect(id).toBeTruthy();
-
-    const episodes = layer.queryEpisodes({ outcomeSignal: 'success' });
-    expect(episodes.length).toBeGreaterThanOrEqual(1);
-    expect(episodes[0]!.task).toBe('Fix the API bug');
-    expect(episodes[0]!.toolsUsed).toEqual(['file_write', 'bash']);
-  });
-
-  it('updates episode outcome', () => {
-    const id = layer.createEpisode({ task: 'Deploy' });
-    layer.updateEpisodeOutcome(id, { outcomeSignal: 'failed', userFeedback: 'wrong branch' });
-    const episodes = layer.queryEpisodes({ outcomeSignal: 'failed' });
-    expect(episodes.some(e => e.id === id)).toBe(true);
   });
 
   // --- Patterns ---

@@ -11,8 +11,6 @@ import type {
   KnowledgeRetrievalResult,
   KnowledgeGraphStats,
   KnowledgeGcResult,
-  EpisodeOutcomeSignal,
-  EpisodeRecord,
   PatternType,
   PatternRecord,
   MetricWindow,
@@ -27,6 +25,7 @@ import { extractEntities } from './entity-extractor.js';
 import { detectContradictions } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { PatternEngine } from './pattern-engine.js';
+import type { RunHistory } from './run-history.js';
 import { channels } from './observability.js';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
@@ -36,7 +35,7 @@ const DEDUP_THRESHOLD = 0.90;
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
  *
  * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
- * ContradictionDetector + EpisodicLog + PatternEngine.
+ * ContradictionDetector + PatternEngine + RunHistory (for insights).
  */
 export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly db: AgentMemoryDb;
@@ -44,22 +43,25 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly entityResolver: EntityResolver;
   private readonly retrievalEngine: RetrievalEngine;
   private readonly anthropicClient: Anthropic | undefined;
-  private readonly patternEngine: PatternEngine;
+  private readonly patternEngine: PatternEngine | null;
+  private readonly runHistory: RunHistory | null;
 
   constructor(
     dbPath: string,
     embeddingProvider: EmbeddingProvider,
     anthropicClient?: Anthropic | undefined,
+    runHistory?: RunHistory | undefined,
   ) {
     this.db = new AgentMemoryDb(dbPath);
     this.db.setEmbeddingDimensions(embeddingProvider.dimensions);
     this.embeddingProvider = embeddingProvider;
     this.entityResolver = new EntityResolver(this.db, embeddingProvider);
     this.retrievalEngine = new RetrievalEngine(
-      this.db, embeddingProvider, this.entityResolver, anthropicClient,
+      this.db, embeddingProvider, this.entityResolver, anthropicClient, runHistory,
     );
     this.anthropicClient = anthropicClient;
-    this.patternEngine = new PatternEngine(this.db);
+    this.runHistory = runHistory ?? null;
+    this.patternEngine = runHistory ? new PatternEngine(runHistory, this.db) : null;
   }
 
   // === Lifecycle ===
@@ -253,15 +255,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       parts.push(`<learned_patterns>\n${lines.join('\n')}\n</learned_patterns>`);
     }
 
-    // Recent successful episodes (last 3) for episodic context
-    const recent = this.db.queryEpisodes({ outcomeSignal: 'success', limit: 3 });
-    if (recent.length > 0) {
-      const lines = recent.map(e => {
-        const tools = JSON.parse(e.tools_used) as string[];
-        const toolStr = tools.length > 0 ? ` (tools: ${tools.join(', ')})` : '';
-        return `- ${e.task.slice(0, 100)}${toolStr}`;
-      });
-      parts.push(`<recent_successes>\n${lines.join('\n')}\n</recent_successes>`);
+    // Recent successful runs for context
+    if (this.runHistory) {
+      const recent = this.runHistory.getRunsForAnalysis(10);
+      const successful = recent.filter(r => r.status === 'completed' && r.toolNames.length > 0);
+      if (successful.length > 0) {
+        const lines = successful.slice(0, 3).map(r => {
+          const toolStr = r.toolNames.length > 0 ? ` (tools: ${r.toolNames.join(', ')})` : '';
+          return `- run ${r.id.slice(0, 8)}${toolStr}`;
+        });
+        parts.push(`<recent_successes>\n${lines.join('\n')}\n</recent_successes>`);
+      }
     }
 
     return parts.join('\n');
@@ -363,52 +367,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       entityCount: this.db.getEntityCount(),
       relationCount: this.db.getRelationCount(),
       communityCount: 0,
-      episodeCount: this.db.getEpisodeCount(),
       patternCount: this.db.getPatternCount(),
     };
-  }
-
-  // === Episodic Memory ===
-
-  createEpisode(params: {
-    runId?: string | undefined;
-    sessionId?: string | undefined;
-    task: string;
-    approach?: string | undefined;
-    outcome?: string | undefined;
-    outcomeSignal?: EpisodeOutcomeSignal | undefined;
-    toolsUsed?: string[] | undefined;
-    entitiesInvolved?: string[] | undefined;
-    durationMs?: number | undefined;
-    tokenCost?: number | undefined;
-  }): string {
-    return this.db.createEpisode(params);
-  }
-
-  updateEpisodeOutcome(id: string, params: {
-    outcome?: string | undefined;
-    outcomeSignal?: EpisodeOutcomeSignal | undefined;
-    userFeedback?: string | undefined;
-  }): void {
-    this.db.updateEpisodeOutcome(id, params);
-  }
-
-  queryEpisodes(filters?: {
-    runId?: string | undefined;
-    sessionId?: string | undefined;
-    outcomeSignal?: EpisodeOutcomeSignal | undefined;
-    limit?: number | undefined;
-  }): EpisodeRecord[] {
-    return this.db.queryEpisodes(filters).map(r => ({
-      id: r.id, runId: r.run_id, sessionId: r.session_id,
-      task: r.task, approach: r.approach, outcome: r.outcome,
-      outcomeSignal: r.outcome_signal as EpisodeOutcomeSignal,
-      toolsUsed: JSON.parse(r.tools_used) as string[],
-      entitiesInvolved: JSON.parse(r.entities_involved) as string[],
-      memoriesCreated: JSON.parse(r.memories_created) as string[],
-      durationMs: r.duration_ms, tokenCost: r.token_cost,
-      userFeedback: r.user_feedback, createdAt: r.created_at,
-    }));
   }
 
   // === Pattern Engine ===
@@ -440,6 +400,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   /** Run pattern detection + KPI computation. Called periodically by engine. */
   runIntelligence(): void {
+    if (!this.patternEngine) return;
     try {
       this.patternEngine.detectPatterns();
       this.patternEngine.computeKPIs();

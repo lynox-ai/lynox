@@ -4,24 +4,36 @@
 
 	interface Metric { metricName: string; value: number; sampleCount: number; }
 	interface Pattern { id: string; patternType: string; description: string; evidenceCount: number; confidence: number; }
-	interface Episode { id: string; task: string; outcomeSignal: string; toolsUsed: string[]; durationMs: number | null; tokenCost: number | null; createdAt: string; }
+	interface ThreadInsight {
+		sessionId: string;
+		title: string;
+		runCount: number;
+		successCount: number;
+		failedCount: number;
+		totalDurationMs: number;
+		totalCostUsd: number;
+		lastTask: string;
+		lastOutcomeSignal: string;
+		lastRunAt: string;
+		toolsUsed: Record<string, number>;
+	}
 
 	let metrics = $state<Metric[]>([]);
 	let patterns = $state<Pattern[]>([]);
-	let episodes = $state<Episode[]>([]);
+	let threadInsights = $state<ThreadInsight[]>([]);
 	let loading = $state(true);
 
 	async function loadData() {
 		loading = true;
 		try {
-			const [mRes, pRes, eRes] = await Promise.all([
+			const [mRes, pRes, tRes] = await Promise.all([
 				fetch(`${getApiBase()}/metrics`),
 				fetch(`${getApiBase()}/patterns`),
-				fetch(`${getApiBase()}/episodes?limit=20`),
+				fetch(`${getApiBase()}/thread-insights?limit=20`),
 			]);
 			metrics = ((await mRes.json()) as { metrics: Metric[] }).metrics;
 			patterns = ((await pRes.json()) as { patterns: Pattern[] }).patterns;
-			episodes = ((await eRes.json()) as { episodes: Episode[] }).episodes;
+			threadInsights = ((await tRes.json()) as { threadInsights: ThreadInsight[] }).threadInsights;
 		} catch { /* ignore */ }
 		loading = false;
 	}
@@ -34,24 +46,27 @@
 	}
 
 	function formatDuration(ms: number | null): string {
-		if (ms === null) return '-';
+		if (ms === null || ms === 0) return '-';
 		if (ms < 1000) return `${ms}ms`;
 		return `${(ms / 1000).toFixed(1)}s`;
 	}
 
 	function formatCost(usd: number | null): string {
-		if (usd === null) return '-';
+		if (usd === null || usd === 0) return '-';
 		if (usd < 0.01) return `$${(usd * 100).toFixed(1)}c`;
 		return `$${usd.toFixed(2)}`;
 	}
 
-	const signalIcon: Record<string, string> = {
-		success: '\u2713',
-		failed: '\u2717',
-		partial: '\u25CB',
-		abandoned: '\u2014',
-		unknown: '?',
-	};
+	function topTools(toolMap: Record<string, number>, max = 3): string[] {
+		return Object.entries(toolMap)
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, max)
+			.map(([k]) => k);
+	}
+
+	function successRate(t: ThreadInsight): number {
+		return t.runCount > 0 ? t.successCount / t.runCount : 0;
+	}
 
 	const signalColor: Record<string, string> = {
 		success: 'text-success',
@@ -97,11 +112,11 @@
 			</div>
 			<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 				<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('insights.total_runs')}</p>
-				<p class="text-2xl font-light mt-1">{getMetric('total_runs') ?? episodes.length}</p>
+				<p class="text-2xl font-light mt-1">{getMetric('total_runs') ?? threadInsights.reduce((s, ti) => s + ti.runCount, 0)}</p>
 			</div>
 		</div>
 
-		<!-- Patterns + Episodes -->
+		<!-- Patterns + Thread Insights -->
 		<div class="flex gap-4 flex-col md:flex-row">
 			<!-- Patterns -->
 			<div class="flex-1 min-w-0">
@@ -124,30 +139,33 @@
 				{/if}
 			</div>
 
-			<!-- Episodes -->
+			<!-- Thread Insights -->
 			<div class="flex-1 min-w-0">
-				<h2 class="text-sm font-medium mb-3">{t('insights.episodes')}</h2>
-				{#if episodes.length === 0}
-					<p class="text-text-subtle text-sm">{t('insights.no_episodes')}</p>
+				<h2 class="text-sm font-medium mb-3">{t('insights.threads')}</h2>
+				{#if threadInsights.length === 0}
+					<p class="text-text-subtle text-sm">{t('insights.no_threads')}</p>
 				{:else}
 					<div class="space-y-1">
-						{#each episodes as ep}
+						{#each threadInsights as ti}
 							<div class="rounded-[var(--radius-sm)] border border-border px-3 py-2 flex items-center gap-3">
-								<span class="text-lg {signalColor[ep.outcomeSignal] ?? 'text-text-muted'}">{signalIcon[ep.outcomeSignal] ?? '?'}</span>
+								<!-- Success rate indicator -->
+								<div class="shrink-0 w-8 text-center">
+									<span class="text-xs font-mono {successRate(ti) >= 0.6 ? 'text-success' : successRate(ti) >= 0.3 ? 'text-warning' : 'text-danger'}">
+										{(successRate(ti) * 100).toFixed(0)}%
+									</span>
+								</div>
 								<div class="flex-1 min-w-0">
-									<p class="text-sm truncate">{ep.task.slice(0, 80)}</p>
+									<p class="text-sm truncate">{(ti.title || ti.lastTask).slice(0, 80)}</p>
 									<div class="flex gap-2 text-[10px] text-text-subtle mt-0.5">
-										{#each ep.toolsUsed.slice(0, 3) as tool}
+										<span class="font-mono">{ti.runCount} runs</span>
+										{#each topTools(ti.toolsUsed) as tool}
 											<span class="bg-bg-muted px-1.5 py-0.5 rounded">{tool}</span>
 										{/each}
-										{#if ep.toolsUsed.length > 3}
-											<span>+{ep.toolsUsed.length - 3}</span>
-										{/if}
 									</div>
 								</div>
 								<div class="text-right shrink-0 text-xs text-text-subtle tabular-nums">
-									<p>{formatDuration(ep.durationMs)}</p>
-									<p>{formatCost(ep.tokenCost)}</p>
+									<p>{formatDuration(ti.totalDurationMs)}</p>
+									<p>{formatCost(ti.totalCostUsd)}</p>
 								</div>
 							</div>
 						{/each}

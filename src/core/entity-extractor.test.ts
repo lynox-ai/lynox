@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractEntitiesRegex, shouldUseLLMExtraction } from './entity-extractor.js';
+import { extractEntitiesRegex, shouldUseLLMExtraction, isValidEntity } from './entity-extractor.js';
 
 describe('extractEntitiesRegex', () => {
   describe('person extraction', () => {
@@ -143,6 +143,73 @@ describe('extractEntitiesRegex', () => {
       expect(result.entities).toBeDefined();
       expect(result.relations).toHaveLength(0);
     });
+  });
+
+  describe('false positive filtering', () => {
+    it('rejects "Stages" as a location', () => {
+      const result = extractEntitiesRegex('Deals are in Stages like discovery and closing.');
+      const names = result.entities.map(e => e.name.toLowerCase());
+      expect(names).not.toContain('stages');
+    });
+
+    it('rejects "prefers" as any entity type', () => {
+      const result = extractEntitiesRegex('The client prefers self-hosted.');
+      const names = result.entities.map(e => e.name.toLowerCase());
+      expect(names).not.toContain('prefers');
+    });
+
+    it('still extracts real locations', () => {
+      const result = extractEntitiesRegex('Company is based in Zurich.');
+      expect(result.entities).toContainEqual(
+        expect.objectContaining({ name: 'Zurich', type: 'location' }),
+      );
+    });
+
+    it('still extracts real person names', () => {
+      const result = extractEntitiesRegex('Kunde Thomas und Frau Müller');
+      expect(result.entities).toContainEqual(
+        expect.objectContaining({ name: 'Thomas', type: 'person' }),
+      );
+      expect(result.entities).toContainEqual(
+        expect.objectContaining({ name: 'Müller', type: 'person' }),
+      );
+    });
+  });
+});
+
+describe('isValidEntity', () => {
+  it('rejects single-word stopwords', () => {
+    expect(isValidEntity('prefers', 'person')).toBe(false);
+    expect(isValidEntity('Stages', 'location')).toBe(false);
+    expect(isValidEntity('tracking', 'concept')).toBe(false);
+    expect(isValidEntity('qualified', 'concept')).toBe(false);
+  });
+
+  it('rejects slash-separated enum values', () => {
+    expect(isValidEntity('lead/qualified', 'project')).toBe(false);
+    expect(isValidEntity('proposal/negotiation', 'project')).toBe(false);
+  });
+
+  it('rejects multi-word phrases where all words are stopwords', () => {
+    expect(isValidEntity('tracking report', 'product')).toBe(false);
+  });
+
+  it('accepts proper names', () => {
+    expect(isValidEntity('Thomas', 'person')).toBe(true);
+    expect(isValidEntity('Zurich', 'location')).toBe(true);
+    expect(isValidEntity('lynox AI', 'organization')).toBe(true);
+  });
+
+  it('rejects multi-word phrases where all words are generic nouns', () => {
+    expect(isValidEntity('investor tracking table', 'product')).toBe(false);
+  });
+
+  it('accepts multi-word phrases with non-stopword content', () => {
+    expect(isValidEntity('lynox Dashboard', 'product')).toBe(true);
+  });
+
+  it('rejects entities shorter than 2 characters', () => {
+    expect(isValidEntity('A', 'person')).toBe(false);
   });
 });
 

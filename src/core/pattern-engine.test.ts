@@ -3,38 +3,63 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AgentMemoryDb } from './agent-memory-db.js';
+import { RunHistory } from './run-history.js';
 import { PatternEngine } from './pattern-engine.js';
 
 describe('PatternEngine', () => {
   let tempDir: string;
   let db: AgentMemoryDb;
+  let rh: RunHistory;
   let engine: PatternEngine;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'lynox-pattern-test-'));
-    db = new AgentMemoryDb(join(tempDir, 'test.db'));
-    engine = new PatternEngine(db);
+    db = new AgentMemoryDb(join(tempDir, 'memory.db'));
+    rh = new RunHistory(join(tempDir, 'history.db'));
+    engine = new PatternEngine(rh, db);
   });
 
   afterEach(async () => {
     db.close();
+    rh.close();
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  /** Helper: insert a completed/failed run with tool calls. */
+  function insertRun(opts: { sessionId?: string; status?: string; tools?: string[]; durationMs?: number; costUsd?: number }) {
+    const runId = rh.insertRun({
+      sessionId: opts.sessionId ?? 'test-session',
+      taskText: 'test task',
+      modelTier: 'sonnet',
+      modelId: 'claude-sonnet',
+    });
+    rh.updateRun(runId, {
+      status: (opts.status ?? 'completed') as 'completed' | 'failed',
+      durationMs: opts.durationMs ?? 1000,
+      costUsd: opts.costUsd ?? 0.01,
+    });
+    for (let i = 0; i < (opts.tools ?? []).length; i++) {
+      rh.insertToolCall({
+        runId,
+        toolName: opts.tools![i]!,
+        inputJson: '{}',
+        outputJson: '{}',
+        durationMs: 100,
+        sequenceOrder: i,
+      });
+    }
+    return runId;
+  }
+
   describe('detectPatterns', () => {
-    it('returns 0 with too few episodes', () => {
-      db.createEpisode({ task: 'A', outcomeSignal: 'success', toolsUsed: ['bash'] });
+    it('returns 0 with too few runs', () => {
+      insertRun({ tools: ['bash'] });
       expect(engine.detectPatterns()).toBe(0);
     });
 
     it('detects tool sequence patterns', () => {
-      // Create 5 successful episodes with same tool combo
       for (let i = 0; i < 5; i++) {
-        db.createEpisode({
-          task: `Task ${i}`,
-          outcomeSignal: 'success',
-          toolsUsed: ['file_read', 'file_write'],
-        });
+        insertRun({ status: 'completed', tools: ['file_read', 'file_write'] });
       }
       const detected = engine.detectPatterns();
       expect(detected).toBeGreaterThanOrEqual(1);
@@ -46,15 +71,13 @@ describe('PatternEngine', () => {
     });
 
     it('detects anti-patterns from high failure rate', () => {
-      // Create episodes where 'bash' as primary tool fails often
       for (let i = 0; i < 4; i++) {
-        db.createEpisode({ task: `Fail ${i}`, outcomeSignal: 'failed', toolsUsed: ['bash'] });
+        insertRun({ status: 'failed', tools: ['bash'] });
       }
-      db.createEpisode({ task: 'OK', outcomeSignal: 'success', toolsUsed: ['bash'] });
-      // Need 5+ total for detection to run
-      db.createEpisode({ task: 'Other', outcomeSignal: 'success', toolsUsed: ['file_write'] });
+      insertRun({ status: 'completed', tools: ['bash'] });
+      insertRun({ status: 'completed', tools: ['file_write'] });
 
-      const detected = engine.detectPatterns();
+      engine.detectPatterns();
       const antiPatterns = db.getPatterns({ patternType: 'anti-pattern' });
       expect(antiPatterns.length).toBeGreaterThanOrEqual(1);
       expect(antiPatterns[0]!.description).toContain('bash');
@@ -62,14 +85,13 @@ describe('PatternEngine', () => {
 
     it('increments evidence on repeated detection', () => {
       for (let i = 0; i < 5; i++) {
-        db.createEpisode({ task: `T${i}`, outcomeSignal: 'success', toolsUsed: ['web_search', 'memory_store'] });
+        insertRun({ status: 'completed', tools: ['web_search', 'memory_store'] });
       }
       engine.detectPatterns();
       const before = db.getPatterns({ patternType: 'sequence' });
       expect(before.length).toBe(1);
       const evidenceBefore = before[0]!.evidence_count;
 
-      // Run again — same pattern should get incremented, not duplicated
       engine.detectPatterns();
       const after = db.getPatterns({ patternType: 'sequence' });
       expect(after.length).toBe(1);
@@ -79,9 +101,9 @@ describe('PatternEngine', () => {
 
   describe('computeKPIs', () => {
     it('computes success rate', () => {
-      db.createEpisode({ task: 'A', outcomeSignal: 'success' });
-      db.createEpisode({ task: 'B', outcomeSignal: 'success' });
-      db.createEpisode({ task: 'C', outcomeSignal: 'failed' });
+      insertRun({ status: 'completed' });
+      insertRun({ status: 'completed' });
+      insertRun({ status: 'failed' });
 
       engine.computeKPIs();
 
@@ -91,8 +113,8 @@ describe('PatternEngine', () => {
     });
 
     it('computes average duration', () => {
-      db.createEpisode({ task: 'A', outcomeSignal: 'success', durationMs: 1000 });
-      db.createEpisode({ task: 'B', outcomeSignal: 'success', durationMs: 3000 });
+      insertRun({ durationMs: 1000 });
+      insertRun({ durationMs: 3000 });
 
       engine.computeKPIs();
 
@@ -102,8 +124,8 @@ describe('PatternEngine', () => {
     });
 
     it('computes total cost', () => {
-      db.createEpisode({ task: 'A', outcomeSignal: 'success', tokenCost: 0.01 });
-      db.createEpisode({ task: 'B', outcomeSignal: 'success', tokenCost: 0.02 });
+      insertRun({ costUsd: 0.01 });
+      insertRun({ costUsd: 0.02 });
 
       engine.computeKPIs();
 
@@ -113,8 +135,8 @@ describe('PatternEngine', () => {
     });
 
     it('tracks tool usage frequency', () => {
-      db.createEpisode({ task: 'A', outcomeSignal: 'success', toolsUsed: ['bash', 'file_write'] });
-      db.createEpisode({ task: 'B', outcomeSignal: 'success', toolsUsed: ['bash'] });
+      insertRun({ tools: ['bash', 'file_write'] });
+      insertRun({ tools: ['bash'] });
 
       engine.computeKPIs();
 
@@ -127,7 +149,7 @@ describe('PatternEngine', () => {
       expect(writeMetrics[0]!.value).toBe(1);
     });
 
-    it('handles empty episodes', () => {
+    it('handles empty runs', () => {
       engine.computeKPIs();
       expect(db.getMetrics()).toHaveLength(0);
     });

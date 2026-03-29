@@ -13,6 +13,7 @@ import { cosineSimilarity, blobToEmbed } from './embedding.js';
 import { extractEntitiesRegex } from './entity-extractor.js';
 import type { EntityResolver } from './entity-resolver.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
+import type { RunHistory } from './run-history.js';
 import { escapeXml } from './data-boundary.js';
 
 /** Default retrieval options. */
@@ -26,7 +27,7 @@ const DEFAULT_MAX_KNOWLEDGE_CONTEXT_CHARS = 12_000;
 /** Weight allocation for multi-signal scoring. */
 const VECTOR_WEIGHT = 0.55;
 const GRAPH_BOOST = 0.15;
-const EPISODIC_BOOST = 0.10;
+const THREAD_BOOST = 0.10;
 
 export interface RetrievalOptions {
   topK?: number | undefined;
@@ -46,11 +47,11 @@ interface ScoredCandidate {
   embedding: number[];
   confidence: number;
   confirmationCount: number;
-  sourceEpisodeId: string | null;
+  sourceRunId: string | null;
   vectorScore: number;
   ftsScore: number;
   graphBoost: number;
-  episodicBoost: number;
+  runBoost: number;
   finalScore: number;
   source: 'vector' | 'graph' | 'fts';
 }
@@ -68,6 +69,7 @@ export class RetrievalEngine {
     private readonly embeddingProvider: EmbeddingProvider,
     private readonly entityResolver: EntityResolver,
     private readonly anthropicClient?: Anthropic | undefined,
+    private readonly runHistory?: RunHistory | undefined,
   ) {}
 
   setDataStoreBridge(bridge: DataStoreBridge): void {
@@ -124,11 +126,11 @@ export class RetrievalEngine {
         embedding: emb,
         confidence: row.confidence,
         confirmationCount: row.confirmation_count,
-        sourceEpisodeId: row.source_episode_id,
+        sourceRunId: row.source_run_id,
         vectorScore: row._similarity * VECTOR_WEIGHT,
         ftsScore: 0,
         graphBoost: 0,
-        episodicBoost: 0,
+        runBoost: 0,
         finalScore: 0,
         source: 'vector',
       });
@@ -146,8 +148,8 @@ export class RetrievalEngine {
           scopeType: row.scope_type, scopeId: row.scope_id,
           createdAt: row.created_at, embedding: emb,
           confidence: row.confidence, confirmationCount: row.confirmation_count,
-          sourceEpisodeId: row.source_episode_id,
-          vectorScore: 0, ftsScore: 0, graphBoost: GRAPH_BOOST, episodicBoost: 0,
+          sourceRunId: row.source_run_id,
+          vectorScore: 0, ftsScore: 0, graphBoost: GRAPH_BOOST, runBoost: 0,
           finalScore: 0, source: 'graph',
         });
       }
@@ -159,16 +161,16 @@ export class RetrievalEngine {
       scopeSet.has(`${c.scopeType}:${c.scopeId}`),
     );
 
-    // === Step 6: Scoring with decay + confidence + episodic boost ===
+    // === Step 6: Scoring with decay + confidence + run boost ===
     for (const c of candidates) {
       const scopeWeight = SCOPE_WEIGHTS[c.scopeType as MemoryScopeType] ?? 0.3;
       const decay = this._namespacedDecay(c.createdAt, c.namespace as MemoryNamespace);
 
-      // Episodic boost: memories linked to successful episodes score higher
-      if (c.sourceEpisodeId) {
-        const ep = this.db.getEpisode(c.sourceEpisodeId);
-        if (ep && ep.outcome_signal === 'success') {
-          c.episodicBoost = EPISODIC_BOOST;
+      // Run boost: memories linked to successful runs score higher
+      if (c.sourceRunId && this.runHistory) {
+        const run = this.runHistory.getRun(c.sourceRunId);
+        if (run && run.status === 'completed') {
+          c.runBoost = THREAD_BOOST;
         }
       }
 
@@ -177,7 +179,7 @@ export class RetrievalEngine {
       const confirmDecay = c.confirmationCount > 0 ? 1.0 : Math.max(0.5, 1.0 - ageDays / 365);
       const confMult = (0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0)) * confirmDecay;
 
-      c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.episodicBoost)
+      c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost)
         * scopeWeight * decay * confMult;
     }
 

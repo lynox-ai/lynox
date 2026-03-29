@@ -5,7 +5,7 @@
  * Uses better-sqlite3 (already a project dependency) with WAL mode.
  *
  * Tables: memories, entities, relations, mentions, cooccurrences, supersedes,
- *         episodes, patterns, metrics.
+ *         thread_insights, patterns, metrics.
  */
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
@@ -74,23 +74,6 @@ export interface CooccurrenceRow {
   entity_b_id: string;
   count: number;
   last_seen_at: string;
-}
-
-export interface EpisodeRow {
-  id: string;
-  run_id: string | null;
-  session_id: string | null;
-  task: string;
-  approach: string | null;
-  outcome: string | null;
-  outcome_signal: string;
-  tools_used: string;         // JSON array
-  entities_involved: string;  // JSON array
-  memories_created: string;   // JSON array
-  duration_ms: number | null;
-  token_cost: number | null;
-  user_feedback: string | null;
-  created_at: string;
 }
 
 export interface PatternRow {
@@ -251,6 +234,12 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at);
    CREATE INDEX IF NOT EXISTS idx_patterns_type ON patterns(pattern_type, is_active);
    CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(metric_name, window);`,
+
+  // v2: Drop episodes table (data now lives in RunHistory)
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+   DROP TABLE IF EXISTS episodes;
+   DROP TABLE IF EXISTS episodes_deprecated;
+   DROP TABLE IF EXISTS thread_insights;`,
 ];
 
 // ── Database Class ──────────────────────────────────────────────
@@ -711,94 +700,6 @@ export class AgentMemoryDb {
 
     const relations = this.getEntityRelations(entityId);
     return { entities: entityRows, relations };
-  }
-
-  // ── Episode Operations ────────────────────────────────────────
-
-  createEpisode(props: {
-    id?: string | undefined;
-    runId?: string | undefined;
-    sessionId?: string | undefined;
-    task: string;
-    approach?: string | undefined;
-    outcome?: string | undefined;
-    outcomeSignal?: string | undefined;
-    toolsUsed?: string[] | undefined;
-    entitiesInvolved?: string[] | undefined;
-    durationMs?: number | undefined;
-    tokenCost?: number | undefined;
-  }): string {
-    const id = props.id ?? randomUUID();
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      INSERT INTO episodes (id, run_id, session_id, task, approach, outcome,
-        outcome_signal, tools_used, entities_involved, memories_created,
-        duration_ms, token_cost, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)
-    `).run(
-      id, props.runId ?? null, props.sessionId ?? null, props.task,
-      props.approach ?? null, props.outcome ?? null,
-      props.outcomeSignal ?? 'unknown',
-      JSON.stringify(props.toolsUsed ?? []),
-      JSON.stringify(props.entitiesInvolved ?? []),
-      props.durationMs ?? null, props.tokenCost ?? null, now,
-    );
-    return id;
-  }
-
-  updateEpisodeOutcome(id: string, params: {
-    outcome?: string | undefined;
-    outcomeSignal?: string | undefined;
-    userFeedback?: string | undefined;
-  }): void {
-    const sets: string[] = [];
-    const values: unknown[] = [];
-    if (params.outcome !== undefined) { sets.push('outcome = ?'); values.push(params.outcome); }
-    if (params.outcomeSignal !== undefined) { sets.push('outcome_signal = ?'); values.push(params.outcomeSignal); }
-    if (params.userFeedback !== undefined) { sets.push('user_feedback = ?'); values.push(params.userFeedback); }
-    if (sets.length === 0) return;
-    values.push(id);
-    this.db.prepare(`UPDATE episodes SET ${sets.join(', ')} WHERE id = ?`).run(...values);
-  }
-
-  getEpisode(id: string): EpisodeRow | null {
-    return this.db.prepare('SELECT * FROM episodes WHERE id = ?').get(id) as EpisodeRow | undefined ?? null;
-  }
-
-  queryEpisodes(filters?: {
-    runId?: string | undefined;
-    sessionId?: string | undefined;
-    outcomeSignal?: string | undefined;
-    limit?: number | undefined;
-  }): EpisodeRow[] {
-    const clauses: string[] = [];
-    const params: unknown[] = [];
-    if (filters?.runId) { clauses.push('run_id = ?'); params.push(filters.runId); }
-    if (filters?.sessionId) { clauses.push('session_id = ?'); params.push(filters.sessionId); }
-    if (filters?.outcomeSignal) { clauses.push('outcome_signal = ?'); params.push(filters.outcomeSignal); }
-    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    const limit = Math.min(filters?.limit ?? 50, 200);
-    params.push(limit);
-    return this.db.prepare(`SELECT * FROM episodes ${where} ORDER BY created_at DESC LIMIT ?`).all(...params) as EpisodeRow[];
-  }
-
-  linkMemoriesToEpisode(episodeId: string, memoryIds: string[]): void {
-    const episode = this.getEpisode(episodeId);
-    if (!episode) return;
-    const existing = JSON.parse(episode.memories_created) as string[];
-    const merged = [...new Set([...existing, ...memoryIds])];
-    this.db.prepare('UPDATE episodes SET memories_created = ? WHERE id = ?')
-      .run(JSON.stringify(merged), episodeId);
-    const now = new Date().toISOString();
-    for (const mid of memoryIds) {
-      this.db.prepare('UPDATE memories SET source_episode_id = ?, updated_at = ? WHERE id = ?')
-        .run(episodeId, now, mid);
-    }
-  }
-
-  getEpisodeCount(): number {
-    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM episodes').get() as { cnt: number };
-    return row.cnt;
   }
 
   // ── Pattern Operations ────────────────────────────────────────

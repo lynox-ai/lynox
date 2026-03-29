@@ -55,8 +55,65 @@ const LOCATION_RE = /\b(?:in|from|located\s+in|based\s+in|aus|in)\s+([A-ZÄÖÜ]
 const COMMON_PREPOSITION_FOLLOWERS = new Set([
   'the', 'a', 'an', 'this', 'that', 'order', 'general', 'particular',
   'addition', 'fact', 'case', 'mind', 'place', 'total', 'summary',
+  'advance', 'detail', 'progress', 'process', 'response', 'return',
+  'short', 'full', 'part', 'terms', 'time', 'touch', 'turn',
+  'stages', 'stage', 'phase', 'phases', 'step', 'steps',
   'der', 'die', 'das', 'dem', 'den', 'einer',
 ]);
+
+/**
+ * Common single words that are NOT proper nouns — verbs, adjectives, generic nouns.
+ * These slip through when capitalized at sentence start or from LLM hallucination.
+ */
+const ENTITY_STOPWORDS = new Set([
+  // Common English verbs / adjectives / nouns that get misclassified
+  'prefers', 'prefer', 'preferred', 'requires', 'required', 'wants', 'needs',
+  'likes', 'uses', 'used', 'using', 'manages', 'managed', 'creates', 'created',
+  'stages', 'stage', 'status', 'state', 'type', 'types', 'kind', 'level',
+  'history', 'details', 'summary', 'overview', 'notes', 'comments', 'description',
+  'potential', 'current', 'active', 'inactive', 'new', 'old', 'open', 'closed',
+  'round', 'rounds', 'investor', 'investors', 'contact', 'contacts',
+  'table', 'tables', 'field', 'fields', 'column', 'columns', 'row', 'rows',
+  'tracking', 'report', 'reports', 'monthly', 'weekly', 'daily', 'annual',
+  'qualified', 'unqualified', 'pending', 'approved', 'rejected', 'archived',
+  'lead', 'leads', 'deal', 'deals', 'pipeline', 'funnel', 'conversion',
+  'proposal', 'negotiation', 'discovery', 'onboarding', 'retention',
+  // German equivalents
+  'bevorzugt', 'benötigt', 'verwaltet', 'erstellt', 'aktiv', 'inaktiv',
+  'tabelle', 'bericht', 'übersicht',
+]);
+
+/**
+ * Returns true if the entity name looks like a CRM enum/status value
+ * (e.g. "lead/qualified", "proposal/negotiation").
+ * Excludes org/repo patterns by requiring at least one side to be a stopword.
+ */
+function isEnumValue(name: string): boolean {
+  const match = /^([\w-]+)\/([\w-]+)$/.exec(name);
+  if (!match) return false;
+  const left = match[1]!.toLowerCase();
+  const right = match[2]!.toLowerCase();
+  // Only flag as enum if at least one side is a known stopword (generic term)
+  return ENTITY_STOPWORDS.has(left) || ENTITY_STOPWORDS.has(right);
+}
+
+/**
+ * Validate an extracted entity — returns false for likely false positives.
+ * Shared between regex and LLM tiers.
+ */
+export function isValidEntity(name: string, _type: EntityType): boolean {
+  const trimmed = name.trim();
+  if (trimmed.length < 2) return false;
+  // Reject slash-separated enum values (deal stages, status labels)
+  if (isEnumValue(trimmed)) return false;
+  // Reject single-word stopwords (case-insensitive)
+  const lower = trimmed.toLowerCase();
+  if (!lower.includes(' ') && ENTITY_STOPWORDS.has(lower)) return false;
+  // Reject multi-word phrases where every word is a stopword
+  const words = lower.split(/\s+/);
+  if (words.length > 1 && words.every(w => ENTITY_STOPWORDS.has(w))) return false;
+  return true;
+}
 
 /**
  * Extract entities from text using regex patterns.
@@ -68,7 +125,7 @@ export function extractEntitiesRegex(text: string): ExtractionResult {
 
   const addEntity = (name: string, type: EntityType, confidence: number): void => {
     const normalized = name.trim();
-    if (normalized.length < 2) return;
+    if (!isValidEntity(normalized, type)) return;
     const key = `${type}:${normalized.toLowerCase()}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -248,7 +305,7 @@ function parseExtractionResponse(raw: string): ExtractionResult {
           const type = typeof ent['type'] === 'string' && VALID_ENTITY_TYPES.has(ent['type'])
             ? ent['type'] as EntityType
             : 'concept';
-          if (name.length >= 2) {
+          if (isValidEntity(name, type)) {
             entities.push({ name, type, confidence: 0.75 });
           }
         }

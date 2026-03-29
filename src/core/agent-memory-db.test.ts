@@ -306,58 +306,6 @@ describe('AgentMemoryDb', () => {
     });
   });
 
-  // ── Episodes ─────────────────────────────────────────────────
-
-  describe('episodes', () => {
-    it('creates and retrieves episode', () => {
-      const id = db.createEpisode({
-        task: 'Fix bug',
-        outcomeSignal: 'success',
-        toolsUsed: ['file_write', 'bash'],
-        durationMs: 5000,
-      });
-      const ep = db.getEpisode(id);
-      expect(ep).not.toBeNull();
-      expect(ep!.task).toBe('Fix bug');
-      expect(ep!.outcome_signal).toBe('success');
-      expect(JSON.parse(ep!.tools_used)).toEqual(['file_write', 'bash']);
-    });
-
-    it('updates episode outcome', () => {
-      const id = db.createEpisode({ task: 'Deploy' });
-      db.updateEpisodeOutcome(id, { outcomeSignal: 'failed', userFeedback: 'wrong branch' });
-      const ep = db.getEpisode(id);
-      expect(ep!.outcome_signal).toBe('failed');
-      expect(ep!.user_feedback).toBe('wrong branch');
-    });
-
-    it('queries episodes by signal', () => {
-      db.createEpisode({ task: 'A', outcomeSignal: 'success' });
-      db.createEpisode({ task: 'B', outcomeSignal: 'failed' });
-      db.createEpisode({ task: 'C', outcomeSignal: 'success' });
-
-      const successes = db.queryEpisodes({ outcomeSignal: 'success' });
-      expect(successes).toHaveLength(2);
-    });
-
-    it('links memories to episode', () => {
-      const epId = db.createEpisode({ task: 'Test' });
-      const mId = db.createMemory({ text: 'fact', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
-      db.linkMemoriesToEpisode(epId, [mId]);
-
-      const mem = db.getMemory(mId);
-      expect(mem!.source_episode_id).toBe(epId);
-      const ep = db.getEpisode(epId);
-      expect(JSON.parse(ep!.memories_created)).toContain(mId);
-    });
-
-    it('counts episodes', () => {
-      db.createEpisode({ task: 'A' });
-      db.createEpisode({ task: 'B' });
-      expect(db.getEpisodeCount()).toBe(2);
-    });
-  });
-
   // ── Patterns ─────────────────────────────────────────────────
 
   describe('patterns', () => {

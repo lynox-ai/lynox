@@ -62,6 +62,29 @@ export interface RunStats {
   cost_by_model: Array<{ model_id: string; cost_usd: number; run_count: number }>;
 }
 
+/** Per-run data for Pattern Engine analysis. */
+export interface AnalysisRun {
+  id: string;
+  sessionId: string;
+  status: string;
+  toolNames: string[];
+  durationMs: number;
+  costUsd: number;
+}
+
+/** Thread-level aggregate for insights API. */
+export interface ThreadAggregate {
+  sessionId: string;
+  title: string;
+  runCount: number;
+  successCount: number;
+  failedCount: number;
+  toolCounts: Record<string, number>;
+  totalDurationMs: number;
+  totalCostUsd: number;
+  lastRunAt: string;
+}
+
 export interface PromptSnapshotRecord {
   hash: string;
   profile_name: string;
@@ -747,6 +770,84 @@ export class RunHistory {
       'SELECT * FROM run_tool_calls WHERE run_id = ? ORDER BY sequence_order'
     ).all(runId) as ToolCallRecord[];
     return rows.map(tc => this._decToolCall(tc));
+  }
+
+  /** Per-run data with tool names for Pattern Engine. */
+  getRunsForAnalysis(limit = 200): AnalysisRun[] {
+    const rows = this.db.prepare(`
+      SELECT r.id, r.session_id, r.status, r.duration_ms, r.cost_usd,
+             GROUP_CONCAT(tc.tool_name) as tool_names
+      FROM runs r
+      LEFT JOIN run_tool_calls tc ON tc.run_id = r.id
+      WHERE r.status != 'running'
+      GROUP BY r.id
+      ORDER BY r.created_at DESC
+      LIMIT ?
+    `).all(limit) as Array<{
+      id: string; session_id: string; status: string;
+      duration_ms: number; cost_usd: number; tool_names: string | null;
+    }>;
+
+    return rows.map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      status: r.status,
+      toolNames: r.tool_names ? [...new Set(r.tool_names.split(','))] : [],
+      durationMs: r.duration_ms,
+      costUsd: r.cost_usd,
+    }));
+  }
+
+  /** Thread-level aggregates for insights UI. */
+  getThreadAggregates(limit = 20): ThreadAggregate[] {
+    // Step 1: aggregate runs per session
+    const rows = this.db.prepare(`
+      SELECT r.session_id,
+             COALESCE(t.title, '') as title,
+             COUNT(*) as run_count,
+             SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) as success_count,
+             SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+             COALESCE(SUM(r.duration_ms), 0) as total_duration_ms,
+             COALESCE(SUM(r.cost_usd), 0) as total_cost_usd,
+             MAX(r.created_at) as last_run_at
+      FROM runs r
+      LEFT JOIN threads t ON t.id = r.session_id
+      WHERE r.session_id != '' AND r.status != 'running'
+      GROUP BY r.session_id
+      ORDER BY last_run_at DESC
+      LIMIT ?
+    `).all(limit) as Array<{
+      session_id: string; title: string; run_count: number;
+      success_count: number; failed_count: number;
+      total_duration_ms: number; total_cost_usd: number; last_run_at: string;
+    }>;
+
+    // Step 2: get tool counts per session (separate query to avoid GROUP_CONCAT explosion)
+    return rows.map(r => {
+      const toolRows = this.db.prepare(`
+        SELECT tc.tool_name, COUNT(*) as cnt
+        FROM run_tool_calls tc
+        JOIN runs ru ON ru.id = tc.run_id
+        WHERE ru.session_id = ?
+        GROUP BY tc.tool_name
+        ORDER BY cnt DESC
+      `).all(r.session_id) as Array<{ tool_name: string; cnt: number }>;
+
+      const toolCounts: Record<string, number> = {};
+      for (const tr of toolRows) toolCounts[tr.tool_name] = tr.cnt;
+
+      return {
+        sessionId: r.session_id,
+        title: r.title,
+        runCount: r.run_count,
+        successCount: r.success_count,
+        failedCount: r.failed_count,
+        toolCounts,
+        totalDurationMs: r.total_duration_ms,
+        totalCostUsd: r.total_cost_usd,
+        lastRunAt: r.last_run_at,
+      };
+    });
   }
 
   getStats(): RunStats {

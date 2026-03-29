@@ -92,10 +92,10 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `project.ts` | -- | `detectProjectRoot()`, `generateBriefing()`, `buildFileManifest()` + `diffManifest()` |
 | `prompt-hash.ts` | -- | SHA-256 prompt versioning via `sha256Short()` from utils |
 | `embedding.ts` | `EmbeddingProvider` | Interface with `OnnxProvider` (model registry: multilingual-e5-small default 384d, all-minilm-l6-v2, bge-m3), `VoyageProvider` (HTTP, 1024d), `LocalProvider` (test-only), cosine similarity, BLOB serialization |
-| `agent-memory-db.ts` | `AgentMemoryDb` | SQLite (better-sqlite3, WAL) unified agent memory. 9 tables: memories, entities, relations, mentions, cooccurrences, supersedes, episodes, patterns, metrics. Brute-force vector search, recursive CTE graph traversal |
-| `knowledge-layer.ts` | `KnowledgeLayer` | Unified `IKnowledgeLayer` implementation: store (embed + dedup + confidence boost + contradiction + entity extraction + graph write), retrieve (HyDE + vector + graph expansion + MMR + intelligence injection), episodic memory, pattern engine, KPIs, retrieval feedback, memory consolidation, entity ops, GC |
-| `retrieval-engine.ts` | `RetrievalEngine` | Graph-augmented retrieval: HyDE query expansion (Haiku), multi-signal search (vector 55% + graph 15% + episodic 10%), confidence multiplier with unconfirmed decay, namespace-specific temporal decay, MMR re-ranking (lambda=0.7), XML context formatting |
-| `pattern-engine.ts` | `PatternEngine` | Detects tool sequence patterns + anti-patterns from episodic history. Computes KPIs (success_rate, avg_duration, cost, tool_usage). Triggered every 10 runs by engine |
+| `agent-memory-db.ts` | `AgentMemoryDb` | SQLite (better-sqlite3, WAL) unified agent memory. 9 tables: memories, entities, relations, mentions, cooccurrences, supersedes, thread_insights, patterns, metrics. Brute-force vector search, recursive CTE graph traversal |
+| `knowledge-layer.ts` | `KnowledgeLayer` | Unified `IKnowledgeLayer` implementation: store (embed + dedup + confidence boost + contradiction + entity extraction + graph write), retrieve (HyDE + vector + graph expansion + MMR + intelligence injection), thread insights, pattern engine, KPIs, retrieval feedback, memory consolidation, entity ops, GC |
+| `retrieval-engine.ts` | `RetrievalEngine` | Graph-augmented retrieval: HyDE query expansion (Haiku), multi-signal search (vector 55% + graph 15% + thread 10%), confidence multiplier with unconfirmed decay, namespace-specific temporal decay, MMR re-ranking (lambda=0.7), XML context formatting |
+| `pattern-engine.ts` | `PatternEngine` | Detects tool mix patterns + anti-patterns from thread insights. Computes KPIs (success_rate, avg_duration, cost, tool_usage, avg_runs_per_thread). Triggered every 10 runs by engine |
 | `entity-extractor.ts` | -- | Two-tier entity extraction: Tier 1 regex (DE/EN persons, orgs, tech, projects, locations), Tier 2 optional Haiku for high-value namespaces |
 | `entity-resolver.ts` | `EntityResolver` | Canonical name resolution (exact → alias → normalized → create), entity merge with alias transfer |
 | `contradiction-detector.ts` | -- | Contradiction detection for knowledge/learnings: vector search >0.80 → heuristic checks (negation DE/EN, number change, state change) |
@@ -250,7 +250,7 @@ Agent.send(userMessage)
              ├──► Memory.maybeUpdate() (fire-and-forget) → lynox:memory:store channel
              ├──► RunHistory.updateRun() (cost, tokens, status)
              ├──► ThreadStore.appendMessages() (persist new messages to thread)
-             ├──► KnowledgeLayer.createEpisode() (episodic memory)
+             ├──► KnowledgeLayer.upsertThreadInsight() (thread-level stats)
              │
              ▼
          Return text response

@@ -1,17 +1,19 @@
 /**
- * Pattern Engine — detects recurring patterns from episodic memory and computes KPIs.
+ * Pattern Engine — detects recurring patterns from run history and computes KPIs.
  *
- * Analyzes episode history to find:
- * - Tool sequences that correlate with success/failure
- * - User preferences (consistent choices)
- * - Anti-patterns (approaches that frequently fail)
+ * Reads per-run data from RunHistory (runs + tool_calls).
+ * Writes detected patterns and metrics to AgentMemoryDb.
  *
- * Computes agent performance metrics (success rate, avg duration, cost).
+ * Analyzes:
+ * - Tool sequences that correlate with success/failure (per-run)
+ * - Anti-patterns (tools with high failure rates)
+ * - Agent performance metrics (success rate, avg duration, cost, tool usage)
  */
-import type { AgentMemoryDb, EpisodeRow } from './agent-memory-db.js';
+import type { AgentMemoryDb } from './agent-memory-db.js';
+import type { RunHistory, AnalysisRun } from './run-history.js';
 
-/** Minimum episodes needed before pattern detection runs. */
-const MIN_EPISODES_FOR_DETECTION = 5;
+/** Minimum runs needed before pattern detection runs. */
+const MIN_RUNS_FOR_DETECTION = 5;
 
 /** Minimum occurrences to consider something a pattern. */
 const MIN_PATTERN_EVIDENCE = 3;
@@ -19,44 +21,36 @@ const MIN_PATTERN_EVIDENCE = 3;
 /** Failure rate threshold to flag an anti-pattern. */
 const ANTI_PATTERN_FAILURE_RATE = 0.5;
 
-/** Safely parse JSON array, returning empty array on failure. */
-function safeParseTools(json: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed.filter((t): t is string => typeof t === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
 export class PatternEngine {
-  constructor(private readonly db: AgentMemoryDb) {}
+  constructor(
+    private readonly runHistory: RunHistory,
+    private readonly db: AgentMemoryDb,
+  ) {}
 
   // ── Pattern Detection ─────────────────────────────────────────
 
-  /** Analyze recent episodes and detect/update patterns. Returns count of new patterns. */
+  /** Analyze recent runs and detect/update patterns. Returns count of new patterns. */
   detectPatterns(): number {
-    const episodes = this.db.queryEpisodes({ limit: 200 });
-    if (episodes.length < MIN_EPISODES_FOR_DETECTION) return 0;
+    const runs = this.runHistory.getRunsForAnalysis(200);
+    if (runs.length < MIN_RUNS_FOR_DETECTION) return 0;
 
     let detected = 0;
-    detected += this._detectToolSequences(episodes);
-    detected += this._detectOutcomePatterns(episodes);
+    detected += this._detectToolSequences(runs);
+    detected += this._detectOutcomePatterns(runs);
     return detected;
   }
 
   /**
-   * Find tool combinations that appear repeatedly in successful episodes.
+   * Find tool combinations that appear repeatedly in successful runs.
    */
-  private _detectToolSequences(episodes: EpisodeRow[]): number {
-    const successful = episodes.filter(e => e.outcome_signal === 'success');
+  private _detectToolSequences(runs: AnalysisRun[]): number {
+    const successful = runs.filter(r => r.status === 'completed');
     if (successful.length < MIN_PATTERN_EVIDENCE) return 0;
 
     const comboCounts = new Map<string, number>();
-    for (const ep of successful) {
-      const tools = safeParseTools(ep.tools_used);
-      if (tools.length < 2) continue;
-      const key = [...new Set(tools)].sort().join(' + ');
+    for (const run of successful) {
+      if (run.toolNames.length < 2) continue;
+      const key = [...new Set(run.toolNames)].sort().join(' + ');
       comboCounts.set(key, (comboCounts.get(key) ?? 0) + 1);
     }
 
@@ -64,7 +58,6 @@ export class PatternEngine {
     for (const [combo, count] of comboCounts) {
       if (count < MIN_PATTERN_EVIDENCE) continue;
       const toolList = combo.split(' + ');
-      // Stable description without dynamic count — prevents duplicate patterns
       const desc = `Tool combination "${combo}" correlates with success`;
       detected += this._upsertPattern('sequence', desc, toolList, {
         tools: toolList,
@@ -79,16 +72,15 @@ export class PatternEngine {
   /**
    * Find tools/approaches with high failure rates.
    */
-  private _detectOutcomePatterns(episodes: EpisodeRow[]): number {
+  private _detectOutcomePatterns(runs: AnalysisRun[]): number {
     const toolOutcomes = new Map<string, { success: number; total: number }>();
 
-    for (const ep of episodes) {
-      const tools = safeParseTools(ep.tools_used);
-      if (tools.length === 0) continue;
-      const primaryTool = tools[0]!;
+    for (const run of runs) {
+      if (run.toolNames.length === 0) continue;
+      const primaryTool = run.toolNames[0]!;
       const entry = toolOutcomes.get(primaryTool) ?? { success: 0, total: 0 };
       entry.total++;
-      if (ep.outcome_signal === 'success') entry.success++;
+      if (run.status === 'completed') entry.success++;
       toolOutcomes.set(primaryTool, entry);
     }
 
@@ -98,7 +90,6 @@ export class PatternEngine {
       const failureRate = 1 - stats.success / stats.total;
 
       if (failureRate >= ANTI_PATTERN_FAILURE_RATE) {
-        // Stable description without dynamic percentages
         const desc = `Primary tool "${tool}" has high failure rate`;
         detected += this._upsertPattern('anti-pattern', desc, [tool], {
           tool,
@@ -113,7 +104,6 @@ export class PatternEngine {
 
   /**
    * Upsert a pattern: match by type + key tools to prevent duplicates.
-   * Updates description and metadata on existing patterns.
    */
   private _upsertPattern(
     patternType: string,
@@ -124,7 +114,6 @@ export class PatternEngine {
     const existing = this.db.getPatterns({ patternType, activeOnly: true, limit: 200 });
     const sortedKey = [...keyTools].sort().join(',');
 
-    // Match by pattern type + tool signature (stable, count-independent)
     const match = existing.find(p => {
       try {
         const m = JSON.parse(p.metadata) as Record<string, unknown>;
@@ -147,15 +136,15 @@ export class PatternEngine {
 
   // ── KPI Computation ───────────────────────────────────────────
 
-  /** Compute and store agent performance metrics from recent episodes. */
+  /** Compute and store agent performance metrics from recent runs. */
   computeKPIs(): void {
-    const episodes = this.db.queryEpisodes({ limit: 200 });
-    if (episodes.length === 0) return;
+    const runs = this.runHistory.getRunsForAnalysis(200);
+    if (runs.length === 0) return;
 
-    const total = episodes.length;
+    const total = runs.length;
 
     // Success rate
-    const successes = episodes.filter(e => e.outcome_signal === 'success').length;
+    const successes = runs.filter(r => r.status === 'completed').length;
     this.db.upsertMetric({
       metricName: 'success_rate',
       value: total > 0 ? successes / total : 0,
@@ -163,9 +152,7 @@ export class PatternEngine {
     });
 
     // Average duration
-    const durations = episodes
-      .filter((e): e is EpisodeRow & { duration_ms: number } => e.duration_ms !== null)
-      .map(e => e.duration_ms);
+    const durations = runs.filter(r => r.durationMs > 0).map(r => r.durationMs);
     if (durations.length > 0) {
       this.db.upsertMetric({
         metricName: 'avg_duration_ms',
@@ -175,22 +162,19 @@ export class PatternEngine {
     }
 
     // Total cost
-    const costs = episodes
-      .filter((e): e is EpisodeRow & { token_cost: number } => e.token_cost !== null)
-      .map(e => e.token_cost);
-    if (costs.length > 0) {
+    const totalCost = runs.reduce((sum, r) => sum + r.costUsd, 0);
+    if (totalCost > 0) {
       this.db.upsertMetric({
         metricName: 'total_cost_usd',
-        value: costs.reduce((a, b) => a + b, 0),
-        sampleCount: costs.length,
+        value: totalCost,
+        sampleCount: total,
       });
     }
 
     // Tool usage frequency
     const toolCounts = new Map<string, number>();
-    for (const ep of episodes) {
-      const tools = safeParseTools(ep.tools_used);
-      for (const tool of tools) {
+    for (const run of runs) {
+      for (const tool of run.toolNames) {
         toolCounts.set(tool, (toolCounts.get(tool) ?? 0) + 1);
       }
     }
@@ -208,5 +192,20 @@ export class PatternEngine {
       value: total,
       sampleCount: total,
     });
+
+    // Threads: avg runs per thread
+    const sessionCounts = new Map<string, number>();
+    for (const run of runs) {
+      if (run.sessionId) {
+        sessionCounts.set(run.sessionId, (sessionCounts.get(run.sessionId) ?? 0) + 1);
+      }
+    }
+    if (sessionCounts.size > 0) {
+      this.db.upsertMetric({
+        metricName: 'avg_runs_per_thread',
+        value: total / sessionCounts.size,
+        sampleCount: sessionCounts.size,
+      });
+    }
   }
 }

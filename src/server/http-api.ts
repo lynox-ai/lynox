@@ -929,19 +929,15 @@ export class LynoxHTTPApi {
       }
     }));
 
-    // ── Episodic Memory + Metrics ─────────────────────────────────
+    // ── Thread Insights + Metrics ──────────────────────────────────
 
-    this.staticRoutes.set('GET /api/episodes', async (req, res) => {
-      const kg = engine.getKnowledgeLayer();
-      if (!kg) { jsonResponse(res, 200, { episodes: [] }); return; }
+    this.staticRoutes.set('GET /api/thread-insights', async (req, res) => {
+      const rh = engine.getRunHistory();
+      if (!rh) { jsonResponse(res, 200, { threadInsights: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
-      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
-      const outcomeSignal = url.searchParams.get('outcome_signal') ?? undefined;
-      const episodes = kg.queryEpisodes({
-        limit,
-        outcomeSignal: outcomeSignal as import('../types/index.js').EpisodeOutcomeSignal | undefined,
-      });
-      jsonResponse(res, 200, { episodes });
+      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+      const threadInsights = rh.getThreadAggregates(limit);
+      jsonResponse(res, 200, { threadInsights });
     });
 
     this.staticRoutes.set('GET /api/patterns', async (_req, res) => {

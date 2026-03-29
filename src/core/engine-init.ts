@@ -536,12 +536,13 @@ export async function initKnowledgeLayer(
   userConfig: LynoxUserConfig,
   embeddingProvider: EmbeddingProvider | null,
   client: Anthropic,
+  runHistory?: RunHistory | null | undefined,
 ): Promise<KnowledgeLayer | null> {
   if (userConfig.knowledge_graph_enabled === false || !embeddingProvider) return null;
   try {
     const lynoxDir = getLynoxDir();
     const dbPath = `${lynoxDir}/${AGENT_MEMORY_DB_NAME}`;
-    const layer = new KnowledgeLayer(dbPath, embeddingProvider, client);
+    const layer = new KnowledgeLayer(dbPath, embeddingProvider, client, runHistory ?? undefined);
     await layer.init();
     return layer;
   } catch (err: unknown) {

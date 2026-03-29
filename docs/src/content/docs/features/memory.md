@@ -107,7 +107,7 @@ The `<relevant_context>` block has `cache_control: { type: 'ephemeral' }` for ef
 
 ### Architecture
 
-The agent memory system uses a unified SQLite database (`better-sqlite3`, WAL mode) that stores memories, entities, relationships, episodes, patterns, and metrics in a single crash-safe file.
+The agent memory system uses a unified SQLite database (`better-sqlite3`, WAL mode) that stores memories, entities, relationships, thread insights, patterns, and metrics in a single crash-safe file.
 
 ```
 ~/.lynox/agent-memory.db    # SQLite database (WAL mode, crash-safe)
@@ -120,7 +120,7 @@ The agent memory system uses a unified SQLite database (`better-sqlite3`, WAL mo
 - **mentions**: Memory → Entity (which entities a memory references)
 - **supersedes**: Memory → Memory (contradiction resolution)
 - **cooccurrences**: Entity ↔ Entity (co-occurrence frequency)
-- **episodes**: per-run tracking with task, outcome, tools_used, duration, cost
+- **thread_insights**: per-thread aggregated stats (run count, success/failure counts, tool mix, cost, duration)
 - **patterns**: detected behavioral patterns (sequences, preferences, schedules)
 - **metrics**: computed KPIs (success rate, avg duration, cost trends)
 
@@ -136,10 +136,10 @@ User query
   │     ├─ Vector search (cosine, top-50) ── 55% weight
   │     ├─ Graph expansion ─────────────── 15% boost
   │     │     Query entities → resolve → 1-2 hop → connected memories
-  │     └─ Episodic boost ─────────────── 10% boost
-  │           Memories linked to successful episodes score higher
+  │     └─ Thread boost ──────────────── 10% boost
+  │           Memories from successful threads score higher
   │
-  ├─ 3. Scoring: (vector + graph + episodic) × scope × decay × confidence
+  ├─ 3. Scoring: (vector + graph + thread) × scope × decay × confidence
   │     Confidence multiplier: confirmed memories score higher
   │     Confidence decay: unconfirmed memories lose score over time
   │     knowledge: 365d half-life, status: 21d half-life
@@ -189,22 +189,22 @@ Only for `knowledge` and `learnings` namespaces. Finds memories with >0.80 cosin
 
 Contradicted memories: `is_active=false`, `SUPERSEDES` edge created. Old memory stays in graph as audit trail but is excluded from retrieval.
 
-### Episodic Memory
+### Thread Insights
 
-Every agent run creates an **episode** record with:
-- Task text, outcome, outcome signal (`success`/`failed`/`partial`/`abandoned`)
-- Tools used during the run
-- Duration (ms), token cost (USD)
-- Links to memories created during the episode
+Each conversation thread maintains an aggregated **thread insight** record:
+- Run count, success/failure/partial/abandoned counts
+- Tool usage map (tool → invocation count)
+- Total duration (ms), total cost (USD)
+- Last task, last outcome signal
 
-Episodes provide causal context: "What happened, how did it go, what did we use?"
+Thread insights provide conversation-level context: "How productive was this thread?"
 
 ### Pattern Detection
 
-The **Pattern Engine** analyzes episodes every 10 runs to find:
+The **Pattern Engine** analyzes thread insights to find:
 
-- **Tool sequences**: Tool combinations that correlate with success (e.g., `file_read + file_write` appears in 80% of successful runs)
-- **Anti-patterns**: Tools/approaches with high failure rates (e.g., `bash` alone fails 60% of the time)
+- **Tool mixes**: Tool combinations that correlate with successful threads (e.g., `file_read + file_write` appears in 80% of successful threads)
+- **Anti-patterns**: Tools dominant in failing threads (e.g., threads dominated by `bash` fail 60% of the time)
 - Patterns are stored with `confidence` (0-1) and `evidence_count`
 
 Patterns with high confidence (>60%, 3+ observations) are injected into the system prompt as `<learned_patterns>`.
@@ -212,11 +212,12 @@ Patterns with high confidence (>60%, 3+ observations) are injected into the syst
 ### KPI Metrics
 
 Computed automatically alongside pattern detection:
-- `success_rate`: Fraction of successful runs
-- `avg_duration_ms`: Average run duration
+- `success_rate`: Fraction of successful runs across all threads
+- `avg_duration_ms`: Average thread duration
 - `total_cost_usd`: Cumulative API cost
 - `tool_usage.<name>`: Per-tool usage frequency
-- `total_runs`: Total episode count
+- `total_runs`: Total run count across all threads
+- `avg_runs_per_thread`: Average conversation depth
 
 Available via `GET /api/metrics` and the Insights dashboard (`/app/insights`).
 
@@ -324,8 +325,8 @@ const engine = new Engine({ memory: false });
 
 ### Knowledge Graph (primary path)
 
-- **`KnowledgeLayer`** (`src/core/knowledge-layer.ts`) — implements `IKnowledgeLayer` from `src/types/index.ts`. Composes AgentMemoryDb + EntityResolver + RetrievalEngine + ContradictionDetector + EpisodicLog + PatternEngine
-- **`AgentMemoryDb`** (`src/core/agent-memory-db.ts`) — SQLite wrapper (better-sqlite3, WAL). DB at `~/.lynox/agent-memory.db`. 9 tables: memories, entities, relations, mentions, cooccurrences, supersedes, episodes, patterns, metrics
+- **`KnowledgeLayer`** (`src/core/knowledge-layer.ts`) — implements `IKnowledgeLayer` from `src/types/index.ts`. Composes AgentMemoryDb + EntityResolver + RetrievalEngine + ContradictionDetector + ThreadInsights + PatternEngine
+- **`AgentMemoryDb`** (`src/core/agent-memory-db.ts`) — SQLite wrapper (better-sqlite3, WAL). DB at `~/.lynox/agent-memory.db`. 9 tables: memories, entities, relations, mentions, cooccurrences, supersedes, thread_insights, patterns, metrics
 - **`RetrievalEngine`** (`src/core/retrieval-engine.ts`) — HyDE + vector + graph expansion + MMR. `formatContext()` produces XML output
 - **`EntityExtractor`** (`src/core/entity-extractor.ts`) — Tier 1 regex (DE/EN), Tier 2 optional Haiku
 - **`EntityResolver`** (`src/core/entity-resolver.ts`) — Canonical name resolution, alias merge

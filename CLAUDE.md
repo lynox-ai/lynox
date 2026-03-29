@@ -80,7 +80,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 - Security: 6 layers (input-guard, output-guard, permission-guard, data-boundary, secret-store, security-audit)
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
-- Agent Memory: SQLite (AgentMemoryDb, `~/.lynox/agent-memory.db`) — entity graph, episodic log, pattern detection, KPI metrics, confidence evolution, memory consolidation, retrieval feedback loop. ONNX embeddings, brute-force cosine search, recursive CTE graph traversal
+- Agent Memory: SQLite (AgentMemoryDb, `~/.lynox/agent-memory.db`) — entity graph, thread insights (per-thread aggregated stats), pattern detection, KPI metrics, confidence evolution, memory consolidation, retrieval feedback loop. ONNX embeddings, brute-force cosine search, recursive CTE graph traversal
 - Backup: VACUUM INTO + AES-256-GCM encryption + GDrive upload
 - API Store: profile-first enforcement, agent-driven setup
 - CRM: agent-driven contacts/deals, entity-primary, DataStore for structured tracking

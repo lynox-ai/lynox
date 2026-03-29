@@ -328,7 +328,7 @@ export class Engine {
 
     // Initialize embedding provider + knowledge graph
     this.embeddingProvider = initEmbeddingProvider(this.userConfig, this.runHistory);
-    this.knowledgeLayer = await initKnowledgeLayer(this.userConfig, this.embeddingProvider, this.client);
+    this.knowledgeLayer = await initKnowledgeLayer(this.userConfig, this.embeddingProvider, this.client, this.runHistory);
     this._toolContext.knowledgeLayer = this.knowledgeLayer;
 
     // Initialize DataStore ↔ Knowledge Graph Bridge
