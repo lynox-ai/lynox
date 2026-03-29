@@ -15,7 +15,7 @@ pnpm run lint        # eslint src/
 pnpm run build       # tsc → dist/
 pnpm run dev         # watch mode with tsx
 pnpm run security    # security scan + vitest security tests
-npx vitest run       # 114 test files / ~2639 tests
+npx vitest run       # 115 test files / ~2680 tests
 npx vitest run tests/online/  # 22 real API tests
 
 # Web UI (@lynox-ai/web-ui)
@@ -31,9 +31,9 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 ### Engine (`@lynox-ai/core`, root)
 
-Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
+Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — 66 modules: engine, session, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
+- `src/core/` — 67 modules: engine, session, thread-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
 - `src/cli/` — Terminal UI + 14 command handler modules
 - `src/tools/` — 14 builtin tools (incl. api_setup) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
@@ -45,8 +45,9 @@ Engine (singleton) + Session (per-conversation) + WorkerLoop (background tasks).
 
 SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
 
-- `src/lib/components/` — 11 View components (ChatView, AppLayout, MemoryView, HistoryView, KnowledgeGraphView, MemoryInsightsView, Settings...)
-- `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base
+- `src/lib/components/` — 12 View components (ChatView, AppLayout, ThreadList, MemoryView, HistoryView, KnowledgeGraphView, MemoryInsightsView, Settings...)
+- `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume
+- `src/lib/stores/threads.svelte.ts` — Thread list store (load, archive, delete, rename)
 - `src/lib/config.svelte.ts` — configurable `apiBase` (/api/engine for standalone, /api/proxy for cloud)
 - `src/lib/i18n.ts` — DE/EN translations
 - `src/lib/index.ts` — barrel export for library consumers
@@ -86,7 +87,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Testing
 
-109 offline test files / ~2620 tests. Co-located *.test.ts.
+110 offline test files / ~2658 tests. Co-located *.test.ts.
 19 security audit tests in tests/security/.
 5 online test files / 22 tests (real Haiku API).
 Coverage enforced on src/core/, src/tools/, src/orchestrator/ (>=70%).

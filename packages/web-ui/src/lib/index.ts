@@ -22,6 +22,7 @@ export { default as FileBrowserView } from './components/FileBrowserView.svelte'
 export { default as TasksView } from './components/TasksView.svelte';
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';
+export { default as ThreadList } from './components/ThreadList.svelte';
 
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';
@@ -51,6 +52,8 @@ export {
 	getSessionModel,
 	getContextWindow,
 	getContextBudget,
+	getSessionId,
+	resumeThread,
 } from './stores/chat.svelte.js';
 
 export type {
@@ -60,6 +63,17 @@ export type {
 	FileAttachment,
 	ContextBudget,
 } from './stores/chat.svelte.js';
+
+// Thread store
+export {
+	loadThreads,
+	archiveThread,
+	deleteThread,
+	renameThread,
+	getThreads,
+	getIsLoadingThreads,
+} from './stores/threads.svelte.js';
+export type { Thread } from './stores/threads.svelte.js';
 
 // Context Panel
 export { setContext, clearContext, getContext, closePanel } from './stores/context-panel.svelte.js';

@@ -11,6 +11,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.new_chat': { de: 'Neuer Chat', en: 'New Chat' },
 	'nav.tasks': { de: 'Tasks', en: 'Tasks' },
 
+	// Threads
+	'threads.recent': { de: 'Letzte Chats', en: 'Recent Chats' },
+	'threads.no_title': { de: 'Neuer Chat', en: 'New Chat' },
+	'threads.archive': { de: 'Archivieren', en: 'Archive' },
+	'threads.delete': { de: 'Löschen', en: 'Delete' },
+
 	// Command Palette
 	'cmd.placeholder': { de: 'Suche oder Aktion...', en: 'Search or action...' },
 	'cmd.no_results': { de: 'Keine Ergebnisse', en: 'No results' },

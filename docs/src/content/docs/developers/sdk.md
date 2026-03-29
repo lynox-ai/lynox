@@ -26,6 +26,19 @@ await engine.shutdown();
 
 > **Note:** Use `Engine` + `Session` directly. The old `Lynox` class no longer exists.
 
+## Resuming a conversation
+
+Sessions are backed by persistent threads. To resume a previous conversation:
+
+```typescript
+// Resume by thread ID (loads persisted messages from SQLite)
+const session = engine.createSession({ sessionId: 'existing-thread-id' });
+// Messages are automatically loaded from the thread store
+const result = await session.run('Continue where we left off');
+```
+
+Thread IDs are the same as session IDs. The `ThreadStore` persists messages after each `run()` call, so conversations survive process restarts.
+
 ## Error handling
 
 ```typescript

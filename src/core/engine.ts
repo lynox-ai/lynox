@@ -156,6 +156,7 @@ export class Engine {
   private _backupManager: import('./backup.js').BackupManager | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
+  private _threadStore: import('./thread-store.js').ThreadStore | null = null;
 
   constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
@@ -252,6 +253,16 @@ export class Engine {
       this._toolContext.runHistory = this.runHistory;
     } catch {
       this.runHistory = null;
+    }
+
+    // Initialize thread store (shares DB connection with RunHistory)
+    if (this.runHistory) {
+      try {
+        const { ThreadStore } = await import('./thread-store.js');
+        this._threadStore = new ThreadStore(this.runHistory.getDb());
+      } catch {
+        this._threadStore = null;
+      }
     }
 
     // Initialize security audit trail (subscribes to guard/security channels)
@@ -652,6 +663,7 @@ export class Engine {
   getKnowledgeLayer(): KnowledgeLayer | null { return this.knowledgeLayer; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
+  getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
 
   /** Re-initialize Google Workspace integration after credentials change. */

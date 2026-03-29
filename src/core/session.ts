@@ -46,6 +46,7 @@ import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 
 export interface SessionOptions {
+  sessionId?: string | undefined;
   model?: ModelTier | undefined;
   effort?: EffortLevel | undefined;
   thinking?: ThinkingMode | undefined;
@@ -104,7 +105,7 @@ export class Session {
 
   constructor(engine: Engine, opts?: SessionOptions) {
     this.engine = engine;
-    this.sessionId = randomUUID();
+    this.sessionId = opts?.sessionId ?? randomUUID();
     // Copy config from engine — session mutates its own copy, not the shared config
     this._model = opts?.model ?? engine.config.model ?? 'sonnet';
     this._effort = opts?.effort ?? engine.config.effort ?? 'high';
@@ -138,6 +139,17 @@ export class Session {
         () => this.runToolCallSeq++,
         (ms: number) => { this._userWaitMs += ms; },
       );
+    }
+
+    // Create persistent thread record (idempotent — OR IGNORE)
+    const threadStore = engine.getThreadStore();
+    if (threadStore) {
+      try {
+        threadStore.createThread(this.sessionId, {
+          model_tier: this._model,
+          context_id: engine.getContext()?.id ?? '',
+        });
+      } catch { /* best-effort */ }
     }
 
     if (opts?.messages) {
@@ -191,6 +203,7 @@ export class Session {
     // Multimodal content (e.g. Telegram vision) is an array of content blocks.
     const isMultimodal = Array.isArray(task);
     const taskText = isMultimodal ? '[image]' : task;
+    const threadStore = this.engine.getThreadStore();
 
     // Create changeset manager if enabled (backup-before-write mode).
     const isAutonomous = this.agentOverrides.autonomy === 'autonomous';
@@ -355,6 +368,29 @@ export class Session {
         }
       }
 
+      // Persist messages to thread (fire-and-forget)
+      if (threadStore) {
+        try {
+          const allMessages = this.saveMessages();
+          const existingCount = threadStore.getMessageCount(this.sessionId);
+          const newMessages = allMessages.slice(existingCount);
+          if (newMessages.length > 0) {
+            threadStore.appendMessages(this.sessionId, newMessages, existingCount);
+            threadStore.updateThread(this.sessionId, {
+              message_count: allMessages.length,
+              total_tokens: this.usage.input_tokens + this.usage.output_tokens,
+              total_cost_usd: costUsd,
+            });
+
+            // Auto-generate title on first run (heuristic: first user message)
+            if (existingCount === 0) {
+              const title = generateThreadTitle(taskText);
+              threadStore.updateThread(this.sessionId, { title });
+            }
+          }
+        } catch { /* fire-and-forget */ }
+      }
+
       // Create episodic memory + auto-confirm retrieved memories on success
       if (knowledgeLayer) {
         try {
@@ -431,6 +467,19 @@ export class Session {
         } catch {
           // Fire-and-forget
         }
+      }
+
+      // Persist messages to thread even on failure (preserve partial progress)
+      if (threadStore) {
+        try {
+          const allMessages = this.saveMessages();
+          const existingCount = threadStore.getMessageCount(this.sessionId);
+          const newMessages = allMessages.slice(existingCount);
+          if (newMessages.length > 0) {
+            threadStore.appendMessages(this.sessionId, newMessages, existingCount);
+            threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
+          }
+        } catch { /* fire-and-forget */ }
       }
 
       // Create episodic memory entry for failed run
@@ -745,4 +794,25 @@ export class Session {
   async shutdown(): Promise<void> {
     await this.engine.shutdown();
   }
+}
+
+/** Generate a short thread title from the first user message. */
+function generateThreadTitle(taskText: string): string {
+  // Strip markdown, trim, and take first meaningful line
+  let title = taskText
+    .replace(/^#+\s*/gm, '')
+    .replace(/\[.*?\]\(.*?\)/g, '')
+    .replace(/[*_`~]/g, '')
+    .trim();
+
+  // Take the first line if multi-line
+  const firstLine = title.split('\n')[0] ?? title;
+  title = firstLine.trim();
+
+  // Cap at 80 chars
+  if (title.length > 80) {
+    title = title.slice(0, 77) + '...';
+  }
+
+  return title || 'New Chat';
 }

@@ -25,7 +25,8 @@ sidebar:
                     │   Session (per-conversation)     │
                     │   (src/core/session.ts)          │
                     │   Agent, messages, mode,         │
-                    │   callbacks, run tracking        │
+                    │   callbacks, run tracking,       │
+                    │   thread persistence             │
                     └──────────────┬───────────────────┘
                                    │
                           ┌────────▼────────┐
@@ -78,13 +79,14 @@ Runtime validation schemas for JSON-serializable config types. Used where untrus
 | `stream.ts` | `StreamProcessor` | Assembles stream deltas into content blocks, emits `StreamEvent`s |
 | `memory.ts` | `Memory` | Context-scoped local file storage in `~/.lynox/features/memory/<contextId>/` with global fallback, `hasContent()`, publishes to `lynox:memory:store`. Unified scope-keyed cache (`${type}:${id}:${ns}`) covers global, project, and user scopes |
 | `engine.ts` | `Engine` | Shared singleton per process. Owns KG, Memory, DataStore, Secrets, Config, ToolRegistry, WorkerLoop, NotificationRouter. `init()` once, then `createSession()` for per-conversation state. `LynoxHooks.onAfterRun` receives `RunContext` (includes `runId`, `contextId`, `modelTier`, `durationMs`, `source`, `tenantId?`). Hook errors logged to `costWarning` debug channel |
-| `session.ts` | `Session` | Per-conversation state created via `engine.createSession()`. Implements `ModeOrchestrator`. Owns Agent, messages, mode, callbacks, run tracking. Entry point for `run()`, `batch()`, `shutdown()`. Per-session config isolation: `setModel()`, `setEffort()`, `setThinking()` mutate session-local fields, not `engine.config`. `SessionOptions`: `model`, `effort`, `thinking`, `autonomy`, `briefing`, `systemPromptSuffix` |
-| `session-store.ts` | `SessionStore` | Multi-turn MCP session management |
+| `session.ts` | `Session` | Per-conversation state created via `engine.createSession()`. Owns Agent, messages, mode, callbacks, run tracking, thread persistence. Entry point for `run()`, `batch()`, `shutdown()`. Per-session config isolation: `setModel()`, `setEffort()`, `setThinking()` mutate session-local fields, not `engine.config`. `SessionOptions`: `sessionId`, `model`, `effort`, `thinking`, `autonomy`, `briefing`, `systemPromptSuffix`. Creates a persistent thread on construction; persists messages to `thread_messages` after each run |
+| `session-store.ts` | `SessionStore` | Thread-aware session management. `getOrCreate()` checks for persisted threads and resumes them (loads messages from DB). Short threads (<80 messages) loaded verbatim; long threads use LLM-generated summary + recent 40 messages |
+| `thread-store.ts` | `ThreadStore` | SQLite persistence for conversation threads. CRUD for `threads` + `thread_messages` tables (v22 migration in `history.db`). Shares DB connection with RunHistory. Thread ID = Session ID — `runs.session_id` links automatically |
 | `batch-index.ts` | `BatchIndex` | Persists batch metadata to `~/.lynox/batch-index.json` |
 | `utils.ts` | -- | Shared utilities: `sleep()`, `getErrorMessage()`, `sha256Short()` (used by prompt-hash, run-history, project) |
 | `observability.ts` | -- | `node:diagnostics_channel` + `node:perf_hooks` instrumentation (includes `lynox:memory:store` channel) |
 | `config.ts` | -- | 3-tier config merge (env > project > user), `PROJECT_SAFE_KEYS` allowlist, `getLynoxDir()` canonical `~/.lynox` path, parse error warning to stderr |
-| `run-history.ts` | `RunHistory` | SQLite via `better-sqlite3` (WAL mode, 19 migrations) at `~/.lynox/history.db`. Delegates analytics to `run-history-analytics.ts` (9 query functions) and domain persistence to `run-history-persistence.ts` (44 functions). Tables: runs, tool_calls, spawns, prompt_snapshots, pre_approval, pipelines, scopes, tasks, security_events, processes |
+| `run-history.ts` | `RunHistory` | SQLite via `better-sqlite3` (WAL mode, 22 migrations) at `~/.lynox/history.db`. Delegates analytics to `run-history-analytics.ts` (9 query functions) and domain persistence to `run-history-persistence.ts` (44 functions). Tables: runs, tool_calls, spawns, prompt_snapshots, pre_approval, pipelines, scopes, tasks, security_events, processes, threads, thread_messages. `getDb()` exposes connection for ThreadStore |
 | `process-capture.ts` | -- | Extracts ProcessRecord from run_history tool calls. Haiku call for step naming + parameter identification. Sanitizes secrets, filters internal tools |
 | `pricing.ts` | -- | Shared pricing table with `calculateCost()`, cache token support, optional JSON override |
 | `project.ts` | -- | `detectProjectRoot()`, `generateBriefing()`, `buildFileManifest()` + `diffManifest()` |
@@ -193,11 +195,11 @@ In-process Telegram bot using Telegraf. Connects directly to `session.run()` (no
 
 ### `src/server/http-api.ts` -- Engine HTTP API
 
-REST + SSE server for the PWA and programmatic access. Provides full CRUD for all Engine subsystems (memory, secrets, config, history, tasks) plus SSE streaming for agent runs. Uses `Engine` directly (in-process). Started with `--http-api` flag, default port 3100. Bearer token auth, rate limiting (120 req/min/IP), CORS support. See [HTTP API docs](/developers/http-api/) for endpoint reference.
+REST + SSE server for the PWA and programmatic access. Provides full CRUD for all Engine subsystems (memory, secrets, config, history, tasks, threads) plus SSE streaming for agent runs. Uses `Engine` directly (in-process). Started with `--http-api` flag, default port 3100. Bearer token auth, rate limiting (120 req/min/IP), CORS support. See [HTTP API docs](/developers/http-api/) for endpoint reference.
 
 ### `src/server/mcp-server.ts` -- MCP Server
 
-Exposes LYNOX as an MCP server with stdio and HTTP transport for external tool integration (Claude Desktop, IDE plugins). Uses `Engine` internally — `SessionStore` holds per-session `Session` instances. Includes async run polling with cursor-based event log, reply/abort flow, file attachments, buffered output limits, and persisted async run state for restart-resilient polling.
+Exposes LYNOX as an MCP server with stdio and HTTP transport for external tool integration (Claude Desktop, IDE plugins). Uses `Engine` internally — `SessionStore` holds per-session `Session` instances (each backed by a persistent thread). Includes async run polling with cursor-based event log, reply/abort flow, file attachments, buffered output limits, and persisted async run state for restart-resilient polling.
 
 ### `src/index.ts` -- Entry Point
 
@@ -247,7 +249,8 @@ Agent.send(userMessage)
              │
              ├──► Memory.maybeUpdate() (fire-and-forget) → lynox:memory:store channel
              ├──► RunHistory.updateRun() (cost, tokens, status)
-             ├──► storeKnowledgeEmbedding() (bounded queue, max 3 concurrent, errors logged)
+             ├──► ThreadStore.appendMessages() (persist new messages to thread)
+             ├──► KnowledgeLayer.createEpisode() (episodic memory)
              │
              ▼
          Return text response

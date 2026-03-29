@@ -162,6 +162,8 @@ Multi-layered guards prevent context overflow and token waste:
 
 **Briefing cap** — `MAX_BRIEFING_CHARS = 8,000`. Manifest diff trimmed first (lowest priority), run history preserved intact. Briefing is one-shot (cleared after turn 1).
 
+**Thread persistence** — After each `session.run()`, new messages are appended to the persistent thread in SQLite via `ThreadStore.appendMessages()`. This happens after both successful and failed runs. When a thread is resumed, the full message history (or a summary + recent messages for long threads) is loaded back into the Agent.
+
 **History truncation** — `_truncateHistory()` runs before every `_callAPI()` call:
 
 - **Token estimate**: `JSON.stringify(messages).length / CHARS_PER_TOKEN` where `CHARS_PER_TOKEN = 3.5`

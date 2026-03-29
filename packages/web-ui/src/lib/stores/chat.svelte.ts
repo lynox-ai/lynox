@@ -352,9 +352,7 @@ export function downloadExport(format: 'md' | 'json'): void {
 }
 
 export function newChat() {
-	if (sessionId) {
-		fetch(`${getApiBase()}/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
-	}
+	// Thread persists in DB — just detach from current session
 	messages = [];
 	sessionId = null;
 	currentRunId = null;
@@ -366,4 +364,60 @@ export function newChat() {
 	contextBudget = null;
 	clearContext();
 	persistChat();
+}
+
+export function getSessionId() {
+	return sessionId;
+}
+
+export async function resumeThread(threadId: string): Promise<void> {
+	// Create backend session from persisted thread
+	const res = await fetch(`${getApiBase()}/sessions`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ threadId }),
+	});
+	if (!res.ok) return;
+	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
+	sessionId = data.sessionId;
+	if (data.model) sessionModel = data.model;
+	if (data.contextWindow) contextWindow = data.contextWindow;
+
+	// Load messages for display
+	const msgRes = await fetch(`${getApiBase()}/threads/${threadId}/messages`);
+	if (msgRes.ok) {
+		const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
+		messages = msgData.messages.map((m) => ({
+			role: m.role as 'user' | 'assistant',
+			content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
+			toolCalls: extractToolCalls(m.content),
+		}));
+	}
+
+	chatError = null;
+	pendingPermission = null;
+	messageQueue = [];
+	contextBudget = null;
+	clearContext();
+	persistChat();
+}
+
+function extractContentText(content: unknown): string {
+	if (typeof content === 'string') return content;
+	if (!Array.isArray(content)) return '';
+	return (content as Array<Record<string, unknown>>)
+		.filter((b) => b['type'] === 'text')
+		.map((b) => String(b['text'] ?? ''))
+		.join('');
+}
+
+function extractToolCalls(content: unknown): ToolCallInfo[] {
+	if (!Array.isArray(content)) return [];
+	return (content as Array<Record<string, unknown>>)
+		.filter((b) => b['type'] === 'tool_use')
+		.map((b) => ({
+			name: String(b['name'] ?? ''),
+			input: b['input'],
+			status: 'done' as const,
+		}));
 }

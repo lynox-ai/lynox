@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { newChat } from '../stores/chat.svelte.js';
+	import { newChat, resumeThread } from '../stores/chat.svelte.js';
+	import { loadThreads } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
+	import ThreadList from './ThreadList.svelte';
 	import StatusBar from './StatusBar.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
@@ -87,7 +89,7 @@
 			<!-- New Chat -->
 			<div class="px-3 mb-2">
 				<button
-					onclick={() => { newChat(); sidebarOpen = false; goto('/app'); }}
+					onclick={() => { newChat(); void loadThreads(); sidebarOpen = false; goto('/app'); }}
 					class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all text-left flex items-center gap-2"
 				>
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
@@ -96,6 +98,9 @@
 					{t('nav.new_chat')}
 				</button>
 			</div>
+
+			<!-- Recent Threads -->
+			<ThreadList onselect={(id) => { void resumeThread(id).then(() => { void loadThreads(); }); sidebarOpen = false; goto('/app'); }} />
 
 			<!-- Nav Items -->
 			<ul class="flex-1 space-y-0.5 px-3">

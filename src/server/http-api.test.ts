@@ -31,6 +31,8 @@ const mockSessionInstance = {
   reset: mockSessionReset,
   onStream: null as unknown,
   promptUser: null as unknown,
+  getModelTier: vi.fn().mockReturnValue('sonnet'),
+  sessionId: 'mock-session-id',
 };
 const mockGetOrCreate = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionGet = vi.fn().mockReturnValue(mockSessionInstance);
@@ -53,6 +55,7 @@ vi.mock('../core/engine.js', () => ({
       listNames: mockSecretListNames,
       set: mockSecretSet,
       deleteSecret: mockSecretDelete,
+      resolve: vi.fn().mockReturnValue(null),
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -68,6 +71,9 @@ vi.mock('../core/engine.js', () => ({
       update: mockTaskUpdate,
       complete: mockTaskComplete,
     });
+    this.getThreadStore = vi.fn().mockReturnValue(null);
+    this.reloadUserConfig = vi.fn();
+    this.getUserConfig = vi.fn().mockReturnValue({});
     return this;
   }),
 }));
@@ -388,7 +394,7 @@ describe('LynoxHTTPApi', () => {
       mockHistorySearchRuns.mockReturnValue([{ id: 'r-2', task_text: 'search result' }]);
       const res = await jsonFetch('/api/history/runs?q=search');
       expect(res.status).toBe(200);
-      expect(mockHistorySearchRuns).toHaveBeenCalledWith('search', 20);
+      expect(mockHistorySearchRuns).toHaveBeenCalledWith('search', 20, 0);
     });
 
     it('GET /api/history/runs/:id returns run detail', async () => {

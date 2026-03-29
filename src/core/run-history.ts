@@ -476,6 +476,36 @@ const MIGRATIONS: string[] = [
   // v21: User wait time tracking — separate AI processing time from user interaction wait
   `INSERT OR IGNORE INTO schema_version (version) VALUES (21);
    ALTER TABLE runs ADD COLUMN user_wait_ms INTEGER NOT NULL DEFAULT 0;`,
+
+  // v22: Persistent conversation threads
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (22);
+
+   CREATE TABLE IF NOT EXISTS threads (
+     id TEXT PRIMARY KEY,
+     title TEXT NOT NULL DEFAULT '',
+     model_tier TEXT NOT NULL DEFAULT 'sonnet',
+     context_id TEXT NOT NULL DEFAULT '',
+     message_count INTEGER NOT NULL DEFAULT 0,
+     total_tokens INTEGER NOT NULL DEFAULT 0,
+     total_cost_usd REAL NOT NULL DEFAULT 0,
+     summary TEXT,
+     summary_up_to INTEGER NOT NULL DEFAULT 0,
+     is_archived INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at);
+   CREATE INDEX IF NOT EXISTS idx_threads_archived ON threads(is_archived);
+
+   CREATE TABLE IF NOT EXISTS thread_messages (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     role TEXT NOT NULL,
+     content_json TEXT NOT NULL,
+     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX IF NOT EXISTS idx_thread_messages_thread ON thread_messages(thread_id, seq);`,
 ];
 
 export class RunHistory {
@@ -1304,6 +1334,11 @@ export class RunHistory {
     }
 
     return count;
+  }
+
+  /** Expose database instance for shared-connection modules (e.g. ThreadStore). */
+  getDb(): Database.Database {
+    return this.db;
   }
 
   close(): void {

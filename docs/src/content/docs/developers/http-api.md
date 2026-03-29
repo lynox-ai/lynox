@@ -49,20 +49,46 @@ GET /health
 
 Unauthenticated. Returns `{"status":"ok"}`. Use for Docker healthchecks and load balancer probes.
 
-### Sessions
+### Sessions & Threads
 
-Sessions hold conversation state across multiple runs.
+Sessions hold conversation state across multiple runs. Every session is backed by a **persistent thread** stored in SQLite — conversations survive process restarts and can be resumed from the Web UI.
 
 ```
 POST /api/sessions
-Body: { "model"?: "opus"|"sonnet"|"haiku", "effort"?: "low"|"medium"|"high" }
-Response: { "sessionId": "uuid" }
+Body: {
+  "model"?: "opus"|"sonnet"|"haiku",
+  "effort"?: "low"|"medium"|"high",
+  "threadId"?: "uuid"   // Resume an existing thread
+}
+Response: {
+  "sessionId": "uuid",
+  "model": "sonnet",
+  "contextWindow": 200000,
+  "threadId": "uuid",
+  "resumed": false
+}
 ```
+
+When `threadId` is provided, the backend loads the persisted conversation from the thread's message history. Short threads (<80 messages) are loaded verbatim; longer threads use a summary + the most recent 40 messages.
 
 ```
 DELETE /api/sessions/:id
 Response: { "ok": true }
 ```
+
+### Threads
+
+Threads are the persistent storage for conversations. Each session automatically creates a thread on first use.
+
+```
+GET    /api/threads                  → { threads: ThreadRecord[] }   Query: ?limit=50&includeArchived=false
+GET    /api/threads/:id              → { thread: ThreadRecord }
+PATCH  /api/threads/:id              → { ok: true }                  Body: { title?, is_archived? }
+DELETE /api/threads/:id              → { ok: true }                  (deletes thread + all messages)
+GET    /api/threads/:id/messages     → { messages: [...] }           Query: ?fromSeq=0&limit=10000
+```
+
+**ThreadRecord fields:** `id`, `title`, `model_tier`, `context_id`, `message_count`, `total_tokens`, `total_cost_usd`, `summary`, `is_archived`, `created_at`, `updated_at`.
 
 ### Runs (SSE Streaming)
 
@@ -166,7 +192,7 @@ POST   /api/tasks/:id/complete   → TaskRecord
 | **Purpose** | PWA backend, programmatic access | External tool integration |
 | **Consumers** | PWA Gateway, scripts | Claude Desktop, IDE plugins |
 | **Protocol** | REST + SSE | MCP (stdio / HTTP) |
-| **Data access** | Full CRUD (memory, secrets, config, history, tasks) | Read-only memory, task execution only |
+| **Data access** | Full CRUD (memory, secrets, config, history, tasks, threads) | Read-only memory, task execution only |
 | **Streaming** | Real SSE (push) | Polling (1s interval) |
 | **Auth** | Bearer token | Bearer token |
 | **Port** | 3100 (default) | 3042 (default) |

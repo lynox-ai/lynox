@@ -369,14 +369,23 @@ export class LynoxHTTPApi {
     // ── Sessions ──
     this.staticRoutes.set('POST /api/sessions', async (_req, res, _params, body) => {
       const opts = body && typeof body === 'object' ? body as Record<string, unknown> : {};
-      const sessionId = randomUUID();
+      const threadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
+      const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
         model: typeof opts['model'] === 'string' ? opts['model'] as 'opus' | 'sonnet' | 'haiku' : undefined,
         effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
       });
       const tier = session.getModelTier();
       const CONTEXT_SIZES: Record<string, number> = { opus: 1_000_000, sonnet: 200_000, haiku: 200_000 };
-      jsonResponse(res, 201, { sessionId, model: tier, contextWindow: CONTEXT_SIZES[tier] ?? 200_000 });
+      const threadStore = engine.getThreadStore();
+      const thread = threadStore?.getThread(sessionId);
+      jsonResponse(res, 201, {
+        sessionId,
+        model: tier,
+        contextWindow: CONTEXT_SIZES[tier] ?? 200_000,
+        threadId: sessionId,
+        resumed: !!threadId && !!thread,
+      });
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/sessions/:id', async (_req, res, params) => {
@@ -503,6 +512,67 @@ export class LynoxHTTPApi {
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
       jsonResponse(res, 200, { ok: true });
+    }));
+
+    // ── Threads ──
+    this.staticRoutes.set('GET /api/threads', async (req, res) => {
+      const threadStore = engine.getThreadStore();
+      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      const url = new URL(req.url ?? '', 'http://localhost');
+      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const includeArchived = url.searchParams.get('includeArchived') === 'true';
+      const threads = threadStore.listThreads({ limit, includeArchived });
+      jsonResponse(res, 200, { threads });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/threads/:id', async (_req, res, params) => {
+      const threadStore = engine.getThreadStore();
+      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      const thread = threadStore.getThread(params['id']!);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      jsonResponse(res, 200, { thread });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/threads/:id', async (_req, res, params, body) => {
+      const threadStore = engine.getThreadStore();
+      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      const thread = threadStore.getThread(params['id']!);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      const b = body as Record<string, unknown> | null;
+      threadStore.updateThread(params['id']!, {
+        title: typeof b?.['title'] === 'string' ? b['title'] : undefined,
+        is_archived: typeof b?.['is_archived'] === 'boolean' ? b['is_archived'] : undefined,
+      });
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/threads/:id', async (_req, res, params) => {
+      const threadStore = engine.getThreadStore();
+      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      const thread = threadStore.getThread(params['id']!);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      // Also clean up in-memory session
+      this.sessionStore.reset(params['id']!);
+      threadStore.deleteThread(params['id']!);
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/threads/:id/messages', async (req, res, params) => {
+      const threadStore = engine.getThreadStore();
+      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      const thread = threadStore.getThread(params['id']!);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      const url = new URL(req.url ?? '', 'http://localhost');
+      const fromSeq = parseInt(url.searchParams.get('fromSeq') ?? '0', 10);
+      const limit = parseInt(url.searchParams.get('limit') ?? '10000', 10);
+      const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
+      const messages = records.map(r => ({
+        seq: r.seq,
+        role: r.role,
+        content: JSON.parse(r.content_json) as unknown,
+        created_at: r.created_at,
+      }));
+      jsonResponse(res, 200, { messages });
     }));
 
     // ── Memory ──

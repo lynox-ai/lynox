@@ -16,6 +16,7 @@ function makeMockSession(): Session {
 function makeMockEngine(): Engine {
   return {
     createSession: vi.fn().mockImplementation(() => makeMockSession()),
+    getThreadStore: vi.fn().mockReturnValue(null),
   } as unknown as Engine;
 }
 
