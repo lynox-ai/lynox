@@ -142,7 +142,10 @@
 					});
 					if (res.ok) {
 						const data = (await res.json()) as { text: string };
-						inputText += (inputText ? ' ' : '') + data.text;
+						if (data.text.trim()) {
+							// Auto-send voice message (WhatsApp-style)
+							await sendMessage(`🎤 ${data.text.trim()}`);
+						}
 					}
 				};
 				reader.readAsDataURL(blob);
@@ -698,75 +701,89 @@
 			</div>
 		{/if}
 
-		<div class="max-w-3xl mx-auto flex items-stretch gap-1.5 md:gap-2">
-			<!-- File upload -->
+		<div class="max-w-3xl mx-auto flex items-end gap-1.5 md:gap-2">
 			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
-			<button
-				onclick={() => fileInputEl.click()}
-				disabled={!ready}
-				class="shrink-0 rounded-[var(--radius-sm)] p-2.5 text-text-subtle hover:text-text disabled:opacity-30 transition-opacity"
-				aria-label={t('chat.attach_file')}
-			>
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
-				</svg>
-			</button>
 
-			<!-- Voice -->
-			<button
-				onclick={toggleVoice}
-				disabled={!ready}
-				class="shrink-0 rounded-[var(--radius-sm)] p-2.5 transition-opacity flex items-center gap-1 {recording ? 'text-danger animate-pulse' : 'text-text-subtle hover:text-text'} disabled:opacity-30"
-				aria-label={t('chat.voice_input')}
-			>
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
-				</svg>
-				{#if recording}
-					<span class="text-xs font-mono">{recordingSeconds}s</span>
-				{/if}
-			</button>
-
-			<textarea
-				bind:this={textareaEl}
-				bind:value={inputText}
-				onkeydown={handleKeydown}
-				oninput={autoResize}
-				onpaste={handlePaste}
-				placeholder={pendingPermission && !inBatchMode ? pendingPermission.question : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
-				rows="1"
-				disabled={!ready && !pendingPermission}
-				class="flex-1 resize-none rounded-2xl md:rounded-[var(--radius-md)] border border-border/50 md:border-border bg-bg px-4 py-2.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle focus:border-border-hover outline-none disabled:opacity-50 overflow-hidden"
-			></textarea>
-			{#if isStreaming}
+			{#if recording}
+				<!-- Recording state: [🗑  ● 0:03 ━━━━━  ⬛]  [➤] -->
+				<div class="flex-1 flex items-center gap-3 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2.5">
+					<button onclick={() => { toggleVoice(); /* discard */ }} class="text-text-subtle hover:text-danger transition-colors shrink-0" aria-label="Discard">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+					</button>
+					<span class="h-2 w-2 rounded-full bg-danger animate-pulse shrink-0"></span>
+					<span class="text-sm font-mono text-text-subtle tabular-nums">{recordingSeconds}s</span>
+					<div class="flex-1 h-1 rounded-full bg-border overflow-hidden">
+						<div class="h-full bg-danger/60 rounded-full animate-pulse" style="width: {Math.min(recordingSeconds * 3, 100)}%"></div>
+					</div>
+					<button onclick={toggleVoice} class="text-danger hover:text-text transition-colors shrink-0" aria-label="Stop">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="2" /></svg>
+					</button>
+				</div>
+				<!-- Send button during recording -->
 				<button
-					onclick={() => abortRun()}
-					class="shrink-0 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-3 py-2.5 text-sm text-danger hover:bg-danger/25 transition-opacity"
-					title={t('chat.stop')}
+					onclick={toggleVoice}
+					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
 				>
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
-				</button>
-			{/if}
-			{#if !isStreaming || pendingPermission}
-				<button
-					onclick={handleSend}
-					disabled={!inputText.trim() && pendingFiles.length === 0}
-					class="shrink-0 rounded-2xl md:rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
-				>
-					{pendingPermission ? t('chat.send') : t('chat.send')}
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 				</button>
 			{:else}
-				<button
-					onclick={handleSend}
-					disabled={!inputText.trim() && pendingFiles.length === 0}
-					class="shrink-0 rounded-[var(--radius-sm)] border border-border bg-bg px-4 py-2.5 text-sm text-text-muted hover:text-text hover:border-border-hover disabled:opacity-30 transition-all"
-				>
-					{t('chat.queue')}
-				</button>
+				<!-- Normal: [📎  Nachricht eingeben...  ]  [🎤 or ➤] -->
+				<div class="flex-1 flex items-end rounded-2xl md:rounded-[var(--radius-md)] border border-border/50 md:border-border bg-bg overflow-hidden">
+					<button
+						onclick={() => fileInputEl.click()}
+						disabled={!ready}
+						class="shrink-0 p-2.5 text-text-subtle hover:text-text disabled:opacity-30 transition-opacity self-end"
+						aria-label={t('chat.attach_file')}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+						</svg>
+					</button>
+					<textarea
+						bind:this={textareaEl}
+						bind:value={inputText}
+						onkeydown={handleKeydown}
+						oninput={autoResize}
+						onpaste={handlePaste}
+						placeholder={pendingPermission && !inBatchMode ? pendingPermission.question : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
+						rows="1"
+						disabled={!ready && !pendingPermission}
+						class="flex-1 resize-none border-0 bg-transparent py-2.5 pr-2 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
+					></textarea>
+				</div>
+
+				<!-- Right button: 🎤 (empty) / ⬛ (streaming) / ➤ (text) -->
+				{#if isStreaming && !pendingPermission}
+					<button
+						onclick={() => abortRun()}
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-opacity"
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
+					</button>
+				{:else if inputText.trim() || pendingFiles.length > 0 || pendingPermission}
+					<button
+						onclick={handleSend}
+						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission)}
+						class="shrink-0 h-12 w-12 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+					</button>
+				{:else}
+					<button
+						onclick={toggleVoice}
+						disabled={!ready}
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-all"
+						aria-label={t('chat.voice_input')}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+						</svg>
+					</button>
+				{/if}
 			{/if}
 		</div>
-		<div class="mt-1.5 max-w-3xl mx-auto flex items-center justify-between gap-3">
-			<p class="hidden md:block text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
+		<div class="hidden md:flex mt-1.5 max-w-3xl mx-auto items-center justify-between gap-3">
+			<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
 				{pendingPermission ? t('chat.hint') : isStreaming ? (queueLength > 0 ? `${queueLength} ${t('chat.hint_queued')}` : t('chat.hint_streaming')) : t('chat.hint')}
 			</p>
 			<div class="flex items-center gap-2 ml-auto">

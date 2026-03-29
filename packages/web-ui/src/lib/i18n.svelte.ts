@@ -135,6 +135,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.mic_unavailable': { de: '[Mikrofon nicht verfuegbar]', en: '[Microphone not available]' },
 	'chat.attach_file': { de: 'Datei anhaengen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
+	'chat.recording': { de: 'Aufnahme', en: 'Recording' },
 	'chat.thinking_label': { de: 'Thinking', en: 'Thinking' },
 	'chat.expand_all': { de: 'Alle aufklappen', en: 'Expand all' },
 	'chat.edit_answer': { de: 'Antworten verwerfen & neu starten', en: 'Discard answers & restart' },
