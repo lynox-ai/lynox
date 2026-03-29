@@ -787,7 +787,7 @@
 					<button
 						onclick={() => fileInputEl.click()}
 						disabled={!ready}
-						class="shrink-0 p-2.5 text-text-subtle hover:text-text disabled:opacity-30 transition-opacity self-end"
+						class="shrink-0 p-2.5 text-text-subtle hover:text-text disabled:opacity-30 transition-opacity self-end outline-none focus:outline-none"
 						aria-label={t('chat.attach_file')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
