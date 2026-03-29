@@ -136,7 +136,7 @@ export function extractEntitiesRegex(text: string): ExtractionResult {
 
 // === Tier 2: LLM-based extraction (optional, for high-value memories) ===
 
-const ENTITY_EXTRACTION_PROMPT = `Extract entities and their relationships from this text.
+const ENTITY_EXTRACTION_PROMPT = `Extract SPECIFIC named entities and their relationships from this text.
 Return a JSON object with two arrays:
 - "entities": [{"name": "...", "type": "person|organization|project|product|concept|location"}]
 - "relations": [{"from": "entity name", "to": "entity name", "type": "relationship type", "description": "brief description"}]
@@ -144,9 +144,13 @@ Return a JSON object with two arrays:
 Relationship types: works_for, owns, manages, uses, located_in, part_of, prefers, depends_on, created_by, related_to
 
 Rules:
-- Only extract clearly stated entities, do not infer
+- ONLY extract proper nouns and specific named things (people, companies, products, places, named projects)
+- DO NOT extract generic concepts, adjectives, or common nouns (e.g. "investor", "round", "potential", "history", "details")
+- DO NOT extract single common words that are not names
+- Entity names must be at least 2 words OR a recognized proper noun (e.g. "Peter Huber", "lynox AI", "Zurich")
 - Keep entity names as they appear (preserve original language)
-- Return {"entities": [], "relations": []} if nothing clear is found
+- Return {"entities": [], "relations": []} if nothing specific is found
+- When in doubt, leave it out — fewer high-quality entities are better than many noisy ones
 
 Text: `;
 
