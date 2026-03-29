@@ -98,19 +98,21 @@
 		<h1 class="text-xl font-light tracking-tight">{t('memory.title')}</h1>
 	</div>
 
-	<div class="flex gap-2 mb-4">
-		{#each namespaces as ns}
-			<button
-				onclick={() => { selectedNs = ns; }}
-				title={t(`memory.ns.${ns}`)}
-				class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-all {selectedNs === ns
-					? 'bg-accent/10 text-accent-text border border-accent/30'
-					: 'text-text-muted hover:text-text border border-transparent'}"
-			>
-				{ns}
-			</button>
-		{/each}
-		<span class="text-xs text-text-subtle ml-1">{t(`memory.ns.${selectedNs}`)}</span>
+	<div class="mb-6 space-y-2">
+		<div class="flex flex-wrap gap-2">
+			{#each namespaces as ns}
+				<button
+					onclick={() => { selectedNs = ns; }}
+					title={t(`memory.ns.${ns}`)}
+					class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-all {selectedNs === ns
+						? 'bg-accent/10 text-accent-text border border-accent/30'
+						: 'text-text-muted hover:text-text border border-transparent'}"
+				>
+					{ns}
+				</button>
+			{/each}
+		</div>
+		<p class="text-xs text-text-subtle">{t(`memory.ns.${selectedNs}`)}</p>
 	</div>
 
 	{#if error}
