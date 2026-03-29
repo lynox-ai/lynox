@@ -292,6 +292,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.sunday': { de: 'Sonntags', en: 'Sundays' },
 	'tasks.done': { de: 'Erledigt', en: 'Done' },
 	'tasks.delete': { de: 'Loeschen', en: 'Delete' },
+	'tasks.who': { de: 'Wer?', en: 'Who?' },
+	'tasks.assignee_lynox': { de: 'lynox (automatisch)', en: 'lynox (automatic)' },
+	'tasks.assignee_user': { de: 'Ich (Erinnerung)', en: 'Me (reminder)' },
 
 	// Integrations
 	'integrations.title': { de: 'Integrationen', en: 'Integrations' },

@@ -18,6 +18,7 @@
 	let loading = $state(true);
 	let newTitle = $state('');
 	let newSchedule = $state('');
+	let newAssignee = $state('lynox');
 	let error = $state('');
 
 	async function loadTasks() {
@@ -44,6 +45,7 @@
 				body: JSON.stringify({
 					title: newTitle,
 					description: newTitle,
+					assignee: newAssignee || undefined,
 					scheduleCron: newSchedule || undefined
 				})
 			});
@@ -153,15 +155,24 @@
 			placeholder={t('tasks.description_placeholder')}
 			class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 		/>
-		<div>
-			<label class="text-xs text-text-subtle mb-1 block">{t('tasks.repeat')}</label>
-			<select bind:value={newSchedule} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none">
-				<option value="">{t('tasks.once')}</option>
-				<option value="0 * * * *">{t('tasks.every_hour')}</option>
-				<option value="0 9 * * *">{t('tasks.preset_daily')}</option>
-				<option value="0 9 * * 1">{t('tasks.preset_weekly')}</option>
-				<option value="0 9 1 * *">{t('tasks.preset_monthly')}</option>
-			</select>
+		<div class="grid grid-cols-2 gap-3">
+			<div>
+				<label class="text-xs text-text-subtle mb-1 block">{t('tasks.who')}</label>
+				<select bind:value={newAssignee} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none">
+					<option value="lynox">{t('tasks.assignee_lynox')}</option>
+					<option value="user">{t('tasks.assignee_user')}</option>
+				</select>
+			</div>
+			<div>
+				<label class="text-xs text-text-subtle mb-1 block">{t('tasks.repeat')}</label>
+				<select bind:value={newSchedule} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none">
+					<option value="">{t('tasks.once')}</option>
+					<option value="0 * * * *">{t('tasks.every_hour')}</option>
+					<option value="0 9 * * *">{t('tasks.preset_daily')}</option>
+					<option value="0 9 * * 1">{t('tasks.preset_weekly')}</option>
+					<option value="0 9 1 * *">{t('tasks.preset_monthly')}</option>
+				</select>
+			</div>
 		</div>
 		<button
 			onclick={createTask}
