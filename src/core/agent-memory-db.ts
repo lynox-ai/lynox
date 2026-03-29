@@ -942,14 +942,23 @@ export class AgentMemoryDb {
     scopeId: string,
     threshold = 0.85,
   ): number {
-    const rows = this.db.prepare(`
-      SELECT * FROM memories
-      WHERE is_active = 1 AND namespace = ? AND scope_type = ? AND scope_id = ?
-      ORDER BY created_at DESC LIMIT 500
-    `).all(namespace, scopeType, scopeId) as MemoryRow[];
+    // scopeId='*' means all scopes of this type
+    const rows = scopeId === '*'
+      ? this.db.prepare(`
+          SELECT * FROM memories
+          WHERE is_active = 1 AND namespace = ? AND scope_type = ?
+          ORDER BY created_at DESC LIMIT 500
+        `).all(namespace, scopeType) as MemoryRow[]
+      : this.db.prepare(`
+          SELECT * FROM memories
+          WHERE is_active = 1 AND namespace = ? AND scope_type = ? AND scope_id = ?
+          ORDER BY created_at DESC LIMIT 500
+        `).all(namespace, scopeType, scopeId) as MemoryRow[];
 
     if (rows.length < 2) return 0;
 
+    // Wrap in transaction for atomicity
+    return this.transaction(() => {
     const dim = this._embeddingDimensions ?? 384;
     const merged = new Set<string>();
     let consolidatedCount = 0;
@@ -999,6 +1008,7 @@ export class AgentMemoryDb {
     }
 
     return consolidatedCount;
+    }); // end transaction
   }
 
   // ── Transaction helper ────────────────────────────────────────

@@ -297,4 +297,10 @@ export interface IKnowledgeLayer {
   }): PatternRecord[];
 
   getMetrics(metricName?: string | undefined, window?: MetricWindow | undefined): MetricRecord[];
+
+  // === Intelligence ===
+
+  runIntelligence(): void;
+  feedbackOnRetrieval(memoryIds: string[], signal: 'useful' | 'wrong'): void;
+  consolidateMemories(namespace: MemoryNamespace, scopeType: string, scopeId: string): number;
 }

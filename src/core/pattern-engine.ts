@@ -8,7 +8,7 @@
  *
  * Computes agent performance metrics (success rate, avg duration, cost).
  */
-import type { AgentMemoryDb, EpisodeRow, PatternRow } from './agent-memory-db.js';
+import type { AgentMemoryDb, EpisodeRow } from './agent-memory-db.js';
 
 /** Minimum episodes needed before pattern detection runs. */
 const MIN_EPISODES_FOR_DETECTION = 5;
@@ -18,6 +18,16 @@ const MIN_PATTERN_EVIDENCE = 3;
 
 /** Failure rate threshold to flag an anti-pattern. */
 const ANTI_PATTERN_FAILURE_RATE = 0.5;
+
+/** Safely parse JSON array, returning empty array on failure. */
+function safeParseTools(json: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.filter((t): t is string => typeof t === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 
 export class PatternEngine {
   constructor(private readonly db: AgentMemoryDb) {}
@@ -37,16 +47,14 @@ export class PatternEngine {
 
   /**
    * Find tool combinations that appear repeatedly in successful episodes.
-   * E.g., "file_read + file_write" appears in 8/10 successful runs → sequence pattern.
    */
   private _detectToolSequences(episodes: EpisodeRow[]): number {
     const successful = episodes.filter(e => e.outcome_signal === 'success');
     if (successful.length < MIN_PATTERN_EVIDENCE) return 0;
 
-    // Count tool-set occurrences (sorted for consistency)
     const comboCounts = new Map<string, number>();
     for (const ep of successful) {
-      const tools = JSON.parse(ep.tools_used) as string[];
+      const tools = safeParseTools(ep.tools_used);
       if (tools.length < 2) continue;
       const key = [...new Set(tools)].sort().join(' + ');
       comboCounts.set(key, (comboCounts.get(key) ?? 0) + 1);
@@ -55,10 +63,11 @@ export class PatternEngine {
     let detected = 0;
     for (const [combo, count] of comboCounts) {
       if (count < MIN_PATTERN_EVIDENCE) continue;
-
-      const desc = `Tool combination "${combo}" used in ${count} successful runs`;
-      detected += this._upsertPattern('sequence', desc, {
-        tools: combo.split(' + '),
+      const toolList = combo.split(' + ');
+      // Stable description without dynamic count — prevents duplicate patterns
+      const desc = `Tool combination "${combo}" correlates with success`;
+      detected += this._upsertPattern('sequence', desc, toolList, {
+        tools: toolList,
         occurrences: count,
         successRate: count / successful.length,
       });
@@ -68,15 +77,13 @@ export class PatternEngine {
   }
 
   /**
-   * Find tools/approaches with high failure rates → anti-patterns.
-   * E.g., runs using only "bash" fail 60% of the time → anti-pattern.
+   * Find tools/approaches with high failure rates.
    */
   private _detectOutcomePatterns(episodes: EpisodeRow[]): number {
-    // Group by primary tool (first tool used)
     const toolOutcomes = new Map<string, { success: number; total: number }>();
 
     for (const ep of episodes) {
-      const tools = JSON.parse(ep.tools_used) as string[];
+      const tools = safeParseTools(ep.tools_used);
       if (tools.length === 0) continue;
       const primaryTool = tools[0]!;
       const entry = toolOutcomes.get(primaryTool) ?? { success: 0, total: 0 };
@@ -91,8 +98,9 @@ export class PatternEngine {
       const failureRate = 1 - stats.success / stats.total;
 
       if (failureRate >= ANTI_PATTERN_FAILURE_RATE) {
-        const desc = `Tool "${tool}" as primary has ${(failureRate * 100).toFixed(0)}% failure rate (${stats.total - stats.success}/${stats.total})`;
-        detected += this._upsertPattern('anti-pattern', desc, {
+        // Stable description without dynamic percentages
+        const desc = `Primary tool "${tool}" has high failure rate`;
+        detected += this._upsertPattern('anti-pattern', desc, [tool], {
           tool,
           failureRate,
           totalRuns: stats.total,
@@ -104,17 +112,29 @@ export class PatternEngine {
   }
 
   /**
-   * Upsert a pattern: if a similar description exists, increment evidence.
-   * Returns 1 if new pattern created, 0 if existing updated.
+   * Upsert a pattern: match by type + key tools to prevent duplicates.
+   * Updates description and metadata on existing patterns.
    */
   private _upsertPattern(
     patternType: string,
     description: string,
+    keyTools: string[],
     metadata: Record<string, unknown>,
   ): number {
-    // Check if pattern with same type and similar description already exists
-    const existing = this.db.getPatterns({ patternType, activeOnly: true, limit: 100 });
-    const match = existing.find(p => p.description === description);
+    const existing = this.db.getPatterns({ patternType, activeOnly: true, limit: 200 });
+    const sortedKey = [...keyTools].sort().join(',');
+
+    // Match by pattern type + tool signature (stable, count-independent)
+    const match = existing.find(p => {
+      try {
+        const m = JSON.parse(p.metadata) as Record<string, unknown>;
+        const mTools = Array.isArray(m['tools']) ? (m['tools'] as string[]).sort().join(',')
+          : typeof m['tool'] === 'string' ? m['tool'] : '';
+        return mTools === sortedKey;
+      } catch {
+        return false;
+      }
+    });
 
     if (match) {
       this.db.incrementPatternEvidence(match.id);
@@ -169,7 +189,7 @@ export class PatternEngine {
     // Tool usage frequency
     const toolCounts = new Map<string, number>();
     for (const ep of episodes) {
-      const tools = JSON.parse(ep.tools_used) as string[];
+      const tools = safeParseTools(ep.tools_used);
       for (const tool of tools) {
         toolCounts.set(tool, (toolCounts.get(tool) ?? 0) + 1);
       }

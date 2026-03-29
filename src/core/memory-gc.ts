@@ -193,12 +193,16 @@ export async function runGraphGc(
 ): Promise<{ supersededRemoved: number; orphanEntitiesRemoved: number; staleMemoriesRemoved: number }> {
   const result = await knowledgeLayer.gc(options);
 
-  // Consolidate similar memories (only on real GC, not dry-run)
-  if (!options?.dryRun && 'consolidateMemories' in knowledgeLayer) {
+  // Consolidate similar memories across all scopes (only on real GC, not dry-run)
+  if (!options?.dryRun) {
     try {
-      const kl = knowledgeLayer as import('./knowledge-layer.js').KnowledgeLayer;
-      for (const ns of ['knowledge', 'methods', 'learnings', 'project-state'] as const) {
-        kl.consolidateMemories(ns, 'global', 'global');
+      const stats = await knowledgeLayer.stats();
+      if (stats.memoryCount > 10) {
+        for (const ns of ['knowledge', 'methods', 'learnings', 'project-state'] as const) {
+          for (const scopeType of ['global', 'context', 'user'] as const) {
+            knowledgeLayer.consolidateMemories(ns, scopeType, '*');
+          }
+        }
       }
     } catch { /* non-critical */ }
   }
