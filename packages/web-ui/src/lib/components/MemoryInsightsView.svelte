@@ -12,10 +12,8 @@
 		failedCount: number;
 		totalDurationMs: number;
 		totalCostUsd: number;
-		lastTask: string;
-		lastOutcomeSignal: string;
 		lastRunAt: string;
-		toolsUsed: Record<string, number>;
+		toolCounts: Record<string, number>;
 	}
 
 	let metrics = $state<Metric[]>([]);
@@ -57,7 +55,8 @@
 		return `$${usd.toFixed(2)}`;
 	}
 
-	function topTools(toolMap: Record<string, number>, max = 3): string[] {
+	function topTools(toolMap: Record<string, number> | undefined | null, max = 3): string[] {
+		if (!toolMap) return [];
 		return Object.entries(toolMap)
 			.sort((a, b) => b[1] - a[1])
 			.slice(0, max)
@@ -155,10 +154,10 @@
 									</span>
 								</div>
 								<div class="flex-1 min-w-0">
-									<p class="text-sm truncate">{(ti.title || ti.lastTask).slice(0, 80)}</p>
+									<p class="text-sm truncate">{(ti.title || 'Untitled').slice(0, 80)}</p>
 									<div class="flex gap-2 text-[10px] text-text-subtle mt-0.5">
 										<span class="font-mono">{ti.runCount} runs</span>
-										{#each topTools(ti.toolsUsed) as tool}
+										{#each topTools(ti.toolCounts) as tool}
 											<span class="bg-bg-muted px-1.5 py-0.5 rounded">{tool}</span>
 										{/each}
 									</div>
