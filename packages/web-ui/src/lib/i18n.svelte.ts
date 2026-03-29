@@ -8,7 +8,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.knowledge': { de: 'Knowledge', en: 'Knowledge' },
 	'nav.history': { de: 'History', en: 'History' },
 	'nav.settings': { de: 'Settings', en: 'Settings' },
-	'nav.new_chat': { de: '+ Neuer Chat', en: '+ New Chat' },
+	'nav.new_chat': { de: 'Neuer Chat', en: 'New Chat' },
 	'nav.tasks': { de: 'Tasks', en: 'Tasks' },
 
 	// Command Palette
