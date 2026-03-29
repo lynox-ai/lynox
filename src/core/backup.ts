@@ -175,7 +175,7 @@ export class BackupManager {
       renameSync(tmpDir, finalDir);
 
       // 9. Verify (skip SQLite integrity for encrypted backups — files are ciphertext)
-      const verifiableFiles = files.filter(f => f.type !== 'directory' && f.type !== 'kuzu_dir');
+      const verifiableFiles = files.filter(f => f.type !== 'directory');
       const verifyFiles = this.encrypt
         ? verifiableFiles.map(f => f.type === 'sqlite' ? { ...f, type: 'file' as const } : f)
         : verifiableFiles;
@@ -251,7 +251,7 @@ export class BackupManager {
       const key = needsDecrypt ? deriveBackupKey(this.vaultKey!) : null;
 
       for (const entry of manifest.files) {
-        if (entry.type === 'directory' || entry.type === 'kuzu_dir') continue;
+        if (entry.type === 'directory') continue;
 
         const srcFile = join(backupPath, entry.path);
         const destFile = join(this.lynoxDir, entry.path);

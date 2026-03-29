@@ -18,7 +18,7 @@ lynox can automatically back up everything — your knowledge, history, contacts
 | Run history (`history.db`) | SQLite WAL | `VACUUM INTO` (crash-safe) |
 | Secrets vault (`vault.db`) | SQLite WAL | `VACUUM INTO` (crash-safe) |
 | Data store (`datastore.db`) | SQLite WAL | `VACUUM INTO` (crash-safe) |
-| Knowledge graph (`knowledge-graph/`) | LadybugDB (Kuzu) | Directory copy |
+| Agent memory (`agent-memory.db`) | SQLite WAL | `VACUUM INTO` (crash-safe) |
 | Memory (`memory/`) | Text files | Recursive copy |
 | Config (`config.json`) | JSON | File copy |
 | Sessions (`sessions/`) | JSON files | Recursive copy |

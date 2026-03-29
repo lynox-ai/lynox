@@ -78,7 +78,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 - Security: 6 layers (input-guard, output-guard, permission-guard, data-boundary, secret-store, security-audit)
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
-- KG: LadybugDB graph + ONNX embeddings + entity extraction + contradiction detection
+- Agent Memory: SQLite (AgentMemoryDb) + ONNX embeddings + entity extraction + contradiction detection + episodic log + pattern engine
 - Backup: VACUUM INTO + AES-256-GCM encryption + GDrive upload
 - API Store: profile-first enforcement, agent-driven setup
 - CRM: agent-driven contacts/deals, KG-primary, DataStore for structured tracking

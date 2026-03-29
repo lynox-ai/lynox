@@ -22,8 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && corepack enable && corepack prepare pnpm@latest --activate
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod \
-    && node node_modules/@ladybugdb/core/install.js
+RUN pnpm install --frozen-lockfile --prod
 
 # Whisper.cpp build stage — compiles whisper-cli + downloads base model
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS whisper-build
