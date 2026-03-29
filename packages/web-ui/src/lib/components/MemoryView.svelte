@@ -108,7 +108,7 @@
 						? 'bg-accent/10 text-accent-text border border-accent/30'
 						: 'text-text-muted hover:text-text border border-transparent'}"
 				>
-					{ns}
+					{ns === 'project-state' ? 'status' : ns}
 				</button>
 			{/each}
 		</div>

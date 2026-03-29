@@ -52,7 +52,7 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
         namespace: {
           type: 'string',
           enum: ['knowledge', 'methods', 'project-state', 'learnings'],
-          description: 'Category: knowledge (business facts), methods (techniques learned), project-state (current state), learnings (lessons learned)',
+          description: 'Category: knowledge (business facts), methods (techniques), project-state (current status), learnings (lessons learned)',
         },
         content: { type: 'string', description: 'Content to store' },
         scope: {
@@ -99,7 +99,7 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         namespace: {
           type: 'string',
           enum: ['knowledge', 'methods', 'project-state', 'learnings'],
-          description: 'Category: knowledge (business facts), methods (techniques learned), project-state (current state), learnings (lessons learned)',
+          description: 'Category: knowledge (business facts), methods (techniques), project-state (current status), learnings (lessons learned)',
         },
         scope: {
           type: 'string',

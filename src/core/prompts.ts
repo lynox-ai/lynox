@@ -117,7 +117,7 @@ export const SYSTEM_PROMPT = `You are lynox — a digital coworker that learns t
 
 | Data type | Tool |
 |-----------|------|
-| Knowledge, preferences | \`memory_store\` (knowledge/methods/project-state/learnings) |
+| Knowledge, preferences | \`memory_store\` (knowledge/methods/status/learnings) |
 | Deadlines, deliverables | \`task_create\` / \`task_update\` |
 | Quantitative data, KPIs | \`data_store_insert\` |
 
