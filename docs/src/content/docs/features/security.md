@@ -490,7 +490,7 @@ The debug subscriber (`src/core/debug-subscriber.ts`) applies multi-layer redact
 
 Additional security fixes across MCP server, Knowledge Graph, HTTP tool, and Telegram:
 
-1. **Cypher injection** (`knowledge-graph.ts`): All namespace/scopeType values now use parameterized queries (`$ns`, `$filterNs`, `$filterScopeTypes`) instead of string interpolation. LIMIT values validated with `Math.floor()`/`Math.min()` before interpolation
+1. **SQL injection** (`agent-memory-db.ts`): All queries use parameterized `?` placeholders. LIKE patterns escape `%`/`_`. Dynamic IN clauses built with placeholder arrays, never string interpolation
 2. **MCP user_context injection** (`mcp-server.ts`): `user_context` parameter wrapped via `wrapUntrustedData()` before injection into system prompt — prevents `</user_context>` tag breakout
 3. **MCP session ownership** (`mcp-server.ts`): `session_id` is now **mandatory** on `lynox_poll` and `lynox_reply` — prevents cross-session data access
 4. **MCP body size limit** (`mcp-server.ts`): HTTP request body size limited to 30MB via `Content-Length` header check — prevents large-payload DoS

@@ -78,15 +78,15 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 - Security: 6 layers (input-guard, output-guard, permission-guard, data-boundary, secret-store, security-audit)
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
-- Agent Memory: SQLite (AgentMemoryDb) + ONNX embeddings + entity extraction + contradiction detection + episodic log + pattern engine
+- Agent Memory: SQLite (AgentMemoryDb, `~/.lynox/agent-memory.db`) — entity graph, episodic log, pattern detection, KPI metrics, confidence evolution, memory consolidation, retrieval feedback loop. ONNX embeddings, brute-force cosine search, recursive CTE graph traversal
 - Backup: VACUUM INTO + AES-256-GCM encryption + GDrive upload
 - API Store: profile-first enforcement, agent-driven setup
-- CRM: agent-driven contacts/deals, KG-primary, DataStore for structured tracking
+- CRM: agent-driven contacts/deals, entity-primary, DataStore for structured tracking
 - Sentry: opt-in error reporting (LYNOX_SENTRY_DSN), PII scrubbed
 
 ## Testing
 
-113 offline test files / ~2601 tests. Co-located *.test.ts.
+109 offline test files / ~2620 tests. Co-located *.test.ts.
 19 security audit tests in tests/security/.
 5 online test files / 22 tests (real Haiku API).
 Coverage enforced on src/core/, src/tools/, src/orchestrator/ (>=70%).

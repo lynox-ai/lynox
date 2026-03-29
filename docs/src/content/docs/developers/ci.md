@@ -81,7 +81,7 @@ pnpm bench              # offline benchmarks (~30s, no API key)
 pnpm bench:online       # online benchmarks (requires API key, ~$0.02)
 ```
 
-7 offline benchmark files (embedding, data-store, entity-extractor, security, memory, knowledge-graph, history-truncation) + 3 online files (agent-loop, retrieval-pipeline, dag-planner). Results saved to `tests/performance/results.json` (gitignored). Baselines committed in `tests/performance/baselines/`.
+6 offline benchmark files (embedding, data-store, entity-extractor, security, memory, history-truncation) + 3 online files (agent-loop, retrieval-pipeline, dag-planner). Results saved to `tests/performance/results.json` (gitignored). Baselines committed in `tests/performance/baselines/`.
 
 ## Local Equivalent
 

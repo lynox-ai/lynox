@@ -78,7 +78,7 @@ Without a vault key, backups are unencrypted. The CLI warns about this.
     history.db          # VACUUM INTO copy (or encrypted)
     vault.db            # VACUUM INTO copy (or encrypted)
     datastore.db        # VACUUM INTO copy (or encrypted)
-    knowledge-graph/    # Directory copy
+    agent-memory.db     # VACUUM INTO copy (or encrypted)
     memory/             # Recursive copy
     config.json         # File copy
 ```

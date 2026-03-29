@@ -133,17 +133,22 @@ User query
   │     Generate hypothetical answer → embed for better semantic match
   │
   ├─ 2. Multi-signal search (parallel)
-  │     ├─ Vector search (ANN, top-50) ─── 55% weight
-  │     ├─ Full-text search (keywords) ─── 30% weight
-  │     └─ Graph expansion ─────────────── 15% boost
-  │           Query entities → resolve → 1-2 hop → connected memories
+  │     ├─ Vector search (cosine, top-50) ── 55% weight
+  │     ├─ Graph expansion ─────────────── 15% boost
+  │     │     Query entities → resolve → 1-2 hop → connected memories
+  │     └─ Episodic boost ─────────────── 10% boost
+  │           Memories linked to successful episodes score higher
   │
-  ├─ 3. Scoring: similarity × scope_weight × namespace_decay
+  ├─ 3. Scoring: (vector + graph + episodic) × scope × decay × confidence
+  │     Confidence multiplier: confirmed memories score higher
+  │     Confidence decay: unconfirmed memories lose score over time
   │     knowledge: 365d half-life, project-state: 21d half-life
   │
   ├─ 4. MMR re-ranking (λ=0.7 relevance, 0.3 diversity)
   │
-  └─ 5. Context formatting with entity subgraph
+  ├─ 5. Context formatting with entity subgraph
+  │
+  └─ 6. Intelligence injection: active patterns + recent successes
 ```
 
 ### Store Pipeline
@@ -152,7 +157,7 @@ User query
 memory_store / maybeUpdate()
   │
   ├─ 1. Embed text (multilingual-e5-small, 384d)
-  ├─ 2. Dedup check (cosine > 0.90 → skip)
+  ├─ 2. Dedup check (cosine > 0.90 → skip + boost confidence)
   ├─ 3. Contradiction detection (knowledge/learnings only)
   │     Vector search > 0.80 → heuristic: negation, number, state change
   │     Contradicted memory → is_active=false, SUPERSEDES edge
@@ -168,7 +173,7 @@ memory_store / maybeUpdate()
 Two-tier approach:
 
 - **Tier 1 — Regex (always, zero cost):** Persons (`Herr/Frau/Mr. + Name`, `client/Kunde + Name`), Organizations (domain names, `Firma/company + Name`), Technology (`uses/nutzt + Term`), Projects (`project "Name"`, `org/repo`), Locations (`in/aus + Place`)
-- **Tier 2 — Haiku (~$0.001, optional):** Only for `knowledge`/`methods` namespace, text > 200 chars, 0 regex entities found. Also extracts relations between entities
+- **Tier 2 — Haiku (~$0.001, optional):** For `knowledge`/`methods` namespace, text > 30 chars. Always runs when text qualifies (merged with regex results). Extracts both entities and relations
 
 ### Entity Resolution
 
@@ -183,6 +188,55 @@ Only for `knowledge` and `learnings` namespaces. Finds memories with >0.80 cosin
 - **State change:** "project is active" vs "project is completed"
 
 Contradicted memories: `is_active=false`, `SUPERSEDES` edge created. Old memory stays in graph as audit trail but is excluded from retrieval.
+
+### Episodic Memory
+
+Every agent run creates an **episode** record with:
+- Task text, outcome, outcome signal (`success`/`failed`/`partial`/`abandoned`)
+- Tools used during the run
+- Duration (ms), token cost (USD)
+- Links to memories created during the episode
+
+Episodes provide causal context: "What happened, how did it go, what did we use?"
+
+### Pattern Detection
+
+The **Pattern Engine** analyzes episodes every 10 runs to find:
+
+- **Tool sequences**: Tool combinations that correlate with success (e.g., `file_read + file_write` appears in 80% of successful runs)
+- **Anti-patterns**: Tools/approaches with high failure rates (e.g., `bash` alone fails 60% of the time)
+- Patterns are stored with `confidence` (0-1) and `evidence_count`
+
+Patterns with high confidence (>60%, 3+ observations) are injected into the system prompt as `<learned_patterns>`.
+
+### KPI Metrics
+
+Computed automatically alongside pattern detection:
+- `success_rate`: Fraction of successful runs
+- `avg_duration_ms`: Average run duration
+- `total_cost_usd`: Cumulative API cost
+- `tool_usage.<name>`: Per-tool usage frequency
+- `total_runs`: Total episode count
+
+Available via `GET /api/metrics` and the Insights dashboard (`/app/insights`).
+
+### Confidence Evolution
+
+Memory confidence changes over time:
+- **Initial**: 0.75 (new memory)
+- **Dedup hit**: +0.05 per confirmation (cap 1.0) — repeated storage = confirmation
+- **Successful retrieval**: +0.05 per successful run that used the memory
+- **Wrong retrieval**: -0.10 per correction (floor 0.1)
+- **Unconfirmed decay**: Old memories without confirmations gradually score lower in retrieval
+
+### Memory Consolidation
+
+During GC (every 50 runs), similar memories are consolidated:
+1. Find clusters of active memories with cosine similarity > 0.85
+2. Keep the memory with highest confirmation count (tiebreak: longest text)
+3. Supersede duplicates, transfer confirmation counts to the keeper
+
+Runs across all namespaces and scopes.
 
 ### Embedding Providers
 

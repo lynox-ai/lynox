@@ -172,8 +172,10 @@ export class RetrievalEngine {
         }
       }
 
-      // Confidence multiplier: confirmed memories score higher
-      const confMult = 0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0);
+      // Confidence multiplier: confirmed memories score higher, unconfirmed decay over time
+      const ageDays = (Date.now() - new Date(c.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+      const confirmDecay = c.confirmationCount > 0 ? 1.0 : Math.max(0.5, 1.0 - ageDays / 365);
+      const confMult = (0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0)) * confirmDecay;
 
       c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.episodicBoost)
         * scopeWeight * decay * confMult;

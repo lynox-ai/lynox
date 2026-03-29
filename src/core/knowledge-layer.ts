@@ -226,7 +226,45 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   formatRetrievalContext(result: KnowledgeRetrievalResult, maxChars?: number | undefined): string {
-    return this.retrievalEngine.formatContext(result, maxChars);
+    let context = this.retrievalEngine.formatContext(result, maxChars);
+
+    // Inject active patterns and recent relevant episodes into context
+    const extras = this._formatIntelligenceContext();
+    if (extras && context) {
+      context = context.replace('</relevant_context>', `${extras}\n</relevant_context>`);
+    } else if (extras && !context) {
+      context = `<relevant_context>\n${extras}\n</relevant_context>`;
+    }
+
+    return context;
+  }
+
+  /** Format patterns + recent episodes as context for the agent. */
+  private _formatIntelligenceContext(): string {
+    const parts: string[] = [];
+
+    // Active patterns with high confidence
+    const patterns = this.db.getPatterns({ activeOnly: true, limit: 5 });
+    const strongPatterns = patterns.filter(p => p.confidence >= 0.6 && p.evidence_count >= 3);
+    if (strongPatterns.length > 0) {
+      const lines = strongPatterns.map(p =>
+        `- [${p.pattern_type}] ${p.description} (${(p.confidence * 100).toFixed(0)}% confidence, ${p.evidence_count}x observed)`,
+      );
+      parts.push(`<learned_patterns>\n${lines.join('\n')}\n</learned_patterns>`);
+    }
+
+    // Recent successful episodes (last 3) for episodic context
+    const recent = this.db.queryEpisodes({ outcomeSignal: 'success', limit: 3 });
+    if (recent.length > 0) {
+      const lines = recent.map(e => {
+        const tools = JSON.parse(e.tools_used) as string[];
+        const toolStr = tools.length > 0 ? ` (tools: ${tools.join(', ')})` : '';
+        return `- ${e.task.slice(0, 100)}${toolStr}`;
+      });
+      parts.push(`<recent_successes>\n${lines.join('\n')}\n</recent_successes>`);
+    }
+
+    return parts.join('\n');
   }
 
   // === Entity Operations ===
