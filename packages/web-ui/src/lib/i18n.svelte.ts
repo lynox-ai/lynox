@@ -183,6 +183,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.thinking_adaptive': { de: 'Adaptiv (empfohlen)', en: 'Adaptive (recommended)' },
 	'config.memory_extraction': { de: 'Memory Extraction', en: 'Memory Extraction' },
 	'config.memory_extraction_desc': { de: 'Agent lernt automatisch aus Gespraechen', en: 'Agent learns automatically from conversations' },
+	'config.experience': { de: 'Erfahrungslevel', en: 'Experience Level' },
+	'config.experience_desc': { de: 'Bestimmt den Kommunikationsstil: Business = einfache Anleitungen, Developer = CLI-Befehle & Config-Details', en: 'Controls communication style: Business = simple instructions, Developer = CLI commands & config details' },
+	'config.experience_business': { de: 'Business (Standard)', en: 'Business (default)' },
+	'config.experience_developer': { de: 'Developer', en: 'Developer' },
 
 	// Budget
 	'config.budget': { de: 'Budget', en: 'Budget' },

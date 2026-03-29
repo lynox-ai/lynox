@@ -1,17 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { detectContradictions } from './contradiction-detector.js';
-import type { KuzuGraph } from './knowledge-graph.js';
+import type { AgentMemoryDb, ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 
-// Mock graph that returns configurable similar memories
-function createMockGraph(similarMemories: Array<{
-  'm.id': string;
-  'm.text': string;
-  _similarity: number;
-}>): KuzuGraph {
+// Mock db that returns configurable similar memories
+function createMockDb(similarMemories: ScoredMemoryRow[]): AgentMemoryDb {
   return {
-    findSimilarMemories: vi.fn().mockResolvedValue(similarMemories),
-  } as unknown as KuzuGraph;
+    findSimilarMemories: vi.fn().mockReturnValue(similarMemories),
+  } as unknown as AgentMemoryDb;
+}
+
+function mockMemory(id: string, text: string, similarity: number): ScoredMemoryRow {
+  return {
+    id, text, namespace: 'knowledge', scope_type: 'context', scope_id: 'test',
+    source_run_id: null, source_episode_id: null, provider: 'test',
+    embedding: null, confidence: 0.75, is_active: 1, superseded_by: null,
+    retrieval_count: 0, confirmation_count: 0, last_retrieved_at: null,
+    created_at: '', updated_at: '', _similarity: similarity,
+  };
 }
 
 function createMockProvider(): EmbeddingProvider {
@@ -30,153 +36,86 @@ describe('detectContradictions', () => {
   });
 
   it('skips non-factual namespaces', async () => {
-    const graph = createMockGraph([]);
+    const db = createMockDb([]);
     const result = await detectContradictions(
-      'Use technique X',
-      'methods',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'Use technique X', 'methods', { type: 'context', id: 'test' }, db, mockProvider,
     );
     expect(result).toHaveLength(0);
-    expect(graph.findSimilarMemories).not.toHaveBeenCalled();
+    expect(db.findSimilarMemories).not.toHaveBeenCalled();
   });
 
   it('skips project-state namespace', async () => {
-    const graph = createMockGraph([]);
+    const db = createMockDb([]);
     const result = await detectContradictions(
-      'Project is active',
-      'project-state',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'Project is active', 'project-state', { type: 'context', id: 'test' }, db, mockProvider,
     );
     expect(result).toHaveLength(0);
   });
 
   it('returns empty when no similar memories found', async () => {
-    const graph = createMockGraph([]);
+    const db = createMockDb([]);
     const result = await detectContradictions(
-      'PostgreSQL is required',
-      'knowledge',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'PostgreSQL is required', 'knowledge', { type: 'context', id: 'test' }, db, mockProvider,
     );
     expect(result).toHaveLength(0);
   });
 
   it('detects negation contradiction (English)', async () => {
-    const graph = createMockGraph([{
-      'm.id': 'old-1',
-      'm.text': 'The project uses PostgreSQL.',
-      _similarity: 0.92,
-    }]);
-
+    const db = createMockDb([mockMemory('old-1', 'The project uses PostgreSQL.', 0.92)]);
     const result = await detectContradictions(
       "The project doesn't use PostgreSQL anymore.",
-      'knowledge',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'knowledge', { type: 'context', id: 'test' }, db, mockProvider,
     );
-
     expect(result).toHaveLength(1);
     expect(result[0]!.resolution).toBe('superseded');
     expect(result[0]!.existingMemoryId).toBe('old-1');
   });
 
   it('detects negation contradiction (German)', async () => {
-    const graph = createMockGraph([{
-      'm.id': 'old-2',
-      'm.text': 'Das Projekt nutzt PostgreSQL.',
-      _similarity: 0.90,
-    }]);
-
+    const db = createMockDb([mockMemory('old-2', 'Das Projekt nutzt PostgreSQL.', 0.90)]);
     const result = await detectContradictions(
       'Das Projekt nutzt nicht mehr PostgreSQL.',
-      'knowledge',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'knowledge', { type: 'context', id: 'test' }, db, mockProvider,
     );
-
     expect(result).toHaveLength(1);
     expect(result[0]!.resolution).toBe('superseded');
   });
 
   it('detects number change', async () => {
-    const graph = createMockGraph([{
-      'm.id': 'old-3',
-      'm.text': 'Budget is 5000 per month.',
-      _similarity: 0.88,
-    }]);
-
+    const db = createMockDb([mockMemory('old-3', 'Budget is 5000 per month.', 0.88)]);
     const result = await detectContradictions(
       'Budget is 8000 per month.',
-      'knowledge',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'knowledge', { type: 'context', id: 'test' }, db, mockProvider,
     );
-
     expect(result).toHaveLength(1);
     expect(result[0]!.existingMemoryId).toBe('old-3');
   });
 
   it('detects state change', async () => {
-    const graph = createMockGraph([{
-      'm.id': 'old-4',
-      'm.text': 'The project is active.',
-      _similarity: 0.91,
-    }]);
-
+    const db = createMockDb([mockMemory('old-4', 'The project is active.', 0.91)]);
     const result = await detectContradictions(
       'The project is completed.',
-      'knowledge',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'knowledge', { type: 'context', id: 'test' }, db, mockProvider,
     );
-
     expect(result).toHaveLength(1);
     expect(result[0]!.resolution).toBe('superseded');
   });
 
   it('does not flag similar non-contradictory memories', async () => {
-    const graph = createMockGraph([{
-      'm.id': 'old-5',
-      'm.text': 'The project uses PostgreSQL 16.',
-      _similarity: 0.95,
-    }]);
-
+    const db = createMockDb([mockMemory('old-5', 'The project uses PostgreSQL 16.', 0.95)]);
     const result = await detectContradictions(
       'The project uses PostgreSQL 16 for JSONB queries.',
-      'knowledge',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'knowledge', { type: 'context', id: 'test' }, db, mockProvider,
     );
-
-    // High similarity but no negation/number change/state change → not a contradiction
     expect(result).toHaveLength(0);
   });
 
   it('works with learnings namespace', async () => {
-    const graph = createMockGraph([{
-      'm.id': 'old-6',
-      'm.text': 'Mocking the database is fine for tests.',
-      _similarity: 0.85,
-    }]);
-
+    const db = createMockDb([mockMemory('old-6', 'Mocking the database is fine for tests.', 0.85)]);
     const result = await detectContradictions(
       "Don't mock the database in tests.",
-      'learnings',
-      { type: 'context', id: 'test' },
-      graph,
-      mockProvider,
+      'learnings', { type: 'context', id: 'test' }, db, mockProvider,
     );
-
     expect(result).toHaveLength(1);
   });
 });

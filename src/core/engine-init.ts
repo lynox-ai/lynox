@@ -3,7 +3,7 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
-import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -32,7 +32,6 @@ import { resolveActiveScopes } from './scope-resolver.js';
 import { createEmbeddingProvider } from './embedding.js';
 import type { EmbeddingProvider, OnnxModelId } from './embedding.js';
 import { KnowledgeLayer } from './knowledge-layer.js';
-import { KNOWLEDGE_GRAPH_DB_NAME } from './knowledge-graph.js';
 import { DataStoreBridge } from './datastore-bridge.js';
 import { getLynoxDir } from './config.js';
 import { FILE_MODE_PRIVATE } from './constants.js';
@@ -525,39 +524,23 @@ export function initEmbeddingProvider(
   }
 }
 
+/** Default filename for the unified agent memory SQLite database. */
+const AGENT_MEMORY_DB_NAME = 'agent-memory.db';
+
 export async function initKnowledgeLayer(
   userConfig: LynoxUserConfig,
   embeddingProvider: EmbeddingProvider | null,
   client: Anthropic,
 ): Promise<KnowledgeLayer | null> {
   if (userConfig.knowledge_graph_enabled === false || !embeddingProvider) return null;
-  const lynoxDir = getLynoxDir();
-  const graphPath = `${lynoxDir}/${KNOWLEDGE_GRAPH_DB_NAME}`;
-  const walPath = `${graphPath}.wal`;
-
-  // First attempt
   try {
-    const layer = new KnowledgeLayer(graphPath, embeddingProvider, client);
+    const lynoxDir = getLynoxDir();
+    const dbPath = `${lynoxDir}/${AGENT_MEMORY_DB_NAME}`;
+    const layer = new KnowledgeLayer(dbPath, embeddingProvider, client);
     await layer.init();
     return layer;
   } catch (err: unknown) {
-    const msg = getErrorMessage(err);
-    // LadybugDB WAL corruption (e.g. from unclean shutdown) — recover by deleting
-    // the corrupt WAL and retrying. Data in the WAL is lost, but the DB stays usable.
-    if (msg.includes('wal') || msg.includes('WAL') || msg.includes('Corrupted')) {
-      process.stderr.write(`[lynox:knowledge] Corrupt WAL detected — removing ${walPath} and retrying…\n`);
-      try { unlinkSync(walPath); } catch { /* may not exist */ }
-      try {
-        const layer = new KnowledgeLayer(graphPath, embeddingProvider, client);
-        await layer.init();
-        process.stderr.write(`[lynox:knowledge] Graph recovered successfully after WAL removal.\n`);
-        return layer;
-      } catch (retryErr: unknown) {
-        process.stderr.write(`[lynox:knowledge] Graph init failed after WAL recovery: ${getErrorMessage(retryErr)}\n`);
-        return null;
-      }
-    }
-    process.stderr.write(`[lynox:knowledge] Graph init failed: ${msg}\n`);
+    process.stderr.write(`[lynox:knowledge] Agent memory init failed: ${getErrorMessage(err)}\n`);
     return null;
   }
 }
@@ -567,7 +550,7 @@ export function initDataStoreBridge(
   dataStore: import('./data-store.js').DataStore,
 ): DataStoreBridge {
   const bridge = new DataStoreBridge(
-    knowledgeLayer.getGraph(),
+    knowledgeLayer.getDb(),
     knowledgeLayer.getEntityResolver(),
     dataStore,
   );

@@ -1,7 +1,6 @@
 import type { EntityRecord, EntityType, MemoryScopeRef } from '../types/index.js';
-import type { KuzuGraph } from './knowledge-graph.js';
+import type { AgentMemoryDb, EntityRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
-import type { LbugValue } from '@ladybugdb/core';
 import { channels } from './observability.js';
 
 /**
@@ -10,12 +9,11 @@ import { channels } from './observability.js';
  * Resolution priority:
  * 1. Exact match on canonical_name (case-insensitive)
  * 2. Exact match on any alias
- * 3. Normalized substring match (for partial names)
- * 4. Create new entity if no match found
+ * 3. Create new entity if no match found
  */
 export class EntityResolver {
   constructor(
-    private readonly graph: KuzuGraph,
+    private readonly db: AgentMemoryDb,
     private readonly embeddingProvider?: EmbeddingProvider | undefined,
   ) {}
 
@@ -36,37 +34,26 @@ export class EntityResolver {
 
     const scopeTypes = scopes.map(s => s.type);
 
-    // 1. Exact canonical match (case-insensitive)
-    const exactMatch = await this.graph.findEntityByCanonicalName(normalized, scopeTypes);
+    // 1. Exact canonical match (case-insensitive, scope-filtered)
+    const exactMatch = this.db.findEntityByCanonicalName(normalized, scopeTypes);
     if (exactMatch) {
-      await this.graph.incrementEntityMentions(exactMatch['e.id'] as string);
-      return this._toEntityRecord(exactMatch);
+      this.db.incrementEntityMentions(exactMatch.id);
+      return toEntityRecord(exactMatch);
     }
 
     // 2. Alias match
-    const aliasMatch = await this.graph.findEntityByAlias(normalized);
+    const aliasMatch = this.db.findEntityByAlias(normalized);
     if (aliasMatch) {
-      await this.graph.incrementEntityMentions(aliasMatch['e.id'] as string);
-      return this._toEntityRecord(aliasMatch);
+      this.db.incrementEntityMentions(aliasMatch.id);
+      return toEntityRecord(aliasMatch);
     }
 
-    // 3. Normalized match — try lowercase, without accents
-    const normalizedLower = normalized.toLowerCase();
-    const fuzzyMatch = await this.graph.queryOne(
-      `MATCH (e:Entity)
-       WHERE lower(e.canonical_name) = $normalizedLower
-         AND e.scope_type IN $scopeTypes
-       RETURN e.id, e.canonical_name, e.entity_type, e.aliases,
-              e.description, e.scope_type, e.scope_id, e.mention_count,
-              e.first_seen_at, e.last_seen_at
-       LIMIT 1`,
-      { normalizedLower, scopeTypes },
-    );
-    if (fuzzyMatch) {
-      // Add current name as alias if different
-      await this.graph.addEntityAlias(fuzzyMatch['e.id'] as string, normalized);
-      await this.graph.incrementEntityMentions(fuzzyMatch['e.id'] as string);
-      return this._toEntityRecord(fuzzyMatch);
+    // 3. Canonical match without scope filter (fallback)
+    const anyMatch = this.db.findEntityByCanonicalName(normalized);
+    if (anyMatch) {
+      this.db.addEntityAlias(anyMatch.id, normalized);
+      this.db.incrementEntityMentions(anyMatch.id);
+      return toEntityRecord(anyMatch);
     }
 
     // 4. Create new entity if allowed
@@ -81,57 +68,32 @@ export class EntityResolver {
    * Merge two entities: move all references from source to target, then delete source.
    */
   async merge(sourceId: string, targetId: string): Promise<void> {
-    // Get source entity for its aliases
-    const source = await this.graph.queryOne(
-      `MATCH (e:Entity) WHERE e.id = $id
-       RETURN e.aliases, e.canonical_name, e.mention_count`,
-      { id: sourceId },
-    );
+    const source = this.db.getEntity(sourceId);
     if (!source) return;
 
-    const sourceAliases = (source['e.aliases'] as string[]) ?? [];
-    const sourceName = source['e.canonical_name'] as string;
+    const sourceAliases = JSON.parse(source.aliases) as string[];
 
     // Add source aliases + canonical name to target
-    for (const alias of [...sourceAliases, sourceName]) {
-      await this.graph.addEntityAlias(targetId, alias);
+    for (const alias of [...sourceAliases, source.canonical_name]) {
+      this.db.addEntityAlias(targetId, alias);
     }
 
     // Transfer mention count
-    const sourceMentions = Number(source['e.mention_count'] ?? 0);
-    if (sourceMentions > 0) {
-      await this.graph.execute(
-        `MATCH (e:Entity) WHERE e.id = $id
-         SET e.mention_count = e.mention_count + $count`,
-        { id: targetId, count: BigInt(sourceMentions) },
-      );
+    if (source.mention_count > 0) {
+      const target = this.db.getEntity(targetId);
+      if (target) {
+        // Increment target mentions by source count (minus the 1 already there)
+        for (let i = 0; i < source.mention_count; i++) {
+          this.db.incrementEntityMentions(targetId);
+        }
+      }
     }
 
-    // Re-point MENTIONS relationships from source to target
-    await this.graph.execute(
-      `MATCH (m:Memory)-[r:MENTIONS]->(src:Entity {id: $sourceId})
-       DELETE r`,
-      { sourceId },
-    );
-    // Note: We cannot easily re-create MENTIONS to target in a single Cypher
-    // because LadybugDB doesn't support MERGE-like semantics for relationships.
-    // The MENTIONS will be re-created naturally on next memory store.
-
-    // Re-point RELATES_TO relationships
-    // (complex — for now, delete source entity; relations rebuild organically)
-
-    // Delete source entity
-    await this.graph.execute(
-      `MATCH (e:Entity) WHERE e.id = $id DETACH DELETE e`,
-      { id: sourceId },
-    );
+    // Delete source entity (cascades mentions, relations, cooccurrences)
+    this.db.deleteEntity(sourceId);
 
     if (channels.knowledgeEntity.hasSubscribers) {
-      channels.knowledgeEntity.publish({
-        event: 'entity_merge',
-        sourceId,
-        targetId,
-      });
+      channels.knowledgeEntity.publish({ event: 'entity_merge', sourceId, targetId });
     }
   }
 
@@ -143,23 +105,21 @@ export class EntityResolver {
     scopes: MemoryScopeRef[],
     description?: string | undefined,
   ): Promise<EntityRecord> {
-    // Determine scope: prefer context scope, fall back to first available
     const scope = scopes.find(s => s.type === 'context')
       ?? scopes.find(s => s.type !== 'global')
       ?? scopes[0]
       ?? { type: 'context' as const, id: '' };
 
-    // Generate embedding for the entity description if provider available
     let embedding: number[] | undefined;
     if (this.embeddingProvider && description) {
       try {
         embedding = await this.embeddingProvider.embed(`${name}: ${description}`);
       } catch {
-        // Non-critical, skip embedding
+        // Non-critical
       }
     }
 
-    const id = await this.graph.createEntity({
+    const id = this.db.createEntity({
       canonicalName: name,
       entityType,
       aliases: [name],
@@ -168,15 +128,6 @@ export class EntityResolver {
       scopeId: scope.id,
       embedding,
     });
-
-    if (channels.knowledgeEntity.hasSubscribers) {
-      channels.knowledgeEntity.publish({
-        event: 'entity_created',
-        id,
-        name,
-        entityType,
-      });
-    }
 
     return {
       id,
@@ -191,19 +142,20 @@ export class EntityResolver {
       lastSeenAt: new Date().toISOString(),
     };
   }
+}
 
-  private _toEntityRecord(row: Record<string, LbugValue>): EntityRecord {
-    return {
-      id: row['e.id'] as string,
-      canonicalName: row['e.canonical_name'] as string,
-      entityType: row['e.entity_type'] as EntityType,
-      aliases: (row['e.aliases'] as string[]) ?? [],
-      description: (row['e.description'] as string) ?? '',
-      scopeType: row['e.scope_type'] as EntityRecord['scopeType'],
-      scopeId: (row['e.scope_id'] as string) ?? '',
-      mentionCount: Number(row['e.mention_count'] ?? 1),
-      firstSeenAt: String(row['e.first_seen_at'] ?? ''),
-      lastSeenAt: String(row['e.last_seen_at'] ?? ''),
-    };
-  }
+/** Convert a DB row to an EntityRecord. */
+export function toEntityRecord(row: EntityRow): EntityRecord {
+  return {
+    id: row.id,
+    canonicalName: row.canonical_name,
+    entityType: row.entity_type as EntityType,
+    aliases: JSON.parse(row.aliases) as string[],
+    description: row.description,
+    scopeType: row.scope_type as EntityRecord['scopeType'],
+    scopeId: row.scope_id,
+    mentionCount: row.mention_count,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+  };
 }

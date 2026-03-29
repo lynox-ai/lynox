@@ -899,25 +899,13 @@ Docs: https://docs.lynox.dev
     };
   }
 
-  // SIGINT: close KG before hard exit to prevent LadybugDB WAL corruption.
-  // better-sqlite3 db.close() throws a native C++ mutex exception (std::system_error)
-  // that JS try/catch cannot intercept — so we skip SQLite cleanup and use SIGKILL.
+  // SIGINT: hard exit — better-sqlite3 db.close() throws a native C++ mutex
+  // exception (std::system_error) that JS try/catch cannot intercept.
   // SQLite WAL mode is crash-safe; the WAL file auto-recovers on next open.
-  // LadybugDB (Kuzu fork) is NOT crash-safe — its WAL corrupts without clean close.
   process.on('SIGINT', () => {
     spinner.stop();
     stdout.write('\n');
-    // Close KG synchronously-ish before hard exit — fire and forget with short deadline
-    const kg = engine.getKnowledgeLayer();
-    if (kg) {
-      void kg.close().catch(() => {}).finally(() => {
-        process.kill(process.pid, 'SIGKILL');
-      });
-      // Fallback: if close hangs, force kill after 500ms
-      setTimeout(() => process.kill(process.pid, 'SIGKILL'), 500).unref();
-    } else {
-      process.kill(process.pid, 'SIGKILL');
-    }
+    process.kill(process.pid, 'SIGKILL');
   });
 
   // === Initial greeting — lynox introduces itself proactively ===

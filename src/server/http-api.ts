@@ -782,6 +782,41 @@ export class LynoxHTTPApi {
       }
     }));
 
+    // ── Episodic Memory + Metrics ─────────────────────────────────
+
+    this.staticRoutes.set('GET /api/episodes', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { episodes: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const outcomeSignal = url.searchParams.get('outcome_signal') ?? undefined;
+      const episodes = kg.queryEpisodes({
+        limit,
+        outcomeSignal: outcomeSignal as import('../types/index.js').EpisodeOutcomeSignal | undefined,
+      });
+      jsonResponse(res, 200, { episodes });
+    });
+
+    this.staticRoutes.set('GET /api/patterns', async (_req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { patterns: [] }); return; }
+      const patterns = kg.getPatterns();
+      jsonResponse(res, 200, { patterns });
+    });
+
+    this.staticRoutes.set('GET /api/metrics', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { metrics: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const metricName = url.searchParams.get('name') ?? undefined;
+      const window = url.searchParams.get('window') ?? undefined;
+      const metrics = kg.getMetrics(
+        metricName,
+        window as import('../types/index.js').MetricWindow | undefined,
+      );
+      jsonResponse(res, 200, { metrics });
+    });
+
     // ── CRM ──────────────────────────────────────────────────────
 
     this.staticRoutes.set('GET /api/crm/contacts', async (req, res) => {

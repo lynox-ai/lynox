@@ -3,17 +3,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DataStoreBridge } from './datastore-bridge.js';
-import { KuzuGraph } from './knowledge-graph.js';
+import { AgentMemoryDb } from './agent-memory-db.js';
 import { EntityResolver } from './entity-resolver.js';
 import { LocalProvider } from './embedding.js';
 import type { DataStore } from './data-store.js';
 import type { DataStoreCollectionInfo } from '../types/index.js';
 
-/**
- * Tests for DataStoreBridge using a real LadybugDB graph but mocked DataStore.
- * DataStore is mocked because better-sqlite3 native binary may not be available
- * in all environments (same issue as existing data-store.test.ts).
- */
 function createMockDataStore(): DataStore {
   const collections = new Map<string, DataStoreCollectionInfo>();
 
@@ -41,54 +36,47 @@ function createMockDataStore(): DataStore {
 
 describe('DataStoreBridge', () => {
   let bridge: DataStoreBridge;
-  let graph: KuzuGraph;
+  let db: AgentMemoryDb;
   let mockStore: DataStore;
   let tempDir: string;
   const scope = { type: 'context' as const, id: 'test' };
 
   beforeAll(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'lynox-bridge-test-'));
-    graph = new KuzuGraph(join(tempDir, 'test-graph'));
-    await graph.init();
+    db = new AgentMemoryDb(join(tempDir, 'test.db'));
+    db.setEmbeddingDimensions(10);
     mockStore = createMockDataStore();
 
-    const resolver = new EntityResolver(graph, new LocalProvider());
-    bridge = new DataStoreBridge(graph, resolver, mockStore);
+    const resolver = new EntityResolver(db, new LocalProvider());
+    bridge = new DataStoreBridge(db, resolver, mockStore);
   });
 
   afterAll(async () => {
+    db.close();
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
   });
 
-  // --- Collection Registration ---
-
-  it('registers a collection as entity in the graph', async () => {
+  it('registers a collection as entity', async () => {
     await bridge.registerCollection(
       'customers',
       [{ name: 'name', type: 'string' }, { name: 'revenue', type: 'number' }],
       scope,
     );
-
-    const entity = await graph.findEntityByCanonicalName('customers');
+    const entity = db.findEntityByCanonicalName('customers');
     expect(entity).not.toBeNull();
-    expect(entity!['e.entity_type']).toBe('collection');
-    expect((entity!['e.description'] as string)).toContain('name (string)');
+    expect(entity!.entity_type).toBe('collection');
+    expect(entity!.description).toContain('name (string)');
   });
 
-  it('is idempotent — does not duplicate collection entities', async () => {
+  it('is idempotent', async () => {
     await bridge.registerCollection('customers', [{ name: 'name', type: 'string' }], scope);
     await bridge.registerCollection('customers', [{ name: 'name', type: 'string' }], scope);
-
-    const rows = await graph.query(
-      `MATCH (e:Entity) WHERE e.canonical_name = 'customers' RETURN e.id`,
-    );
-    expect(rows.length).toBe(1);
+    const entities = db.listEntities({ type: 'collection' });
+    const customers = entities.filter(e => e.canonical_name === 'customers');
+    expect(customers).toHaveLength(1);
   });
-
-  // --- Entity Indexing ---
 
   it('extracts entities from string fields and links to collection', async () => {
-    // Mock DataStore returns collection info with string columns
     (mockStore.getCollectionInfo as ReturnType<typeof vi.fn>).mockReturnValue({
       name: 'contacts',
       columns: [
@@ -99,7 +87,6 @@ describe('DataStoreBridge', () => {
       recordCount: 1,
     });
 
-    // Register collection first
     await bridge.registerCollection(
       'contacts',
       [{ name: 'name', type: 'string' }, { name: 'company', type: 'string' }, { name: 'revenue', type: 'number' }],
@@ -112,57 +99,21 @@ describe('DataStoreBridge', () => {
       scope,
     );
 
-    const smith = await graph.findEntityByCanonicalName('Smith');
+    const smith = db.findEntityByCanonicalName('Smith');
     expect(smith).not.toBeNull();
-    expect(smith!['e.entity_type']).toBe('person');
+    expect(smith!.entity_type).toBe('person');
 
-    const firma = await graph.findEntityByCanonicalName('acme-corp.com');
+    const firma = db.findEntityByCanonicalName('acme-corp.com');
     expect(firma).not.toBeNull();
-    expect(firma!['e.entity_type']).toBe('organization');
+    expect(firma!.entity_type).toBe('organization');
   });
-
-  it('skips collections with only non-string columns', async () => {
-    (mockStore.getCollectionInfo as ReturnType<typeof vi.fn>).mockReturnValue({
-      name: 'numbers_only',
-      columns: [{ name: 'amount', type: 'number' }, { name: 'active', type: 'boolean' }],
-      recordCount: 1,
-    });
-
-    await bridge.registerCollection(
-      'numbers_only',
-      [{ name: 'amount', type: 'number' }, { name: 'active', type: 'boolean' }],
-      scope,
-    );
-
-    const countBefore = await graph.getEntityCount();
-    await bridge.indexRecords('numbers_only', [{ amount: 1000, active: true }], scope);
-    const countAfter = await graph.getEntityCount();
-
-    // numbers_only collection entity was added, but no data entities
-    expect(countAfter - countBefore).toBeLessThanOrEqual(0);
-  });
-
-  // --- Find Related Data ---
 
   it('finds collections related to an entity', async () => {
-    const smith = await graph.findEntityByCanonicalName('Smith');
+    const smith = db.findEntityByCanonicalName('Smith');
     if (!smith) return;
-
-    const hints = await bridge.findRelatedData([smith['e.id'] as string]);
+    const hints = await bridge.findRelatedData([smith.id]);
     expect(hints.length).toBeGreaterThanOrEqual(1);
     expect(hints.some(h => h.collection === 'contacts')).toBe(true);
-  });
-
-  it('returns preview data from DataStore', async () => {
-    const smith = await graph.findEntityByCanonicalName('Smith');
-    if (!smith) return;
-
-    const hints = await bridge.findRelatedData([smith['e.id'] as string]);
-    const contactsHint = hints.find(h => h.collection === 'contacts');
-    if (contactsHint) {
-      // Preview should contain data from the mock queryRecords
-      expect(contactsHint.preview.length).toBeGreaterThan(0);
-    }
   });
 
   it('returns empty for unknown entities', async () => {

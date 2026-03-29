@@ -22,7 +22,7 @@ export async function handleBackup(parts: string[], session: Session, ctx: CLICt
     ctx.stdout.write(`${DIM}Creating backup...${RESET}\n`);
     const result = await backupManager.createBackup();
     if (result.success) {
-      const fileCount = result.manifest.files.filter(f => f.type !== 'directory' && f.type !== 'kuzu_dir').length;
+      const fileCount = result.manifest.files.filter(f => f.type !== 'directory').length;
       const totalBytes = result.manifest.files.reduce((sum, f) => sum + f.size_bytes, 0);
       const sizeMB = (totalBytes / (1024 * 1024)).toFixed(1);
       ctx.stdout.write(
@@ -47,7 +47,7 @@ export async function handleBackup(parts: string[], session: Session, ctx: CLICt
     }
     ctx.stdout.write(`${BOLD}Backups (${String(backups.length)}):${RESET}\n`);
     for (const b of backups) {
-      const fileCount = b.files.filter(f => f.type !== 'directory' && f.type !== 'kuzu_dir').length;
+      const fileCount = b.files.filter(f => f.type !== 'directory').length;
       const totalBytes = b.files.reduce((sum, f) => sum + f.size_bytes, 0);
       const sizeMB = (totalBytes / (1024 * 1024)).toFixed(1);
       const enc = b.encrypted ? ' [encrypted]' : '';

@@ -107,20 +107,22 @@ The `<relevant_context>` block has `cache_control: { type: 'ephemeral' }` for ef
 
 ### Architecture
 
-The Knowledge Graph is an embedded property graph (LadybugDB, Kuzu fork) that stores memories, entities, and their relationships. It provides entity-aware, graph-augmented retrieval.
+The agent memory system uses a unified SQLite database (`better-sqlite3`, WAL mode) that stores memories, entities, relationships, episodes, patterns, and metrics in a single crash-safe file.
 
 ```
-~/.lynox/knowledge-graph/    # LadybugDB embedded database
+~/.lynox/agent-memory.db    # SQLite database (WAL mode, crash-safe)
 ```
 
-**Graph Schema:**
-- **Entity** nodes: persons, organizations, projects, products, concepts, locations — with `canonical_name`, `aliases[]`, `entity_type`, `embedding`, `mention_count`
-- **Memory** nodes: knowledge entries with `text`, `namespace`, `scope`, `embedding`, `is_active`, `superseded_by`
-- **Community** nodes: clusters of related entities (future use)
-- **MENTIONS** edges: Memory → Entity (which entities a memory references)
-- **RELATES_TO** edges: Entity → Entity (typed: works_for, owns, uses, etc.)
-- **SUPERSEDES** edges: Memory → Memory (contradiction resolution)
-- **COOCCURS** edges: Entity → Entity (co-occurrence frequency)
+**Tables:**
+- **memories**: knowledge entries with `text`, `namespace`, `scope`, `embedding` (BLOB), `confidence`, `is_active`, `superseded_by`
+- **entities**: persons, organizations, projects, products, concepts, locations — with `canonical_name`, `aliases` (JSON), `entity_type`, `embedding`, `mention_count`
+- **relations**: Entity → Entity relationships (typed: works_for, owns, uses, etc.)
+- **mentions**: Memory → Entity (which entities a memory references)
+- **supersedes**: Memory → Memory (contradiction resolution)
+- **cooccurrences**: Entity ↔ Entity (co-occurrence frequency)
+- **episodes**: per-run tracking with task, outcome, tools_used, duration, cost
+- **patterns**: detected behavioral patterns (sequences, preferences, schedules)
+- **metrics**: computed KPIs (success rate, avg duration, cost trends)
 
 ### Retrieval Pipeline
 
@@ -268,8 +270,8 @@ const engine = new Engine({ memory: false });
 
 ### Knowledge Graph (primary path)
 
-- **`KnowledgeLayer`** (`src/core/knowledge-layer.ts`) — implements `IKnowledgeLayer` from `src/types/index.ts`. Composes KuzuGraph + EntityExtractor + EntityResolver + ContradictionDetector + RetrievalEngine
-- **`KuzuGraph`** (`src/core/knowledge-graph.ts`) — LadybugDB wrapper. DB at `~/.lynox/knowledge-graph/`. Schema: Entity/Memory/Community nodes, MENTIONS/RELATES_TO/SUPERSEDES/COOCCURS edges
+- **`KnowledgeLayer`** (`src/core/knowledge-layer.ts`) — implements `IKnowledgeLayer` from `src/types/index.ts`. Composes AgentMemoryDb + EntityResolver + RetrievalEngine + ContradictionDetector + EpisodicLog + PatternEngine
+- **`AgentMemoryDb`** (`src/core/agent-memory-db.ts`) — SQLite wrapper (better-sqlite3, WAL). DB at `~/.lynox/agent-memory.db`. 9 tables: memories, entities, relations, mentions, cooccurrences, supersedes, episodes, patterns, metrics
 - **`RetrievalEngine`** (`src/core/retrieval-engine.ts`) — HyDE + vector + graph expansion + MMR. `formatContext()` produces XML output
 - **`EntityExtractor`** (`src/core/entity-extractor.ts`) — Tier 1 regex (DE/EN), Tier 2 optional Haiku
 - **`EntityResolver`** (`src/core/entity-resolver.ts`) — Canonical name resolution, alias merge

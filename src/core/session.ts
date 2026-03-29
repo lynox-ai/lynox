@@ -29,6 +29,7 @@ import {
   SYSTEM_PROMPT,
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
+  DEVELOPER_PROMPT_SUFFIX,
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
@@ -78,6 +79,7 @@ export class Session {
   private _briefingConsumed = false;
   private currentRunId: string | null = null;
   private runToolCallSeq = 0;
+  private _runToolNames = new Set<string>();
   private _changesetManager: ChangesetManager | null = null;
   onStream: StreamHandler | null = null;
   private _promptUser: ((question: string, options?: string[]) => Promise<string>) | null = null;
@@ -242,6 +244,7 @@ export class Session {
     const model = MODEL_MAP[this._model];
     const startTime = Date.now();
     this.runToolCallSeq = 0;
+    this._runToolNames.clear();
 
     // Compute prompt hash from the system prompt the agent uses
     const basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
@@ -332,6 +335,22 @@ export class Session {
         }
       }
 
+      // Create episodic memory entry for this run
+      if (knowledgeLayer) {
+        try {
+          knowledgeLayer.createEpisode({
+            runId: this.currentRunId ?? undefined,
+            sessionId: this.sessionId,
+            task: taskText,
+            outcome: result.slice(0, 500),
+            outcomeSignal: 'success',
+            toolsUsed: this._getToolsUsed(),
+            durationMs,
+            tokenCost: costUsd,
+          });
+        } catch { /* fire-and-forget */ }
+      }
+
       // Fire orchestrator lifecycle hooks (for Pro extensions — includes tenant cost tracking)
       const runContext: RunContext = {
         runId: this.currentRunId!,
@@ -389,6 +408,22 @@ export class Session {
           // Fire-and-forget
         }
       }
+
+      // Create episodic memory entry for failed run
+      if (knowledgeLayer) {
+        try {
+          knowledgeLayer.createEpisode({
+            runId: this.currentRunId ?? undefined,
+            sessionId: this.sessionId,
+            task: taskText,
+            outcome: getErrorMessage(err).slice(0, 500),
+            outcomeSignal: 'failed',
+            toolsUsed: this._getToolsUsed(),
+            durationMs: Date.now() - startTime,
+          });
+        } catch { /* fire-and-forget */ }
+      }
+
       throw err;
     } finally {
       this.currentRunId = null;
@@ -396,6 +431,15 @@ export class Session {
         this.agent.currentRunId = undefined;
       }
     }
+  }
+
+  /** Track tool name used during current run (called from stream handler). */
+  recordToolName(name: string): void {
+    this._runToolNames.add(name);
+  }
+
+  private _getToolsUsed(): string[] {
+    return [...this._runToolNames];
   }
 
   abort(): void {
@@ -511,10 +555,13 @@ export class Session {
         this.usage.output_tokens += event.usage.output_tokens;
         this.usage.cache_creation_input_tokens += event.usage.cache_creation_input_tokens ?? 0;
         this.usage.cache_read_input_tokens += event.usage.cache_read_input_tokens ?? 0;
-        // Sentry breadcrumb — model + token counts only (no prompt content)
         void import('./sentry.js').then(({ addLLMBreadcrumb }) => {
           addLLMBreadcrumb(model, event.usage.input_tokens, event.usage.output_tokens);
         }).catch(() => {});
+      }
+      // Track tool names for episodic memory
+      if (event.type === 'tool_call' && 'name' in event) {
+        this.recordToolName(event.name as string);
       }
       if (this.onStream) {
         await this.onStream(event);
@@ -529,6 +576,10 @@ export class Session {
     // Append data store docs only when data store tools are registered
     if (engine.getDataStoreEnabled()) {
       basePrompt += DATASTORE_PROMPT_SUFFIX;
+    }
+    // Append developer mode suffix when experience is set to 'developer'
+    if (userConfig.experience === 'developer') {
+      basePrompt += DEVELOPER_PROMPT_SUFFIX;
     }
     const systemPrompt = this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix

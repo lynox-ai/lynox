@@ -9,6 +9,7 @@
 		default_tier?: string;
 		effort_level?: string;
 		thinking_mode?: string;
+		experience?: string;
 		memory_extraction?: boolean;
 		max_daily_cost_usd?: number | undefined;
 		max_monthly_cost_usd?: number | undefined;
@@ -41,6 +42,7 @@
 				default_tier: 'sonnet',
 				effort_level: 'high',
 				thinking_mode: 'adaptive',
+				experience: 'business',
 				memory_extraction: true,
 				embedding_provider: 'onnx',
 				search_provider: 'tavily',
@@ -167,6 +169,15 @@
 				<select id="thinking" bind:value={config.thinking_mode} class={inputClass}>
 					<option value="disabled">{t('config.thinking_disabled')}</option>
 					<option value="adaptive">{t('config.thinking_adaptive')}</option>
+				</select>
+			</div>
+
+			<div class={cardClass}>
+				<label for="experience" class="block text-sm font-medium mb-1">{t('config.experience')}</label>
+				<p class="text-xs text-text-muted mb-2">{t('config.experience_desc')}</p>
+				<select id="experience" bind:value={config.experience} class={inputClass}>
+					<option value="business">{t('config.experience_business')}</option>
+					<option value="developer">{t('config.experience_developer')}</option>
 				</select>
 			</div>
 

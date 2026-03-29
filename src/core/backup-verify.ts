@@ -17,7 +17,7 @@ export interface BackupFileEntry {
   path: string;
   size_bytes: number;
   checksum_sha256: string;
-  type: 'sqlite' | 'kuzu_dir' | 'file' | 'directory';
+  type: 'sqlite' | 'file' | 'directory';
 }
 
 /** Compute SHA-256 checksum of a file (synchronous — backup files are small). */
@@ -61,8 +61,8 @@ export function verifyBackup(backupDir: string, files: BackupFileEntry[]): Verif
   for (const entry of files) {
     const fullPath = `${backupDir}/${entry.path}`;
 
-    // Skip directory entries (checked via their contents)
-    if (entry.type === 'directory' || entry.type === 'kuzu_dir') {
+    // Skip directory entries (checked via their contents) + legacy kuzu_dir
+    if (entry.type === 'directory' || entry.type as string === 'kuzu_dir') {
       if (!existsSync(fullPath)) {
         errors.push(`Missing directory: ${entry.path}`);
       }

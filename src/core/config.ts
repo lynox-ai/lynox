@@ -74,6 +74,7 @@ export function loadConfig(): LynoxUserConfig {
     'enforce_https',
     'sentry_dsn',
     'backup_dir', 'backup_schedule', 'backup_retention_days', 'backup_encrypt',
+    'experience',
   ]);
 
   if (projectConfig) {
