@@ -217,7 +217,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Backup
 	'config.backup': { de: 'Backup', en: 'Backup' },
 	'config.backup_schedule': { de: 'Backup-Intervall', en: 'Backup schedule' },
-	'config.backup_schedule_desc': { de: 'Cron-Ausdruck fuer automatische Backups. Leer = deaktiviert.', en: 'Cron expression for auto-backups. Empty = disabled.' },
+	'config.backup_schedule_desc': { de: 'Automatische Backups in regelmaessigen Abstaenden.', en: 'Automatic backups at regular intervals.' },
+	'config.backup_off': { de: 'Deaktiviert', en: 'Disabled' },
+	'config.backup_daily': { de: 'Taeglich (03:00 Uhr)', en: 'Daily (3:00 AM)' },
+	'config.backup_weekly': { de: 'Woechentlich (Montag 03:00)', en: 'Weekly (Monday 3:00 AM)' },
+	'config.backup_monthly': { de: 'Monatlich (1. um 03:00)', en: 'Monthly (1st at 3:00 AM)' },
 	'config.backup_encrypt': { de: 'Backups verschluesseln', en: 'Encrypt backups' },
 	'config.backup_encrypt_desc': { de: 'AES-256-GCM Verschluesselung mit Vault Key', en: 'AES-256-GCM encryption with vault key' },
 	'config.backup_retention': { de: 'Aufbewahrung (Tage)', en: 'Retention (days)' },

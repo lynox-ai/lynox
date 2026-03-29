@@ -186,7 +186,7 @@
 					<p class="text-sm font-medium">{t('config.memory_extraction')}</p>
 					<p class="text-xs text-text-muted mt-1">{t('config.memory_extraction_desc')}</p>
 				</div>
-				<input type="checkbox" bind:checked={config.memory_extraction} class="h-4 w-4 rounded border-border accent-accent" />
+				<button onclick={() => config.memory_extraction = !config.memory_extraction} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.memory_extraction ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.memory_extraction ? 'translate-x-4' : ''}"></span></button>
 			</div>
 
 			<!-- Budget -->
@@ -212,8 +212,15 @@
 			<div class={cardClass}>
 				<label for="backup-schedule" class="block text-sm font-medium mb-1">{t('config.backup_schedule')}</label>
 				<p class="text-xs text-text-muted mb-2">{t('config.backup_schedule_desc')}</p>
-				<input id="backup-schedule" type="text" placeholder="0 3 * * *"
-					bind:value={config.backup_schedule} class="{inputClass} font-mono" />
+				<select id="backup-schedule"
+					value={config.backup_schedule ?? ''}
+					onchange={(e) => config.backup_schedule = (e.target as HTMLSelectElement).value || undefined}
+					class="{inputClass}">
+					<option value="">{t('config.backup_off')}</option>
+					<option value="0 3 * * *">{t('config.backup_daily')}</option>
+					<option value="0 3 * * 1">{t('config.backup_weekly')}</option>
+					<option value="0 3 1 * *">{t('config.backup_monthly')}</option>
+				</select>
 			</div>
 
 			<div class={cardClass}>
@@ -227,7 +234,7 @@
 					<p class="text-sm font-medium">{t('config.backup_encrypt')}</p>
 					<p class="text-xs text-text-muted mt-1">{t('config.backup_encrypt_desc')}</p>
 				</div>
-				<input type="checkbox" bind:checked={config.backup_encrypt} class="h-4 w-4 rounded border-border accent-accent" />
+				<button onclick={() => config.backup_encrypt = !config.backup_encrypt} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.backup_encrypt ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.backup_encrypt ? 'translate-x-4' : ''}"></span></button>
 			</div>
 
 			<!-- Knowledge -->
@@ -240,13 +247,6 @@
 					bind:value={config.memory_half_life_days} class="{inputClass} font-mono" />
 			</div>
 
-			<div class={cardClass}>
-				<label for="embedding" class="block text-sm font-medium mb-2">{t('config.embedding_provider')}</label>
-				<select id="embedding" bind:value={config.embedding_provider} class={inputClass}>
-					<option value="onnx">{t('config.embedding_onnx')}</option>
-					<option value="voyage">{t('config.embedding_voyage')}</option>
-				</select>
-			</div>
 
 			<!-- Limits -->
 			<p class={sectionClass}>{t('config.limits')}</p>
@@ -258,13 +258,6 @@
 					bind:value={config.max_http_requests_per_hour} class="{inputClass} font-mono" />
 			</div>
 
-			<div class={cardClass}>
-				<label for="search-prov" class="block text-sm font-medium mb-2">{t('config.search_provider')}</label>
-				<select id="search-prov" bind:value={config.search_provider} class={inputClass}>
-					<option value="tavily">Tavily</option>
-					<option value="brave">Brave</option>
-				</select>
-			</div>
 
 			<!-- Privacy -->
 			<p class={sectionClass}>{t('config.privacy')}</p>
@@ -274,12 +267,7 @@
 					<p class="text-sm font-medium">{t('config.sentry')}</p>
 					<p class="text-xs text-text-muted mt-1">{t('config.sentry_desc')}</p>
 				</div>
-				<button
-					onclick={toggleSentry}
-					class="rounded-[var(--radius-sm)] px-3 py-1.5 text-xs font-medium transition-all {sentryEnabled ? 'bg-success/15 border border-success/30 text-success' : 'bg-bg-muted border border-border text-text-muted hover:text-text'}"
-				>
-					{sentryEnabled ? t('config.sentry_enabled') : t('config.sentry_disabled')}
-				</button>
+				<button onclick={toggleSentry} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {sentryEnabled ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {sentryEnabled ? 'translate-x-4' : ''}"></span></button>
 			</div>
 
 			<!-- Updates -->
@@ -290,7 +278,7 @@
 					<p class="text-sm font-medium">{t('config.update_check')}</p>
 					<p class="text-xs text-text-muted mt-1">{t('config.update_check_desc')}</p>
 				</div>
-				<input type="checkbox" bind:checked={config.update_check} class="h-4 w-4 rounded border-border accent-accent" />
+				<button onclick={() => config.update_check = !config.update_check} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.update_check ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.update_check ? 'translate-x-4' : ''}"></span></button>
 			</div>
 
 			<div class={cardClass}>
