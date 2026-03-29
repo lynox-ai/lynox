@@ -1,5 +1,5 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	onMount(() => goto('/app/artifacts', { replaceState: true }));
+	onMount(() => goto('/app/artifacts?tab=files', { replaceState: true }));
 </script>

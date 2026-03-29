@@ -1,9 +1,14 @@
 <script lang="ts">
+	import { page } from '$app/stores';
 	import { t } from '../i18n.svelte.js';
 	import ArtifactsView from './ArtifactsView.svelte';
 	import FileBrowserView from './FileBrowserView.svelte';
 
 	let tab = $state<'gallery' | 'files'>('gallery');
+
+	$effect(() => {
+		if ($page.url.searchParams.get('tab') === 'files') tab = 'files';
+	});
 
 	const tabs = [
 		{ id: 'gallery' as const, labelKey: 'hub.artifacts.gallery' },

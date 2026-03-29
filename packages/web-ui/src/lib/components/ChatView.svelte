@@ -577,9 +577,15 @@
 								<div class="border-t border-border px-3 py-2 space-y-1">
 									<pre class="whitespace-pre-wrap font-mono text-xs text-text-subtle">{JSON.stringify(tc.input, null, 2)}</pre>
 									{#if tc.result}
-										<pre class="whitespace-pre-wrap font-mono text-xs text-text-muted mt-2 max-h-40 overflow-y-auto">{tc.result.slice(0, 2000)}</pre>
-										{#if tc.result.length > 2000}
-											<p class="text-xs text-text-subtle mt-1">[... {(tc.result.length - 2000).toLocaleString()} more chars]</p>
+										{#if tc.name === 'write_file' && tc.result.startsWith('Written to ')}
+											<p class="text-xs text-success mt-2">
+												Written to <a href="/app/files" class="text-accent-text hover:underline font-mono">{tc.result.slice(11)}</a>
+											</p>
+										{:else}
+											<pre class="whitespace-pre-wrap font-mono text-xs text-text-muted mt-2 max-h-40 overflow-y-auto">{tc.result.slice(0, 2000)}</pre>
+											{#if tc.result.length > 2000}
+												<p class="text-xs text-text-subtle mt-1">[... {(tc.result.length - 2000).toLocaleString()} more chars]</p>
+											{/if}
 										{/if}
 									{/if}
 								</div>

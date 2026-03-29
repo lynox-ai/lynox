@@ -79,10 +79,15 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       if (sessionWriteBytes + contentBytes > MAX_WRITE_BYTES_PER_SESSION) {
         throw new Error(`Session write limit (${MAX_WRITE_BYTES_PER_SESSION} bytes) exceeded.`);
       }
-      // Relative paths → ~/.lynox/files/ (not process.cwd()) when no workspace is set
-      const resolved = (!isAbsolute(input.path) && !isWorkspaceActive())
-        ? resolve(join(getLynoxDir(), 'workspace'), input.path)
-        : resolve(input.path);
+      // Without active workspace: ALL paths → ~/.lynox/workspace/ (strip leading /)
+      // With active workspace: resolve normally (validatePath enforces boundaries)
+      let resolved: string;
+      if (isWorkspaceActive()) {
+        resolved = resolve(input.path);
+      } else {
+        const name = isAbsolute(input.path) ? basename(input.path) : input.path;
+        resolved = resolve(join(getLynoxDir(), 'workspace'), name);
+      }
       let realPath: string;
       if (isWorkspaceActive()) {
         realPath = validatePath(resolved, 'write');
