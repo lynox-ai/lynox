@@ -13,6 +13,7 @@ export { default as ConfigView } from './components/ConfigView.svelte';
 export { default as KeysView } from './components/KeysView.svelte';
 export { default as IntegrationsView } from './components/IntegrationsView.svelte';
 export { default as KnowledgeGraphView } from './components/KnowledgeGraphView.svelte';
+export { default as MemoryInsightsView } from './components/MemoryInsightsView.svelte';
 export { default as ContactsView } from './components/ContactsView.svelte';
 export { default as BackupsView } from './components/BackupsView.svelte';
 export { default as ApiStoreView } from './components/ApiStoreView.svelte';
@@ -46,14 +47,18 @@ export {
 	getIsStreaming,
 	getPendingPermission,
 	getChatError,
-	clearError
+	clearError,
+	getSessionModel,
+	getContextWindow,
+	getContextBudget,
 } from './stores/chat.svelte.js';
 
 export type {
 	ChatMessage,
 	ToolCallInfo,
 	PermissionPrompt,
-	FileAttachment
+	FileAttachment,
+	ContextBudget,
 } from './stores/chat.svelte.js';
 
 // Context Panel

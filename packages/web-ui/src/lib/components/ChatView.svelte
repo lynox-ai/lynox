@@ -11,8 +11,12 @@
 		clearError,
 		cancelQueue,
 		downloadExport,
+		getSessionModel,
+		getContextBudget,
+		getContextWindow,
 		type FileAttachment,
-		type UsageInfo
+		type UsageInfo,
+		type ContextBudget,
 	} from '../stores/chat.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -327,6 +331,9 @@
 	const pendingPermission = $derived(getPendingPermission());
 	const chatError = $derived(getChatError());
 	const ready = $derived(hasApiKey !== false);
+	const ctxModel = $derived(getSessionModel());
+	const ctxBudget = $derived(getContextBudget());
+	const ctxWindow = $derived(getContextWindow());
 
 	async function handleSend() {
 		const task = inputText.trim();
@@ -388,6 +395,12 @@
 		];
 		if (cachePct > 0) parts.push(`${cachePct}% cache`);
 		return parts.join(' · ');
+	}
+
+	function formatK(n: number): string {
+		if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
+		if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+		return String(n);
 	}
 
 	function autoResize(e: Event) {
@@ -743,15 +756,28 @@
 				</button>
 			{/if}
 		</div>
-		<div class="mt-1.5 max-w-3xl mx-auto flex items-center justify-between">
-			<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle">
+		<div class="mt-1.5 max-w-3xl mx-auto flex items-center justify-between gap-3">
+			<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
 				{pendingPermission ? t('chat.hint') : isStreaming ? (queueLength > 0 ? `${queueLength} ${t('chat.hint_queued')}` : t('chat.hint_streaming')) : t('chat.hint')}
 			</p>
-			{#if queueLength > 0}
-				<button onclick={cancelQueue} class="text-[11px] font-mono uppercase tracking-widest text-danger hover:text-danger/80 transition-colors">
-					{t('chat.cancel_queue')}
-				</button>
-			{/if}
+			<div class="flex items-center gap-2 ml-auto">
+				{#if queueLength > 0}
+					<button onclick={cancelQueue} class="text-[11px] font-mono uppercase tracking-widest text-danger hover:text-danger/80 transition-colors shrink-0">
+						{t('chat.cancel_queue')}
+					</button>
+				{/if}
+				{#if ctxBudget}
+					{@const pct = ctxBudget.usagePercent}
+					{@const color = pct >= 80 ? 'bg-danger' : pct >= 50 ? 'bg-warning' : 'bg-accent'}
+					{@const textColor = pct >= 80 ? 'text-danger' : pct >= 50 ? 'text-warning' : 'text-text-subtle'}
+					<div class="flex items-center gap-1.5 shrink-0" title="{formatK(ctxBudget.totalTokens)} / {formatK(ctxBudget.maxTokens)} {t('status.context_tokens')}{ctxModel ? ` · ${ctxModel}` : ''}">
+						<div class="w-16 h-1 rounded-full bg-border overflow-hidden">
+							<div class="{color} h-full rounded-full transition-all duration-500" style="width: {Math.min(pct, 100)}%"></div>
+						</div>
+						<span class="text-[10px] font-mono {textColor}">{pct}%</span>
+					</div>
+				{/if}
+			</div>
 		</div>
 	</div>
 </div>

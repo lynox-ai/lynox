@@ -80,6 +80,7 @@ export class Session {
   private currentRunId: string | null = null;
   private runToolCallSeq = 0;
   private _runToolNames = new Set<string>();
+  private _retrievedMemoryIds: string[] = [];
   private _changesetManager: ChangesetManager | null = null;
   onStream: StreamHandler | null = null;
   private _promptUser: ((question: string, options?: string[]) => Promise<string>) | null = null;
@@ -245,6 +246,7 @@ export class Session {
     const startTime = Date.now();
     this.runToolCallSeq = 0;
     this._runToolNames.clear();
+    this._retrievedMemoryIds = [];
 
     // Compute prompt hash from the system prompt the agent uses
     const basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
@@ -289,6 +291,7 @@ export class Session {
           useHyDE: true,
           useGraphExpansion: true,
         });
+        this._retrievedMemoryIds = result.memories.map(m => m.id);
         this.agent.setKnowledgeContext(knowledgeLayer.formatRetrievalContext(result));
       } catch {
         this.agent.setKnowledgeContext('');
@@ -335,7 +338,7 @@ export class Session {
         }
       }
 
-      // Create episodic memory entry for this run
+      // Create episodic memory + auto-confirm retrieved memories on success
       if (knowledgeLayer) {
         try {
           knowledgeLayer.createEpisode({
@@ -348,6 +351,9 @@ export class Session {
             durationMs,
             tokenCost: costUsd,
           });
+          if (this._retrievedMemoryIds.length > 0) {
+            knowledgeLayer.feedbackOnRetrieval(this._retrievedMemoryIds, 'useful');
+          }
         } catch { /* fire-and-forget */ }
       }
 

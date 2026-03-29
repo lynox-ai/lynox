@@ -183,9 +183,25 @@ export async function runMemoryGc(
  * Run garbage collection on the Knowledge Graph.
  * Removes superseded memories and orphan entities.
  */
+/**
+ * Run garbage collection on the Knowledge Graph.
+ * Removes superseded memories, orphan entities, and consolidates similar memories.
+ */
 export async function runGraphGc(
   knowledgeLayer: IKnowledgeLayer,
   options?: { dryRun?: boolean | undefined },
 ): Promise<{ supersededRemoved: number; orphanEntitiesRemoved: number; staleMemoriesRemoved: number }> {
-  return knowledgeLayer.gc(options);
+  const result = await knowledgeLayer.gc(options);
+
+  // Consolidate similar memories (only on real GC, not dry-run)
+  if (!options?.dryRun && 'consolidateMemories' in knowledgeLayer) {
+    try {
+      const kl = knowledgeLayer as import('./knowledge-layer.js').KnowledgeLayer;
+      for (const ns of ['knowledge', 'methods', 'learnings', 'project-state'] as const) {
+        kl.consolidateMemories(ns, 'global', 'global');
+      }
+    } catch { /* non-critical */ }
+  }
+
+  return result;
 }

@@ -370,11 +370,13 @@ export class LynoxHTTPApi {
     this.staticRoutes.set('POST /api/sessions', async (_req, res, _params, body) => {
       const opts = body && typeof body === 'object' ? body as Record<string, unknown> : {};
       const sessionId = randomUUID();
-      this.sessionStore.getOrCreate(sessionId, engine, {
+      const session = this.sessionStore.getOrCreate(sessionId, engine, {
         model: typeof opts['model'] === 'string' ? opts['model'] as 'opus' | 'sonnet' | 'haiku' : undefined,
         effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
       });
-      jsonResponse(res, 201, { sessionId });
+      const tier = session.getModelTier();
+      const CONTEXT_SIZES: Record<string, number> = { opus: 1_000_000, sonnet: 200_000, haiku: 200_000 };
+      jsonResponse(res, 201, { sessionId, model: tier, contextWindow: CONTEXT_SIZES[tier] ?? 200_000 });
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/sessions/:id', async (_req, res, params) => {

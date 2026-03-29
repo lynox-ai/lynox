@@ -19,6 +19,7 @@
 		{ href: '/app', labelKey: 'nav.chat', exact: true, icon: 'chat', descKey: 'nav.desc.chat' },
 		{ href: '/app/memory', labelKey: 'nav.knowledge', exact: false, icon: 'brain', descKey: 'nav.desc.knowledge' },
 		{ href: '/app/graph', labelKey: 'nav.graph', exact: false, icon: 'graph', descKey: 'nav.desc.graph' },
+		{ href: '/app/insights', labelKey: 'nav.insights', exact: false, icon: 'insights', descKey: 'nav.desc.insights' },
 		{ href: '/app/contacts', labelKey: 'nav.contacts', exact: false, icon: 'contacts', descKey: 'nav.desc.contacts' },
 		{ href: '/app/history', labelKey: 'nav.history', exact: false, icon: 'clock', descKey: 'nav.desc.history' },
 		{ href: '/app/tasks', labelKey: 'nav.tasks', exact: false, icon: 'bolt', descKey: 'nav.desc.tasks' },

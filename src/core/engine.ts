@@ -114,6 +114,7 @@ export interface AccumulatedUsage {
 }
 
 const AUTO_GC_INTERVAL = 50; // Run GC every N runs
+const INTELLIGENCE_INTERVAL = 10; // Run pattern detection + KPIs every N runs
 
 /**
  * Engine — shared singleton per process.
@@ -698,9 +699,16 @@ export class Engine {
 
   // ── GC ──
 
-  /** Called by Session after each run. Triggers auto-GC when threshold reached. */
+  /** Called by Session after each run. Triggers auto-GC and intelligence when thresholds reached. */
   incrementRunCount(): void {
     this.runCount++;
+
+    // Pattern detection + KPI computation (every 10 runs)
+    if (this.runCount % INTELLIGENCE_INTERVAL === 0 && this.knowledgeLayer) {
+      try { this.knowledgeLayer.runIntelligence(); } catch { /* non-critical */ }
+    }
+
+    // GC (every 50 runs)
     if (this.runCount % AUTO_GC_INTERVAL === 0) {
       if (this.knowledgeLayer) {
         void runGraphGc(this.knowledgeLayer).catch(() => {});

@@ -27,9 +27,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'nav.files': { de: 'Dateien', en: 'Files' },
 	'nav.graph': { de: 'Graph', en: 'Graph' },
+	'nav.insights': { de: 'Insights', en: 'Insights' },
 	'nav.desc.chat': { de: 'Dein KI-Assistent', en: 'Your AI assistant' },
 	'nav.desc.knowledge': { de: 'Was lynox sich merkt', en: 'What lynox remembers' },
 	'nav.desc.graph': { de: 'Personen, Firmen, Beziehungen', en: 'People, companies, relationships' },
+	'nav.desc.insights': { de: 'Leistung, Muster, Episoden', en: 'Performance, patterns, episodes' },
 	'nav.desc.contacts': { de: 'Deine Kunden und Deals', en: 'Your clients and deals' },
 	'nav.desc.history': { de: 'Vergangene Aufgaben', en: 'Past runs' },
 	'nav.desc.tasks': { de: 'Geplante Aufgaben', en: 'Scheduled jobs' },
@@ -47,6 +49,20 @@ const translations: Record<string, Record<Locale, string>> = {
 	'kg.people': { de: 'Personen', en: 'People' },
 	'kg.orgs': { de: 'Organisationen', en: 'Organizations' },
 	'kg.projects': { de: 'Projekte', en: 'Projects' },
+
+	// Insights
+	'insights.title': { de: 'Memory Insights', en: 'Memory Insights' },
+	'insights.kpis': { de: 'Leistung', en: 'Performance' },
+	'insights.success_rate': { de: 'Erfolgsrate', en: 'Success Rate' },
+	'insights.avg_duration': { de: 'Avg. Dauer', en: 'Avg. Duration' },
+	'insights.total_cost': { de: 'Gesamtkosten', en: 'Total Cost' },
+	'insights.total_runs': { de: 'Runs', en: 'Runs' },
+	'insights.patterns': { de: 'Erkannte Muster', en: 'Detected Patterns' },
+	'insights.no_patterns': { de: 'Noch keine Muster erkannt. Muster werden nach mehreren Runs automatisch erkannt.', en: 'No patterns detected yet. Patterns are detected automatically after several runs.' },
+	'insights.episodes': { de: 'Letzte Episoden', en: 'Recent Episodes' },
+	'insights.no_episodes': { de: 'Keine Episoden vorhanden.', en: 'No episodes yet.' },
+	'insights.confidence': { de: 'Konfidenz', en: 'Confidence' },
+	'insights.evidence': { de: 'Belege', en: 'Evidence' },
 
 	// CRM
 	'crm.title': { de: 'Kontakte', en: 'Contacts' },
@@ -89,6 +105,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.entities': { de: 'Entities', en: 'Entities' },
 	'status.today': { de: 'heute', en: 'today' },
 	'status.runs': { de: 'Runs', en: 'runs' },
+	'status.context': { de: 'Kontext', en: 'Context' },
+	'status.context_tokens': { de: 'Tokens', en: 'tokens' },
 
 	'common.ok': { de: 'OK', en: 'OK' },
 

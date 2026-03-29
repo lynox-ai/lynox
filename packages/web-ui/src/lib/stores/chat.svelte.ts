@@ -56,6 +56,12 @@ function persistChat(): void {
 	} catch { /* quota exceeded */ }
 }
 
+export interface ContextBudget {
+	totalTokens: number;
+	maxTokens: number;
+	usagePercent: number;
+}
+
 const persisted = loadPersistedChat();
 let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
@@ -64,12 +70,17 @@ let isStreaming = $state(false);
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let chatError = $state<string | null>(null);
 let messageQueue = $state<QueuedMessage[]>([]);
+let sessionModel = $state<string | null>(null);
+let contextWindow = $state<number>(200_000);
+let contextBudget = $state<ContextBudget | null>(null);
 
 async function ensureSession(): Promise<string> {
 	if (sessionId) return sessionId;
 	const res = await fetch(`${getApiBase()}/sessions`, { method: 'POST' });
-	const data = (await res.json()) as { sessionId: string };
+	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
+	if (data.model) sessionModel = data.model;
+	if (data.contextWindow) contextWindow = data.contextWindow;
 	return sessionId;
 }
 
@@ -229,6 +240,21 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					cacheWrite: (prev?.cacheWrite ?? 0) + cacheWrite,
 					costUsd: (prev?.costUsd ?? 0) + costUsd,
 				};
+				// Update context estimate (input tokens ≈ current context usage)
+				if (!contextBudget || inTok > (contextBudget.totalTokens ?? 0)) {
+					const pct = Math.round(inTok / contextWindow * 100);
+					contextBudget = { totalTokens: inTok, maxTokens: contextWindow, usagePercent: pct };
+				}
+			}
+			break;
+		}
+		case 'context_budget': {
+			const total = data['totalTokens'] as number | undefined;
+			const max = data['maxTokens'] as number | undefined;
+			const pct = data['usagePercent'] as number | undefined;
+			if (total != null && max != null && pct != null) {
+				contextBudget = { totalTokens: total, maxTokens: max, usagePercent: pct };
+				if (max) contextWindow = max;
 			}
 			break;
 		}
@@ -277,6 +303,15 @@ export function getPendingPermission() {
 export function getChatError() {
 	return chatError;
 }
+export function getSessionModel() {
+	return sessionModel;
+}
+export function getContextWindow() {
+	return contextWindow;
+}
+export function getContextBudget() {
+	return contextBudget;
+}
 export function clearError() {
 	chatError = null;
 }
@@ -322,6 +357,8 @@ export function newChat() {
 	pendingPermission = null;
 	chatError = null;
 	messageQueue = [];
+	sessionModel = null;
+	contextBudget = null;
 	clearContext();
 	persistChat();
 }

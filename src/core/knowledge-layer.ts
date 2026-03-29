@@ -26,6 +26,7 @@ import type { RetrievalOptions } from './retrieval-engine.js';
 import { extractEntities } from './entity-extractor.js';
 import { detectContradictions } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
+import { PatternEngine } from './pattern-engine.js';
 import { channels } from './observability.js';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
@@ -43,6 +44,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly entityResolver: EntityResolver;
   private readonly retrievalEngine: RetrievalEngine;
   private readonly anthropicClient: Anthropic | undefined;
+  private readonly patternEngine: PatternEngine;
 
   constructor(
     dbPath: string,
@@ -57,6 +59,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.db, embeddingProvider, this.entityResolver, anthropicClient,
     );
     this.anthropicClient = anthropicClient;
+    this.patternEngine = new PatternEngine(this.db);
   }
 
   // === Lifecycle ===
@@ -393,5 +396,28 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       value: r.value, sampleCount: r.sample_count,
       window: r.window as MetricWindow, computedAt: r.computed_at,
     }));
+  }
+
+  // === Intelligence Layer ===
+
+  /** Run pattern detection + KPI computation. Called periodically by engine. */
+  runIntelligence(): void {
+    try {
+      this.patternEngine.detectPatterns();
+      this.patternEngine.computeKPIs();
+    } catch { /* non-critical */ }
+  }
+
+  /** Provide feedback on retrieved memories. */
+  feedbackOnRetrieval(memoryIds: string[], signal: 'useful' | 'wrong'): void {
+    for (const id of memoryIds) {
+      if (signal === 'useful') this.db.confirmMemory(id);
+      else this.db.penalizeMemory(id);
+    }
+  }
+
+  /** Consolidate similar memories within a scope. Returns count merged. */
+  consolidateMemories(namespace: MemoryNamespace, scopeType: string, scopeId: string): number {
+    return this.db.consolidateMemories(namespace, scopeType, scopeId);
   }
 }

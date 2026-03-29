@@ -919,6 +919,88 @@ export class AgentMemoryDb {
     return { supersededRemoved: supersededCount, orphanEntitiesRemoved: orphanRows.length, staleMemoriesRemoved: 0 };
   }
 
+  // ── Confidence Feedback ────────────────────────────────────────
+
+  /** Reduce confidence when a memory was retrieved but turned out wrong. Floor at 0.1. */
+  penalizeMemory(memoryId: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE memories SET confidence = MAX(confidence - 0.1, 0.1), updated_at = ? WHERE id = ?
+    `).run(now, memoryId);
+  }
+
+  // ── Memory Consolidation ──────────────────────────────────────
+
+  /**
+   * Find clusters of similar active memories and merge them.
+   * Keeps the longest (or most-confirmed) memory, supersedes the rest.
+   * Returns number of memories consolidated.
+   */
+  consolidateMemories(
+    namespace: string,
+    scopeType: string,
+    scopeId: string,
+    threshold = 0.85,
+  ): number {
+    const rows = this.db.prepare(`
+      SELECT * FROM memories
+      WHERE is_active = 1 AND namespace = ? AND scope_type = ? AND scope_id = ?
+      ORDER BY created_at DESC LIMIT 500
+    `).all(namespace, scopeType, scopeId) as MemoryRow[];
+
+    if (rows.length < 2) return 0;
+
+    const dim = this._embeddingDimensions ?? 384;
+    const merged = new Set<string>();
+    let consolidatedCount = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const anchor = rows[i]!;
+      if (merged.has(anchor.id)) continue;
+      if (!anchor.embedding || anchor.embedding.length !== dim * 8) continue;
+
+      const anchorEmb = blobToEmbed(anchor.embedding, dim);
+      const cluster: MemoryRow[] = [anchor];
+
+      for (let j = i + 1; j < rows.length; j++) {
+        const candidate = rows[j]!;
+        if (merged.has(candidate.id)) continue;
+        if (!candidate.embedding || candidate.embedding.length !== dim * 8) continue;
+
+        const candEmb = blobToEmbed(candidate.embedding, dim);
+        const sim = cosineSimilarity(anchorEmb, candEmb);
+        if (sim >= threshold) {
+          cluster.push(candidate);
+        }
+      }
+
+      if (cluster.length < 2) continue;
+
+      // Keep the best memory: highest confirmation_count, then longest text
+      cluster.sort((a, b) => {
+        if (b.confirmation_count !== a.confirmation_count) return b.confirmation_count - a.confirmation_count;
+        return b.text.length - a.text.length;
+      });
+
+      const keeper = cluster[0]!;
+      for (let k = 1; k < cluster.length; k++) {
+        const victim = cluster[k]!;
+        this.supersedMemory(victim.id, keeper.id);
+        this.createSupersedes(keeper.id, victim.id, 'consolidation');
+        // Transfer confirmation count
+        if (victim.confirmation_count > 0) {
+          this.db.prepare(`
+            UPDATE memories SET confirmation_count = confirmation_count + ?, updated_at = ? WHERE id = ?
+          `).run(victim.confirmation_count, new Date().toISOString(), keeper.id);
+        }
+        merged.add(victim.id);
+        consolidatedCount++;
+      }
+    }
+
+    return consolidatedCount;
+  }
+
   // ── Transaction helper ────────────────────────────────────────
 
   transaction<T>(fn: () => T): T {
