@@ -9,6 +9,9 @@
 		schedule_cron?: string;
 		next_run_at?: string;
 		last_run_at?: string;
+		last_run_status?: string;
+		priority?: string;
+		assignee?: string;
 	}
 
 	let tasks = $state<TaskRecord[]>([]);
@@ -53,9 +56,31 @@
 		}
 	}
 
-	$effect(() => {
-		loadTasks();
-	});
+	function cronToHuman(cron: string): string {
+		if (cron === '0 * * * *') return t('tasks.every_hour');
+		const m = cron.match(/^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/);
+		if (!m) return cron;
+		const hour = m[2];
+		const day = m[3];
+		const weekday = m[4];
+		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
+		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${hour}:${m[1]?.padStart(2, '0')}`;
+		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${hour}:${m[1]?.padStart(2, '0')}`;
+		return `${t('tasks.daily_at')} ${hour}:${m[1]?.padStart(2, '0')}`;
+	}
+
+	const statusLabel: Record<string, string> = {
+		open: 'Offen', in_progress: 'Aktiv', completed: 'Erledigt', done: 'Erledigt',
+	};
+
+	const statusColor: Record<string, string> = {
+		open: 'bg-bg-muted text-text-muted',
+		in_progress: 'bg-warning/15 text-warning',
+		completed: 'bg-success/15 text-success',
+		done: 'bg-success/15 text-success',
+	};
+
+	$effect(() => { loadTasks(); });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
@@ -71,26 +96,34 @@
 		<div class="space-y-2 mb-6">
 			{#each tasks as task}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
-					<div class="flex items-center justify-between">
-						<span class="text-sm font-medium">{task.title}</span>
-						<span class="text-xs rounded-[var(--radius-sm)] px-1.5 py-0.5 {task.status === 'completed' ? 'bg-success/15 text-success' : task.status === 'in_progress' ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">{task.status}</span>
-					</div>
-					<div class="flex flex-wrap gap-3 mt-1.5 text-xs text-text-subtle">
-						{#if task.schedule_cron}
-							<span class="font-mono">{task.schedule_cron}</span>
-						{/if}
-						{#if task.next_run_at}
-							<span>{t('tasks.next_run')}: {new Date(task.next_run_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { dateStyle: 'short', timeStyle: 'short' })}</span>
-						{/if}
-						{#if task.last_run_at}
-							<span>{t('tasks.last_run')}: {new Date(task.last_run_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { dateStyle: 'short', timeStyle: 'short' })}</span>
-						{/if}
+					<div class="flex items-center justify-between gap-3">
+						<div class="flex-1 min-w-0">
+							<p class="text-sm font-medium truncate">{task.title}</p>
+							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
+								{#if task.schedule_cron}
+									<span class="flex items-center gap-1">
+										<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+										{cronToHuman(task.schedule_cron)}
+									</span>
+								{/if}
+								{#if task.next_run_at}
+									<span>{t('tasks.next_run')}: {new Date(task.next_run_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { dateStyle: 'short', timeStyle: 'short' })}</span>
+								{/if}
+								{#if task.assignee}
+									<span class="text-accent-text">@{task.assignee}</span>
+								{/if}
+							</div>
+						</div>
+						<span class="text-xs rounded-full px-2.5 py-0.5 shrink-0 {statusColor[task.status] ?? 'bg-bg-muted text-text-muted'}">{statusLabel[task.status] ?? task.status}</span>
 					</div>
 				</div>
 			{/each}
 		</div>
 	{:else}
-		<p class="text-text-subtle text-sm mb-4">{t('tasks.no_tasks')}</p>
+		<div class="text-center py-12 text-text-subtle">
+			<p class="text-sm">{t('tasks.no_tasks')}</p>
+			<p class="text-xs mt-2">{t('tasks.no_tasks_hint')}</p>
+		</div>
 	{/if}
 
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3">
@@ -98,18 +131,17 @@
 		<input
 			bind:value={newTitle}
 			placeholder={t('tasks.description_placeholder')}
-			class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none"
+			class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 		/>
-		<input
-			bind:value={newSchedule}
-			placeholder={t('tasks.cron_placeholder')}
-			class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 font-mono text-sm focus:border-accent focus:outline-none"
-		/>
-		<div class="flex items-center gap-2 flex-wrap">
-			<span class="text-xs text-text-subtle">{t('tasks.presets')}</span>
-			<button type="button" onclick={() => newSchedule = '0 9 * * *'} class="rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('tasks.preset_daily')}</button>
-			<button type="button" onclick={() => newSchedule = '0 9 * * 1'} class="rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('tasks.preset_weekly')}</button>
-			<button type="button" onclick={() => newSchedule = '0 * * * *'} class="rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('tasks.preset_hourly')}</button>
+		<div>
+			<label class="text-xs text-text-subtle mb-1 block">{t('tasks.repeat')}</label>
+			<select bind:value={newSchedule} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none">
+				<option value="">{t('tasks.once')}</option>
+				<option value="0 * * * *">{t('tasks.every_hour')}</option>
+				<option value="0 9 * * *">{t('tasks.preset_daily')}</option>
+				<option value="0 9 * * 1">{t('tasks.preset_weekly')}</option>
+				<option value="0 9 1 * *">{t('tasks.preset_monthly')}</option>
+			</select>
 		</div>
 		<button
 			onclick={createTask}
