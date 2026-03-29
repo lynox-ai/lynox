@@ -370,6 +370,13 @@
 	const ctxBudget = $derived(getContextBudget());
 	const ctxWindow = $derived(getContextWindow());
 
+	// Auto-focus textarea when chat is empty (new chat or initial load)
+	$effect(() => {
+		if (messages.length === 0 && !isStreaming && textareaEl) {
+			requestAnimationFrame(() => textareaEl?.focus());
+		}
+	});
+
 	// Slash commands handled client-side (navigate instead of sending to agent)
 	const SLASH_ROUTES: Record<string, string> = {
 		'/settings': '/app/settings',

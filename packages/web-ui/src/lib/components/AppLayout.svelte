@@ -21,6 +21,14 @@
 		const path = $page.url.pathname;
 		return exact ? path === href : path.startsWith(href);
 	}
+
+	$effect(() => {
+		function handleEscape(e: KeyboardEvent) {
+			if (e.key === 'Escape' && sidebarOpen) sidebarOpen = false;
+		}
+		window.addEventListener('keydown', handleEscape);
+		return () => window.removeEventListener('keydown', handleEscape);
+	});
 </script>
 
 <div class="fixed inset-0 flex overflow-hidden">

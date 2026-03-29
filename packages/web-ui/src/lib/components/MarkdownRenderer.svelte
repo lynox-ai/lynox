@@ -75,15 +75,16 @@
 	}
 
 	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
+	const RESIZE_SCRIPT = `<script>new ResizeObserver(()=>parent.postMessage({type:'artifact-resize',h:document.documentElement.scrollHeight},'*')).observe(document.body)<\/script>`;
 
 	function buildArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
-			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}`);
+			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}`).replace(/<\/body>/i, `${RESIZE_SCRIPT}</body>`);
 		} else {
-			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}</head><body>${clean}</body></html>`;
+			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}</head><body>${clean}${RESIZE_SCRIPT}</body></html>`;
 		}
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
@@ -93,11 +94,11 @@
 		return `<div class="artifact-container" data-html="${encoded}" data-title="${safeTitle}">
 			<div class="artifact-toolbar">
 				<span class="artifact-label">${safeTitle}</span>
-				<button class="artifact-btn" data-action="save" title="Save">${ICON_SAVE}</button>
 				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CAMERA}</button>
-				<button class="artifact-btn" data-action="source" title="Source">${ICON_CODE}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
-				<button class="artifact-btn" data-action="export" title="Export HTML">${ICON_DOWNLOAD}</button>
+				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
+				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
+				<button class="artifact-btn" data-action="export" title="Download HTML">${ICON_DOWNLOAD}</button>
 			</div>
 			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" loading="lazy"></iframe>
 			<div class="artifact-source-wrap hidden"></div>
@@ -111,6 +112,7 @@
 	const ICON_EXPAND = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
 	const ICON_CAMERA = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 5.5A1.5 1.5 0 013.5 4h1.17a1 1 0 00.83-.45l.67-1.1A1 1 0 017 2h2a1 1 0 01.83.45l.67 1.1a1 1 0 00.83.45h1.17A1.5 1.5 0 0114 5.5v6a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-6z" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8.5" r="2" stroke="currentColor" stroke-width="1.3"/></svg>`;
+	const ICON_CLOSE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
 
 	// ── Event delegation ─────────────────────────────────────
 
@@ -143,10 +145,11 @@
 			const container = artifactBtn.closest('.artifact-container') as HTMLElement;
 			if (!container) return;
 
-			if (action === 'save') handleArtifactSave(container);
+			if (action === 'pin') handleArtifactSave(container);
 			else if (action === 'screenshot') handleArtifactScreenshot(container);
 			else if (action === 'source') handleArtifactSource(container);
 			else if (action === 'expand') handleArtifactExpand(container);
+			else if (action === 'close') handleArtifactExpand(container);
 			else if (action === 'export') handleArtifactExport(container);
 		}
 	}
@@ -227,24 +230,38 @@
 	}
 
 	async function handleArtifactScreenshot(container: HTMLElement) {
-		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
-		if (!iframe) return;
+		// Render artifact HTML in a temporary unsandboxed iframe for html2canvas
+		const encoded = container.dataset['html'] ?? '';
+		if (!encoded) return;
+		const html = decodeURIComponent(escape(atob(encoded)));
+
+		const tmp = document.createElement('iframe');
+		tmp.style.cssText = 'position:fixed;left:-9999px;top:0;width:800px;height:600px;border:none';
+		document.body.appendChild(tmp);
+
 		try {
+			const doc = tmp.contentDocument;
+			if (!doc) { addToast('Screenshot failed', 'error'); return; }
+			doc.open();
+			doc.write(html);
+			doc.close();
+
+			// Wait for content to render
+			await new Promise(r => setTimeout(r, 500));
+
 			const { default: html2canvas } = await import('html2canvas');
-			const iframeDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
-			if (!iframeDoc?.body) { addToast('Cannot capture sandboxed iframe', 'error'); return; }
-			const canvas = await html2canvas(iframeDoc.body, {
+			const canvas = await html2canvas(doc.body, {
 				backgroundColor: '#0a0a1a',
 				scale: 2,
 				useCORS: true,
+				width: 800,
 			});
+
 			canvas.toBlob(blob => {
 				if (!blob) return;
-				// Copy to clipboard
 				navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
 					addToast('Screenshot copied', 'success');
 				}).catch(() => {
-					// Fallback: download
 					const a = document.createElement('a');
 					a.href = URL.createObjectURL(blob);
 					a.download = `artifact-${Date.now()}.png`;
@@ -253,7 +270,9 @@
 				});
 			}, 'image/png');
 		} catch {
-			addToast('Screenshot not available for sandboxed content', 'error');
+			addToast('Screenshot failed', 'error');
+		} finally {
+			document.body.removeChild(tmp);
 		}
 	}
 
@@ -266,6 +285,36 @@
 			if (result) addToast(t('artifacts.saved'), 'success');
 		});
 	}
+
+	// ── Escape key for fullscreen artifacts ──────────────────
+	$effect(() => {
+		function handleEscape(e: KeyboardEvent) {
+			if (e.key !== 'Escape') return;
+			const fs = document.querySelector('.artifact-fullscreen') as HTMLElement | null;
+			if (fs) {
+				fs.classList.remove('artifact-fullscreen');
+				document.body.style.overflow = '';
+			}
+		}
+		window.addEventListener('keydown', handleEscape);
+		return () => window.removeEventListener('keydown', handleEscape);
+	});
+
+	// ── Auto-resize artifact iframes via postMessage ─────────
+	$effect(() => {
+		function handleResize(e: MessageEvent) {
+			if (e.data?.type !== 'artifact-resize' || typeof e.data.h !== 'number') return;
+			const iframes = document.querySelectorAll('.artifact-frame') as NodeListOf<HTMLIFrameElement>;
+			for (const iframe of iframes) {
+				if (iframe.contentWindow === e.source) {
+					iframe.style.height = Math.min(e.data.h + 16, 800) + 'px';
+					break;
+				}
+			}
+		}
+		window.addEventListener('message', handleResize);
+		return () => window.removeEventListener('message', handleResize);
+	});
 
 	// ── Code block processing ────────────────────────────────
 	// Rich blocks (mermaid, artifact) are debounced to prevent iframe flashing
@@ -518,10 +567,19 @@
 
 	div :global(.artifact-frame) {
 		width: 100%;
-		height: 420px;
+		min-height: 120px;
+		max-height: 800px;
+		height: 200px;
 		border: none;
 		display: block;
 		background: #0a0a1a;
+		transition: height 0.15s ease;
+	}
+	div :global(.artifact-close-btn) {
+		display: none;
+	}
+	div :global(.artifact-fullscreen .artifact-close-btn) {
+		display: inline-flex;
 	}
 
 	div :global(.artifact-source-wrap) {

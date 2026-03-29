@@ -61,6 +61,16 @@
 		link.click();
 		URL.revokeObjectURL(link.href);
 	}
+
+	$effect(() => {
+		function handleEscape(e: KeyboardEvent) {
+			if (e.key !== 'Escape') return;
+			if (confirmDelete) confirmDelete = null;
+			else if (selected) closePreview();
+		}
+		window.addEventListener('keydown', handleEscape);
+		return () => window.removeEventListener('keydown', handleEscape);
+	});
 </script>
 
 <div class="flex flex-col h-full">
