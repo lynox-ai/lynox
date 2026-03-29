@@ -71,24 +71,6 @@
 		saving = false;
 	}
 
-	async function deleteEntry() {
-		if (!deletePattern.trim()) return;
-		const confirmed = confirm(`${t('memory.delete_confirm_prefix')} "${deletePattern}" ${t('memory.delete_confirm_from')} ${selectedNs} ${t('memory.delete_confirm_suffix')}`);
-		if (!confirmed) return;
-		saving = true;
-		error = '';
-		try {
-			const res = await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(deletePattern)}`, {
-				method: 'DELETE'
-			});
-			if (!res.ok) throw new Error();
-			deletePattern = '';
-			await loadNamespace();
-		} catch {
-			error = t('common.save_failed');
-		}
-		saving = false;
-	}
 
 	async function updateEntry(oldLine: string, newText: string) {
 		saving = true;
@@ -254,22 +236,5 @@
 			</div>
 		</div>
 
-		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3">
-			<p class="text-xs font-mono uppercase tracking-widest text-text-subtle">{t('memory.delete_entries')}</p>
-			<div class="flex gap-2">
-				<input
-					bind:value={deletePattern}
-					placeholder={t('memory.delete_placeholder')}
-					class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-hover"
-				/>
-				<button
-					onclick={deleteEntry}
-					disabled={!deletePattern.trim() || saving}
-					class="shrink-0 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-4 py-2 text-sm text-danger hover:bg-danger/25 disabled:opacity-50"
-				>
-					{t('settings.delete')}
-				</button>
-			</div>
-		</div>
 	</div>
 </div>
