@@ -1,5 +1,5 @@
 import type { MemoryNamespace, MemoryScopeRef, ContradictionInfo } from '../types/index.js';
-import type { KuzuGraph } from './knowledge-graph.js';
+import type { AgentMemoryDb } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 
 /** Namespaces where contradiction detection applies (factual content). */
@@ -26,18 +26,15 @@ export async function detectContradictions(
   newText: string,
   namespace: MemoryNamespace,
   scope: MemoryScopeRef,
-  graph: KuzuGraph,
+  db: AgentMemoryDb,
   embeddingProvider: EmbeddingProvider,
   reuseEmbedding?: number[] | undefined,
 ): Promise<ContradictionInfo[]> {
-  // Only check factual namespaces
   if (!FACTUAL_NAMESPACES.has(namespace)) return [];
 
-  // Reuse pre-computed embedding when available (avoids duplicate embed call)
   const embedding = reuseEmbedding ?? await embeddingProvider.embed(newText);
 
-  // Find similar existing memories
-  const similar = await graph.findSimilarMemories(
+  const similar = db.findSimilarMemories(
     embedding,
     MAX_CANDIDATES,
     CONTRADICTION_SIMILARITY_THRESHOLD,
@@ -53,20 +50,16 @@ export async function detectContradictions(
   const results: ContradictionInfo[] = [];
 
   for (const existing of similar) {
-    const existingText = existing['m.text'] as string;
-    const existingId = existing['m.id'] as string;
-    const similarity = existing._similarity;
-
     const isContradiction =
-      checkNegation(newText, existingText) ||
-      checkNumberChange(newText, existingText) ||
-      checkStateChange(newText, existingText);
+      checkNegation(newText, existing.text) ||
+      checkNumberChange(newText, existing.text) ||
+      checkStateChange(newText, existing.text);
 
     if (isContradiction) {
       results.push({
-        existingMemoryId: existingId,
-        existingText,
-        similarity,
+        existingMemoryId: existing.id,
+        existingText: existing.text,
+        similarity: existing._similarity,
         resolution: 'superseded',
       });
     }
