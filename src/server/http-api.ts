@@ -774,6 +774,56 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, task);
     }));
 
+    // ── Artifacts ──
+    this.staticRoutes.set('GET /api/artifacts', async (_req, res) => {
+      const store = engine.getArtifactStore();
+      if (!store) { errorResponse(res, 503, 'Artifact store not initialized'); return; }
+      jsonResponse(res, 200, { artifacts: store.list() });
+    });
+
+    this.staticRoutes.set('POST /api/artifacts', async (_req, res, _params, body) => {
+      const store = engine.getArtifactStore();
+      if (!store) { errorResponse(res, 503, 'Artifact store not initialized'); return; }
+      if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid artifact'); return; }
+      const b = body as Record<string, unknown>;
+      if (typeof b['title'] !== 'string' || typeof b['content'] !== 'string') {
+        errorResponse(res, 400, 'title and content are required'); return;
+      }
+      const VALID_TYPES = ['html', 'mermaid', 'svg'] as const;
+      const rawType = typeof b['type'] === 'string' ? b['type'] : undefined;
+      if (rawType && !VALID_TYPES.includes(rawType as typeof VALID_TYPES[number])) {
+        errorResponse(res, 400, `Invalid type. Must be one of: ${VALID_TYPES.join(', ')}`); return;
+      }
+      const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024; // 5 MB
+      if (b['content'].length > MAX_ARTIFACT_BYTES) {
+        errorResponse(res, 413, 'Artifact content too large (max 5 MB)'); return;
+      }
+      const artifact = store.save({
+        title: b['title'],
+        content: b['content'],
+        ...(rawType ? { type: rawType as 'html' | 'mermaid' | 'svg' } : {}),
+        ...(typeof b['description'] === 'string' ? { description: b['description'] } : {}),
+        ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
+      });
+      jsonResponse(res, 201, artifact);
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/artifacts/:id', async (_req, res, params) => {
+      const store = engine.getArtifactStore();
+      if (!store) { errorResponse(res, 503, 'Artifact store not initialized'); return; }
+      const artifact = store.get(params['id']!);
+      if (!artifact) { errorResponse(res, 404, 'Artifact not found'); return; }
+      jsonResponse(res, 200, artifact);
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/artifacts/:id', async (_req, res, params) => {
+      const store = engine.getArtifactStore();
+      if (!store) { errorResponse(res, 503, 'Artifact store not initialized'); return; }
+      const deleted = store.delete(params['id']!);
+      if (!deleted) { errorResponse(res, 404, 'Artifact not found'); return; }
+      jsonResponse(res, 200, { deleted: true });
+    }));
+
     // ── Transcription ──
     this.staticRoutes.set('POST /api/transcribe', async (_req, res, _params, body) => {
       const { HAS_WHISPER, transcribeAudio } = await import('../core/transcribe.js');

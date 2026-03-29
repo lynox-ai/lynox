@@ -35,7 +35,7 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 
 - `src/core/` — 67 modules: engine, session, thread-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
 - `src/cli/` — Terminal UI + 14 command handler modules
-- `src/tools/` — 14 builtin tools (incl. api_setup) + permission guard
+- `src/tools/` — 17 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Telegram, Google Workspace, Web Search
 - `src/server/` — MCP server (stdio + HTTP SSE), Engine HTTP API (REST + SSE for PWA)
@@ -45,9 +45,10 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 
 SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
 
-- `src/lib/components/` — 12 View components (ChatView, AppLayout, ThreadList, MemoryView, HistoryView, KnowledgeGraphView, MemoryInsightsView, Settings...)
+- `src/lib/components/` — 13 View components (ChatView, AppLayout, ThreadList, MemoryView, HistoryView, ArtifactsView, KnowledgeGraphView, MemoryInsightsView, Settings...)
 - `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume
 - `src/lib/stores/threads.svelte.ts` — Thread list store (load, archive, delete, rename)
+- `src/lib/stores/artifacts.svelte.ts` — Artifact gallery store (save, load, delete)
 - `src/lib/config.svelte.ts` — configurable `apiBase` (/api/engine for standalone, /api/proxy for cloud)
 - `src/lib/i18n.ts` — DE/EN translations
 - `src/lib/index.ts` — barrel export for library consumers

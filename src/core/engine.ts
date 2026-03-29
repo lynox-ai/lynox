@@ -56,6 +56,9 @@ import {
   captureProcessTool,
   promoteProcessTool,
   apiSetupTool,
+  artifactSaveTool,
+  artifactListTool,
+  artifactDeleteTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
@@ -155,6 +158,7 @@ export class Engine {
   private _workerLoop: WorkerLoop | null = null;
   private _backupManager: import('./backup.js').BackupManager | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
+  private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
 
@@ -423,6 +427,19 @@ export class Engine {
       }
     } catch {
       this._dataStore = null;
+    }
+
+    // Initialize ArtifactStore (best-effort)
+    try {
+      const { ArtifactStore } = await import('./artifact-store.js');
+      this._artifactStore = new ArtifactStore();
+      this._toolContext.artifactStore = this._artifactStore;
+      this.registry
+        .register(artifactSaveTool)
+        .register(artifactListTool)
+        .register(artifactDeleteTool);
+    } catch {
+      this._artifactStore = null;
     }
 
     // Web search tool (conditional — requires API key)
@@ -708,6 +725,7 @@ export class Engine {
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }
   getApiStore(): import('./api-store.js').ApiStore | null { return this._apiStore; }
+  getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }
   getCRM(): import('./crm.js').CRM | null { return this._crm; }
 
   /** Start the background worker loop. Call from long-lived server modes (Telegram, MCP). */

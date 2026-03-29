@@ -10,6 +10,18 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.settings': { de: 'Settings', en: 'Settings' },
 	'nav.new_chat': { de: 'Neuer Chat', en: 'New Chat' },
 	'nav.tasks': { de: 'Tasks', en: 'Tasks' },
+	'nav.artifacts': { de: 'Artifacts', en: 'Artifacts' },
+
+	// Artifacts
+	'artifacts.title': { de: 'Artifacts', en: 'Artifacts' },
+	'artifacts.items': { de: 'Einträge', en: 'items' },
+	'artifacts.loading': { de: 'Lade Artifacts...', en: 'Loading artifacts...' },
+	'artifacts.empty': { de: 'Noch keine Artifacts gespeichert. Der Agent erstellt hier Dashboards, Diagramme und Reports.', en: 'No saved artifacts yet. The agent creates dashboards, diagrams, and reports here.' },
+	'artifacts.delete': { de: 'Löschen', en: 'Delete' },
+	'artifacts.cancel': { de: 'Abbrechen', en: 'Cancel' },
+	'artifacts.confirm_delete': { de: 'Dieses Artifact wirklich löschen?', en: 'Delete this artifact?' },
+	'artifacts.back': { de: 'Zurück', en: 'Back' },
+	'artifacts.saved': { de: 'Artifact gespeichert', en: 'Artifact saved' },
 
 	// Threads
 	'threads.recent': { de: 'Letzte Chats', en: 'Recent Chats' },

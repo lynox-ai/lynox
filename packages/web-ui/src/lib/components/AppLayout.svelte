@@ -12,6 +12,7 @@
 	const nav = [
 		{ href: '/app', labelKey: 'nav.chat', exact: true },
 		{ href: '/app/memory', labelKey: 'nav.knowledge', exact: false },
+		{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false },
 		{ href: '/app/history', labelKey: 'nav.history', exact: false },
 		{ href: '/app/tasks', labelKey: 'nav.tasks', exact: false }
 	];

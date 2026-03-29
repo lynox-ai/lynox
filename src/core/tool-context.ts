@@ -47,6 +47,9 @@ export interface ToolContext {
   // ── API Store (per-API rate limiting + knowledge) ──
   apiStore: import('./api-store.js').ApiStore | null;
 
+  // ── Artifact Store ──
+  artifactStore: import('./artifact-store.js').ArtifactStore | null;
+
   // ── Isolation (bash tool) ──
   isolationEnvOverride: Record<string, string> | undefined;
   isolationMinimalEnv: boolean;
@@ -69,6 +72,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     hourlyRateLimit: Infinity,
     dailyRateLimit: Infinity,
     apiStore: null,
+    artifactStore: null,
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
   };

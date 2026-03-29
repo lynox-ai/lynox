@@ -22,6 +22,7 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { goto } from '$app/navigation';
 
 	// Mask any secret-like patterns (API keys, tokens) that might leak into display
 	const SECRET_PATTERNS = [

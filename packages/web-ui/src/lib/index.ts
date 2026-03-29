@@ -20,6 +20,7 @@ export { default as ApiStoreView } from './components/ApiStoreView.svelte';
 export { default as DataStoreView } from './components/DataStoreView.svelte';
 export { default as FileBrowserView } from './components/FileBrowserView.svelte';
 export { default as TasksView } from './components/TasksView.svelte';
+export { default as ArtifactsView } from './components/ArtifactsView.svelte';
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';
 export { default as ThreadList } from './components/ThreadList.svelte';
@@ -74,6 +75,17 @@ export {
 	getIsLoadingThreads,
 } from './stores/threads.svelte.js';
 export type { Thread } from './stores/threads.svelte.js';
+
+// Artifact store
+export {
+	loadArtifacts,
+	getArtifact,
+	saveArtifact,
+	deleteArtifact,
+	getArtifacts,
+	getIsLoadingArtifacts,
+} from './stores/artifacts.svelte.js';
+export type { Artifact, ArtifactMeta, ArtifactType } from './stores/artifacts.svelte.js';
 
 // Context Panel
 export { setContext, clearContext, getContext, closePanel } from './stores/context-panel.svelte.js';

@@ -112,9 +112,10 @@
 			<!-- === ask_user === -->
 			{:else if ctx.toolName === 'ask_user'}
 				<p class="text-sm text-text font-medium">{getInput('question')}</p>
-				{#if Array.isArray(getInputObj()['options'])}
+				{@const options = getInputObj()['options']}
+				{#if Array.isArray(options)}
 					<div class="space-y-1.5 mt-2">
-						{#each getInputObj()['options'] as option}
+						{#each options as option}
 							<div class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-sm text-text-muted">
 								{option}
 							</div>
