@@ -39,6 +39,15 @@ When not set:
 - Server binds to `127.0.0.1` (localhost only)
 - No authentication required
 
+## API Versioning
+
+All endpoints accept both `/api/...` and `/api/v1/...` prefixes. The `v1` prefix is recommended for new integrations:
+
+```
+GET /api/v1/sessions      # recommended
+GET /api/sessions          # also works (alias)
+```
+
 ## Endpoints
 
 ### Health
@@ -154,6 +163,18 @@ GET    /api/secrets              → { names: string[] }
 PUT    /api/secrets/:name        → { ok: true }           Body: { value }
 DELETE /api/secrets/:name        → { deleted: boolean }
 ```
+
+### Vault
+
+Rotate the vault master key (re-encrypts all secrets with a new key):
+
+```
+POST /api/vault/rotate
+Body: { "newKey": "new-master-key-min-16-chars" }
+Response: { "rotated": 5, "message": "Update LYNOX_VAULT_KEY and restart" }
+```
+
+Requires `LYNOX_VAULT_KEY` to be set. After rotation, update the environment variable and restart the Engine.
 
 ### Config
 
