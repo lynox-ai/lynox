@@ -1,6 +1,7 @@
 {
   "name": "@lynox-ai/web-ui",
   "version": "0.1.0",
+  "license": "Elastic-2.0",
   "type": "module",
   "sideEffects": false,
   "svelte": "./dist/index.js",
