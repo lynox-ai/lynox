@@ -328,6 +328,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'memory.add_placeholder': { de: 'Neuer Eintrag...', en: 'New entry...' },
 	'memory.add_button': { de: 'Hinzufuegen', en: 'Add' },
 	'memory.delete_entries': { de: 'Eintraege loeschen', en: 'Delete entries' },
+	'memory.delete_button': { de: 'Loeschen', en: 'Delete' },
 	'memory.delete_placeholder': { de: 'Suchmuster...', en: 'Search pattern...' },
 	'memory.delete_confirm_prefix': { de: 'Eintraege mit', en: 'Delete entries matching' },
 	'memory.delete_confirm_suffix': { de: 'loeschen?', en: '?' },

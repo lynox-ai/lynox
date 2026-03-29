@@ -12,6 +12,8 @@
 	let appendText = $state('');
 	let deletePattern = $state('');
 	let error = $state('');
+	let editingIdx = $state<number | null>(null);
+	let editingText = $state('');
 
 	async function loadNamespace() {
 		loading = true;
@@ -88,8 +90,43 @@
 		saving = false;
 	}
 
+	async function updateEntry(oldLine: string, newText: string) {
+		saving = true;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/memory/${selectedNs}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ old_content: oldLine, new_content: newText })
+			});
+			if (!res.ok) throw new Error();
+			editingIdx = null;
+			editingText = '';
+			await loadNamespace();
+		} catch {
+			error = t('common.save_failed');
+		}
+		saving = false;
+	}
+
+	async function deleteEntry(line: string) {
+		saving = true;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(line)}`, {
+				method: 'DELETE'
+			});
+			if (!res.ok) throw new Error();
+			await loadNamespace();
+		} catch {
+			error = t('common.save_failed');
+		}
+		saving = false;
+	}
+
 	$effect(() => {
 		loadNamespace();
+		editingIdx = null;
 	});
 </script>
 
@@ -152,19 +189,45 @@
 				{@const date = dateMatch?.[1] ?? ''}
 				{@const text = dateMatch ? entry.slice(dateMatch[0].length) : entry}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 group relative">
-					<p class="text-sm text-text leading-relaxed">{text}</p>
-					{#if date}
-						<p class="text-[10px] text-text-subtle mt-1.5 font-mono">{date}</p>
+					{#if editingIdx === i}
+						<!-- Inline edit mode -->
+						<textarea
+							bind:value={editingText}
+							rows="3"
+							class="w-full resize-none rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus:border-border-hover"
+						></textarea>
+						<div class="flex gap-2 mt-2">
+							<button
+								onclick={() => updateEntry(entry, (date ? `[${date}] ` : '') + editingText)}
+								disabled={saving}
+								class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-text hover:opacity-90 disabled:opacity-30"
+							>{t('common.save')}</button>
+							<button
+								onclick={() => { editingIdx = null; }}
+								class="rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text"
+							>{t('memory.cancel')}</button>
+						</div>
+					{:else}
+						<!-- Display mode -->
+						<p class="text-sm text-text leading-relaxed pr-16">{text}</p>
+						{#if date}
+							<p class="text-[10px] text-text-subtle mt-1.5 font-mono">{date}</p>
+						{/if}
+						<!-- Edit + Delete buttons (visible on hover) -->
+						<div class="absolute top-2.5 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+							<button
+								onclick={() => { editingIdx = i; editingText = text; }}
+								class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-colors"
+							>{t('memory.edit')}</button>
+							<button
+								onclick={() => deleteEntry(entry)}
+								class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-colors"
+							>{t('memory.delete_button')}</button>
+						</div>
 					{/if}
 				</div>
 			{/each}
 		</div>
-		<button
-			onclick={startEdit}
-			class="mt-3 rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all"
-		>
-			{t('memory.edit')}
-		</button>
 	{:else}
 		<div class="text-text-subtle text-sm space-y-1">
 			<p>{t('memory.no_entries')} {selectedNs}.</p>
