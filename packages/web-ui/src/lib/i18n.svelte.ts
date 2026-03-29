@@ -353,6 +353,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'common.loading': { de: 'Laden...', en: 'Loading...' },
 	'common.back_to_chat': { de: 'Zurueck zum Chat', en: 'Back to chat' },
 	'common.error': { de: 'Etwas ist schiefgelaufen.', en: 'Something went wrong.' },
+	'common.save': { de: 'Speichern', en: 'Save' },
 	'common.save_failed': { de: 'Speichern fehlgeschlagen. Bitte erneut versuchen.', en: 'Save failed. Please try again.' },
 	'common.load_failed': { de: 'Laden fehlgeschlagen. Ist die Engine erreichbar?', en: 'Failed to load. Is the engine reachable?' },
 	'common.copied': { de: 'Kopiert', en: 'Copied' },
