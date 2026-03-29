@@ -35,12 +35,16 @@
 		} catch { relations = []; }
 	}
 
-	const types = [
-		{ value: '', labelKey: 'kg.all' },
-		{ value: 'person', labelKey: 'kg.people' },
-		{ value: 'organization', labelKey: 'kg.orgs' },
-		{ value: 'project', labelKey: 'kg.projects' },
-	];
+	// Dynamic type filters — derived from actual entities
+	const availableTypes = $derived(() => {
+		const typeCounts = new Map<string, number>();
+		for (const e of entities) {
+			typeCounts.set(e.entityType, (typeCounts.get(e.entityType) ?? 0) + 1);
+		}
+		return [...typeCounts.entries()]
+			.sort((a, b) => b[1] - a[1])
+			.map(([type]) => type);
+	});
 
 	const typeColors: Record<string, string> = {
 		person: 'bg-accent/15 text-accent-text',
@@ -64,14 +68,22 @@
 <div class="p-6 max-w-5xl mx-auto">
 	<h1 class="text-xl font-light tracking-tight mb-4">{t('kg.title')}</h1>
 
-	<!-- Search + Filters -->
-	<div class="flex gap-2 mb-4 flex-wrap">
+	<!-- Search -->
+	<div class="mb-3">
 		<input bind:value={query} onkeydown={(e) => e.key === 'Enter' && handleSearch()} placeholder={t('kg.search')}
-			class="flex-1 min-w-48 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-hover" />
-		{#each types as tp}
-			<button onclick={() => { typeFilter = tp.value; loadEntities(); }}
-				class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-all {typeFilter === tp.value ? 'bg-accent/10 text-accent-text border border-accent/30' : 'text-text-muted hover:text-text border border-transparent'}">
-				{t(tp.labelKey)}
+			class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-hover" />
+	</div>
+
+	<!-- Dynamic type filters -->
+	<div class="flex gap-1.5 mb-4 flex-wrap">
+		<button onclick={() => { typeFilter = ''; loadEntities(); }}
+			class="rounded-full px-3 py-1 text-xs transition-all {typeFilter === '' ? 'bg-accent/10 text-accent-text border border-accent/30' : 'text-text-muted hover:text-text border border-transparent'}">
+			{t('kg.all')}
+		</button>
+		{#each availableTypes() as typ}
+			<button onclick={() => { typeFilter = typ; loadEntities(); }}
+				class="rounded-full px-3 py-1 text-xs transition-all {typeFilter === typ ? typeColor(typ).replace(/\/15/g, '/20') + ' border border-current/30' : 'text-text-muted hover:text-text border border-transparent'}">
+				<span class="inline-block h-1.5 w-1.5 rounded-full mr-1 {typeColor(typ).split(' ')[0] ?? 'bg-text-subtle'}"></span>{typ}
 			</button>
 		{/each}
 	</div>
