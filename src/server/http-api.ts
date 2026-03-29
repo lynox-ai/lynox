@@ -1095,14 +1095,25 @@ export class LynoxHTTPApi {
       }
     });
 
+    /** Resolve a workspace-relative path, rejecting traversal. */
+    async function resolveWorkspacePath(filePath: string): Promise<string | null> {
+      const { resolve, join } = await import('node:path');
+      const { getWorkspaceDir } = await import('../core/workspace.js');
+      const { getLynoxDir } = await import('../core/config.js');
+      const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+      const resolved = resolve(base, filePath);
+      return resolved.startsWith(base) ? resolved : null;
+    }
+
     this.staticRoutes.set('GET /api/files/download', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
         const { statSync, createReadStream } = await import('node:fs');
-        const { resolve, basename } = await import('node:path');
-        const resolved = resolve(filePath);
+        const { basename } = await import('node:path');
+        const resolved = await resolveWorkspacePath(filePath);
+        if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
         const st = statSync(resolved);
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         if (st.size > 100 * 1024 * 1024) { errorResponse(res, 413, 'File too large'); return; }
@@ -1113,6 +1124,41 @@ export class LynoxHTTPApi {
           'Content-Length': st.size,
         });
         createReadStream(resolved).pipe(res);
+      } catch {
+        errorResponse(res, 404, 'File not found');
+      }
+    });
+
+    this.staticRoutes.set('GET /api/files/read', async (req, res) => {
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const filePath = url.searchParams.get('path');
+      if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
+      try {
+        const { readFileSync, statSync } = await import('node:fs');
+        const resolved = await resolveWorkspacePath(filePath);
+        if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
+        const st = statSync(resolved);
+        if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
+        if (st.size > 1024 * 1024) { errorResponse(res, 413, 'File too large for preview (max 1 MB)'); return; }
+        const content = readFileSync(resolved, 'utf-8');
+        jsonResponse(res, 200, { content });
+      } catch {
+        errorResponse(res, 404, 'File not found');
+      }
+    });
+
+    this.staticRoutes.set('DELETE /api/files', async (req, res) => {
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const filePath = url.searchParams.get('path');
+      if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
+      try {
+        const { unlinkSync, statSync } = await import('node:fs');
+        const resolved = await resolveWorkspacePath(filePath);
+        if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
+        const st = statSync(resolved);
+        if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
+        unlinkSync(resolved);
+        jsonResponse(res, 200, { ok: true });
       } catch {
         errorResponse(res, 404, 'File not found');
       }
