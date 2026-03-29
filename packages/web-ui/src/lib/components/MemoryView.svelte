@@ -145,15 +145,26 @@
 			</div>
 		</div>
 	{:else if content}
-		<div class="relative group">
-			<pre class="whitespace-pre-wrap rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 font-mono text-sm">{content}</pre>
-			<button
-				onclick={startEdit}
-				class="absolute top-3 right-3 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-xs text-text-muted opacity-0 group-hover:opacity-100 hover:text-text transition-all"
-			>
-				{t('memory.edit')}
-			</button>
+		{@const entries = content.split('\n').filter(line => line.trim())}
+		<div class="space-y-2">
+			{#each entries as entry, i}
+				{@const dateMatch = entry.match(/^\[(\d{4}-\d{2}-\d{2})\]\s*/)}
+				{@const date = dateMatch?.[1] ?? ''}
+				{@const text = dateMatch ? entry.slice(dateMatch[0].length) : entry}
+				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 group relative">
+					<p class="text-sm text-text leading-relaxed">{text}</p>
+					{#if date}
+						<p class="text-[10px] text-text-subtle mt-1.5 font-mono">{date}</p>
+					{/if}
+				</div>
+			{/each}
 		</div>
+		<button
+			onclick={startEdit}
+			class="mt-3 rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all"
+		>
+			{t('memory.edit')}
+		</button>
 	{:else}
 		<div class="text-text-subtle text-sm space-y-1">
 			<p>{t('memory.no_entries')} {selectedNs}.</p>
