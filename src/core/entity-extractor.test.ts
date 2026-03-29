@@ -156,17 +156,17 @@ describe('shouldUseLLMExtraction', () => {
     expect(shouldUseLLMExtraction(longText, 'project-state', [])).toBe(false);
   });
 
-  it('returns false when regex found entities', () => {
+  it('returns true even when regex found entities (LLM merges with regex)', () => {
     const longText = 'A'.repeat(300);
     expect(
       shouldUseLLMExtraction(longText, 'knowledge', [
         { name: 'Test', type: 'concept', confidence: 0.8 },
       ]),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it('returns true for long knowledge text with no regex entities and capitalized words', () => {
-    const text = 'The implementation uses a specialized Architecture pattern ' + 'x'.repeat(200);
+  it('returns true for knowledge text with sufficient length', () => {
+    const text = 'Rafael Burlet ist CEO von lynox AI in Zürich.';
     expect(shouldUseLLMExtraction(text, 'knowledge', [])).toBe(true);
   });
 });

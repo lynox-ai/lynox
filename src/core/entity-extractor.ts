@@ -93,9 +93,12 @@ export function extractEntitiesRegex(text: string): ExtractionResult {
     }
   }
 
-  // Organizations: explicit markers
+  // Organizations: explicit markers — filter stop words (e.g. "Unternehmen in" → "in")
   for (const match of text.matchAll(ORG_EXPLICIT_RE)) {
-    if (match[1]) addEntity(match[1], 'organization', 0.8);
+    const name = match[1]?.trim();
+    if (name && name.length >= 3 && !COMMON_WORDS.has(name.toLowerCase())) {
+      addEntity(name, 'organization', 0.8);
+    }
   }
 
   // Technology: usage context
@@ -162,18 +165,17 @@ export function resetLLMExtractionCount(): void {
 export function shouldUseLLMExtraction(
   text: string,
   namespace: MemoryNamespace,
-  regexEntities: ExtractedEntity[],
+  _regexEntities: ExtractedEntity[],
 ): boolean {
   // Session cap: prevent unbounded LLM extraction costs
   if (_llmExtractionCount >= MAX_LLM_EXTRACTIONS_PER_SESSION) return false;
   // Only for knowledge and methods — highest value namespaces
   if (namespace !== 'knowledge' && namespace !== 'methods') return false;
-  // Only if text is substantial enough
-  if (text.length < 200) return false;
-  // Only if regex found nothing but text has capitalized words (likely entities)
-  if (regexEntities.length > 0) return false;
-  const hasCapitalized = /[A-ZÄÖÜ][a-zäöüß]{2,}/.test(text);
-  return hasCapitalized;
+  // Only if text is substantial enough for meaningful extraction
+  if (text.length < 30) return false;
+  // Always run LLM for qualifying text — regex results are merged, not a gate.
+  // Regex is fast but noisy; LLM catches names, roles, and relationships that regex misses.
+  return true;
 }
 
 /**
