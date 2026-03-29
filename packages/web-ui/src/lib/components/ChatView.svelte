@@ -369,11 +369,34 @@
 	const ctxBudget = $derived(getContextBudget());
 	const ctxWindow = $derived(getContextWindow());
 
+	// Slash commands handled client-side (navigate instead of sending to agent)
+	const SLASH_ROUTES: Record<string, string> = {
+		'/settings': '/app/settings',
+		'/google auth': '/app/settings',
+		'/google': '/app/settings',
+		'/memory': '/app/memory',
+		'/graph': '/app/graph',
+		'/insights': '/app/insights',
+		'/history': '/app/history',
+		'/tasks': '/app/tasks',
+		'/contacts': '/app/contacts',
+		'/files': '/app/files',
+	};
+
 	async function handleSend() {
 		const task = inputText.trim();
 		if (!task && pendingFiles.length === 0) return;
 
-		// If a prompt is active, treat chat input as answer (freeform or custom answer to options)
+		// Handle slash commands as navigation
+		const slashRoute = SLASH_ROUTES[task.toLowerCase()];
+		if (slashRoute) {
+			inputText = '';
+			if (textareaEl) textareaEl.style.height = 'auto';
+			goto(slashRoute);
+			return;
+		}
+
+		// If a prompt is active, treat chat input as answer
 		if (pendingPermission && task) {
 			inputText = '';
 			if (textareaEl) textareaEl.style.height = 'auto';
