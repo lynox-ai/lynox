@@ -367,7 +367,10 @@
 	});
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && !e.shiftKey) {
+		// Desktop: Enter sends, Shift+Enter = newline
+		// Mobile: Enter = newline (no hardware keyboard), use Send button
+		const isMobile = window.innerWidth < 768;
+		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
 			e.preventDefault();
 			handleSend();
 		}
@@ -406,7 +409,7 @@
 	function autoResize(e: Event) {
 		const el = e.target as HTMLTextAreaElement;
 		el.style.height = 'auto';
-		const maxH = 150;
+		const maxH = window.innerWidth < 768 ? 200 : 150;
 		el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
 		el.style.overflowY = el.scrollHeight > maxH ? 'auto' : 'hidden';
 	}
@@ -434,7 +437,7 @@
 									bind:value={setupKey}
 									placeholder="sk-ant-..."
 									onkeydown={(e) => e.key === 'Enter' && saveInlineKey()}
-									class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm font-mono outline-none focus:border-border-hover"
+									class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-[16px] md:text-sm font-mono outline-none focus:border-border-hover"
 								/>
 							</div>
 							<button
@@ -480,7 +483,7 @@
 		{/if}
 
 		<div class="mx-auto max-w-3xl space-y-5">
-			{#each messages as msg}
+			{#each messages as msg, msgIdx}
 				{#if msg.role === 'user'}
 					<div class="flex justify-end">
 						<button
@@ -532,7 +535,7 @@
 								</button>
 							</div>
 						{/if}
-						{#if msg.usage && !isStreaming}
+						{#if msg.usage && !isStreaming && msgIdx !== messages.length - 1}
 							<p class="text-[11px] font-mono text-text-subtle mt-1">{formatUsage(msg.usage)}</p>
 						{/if}
 					</div>
@@ -547,14 +550,20 @@
 			{/if}
 
 			{#if messages.length > 0}
-				<div class="flex items-center gap-3">
+				<div class="flex items-center gap-3 flex-wrap">
+					{#if messages[messages.length - 1]?.usage && !isStreaming}
+						{@const lastUsage = messages[messages.length - 1].usage}
+						{#if lastUsage}
+							<span class="text-[11px] font-mono text-text-subtle">{formatUsage(lastUsage)}</span>
+						{/if}
+					{/if}
 					{#if hasToolCalls}
-						<button onclick={toggleAllToolCalls} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">
+						<button onclick={toggleAllToolCalls} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">
 							{toolCallsExpanded ? t('chat.collapse_all') : t('chat.expand_all')}
 						</button>
 					{/if}
-					<button onclick={() => downloadExport('md')} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">↓ Export</button>
-					<button onclick={async () => { const { exportAsJSON } = await import('../stores/chat.svelte.js'); await navigator.clipboard.writeText(exportAsJSON()); addToast(t('common.copied'), 'success', 1500); }} class="text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">⎘ JSON</button>
+					<button onclick={() => downloadExport('md')} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">↓ Export</button>
+					<button onclick={async () => { const { exportAsJSON } = await import('../stores/chat.svelte.js'); await navigator.clipboard.writeText(exportAsJSON()); addToast(t('common.copied'), 'success', 1500); }} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">⎘ JSON</button>
 				</div>
 			{/if}
 
@@ -676,7 +685,7 @@
 	{/if}
 
 	<!-- Input -->
-	<div class="border-t border-border bg-bg-subtle px-4 py-3 md:px-6 md:py-4">
+	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-6 md:py-4" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl mx-auto flex flex-wrap gap-2 mb-2">
@@ -689,7 +698,7 @@
 			</div>
 		{/if}
 
-		<div class="max-w-3xl mx-auto flex items-end gap-2">
+		<div class="max-w-3xl mx-auto flex items-stretch gap-1.5 md:gap-2">
 			<!-- File upload -->
 			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 			<button
@@ -727,7 +736,7 @@
 				placeholder={pendingPermission && !inBatchMode ? pendingPermission.question : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 				rows="1"
 				disabled={!ready && !pendingPermission}
-				class="flex-1 resize-none rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text placeholder:text-text-subtle focus:border-border-hover outline-none disabled:opacity-50 overflow-hidden"
+				class="flex-1 resize-none rounded-2xl md:rounded-[var(--radius-md)] border border-border/50 md:border-border bg-bg px-4 py-2.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle focus:border-border-hover outline-none disabled:opacity-50 overflow-hidden"
 			></textarea>
 			{#if isStreaming}
 				<button
@@ -742,7 +751,7 @@
 				<button
 					onclick={handleSend}
 					disabled={!inputText.trim() && pendingFiles.length === 0}
-					class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+					class="shrink-0 rounded-2xl md:rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
 				>
 					{pendingPermission ? t('chat.send') : t('chat.send')}
 				</button>
@@ -757,7 +766,7 @@
 			{/if}
 		</div>
 		<div class="mt-1.5 max-w-3xl mx-auto flex items-center justify-between gap-3">
-			<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
+			<p class="hidden md:block text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
 				{pendingPermission ? t('chat.hint') : isStreaming ? (queueLength > 0 ? `${queueLength} ${t('chat.hint_queued')}` : t('chat.hint_streaming')) : t('chat.hint')}
 			</p>
 			<div class="flex items-center gap-2 ml-auto">

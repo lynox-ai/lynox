@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getContext, isPinned, togglePin, closePanel } from '../stores/context-panel.svelte.js';
+	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 
 	const ctx = $derived(getContext());
@@ -61,7 +62,7 @@
 		<!-- Content -->
 		<div class="flex-1 p-4 space-y-3">
 			{#if ctx.type === 'file' && ctx.filePath}
-				<p class="text-xs font-mono text-accent-text break-all">{ctx.filePath}</p>
+				<a href="{getApiBase()}/files/download?path={encodeURIComponent(ctx.filePath)}" download class="text-xs font-mono text-accent-text break-all hover:underline">{ctx.filePath}</a>
 				{#if ctx.toolResult}
 					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-96 overflow-y-auto scrollbar-thin rounded-[var(--radius-md)] bg-bg-muted p-3 border border-border">{ctx.toolResult.slice(0, 3000)}</pre>
 				{/if}

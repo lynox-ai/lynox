@@ -32,7 +32,7 @@
 	}
 </script>
 
-<div class="fixed inset-0 flex flex-col overflow-hidden">
+<div class="fixed inset-0 flex flex-col overflow-hidden bg-bg" style="padding-top: env(safe-area-inset-top);">
 	<!-- Top Bar -->
 	<header class="flex items-center justify-between h-12 px-4 border-b border-border bg-bg shrink-0">
 		<!-- Left: hamburger (mobile) + logo -->
@@ -72,7 +72,7 @@
 		<!-- Mobile overlay -->
 		{#if sidebarOpen}
 			<button
-				class="fixed inset-0 z-30 bg-black/60 md:hidden"
+				class="fixed inset-0 z-30 bg-black/80 md:hidden backdrop-blur-sm"
 				onclick={() => (sidebarOpen = false)}
 				aria-label="Close menu"
 			></button>
@@ -80,8 +80,9 @@
 
 		<!-- Left Sidebar -->
 		<nav
-			class="fixed inset-y-0 left-0 z-40 flex w-52 flex-col border-r border-border bg-bg-subtle pt-3 pb-3 transition-transform md:static md:translate-x-0
+			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle pb-3 transition-transform md:static md:w-52 md:translate-x-0
 			{sidebarOpen ? 'translate-x-0' : '-translate-x-full'}"
+			style="padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem);"
 		>
 			<!-- New Chat -->
 			<div class="px-3 mb-2">
@@ -137,7 +138,7 @@
 			</ul>
 
 			<!-- Bottom: Settings + User -->
-			<div class="border-t border-border pt-2 mt-2 px-3 space-y-0.5">
+			<div class="border-t border-border pt-2 mt-2 px-3 space-y-0.5" style="padding-bottom: env(safe-area-inset-bottom, 0.5rem);">
 				<a
 					href="/app/settings"
 					onclick={() => (sidebarOpen = false)}

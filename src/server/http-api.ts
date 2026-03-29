@@ -949,5 +949,28 @@ export class LynoxHTTPApi {
         jsonResponse(res, 200, { path: dirPath, entries: [] });
       }
     });
+
+    this.staticRoutes.set('GET /api/files/download', async (req, res) => {
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const filePath = url.searchParams.get('path');
+      if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
+      try {
+        const { statSync, createReadStream } = await import('node:fs');
+        const { resolve, basename } = await import('node:path');
+        const resolved = resolve(filePath);
+        const st = statSync(resolved);
+        if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
+        if (st.size > 100 * 1024 * 1024) { errorResponse(res, 413, 'File too large'); return; }
+        const name = basename(resolved);
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${name.replace(/"/g, '\\"')}"`,
+          'Content-Length': st.size,
+        });
+        createReadStream(resolved).pipe(res);
+      } catch {
+        errorResponse(res, 404, 'File not found');
+      }
+    });
   }
 }

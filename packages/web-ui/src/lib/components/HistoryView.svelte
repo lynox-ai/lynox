@@ -166,7 +166,7 @@
 									<p class="text-xs font-medium text-text-muted mb-2">{t('history.files_written')} ({writtenFiles.length})</p>
 									<div class="space-y-1">
 										{#each writtenFiles as filePath}
-											<div class="rounded-[var(--radius-sm)] bg-bg-muted px-2 py-1 text-xs font-mono text-text-muted">{filePath}</div>
+											<a href="{getApiBase()}/files/download?path={encodeURIComponent(filePath)}" download class="block rounded-[var(--radius-sm)] bg-bg-muted px-2 py-1 text-xs font-mono text-accent-text hover:underline">{filePath}</a>
 										{/each}
 									</div>
 								</div>
