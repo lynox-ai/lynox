@@ -108,7 +108,7 @@
 			<ThreadList onselect={(id) => { void resumeThread(id).then(() => { void loadThreads(); }); sidebarOpen = false; goto('/app'); }} />
 
 			<!-- Nav Items -->
-			<ul class="flex-1 space-y-0.5 px-3">
+			<ul class="flex-1 space-y-0.5 px-3 overflow-y-auto">
 				{#each nav as item}
 					<li>
 						<a

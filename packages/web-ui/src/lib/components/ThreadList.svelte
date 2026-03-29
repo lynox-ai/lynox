@@ -28,29 +28,24 @@
 		<ul class="space-y-0.5 max-h-48 overflow-y-auto scrollbar-thin">
 			{#each getThreads().slice(0, 10) as thread (thread.id)}
 				{@const isActive = getSessionId() === thread.id}
-				<li class="group">
-					<button
-						onclick={() => onselect(thread.id)}
-						class="w-full text-left rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-all flex items-center justify-between gap-1
+				<li class="group relative flex items-center rounded-[var(--radius-sm)] transition-all
 						{isActive
 							? 'bg-accent/10 text-accent-text'
-							: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+							: 'text-text-muted hover:text-text hover:bg-bg-muted'}">
+					<button
+						onclick={() => onselect(thread.id)}
+						class="flex-1 text-left px-3 py-1.5 text-xs truncate"
 					>
-						<span class="truncate flex-1 text-xs">
-							{thread.title || t('threads.no_title')}
-						</span>
-						<span class="text-[10px] text-text-subtle shrink-0">
-							{timeAgo(thread.updated_at)}
-						</span>
+						{thread.title || t('threads.no_title')}
 					</button>
-					<!-- Archive button on hover -->
+					<span class="text-[10px] text-text-subtle shrink-0 pr-2 group-hover:hidden">
+						{timeAgo(thread.updated_at)}
+					</span>
 					<button
 						onclick={(e: MouseEvent) => { e.stopPropagation(); void archiveThread(thread.id); }}
-						class="hidden group-hover:block absolute right-5 text-text-subtle hover:text-text text-xs"
+						class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"
 						aria-label={t('threads.archive')}
-					>
-						&times;
-					</button>
+					>&times;</button>
 				</li>
 			{/each}
 		</ul>
