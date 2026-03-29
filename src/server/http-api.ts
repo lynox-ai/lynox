@@ -258,7 +258,10 @@ export class LynoxHTTPApi {
   ): Promise<void> {
     const method = req.method ?? 'GET';
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-    const pathname = url.pathname;
+    // Accept both /api/v1/... and /api/... (normalize v1 prefix away for route matching)
+    const pathname = url.pathname.startsWith('/api/v1/')
+      ? '/api/' + url.pathname.slice('/api/v1/'.length)
+      : url.pathname;
 
     // Health check (unauthenticated)
     if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
@@ -1061,6 +1064,32 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, err instanceof Error ? err.message : 'Query failed');
       }
     }));
+
+    // ── Vault ─────────────────────────────────────────────────────
+
+    this.staticRoutes.set('POST /api/vault/rotate', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const newKey = typeof b?.['newKey'] === 'string' ? b['newKey'] : '';
+      if (!newKey || newKey.length < 16) {
+        errorResponse(res, 400, 'newKey must be at least 16 characters');
+        return;
+      }
+      const currentKey = process.env['LYNOX_VAULT_KEY'];
+      if (!currentKey) {
+        errorResponse(res, 400, 'LYNOX_VAULT_KEY not set — cannot rotate');
+        return;
+      }
+      try {
+        const { resolve } = await import('node:path');
+        const { homedir } = await import('node:os');
+        const { SecretVault } = await import('../core/secret-vault.js');
+        const vaultPath = resolve(homedir(), '.lynox', 'vault.db');
+        const count = SecretVault.rotateVault(vaultPath, currentKey, newKey);
+        jsonResponse(res, 200, { rotated: count, message: 'Update LYNOX_VAULT_KEY and restart' });
+      } catch (err: unknown) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Rotation failed');
+      }
+    });
 
     // ── Files (workspace) ────────────────────────────────────────
 

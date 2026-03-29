@@ -185,6 +185,7 @@ import {
   handleModel, handleAccuracy, handleCost, handleContext,
   handleMode, handleRoles,
   handleTools, handleMcp,
+  handleVault,
 } from './cli/commands/index.js';
 import type { InternalHandler, CLICtx } from './cli/commands/types.js';
 
@@ -214,6 +215,7 @@ const DISPATCH: Record<string, InternalHandler> = {
   '/roles': handleRoles,
   '/tools': handleTools,
   '/mcp': handleMcp,
+  '/vault': handleVault,
 };
 
 // Wrapped stream handler that binds stdout

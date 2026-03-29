@@ -1,11 +1,5 @@
 /**
  * Barrel export for CLI command handlers.
- *
- * Commands removed in CLI slim (moved to PWA):
- * task, schedule, runs, stats, batch, batchStatus, tree,
- * alias, google, vault, secret, plugin, hooks, approvals,
- * profile, memory, scope, knowledge, pipeline, chain,
- * manifest, api, backup, quickstart
  */
 
 export type { CLICtx, InternalHandler } from './types.js';
@@ -27,3 +21,6 @@ export { handleMode, handleRoles } from './mode.js';
 
 // Tool + MCP commands (kept from pipeline.ts)
 export { handleTools, handleMcp } from './pipeline.js';
+
+// Vault commands
+export { handleVault } from './vault.js';
