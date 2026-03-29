@@ -7,26 +7,26 @@ import type {
   KnowledgeRetrievalResult,
 } from '../types/index.js';
 import { SCOPE_WEIGHTS, MODEL_MAP, LYNOX_BETAS, NAMESPACE_HALF_LIFE } from '../types/index.js';
-import type { KuzuGraph } from './knowledge-graph.js';
+import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
-import { cosineSimilarity } from './embedding.js';
+import { cosineSimilarity, blobToEmbed } from './embedding.js';
 import { extractEntitiesRegex } from './entity-extractor.js';
 import type { EntityResolver } from './entity-resolver.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
-import type { LbugValue } from '@ladybugdb/core';
 import { escapeXml } from './data-boundary.js';
 
 /** Default retrieval options. */
 const DEFAULT_TOP_K = 10;
 const DEFAULT_THRESHOLD = 0.55;
-const MMR_LAMBDA = 0.7; // 0.7 relevance, 0.3 diversity
+const MMR_LAMBDA = 0.7;
 
-/** Max chars for formatted knowledge context injected into system prompt (~3K tokens). */
+/** Max chars for formatted knowledge context (~3K tokens). */
 const DEFAULT_MAX_KNOWLEDGE_CONTEXT_CHARS = 12_000;
 
 /** Weight allocation for multi-signal scoring. */
 const VECTOR_WEIGHT = 0.55;
 const GRAPH_BOOST = 0.15;
+const EPISODIC_BOOST = 0.10;
 
 export interface RetrievalOptions {
   topK?: number | undefined;
@@ -44,9 +44,13 @@ interface ScoredCandidate {
   scopeId: string;
   createdAt: string;
   embedding: number[];
+  confidence: number;
+  confirmationCount: number;
+  sourceEpisodeId: string | null;
   vectorScore: number;
   ftsScore: number;
   graphBoost: number;
+  episodicBoost: number;
   finalScore: number;
   source: 'vector' | 'graph' | 'fts';
 }
@@ -54,13 +58,13 @@ interface ScoredCandidate {
 /**
  * Graph-augmented retrieval engine.
  *
- * Pipeline: HyDE → Vector Search → FTS → Graph Expansion → Merge → Score → MMR → Format
+ * Pipeline: HyDE -> Vector Search -> Graph Expansion -> Merge -> Score -> MMR -> Format
  */
 export class RetrievalEngine {
   private dataStoreBridge: DataStoreBridge | null = null;
 
   constructor(
-    private readonly graph: KuzuGraph,
+    private readonly db: AgentMemoryDb,
     private readonly embeddingProvider: EmbeddingProvider,
     private readonly entityResolver: EntityResolver,
     private readonly anthropicClient?: Anthropic | undefined,
@@ -78,7 +82,7 @@ export class RetrievalEngine {
     const topK = options?.topK ?? DEFAULT_TOP_K;
     const threshold = options?.threshold ?? DEFAULT_THRESHOLD;
 
-    // === Step 1: HyDE (Hypothetical Document Embedding) ===
+    // === Step 1: HyDE ===
     let queryForEmbedding = query;
     if (options?.useHyDE && this.anthropicClient && query.length >= 20) {
       const hypothetical = await this._generateHyDE(query);
@@ -90,69 +94,61 @@ export class RetrievalEngine {
     // === Step 2: Embed query ===
     const queryEmbedding = await this.embeddingProvider.embed(queryForEmbedding);
 
-    // === Step 3: Multi-signal search (parallel) ===
+    // === Step 3: Multi-signal search ===
     const scopeTypes = scopes.map(s => s.type);
-
-    // Pre-resolve query entities once (shared between graph expansion + context)
     const queryEntities = await this._resolveQueryEntities(query, scopes);
 
-    const [vectorResults, graphExpanded] = await Promise.all([
-      // 3a. Vector search
-      this.graph.findSimilarMemories(queryEmbedding, 50, threshold * 0.8, {
-        namespace: options?.namespace,
-        scopeTypes,
-        activeOnly: true,
-      }),
-      // 3b. Graph expansion (entity-based, reuses pre-resolved entities)
-      options?.useGraphExpansion !== false
-        ? this._graphExpandResolved(queryEntities)
-        : Promise.resolve([]),
-    ]);
+    const vectorResults = this.db.findSimilarMemories(queryEmbedding, 50, threshold * 0.8, {
+      namespace: options?.namespace,
+      scopeTypes,
+      activeOnly: true,
+    });
+
+    const graphExpanded = options?.useGraphExpansion !== false
+      ? this._graphExpand(queryEntities)
+      : [];
 
     // === Step 4: Merge candidates ===
     const candidateMap = new Map<string, ScoredCandidate>();
+    const dim = this.embeddingProvider.dimensions;
 
-    // Vector results (primary signal)
     for (const row of vectorResults) {
-      const id = row['m.id'] as string;
-      candidateMap.set(id, {
-        id,
-        text: row['m.text'] as string,
-        namespace: row['m.namespace'] as string,
-        scopeType: row['m.scope_type'] as string,
-        scopeId: row['m.scope_id'] as string,
-        createdAt: String(row['m.created_at'] ?? ''),
-        embedding: (row['m.embedding'] as number[]) ?? [],
+      const emb = row.embedding ? blobToEmbed(row.embedding, dim) : [];
+      candidateMap.set(row.id, {
+        id: row.id,
+        text: row.text,
+        namespace: row.namespace,
+        scopeType: row.scope_type,
+        scopeId: row.scope_id,
+        createdAt: row.created_at,
+        embedding: emb,
+        confidence: row.confidence,
+        confirmationCount: row.confirmation_count,
+        sourceEpisodeId: row.source_episode_id,
         vectorScore: row._similarity * VECTOR_WEIGHT,
         ftsScore: 0,
         graphBoost: 0,
+        episodicBoost: 0,
         finalScore: 0,
         source: 'vector',
       });
     }
 
-    // Graph-expanded results (boost signal)
     for (const row of graphExpanded) {
-      const id = row['m.id'] as string;
-      const existing = candidateMap.get(id);
+      const existing = candidateMap.get(row.id);
       if (existing) {
         existing.graphBoost = GRAPH_BOOST;
-        // Promote source to 'graph' if it wasn't found by vector
         if (existing.vectorScore === 0) existing.source = 'graph';
       } else {
-        candidateMap.set(id, {
-          id,
-          text: row['m.text'] as string,
-          namespace: row['m.namespace'] as string,
-          scopeType: row['m.scope_type'] as string,
-          scopeId: row['m.scope_id'] as string,
-          createdAt: String(row['m.created_at'] ?? ''),
-          embedding: [],
-          vectorScore: 0,
-          ftsScore: 0,
-          graphBoost: GRAPH_BOOST,
-          finalScore: 0,
-          source: 'graph',
+        const emb = row.embedding ? blobToEmbed(row.embedding, dim) : [];
+        candidateMap.set(row.id, {
+          id: row.id, text: row.text, namespace: row.namespace,
+          scopeType: row.scope_type, scopeId: row.scope_id,
+          createdAt: row.created_at, embedding: emb,
+          confidence: row.confidence, confirmationCount: row.confirmation_count,
+          sourceEpisodeId: row.source_episode_id,
+          vectorScore: 0, ftsScore: 0, graphBoost: GRAPH_BOOST, episodicBoost: 0,
+          finalScore: 0, source: 'graph',
         });
       }
     }
@@ -163,37 +159,47 @@ export class RetrievalEngine {
       scopeSet.has(`${c.scopeType}:${c.scopeId}`),
     );
 
-    // === Step 6: Scoring with namespace-specific decay + scope weight ===
+    // === Step 6: Scoring with decay + confidence + episodic boost ===
     for (const c of candidates) {
       const scopeWeight = SCOPE_WEIGHTS[c.scopeType as MemoryScopeType] ?? 0.3;
       const decay = this._namespacedDecay(c.createdAt, c.namespace as MemoryNamespace);
 
-      c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost) * scopeWeight * decay;
+      // Episodic boost: memories linked to successful episodes score higher
+      if (c.sourceEpisodeId) {
+        const ep = this.db.getEpisode(c.sourceEpisodeId);
+        if (ep && ep.outcome_signal === 'success') {
+          c.episodicBoost = EPISODIC_BOOST;
+        }
+      }
+
+      // Confidence multiplier: confirmed memories score higher
+      const confMult = 0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0);
+
+      c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.episodicBoost)
+        * scopeWeight * decay * confMult;
     }
 
-    // Filter below threshold
     const aboveThreshold = candidates.filter(c => c.finalScore > threshold * 0.3);
 
     // === Step 7: MMR Re-Ranking ===
     const selected = this._mmrRerank(aboveThreshold, queryEmbedding, topK);
 
-    // === Step 8: Update retrieval metadata ===
+    // === Step 8: Update retrieval metadata (fire-and-forget) ===
     for (const c of selected) {
-      void this.graph.updateMemoryRetrieved(c.id).catch(() => { /* fire-and-forget */ });
+      try { this.db.updateMemoryRetrieved(c.id); } catch { /* best-effort */ }
     }
 
-    // === Step 9: Build entity context + DataStore hints (reuses pre-resolved entities) ===
+    // === Step 9: Build context ===
     const entities = queryEntities;
     const contextGraph = await this._formatContextGraphWithData(entities);
 
     return {
       memories: selected.map(c => ({
-        id: c.id,
-        text: c.text,
+        id: c.id, text: c.text,
         namespace: c.namespace as MemoryNamespace,
         scopeType: c.scopeType as MemoryScopeType,
         scopeId: c.scopeId,
-        score: c.vectorScore / VECTOR_WEIGHT, // raw similarity
+        score: c.vectorScore / VECTOR_WEIGHT,
         finalScore: c.finalScore,
         source: c.source,
       })),
@@ -202,21 +208,14 @@ export class RetrievalEngine {
     };
   }
 
-  /**
-   * Format retrieval results as a system prompt context block.
-   * When maxChars is set, drops lowest-scored memories to stay within budget
-   * (preserves complete memories rather than truncating individual texts).
-   */
   formatContext(result: KnowledgeRetrievalResult, maxChars?: number | undefined): string {
     if (result.memories.length === 0 && result.entities.length === 0) return '';
 
     const limit = maxChars ?? DEFAULT_MAX_KNOWLEDGE_CONTEXT_CHARS;
-    let memories = [...result.memories];
+    const memories = [...result.memories];
 
-    // Build context, dropping lowest-scored memories if over budget
     let formatted = this._buildContextString(memories, result.contextGraph);
     while (formatted.length > limit && memories.length > 1) {
-      // Drop the lowest-scored memory across all scopes
       let lowestIdx = 0;
       let lowestScore = Infinity;
       for (let i = 0; i < memories.length; i++) {
@@ -232,14 +231,11 @@ export class RetrievalEngine {
     return formatted;
   }
 
-  /** Assemble the <relevant_context> XML block from memories and entity graph. */
   private _buildContextString(
     memories: KnowledgeRetrievalResult['memories'],
     contextGraph: string | undefined,
   ): string {
     const sections: string[] = [];
-
-    // Group memories by scope (user > context > global)
     const scopeOrder: MemoryScopeType[] = ['user', 'context', 'global'];
     const grouped = new Map<MemoryScopeType, typeof memories>();
 
@@ -252,31 +248,21 @@ export class RetrievalEngine {
     for (const scopeType of scopeOrder) {
       const bucket = grouped.get(scopeType);
       if (!bucket || bucket.length === 0) continue;
-
       const entries = bucket.map(m =>
         `[${escapeXml(m.namespace)}] (${(m.finalScore * 100).toFixed(0)}%)\n${escapeXml(m.text)}`,
       ).join('\n\n');
-
       sections.push(`<scope type="${escapeXml(scopeType)}">\n${entries}\n</scope>`);
     }
 
-    // Add entity graph context if available
-    if (contextGraph) {
-      sections.push(contextGraph);
-    }
-
+    if (contextGraph) sections.push(contextGraph);
     if (sections.length === 0) return '';
     return `<relevant_context>\n${sections.join('\n')}\n</relevant_context>`;
   }
 
   // === Private Methods ===
 
-  /**
-   * HyDE: Generate a hypothetical answer to improve embedding quality.
-   */
   private async _generateHyDE(query: string): Promise<string | null> {
     if (!this.anthropicClient) return null;
-
     try {
       const stream = this.anthropicClient.beta.messages.stream({
         model: MODEL_MAP['haiku'],
@@ -295,10 +281,6 @@ export class RetrievalEngine {
     }
   }
 
-  /**
-   * Extract and resolve entities from query text (shared between graph expansion + context).
-   * Resolves once to avoid duplicate graph queries.
-   */
   private async _resolveQueryEntities(
     query: string,
     scopes: MemoryScopeRef[],
@@ -308,10 +290,7 @@ export class RetrievalEngine {
 
     for (const entity of entities.slice(0, 5)) {
       const record = await this.entityResolver.resolve(
-        entity.name,
-        entity.type,
-        scopes,
-        { createIfMissing: false },
+        entity.name, entity.type, scopes, { createIfMissing: false },
       );
       if (record) resolved.push(record);
     }
@@ -319,49 +298,27 @@ export class RetrievalEngine {
     return resolved;
   }
 
-  /**
-   * Graph expansion using pre-resolved entities. Finds connected memories.
-   */
-  private async _graphExpandResolved(
-    resolvedEntities: EntityRecord[],
-  ): Promise<Record<string, LbugValue>[]> {
+  private _graphExpand(resolvedEntities: EntityRecord[]): MemoryRow[] {
     if (resolvedEntities.length === 0) return [];
 
-    const results: Record<string, LbugValue>[] = [];
+    const results: MemoryRow[] = [];
     const seenIds = new Set<string>();
 
     for (const resolved of resolvedEntities) {
-      // 1-hop: memories directly mentioning this entity
-      const direct = await this.graph.getMemoriesMentioningEntity(resolved.id, true, 5);
+      const direct = this.db.getMemoriesMentioningEntity(resolved.id, true, 5);
       for (const row of direct) {
-        const id = row['m.id'] as string;
-        if (!seenIds.has(id)) {
-          seenIds.add(id);
-          results.push(row);
-        }
+        if (!seenIds.has(row.id)) { seenIds.add(row.id); results.push(row); }
       }
 
-      // 2-hop: memories mentioning related entities
-      const related = await this.graph.getRelatedMemoriesViaEntities(resolved.id, 2, true, 3);
+      const related = this.db.getRelatedMemoriesViaEntities(resolved.id, 2, true, 3);
       for (const row of related) {
-        const id = row['m.id'] as string;
-        if (!seenIds.has(id)) {
-          seenIds.add(id);
-          results.push(row);
-        }
+        if (!seenIds.has(row.id)) { seenIds.add(row.id); results.push(row); }
       }
     }
 
     return results;
   }
 
-  /**
-   * Namespace-specific temporal decay.
-   * knowledge: 365d half-life (quasi permanent)
-   * methods: 180d
-   * learnings: 120d
-   * project-state: 21d (fast decay)
-   */
   private _namespacedDecay(createdAt: string, namespace: MemoryNamespace): number {
     const created = new Date(createdAt).getTime();
     if (Number.isNaN(created)) return 1.0;
@@ -371,13 +328,9 @@ export class RetrievalEngine {
     return Math.exp(-ageDays / halfLife);
   }
 
-  /**
-   * Maximal Marginal Relevance re-ranking.
-   * Balances relevance and diversity to avoid near-duplicate results.
-   */
   private _mmrRerank(
     candidates: ScoredCandidate[],
-    queryEmbedding: number[],
+    _queryEmbedding: number[],
     topK: number,
   ): ScoredCandidate[] {
     if (candidates.length <= topK) return candidates.sort((a, b) => b.finalScore - a.finalScore);
@@ -393,7 +346,6 @@ export class RetrievalEngine {
         const candidate = remaining[i]!;
         const relevance = candidate.finalScore;
 
-        // Max similarity to any already-selected item
         let maxSim = 0;
         if (candidate.embedding.length > 0) {
           for (const sel of selected) {
@@ -405,10 +357,7 @@ export class RetrievalEngine {
         }
 
         const mmr = MMR_LAMBDA * relevance - (1 - MMR_LAMBDA) * maxSim;
-        if (mmr > bestMMR) {
-          bestMMR = mmr;
-          bestIdx = i;
-        }
+        if (mmr > bestMMR) { bestMMR = mmr; bestIdx = i; }
       }
 
       selected.push(remaining.splice(bestIdx, 1)[0]!);
@@ -417,19 +366,14 @@ export class RetrievalEngine {
     return selected;
   }
 
-  /**
-   * Format entity context graph with optional DataStore hints.
-   */
   private async _formatContextGraphWithData(entities: EntityRecord[]): Promise<string> {
     if (entities.length === 0) return '';
 
     const entityLines = entities.map(e =>
       `${escapeXml(e.canonicalName)} (${e.entityType}, ${e.mentionCount} mentions)`,
     );
-
     const parts = [`Entities: ${entityLines.join(', ')}`];
 
-    // Add DataStore hints if bridge is available
     if (this.dataStoreBridge && entities.length > 0) {
       try {
         const hints = await this.dataStoreBridge.findRelatedData(entities.map(e => e.id));
@@ -442,12 +386,10 @@ export class RetrievalEngine {
           parts.push(`Data: ${dataLines.join('; ')}`);
         }
       } catch {
-        // Non-critical — DataStore hints are best-effort
+        // Best-effort
       }
     }
 
     return `<knowledge_graph>\n${parts.join('\n')}\n</knowledge_graph>`;
   }
 }
-
-// escapeXml imported from data-boundary.ts

@@ -5,24 +5,28 @@ import type {
   MemoryScopeRef,
   MemoryScopeType,
   EntityRecord,
-  EntityType,
   RelationRecord,
   ContradictionInfo,
   KnowledgeStoreResult,
   KnowledgeRetrievalResult,
   KnowledgeGraphStats,
   KnowledgeGcResult,
+  EpisodeOutcomeSignal,
+  EpisodeRecord,
+  PatternType,
+  PatternRecord,
+  MetricWindow,
+  MetricRecord,
 } from '../types/index.js';
-import { KuzuGraph } from './knowledge-graph.js';
+import { AgentMemoryDb } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
-import { EntityResolver } from './entity-resolver.js';
+import { EntityResolver, toEntityRecord } from './entity-resolver.js';
 import { RetrievalEngine } from './retrieval-engine.js';
 import type { RetrievalOptions } from './retrieval-engine.js';
 import { extractEntities } from './entity-extractor.js';
 import { detectContradictions } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { channels } from './observability.js';
-import type { LbugValue } from '@ladybugdb/core';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
 const DEDUP_THRESHOLD = 0.90;
@@ -30,11 +34,11 @@ const DEDUP_THRESHOLD = 0.90;
 /**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
  *
- * Integrates: KuzuGraph (storage) + EntityExtractor + EntityResolver +
- * ContradictionDetector + RetrievalEngine.
+ * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
+ * ContradictionDetector + EpisodicLog + PatternEngine.
  */
 export class KnowledgeLayer implements IKnowledgeLayer {
-  private readonly graph: KuzuGraph;
+  private readonly db: AgentMemoryDb;
   private readonly embeddingProvider: EmbeddingProvider;
   private readonly entityResolver: EntityResolver;
   private readonly retrievalEngine: RetrievalEngine;
@@ -45,14 +49,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     embeddingProvider: EmbeddingProvider,
     anthropicClient?: Anthropic | undefined,
   ) {
-    this.graph = new KuzuGraph(dbPath);
+    this.db = new AgentMemoryDb(dbPath);
+    this.db.setEmbeddingDimensions(embeddingProvider.dimensions);
     this.embeddingProvider = embeddingProvider;
-    this.entityResolver = new EntityResolver(this.graph, embeddingProvider);
+    this.entityResolver = new EntityResolver(this.db, embeddingProvider);
     this.retrievalEngine = new RetrievalEngine(
-      this.graph,
-      embeddingProvider,
-      this.entityResolver,
-      anthropicClient,
+      this.db, embeddingProvider, this.entityResolver, anthropicClient,
     );
     this.anthropicClient = anthropicClient;
   }
@@ -60,26 +62,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   // === Lifecycle ===
 
   async init(): Promise<void> {
-    await this.graph.init();
+    // Schema already created in AgentMemoryDb constructor (synchronous)
   }
 
   async close(): Promise<void> {
-    await this.graph.close();
+    this.db.close();
   }
 
-  get isReady(): boolean {
-    return this.graph.isReady;
-  }
+  get isReady(): boolean { return true; }
 
-  /** Access the underlying graph (for DataStore bridge and advanced queries). */
-  getGraph(): KuzuGraph {
-    return this.graph;
-  }
+  /** Access the underlying DB (for DataStore bridge and advanced queries). */
+  getDb(): AgentMemoryDb { return this.db; }
 
   /** Access the entity resolver (for DataStore bridge). */
-  getEntityResolver(): EntityResolver {
-    return this.entityResolver;
-  }
+  getEntityResolver(): EntityResolver { return this.entityResolver; }
 
   /** Connect DataStore bridge to retrieval engine for data hints. */
   setDataStoreBridge(bridge: DataStoreBridge): void {
@@ -100,135 +96,88 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   ): Promise<KnowledgeStoreResult> {
     const trimmedText = text.trim();
     if (trimmedText.length < 5) {
-      return {
-        memoryId: '',
-        entities: [],
-        relations: [],
-        contradictions: [],
-        stored: false,
-        deduplicated: false,
-      };
+      return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
     }
 
     // 1. Embed the text
     const embedding = options?.reuseEmbedding ?? await this.embeddingProvider.embed(trimmedText);
 
     // 2. Dedup check
-    const similar = await this.graph.findSimilarMemories(embedding, 1, DEDUP_THRESHOLD, {
-      namespace,
-      scopeTypes: [scope.type],
-      activeOnly: true,
+    const similar = this.db.findSimilarMemories(embedding, 1, DEDUP_THRESHOLD, {
+      namespace, scopeTypes: [scope.type], activeOnly: true,
     });
 
     if (similar.length > 0) {
-      return {
-        memoryId: similar[0]!['m.id'] as string,
-        entities: [],
-        relations: [],
-        contradictions: [],
-        stored: false,
-        deduplicated: true,
-      };
+      return { memoryId: similar[0]!.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
     }
 
-    // 3. Contradiction detection (reuse embedding to avoid duplicate embed call)
+    // 3. Contradiction detection
     let contradictions: ContradictionInfo[] = [];
     if (!options?.skipContradictionCheck) {
       contradictions = await detectContradictions(
-        trimmedText,
-        namespace,
-        scope,
-        this.graph,
-        this.embeddingProvider,
-        embedding,
+        trimmedText, namespace, scope, this.db, this.embeddingProvider, embedding,
       );
     }
 
     // 4. Create memory node
-    const memoryId = await this.graph.createMemory({
-      text: trimmedText,
-      namespace,
-      scopeType: scope.type,
-      scopeId: scope.id,
-      sourceRunId: options?.sourceRunId,
-      provider: this.embeddingProvider.name,
-      embedding,
+    const memoryId = this.db.createMemory({
+      text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
+      sourceRunId: options?.sourceRunId, provider: this.embeddingProvider.name, embedding,
     });
 
     // 5. Mark contradicted memories as superseded
     for (const c of contradictions) {
       if (c.resolution === 'superseded') {
-        await this.graph.supersedMemory(c.existingMemoryId, memoryId);
-        await this.graph.createSupersedes(memoryId, c.existingMemoryId, 'contradiction');
+        this.db.supersedMemory(c.existingMemoryId, memoryId);
+        this.db.createSupersedes(memoryId, c.existingMemoryId, 'contradiction');
       }
     }
 
     // 6. Extract entities and relations
-    const extraction = await extractEntities(
-      trimmedText,
-      namespace,
-      this.anthropicClient,
-    );
+    const extraction = await extractEntities(trimmedText, namespace, this.anthropicClient);
 
     // 7. Resolve entities and create graph nodes
     const resolvedEntities: EntityRecord[] = [];
-    const entityIdMap = new Map<string, string>(); // name → entity ID
+    const entityIdMap = new Map<string, string>();
 
     for (const ext of extraction.entities) {
       const entity = await this.entityResolver.resolve(
-        ext.name,
-        ext.type,
-        [scope],
-        { createIfMissing: true },
+        ext.name, ext.type, [scope], { createIfMissing: true },
       );
       if (entity) {
         resolvedEntities.push(entity);
         entityIdMap.set(ext.name.toLowerCase(), entity.id);
-
-        // Create MENTIONS relationship
-        await this.graph.createMention(memoryId, entity.id);
+        this.db.createMention(memoryId, entity.id);
       }
     }
 
-    // 8. Create entity-entity relationships
+    // 8. Create entity-entity relations from extraction
     const resolvedRelations: RelationRecord[] = [];
     for (const rel of extraction.relations) {
       const fromId = entityIdMap.get(rel.from.toLowerCase());
       const toId = entityIdMap.get(rel.to.toLowerCase());
       if (fromId && toId && fromId !== toId) {
-        await this.graph.createRelation(
-          fromId,
-          toId,
-          rel.relationType,
-          rel.description,
-          memoryId,
-        );
+        this.db.createRelation(fromId, toId, rel.relationType, rel.description, memoryId);
         resolvedRelations.push({
-          fromEntityId: fromId,
-          toEntityId: toId,
-          relationType: rel.relationType,
-          description: rel.description,
-          confidence: 1.0,
-          sourceMemoryId: memoryId,
-          createdAt: new Date().toISOString(),
+          fromEntityId: fromId, toEntityId: toId,
+          relationType: rel.relationType, description: rel.description,
+          confidence: 1.0, sourceMemoryId: memoryId, createdAt: new Date().toISOString(),
         });
       }
     }
 
-    // 9. Update co-occurrence for all entity pairs in this memory
+    // 9. Update co-occurrences
     const entityIds = [...entityIdMap.values()];
     for (let i = 0; i < entityIds.length; i++) {
       for (let j = i + 1; j < entityIds.length; j++) {
-        await this.graph.updateCooccurrence(entityIds[i]!, entityIds[j]!);
+        this.db.updateCooccurrence(entityIds[i]!, entityIds[j]!);
       }
     }
 
-    // 10. Publish diagnostics
+    // 10. Publish event
     if (channels.knowledgeGraph.hasSubscribers) {
       channels.knowledgeGraph.publish({
-        event: 'memory_stored',
-        memoryId,
-        namespace,
+        event: 'memory_stored', memoryId, namespace,
         entityCount: resolvedEntities.length,
         relationCount: resolvedRelations.length,
         contradictionCount: contradictions.length,
@@ -236,12 +185,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
 
     return {
-      memoryId,
-      entities: resolvedEntities,
-      relations: resolvedRelations,
-      contradictions,
-      stored: true,
-      deduplicated: false,
+      memoryId, entities: resolvedEntities, relations: resolvedRelations,
+      contradictions, stored: true, deduplicated: false,
     };
   }
 
@@ -250,15 +195,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   async retrieve(
     query: string,
     scopes: MemoryScopeRef[],
-    options?: RetrievalOptions | undefined,
+    options?: RetrievalOptions,
   ): Promise<KnowledgeRetrievalResult> {
     return this.retrievalEngine.retrieve(query, scopes, options);
   }
 
-  /**
-   * Format retrieval results as system prompt context.
-   * @param maxChars — optional budget; drops lowest-scored memories if exceeded.
-   */
   formatRetrievalContext(result: KnowledgeRetrievalResult, maxChars?: number | undefined): string {
     return this.retrievalEngine.formatContext(result, maxChars);
   }
@@ -266,40 +207,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   // === Entity Operations ===
 
   async listEntities(opts?: { type?: string; limit?: number }): Promise<EntityRecord[]> {
-    const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
-    const typeFilter = opts?.type ? `WHERE e.entity_type = $type` : '';
-    const params: Record<string, unknown> = { limit: BigInt(limit) };
-    if (opts?.type) params['type'] = opts.type;
-    const rows = await this.graph.query(
-      `MATCH (e:Entity) ${typeFilter} RETURN e.id, e.canonical_name, e.entity_type, e.aliases, e.description, e.scope_type, e.scope_id, e.mention_count, e.first_seen_at, e.last_seen_at ORDER BY e.mention_count DESC LIMIT $limit`,
-      params as Record<string, import('@ladybugdb/core').LbugValue>,
-    );
-    return rows.map(r => this._rowToEntity(r));
+    return this.db.listEntities(opts).map(toEntityRecord);
   }
 
   async getEntity(id: string): Promise<EntityRecord | null> {
-    const rows = await this.graph.query(
-      `MATCH (e:Entity) WHERE e.id = $id RETURN e.id, e.canonical_name, e.entity_type, e.aliases, e.description, e.scope_type, e.scope_id, e.mention_count, e.first_seen_at, e.last_seen_at`,
-      { id } as Record<string, import('@ladybugdb/core').LbugValue>,
-    );
-    const r = rows[0];
-    if (!r) return null;
-    return this._rowToEntity(r);
-  }
-
-  private _rowToEntity(r: Record<string, import('@ladybugdb/core').LbugValue>): EntityRecord {
-    return {
-      id: String(r['e.id'] ?? ''),
-      canonicalName: String(r['e.canonical_name'] ?? ''),
-      entityType: (String(r['e.entity_type'] ?? 'concept')) as EntityType,
-      aliases: Array.isArray(r['e.aliases']) ? r['e.aliases'].map(String) : [],
-      description: String(r['e.description'] ?? ''),
-      scopeType: (String(r['e.scope_type'] ?? 'global')) as MemoryScopeType,
-      scopeId: String(r['e.scope_id'] ?? ''),
-      mentionCount: Number(r['e.mention_count'] ?? 0),
-      firstSeenAt: String(r['e.first_seen_at'] ?? ''),
-      lastSeenAt: String(r['e.last_seen_at'] ?? ''),
-    };
+    const row = this.db.getEntity(id);
+    return row ? toEntityRecord(row) : null;
   }
 
   async resolveEntity(name: string, scopes: MemoryScopeRef[]): Promise<EntityRecord | null> {
@@ -307,24 +220,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   async getEntityRelations(entityId: string, depth?: number | undefined): Promise<RelationRecord[]> {
-    const maxDepth = depth ?? 1;
-    const rows = await this.graph.query(
-      `MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
-       WHERE a.id = $entityId
-       RETURN a.id AS from_id, b.id AS to_id, r.relation_type, r.description,
-              r.confidence, r.source_memory_id, r.created_at
-       LIMIT $relLimit`,
-      { entityId, relLimit: BigInt(Math.min(maxDepth, 5) * 20) },
-    );
-
-    return rows.map(row => ({
-      fromEntityId: row['from_id'] as string,
-      toEntityId: row['to_id'] as string,
-      relationType: row['r.relation_type'] as string,
-      description: (row['r.description'] as string) ?? '',
-      confidence: (row['r.confidence'] as number) ?? 1.0,
-      sourceMemoryId: (row['r.source_memory_id'] as string) ?? '',
-      createdAt: String(row['r.created_at'] ?? ''),
+    const rows = this.db.getEntityRelations(entityId, depth === undefined ? 50 : depth * 20);
+    return rows.map(r => ({
+      fromEntityId: r.from_entity_id,
+      toEntityId: r.to_entity_id,
+      relationType: r.relation_type,
+      description: r.description,
+      confidence: r.confidence,
+      sourceMemoryId: r.source_memory_id ?? '',
+      createdAt: r.created_at,
     }));
   }
 
@@ -332,180 +236,140 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return this.entityResolver.merge(sourceId, targetId);
   }
 
-  // === Relationship Queries ===
-
-  async findPath(
-    fromEntityId: string,
-    toEntityId: string,
-    maxHops?: number | undefined,
-  ): Promise<RelationRecord[]> {
-    const hops = maxHops ?? 3;
-    const rows = await this.graph.query(
-      `MATCH path = (a:Entity)-[:RELATES_TO* ..${hops}]->(b:Entity)
-       WHERE a.id = $fromId AND b.id = $toId
-       RETURN nodes(path), rels(path)
-       LIMIT 1`,
-      { fromId: fromEntityId, toId: toEntityId },
-    );
-
-    // Parse path into relation records
-    if (rows.length === 0) return [];
-
-    const rels = rows[0]!['rels(path)'];
-    if (!Array.isArray(rels)) return [];
-
-    return rels.map((rel: LbugValue) => {
-      const r = rel as Record<string, LbugValue>;
-      return {
-        fromEntityId: '',
-        toEntityId: '',
-        relationType: (r['relation_type'] as string) ?? '',
-        description: (r['description'] as string) ?? '',
-        confidence: (r['confidence'] as number) ?? 1.0,
-        sourceMemoryId: (r['source_memory_id'] as string) ?? '',
-        createdAt: String(r['created_at'] ?? ''),
-      };
-    });
-  }
-
-  async getNeighborhood(
-    entityId: string,
-    hops?: number | undefined,
-  ): Promise<{ entities: EntityRecord[]; relations: RelationRecord[] }> {
-    const maxHops = hops ?? 1;
-
-    // Get related entities
-    const entityRows = await this.graph.query(
-      `MATCH (a:Entity)-[:RELATES_TO* ..${maxHops}]-(b:Entity)
-       WHERE a.id = $entityId AND a.id <> b.id
-       RETURN DISTINCT b.id, b.canonical_name, b.entity_type, b.aliases,
-              b.description, b.scope_type, b.scope_id, b.mention_count,
-              b.first_seen_at, b.last_seen_at
-       LIMIT 20`,
-      { entityId },
-    );
-
-    const entities: EntityRecord[] = entityRows.map(row => ({
-      id: row['b.id'] as string,
-      canonicalName: row['b.canonical_name'] as string,
-      entityType: row['b.entity_type'] as EntityRecord['entityType'],
-      aliases: (row['b.aliases'] as string[]) ?? [],
-      description: (row['b.description'] as string) ?? '',
-      scopeType: row['b.scope_type'] as EntityRecord['scopeType'],
-      scopeId: (row['b.scope_id'] as string) ?? '',
-      mentionCount: Number(row['b.mention_count'] ?? 1),
-      firstSeenAt: String(row['b.first_seen_at'] ?? ''),
-      lastSeenAt: String(row['b.last_seen_at'] ?? ''),
+  async findPath(fromEntityId: string, toEntityId: string, maxHops?: number | undefined): Promise<RelationRecord[]> {
+    const rows = this.db.findPath(fromEntityId, toEntityId, maxHops);
+    return rows.map(r => ({
+      fromEntityId: r.from_entity_id, toEntityId: r.to_entity_id,
+      relationType: r.relation_type, description: r.description,
+      confidence: r.confidence, sourceMemoryId: r.source_memory_id ?? '',
+      createdAt: r.created_at,
     }));
-
-    // Get relations between the entity and its neighbors
-    const relations = await this.getEntityRelations(entityId, maxHops);
-
-    return { entities, relations };
   }
 
-  // === Update / Delete ===
+  async getNeighborhood(entityId: string, hops?: number | undefined): Promise<{
+    entities: EntityRecord[];
+    relations: RelationRecord[];
+  }> {
+    const result = this.db.getNeighborhood(entityId, hops);
+    return {
+      entities: result.entities.map(toEntityRecord),
+      relations: result.relations.map(r => ({
+        fromEntityId: r.from_entity_id, toEntityId: r.to_entity_id,
+        relationType: r.relation_type, description: r.description,
+        confidence: r.confidence, sourceMemoryId: r.source_memory_id ?? '',
+        createdAt: r.created_at,
+      })),
+    };
+  }
 
-  /**
-   * Deactivate memories matching a text pattern in the graph.
-   * Called by memory_delete tool to keep graph in sync with flat files.
-   */
+  // === Update/Delete ===
+
+  async checkContradictions(text: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<ContradictionInfo[]> {
+    return detectContradictions(text, namespace, scope, this.db, this.embeddingProvider);
+  }
+
   async deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
-    return this.graph.deactivateMemoriesByPattern(pattern, namespace);
+    return this.db.deactivateMemoriesByPattern(pattern, namespace);
   }
 
-  /**
-   * Update memory text in the graph and re-extract entities.
-   * Called by memory_update tool to keep graph in sync with flat files.
-   */
   async updateMemoryText(
-    oldText: string,
-    newText: string,
-    namespace: MemoryNamespace,
-    scope: MemoryScopeRef,
+    oldText: string, newText: string, namespace: MemoryNamespace, scope: MemoryScopeRef,
   ): Promise<boolean> {
-    const memoryId = await this.graph.updateMemoryText(oldText, newText, namespace);
-    if (!memoryId) return false;
+    const id = this.db.updateMemoryText(oldText, newText, namespace);
+    if (!id) return false;
 
-    // Re-extract entities for the new text and link them
+    // Re-extract entities for the updated text
     const extraction = await extractEntities(newText, namespace, this.anthropicClient);
     for (const ext of extraction.entities) {
       const entity = await this.entityResolver.resolve(ext.name, ext.type, [scope], { createIfMissing: true });
-      if (entity) {
-        await this.graph.createMention(memoryId, entity.id);
-      }
+      if (entity) this.db.createMention(id, entity.id);
     }
 
     return true;
   }
 
-  // === Contradiction Detection ===
-
-  async checkContradictions(
-    text: string,
-    namespace: MemoryNamespace,
-    scope: MemoryScopeRef,
-  ): Promise<ContradictionInfo[]> {
-    return detectContradictions(text, namespace, scope, this.graph, this.embeddingProvider);
-  }
-
   // === Maintenance ===
 
   async gc(options?: { dryRun?: boolean | undefined }): Promise<KnowledgeGcResult> {
-    const dryRun = options?.dryRun ?? false;
-    const result: KnowledgeGcResult = {
-      supersededRemoved: 0,
-      orphanEntitiesRemoved: 0,
-      staleMemoriesRemoved: 0,
-    };
-
-    // 1. Count superseded memories (already marked inactive)
-    const superseded = await this.graph.queryScalar<bigint>(
-      'MATCH (m:Memory) WHERE m.is_active = false RETURN count(m) AS cnt',
-    );
-    result.supersededRemoved = Number(superseded ?? 0);
-
-    if (!dryRun && result.supersededRemoved > 0) {
-      // Delete superseded memories older than 90 days
-      await this.graph.execute(
-        `MATCH (m:Memory)
-         WHERE m.is_active = false
-         DETACH DELETE m`,
-      );
-    }
-
-    // 2. Find orphan entities (not mentioned by any active memory)
-    const orphans = await this.graph.query(
-      `MATCH (e:Entity)
-       WHERE NOT EXISTS {
-         MATCH (m:Memory)-[:MENTIONS]->(e) WHERE m.is_active = true
-       }
-       RETURN e.id`,
-    );
-    result.orphanEntitiesRemoved = orphans.length;
-
-    if (!dryRun && orphans.length > 0) {
-      for (const row of orphans) {
-        await this.graph.execute(
-          'MATCH (e:Entity) WHERE e.id = $id DETACH DELETE e',
-          { id: row['e.id'] as string },
-        );
-      }
-    }
-
-    return result;
+    return this.db.gc(options?.dryRun ?? false);
   }
 
-  // === Stats ===
-
   async stats(): Promise<KnowledgeGraphStats> {
-    const [memoryCount, entityCount, relationCount, communityCount] = await Promise.all([
-      this.graph.getActiveMemoryCount(),
-      this.graph.getEntityCount(),
-      this.graph.getRelationCount(),
-      this.graph.getCommunityCount(),
-    ]);
+    return {
+      memoryCount: this.db.getActiveMemoryCount(),
+      entityCount: this.db.getEntityCount(),
+      relationCount: this.db.getRelationCount(),
+      communityCount: 0,
+      episodeCount: this.db.getEpisodeCount(),
+      patternCount: this.db.getPatternCount(),
+    };
+  }
 
-    return { memoryCount, entityCount, relationCount, communityCount };
+  // === Episodic Memory ===
+
+  createEpisode(params: {
+    runId?: string | undefined;
+    sessionId?: string | undefined;
+    task: string;
+    approach?: string | undefined;
+    outcome?: string | undefined;
+    outcomeSignal?: EpisodeOutcomeSignal | undefined;
+    toolsUsed?: string[] | undefined;
+    entitiesInvolved?: string[] | undefined;
+    durationMs?: number | undefined;
+    tokenCost?: number | undefined;
+  }): string {
+    return this.db.createEpisode(params);
+  }
+
+  updateEpisodeOutcome(id: string, params: {
+    outcome?: string | undefined;
+    outcomeSignal?: EpisodeOutcomeSignal | undefined;
+    userFeedback?: string | undefined;
+  }): void {
+    this.db.updateEpisodeOutcome(id, params);
+  }
+
+  queryEpisodes(filters?: {
+    runId?: string | undefined;
+    sessionId?: string | undefined;
+    outcomeSignal?: EpisodeOutcomeSignal | undefined;
+    limit?: number | undefined;
+  }): EpisodeRecord[] {
+    return this.db.queryEpisodes(filters).map(r => ({
+      id: r.id, runId: r.run_id, sessionId: r.session_id,
+      task: r.task, approach: r.approach, outcome: r.outcome,
+      outcomeSignal: r.outcome_signal as EpisodeOutcomeSignal,
+      toolsUsed: JSON.parse(r.tools_used) as string[],
+      entitiesInvolved: JSON.parse(r.entities_involved) as string[],
+      memoriesCreated: JSON.parse(r.memories_created) as string[],
+      durationMs: r.duration_ms, tokenCost: r.token_cost,
+      userFeedback: r.user_feedback, createdAt: r.created_at,
+    }));
+  }
+
+  // === Pattern Engine ===
+
+  getPatterns(opts?: {
+    patternType?: PatternType | undefined;
+    activeOnly?: boolean | undefined;
+    limit?: number | undefined;
+  }): PatternRecord[] {
+    return this.db.getPatterns(opts).map(r => ({
+      id: r.id, patternType: r.pattern_type as PatternType,
+      description: r.description, evidenceCount: r.evidence_count,
+      confidence: r.confidence, lastSeenAt: r.last_seen_at,
+      metadata: JSON.parse(r.metadata) as Record<string, unknown>,
+      isActive: r.is_active === 1, createdAt: r.created_at,
+    }));
+  }
+
+  getMetrics(metricName?: string | undefined, window?: MetricWindow | undefined): MetricRecord[] {
+    return this.db.getMetrics(metricName, window).map(r => ({
+      id: r.id, metricName: r.metric_name,
+      scopeType: r.scope_type, scopeId: r.scope_id,
+      value: r.value, sampleCount: r.sample_count,
+      window: r.window as MetricWindow, computedAt: r.computed_at,
+    }));
   }
 }

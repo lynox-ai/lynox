@@ -567,7 +567,7 @@ export function initDataStoreBridge(
   dataStore: import('./data-store.js').DataStore,
 ): DataStoreBridge {
   const bridge = new DataStoreBridge(
-    knowledgeLayer.getGraph(),
+    knowledgeLayer.getDb(),
     knowledgeLayer.getEntityResolver(),
     dataStore,
   );
