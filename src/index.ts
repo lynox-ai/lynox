@@ -424,6 +424,18 @@ Docs: https://docs.lynox.dev
     const api = new LynoxHTTPApi();
     await api.init();
     await api.start(port);
+
+    // Graceful shutdown — close KG + DBs before exit to prevent WAL corruption
+    let shuttingDown = false;
+    const graceful = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      process.stderr.write(`\n[lynox] ${signal} received — shutting down…\n`);
+      try { await api.shutdown(); } catch { /* best-effort */ }
+      process.exit(0);
+    };
+    process.on('SIGINT', () => void graceful('SIGINT'));
+    process.on('SIGTERM', () => void graceful('SIGTERM'));
     return;
   }
 
@@ -887,16 +899,25 @@ Docs: https://docs.lynox.dev
     };
   }
 
-  // SIGINT: skip shutdown() — better-sqlite3 db.close() throws a native C++ mutex
-  // exception (std::system_error) that JS try/catch cannot intercept, crashing the process.
+  // SIGINT: close KG before hard exit to prevent LadybugDB WAL corruption.
+  // better-sqlite3 db.close() throws a native C++ mutex exception (std::system_error)
+  // that JS try/catch cannot intercept — so we skip SQLite cleanup and use SIGKILL.
   // SQLite WAL mode is crash-safe; the WAL file auto-recovers on next open.
-  // Registered early so it covers the greeting phase too.
+  // LadybugDB (Kuzu fork) is NOT crash-safe — its WAL corrupts without clean close.
   process.on('SIGINT', () => {
     spinner.stop();
     stdout.write('\n');
-    // Hard exit — process.exit() runs 'exit' handlers that may touch SQLite and crash.
-    // SIGKILL bypasses all cleanup. SQLite WAL mode recovers automatically.
-    process.kill(process.pid, 'SIGKILL');
+    // Close KG synchronously-ish before hard exit — fire and forget with short deadline
+    const kg = engine.getKnowledgeLayer();
+    if (kg) {
+      void kg.close().catch(() => {}).finally(() => {
+        process.kill(process.pid, 'SIGKILL');
+      });
+      // Fallback: if close hangs, force kill after 500ms
+      setTimeout(() => process.kill(process.pid, 'SIGKILL'), 500).unref();
+    } else {
+      process.kill(process.pid, 'SIGKILL');
+    }
   });
 
   // === Initial greeting — lynox introduces itself proactively ===

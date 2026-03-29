@@ -292,6 +292,9 @@ export class Engine {
       this.briefing = this.briefing ? `${this.briefing}\n\n${part}` : part;
     }
 
+    // Recreate API client now that secrets are available (vault may hold ANTHROPIC_API_KEY)
+    this._recreateClient();
+
     // Resolve user ID and active scopes
     const scopeResult = initScopes(this.userConfig, this.context, this.runHistory, this.memory);
     this.userId = scopeResult.userId;

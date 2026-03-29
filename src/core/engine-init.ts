@@ -3,7 +3,7 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
-import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -531,14 +531,33 @@ export async function initKnowledgeLayer(
   client: Anthropic,
 ): Promise<KnowledgeLayer | null> {
   if (userConfig.knowledge_graph_enabled === false || !embeddingProvider) return null;
+  const lynoxDir = getLynoxDir();
+  const graphPath = `${lynoxDir}/${KNOWLEDGE_GRAPH_DB_NAME}`;
+  const walPath = `${graphPath}.wal`;
+
+  // First attempt
   try {
-    const lynoxDir = getLynoxDir();
-    const graphPath = `${lynoxDir}/${KNOWLEDGE_GRAPH_DB_NAME}`;
     const layer = new KnowledgeLayer(graphPath, embeddingProvider, client);
     await layer.init();
     return layer;
   } catch (err: unknown) {
-    process.stderr.write(`[lynox:knowledge] Graph init failed: ${getErrorMessage(err)}\n`);
+    const msg = getErrorMessage(err);
+    // LadybugDB WAL corruption (e.g. from unclean shutdown) — recover by deleting
+    // the corrupt WAL and retrying. Data in the WAL is lost, but the DB stays usable.
+    if (msg.includes('wal') || msg.includes('WAL') || msg.includes('Corrupted')) {
+      process.stderr.write(`[lynox:knowledge] Corrupt WAL detected — removing ${walPath} and retrying…\n`);
+      try { unlinkSync(walPath); } catch { /* may not exist */ }
+      try {
+        const layer = new KnowledgeLayer(graphPath, embeddingProvider, client);
+        await layer.init();
+        process.stderr.write(`[lynox:knowledge] Graph recovered successfully after WAL removal.\n`);
+        return layer;
+      } catch (retryErr: unknown) {
+        process.stderr.write(`[lynox:knowledge] Graph init failed after WAL recovery: ${getErrorMessage(retryErr)}\n`);
+        return null;
+      }
+    }
+    process.stderr.write(`[lynox:knowledge] Graph init failed: ${msg}\n`);
     return null;
   }
 }

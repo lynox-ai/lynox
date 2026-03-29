@@ -32,7 +32,9 @@ export class KuzuGraph {
   async init(): Promise<void> {
     if (this._ready) return;
 
-    this.db = new Database(this.dbPath);
+    // Lower checkpoint threshold (1 MB) to minimise WAL data at risk on crash.
+    // LadybugDB positional: path, bufferMgr, compression, readOnly, maxSize, autoCheckpoint, threshold
+    this.db = new Database(this.dbPath, 0, true, false, 0, true, 1_048_576);
     await this.db.init();
 
     this.conn = new Connection(this.db);
