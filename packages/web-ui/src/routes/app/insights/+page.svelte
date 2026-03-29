@@ -1,5 +1,5 @@
 <script lang="ts">
-	import MemoryInsightsView from '$lib/components/MemoryInsightsView.svelte';
+	import { goto } from '$app/navigation';
+	import { onMount } from 'svelte';
+	onMount(() => goto('/app/knowledge', { replaceState: true }));
 </script>
-
-<MemoryInsightsView />

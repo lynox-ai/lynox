@@ -1,5 +1,5 @@
 <script lang="ts">
-	import ArtifactsView from '$lib/components/ArtifactsView.svelte';
+	import ArtifactsHub from '$lib/components/ArtifactsHub.svelte';
 </script>
 
-<ArtifactsView />
+<ArtifactsHub />

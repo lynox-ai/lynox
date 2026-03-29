@@ -20,9 +20,10 @@
 	const items: PaletteItem[] = [
 		{ id: 'new-chat', label: t('cmd.new_chat'), group: t('cmd.actions'), action: () => { newChat(); goto('/app'); }, keywords: 'new chat neu' },
 		{ id: 'nav-chat', label: t('nav.chat'), group: t('cmd.nav'), action: () => goto('/app'), keywords: 'chat home' },
-		{ id: 'nav-knowledge', label: t('nav.knowledge'), group: t('cmd.nav'), action: () => goto('/app/memory'), keywords: 'knowledge memory wissen' },
-		{ id: 'nav-history', label: t('nav.history'), group: t('cmd.nav'), action: () => goto('/app/history'), keywords: 'history runs verlauf' },
-		{ id: 'nav-tasks', label: t('nav.tasks'), group: t('cmd.nav'), action: () => goto('/app/tasks'), keywords: 'tasks aufgaben cron' },
+		{ id: 'nav-knowledge', label: t('nav.knowledge'), group: t('cmd.nav'), action: () => goto('/app/knowledge'), keywords: 'knowledge memory wissen graph insights' },
+		{ id: 'nav-contacts', label: t('nav.contacts'), group: t('cmd.nav'), action: () => goto('/app/contacts'), keywords: 'contacts kontakte crm deals' },
+		{ id: 'nav-artifacts', label: t('nav.artifacts'), group: t('cmd.nav'), action: () => goto('/app/artifacts'), keywords: 'artifacts dashboards diagrams files' },
+		{ id: 'nav-activity', label: t('nav.activity'), group: t('cmd.nav'), action: () => goto('/app/activity'), keywords: 'activity history tasks runs kosten' },
 		{ id: 'nav-settings', label: t('nav.settings'), group: t('cmd.nav'), action: () => goto('/app/settings'), keywords: 'settings einstellungen config' },
 		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/keys'), keywords: 'keys api schluessel' },
 		{ id: 'nav-integrations', label: t('settings.integrations'), group: t('cmd.nav'), action: () => goto('/app/settings/integrations'), keywords: 'integrations google telegram tavily' },

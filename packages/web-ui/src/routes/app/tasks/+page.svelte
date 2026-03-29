@@ -1,5 +1,5 @@
 <script lang="ts">
-	import TasksView from '$lib/components/TasksView.svelte';
+	import { goto } from '$app/navigation';
+	import { onMount } from 'svelte';
+	onMount(() => goto('/app/activity', { replaceState: true }));
 </script>
-
-<TasksView />

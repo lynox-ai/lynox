@@ -1,12 +1,5 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { sendMessage } from '$lib/stores/chat.svelte.js';
-	import HistoryView from '$lib/components/HistoryView.svelte';
-
-	function rerun(task: string) {
-		sendMessage(task);
-		goto('/app');
-	}
+	import { onMount } from 'svelte';
+	onMount(() => goto('/app/activity', { replaceState: true }));
 </script>
-
-<HistoryView onrerun={rerun} />

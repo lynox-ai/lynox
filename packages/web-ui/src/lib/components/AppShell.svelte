@@ -19,14 +19,10 @@
 
 	const nav = [
 		{ href: '/app', labelKey: 'nav.chat', exact: true, icon: 'chat', descKey: 'nav.desc.chat' },
-		{ href: '/app/memory', labelKey: 'nav.knowledge', exact: false, icon: 'brain', descKey: 'nav.desc.knowledge' },
-		{ href: '/app/graph', labelKey: 'nav.graph', exact: false, icon: 'graph', descKey: 'nav.desc.graph' },
-		{ href: '/app/insights', labelKey: 'nav.insights', exact: false, icon: 'insights', descKey: 'nav.desc.insights' },
+		{ href: '/app/knowledge', labelKey: 'nav.knowledge', exact: false, icon: 'brain', descKey: 'nav.desc.knowledge' },
 		{ href: '/app/contacts', labelKey: 'nav.contacts', exact: false, icon: 'contacts', descKey: 'nav.desc.contacts' },
 		{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts', descKey: 'nav.desc.artifacts' },
-		{ href: '/app/history', labelKey: 'nav.history', exact: false, icon: 'clock', descKey: 'nav.desc.history' },
-		{ href: '/app/tasks', labelKey: 'nav.tasks', exact: false, icon: 'bolt', descKey: 'nav.desc.tasks' },
-		{ href: '/app/files', labelKey: 'nav.files', exact: false, icon: 'files', descKey: 'nav.desc.files' },
+		{ href: '/app/activity', labelKey: 'nav.activity', exact: false, icon: 'clock', descKey: 'nav.desc.activity' },
 	];
 
 	function isActive(href: string, exact: boolean): boolean {

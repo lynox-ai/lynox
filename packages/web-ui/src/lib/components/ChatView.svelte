@@ -382,13 +382,16 @@
 		'/settings': '/app/settings',
 		'/google auth': '/app/settings',
 		'/google': '/app/settings',
-		'/memory': '/app/memory',
-		'/graph': '/app/graph',
-		'/insights': '/app/insights',
-		'/history': '/app/history',
-		'/tasks': '/app/tasks',
+		'/memory': '/app/knowledge',
+		'/knowledge': '/app/knowledge',
+		'/graph': '/app/knowledge',
+		'/insights': '/app/knowledge',
+		'/history': '/app/activity',
+		'/tasks': '/app/activity',
+		'/activity': '/app/activity',
 		'/contacts': '/app/contacts',
-		'/files': '/app/files',
+		'/files': '/app/artifacts',
+		'/artifacts': '/app/artifacts',
 	};
 
 	async function handleSend() {

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import KnowledgeGraphView from '$lib/components/KnowledgeGraphView.svelte';
+	import { goto } from '$app/navigation';
+	import { onMount } from 'svelte';
+	onMount(() => goto('/app/knowledge', { replaceState: true }));
 </script>
-
-<KnowledgeGraphView />

@@ -52,9 +52,28 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.desc.insights': { de: 'Leistung, Muster, Episoden', en: 'Performance, patterns, episodes' },
 	'nav.desc.contacts': { de: 'Deine Kunden und Deals', en: 'Your clients and deals' },
 	'nav.desc.artifacts': { de: 'Dashboards, Diagramme, Reports', en: 'Dashboards, diagrams, reports' },
+	'nav.activity': { de: 'Activity', en: 'Activity' },
+	'nav.desc.activity': { de: 'Runs, Kosten, Aufgaben', en: 'Runs, costs, tasks' },
 	'nav.desc.history': { de: 'Vergangene Aufgaben', en: 'Past runs' },
 	'nav.desc.tasks': { de: 'Geplante Aufgaben', en: 'Scheduled jobs' },
 	'nav.desc.files': { de: 'Erstellte Dateien', en: 'Created files' },
+
+	// Hub tabs
+	'hub.knowledge.wissen': { de: 'Wissen', en: 'Knowledge' },
+	'hub.knowledge.graph': { de: 'Graph', en: 'Graph' },
+	'hub.knowledge.insights': { de: 'Insights', en: 'Insights' },
+	'hub.artifacts.gallery': { de: 'Galerie', en: 'Gallery' },
+	'hub.artifacts.files': { de: 'Dateien', en: 'Files' },
+	'hub.activity.dashboard': { de: 'Dashboard', en: 'Dashboard' },
+	'hub.activity.history': { de: 'History', en: 'History' },
+	'hub.activity.tasks': { de: 'Tasks', en: 'Tasks' },
+	'hub.activity.total_runs': { de: 'Runs gesamt', en: 'Total runs' },
+	'hub.activity.avg_speed': { de: 'Avg. Dauer', en: 'Avg. duration' },
+	'hub.activity.cost_chart': { de: 'Kosten (14 Tage)', en: 'Cost (14 days)' },
+	'hub.activity.by_model': { de: 'Nach Modell', en: 'By model' },
+	'hub.activity.open_tasks': { de: 'Offene Aufgaben', en: 'Open tasks' },
+	'hub.activity.scheduled': { de: 'Geplante Jobs', en: 'Scheduled jobs' },
+	'hub.activity.view_all': { de: 'Alle anzeigen', en: 'View all' },
 
 	// Knowledge Graph
 	'kg.title': { de: 'Knowledge Graph', en: 'Knowledge Graph' },
