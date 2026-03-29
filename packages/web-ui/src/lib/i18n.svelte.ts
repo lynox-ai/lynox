@@ -395,6 +395,8 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// History
 	'history.title': { de: 'Run History', en: 'Run History' },
+	'history.archived': { de: 'Archiviert', en: 'Archived' },
+	'history.ungrouped': { de: 'Einzelne Runs', en: 'Ungrouped runs' },
 	'history.runs': { de: 'Runs', en: 'Runs' },
 	'history.total': { de: 'Total', en: 'Total' },
 	'history.no_runs': { de: 'Noch keine Runs. Starte einen Chat, um deinen ersten Run zu erstellen.', en: 'No runs yet. Start a chat to create your first run.' },

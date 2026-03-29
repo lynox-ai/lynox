@@ -697,11 +697,12 @@ export class RunHistory {
     return tc;
   }
 
-  getRecentRuns(limit = 20, offset = 0, filters?: { status?: string; model?: string; dateFrom?: string; dateTo?: string }): RunRecord[] {
+  getRecentRuns(limit = 20, offset = 0, filters?: { status?: string; model?: string; dateFrom?: string; dateTo?: string; sessionId?: string }): RunRecord[] {
     let sql = 'SELECT * FROM runs';
     const conditions: string[] = [];
     const params: unknown[] = [];
 
+    if (filters?.sessionId) { conditions.push('session_id = ?'); params.push(filters.sessionId); }
     if (filters?.status) { conditions.push('status = ?'); params.push(filters.status); }
     if (filters?.model) { conditions.push('model_id = ?'); params.push(filters.model); }
     if (filters?.dateFrom) { conditions.push('created_at >= ?'); params.push(filters.dateFrom); }

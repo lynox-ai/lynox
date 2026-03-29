@@ -686,15 +686,17 @@ export class LynoxHTTPApi {
         const runs = history.searchRuns(q, limit, offset);
         jsonResponse(res, 200, { runs });
       } else {
-        const filters: { status?: string; model?: string; dateFrom?: string; dateTo?: string } = {};
+        const filters: { status?: string; model?: string; dateFrom?: string; dateTo?: string; sessionId?: string } = {};
         const status = url.searchParams.get('status');
         const model = url.searchParams.get('model');
         const dateFrom = url.searchParams.get('dateFrom');
         const dateTo = url.searchParams.get('dateTo');
+        const sessionId = url.searchParams.get('sessionId') ?? url.searchParams.get('thread_id');
         if (status) filters.status = status;
         if (model) filters.model = model;
         if (dateFrom) filters.dateFrom = dateFrom;
         if (dateTo) filters.dateTo = dateTo;
+        if (sessionId) filters.sessionId = sessionId;
         const runs = history.getRecentRuns(limit, offset, Object.keys(filters).length > 0 ? filters : undefined);
         jsonResponse(res, 200, { runs });
       }

@@ -5,6 +5,7 @@
 
 	interface RunRecord {
 		id: string;
+		session_id: string;
 		task_text: string;
 		response_text: string;
 		status: string;
@@ -21,6 +22,13 @@
 		spawn_depth?: number;
 		batch_parent_id?: string;
 		spawn_parent_id?: string;
+	}
+
+	interface ThreadInfo {
+		id: string;
+		title: string;
+		is_archived: number;
+		updated_at: string;
 	}
 
 	interface ToolCall {
@@ -77,12 +85,54 @@
 	let filterDateFrom = $state('');
 	let filterDateTo = $state('');
 
+	// Threads (for grouping)
+	let threads = $state<ThreadInfo[]>([]);
+	let expandedThreads = $state<Set<string>>(new Set());
+
 	// Cost chart
 	let costData = $state<CostDay[]>([]);
 	let showCostChart = $state(false);
 
 	// Available models for filter (derived from stats)
 	let availableModels = $derived(stats?.cost_by_model?.map((m) => m.model_id) ?? []);
+
+	// Group runs by thread
+	interface ThreadGroup {
+		threadId: string;
+		title: string;
+		isArchived: boolean;
+		runs: RunRecord[];
+		totalCost: number;
+		lastActivity: string;
+	}
+
+	const groupedRuns = $derived.by(() => {
+		if (searchQuery.trim()) return null; // flat list during search
+		const threadMap = new Map<string, ThreadInfo>();
+		for (const th of threads) threadMap.set(th.id, th);
+
+		const groups = new Map<string, RunRecord[]>();
+		for (const run of runs) {
+			const key = run.session_id || '_orphan';
+			const arr = groups.get(key);
+			if (arr) arr.push(run);
+			else groups.set(key, [run]);
+		}
+
+		const result: ThreadGroup[] = [];
+		for (const [threadId, threadRuns] of groups) {
+			const th = threadMap.get(threadId);
+			result.push({
+				threadId,
+				title: th?.title || (threadId === '_orphan' ? t('history.ungrouped') : threadRuns[0]?.task_text?.slice(0, 50) || threadId.slice(0, 8)),
+				isArchived: (th?.is_archived ?? 0) === 1,
+				runs: threadRuns,
+				totalCost: threadRuns.reduce((s, r) => s + r.cost_usd, 0),
+				lastActivity: threadRuns[0]?.created_at ?? '',
+			});
+		}
+		return result;
+	});
 
 	function buildQueryParams(offset = 0): string {
 		const params = new URLSearchParams();
@@ -102,15 +152,20 @@
 		loading = true;
 		error = '';
 		try {
-			const [runsRes, statsRes] = await Promise.all([
+			const [runsRes, statsRes, threadsRes] = await Promise.all([
 				fetch(`${getApiBase()}/history/runs?${buildQueryParams()}`),
-				fetch(`${getApiBase()}/history/stats`)
+				fetch(`${getApiBase()}/history/stats`),
+				fetch(`${getApiBase()}/threads?limit=200&includeArchived=true`),
 			]);
 			if (!runsRes.ok) throw new Error();
 			const runsData = (await runsRes.json()) as { runs: RunRecord[] };
 			runs = runsData.runs;
 			hasMore = runsData.runs.length >= PAGE_SIZE;
 			stats = (await statsRes.json()) as typeof stats;
+			if (threadsRes.ok) {
+				const td = (await threadsRes.json()) as { threads: ThreadInfo[] };
+				threads = td.threads;
+			}
 		} catch {
 			error = t('common.load_failed');
 		}
@@ -366,16 +421,84 @@
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else if runs.length === 0}
 		<p class="text-text-subtle text-sm">{t('history.no_runs')}</p>
-	{:else}
-		<div class="space-y-2">
-			{#each runs as run, _i}
-				<div id="run-{run.id}" class="flex gap-1.5">
-					{#if run.status === 'failed'}
-						<div class="w-[3px] shrink-0 rounded-full bg-danger"></div>
-					{/if}
-					<div
-						class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden transition-all"
+	{:else if groupedRuns}
+		<!-- Grouped by thread -->
+		<div class="space-y-3">
+			{#each groupedRuns as group (group.threadId)}
+				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
+					<!-- Thread header -->
+					<button
+						onclick={() => {
+							const next = new Set(expandedThreads);
+							if (next.has(group.threadId)) next.delete(group.threadId);
+							else next.add(group.threadId);
+							expandedThreads = next;
+						}}
+						class="w-full px-4 py-3 text-left hover:bg-bg-muted transition-colors flex items-center gap-3"
 					>
+						<span class="text-text-subtle text-xs shrink-0">{expandedThreads.has(group.threadId) ? '▾' : '▸'}</span>
+						<div class="flex-1 min-w-0">
+							<div class="flex items-center gap-2">
+								<span class="text-sm font-medium text-text truncate">{group.title}</span>
+								{#if group.isArchived}
+									<span class="text-[9px] uppercase tracking-widest text-text-subtle bg-bg-muted rounded px-1.5 py-0.5">{t('history.archived')}</span>
+								{/if}
+							</div>
+							<div class="flex gap-3 mt-0.5 text-xs text-text-muted">
+								<span>{group.runs.length} {group.runs.length === 1 ? 'Run' : 'Runs'}</span>
+								<span>${group.totalCost.toFixed(4)}</span>
+								<span>{formatDateTime(group.lastActivity)}</span>
+							</div>
+						</div>
+					</button>
+
+					<!-- Expanded runs -->
+					{#if expandedThreads.has(group.threadId)}
+						<div class="border-t border-border">
+							{#each group.runs as run}
+								{@render runItem(run)}
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/each}
+		</div>
+		{#if hasMore}
+			<button
+				onclick={loadMore}
+				disabled={loadingMore}
+				class="w-full rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-2.5 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50 mt-3"
+			>
+				{loadingMore ? t('common.loading') : t('history.load_more')}
+			</button>
+		{/if}
+	{:else}
+		<!-- Flat list (search mode) -->
+		<div class="space-y-2">
+			{#each runs as run}
+				{@render runItem(run)}
+			{/each}
+			{#if hasMore}
+				<button
+					onclick={loadMore}
+					disabled={loadingMore}
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-2.5 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50"
+				>
+					{loadingMore ? t('common.loading') : t('history.load_more')}
+				</button>
+			{/if}
+		</div>
+	{/if}
+</div>
+
+{#snippet runItem(run: RunRecord)}
+		<div id="run-{run.id}" class="flex gap-1.5">
+			{#if run.status === 'failed'}
+				<div class="w-[3px] shrink-0 rounded-full bg-danger"></div>
+			{/if}
+			<div
+				class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden transition-all"
+			>
 					<button
 						onclick={() => toggleRun(run.id)}
 						class="w-full p-3 text-left hover:bg-bg-muted transition-colors"
@@ -514,16 +637,4 @@
 					{/if}
 					</div>
 				</div>
-			{/each}
-			{#if hasMore}
-				<button
-					onclick={loadMore}
-					disabled={loadingMore}
-					class="w-full rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-2.5 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50"
-				>
-					{loadingMore ? t('common.loading') : t('history.load_more')}
-				</button>
-			{/if}
-		</div>
-	{/if}
-</div>
+{/snippet}
