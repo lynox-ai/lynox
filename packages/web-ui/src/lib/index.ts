@@ -4,8 +4,6 @@ export { default as AppShell } from './components/AppShell.svelte';
 export { default as StatusBar } from './components/StatusBar.svelte';
 export { default as ContextPanel } from './components/ContextPanel.svelte';
 export { default as CommandPalette } from './components/CommandPalette.svelte';
-/** @deprecated Use AppShell instead */
-export { default as AppLayout } from './components/AppLayout.svelte';
 export { default as MemoryView } from './components/MemoryView.svelte';
 export { default as HistoryView } from './components/HistoryView.svelte';
 export { default as SettingsIndex } from './components/SettingsIndex.svelte';

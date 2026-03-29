@@ -1,5 +1,5 @@
 /**
- * Config-related CLI commands: /config, /status, /hooks, /approvals
+ * Config-related CLI commands: /config, /status
  */
 
 import { createRequire } from 'node:module';
@@ -199,71 +199,6 @@ export async function handleStatus(_parts: string[], session: Session, ctx: CLIC
   const u = session.usage;
   if (u.input_tokens > 0 || u.output_tokens > 0) {
     ctx.stdout.write(`\n  ${DIM}Session:${RESET}    ${u.input_tokens.toLocaleString()} in / ${u.output_tokens.toLocaleString()} out (${state.turnCount} turns)\n`);
-  }
-  return true;
-}
-
-export async function handleHooks(_parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
-  const pm = session.getPluginManager();
-  const loadedPlugins = pm ? pm.getLoadedPluginNames() : [];
-  ctx.stdout.write(`${BOLD}Hooks${RESET}\n`);
-  if (loadedPlugins.length === 0) {
-    ctx.stdout.write(`  ${DIM}No plugins with hooks loaded.${RESET}\n`);
-  } else {
-    ctx.stdout.write(`  ${DIM}Plugin hooks from:${RESET}\n`);
-    for (const name of loadedPlugins) {
-      ctx.stdout.write(`    ${BLUE}${name}${RESET}\n`);
-    }
-  }
-  return true;
-}
-
-export async function handleApprovals(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
-  const sub = parts[1];
-  const history = session.getRunHistory();
-
-  if (!history) {
-    ctx.stdout.write(`${DIM}No run history available.${RESET}\n`);
-    return true;
-  }
-
-  const sets = history.getPreApprovalSets(20);
-  if (sets.length === 0) {
-    ctx.stdout.write(`${DIM}No pre-approval sets recorded.${RESET}\n`);
-    return true;
-  }
-
-  if (sub === 'audit' || sub === 'show') {
-    // Show detailed audit for the most recent set
-    const set = sets[0]!;
-    const summary = history.getPreApprovalSummary(set.id);
-    const events = history.getPreApprovalEvents(set.id);
-    ctx.stdout.write(`${BOLD}Pre-Approval Audit${RESET}  ${DIM}${set.id.slice(0, 8)}${RESET}\n`);
-    ctx.stdout.write(`  Task:     ${set.task_summary}\n`);
-    ctx.stdout.write(`  Created:  ${set.created_at}\n`);
-    const patterns: unknown[] = JSON.parse(set.patterns_json) as unknown[];
-    ctx.stdout.write(`  Patterns: ${patterns.length}\n`);
-    if (summary) {
-      ctx.stdout.write(`  Matches:  ${GREEN}${summary.total_matches}${RESET}  Exhausted: ${YELLOW}${summary.total_exhausted}${RESET}  Expired: ${DIM}${summary.total_expired}${RESET}\n`);
-    }
-    if (events.length > 0) {
-      ctx.stdout.write(`\n${BOLD}Recent Events${RESET}\n`);
-      for (const e of events.slice(0, 20)) {
-        const color = e.decision === 'approved' ? GREEN : e.decision === 'exhausted' ? YELLOW : DIM;
-        ctx.stdout.write(`  ${color}${e.decision}${RESET}  ${e.tool_name}  ${DIM}${e.pattern}${RESET}\n`);
-      }
-    }
-  } else if (sub === 'export') {
-    const data = JSON.stringify(sets, null, 2);
-    ctx.stdout.write(`${data}\n`);
-  } else {
-    // Default: list sets
-    ctx.stdout.write(`${BOLD}Pre-Approval Sets${RESET}  ${DIM}(${sets.length})${RESET}\n`);
-    for (const s of sets) {
-      const summary = history.getPreApprovalSummary(s.id);
-      const matches = summary?.total_matches ?? 0;
-      ctx.stdout.write(`  ${DIM}${s.id.slice(0, 8)}${RESET}  ${s.task_summary.slice(0, 40)}  ${GREEN}${matches} matches${RESET}  ${DIM}${s.created_at}${RESET}\n`);
-    }
   }
   return true;
 }

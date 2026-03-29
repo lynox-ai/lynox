@@ -14,14 +14,6 @@ export function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function getErrorMessageWithCause(err: unknown): string {
-  const msg = getErrorMessage(err);
-  if (err instanceof Error && err.cause instanceof Error) {
-    return `${msg} (caused by: ${err.cause.message})`;
-  }
-  return msg;
-}
-
 export function logErrorChain(context: string, err: unknown): void {
   if (!process.env['LYNOX_DEBUG']) return;
   const parts = [context];
