@@ -79,6 +79,7 @@ export class Session {
   private _briefingConsumed = false;
   private currentRunId: string | null = null;
   private runToolCallSeq = 0;
+  private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
   private _changesetManager: ChangesetManager | null = null;
@@ -135,6 +136,7 @@ export class Session {
         runHistory,
         () => this.currentRunId,
         () => this.runToolCallSeq++,
+        (ms: number) => { this._userWaitMs += ms; },
       );
     }
 
@@ -258,6 +260,7 @@ export class Session {
     const model = MODEL_MAP[this._model];
     const startTime = Date.now();
     this.runToolCallSeq = 0;
+    this._userWaitMs = 0;
     this._runToolNames.clear();
     this._retrievedMemoryIds = [];
 
@@ -343,6 +346,7 @@ export class Session {
             costUsd,
             toolCallCount: this.runToolCallSeq,
             durationMs,
+            userWaitMs: this._userWaitMs,
             stopReason: 'end_turn',
             status: 'completed',
           });
@@ -421,6 +425,7 @@ export class Session {
           runHistory.updateRun(this.currentRunId, {
             responseText: getErrorMessage(err),
             durationMs: Date.now() - startTime,
+            userWaitMs: this._userWaitMs,
             status: 'failed',
           });
         } catch {

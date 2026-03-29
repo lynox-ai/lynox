@@ -611,8 +611,23 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const q = url.searchParams.get('q');
       const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
-      const runs = q ? history.searchRuns(q, limit) : history.getRecentRuns(limit);
-      jsonResponse(res, 200, { runs });
+      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
+      if (q) {
+        const runs = history.searchRuns(q, limit, offset);
+        jsonResponse(res, 200, { runs });
+      } else {
+        const filters: { status?: string; model?: string; dateFrom?: string; dateTo?: string } = {};
+        const status = url.searchParams.get('status');
+        const model = url.searchParams.get('model');
+        const dateFrom = url.searchParams.get('dateFrom');
+        const dateTo = url.searchParams.get('dateTo');
+        if (status) filters.status = status;
+        if (model) filters.model = model;
+        if (dateFrom) filters.dateFrom = dateFrom;
+        if (dateTo) filters.dateTo = dateTo;
+        const runs = history.getRecentRuns(limit, offset, Object.keys(filters).length > 0 ? filters : undefined);
+        jsonResponse(res, 200, { runs });
+      }
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/history/runs/:id', async (_req, res, params) => {

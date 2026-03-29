@@ -68,12 +68,17 @@ export function setupHistorySubscriptions(
   history: RunHistory,
   getCurrentRunId: () => string | null,
   getAndIncrementSeq: () => number,
+  addUserWaitMs?: (ms: number) => void,
 ): void {
   // tool:end → fire-and-forget tool call recording
   channels.toolEnd.subscribe((msg: unknown) => {
     const runId = getCurrentRunId();
     if (!runId) return;
     const data = msg as { name: string; duration: number; success: boolean; error?: string | undefined; input?: string | undefined };
+    // Track user wait time from interactive tools
+    if (data.name === 'ask_user' && addUserWaitMs) {
+      addUserWaitMs(Math.round(data.duration));
+    }
     try {
       history.insertToolCall({
         runId,

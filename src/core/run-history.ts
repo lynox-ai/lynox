@@ -32,6 +32,7 @@ export interface RunRecord {
   cost_usd: number;
   tool_call_count: number;
   duration_ms: number;
+  user_wait_ms: number;
   stop_reason: string;
   status: 'running' | 'completed' | 'failed';
   run_type: 'single' | 'batch_parent' | 'batch_item';
@@ -471,6 +472,10 @@ const MIGRATIONS: string[] = [
    ALTER TABLE tasks ADD COLUMN pipeline_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run_at);
    CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);`,
+
+  // v21: User wait time tracking — separate AI processing time from user interaction wait
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (21);
+   ALTER TABLE runs ADD COLUMN user_wait_ms INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export class RunHistory {
@@ -595,6 +600,7 @@ export class RunHistory {
     costUsd?: number | undefined;
     toolCallCount?: number | undefined;
     durationMs?: number | undefined;
+    userWaitMs?: number | undefined;
     stopReason?: string | undefined;
     status?: 'running' | 'completed' | 'failed' | undefined;
   }): void {
@@ -609,6 +615,7 @@ export class RunHistory {
     if (params.costUsd !== undefined) { sets.push('cost_usd = ?'); values.push(params.costUsd); }
     if (params.toolCallCount !== undefined) { sets.push('tool_call_count = ?'); values.push(params.toolCallCount); }
     if (params.durationMs !== undefined) { sets.push('duration_ms = ?'); values.push(params.durationMs); }
+    if (params.userWaitMs !== undefined) { sets.push('user_wait_ms = ?'); values.push(params.userWaitMs); }
     if (params.stopReason !== undefined) { sets.push('stop_reason = ?'); values.push(params.stopReason); }
     if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
 
@@ -660,24 +667,38 @@ export class RunHistory {
     return tc;
   }
 
-  getRecentRuns(limit = 20): RunRecord[] {
-    const rows = this.db.prepare(
-      'SELECT * FROM runs ORDER BY created_at DESC LIMIT ?'
-    ).all(limit) as RunRecord[];
+  getRecentRuns(limit = 20, offset = 0, filters?: { status?: string; model?: string; dateFrom?: string; dateTo?: string }): RunRecord[] {
+    let sql = 'SELECT * FROM runs';
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (filters?.status) { conditions.push('status = ?'); params.push(filters.status); }
+    if (filters?.model) { conditions.push('model_id = ?'); params.push(filters.model); }
+    if (filters?.dateFrom) { conditions.push('created_at >= ?'); params.push(filters.dateFrom); }
+    if (filters?.dateTo) { conditions.push("created_at < datetime(?, '+1 day')"); params.push(filters.dateTo); }
+
+    if (conditions.length > 0) sql += ' WHERE ' + conditions.join(' AND ');
+    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const rows = this.db.prepare(sql).all(...params) as RunRecord[];
     return rows.map(r => this._decRun(r));
   }
 
-  searchRuns(query: string, limit = 20): RunRecord[] {
+  searchRuns(query: string, limit = 20, offset = 0): RunRecord[] {
     // Search works on plaintext rows via LIKE; encrypted rows checked post-decrypt
+    // Over-fetch to account for post-decrypt filtering, skip first `offset` matches
     const rows = this.db.prepare(
       'SELECT * FROM runs ORDER BY created_at DESC LIMIT ?'
-    ).all(limit * 5) as RunRecord[]; // Over-fetch then filter
+    ).all((limit + offset) * 5) as RunRecord[];
     const results: RunRecord[] = [];
     const lowerQuery = query.toLowerCase();
+    let skipped = 0;
     for (const r of rows) {
       const decrypted = this._decRun(r);
       if (decrypted.task_text.toLowerCase().includes(lowerQuery) ||
           decrypted.response_text.toLowerCase().includes(lowerQuery)) {
+        if (skipped < offset) { skipped++; continue; }
         results.push(decrypted);
         if (results.length >= limit) break;
       }
