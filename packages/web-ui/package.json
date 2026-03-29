@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "dompurify": "^3.3.3",
+    "html2canvas": "^1.4.1",
     "marked": "^17.0.5",
     "mermaid": "^11.6.0",
     "shiki": "^4.0.2"
@@ -43,7 +44,7 @@
     "vite": "^6.3.5"
   },
   "peerDependencies": {
-    "svelte": "^5.0.0",
-    "@sveltejs/kit": "^2.0.0"
+    "@sveltejs/kit": "^2.0.0",
+    "svelte": "^5.0.0"
   }
 }

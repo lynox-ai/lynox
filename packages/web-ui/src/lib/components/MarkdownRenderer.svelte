@@ -94,6 +94,7 @@
 			<div class="artifact-toolbar">
 				<span class="artifact-label">${safeTitle}</span>
 				<button class="artifact-btn" data-action="save" title="Save">${ICON_SAVE}</button>
+				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CAMERA}</button>
 				<button class="artifact-btn" data-action="source" title="Source">${ICON_CODE}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn" data-action="export" title="Export HTML">${ICON_DOWNLOAD}</button>
@@ -109,6 +110,7 @@
 	const ICON_CODE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 4L2 8l3.5 4M10.5 4L14 8l-3.5 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_EXPAND = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
+	const ICON_CAMERA = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 5.5A1.5 1.5 0 013.5 4h1.17a1 1 0 00.83-.45l.67-1.1A1 1 0 017 2h2a1 1 0 01.83.45l.67 1.1a1 1 0 00.83.45h1.17A1.5 1.5 0 0114 5.5v6a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-6z" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8.5" r="2" stroke="currentColor" stroke-width="1.3"/></svg>`;
 
 	// ── Event delegation ─────────────────────────────────────
 
@@ -142,6 +144,7 @@
 			if (!container) return;
 
 			if (action === 'save') handleArtifactSave(container);
+			else if (action === 'screenshot') handleArtifactScreenshot(container);
 			else if (action === 'source') handleArtifactSource(container);
 			else if (action === 'expand') handleArtifactExpand(container);
 			else if (action === 'export') handleArtifactExport(container);
@@ -223,6 +226,37 @@
 		URL.revokeObjectURL(a.href);
 	}
 
+	async function handleArtifactScreenshot(container: HTMLElement) {
+		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
+		if (!iframe) return;
+		try {
+			const { default: html2canvas } = await import('html2canvas');
+			const iframeDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
+			if (!iframeDoc?.body) { addToast('Cannot capture sandboxed iframe', 'error'); return; }
+			const canvas = await html2canvas(iframeDoc.body, {
+				backgroundColor: '#0a0a1a',
+				scale: 2,
+				useCORS: true,
+			});
+			canvas.toBlob(blob => {
+				if (!blob) return;
+				// Copy to clipboard
+				navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
+					addToast('Screenshot copied', 'success');
+				}).catch(() => {
+					// Fallback: download
+					const a = document.createElement('a');
+					a.href = URL.createObjectURL(blob);
+					a.download = `artifact-${Date.now()}.png`;
+					a.click();
+					URL.revokeObjectURL(a.href);
+				});
+			}, 'image/png');
+		} catch {
+			addToast('Screenshot not available for sandboxed content', 'error');
+		}
+	}
+
 	function handleArtifactSave(container: HTMLElement) {
 		const encoded = container.dataset['html'] ?? '';
 		const html = decodeURIComponent(escape(atob(encoded)));
@@ -234,32 +268,28 @@
 	}
 
 	// ── Code block processing ────────────────────────────────
+	// Rich blocks (mermaid, artifact) are debounced to prevent iframe flashing
+	// during streaming. Once rendered, results are cached so subsequent updates
+	// reuse the stable HTML without recreating iframes.
 
-	$effect(() => {
-		const codeBlockRegex = /<pre><code class="language-(\w+)">([\s\S]*?)<\/code><\/pre>/g;
-		let html = baseHtml;
-		const matches = [...html.matchAll(codeBlockRegex)];
+	const richCache = new Map<string, string>();
 
-		if (matches.length === 0) {
-			highlightedHtml = html;
-			return;
-		}
-
-		Promise.all(
+	async function processBlocks(html: string, matches: RegExpMatchArray[]): Promise<string> {
+		const results = await Promise.all(
 			matches.map(async (match) => {
 				const lang = match[1] ?? 'text';
-				const code = decodeEntities(match[2] ?? '');
+				const raw = match[2] ?? '';
+				const code = decodeEntities(raw);
 
-				if (lang === 'mermaid') {
+				if (lang === 'mermaid' || lang === 'artifact') {
+					const cached = richCache.get(raw);
+					if (cached) return { original: match[0], result: cached };
+					// Uncached → show as syntax-highlighted code while waiting
 					try {
-						return { original: match[0], result: await renderMermaid(code) };
+						return { original: match[0], result: await codeToHtml(code, { lang: 'html', theme: 'github-dark' }) };
 					} catch {
 						return { original: match[0], result: match[0] };
 					}
-				}
-
-				if (lang === 'artifact') {
-					return { original: match[0], result: buildArtifact(code) };
 				}
 
 				try {
@@ -268,13 +298,51 @@
 					return { original: match[0], result: match[0] };
 				}
 			})
-		).then((results) => {
-			let result = html;
-			for (const { original, result: replacement } of results) {
-				if (original) result = result.replace(original, replacement);
-			}
+		);
+		let result = html;
+		for (const { original, result: replacement } of results) {
+			if (original) result = result.replace(original, replacement);
+		}
+		return result;
+	}
+
+	$effect(() => {
+		const html = baseHtml;
+		const codeBlockRegex = /<pre><code class="language-(\w+)">([\s\S]*?)<\/code><\/pre>/g;
+		const matches = [...html.matchAll(codeBlockRegex)];
+
+		if (matches.length === 0) {
+			highlightedHtml = html;
+			return;
+		}
+
+		// Immediate render — uses cached rich blocks or falls back to shiki
+		processBlocks(html, matches).then(result => {
 			highlightedHtml = result;
 		});
+
+		// Debounce uncached rich blocks (prevents iframe flash during streaming)
+		const uncached = matches.filter(m =>
+			(m[1] === 'mermaid' || m[1] === 'artifact') && !richCache.has(m[2] ?? '')
+		);
+		if (uncached.length === 0) return;
+
+		const timer = setTimeout(async () => {
+			for (const match of uncached) {
+				const lang = match[1] ?? 'text';
+				const raw = match[2] ?? '';
+				const code = decodeEntities(raw);
+				try {
+					if (lang === 'mermaid') richCache.set(raw, await renderMermaid(code));
+					else richCache.set(raw, buildArtifact(code));
+				} catch { /* keep shiki fallback */ }
+			}
+			if (baseHtml === html) {
+				highlightedHtml = await processBlocks(html, matches);
+			}
+		}, 400);
+
+		return () => clearTimeout(timer);
 	});
 </script>
 
