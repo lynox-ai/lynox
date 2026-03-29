@@ -122,60 +122,79 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       );
     }
 
-    // 4. Create memory node
-    const memoryId = this.db.createMemory({
-      text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
-      sourceRunId: options?.sourceRunId, provider: this.embeddingProvider.name, embedding,
+    // 4+5. Create memory + supersede contradicted (atomic transaction)
+    const memoryId = this.db.transaction(() => {
+      const id = this.db.createMemory({
+        text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
+        sourceRunId: options?.sourceRunId, provider: this.embeddingProvider.name, embedding,
+      });
+      for (const c of contradictions) {
+        if (c.resolution === 'superseded') {
+          this.db.supersedMemory(c.existingMemoryId, id);
+          this.db.createSupersedes(id, c.existingMemoryId, 'contradiction');
+        }
+      }
+      return id;
     });
 
-    // 5. Mark contradicted memories as superseded
-    for (const c of contradictions) {
-      if (c.resolution === 'superseded') {
-        this.db.supersedMemory(c.existingMemoryId, memoryId);
-        this.db.createSupersedes(memoryId, c.existingMemoryId, 'contradiction');
-      }
-    }
-
-    // 6. Extract entities and relations
+    // 6. Extract entities and relations (async LLM call — outside transaction)
     const extraction = await extractEntities(trimmedText, namespace, this.anthropicClient);
 
-    // 7. Resolve entities and create graph nodes
-    const resolvedEntities: EntityRecord[] = [];
-    const entityIdMap = new Map<string, string>();
+    // 7+8+9. Resolve entities, create mentions/relations/cooccurrences (atomic transaction)
+    const { resolvedEntities, resolvedRelations } = this.db.transaction(() => {
+      const entities: EntityRecord[] = [];
+      const entityIdMap = new Map<string, string>();
 
-    for (const ext of extraction.entities) {
-      const entity = await this.entityResolver.resolve(
-        ext.name, ext.type, [scope], { createIfMissing: true },
-      );
-      if (entity) {
-        resolvedEntities.push(entity);
-        entityIdMap.set(ext.name.toLowerCase(), entity.id);
-        this.db.createMention(memoryId, entity.id);
+      for (const ext of extraction.entities) {
+        // entityResolver.resolve is sync internally (all DB ops are sync)
+        const row = this.db.findEntityByCanonicalName(ext.name)
+          ?? this.db.findEntityByAlias(ext.name);
+        let entity: EntityRecord | null = null;
+        if (row) {
+          this.db.incrementEntityMentions(row.id);
+          entity = toEntityRecord(row);
+        } else {
+          const scopeRef = scope;
+          const id = this.db.createEntity({
+            canonicalName: ext.name, entityType: ext.type,
+            aliases: [ext.name], scopeType: scopeRef.type, scopeId: scopeRef.id,
+          });
+          entity = {
+            id, canonicalName: ext.name, entityType: ext.type, aliases: [ext.name],
+            description: '', scopeType: scopeRef.type, scopeId: scopeRef.id,
+            mentionCount: 1, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+          };
+        }
+        if (entity) {
+          entities.push(entity);
+          entityIdMap.set(ext.name.toLowerCase(), entity.id);
+          this.db.createMention(memoryId, entity.id);
+        }
       }
-    }
 
-    // 8. Create entity-entity relations from extraction
-    const resolvedRelations: RelationRecord[] = [];
-    for (const rel of extraction.relations) {
-      const fromId = entityIdMap.get(rel.from.toLowerCase());
-      const toId = entityIdMap.get(rel.to.toLowerCase());
-      if (fromId && toId && fromId !== toId) {
-        this.db.createRelation(fromId, toId, rel.relationType, rel.description, memoryId);
-        resolvedRelations.push({
-          fromEntityId: fromId, toEntityId: toId,
-          relationType: rel.relationType, description: rel.description,
-          confidence: 1.0, sourceMemoryId: memoryId, createdAt: new Date().toISOString(),
-        });
+      const relations: RelationRecord[] = [];
+      for (const rel of extraction.relations) {
+        const fromId = entityIdMap.get(rel.from.toLowerCase());
+        const toId = entityIdMap.get(rel.to.toLowerCase());
+        if (fromId && toId && fromId !== toId) {
+          this.db.createRelation(fromId, toId, rel.relationType, rel.description, memoryId);
+          relations.push({
+            fromEntityId: fromId, toEntityId: toId,
+            relationType: rel.relationType, description: rel.description,
+            confidence: 1.0, sourceMemoryId: memoryId, createdAt: new Date().toISOString(),
+          });
+        }
       }
-    }
 
-    // 9. Update co-occurrences
-    const entityIds = [...entityIdMap.values()];
-    for (let i = 0; i < entityIds.length; i++) {
-      for (let j = i + 1; j < entityIds.length; j++) {
-        this.db.updateCooccurrence(entityIds[i]!, entityIds[j]!);
+      const eIds = [...entityIdMap.values()];
+      for (let i = 0; i < eIds.length; i++) {
+        for (let j = i + 1; j < eIds.length; j++) {
+          this.db.updateCooccurrence(eIds[i]!, eIds[j]!);
+        }
       }
-    }
+
+      return { resolvedEntities: entities, resolvedRelations: relations };
+    });
 
     // 10. Publish event
     if (channels.knowledgeGraph.hasSubscribers) {

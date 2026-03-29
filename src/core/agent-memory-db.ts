@@ -536,7 +536,15 @@ export class AgentMemoryDb {
     }
 
     const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    const rows = this.db.prepare(`SELECT * FROM memories ${whereClause}`).all(...params) as MemoryRow[];
+    // Cap SQL results to prevent loading unbounded rows into JS for brute-force cosine.
+    // 500 candidates is 3-10x typical topK, leaving room for threshold filtering.
+    const sqlLimit = Math.min(Math.max(topK * 10, 100), 500);
+    clauses.length > 0
+      ? params.push(sqlLimit)
+      : params.push(sqlLimit);
+    const rows = this.db.prepare(
+      `SELECT * FROM memories ${whereClause} ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params) as MemoryRow[];
 
     const dim = this._embeddingDimensions ?? (embedding.length || 384);
     const scored: ScoredMemoryRow[] = [];
