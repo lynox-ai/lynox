@@ -6,7 +6,7 @@
 import type { ModelTier } from '../types/index.js';
 import { BOLD, DIM, BLUE, RESET } from './ui.js';
 
-export const VALID_NAMESPACES = new Set(['knowledge', 'methods', 'project-state', 'learnings']);
+export const VALID_NAMESPACES = new Set(['knowledge', 'methods', 'status', 'learnings']);
 
 export const COMMANDS = [
   '/clear', '/reset', '/compact',

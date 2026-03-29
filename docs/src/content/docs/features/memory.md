@@ -24,12 +24,12 @@ Knowledge is stored as plain text files, scoped by context:
   <contextId>/          # SHA-256 hash of project root (CLI) or explicit ID
     knowledge.txt       # knowledge namespace
     methods.txt         # methods namespace
-    project-state.txt   # project-state namespace
+    status.txt   # status namespace
     learnings.txt       # learnings namespace
   global/               # Fallback when no contextId
     knowledge.txt
     methods.txt
-    project-state.txt
+    status.txt
     learnings.txt
   user-<userId>/        # User-specific preferences (when LYNOX_USER set)
     knowledge.txt
@@ -59,7 +59,7 @@ Knowledge is organized into 4 namespaces:
 |-----------|---------|----------|
 | `knowledge` | Key facts, user preferences | "User prefers TypeScript", "Project uses ESM" |
 | `methods` | Patterns and techniques | "Use Promise.allSettled for parallel ops" |
-| `project-state` | Ongoing project state | "Currently refactoring auth module" |
+| `status` | Ongoing project state | "Currently refactoring auth module" |
 | `learnings` | Mistakes and lessons | "Avoid using any -- use unknown instead" |
 
 ## Auto-Extraction
@@ -142,7 +142,7 @@ User query
   ├─ 3. Scoring: (vector + graph + episodic) × scope × decay × confidence
   │     Confidence multiplier: confirmed memories score higher
   │     Confidence decay: unconfirmed memories lose score over time
-  │     knowledge: 365d half-life, project-state: 21d half-life
+  │     knowledge: 365d half-life, status: 21d half-life
   │
   ├─ 4. MMR re-ranking (λ=0.7 relevance, 0.3 diversity)
   │

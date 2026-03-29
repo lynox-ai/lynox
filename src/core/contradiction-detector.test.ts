@@ -44,10 +44,10 @@ describe('detectContradictions', () => {
     expect(db.findSimilarMemories).not.toHaveBeenCalled();
   });
 
-  it('skips project-state namespace', async () => {
+  it('skips status namespace', async () => {
     const db = createMockDb([]);
     const result = await detectContradictions(
-      'Project is active', 'project-state', { type: 'context', id: 'test' }, db, mockProvider,
+      'Project is active', 'status', { type: 'context', id: 'test' }, db, mockProvider,
     );
     expect(result).toHaveLength(0);
   });

@@ -203,8 +203,8 @@ describe('Memory', () => {
 
     it('updates cache after update', async () => {
       const mem = new Memory(dir);
-      await mem.save('project-state', 'status: pending');
-      await mem.update('project-state', 'pending', 'complete');
+      await mem.save('status', 'status: pending');
+      await mem.update('status', 'pending', 'complete');
       const rendered = mem.render();
       expect(rendered).toContain('status: complete');
       expect(rendered).not.toContain('pending');
@@ -262,7 +262,7 @@ describe('Memory', () => {
     it('preloads all namespaces into cache', async () => {
       const mem = new Memory(dir);
       await mem.save('knowledge', 'f');
-      await mem.save('project-state', 'c');
+      await mem.save('status', 'c');
 
       // Create fresh instance to clear cache
       const mem2 = new Memory(dir);
@@ -270,7 +270,7 @@ describe('Memory', () => {
 
       const rendered = mem2.render();
       expect(rendered).toContain('[knowledge]');
-      expect(rendered).toContain('[project-state]');
+      expect(rendered).toContain('[status]');
     });
   });
 
@@ -570,7 +570,7 @@ describe('Memory', () => {
       mem.setActiveScopes([globalScope, projectScope, userScope]);
 
       mockCreate.mockResolvedValue({
-        content: [{ type: 'text', text: '{"project-state": "Working on auth module."}' }],
+        content: [{ type: 'text', text: '{"status": "Working on auth module."}' }],
       });
 
       const classification: ScopeClassification = {
@@ -583,7 +583,7 @@ describe('Memory', () => {
       await mem.maybeUpdate(LONG_ANSWER);
 
       expect(mockPublish).toHaveBeenCalledWith({
-        namespace: 'project-state',
+        namespace: 'status',
         content: 'Working on auth module.',
         scopeType: 'context',
         scopeId: 'proj1',
@@ -754,10 +754,10 @@ describe('Memory', () => {
       const mem = new Memory(dir, undefined, undefined, 'proj1');
 
       // Save via project-scoped save()
-      await mem.save('project-state', 'project context');
+      await mem.save('status', 'project context');
 
       // loadScoped with matching project scope should hit the same cache
-      const scoped = await mem.loadScoped('project-state', { type: 'context', id: 'proj1' });
+      const scoped = await mem.loadScoped('status', { type: 'context', id: 'proj1' });
       expect(scoped).toBe('project context');
     });
 

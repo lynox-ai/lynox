@@ -2,7 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 
-	const namespaces = ['knowledge', 'methods', 'project-state', 'learnings'] as const;
+	const namespaces = ['knowledge', 'methods', 'status', 'learnings'] as const;
 	let selectedNs = $state<(typeof namespaces)[number]>('knowledge');
 	let content = $state<string | null>(null);
 	let loading = $state(false);
@@ -108,7 +108,7 @@
 						? 'bg-accent/10 text-accent-text border border-accent/30'
 						: 'text-text-muted hover:text-text border border-transparent'}"
 				>
-					{ns === 'project-state' ? 'status' : ns}
+					{ns}
 				</button>
 			{/each}
 		</div>

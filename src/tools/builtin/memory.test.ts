@@ -158,7 +158,7 @@ describe('memoryRecallTool', () => {
 
   it('returns "not configured" when memory is null', async () => {
     const agent = makeAgent(null);
-    const result = await memoryRecallTool.handler({ namespace: 'project-state' }, agent);
+    const result = await memoryRecallTool.handler({ namespace: 'status' }, agent);
     expect(result).toBe('Memory is not configured for this agent.');
   });
 });
@@ -321,11 +321,11 @@ describe('memoryUpdateTool', () => {
     const agent = makeAgent(makeMockMemory({ update: updateFn }));
 
     const result = await memoryUpdateTool.handler(
-      { namespace: 'project-state', old_content: 'old val', new_content: 'new val' },
+      { namespace: 'status', old_content: 'old val', new_content: 'new val' },
       agent,
     );
-    expect(result).toBe('Updated content in project-state namespace.');
-    expect(updateFn).toHaveBeenCalledWith('project-state', 'old val', 'new val');
+    expect(result).toBe('Updated content in status namespace.');
+    expect(updateFn).toHaveBeenCalledWith('status', 'old val', 'new val');
   });
 
   it('returns failure message when update returns false', async () => {
@@ -401,8 +401,8 @@ describe('memoryListTool', () => {
   it('filters by scope', async () => {
     const loadScoped = vi.fn()
       .mockImplementation((ns: string, scope: { type: string }) => {
-        if (scope.type === 'user' && ns === 'project-state') return Promise.resolve('User context');
-        if (scope.type === 'global' && ns === 'project-state') return Promise.resolve('Global context');
+        if (scope.type === 'user' && ns === 'status') return Promise.resolve('User context');
+        if (scope.type === 'global' && ns === 'status') return Promise.resolve('Global context');
         return Promise.resolve(null);
       });
     const agent: IAgent = {

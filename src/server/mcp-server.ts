@@ -68,7 +68,7 @@ import { Engine } from '../core/engine.js';
 import { SessionStore } from '../core/session-store.js';
 import { MAX_BUFFER_BYTES } from '../core/constants.js';
 
-const VALID_NAMESPACES = new Set<MemoryNamespace>(['knowledge', 'methods', 'project-state', 'learnings']);
+const VALID_NAMESPACES = new Set<MemoryNamespace>(['knowledge', 'methods', 'status', 'learnings']);
 const TEMP_BASE = '/tmp/lynox-files';
 const MAX_READ_SIZE = MAX_BUFFER_BYTES;
 const MAX_ATTACHMENT_SIZE = MAX_BUFFER_BYTES;
@@ -515,7 +515,7 @@ export class LynoxMCPServer {
       {
         description: 'Read LYNOX agent memory by namespace',
         inputSchema: {
-          namespace: z.enum(['knowledge', 'methods', 'project-state', 'learnings']),
+          namespace: z.enum(['knowledge', 'methods', 'status', 'learnings']),
         },
       },
       async ({ namespace }) => {

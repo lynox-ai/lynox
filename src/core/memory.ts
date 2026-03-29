@@ -35,7 +35,7 @@ Rules:
 Namespaces:
 - knowledge: Key preferences, decisions, constraints (NOT names, greetings, or obvious details)
 - methods: Techniques or patterns that worked well and should be reused
-- project-state: Active project goals or state changes (NOT session-specific ephemeral updates)
+- status: Active project goals or state changes (NOT session-specific ephemeral updates)
 - learnings: Mistakes to avoid, anti-patterns discovered
 
 Respond with a JSON object. Keys = namespace names, values = strings. Return {} if nothing novel is worth remembering.
@@ -263,26 +263,26 @@ export class Memory implements IMemory {
         }
       };
 
-      // Prune default scope project-state
+      // Prune default scope status
       const defaultScope = this._defaultScope();
       await pruneFile(
-        this._scopeFilePath('project-state', defaultScope),
-        this._cacheKey(defaultScope.type, defaultScope.id, 'project-state'),
+        this._scopeFilePath('status', defaultScope),
+        this._cacheKey(defaultScope.type, defaultScope.id, 'status'),
       );
 
-      // Prune global project-state (when project-scoped)
+      // Prune global status (when project-scoped)
       if (this.contextId) {
         await pruneFile(
-          this._scopeFilePath('project-state', GLOBAL_SCOPE),
-          this._cacheKey('global', 'global', 'project-state'),
+          this._scopeFilePath('status', GLOBAL_SCOPE),
+          this._cacheKey('global', 'global', 'status'),
         );
       }
 
-      // Prune additional scoped project-state
+      // Prune additional scoped status
       for (const scope of this._activeScopes) {
         await pruneFile(
-          this._scopeFilePath('project-state', scope),
-          this._cacheKey(scope.type, scope.id, 'project-state'),
+          this._scopeFilePath('status', scope),
+          this._cacheKey(scope.type, scope.id, 'status'),
         );
       }
     } catch {
@@ -303,7 +303,7 @@ export class Memory implements IMemory {
   async appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef): Promise<void> {
     const safeText = this.maskFn ? this.maskFn(text) : text;
     // Add date prefix for context entries to enable TTL
-    const entry = ns === 'project-state' && !safeText.startsWith('[20')
+    const entry = ns === 'status' && !safeText.startsWith('[20')
       ? `[${new Date().toISOString().slice(0, 10)}] ${safeText}`
       : safeText;
     const content = await this.loadScoped(ns, scope);

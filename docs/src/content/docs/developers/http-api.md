@@ -117,7 +117,7 @@ PATCH  /api/memory/:namespace          → { updated: boolean }   Body: { old, n
 DELETE /api/memory/:namespace?pattern=  → { deleted: number }
 ```
 
-Namespaces: `knowledge`, `methods`, `project-state`, `learnings`.
+Namespaces: `knowledge`, `methods`, `status`, `learnings`.
 
 ### Secrets
 

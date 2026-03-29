@@ -198,7 +198,7 @@ export async function runGraphGc(
     try {
       const stats = await knowledgeLayer.stats();
       if (stats.memoryCount > 10) {
-        for (const ns of ['knowledge', 'methods', 'learnings', 'project-state'] as const) {
+        for (const ns of ['knowledge', 'methods', 'learnings', 'status'] as const) {
           for (const scopeType of ['global', 'context', 'user'] as const) {
             knowledgeLayer.consolidateMemories(ns, scopeType, '*');
           }

@@ -320,7 +320,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'memory.no_entries_hint': { de: 'Fuege oben einen Eintrag hinzu, oder chatte mit lynox — Wissen wird automatisch gespeichert.', en: 'Add an entry above, or chat with lynox — knowledge is stored automatically.' },
 	'memory.ns.knowledge': { de: 'Fakten, Kontakte, Geschaeftswissen', en: 'Facts, contacts, business knowledge' },
 	'memory.ns.methods': { de: 'Bewaeaehrte Vorgehensweisen und Workflows', en: 'Proven approaches and workflows' },
-	'memory.ns.project-state': { de: 'Laufende Projekte und deren Status', en: 'Active projects and their status' },
+	'memory.ns.status': { de: 'Laufende Projekte und deren Status', en: 'Active projects and their status' },
 	'memory.ns.learnings': { de: 'Erkenntnisse und Praeferenzen', en: 'Insights and preferences' },
 	'memory.edit': { de: 'Bearbeiten', en: 'Edit' },
 	'memory.cancel': { de: 'Abbrechen', en: 'Cancel' },

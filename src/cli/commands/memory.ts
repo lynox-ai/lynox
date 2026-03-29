@@ -120,9 +120,9 @@ export async function handleScope(parts: string[], session: Session, ctx: CLICtx
       ctx.stdout.write(`${DIM}Memory not configured.${RESET}\n`);
     } else {
       const { inferScopeFromContext } = await import('../../core/scope-resolver.js');
-      const entries: Array<{ namespace: 'knowledge' | 'methods' | 'project-state' | 'learnings'; text: string; scope: import('../../types/index.js').MemoryScopeRef }> = [];
+      const entries: Array<{ namespace: 'knowledge' | 'methods' | 'status' | 'learnings'; text: string; scope: import('../../types/index.js').MemoryScopeRef }> = [];
       for (const s of scopes) {
-        for (const ns of ['knowledge', 'methods', 'project-state', 'learnings'] as const) {
+        for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
           const content = await mem.loadScoped(ns, s);
           if (content) {
             for (const line of content.split('\n').filter(l => l.trim().length > 10)) {
@@ -158,7 +158,7 @@ export async function handleScope(parts: string[], session: Session, ctx: CLICtx
         if (!mem) {
           ctx.stdout.write(`${DIM}Memory not configured.${RESET}\n`);
         } else {
-          const nss: Array<'knowledge' | 'methods' | 'project-state' | 'learnings'> = ['knowledge', 'methods', 'project-state', 'learnings'];
+          const nss: Array<'knowledge' | 'methods' | 'status' | 'learnings'> = ['knowledge', 'methods', 'status', 'learnings'];
           let hasAny = false;
           for (const ns of nss) {
             const content = await mem.loadScoped(ns, ref);
@@ -183,7 +183,7 @@ export async function handleScope(parts: string[], session: Session, ctx: CLICtx
       for (const s of scopes) {
         const scopeLabel = s.type === 'global' ? 'global' : `${s.type}:${s.id}`;
         let totalEntries = 0;
-        for (const ns of ['knowledge', 'methods', 'project-state', 'learnings'] as const) {
+        for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
           const content = await mem.loadScoped(ns, s);
           if (content) {
             totalEntries += content.split('\n').filter(l => l.trim().length > 0).length;
@@ -223,7 +223,7 @@ export async function handleScope(parts: string[], session: Session, ctx: CLICtx
           ctx.stdout.write(`${DIM}Memory not configured.${RESET}\n`);
         } else {
           let totalMigrated = 0;
-          for (const ns of ['knowledge', 'methods', 'project-state', 'learnings'] as const) {
+          for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
             const content = await mem.loadScoped(ns, fromRef);
             if (!content) continue;
             const lines = content.split('\n').filter(l => l.trim().length > 0);
@@ -288,7 +288,7 @@ export async function handleMemory(parts: string[], session: Session, ctx: CLICt
     const content = await mem.load(ns as MemoryNamespace);
     ctx.stdout.write(content ? `[${ns}]\n${content}\n` : `No content in ${ns}.\n`);
   } else if (ns) {
-    ctx.stdout.write(`Unknown subcommand: ${ns}. Use: cleanup, or a namespace (knowledge/methods/project-state/learnings). See also /knowledge and /scope.\n`);
+    ctx.stdout.write(`Unknown subcommand: ${ns}. Use: cleanup, or a namespace (knowledge/methods/status/learnings). See also /knowledge and /scope.\n`);
   } else {
     const rendered = mem.render();
     ctx.stdout.write(rendered ? `${rendered}\n` : 'Memory is empty.\n');

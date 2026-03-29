@@ -509,7 +509,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/memory/:ns', async (_req, res, params) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'project-state' | 'learnings';
+      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
       const content = await memory.load(ns);
       jsonResponse(res, 200, { content });
     }));
@@ -517,7 +517,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'project-state' | 'learnings';
+      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
       const content = body && typeof body === 'object' && 'content' in body ? String((body as Record<string, unknown>)['content']) : '';
       await memory.save(ns, content);
       jsonResponse(res, 200, { ok: true });
@@ -526,7 +526,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'project-state' | 'learnings';
+      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
       const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
       await memory.append(ns, text);
       jsonResponse(res, 200, { ok: true });
@@ -535,7 +535,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/memory/:ns', async (req, res, params) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'project-state' | 'learnings';
+      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const pattern = url.searchParams.get('pattern') ?? '';
       const deleted = await memory.delete(ns, pattern);
@@ -545,7 +545,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'project-state' | 'learnings';
+      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
       const b = body as Record<string, unknown> | null;
       const oldText = b && typeof b['old'] === 'string' ? b['old'] : '';
       const newText = b && typeof b['new'] === 'string' ? b['new'] : '';

@@ -76,7 +76,7 @@ Writes content to a file. Creates parent directories as needed. Resolves symlink
 | Property | Value |
 |----------|-------|
 | Source | `src/developers/tools/builtin/memory.ts` |
-| Input | `namespace` (knowledge/methods/project-state/learnings), `content` |
+| Input | `namespace` (knowledge/methods/status/learnings), `content` |
 | Eager streaming | Yes |
 
 Appends content to a knowledge namespace. Deduplicates -- skips if content already exists.

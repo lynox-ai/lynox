@@ -151,9 +151,9 @@ describe('shouldUseLLMExtraction', () => {
     expect(shouldUseLLMExtraction('Short text.', 'knowledge', [])).toBe(false);
   });
 
-  it('returns false for project-state namespace', () => {
+  it('returns false for status namespace', () => {
     const longText = 'A'.repeat(300);
-    expect(shouldUseLLMExtraction(longText, 'project-state', [])).toBe(false);
+    expect(shouldUseLLMExtraction(longText, 'status', [])).toBe(false);
   });
 
   it('returns true even when regex found entities (LLM merges with regex)', () => {

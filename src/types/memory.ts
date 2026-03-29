@@ -1,8 +1,8 @@
 // === 4.5 IMemory Interface ===
 
-export type MemoryNamespace = 'knowledge' | 'methods' | 'project-state' | 'learnings';
+export type MemoryNamespace = 'knowledge' | 'methods' | 'status' | 'learnings';
 
-export const ALL_NAMESPACES: readonly MemoryNamespace[] = ['knowledge', 'methods', 'project-state', 'learnings'];
+export const ALL_NAMESPACES: readonly MemoryNamespace[] = ['knowledge', 'methods', 'status', 'learnings'];
 
 // === Context ===
 
@@ -70,7 +70,7 @@ export const NAMESPACE_HALF_LIFE: Record<MemoryNamespace, number> = {
   'knowledge': 365,
   'methods': 180,
   'learnings': 120,
-  'project-state': 21,
+  'status': 21,
 };
 
 export interface EntityRecord {

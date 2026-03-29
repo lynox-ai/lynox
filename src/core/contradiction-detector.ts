@@ -20,7 +20,7 @@ const MAX_CANDIDATES = 10;
  * 3. Mark contradicted memories as superseded
  *
  * Only applies to factual namespaces (knowledge, learnings).
- * Methods and project-state are additive, not contradictory.
+ * Methods and status are additive, not contradictory.
  */
 export async function detectContradictions(
   newText: string,

@@ -51,8 +51,8 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
       properties: {
         namespace: {
           type: 'string',
-          enum: ['knowledge', 'methods', 'project-state', 'learnings'],
-          description: 'Category: knowledge (business facts), methods (techniques), project-state (current status), learnings (lessons learned)',
+          enum: ['knowledge', 'methods', 'status', 'learnings'],
+          description: 'Category: knowledge (business facts), methods (techniques), status (current status), learnings (lessons learned)',
         },
         content: { type: 'string', description: 'Content to store' },
         scope: {
@@ -98,8 +98,8 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
       properties: {
         namespace: {
           type: 'string',
-          enum: ['knowledge', 'methods', 'project-state', 'learnings'],
-          description: 'Category: knowledge (business facts), methods (techniques), project-state (current status), learnings (lessons learned)',
+          enum: ['knowledge', 'methods', 'status', 'learnings'],
+          description: 'Category: knowledge (business facts), methods (techniques), status (current status), learnings (lessons learned)',
         },
         scope: {
           type: 'string',
@@ -139,7 +139,7 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
       properties: {
         namespace: {
           type: 'string',
-          enum: ['knowledge', 'methods', 'project-state', 'learnings'],
+          enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Category to delete from',
         },
         pattern: { type: 'string', description: 'Text pattern — lines containing this will be removed' },
@@ -193,7 +193,7 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
       properties: {
         namespace: {
           type: 'string',
-          enum: ['knowledge', 'methods', 'project-state', 'learnings'],
+          enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Category to update',
         },
         old_content: { type: 'string', description: 'Existing text to find' },
@@ -268,7 +268,7 @@ export const memoryListTool: ToolEntry<MemoryListInput> = {
       properties: {
         namespace: {
           type: 'string',
-          enum: ['knowledge', 'methods', 'project-state', 'learnings'],
+          enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Filter by namespace. Omit to list all namespaces.',
         },
         scope: {
@@ -355,7 +355,7 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       properties: {
         namespace: {
           type: 'string',
-          enum: ['knowledge', 'methods', 'project-state', 'learnings'],
+          enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Memory namespace.',
         },
         content_pattern: {

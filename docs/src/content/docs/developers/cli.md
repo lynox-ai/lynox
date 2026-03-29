@@ -120,7 +120,7 @@ All commands support tab autocomplete in the REPL.
 
 | Command | Description |
 |---------|-------------|
-| `/memory [subcommand]` | Show knowledge (optional: knowledge/methods/project-state/learnings), gc [dry], embeddings (`list`, `prune`), scope (`info`, `list`, `create`, `tree`, `overrides`, `memory`, `stats`, `migrate`) |
+| `/memory [subcommand]` | Show knowledge (optional: knowledge/methods/status/learnings), gc [dry], embeddings (`list`, `prune`), scope (`info`, `list`, `create`, `tree`, `overrides`, `memory`, `stats`, `migrate`) |
 
 ### Session
 
