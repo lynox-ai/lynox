@@ -91,7 +91,7 @@
 			>{t(t_item.labelKey)}</button>
 		{/each}
 	</div>
-	<div class="flex-1 overflow-hidden">
+	<div class="flex-1 overflow-y-auto">
 		{#if tab === 'dashboard'}
 			<div class="overflow-y-auto h-full p-6 space-y-6 max-w-3xl mx-auto">
 				{#if loading}

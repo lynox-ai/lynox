@@ -23,7 +23,7 @@
 			>{t(t_item.labelKey)}</button>
 		{/each}
 	</div>
-	<div class="flex-1 overflow-hidden">
+	<div class="flex-1 overflow-y-auto">
 		{#if tab === 'knowledge'}
 			<MemoryView />
 		{:else if tab === 'graph'}
