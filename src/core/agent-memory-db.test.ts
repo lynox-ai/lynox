@@ -445,6 +445,33 @@ describe('AgentMemoryDb', () => {
     });
   });
 
+  // ── Confidence Evolution ──────────────────────────────────────
+
+  describe('confidence evolution', () => {
+    it('increments confirmation_count and boosts confidence on confirmMemory', () => {
+      const id = db.createMemory({ text: 'fact A', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const before = db.getMemory(id);
+      expect(before!.confidence).toBe(0.75);
+      expect(before!.confirmation_count).toBe(0);
+
+      db.confirmMemory(id);
+      db.confirmMemory(id);
+      db.confirmMemory(id);
+
+      const after = db.getMemory(id);
+      expect(after!.confirmation_count).toBe(3);
+      expect(after!.confidence).toBeGreaterThan(0.75);
+      expect(after!.confidence).toBeLessThanOrEqual(1.0);
+    });
+
+    it('caps confidence at 1.0', () => {
+      const id = db.createMemory({ text: 'fact B', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      for (let i = 0; i < 20; i++) db.confirmMemory(id);
+      const mem = db.getMemory(id);
+      expect(mem!.confidence).toBe(1.0);
+    });
+  });
+
   // ── Transactions ─────────────────────────────────────────────
 
   describe('transactions', () => {
@@ -454,6 +481,19 @@ describe('AgentMemoryDb', () => {
         db.createEntity({ canonicalName: 'B', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
       });
       expect(db.getEntityCount()).toBe(2);
+    });
+
+    it('rolls back on error', () => {
+      const countBefore = db.getEntityCount();
+      try {
+        db.transaction(() => {
+          db.createEntity({ canonicalName: 'C', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+          throw new Error('simulated failure');
+        });
+      } catch {
+        // expected
+      }
+      expect(db.getEntityCount()).toBe(countBefore);
     });
   });
 });
