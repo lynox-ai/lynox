@@ -64,6 +64,12 @@
 
 	$effect(() => { if (tab === 'deals') loadDeals(); });
 
+	function parseTags(tags: unknown): string[] {
+		if (Array.isArray(tags)) return tags;
+		if (typeof tags === 'string') { try { const p = JSON.parse(tags); return Array.isArray(p) ? p as string[] : []; } catch { return []; } }
+		return [];
+	}
+
 	const stageColors: Record<string, string> = {
 		lead: 'bg-bg-muted text-text-muted', qualified: 'bg-accent/10 text-accent-text',
 		proposal: 'bg-warning/15 text-warning', negotiation: 'bg-warning/15 text-warning',
@@ -113,9 +119,8 @@
 						<h2 class="font-medium">{selected.name}</h2>
 						{#if selected.email}<p class="text-xs text-text-muted">{selected.email}</p>{/if}
 						{#if selected.company}<p class="text-xs text-text-muted">{selected.company}</p>{/if}
-						{@const parsedTags = Array.isArray(selected.tags) ? selected.tags : typeof selected.tags === 'string' ? (() => { try { return JSON.parse(selected.tags) as string[]; } catch { return []; } })() : []}
-						{#if parsedTags.length > 0}
-							<div class="flex flex-wrap gap-1">{#each parsedTags as tag}<span class="rounded-[var(--radius-sm)] bg-accent/10 text-accent-text px-2 py-0.5 text-xs">{tag}</span>{/each}</div>
+						{#if parseTags(selected.tags).length > 0}
+							<div class="flex flex-wrap gap-1">{#each parseTags(selected.tags) as tag}<span class="rounded-[var(--radius-sm)] bg-accent/10 text-accent-text px-2 py-0.5 text-xs">{tag}</span>{/each}</div>
 						{/if}
 						{#if interactions.length > 0}
 							<p class="text-xs font-mono uppercase tracking-widest text-text-subtle">{t('crm.interactions')} ({interactions.length})</p>
