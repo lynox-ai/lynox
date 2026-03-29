@@ -242,6 +242,15 @@ export class Session {
       }
     }
 
+    // Auto-downgrade to haiku for simple tasks (cost optimization)
+    if (!isMultimodal && this._model !== 'haiku' && !this._thinking) {
+      const isSimple = this._isSimpleTask(taskText);
+      if (isSimple) {
+        this._model = 'haiku';
+        this._recreateAgent();
+      }
+    }
+
     const model = MODEL_MAP[this._model];
     const startTime = Date.now();
     this.runToolCallSeq = 0;
@@ -446,6 +455,33 @@ export class Session {
 
   private _getToolsUsed(): string[] {
     return [...this._runToolNames];
+  }
+
+  /** Heuristic: detect simple tasks that can use haiku instead of sonnet/opus. */
+  private _isSimpleTask(task: string): boolean {
+    const lower = task.toLowerCase();
+    const len = task.length;
+
+    // Short, simple queries → haiku
+    const simplePatterns = [
+      /^(was|wer|wo|wann|wie viel|how|what|who|where|when)\b/i,
+      /^(zeig|list|show|check|status|prüf)/i,
+      /^(erinner|recall|remember|merke)/i,
+    ];
+
+    // Complex tasks → keep current model
+    const complexPatterns = [
+      /\b(implement|build|create|design|refactor|fix|debug|deploy|migrate)\b/i,
+      /\b(schreib|entwickl|bau|erstell|analysier|optimier)\b/i,
+      /\b(code|function|class|component|api|database|test)\b/i,
+    ];
+
+    if (complexPatterns.some(p => p.test(lower))) return false;
+    if (len > 300) return false;
+    if (simplePatterns.some(p => p.test(lower)) && len < 150) return true;
+    if (len < 50) return true;
+
+    return false;
   }
 
   abort(): void {

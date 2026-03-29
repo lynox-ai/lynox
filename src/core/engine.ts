@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
+import { channels } from './observability.js';
 import type {
   LynoxConfig,
   LynoxUserConfig,
@@ -320,9 +321,32 @@ export class Engine {
       this.dataStoreBridge = initDataStoreBridge(this.knowledgeLayer, this._dataStore);
     }
 
+    // Inject pattern/KPI context into briefing (now that KnowledgeLayer is available)
+    if (this.knowledgeLayer) {
+      try {
+        const perfParts: string[] = [];
+        const metrics = this.knowledgeLayer.getMetrics();
+        if (metrics.length > 0) {
+          const kpiLines = metrics
+            .filter(m => !m.metricName.startsWith('tool_usage.'))
+            .map(m => `${m.metricName}: ${typeof m.value === 'number' && m.value < 1 ? (m.value * 100).toFixed(0) + '%' : String(Math.round(m.value))}`)
+            .slice(0, 5);
+          if (kpiLines.length > 0) perfParts.push(`KPIs: ${kpiLines.join(', ')}`);
+        }
+        const patterns = this.knowledgeLayer.getPatterns({ activeOnly: true, limit: 3 });
+        const strong = patterns.filter(p => p.confidence >= 0.6 && p.evidenceCount >= 3);
+        if (strong.length > 0) {
+          const patLines = strong.map(p => `- [${p.patternType}] ${p.description}`);
+          perfParts.push(`Learned patterns:\n${patLines.join('\n')}`);
+        }
+        if (perfParts.length > 0) {
+          const perfBlock = `<agent_performance>\n${perfParts.join('\n')}\n</agent_performance>`;
+          this.briefing = this.briefing ? `${this.briefing}\n\n${perfBlock}` : perfBlock;
+        }
+      } catch { /* non-critical */ }
+    }
+
     // Subscribe to memory:store for automatic knowledge graph storage
-    // Note: sourceRunId is null here because memory store events don't carry session context.
-    // A future improvement could include runId in the channel payload.
     setupMemoryStoreSubscription(
       this.knowledgeLayer, this.embeddingProvider, this.runHistory,
       this.context?.id ?? '', () => null,
@@ -473,6 +497,19 @@ export class Engine {
         const { CRM } = await import('./crm.js');
         this._crm = new CRM(this._dataStore);
         this._crm.ensureSchema();
+
+        // Auto-create CRM contacts from KG person entities
+        channels.knowledgeEntity.subscribe((msg: unknown) => {
+          const data = msg as { event: string; id?: string; name?: string; type?: string };
+          if (data.event === 'entity_created' && data.type === 'person' && data.name && this._crm) {
+            try {
+              const existing = this._crm.findContact({ name: data.name });
+              if (!existing) {
+                this._crm.upsertContact({ name: data.name, source: 'knowledge_graph' });
+              }
+            } catch { /* non-critical */ }
+          }
+        });
       } catch {
         this._crm = null;
       }
