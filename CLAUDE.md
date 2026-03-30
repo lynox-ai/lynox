@@ -45,15 +45,17 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 
 SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
 
-- `src/lib/components/` — 13 View components (ChatView, AppLayout, ThreadList, MemoryView, HistoryView, ArtifactsView, KnowledgeGraphView, MemoryInsightsView, Settings...)
-- `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume
+- `src/lib/components/` — 30 components: ChatView (interleaved blocks), AppShell, ThreadList, MemoryView, HistoryView, ArtifactsView, KnowledgeGraphView, WorkflowsHub (list + analytics), WorkflowsView (expandable step details), PipelineProgress (sticky during execution), MarkdownRenderer (deferred artifact rendering), ContextPanel, ContactsView, DataStoreView, CommandPalette, StatusBar, etc.
+- `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume, interleaved ContentBlock rendering (text + tool_call blocks in chronological order)
 - `src/lib/stores/threads.svelte.ts` — Thread list store (load, archive, delete, rename)
 - `src/lib/stores/artifacts.svelte.ts` — Artifact gallery store (save, load, delete)
 - `src/lib/config.svelte.ts` — configurable `apiBase` (/api/engine for standalone, /api/proxy for cloud)
-- `src/lib/i18n.ts` — DE/EN translations
+- `src/lib/i18n.svelte.ts` — DE/EN translations (reactive, runtime switchable)
 - `src/lib/index.ts` — barrel export for library consumers
 - `src/routes/` — standalone app routes (thin wrappers around View components)
 - `src/routes/api/engine/[...path]/` — proxy to Engine HTTP API (single-user, no auth)
+
+**Chat rendering:** Tool calls render as user-facing inline text (e.g. "Daten abgefragt: revenue") interleaved with markdown content in chronological order via `ContentBlock[]`. Artifacts defer iframe rendering during streaming (syntax-highlighted code shown instead) to prevent flicker. PipelineProgress shows as a sticky bar above the input during workflow execution.
 
 Pro/pwa imports `@lynox-ai/web-ui` and wraps View components with Lucia auth + onboarding.
 
