@@ -116,9 +116,10 @@
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
 
-		return `<div class="artifact-container" data-html="${encoded}" data-title="${safeTitle}">
-			<div class="artifact-toolbar">
+		return `<div class="artifact-container artifact-collapsed" data-html="${encoded}" data-title="${safeTitle}">
+			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
 				<span class="artifact-label">${safeTitle}</span>
+				<span class="artifact-toggle-hint">Click to open</span>
 				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CAMERA}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
@@ -163,12 +164,24 @@
 			return;
 		}
 
+		// Artifact toolbar toggle (collapsed → expanded)
+		const toggleTarget = target.closest('[data-action="toggle"]') as HTMLElement | null;
+		if (toggleTarget && !target.closest('.artifact-btn')) {
+			const container = toggleTarget.closest('.artifact-container') as HTMLElement;
+			if (container) container.classList.toggle('artifact-collapsed');
+			return;
+		}
+
 		// Artifact toolbar actions
 		const artifactBtn = target.closest('.artifact-btn') as HTMLElement | null;
 		if (artifactBtn) {
 			const action = artifactBtn.dataset['action'];
 			const container = artifactBtn.closest('.artifact-container') as HTMLElement;
 			if (!container) return;
+			// Auto-expand if collapsed
+			if (container.classList.contains('artifact-collapsed')) {
+				container.classList.remove('artifact-collapsed');
+			}
 
 			if (action === 'pin') handleArtifactSave(container);
 			else if (action === 'screenshot') handleArtifactScreenshot(container);
@@ -598,6 +611,18 @@
 		background: #0a0a1a;
 		color-scheme: dark;
 		overflow: hidden;
+	}
+	div :global(.artifact-collapsed .artifact-frame) {
+		display: none;
+	}
+	div :global(.artifact-toggle-hint) {
+		font-size: 0.625rem;
+		color: var(--color-text-subtle);
+		margin-right: auto;
+		transition: opacity 0.15s;
+	}
+	div :global(.artifact-container:not(.artifact-collapsed) .artifact-toggle-hint) {
+		display: none;
 	}
 	div :global(.artifact-close-btn) {
 		display: none;
