@@ -48,46 +48,47 @@
 	/** Tool calls that are already conveyed by the agent's text — hide from UI */
 	const HIDDEN_TOOLS = new Set(['plan_task', 'step_complete', 'artifact_list', 'data_store_list']);
 
-	/** User-facing description of a tool call (empty string = hidden) */
-	function toolCallDetail(tc: ToolCallInfo): string {
-		if (HIDDEN_TOOLS.has(tc.name)) return '';
+	/** Tool call label: returns { action, subject } or null if hidden */
+	function toolCallLabel(tc: ToolCallInfo): { action: string; subject: string } | null {
+		if (HIDDEN_TOOLS.has(tc.name)) return null;
 		const inp = tc.input as Record<string, unknown> | undefined;
 		switch (tc.name) {
-			case 'data_store_query': return String(inp?.['collection'] ?? 'Tabelle');
-			case 'data_store_insert': return `Gespeichert: ${String(inp?.['collection'] ?? 'Tabelle')}`;
-			case 'data_store_create': return `Tabelle erstellt: ${String(inp?.['collection'] ?? '')}`;
-			case 'memory_store': return `Gemerkt: ${String(inp?.['content'] ?? '').slice(0, 50)}`;
-			case 'memory_recall': return `Erinnert: ${String(inp?.['query'] ?? '')}`;
-			case 'memory_update': return 'Wissen aktualisiert';
-			case 'write_file': return `Datei: ${String(inp?.['path'] ?? '').split('/').pop()}`;
-			case 'read_file': return `Gelesen: ${String(inp?.['path'] ?? '').split('/').pop()}`;
-			case 'bash': return `$ ${String(inp?.['command'] ?? '').slice(0, 60)}`;
-			case 'http_request': return `${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}`;
-			case 'web_research': return `Recherche: ${String(inp?.['query'] ?? '')}`;
-			case 'run_pipeline': return `Pipeline: ${String(inp?.['name'] ?? '')}`;
-			case 'spawn_agent': return `Delegiert: ${String(inp?.['task'] ?? '').slice(0, 50)}`;
-			case 'artifact_save': return `Artifact: ${String(inp?.['title'] ?? '')}`;
-			case 'task_create': return `Aufgabe: ${String(inp?.['title'] ?? '')}`;
-			default: return tc.name;
+			case 'data_store_query': return { action: 'Daten abgefragt', subject: String(inp?.['collection'] ?? 'Tabelle') };
+			case 'data_store_insert': return { action: 'Daten gespeichert', subject: String(inp?.['collection'] ?? 'Tabelle') };
+			case 'data_store_create': return { action: 'Tabelle erstellt', subject: String(inp?.['collection'] ?? '') };
+			case 'memory_store': return { action: 'Gemerkt', subject: String(inp?.['content'] ?? '').slice(0, 50) };
+			case 'memory_recall': return { action: 'Wissen abgerufen', subject: String(inp?.['query'] ?? '') };
+			case 'memory_update': return { action: 'Wissen aktualisiert', subject: '' };
+			case 'write_file': return { action: 'Datei geschrieben', subject: String(inp?.['path'] ?? '').split('/').pop() ?? '' };
+			case 'read_file': return { action: 'Datei gelesen', subject: String(inp?.['path'] ?? '').split('/').pop() ?? '' };
+			case 'bash': return { action: 'Befehl', subject: String(inp?.['command'] ?? '').slice(0, 60) };
+			case 'http_request': return { action: 'API-Anfrage', subject: `${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}` };
+			case 'web_research': return { action: 'Web-Recherche', subject: String(inp?.['query'] ?? '') };
+			case 'run_pipeline': return { action: 'Pipeline gestartet', subject: String(inp?.['name'] ?? '') };
+			case 'spawn_agent': return { action: 'Delegiert', subject: String(inp?.['task'] ?? '').slice(0, 50) };
+			case 'artifact_save': return { action: 'Artifact gespeichert', subject: String(inp?.['title'] ?? '') };
+			case 'task_create': return { action: 'Aufgabe erstellt', subject: String(inp?.['title'] ?? '') };
+			default: return { action: tc.name, subject: '' };
 		}
 	}
 
-	/** Group consecutive visible tool calls of the same type into one line */
-	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): Array<{ type: 'text'; text: string } | { type: 'tools'; details: string[] }> {
-		const result: Array<{ type: 'text'; text: string } | { type: 'tools'; details: string[] }> = [];
+	/** Group consecutive tool calls with same action into one line */
+	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): Array<{ type: 'text'; text: string } | { type: 'tools'; action: string; subjects: string[] }> {
+		const result: Array<{ type: 'text'; text: string } | { type: 'tools'; action: string; subjects: string[] }> = [];
 		for (const block of blocks) {
 			if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
 			} else if (block.type === 'tool_call') {
 				const tc = toolCalls[block.index];
 				if (!tc) continue;
-				const detail = toolCallDetail(tc);
-				if (!detail) continue; // hidden tool
+				const label = toolCallLabel(tc);
+				if (!label) continue;
 				const last = result[result.length - 1];
-				if (last && last.type === 'tools') {
-					last.details.push(detail);
+				// Group consecutive calls with same action
+				if (last && last.type === 'tools' && last.action === label.action) {
+					if (label.subject) last.subjects.push(label.subject);
 				} else {
-					result.push({ type: 'tools', details: [detail] });
+					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [] });
 				}
 			}
 		}
@@ -644,7 +645,7 @@
 							{#if gBlock.type === 'tools'}
 								<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 py-0.5">
 									<span class="inline-block h-1 w-1 rounded-full bg-success flex-shrink-0"></span>
-									<span>{gBlock.details.join(', ')}</span>
+									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
 								</div>
 							{:else if gBlock.type === 'text' && gBlock.text}
 								<div class="relative group/copy">
@@ -661,13 +662,15 @@
 						{/each}
 						<!-- Fallback for legacy messages without blocks -->
 						{#if !msg.blocks?.length}
-							{@const visibleCalls = (msg.toolCalls ?? []).map(tc => toolCallDetail(tc)).filter(Boolean)}
-							{#if visibleCalls.length > 0}
-								<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 py-0.5">
-									<span class="inline-block h-1 w-1 rounded-full bg-success flex-shrink-0"></span>
-									<span>{visibleCalls.join(', ')}</span>
-								</div>
-							{/if}
+							{@const legacyGroups = groupedToolCalls((msg.toolCalls ?? []).map((_, i) => ({ type: 'tool_call' as const, index: i })), msg.toolCalls ?? [])}
+							{#each legacyGroups as lg}
+								{#if lg.type === 'tools'}
+									<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 py-0.5">
+										<span class="inline-block h-1 w-1 rounded-full bg-success flex-shrink-0"></span>
+										<span>{lg.action}{lg.subjects.length > 0 ? ': ' + lg.subjects.join(', ') : ''}</span>
+									</div>
+								{/if}
+							{/each}
 							{#if msg.content}
 								<div class="relative group/copy">
 									<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
