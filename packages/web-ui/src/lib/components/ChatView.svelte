@@ -112,12 +112,12 @@
 					continue;
 				}
 
-				// Regular tool call — group by action
+				// Regular tool call — group by action, dedup subjects
 				const label = toolCallLabel(tc);
 				if (!label) continue;
 				const last = result[result.length - 1];
 				if (last && last.type === 'tools' && last.action === label.action) {
-					if (label.subject) last.subjects.push(label.subject);
+					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
 				} else {
 					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [] });
 				}
@@ -692,12 +692,10 @@
 									</div>
 								</details>
 							{:else if gBlock.type === 'step_done'}
-								<div class="flex items-center gap-1.5 text-[11px] border-l-2 border-success/30 pl-3 py-0.5">
-									<span class="text-success text-[10px] font-bold flex-shrink-0">✓</span>
-									<span class="text-text-muted font-medium">{gBlock.stepId.replace(/-/g, ' ')}</span>
-									{#if gBlock.summary}
-										<span class="text-text-subtle/70">— {gBlock.summary}</span>
-									{/if}
+								{@const stepName = gBlock.stepId.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+								<div class="flex items-start gap-1.5 text-[11px] border-l-2 border-success/30 pl-3 py-0.5">
+									<span class="text-success text-[10px] font-bold flex-shrink-0 mt-px">✓</span>
+									<span class="text-text-muted"><span class="font-medium">{stepName}</span>{#if gBlock.summary}<span class="text-text-subtle/70"> — {gBlock.summary.length > 120 ? gBlock.summary.slice(0, 120) + '...' : gBlock.summary}</span>{/if}</span>
 								</div>
 							{:else if gBlock.type === 'tools'}
 								<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 border-l-2 border-border pl-3 py-0.5">
