@@ -692,7 +692,7 @@
 									</div>
 								</details>
 							{:else if gBlock.type === 'step_done'}
-								{@const stepName = gBlock.stepId.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+								{@const stepName = gBlock.stepId.replace(/-/g, ' ').replace(/^\w/, c => c.toUpperCase())}
 								<div class="flex items-start gap-1.5 text-[11px] border-l-2 border-success/30 pl-3 py-0.5">
 									<span class="text-success text-[10px] font-bold flex-shrink-0 mt-px">✓</span>
 									<span class="text-text-muted"><span class="font-medium">{stepName}</span>{#if gBlock.summary}<span class="text-text-subtle/70"> — {gBlock.summary.length > 120 ? gBlock.summary.slice(0, 120) + '...' : gBlock.summary}</span>{/if}</span>

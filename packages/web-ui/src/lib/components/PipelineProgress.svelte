@@ -115,7 +115,7 @@
 							{/if}
 
 							<!-- Step name -->
-							<span class="font-mono truncate text-text-muted">{step.id}</span>
+							<span class="truncate text-text-muted">{step.id.replace(/-/g, ' ').replace(/^\w/, (c: string) => c.toUpperCase())}</span>
 
 							<!-- Time -->
 							{#if formatElapsed(step)}
