@@ -243,34 +243,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return context;
   }
 
-  /** Format patterns + recent episodes as context for the agent. */
+  /** Format active patterns as context for the agent. */
   private _formatIntelligenceContext(): string {
-    const parts: string[] = [];
-
     // Active patterns with high confidence
     const patterns = this.db.getPatterns({ activeOnly: true, limit: 5 });
     const strongPatterns = patterns.filter(p => p.confidence >= 0.6 && p.evidence_count >= 3);
-    if (strongPatterns.length > 0) {
-      const lines = strongPatterns.map(p =>
-        `- [${p.pattern_type}] ${p.description} (${(p.confidence * 100).toFixed(0)}% confidence, ${p.evidence_count}x observed)`,
-      );
-      parts.push(`<learned_patterns>\n${lines.join('\n')}\n</learned_patterns>`);
-    }
+    if (strongPatterns.length === 0) return '';
 
-    // Recent successful runs for context
-    if (this.runHistory) {
-      const recent = this.runHistory.getRunsForAnalysis(10);
-      const successful = recent.filter(r => r.status === 'completed' && r.toolNames.length > 0);
-      if (successful.length > 0) {
-        const lines = successful.slice(0, 3).map(r => {
-          const toolStr = r.toolNames.length > 0 ? ` (tools: ${r.toolNames.join(', ')})` : '';
-          return `- run ${r.id.slice(0, 8)}${toolStr}`;
-        });
-        parts.push(`<recent_successes>\n${lines.join('\n')}\n</recent_successes>`);
-      }
-    }
-
-    return parts.join('\n');
+    const lines = strongPatterns.map(p =>
+      `- [${p.pattern_type}] ${p.description} (${(p.confidence * 100).toFixed(0)}% confidence, ${p.evidence_count}x observed)`,
+    );
+    return `<learned_patterns>\n${lines.join('\n')}\n</learned_patterns>`;
   }
 
   // === Entity Operations ===

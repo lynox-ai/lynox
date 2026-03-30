@@ -10,7 +10,6 @@ build/
 .DS_Store
 .lynox/
 .lynox-*
-.nodyn/
 *.db
 *.db-wal
 *.db-shm

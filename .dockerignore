@@ -9,7 +9,7 @@ build
 .env
 .env.*
 .lynox/
-.nodyn/
+.lynox/
 *.db
 *.db-wal
 *.db-shm

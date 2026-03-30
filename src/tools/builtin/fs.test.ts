@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, symlink, writeFile } from 'node:fs/promises';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readFileTool, writeFileTool, resetWriteByteCounter } from './fs.js';
+import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 
 let dir: string;
 
@@ -12,13 +13,14 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  clearTenantWorkspace();
   if (dir) {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
 async function makeTempDir(): Promise<string> {
-  dir = await mkdtemp(join(tmpdir(), 'lynox-fs-'));
+  dir = realpathSync(await mkdtemp(join(tmpdir(), 'lynox-fs-')));
   return dir;
 }
 
@@ -50,6 +52,7 @@ describe('readFileTool', () => {
 describe('writeFileTool', () => {
   it('creates and writes a file', async () => {
     const d = await makeTempDir();
+    setTenantWorkspace(d);
     const filePath = join(d, 'out.txt');
 
     const result = await writeFileTool.handler({ path: filePath, content: 'data' }, {} as never);
@@ -60,6 +63,7 @@ describe('writeFileTool', () => {
 
   it('creates parent directories recursively', async () => {
     const d = await makeTempDir();
+    setTenantWorkspace(d);
     const filePath = join(d, 'a', 'b', 'c', 'deep.txt');
 
     const result = await writeFileTool.handler({ path: filePath, content: 'nested' }, {} as never);
@@ -70,6 +74,7 @@ describe('writeFileTool', () => {
 
   it('resolves symlinks when writing to existing file', async () => {
     const d = await makeTempDir();
+    setTenantWorkspace(d);
     const realFile = join(d, 'real.txt');
     const linkFile = join(d, 'link.txt');
     writeFileSync(realFile, 'original', 'utf-8');
@@ -84,6 +89,7 @@ describe('writeFileTool', () => {
 
   it('resolves parent symlink for new files in symlinked directories', async () => {
     const d = await makeTempDir();
+    setTenantWorkspace(d);
     const realDir = join(d, 'realdir');
     mkdirSync(realDir);
     const linkDir = join(d, 'linkdir');
@@ -100,6 +106,7 @@ describe('writeFileTool', () => {
   describe('session write byte limit', () => {
     it('normal write passes', async () => {
       const d = await makeTempDir();
+      setTenantWorkspace(d);
       const result = await writeFileTool.handler(
         { path: join(d, 'small.txt'), content: 'hello' },
         {} as never,
@@ -109,6 +116,7 @@ describe('writeFileTool', () => {
 
     it('over limit throws', async () => {
       const d = await makeTempDir();
+      setTenantWorkspace(d);
       // Write 90MB in one go
       const bigContent = 'x'.repeat(90 * 1024 * 1024);
       await writeFileTool.handler(
@@ -127,6 +135,7 @@ describe('writeFileTool', () => {
 
     it('cumulative tracking across multiple writes', async () => {
       const d = await makeTempDir();
+      setTenantWorkspace(d);
       const chunk = 'z'.repeat(40 * 1024 * 1024); // 40MB each
       await writeFileTool.handler({ path: join(d, 'a.txt'), content: chunk }, {} as never);
       await writeFileTool.handler({ path: join(d, 'b.txt'), content: chunk }, {} as never);

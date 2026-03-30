@@ -194,21 +194,25 @@ export class ApiStore {
   }
 
   /**
-   * Format all profiles as system prompt context.
-   * Injected into the agent's briefing so it knows how to use each API.
+   * Format all profiles as system prompt context (compact summary).
+   * Injected into the agent's briefing. Full details available via `api_setup` tool.
    */
   formatForSystemPrompt(): string {
     if (this.profiles.size === 0) return '';
 
-    const sections: string[] = [];
-    for (const profile of this.profiles.values()) {
-      sections.push(this.formatProfile(profile));
-    }
+    const lines = [...this.profiles.values()].map(p => {
+      const auth = p.auth ? ` [${p.auth.type}]` : '';
+      const endpoints = p.endpoints?.length ? `, ${String(p.endpoints.length)} endpoints` : '';
+      return `- ${p.name}: ${p.description} (${p.base_url}${auth}${endpoints})`;
+    });
 
-    return `<api_profiles>\n## Registered APIs\n\nYou have access to the following external APIs via http_request. Follow the guidelines precisely — wrong usage leads to blocks and errors.\n\n${sections.join('\n\n')}\n</api_profiles>`;
+    return `<api_profiles>\nRegistered APIs (use \`api_setup\` to view full details before calling):\n${lines.join('\n')}\n</api_profiles>`;
   }
 
-  private formatProfile(p: ApiProfile): string {
+  /**
+   * Format full profile details for a single API (used by api_setup tool).
+   */
+  formatProfile(p: ApiProfile): string {
     const lines: string[] = [];
     lines.push(`### ${p.name}`);
     lines.push(p.description);

@@ -1,3 +1,7 @@
+# Source maps (halve tarball size)
+*.js.map
+*.d.ts.map
+
 # Test files
 **/*.test.js
 **/*.test.d.ts
@@ -14,7 +18,7 @@ vitest.bench.config.ts
 # Dev files
 .github/
 .lynox/
-.nodyn/
+.lynox/
 .claude/
 *.png
 docs/

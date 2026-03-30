@@ -17,10 +17,10 @@ import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile } from '../../core/api-store.js';
 
 interface ApiSetupInput {
-  action: 'create' | 'update' | 'delete' | 'list';
+  action: 'create' | 'update' | 'delete' | 'list' | 'view';
   /** API profile data (required for create/update). */
   profile?: ApiProfile | undefined;
-  /** Profile ID (required for delete). */
+  /** Profile ID (required for delete/view). */
   id?: string | undefined;
 }
 
@@ -64,13 +64,13 @@ function getApisDir(): string {
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   definition: {
     name: 'api_setup',
-    description: 'Create, update, or delete API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, and common mistakes. Use "create" with a complete profile object when the user wants to connect a new API. Use "list" to show registered APIs. The profile is validated and immediately activated (no restart needed).',
+    description: 'Create, update, delete, list, or view API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, and common mistakes. Use "view" with an id to get full details (endpoints, auth, guidelines) before making API calls. Use "list" for an overview. Use "create" to onboard a new API.',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'update', 'delete', 'list'],
+          enum: ['create', 'update', 'delete', 'list', 'view'],
           description: 'Action to perform',
         },
         profile: {
@@ -79,7 +79,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         },
         id: {
           type: 'string',
-          description: 'Profile ID (for delete action)',
+          description: 'Profile ID (for delete/view action)',
         },
       },
       required: ['action'],
@@ -102,6 +102,21 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         return `- ${p.id}: ${p.name} (${p.base_url})${limitStr}`;
       });
       return `Registered APIs (${String(profiles.length)}):\n${lines.join('\n')}`;
+    }
+
+    if (input.action === 'view') {
+      if (!input.id) {
+        return 'Error: "id" is required for view action.';
+      }
+      const apiStore = agent.toolContext?.apiStore;
+      if (!apiStore) {
+        return 'No API profiles registered.';
+      }
+      const profile = apiStore.get(input.id);
+      if (!profile) {
+        return `API profile "${input.id}" not found. Use action "list" to see available profiles.`;
+      }
+      return apiStore.formatProfile(profile);
     }
 
     if (input.action === 'create' || input.action === 'update') {
@@ -180,6 +195,6 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
       return `Deleted API profile "${id}". Changes take effect on next restart.`;
     }
 
-    return 'Unknown action. Use "create", "update", "delete", or "list".';
+    return 'Unknown action. Use "create", "update", "delete", "list", or "view".';
   },
 };

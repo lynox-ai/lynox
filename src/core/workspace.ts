@@ -61,11 +61,19 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
   } else if (existsSync(dirname(resolved))) {
     real = join(realpathSync(dirname(resolved)), basename(resolved));
   } else {
-    // Cannot verify path is within sandbox — reject
-    throw new Error(
-      `Path '${filePath}' cannot be validated: parent directory does not exist. ` +
-      `Create the directory within the workspace first.`,
-    );
+    // Walk up to find closest existing ancestor (supports recursive mkdir)
+    let ancestor = dirname(resolved);
+    let tail = basename(resolved);
+    while (!existsSync(ancestor) && ancestor !== dirname(ancestor)) {
+      tail = join(basename(ancestor), tail);
+      ancestor = dirname(ancestor);
+    }
+    if (!existsSync(ancestor)) {
+      throw new Error(
+        `Path '${filePath}' cannot be validated: no existing ancestor directory found.`,
+      );
+    }
+    real = join(realpathSync(ancestor), tail);
   }
 
   // Check workspace + /tmp (resolve /tmp via realpath for macOS /private/tmp)

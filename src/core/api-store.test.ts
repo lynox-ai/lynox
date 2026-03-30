@@ -137,45 +137,22 @@ describe('ApiStore', () => {
       expect(store.formatForSystemPrompt()).toBe('');
     });
 
-    it('includes profile name and description', () => {
+    it('includes compact profile summary', () => {
       store.register(SAMPLE_PROFILE);
       const output = store.formatForSystemPrompt();
       expect(output).toContain('Test API');
       expect(output).toContain('A test API for unit testing.');
       expect(output).toContain('api.test.com');
+      expect(output).toContain('[bearer]');
+      expect(output).toContain('2 endpoints');
     });
 
-    it('includes endpoints', () => {
+    it('does not include full details in summary', () => {
       store.register(SAMPLE_PROFILE);
       const output = store.formatForSystemPrompt();
-      expect(output).toContain('POST /search');
-      expect(output).toContain('GET /items/{id}');
-    });
-
-    it('includes guidelines', () => {
-      store.register(SAMPLE_PROFILE);
-      const output = store.formatForSystemPrompt();
-      expect(output).toContain('Always use JSON body');
-      expect(output).toContain('Include pagination params');
-    });
-
-    it('includes avoid section', () => {
-      store.register(SAMPLE_PROFILE);
-      const output = store.formatForSystemPrompt();
-      expect(output).toContain('Do not use GET for mutations');
-    });
-
-    it('includes rate limit info', () => {
-      store.register(SAMPLE_PROFILE);
-      const output = store.formatForSystemPrompt();
-      expect(output).toContain('5/s');
-      expect(output).toContain('100/min');
-    });
-
-    it('includes auth type', () => {
-      store.register(SAMPLE_PROFILE);
-      const output = store.formatForSystemPrompt();
-      expect(output).toContain('Bearer Token');
+      expect(output).not.toContain('POST /search');
+      expect(output).not.toContain('Always use JSON body');
+      expect(output).not.toContain('Do not use GET for mutations');
     });
 
     it('wraps in api_profiles tags', () => {
@@ -183,6 +160,20 @@ describe('ApiStore', () => {
       const output = store.formatForSystemPrompt();
       expect(output).toContain('<api_profiles>');
       expect(output).toContain('</api_profiles>');
+    });
+
+    it('formatProfile returns full details', () => {
+      store.register(SAMPLE_PROFILE);
+      const profile = store.get('test-api')!;
+      const output = store.formatProfile(profile);
+      expect(output).toContain('POST /search');
+      expect(output).toContain('GET /items/{id}');
+      expect(output).toContain('Always use JSON body');
+      expect(output).toContain('Include pagination params');
+      expect(output).toContain('Do not use GET for mutations');
+      expect(output).toContain('5/s');
+      expect(output).toContain('100/min');
+      expect(output).toContain('Bearer Token');
     });
   });
 

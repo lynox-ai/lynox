@@ -94,9 +94,14 @@ describe('workspace', () => {
       expect(() => validatePath(target, 'read')).toThrow(/outside allowed directories/);
     });
 
-    it('rejects path when neither file nor parent exists', () => {
-      expect(() => validatePath(join(tmpDir, 'nonexistent', 'deep', 'file.txt'), 'write'))
-        .toThrow(/cannot be validated.*parent directory does not exist/i);
+    it('resolves deeply nested new path via ancestor walk', () => {
+      const result = validatePath(join(tmpDir, 'nonexistent', 'deep', 'file.txt'), 'write');
+      expect(result).toBe(join(realTmpDir, 'nonexistent', 'deep', 'file.txt'));
+    });
+
+    it('rejects deeply nested path with no valid ancestor', () => {
+      expect(() => validatePath('/nonexistent-root/deep/file.txt', 'write'))
+        .toThrow(/outside allowed directories/i);
     });
 
     it('rejects write through symlink pointing outside workspace', () => {

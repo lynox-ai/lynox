@@ -63,6 +63,7 @@
     "prepare": "lefthook install || true",
     "security": "sh scripts/security-scan.sh && vitest run tests/security/",
     "lint": "eslint src/",
+    "prepack": "find dist -name '*.js.map' -o -name '*.d.ts.map' | xargs rm -f",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
