@@ -501,6 +501,12 @@ export class LynoxHTTPApi {
         res.write(`event: ${event.type}\ndata: ${data}\n\n`);
       };
 
+      // Sync streamHandler to toolContext so plan-tracker events reach the SSE stream
+      const agent = session.getAgent();
+      if (agent?.toolContext) {
+        agent.toolContext.streamHandler = session.onStream;
+      }
+
       // Wire promptUser
       session.promptUser = (question: string, options?: string[]) => {
         return new Promise<string>((resolve) => {
