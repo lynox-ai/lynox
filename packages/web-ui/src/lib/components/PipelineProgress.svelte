@@ -68,7 +68,7 @@
 
 <div class="pipeline-progress rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 	<!-- Header -->
-	<div class="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-subtle/50">
+	<div class="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-bg-subtle/50">
 		<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">Pipeline</span>
 		{#if allDone}
 			<span class="h-1.5 w-1.5 rounded-full bg-success"></span>
@@ -80,20 +80,20 @@
 	</div>
 
 	<!-- Phases -->
-	<div class="px-3 py-2 space-y-2">
+	<div class="px-3 py-1.5 space-y-1">
 		{#each phases as phase, phaseIdx (phaseIdx)}
 			<!-- Phase connector -->
 			{#if phaseIdx > 0}
-				<div class="flex justify-center py-0.5">
-					<div class="w-px h-3 bg-border"></div>
+				<div class="flex justify-center">
+					<div class="w-px h-2 bg-border"></div>
 				</div>
 			{/if}
 
 			<!-- Phase steps (parallel = side by side) -->
-			<div class="flex gap-2 {phase.length === 1 ? 'justify-center' : ''}">
+			<div class="flex gap-1.5 {phase.length === 1 ? 'justify-center' : ''}">
 				{#each phase as step (step.id)}
 					<div
-						class="flex-1 min-w-0 rounded-[var(--radius-sm)] border px-2.5 py-1.5 text-xs transition-colors
+						class="flex-1 min-w-0 rounded-[var(--radius-sm)] border px-2 py-1 text-xs transition-colors
 							{step.status === 'completed' ? 'border-success/30 bg-success/5' :
 							 step.status === 'failed' ? 'border-danger/30 bg-danger/5' :
 							 step.status === 'running' ? 'border-warning/30 bg-warning/5' :

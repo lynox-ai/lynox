@@ -11,10 +11,16 @@ export interface UsageInfo {
 	costUsd: number;
 }
 
+export type ContentBlock =
+	| { type: 'text'; text: string }
+	| { type: 'tool_call'; index: number };
+
 export interface ChatMessage {
 	role: 'user' | 'assistant';
 	content: string;
 	toolCalls?: ToolCallInfo[];
+	/** Ordered blocks for interleaved rendering (text ↔ tool calls) */
+	blocks?: ContentBlock[];
 	pipeline?: PipelineInfo;
 	thinking?: string;
 	usage?: UsageInfo;
@@ -253,6 +259,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			}
 			msg.content += text;
 			msg._toolSinceText = false;
+			// Interleaved blocks: append to current text block or start new one
+			msg.blocks = msg.blocks ?? [];
+			const lastBlock = msg.blocks[msg.blocks.length - 1];
+			if (lastBlock && lastBlock.type === 'text') {
+				lastBlock.text += text;
+			} else {
+				msg.blocks.push({ type: 'text', text });
+			}
 			break;
 		}
 		case 'thinking':
@@ -266,7 +280,11 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const lastTc = msg.toolCalls[msg.toolCalls.length - 1];
 			if (!(lastTc && lastTc.name === toolName && lastTc.status === 'running'
 				&& JSON.stringify(lastTc.input) === JSON.stringify(toolInput))) {
+				const tcIndex = msg.toolCalls.length;
 				msg.toolCalls.push({ name: toolName, input: toolInput, status: 'running' });
+				// Interleaved blocks: add tool_call block in order
+				msg.blocks = msg.blocks ?? [];
+				msg.blocks.push({ type: 'tool_call', index: tcIndex });
 			}
 			msg._toolSinceText = true;
 			setContext({ type: 'tool', toolName, toolInput, title: toolName });

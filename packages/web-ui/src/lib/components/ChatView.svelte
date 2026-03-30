@@ -20,6 +20,7 @@
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
+		type ToolCallInfo,
 	} from '../stores/chat.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -42,6 +43,33 @@
 			result = result.replace(pattern, (match) => `***${match.slice(-4)}`);
 		}
 		return result;
+	}
+
+	/** User-facing description of a tool call */
+	function toolCallDetail(tc: ToolCallInfo): string {
+		const inp = tc.input as Record<string, unknown> | undefined;
+		switch (tc.name) {
+			case 'data_store_query': return `Daten abgefragt: ${String(inp?.['collection'] ?? 'Tabelle')}`;
+			case 'data_store_insert': return `Daten gespeichert: ${String(inp?.['collection'] ?? 'Tabelle')}`;
+			case 'data_store_create': return `Tabelle erstellt: ${String(inp?.['collection'] ?? '')}`;
+			case 'data_store_list': return 'Tabellen aufgelistet';
+			case 'memory_store': return `Gemerkt: ${String(inp?.['content'] ?? '').slice(0, 60)}`;
+			case 'memory_recall': return `Wissen abgerufen: ${String(inp?.['query'] ?? '')}`;
+			case 'memory_update': return `Wissen aktualisiert`;
+			case 'write_file': return `Datei geschrieben: ${String(inp?.['path'] ?? '')}`;
+			case 'read_file': return `Datei gelesen: ${String(inp?.['path'] ?? '')}`;
+			case 'bash': return `Befehl: ${String(inp?.['command'] ?? '').slice(0, 80)}`;
+			case 'http_request': return `API-Anfrage: ${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}`;
+			case 'web_research': return `Web-Recherche: ${String(inp?.['query'] ?? '')}`;
+			case 'plan_task': return `Plan erstellt: ${String(inp?.['summary'] ?? '').slice(0, 60)}`;
+			case 'step_complete': return `Schritt abgeschlossen: ${String(inp?.['step_id'] ?? '')}`;
+			case 'run_pipeline': return `Pipeline gestartet: ${String(inp?.['name'] ?? '')}`;
+			case 'spawn_agent': return `Delegiert: ${String(inp?.['task'] ?? '').slice(0, 60)}`;
+			case 'artifact_save': return `Artifact gespeichert: ${String(inp?.['title'] ?? '')}`;
+			case 'artifact_list': return 'Artifacts aufgelistet';
+			case 'task_create': return `Aufgabe erstellt: ${String(inp?.['title'] ?? '')}`;
+			default: return tc.name;
+		}
 	}
 
 	let inputText = $state('');
@@ -589,66 +617,48 @@
 							</details>
 						{/if}
 
-						{#each msg.toolCalls ?? [] as tc, tcIdx (tcIdx)}
-							<details class="tool-call-details rounded-[var(--radius-md)] border border-border bg-bg-subtle text-sm group">
-								<summary class="cursor-pointer px-3 py-2 text-text-muted hover:text-text flex items-center gap-2">
-									<span class="inline-block h-1.5 w-1.5 rounded-full {tc.status === 'running' ? 'bg-warning animate-pulse' : tc.status === 'done' ? 'bg-success' : 'bg-danger'}"></span>
-									<span class="font-mono text-xs text-accent-text">{tc.name}</span>
-								</summary>
-								<div class="border-t border-border px-3 py-2 space-y-1">
-									<pre class="whitespace-pre-wrap font-mono text-xs text-text-subtle">{JSON.stringify(tc.input, null, 2)}</pre>
-									{#if tc.result}
-										{#if tc.name === 'write_file' && tc.result.startsWith('Written to ')}
-											<p class="text-xs text-success mt-2">
-												Written to <a href="/app/files" class="text-accent-text hover:underline font-mono">{tc.result.slice(11)}</a>
-											</p>
-										{:else if tc.name === 'run_pipeline' && tc.result.startsWith('{')}
-											{@const parsed = (() => { try { return JSON.parse(tc.result); } catch { return null; } })()}
-											{#if parsed?.steps}
-												<div class="mt-2 space-y-1">
-													<div class="flex items-center gap-2 text-xs text-text-subtle">
-														<span class="font-mono uppercase tracking-widest text-[10px]">{parsed.name ?? 'Pipeline'}</span>
-														<span class="text-text-muted">{parsed.status}</span>
-													</div>
-													{#each parsed.steps as step}
-														<div class="flex items-center gap-2 text-xs rounded-[var(--radius-sm)] border border-border px-2 py-1
-															{step.error ? 'border-danger/30 bg-danger/5' : step.skipped ? 'border-border bg-bg-muted' : 'border-success/30 bg-success/5'}">
-															<span class="flex-shrink-0">{step.error ? '\u2717' : step.skipped ? '\u2014' : '\u2713'}</span>
-															<span class="font-mono text-text-muted truncate">{step.stepId}</span>
-															{#if step.durationMs}
-																<span class="ml-auto text-[10px] text-text-subtle tabular-nums">{(step.durationMs / 1000).toFixed(1)}s</span>
-															{/if}
-															{#if step.costUsd}
-																<span class="text-[10px] text-text-subtle tabular-nums">${step.costUsd.toFixed(4)}</span>
-															{/if}
-														</div>
-													{/each}
-												</div>
-											{:else}
-												<pre class="whitespace-pre-wrap font-mono text-xs text-text-muted mt-2 max-h-40 overflow-y-auto">{tc.result.slice(0, 2000)}</pre>
-											{/if}
-										{:else}
-											<pre class="whitespace-pre-wrap font-mono text-xs text-text-muted mt-2 max-h-40 overflow-y-auto">{tc.result.slice(0, 2000)}</pre>
-											{#if tc.result.length > 2000}
-												<p class="text-xs text-text-subtle mt-1">[... {(tc.result.length - 2000).toLocaleString()} more chars]</p>
-											{/if}
-										{/if}
-									{/if}
+						<!-- Interleaved blocks: tool calls + text in chronological order -->
+						{#each msg.blocks ?? [] as block, blockIdx (blockIdx)}
+							{#if block.type === 'tool_call' && msg.toolCalls?.[block.index]}
+								{@const tc = msg.toolCalls[block.index]}
+								{@const detail = toolCallDetail(tc)}
+								<div class="flex items-center gap-2 text-xs py-0.5">
+									<span class="inline-block h-1.5 w-1.5 rounded-full flex-shrink-0 {tc.status === 'running' ? 'bg-warning animate-pulse' : tc.status === 'done' ? 'bg-success' : 'bg-danger'}"></span>
+									<span class="text-text-subtle">{detail}</span>
 								</div>
-							</details>
-						{/each}
-
-						{#if msg.content}
-							<div class="relative group/copy">
-								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
-								<button
-									onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
-									class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
-									title={t('common.copy')}
-								>
-									<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+							{:else if block.type === 'text' && block.text}
+								<div class="relative group/copy">
+									<MarkdownRenderer content={block.text} streaming={isStreaming && msgIdx === messages.length - 1} />
+									<button
+										onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
+										class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
+										title={t('common.copy')}
+									>
+										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
 								</button>
 							</div>
+						{/if}
+						{/each}
+						<!-- Fallback for legacy messages without blocks -->
+						{#if !msg.blocks?.length}
+							{#each msg.toolCalls ?? [] as tc, tcIdx (tcIdx)}
+								<div class="flex items-center gap-2 text-xs py-0.5">
+									<span class="inline-block h-1.5 w-1.5 rounded-full flex-shrink-0 {tc.status === 'running' ? 'bg-warning animate-pulse' : tc.status === 'done' ? 'bg-success' : 'bg-danger'}"></span>
+									<span class="text-text-subtle">{toolCallDetail(tc)}</span>
+								</div>
+							{/each}
+							{#if msg.content}
+								<div class="relative group/copy">
+									<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
+									<button
+										onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
+										class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
+										title={t('common.copy')}
+									>
+										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+									</button>
+								</div>
+							{/if}
 						{/if}
 						{#if msg.usage && !isStreaming && msgIdx !== messages.length - 1}
 							<p class="text-[11px] font-mono text-text-subtle mt-1">{formatUsage(msg.usage)}</p>

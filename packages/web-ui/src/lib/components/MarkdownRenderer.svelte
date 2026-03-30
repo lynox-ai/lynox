@@ -104,11 +104,12 @@
 	function buildArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
+		const overflowFix = `<style>html,body{overflow-x:hidden;max-width:100vw}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
-			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}`);
+			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${overflowFix}`);
 		} else {
-			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}</head><body>${clean}</body></html>`;
+			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}${overflowFix}</head><body>${clean}</body></html>`;
 		}
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
@@ -551,7 +552,9 @@
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-md);
 		overflow: hidden;
+		overflow-x: hidden;
 		background: var(--color-bg-muted);
+		max-width: 100%;
 	}
 
 	div :global(.artifact-toolbar) {
@@ -594,6 +597,7 @@
 		display: block;
 		background: #0a0a1a;
 		color-scheme: dark;
+		overflow-x: hidden;
 	}
 	div :global(.artifact-close-btn) {
 		display: none;
