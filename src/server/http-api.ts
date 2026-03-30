@@ -515,15 +515,22 @@ export class LynoxHTTPApi {
         });
       };
 
+      // SSE keepalive — prevents proxies/browsers from dropping idle connections
+      const keepaliveTimer = setInterval(() => {
+        if (!aborted && !res.writableEnded) res.write(': keepalive\n\n');
+      }, 15_000);
+
       // Abort on client disconnect or timeout (30 min max)
       const streamTimeout = setTimeout(() => {
         aborted = true;
+        clearInterval(keepaliveTimer);
         session.abort();
         if (!res.writableEnded) res.end();
       }, 30 * 60_000);
 
       req.on('close', () => {
         clearTimeout(streamTimeout);
+        clearInterval(keepaliveTimer);
         aborted = true;
         session.abort();
       });
@@ -548,6 +555,7 @@ export class LynoxHTTPApi {
           res.end();
         }
       } finally {
+        clearInterval(keepaliveTimer);
         this.runningSessions.delete(sessionId);
       }
     }));

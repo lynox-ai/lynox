@@ -302,6 +302,41 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			}
 			break;
 		}
+		case 'pipeline_progress': {
+			const stepId = String(data['stepId'] ?? '');
+			const status = String(data['status'] ?? '');
+			const detail = data['detail'] != null ? String(data['detail']) : undefined;
+			msg.toolCalls = msg.toolCalls ?? [];
+
+			if (status === 'started') {
+				// Update existing or add new pipeline step tracker
+				const existing = msg.toolCalls.find(
+					(tc) => tc.name === 'run_pipeline' && tc.input != null
+						&& (tc.input as Record<string, unknown>)['stepId'] === stepId && tc.status === 'running'
+				);
+				if (existing) {
+					existing.result = detail;
+				} else {
+					msg.toolCalls.push({
+						name: 'run_pipeline',
+						input: { stepId, detail },
+						status: 'running',
+					});
+				}
+			} else {
+				// completed / failed / skipped — mark the step done
+				const tc = msg.toolCalls.find(
+					(tc) => tc.name === 'run_pipeline'
+						&& (tc.input as Record<string, unknown>)?.['stepId'] === stepId
+						&& tc.status === 'running'
+				);
+				if (tc) {
+					tc.status = status === 'failed' ? 'error' : 'done';
+					tc.result = detail ?? status;
+				}
+			}
+			break;
+		}
 		case 'done':
 			break;
 		case 'error':
