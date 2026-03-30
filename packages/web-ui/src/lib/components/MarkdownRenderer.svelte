@@ -231,19 +231,24 @@
 		img.src = dataUrl;
 	}
 
-	/** Resize iframe to fit its content height */
+	/** Resize iframe to show full content — no scrollbars */
 	function resizeArtifactFrame(container: HTMLElement) {
 		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
 		if (!iframe) return;
-		// Wait for iframe to load then measure content
 		const measure = () => {
 			try {
 				const doc = iframe.contentDocument;
-				if (doc?.body) {
-					const h = doc.body.scrollHeight;
-					iframe.style.height = `${Math.max(h + 16, 200)}px`;
-				}
-			} catch { /* cross-origin — keep min-height */ }
+				if (!doc?.body) return;
+				// Kill scrollbars inside the iframe
+				doc.documentElement.style.overflow = 'hidden';
+				doc.body.style.overflow = 'hidden';
+				// Measure full content height
+				const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight);
+				iframe.style.height = `${h}px`;
+			} catch {
+				// Cross-origin fallback
+				iframe.style.height = '420px';
+			}
 		};
 		if (iframe.contentDocument?.readyState === 'complete') {
 			measure();
@@ -632,7 +637,6 @@
 
 	div :global(.artifact-frame) {
 		width: 100%;
-		height: 420px;
 		border: none;
 		display: block;
 		background: #0a0a1a;
