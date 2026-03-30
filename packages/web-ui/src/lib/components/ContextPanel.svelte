@@ -51,7 +51,7 @@
 </script>
 
 {#if ctx}
-	<aside class="w-80 shrink-0 border-l border-border bg-bg-subtle overflow-y-auto scrollbar-thin hidden lg:flex flex-col">
+	<aside class="w-80 shrink-0 border-l border-border bg-bg-subtle overflow-y-auto overflow-x-hidden scrollbar-thin hidden lg:flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-4 py-2.5 border-b border-border">
 			<div class="flex items-center gap-2">
@@ -87,7 +87,7 @@
 						<div class="px-3 py-1.5 border-b border-border bg-bg-muted">
 							<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">Inhalt</span>
 						</div>
-						<pre class="px-3 py-2 text-xs font-mono text-text-muted whitespace-pre-wrap max-h-80 overflow-y-auto scrollbar-thin">{truncate(getInput('content'), 2000)}</pre>
+						<pre class="px-3 py-2 text-xs font-mono text-text-muted whitespace-pre-wrap break-all max-h-80 overflow-y-auto scrollbar-thin">{truncate(getInput('content'), 2000)}</pre>
 					</div>
 				{/if}
 				{#if ctx.toolResult}
@@ -103,9 +103,9 @@
 						<span class="h-2 w-2 rounded-full bg-success"></span>
 						<span class="text-[10px] font-mono text-text-subtle ml-2">Terminal</span>
 					</div>
-					<pre class="px-3 py-2 text-xs font-mono text-green-400 whitespace-pre-wrap max-h-60 overflow-y-auto scrollbar-thin">$ {getInput('command')}</pre>
+					<pre class="px-3 py-2 text-xs font-mono text-green-400 whitespace-pre-wrap break-all max-h-60 overflow-y-auto scrollbar-thin">$ {getInput('command')}</pre>
 					{#if ctx.toolResult}
-						<pre class="px-3 py-2 text-xs font-mono text-text-muted whitespace-pre-wrap max-h-40 overflow-y-auto scrollbar-thin border-t border-border">{truncate(ctx.toolResult, 1500)}</pre>
+						<pre class="px-3 py-2 text-xs font-mono text-text-muted whitespace-pre-wrap break-all max-h-40 overflow-y-auto scrollbar-thin border-t border-border">{truncate(ctx.toolResult, 1500)}</pre>
 					{/if}
 				</div>
 
@@ -201,7 +201,7 @@
 					<pre class="text-xs font-mono text-text-subtle whitespace-pre-wrap rounded-[var(--radius-md)] bg-bg p-3 border border-border max-h-48 overflow-y-auto scrollbar-thin">{JSON.stringify(ctx.toolInput, null, 2).slice(0, 1000)}</pre>
 				{/if}
 				{#if ctx.toolResult}
-					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap max-h-80 overflow-y-auto scrollbar-thin">{truncate(ctx.toolResult, 2000)}</pre>
+					<pre class="text-xs font-mono text-text-muted whitespace-pre-wrap break-all max-h-80 overflow-y-auto scrollbar-thin">{truncate(ctx.toolResult, 2000)}</pre>
 				{/if}
 			{/if}
 		</div>

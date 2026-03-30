@@ -958,18 +958,18 @@
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 				</button>
 			{:else}
-				<!-- Normal: [📎  Nachricht eingeben...  ]  [🎤 or ➤] -->
+				<!-- Normal: 📎  [Nachricht eingeben...]  ➤ -->
+				<button
+					onclick={() => fileInputEl.click()}
+					disabled={!ready}
+					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-opacity self-end outline-none focus:outline-none"
+					aria-label={t('chat.attach_file')}
+				>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+					</svg>
+				</button>
 				<div class="flex-1 flex items-end rounded-2xl md:rounded-[var(--radius-md)] border border-border/50 md:border-border bg-bg overflow-hidden">
-					<button
-						onclick={() => fileInputEl.click()}
-						disabled={!ready}
-						class="shrink-0 p-2.5 text-text-subtle hover:text-text disabled:opacity-30 transition-opacity self-end outline-none focus:outline-none"
-						aria-label={t('chat.attach_file')}
-					>
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
-						</svg>
-					</button>
 					<textarea
 						bind:this={textareaEl}
 						bind:value={inputText}
@@ -979,15 +979,14 @@
 						placeholder={pendingPermission && !inBatchMode ? t('chat.placeholder_answer') : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 						rows="1"
 						disabled={!ready && !pendingPermission}
-						class="flex-1 resize-none border-0 bg-transparent py-2.5 pr-2 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
+						class="flex-1 resize-none border-0 bg-transparent px-4 py-2.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
 					></textarea>
 				</div>
 
-				<!-- Right button: 🎤 (empty) / ⬛ (streaming) / ➤ (text) -->
 				{#if isStreaming && !pendingPermission}
 					<button
 						onclick={() => abortRun()}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-opacity"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-all self-end"
 						aria-label={t('chat.abort')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
@@ -996,7 +995,7 @@
 					<button
 						onclick={handleSend}
 						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
-						class="shrink-0 h-12 w-12 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all self-end"
 						aria-label={t('chat.send')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
@@ -1005,7 +1004,7 @@
 					<button
 						onclick={toggleVoice}
 						disabled={!ready}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-all"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-all self-end"
 						aria-label={t('chat.voice_input')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">

@@ -8,6 +8,7 @@
 
 	$effect(() => {
 		if ($page.url.searchParams.get('tab') === 'files') tab = 'files';
+		else tab = 'gallery';
 	});
 
 	const tabs = [

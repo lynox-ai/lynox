@@ -5,15 +5,15 @@
 
 	let engineOk = $state<boolean | null>(null);
 	let activeTasks = $state(0);
-	let dailyCost = $state(0);
-	let totalRuns = $state(0);
+	let todayCost = $state(0);
+	let todayRuns = $state(0);
 
 	async function poll() {
 		try {
-			const [healthRes, tasksRes, costRes] = await Promise.all([
+			const [healthRes, tasksRes, dailyRes] = await Promise.all([
 				fetch(`${getApiBase()}/health`).catch(() => null),
 				fetch(`${getApiBase()}/tasks?status=in_progress`).catch(() => null),
-				fetch(`${getApiBase()}/history/stats`).catch(() => null),
+				fetch(`${getApiBase()}/history/cost/daily?days=1`).catch(() => null),
 			]);
 
 			engineOk = healthRes?.ok ?? false;
@@ -23,10 +23,12 @@
 				activeTasks = data.tasks.length;
 			}
 
-			if (costRes?.ok) {
-				const data = (await costRes.json()) as { total_runs?: number; total_cost_usd?: number };
-				totalRuns = data.total_runs ?? 0;
-				dailyCost = data.total_cost_usd ?? 0;
+			if (dailyRes?.ok) {
+				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number }>;
+				const today = new Date().toISOString().slice(0, 10);
+				const todayRow = rows.find(r => r.day === today);
+				todayCost = todayRow?.cost_usd ?? 0;
+				todayRuns = todayRow?.run_count ?? 0;
 			}
 		} catch { /* silent */ }
 	}
@@ -52,15 +54,15 @@
 
 	<span class="text-border">|</span>
 
-	<!-- Total Runs -->
+	<!-- Today's Cost -->
 	<a href="/app/history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
-		{totalRuns} {t('status.runs')}
+		${todayCost.toFixed(2)} {t('status.today')}
 	</a>
 
 	<span class="text-border">|</span>
 
-	<!-- Daily Cost -->
+	<!-- Today's Runs -->
 	<a href="/app/history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
-		${dailyCost.toFixed(2)} {t('status.today')}
+		{todayRuns} {t('status.runs')} {t('status.today')}
 	</a>
 </div>

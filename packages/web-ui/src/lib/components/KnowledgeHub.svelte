@@ -10,6 +10,7 @@
 	$effect(() => {
 		const p = $page.url.searchParams.get('tab');
 		if (p === 'graph' || p === 'insights') tab = p;
+		else tab = 'knowledge';
 	});
 
 	const tabs = [

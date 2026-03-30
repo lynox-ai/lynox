@@ -39,6 +39,7 @@
 	$effect(() => {
 		const p = $page.url.searchParams.get('tab');
 		if (p === 'analytics') tab = p;
+		else tab = 'list';
 	});
 
 	let days = $state(30);

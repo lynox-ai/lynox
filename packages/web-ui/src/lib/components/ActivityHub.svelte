@@ -14,6 +14,7 @@
 	$effect(() => {
 		const p = $page.url.searchParams.get('tab');
 		if (p === 'history' || p === 'tasks') tab = p;
+		else tab = 'dashboard';
 	});
 
 	const tabs = [
