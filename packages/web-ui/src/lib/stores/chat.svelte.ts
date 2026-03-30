@@ -350,7 +350,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		}
 		case 'pipeline_progress': {
 			const stepId = String(data['stepId'] ?? '');
-			const status = String(data['status'] ?? '') as PipelineStepInfo['status'];
+			const rawStatus = String(data['status'] ?? '');
+			// Engine sends 'started', UI uses 'running'
+			const status = (rawStatus === 'started' ? 'running' : rawStatus) as PipelineStepInfo['status'];
 			const elapsed = data['elapsed'] as number | undefined;
 			const durationMs = data['durationMs'] as number | undefined;
 

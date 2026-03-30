@@ -107,6 +107,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow.step': { de: 'Step', en: 'Step' },
 	'workflow.workflow_name': { de: 'Workflow', en: 'Workflow' },
 	'workflow.fail_rate': { de: 'Fehlerrate', en: 'Fail rate' },
+	'workflow.total_runs': { de: 'Runs gesamt', en: 'Total runs' },
+	'workflow.success_rate': { de: 'Erfolgsrate', en: 'Success rate' },
+	'workflow.failures': { de: 'Fehler', en: 'failures' },
+	'workflow.depends_on': { de: 'Abhaengig von', en: 'Depends on' },
+	'workflow.total_tokens': { de: 'Tokens gesamt', en: 'Total tokens' },
 
 	// Knowledge Graph
 	'kg.title': { de: 'Knowledge Graph', en: 'Knowledge Graph' },
@@ -209,6 +214,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.queued': { de: 'wartet', en: 'queued' },
 	'chat.cancel_queue': { de: 'Queue leeren', en: 'Clear queue' },
 	'chat.placeholder_streaming': { de: 'Naechste Nachricht vorbereiten...', en: 'Prepare next message...' },
+	'chat.placeholder_answer': { de: 'Antwort eingeben...', en: 'Type your answer...' },
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },

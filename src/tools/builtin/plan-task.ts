@@ -41,6 +41,13 @@ function slugify(name: string): string {
     || 'step';
 }
 
+/** Truncate a slug at the last word boundary (hyphen) within maxLen */
+function truncateSlug(slug: string, maxLen: number): string {
+  if (slug.length <= maxLen) return slug;
+  const cut = slug.lastIndexOf('-', maxLen);
+  return cut > 10 ? slug.slice(0, cut) : slug.slice(0, maxLen);
+}
+
 /** Convert agent-assigned plan phases to pipeline steps with dependency graph */
 export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[] {
   // Build per-index ID mapping (supports duplicate phase names)
@@ -147,7 +154,7 @@ function convertToPipeline(summary: string, phases: PlanPhase[]): string {
 
   const planned: PlannedPipeline = {
     id: pipelineId,
-    name: `plan-${pipelineId.slice(0, 8)}`,
+    name: truncateSlug(slugify(summary), 50) || `plan-${pipelineId.slice(0, 8)}`,
     goal: summary,
     steps: pipelineSteps,
     reasoning: 'Converted from user-approved plan',

@@ -244,28 +244,78 @@
 													</button>
 
 													{#if expandedSteps.has(step.step_id)}
-														<div class="border-t border-border px-3 py-2 space-y-2">
+														{@const durationPct = selectedRun.total_duration_ms > 0 ? Math.round((step.duration_ms / selectedRun.total_duration_ms) * 100) : 0}
+														{@const totalTokens = step.tokens_in + step.tokens_out}
+														<div class="border-t border-border px-3 py-3 space-y-3">
+															<!-- Meta row: model + dependencies -->
+															<div class="flex flex-wrap items-center gap-2">
+																{#if mStep?.model}
+																	<span class="text-[10px] font-mono rounded-full px-2 py-0.5 bg-accent/10 text-accent-text">{mStep.model}</span>
+																{/if}
+																{#if mStep?.input_from && mStep.input_from.length > 0}
+																	<span class="text-[10px] text-text-subtle">
+																		{t('workflow.depends_on')}: <span class="font-mono text-text-muted">{mStep.input_from.join(', ')}</span>
+																	</span>
+																{/if}
+																<span class="text-[10px] rounded-full px-2 py-0.5 {statusColor[step.status] ?? 'bg-bg-muted text-text-muted'}">{step.status}</span>
+															</div>
+
+															<!-- Task -->
 															{#if mStep?.task}
 																<div>
 																	<p class="text-[10px] uppercase tracking-widest text-text-subtle mb-0.5">{t('workflow.task')}</p>
 																	<p class="text-xs text-text">{mStep.task}</p>
 																</div>
 															{/if}
+
+															<!-- Timing bar -->
+															<div>
+																<div class="flex items-center justify-between mb-1">
+																	<p class="text-[10px] uppercase tracking-widest text-text-subtle">{t('workflow.duration')}</p>
+																	<span class="text-[10px] font-mono text-text-muted">{formatDuration(step.duration_ms)} ({durationPct}%)</span>
+																</div>
+																<div class="w-full h-1.5 rounded-full bg-border overflow-hidden">
+																	<div class="h-full rounded-full transition-all duration-300
+																		{step.status === 'failed' ? 'bg-danger/60' : 'bg-accent/60'}"
+																		style="width: {Math.max(durationPct, 2)}%"></div>
+																</div>
+															</div>
+
+															<!-- Token + Cost breakdown -->
+															<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+																<div class="rounded-[var(--radius-sm)] bg-bg-muted px-2.5 py-1.5">
+																	<p class="text-[10px] uppercase tracking-widest text-text-subtle">Tokens In</p>
+																	<p class="text-xs font-mono text-text-muted">{step.tokens_in.toLocaleString()}</p>
+																</div>
+																<div class="rounded-[var(--radius-sm)] bg-bg-muted px-2.5 py-1.5">
+																	<p class="text-[10px] uppercase tracking-widest text-text-subtle">Tokens Out</p>
+																	<p class="text-xs font-mono text-text-muted">{step.tokens_out.toLocaleString()}</p>
+																</div>
+																<div class="rounded-[var(--radius-sm)] bg-bg-muted px-2.5 py-1.5">
+																	<p class="text-[10px] uppercase tracking-widest text-text-subtle">{t('workflow.total_tokens')}</p>
+																	<p class="text-xs font-mono text-text-muted">{totalTokens.toLocaleString()}</p>
+																</div>
+																<div class="rounded-[var(--radius-sm)] bg-bg-muted px-2.5 py-1.5">
+																	<p class="text-[10px] uppercase tracking-widest text-text-subtle">{t('workflow.cost')}</p>
+																	<p class="text-xs font-mono text-text-muted">{formatCost(step.cost_usd)}</p>
+																</div>
+															</div>
+
+															<!-- Result -->
 															{#if step.result}
 																<div>
 																	<p class="text-[10px] uppercase tracking-widest text-text-subtle mb-0.5">{t('workflow.result')}</p>
 																	<pre class="text-xs text-text-muted font-mono bg-bg-muted rounded-[var(--radius-sm)] p-2 overflow-x-auto max-h-40 whitespace-pre-wrap">{step.result}</pre>
 																</div>
 															{/if}
+
+															<!-- Error -->
 															{#if step.error}
 																<div>
 																	<p class="text-[10px] uppercase tracking-widest text-text-subtle mb-0.5">{t('workflow.error')}</p>
 																	<pre class="text-xs text-danger font-mono bg-danger/5 rounded-[var(--radius-sm)] p-2 overflow-x-auto whitespace-pre-wrap">{step.error}</pre>
 																</div>
 															{/if}
-															<div class="flex gap-4 text-[10px] text-text-subtle">
-																<span>Tokens: {step.tokens_in.toLocaleString()} → {step.tokens_out.toLocaleString()}</span>
-															</div>
 														</div>
 													{/if}
 												</div>

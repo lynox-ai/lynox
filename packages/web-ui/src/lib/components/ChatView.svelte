@@ -869,7 +869,7 @@
 						onkeydown={handleKeydown}
 						oninput={autoResize}
 						onpaste={handlePaste}
-						placeholder={pendingPermission && !inBatchMode ? pendingPermission.question : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
+						placeholder={pendingPermission && !inBatchMode ? t('chat.placeholder_answer') : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 						rows="1"
 						disabled={!ready && !pendingPermission}
 						class="flex-1 resize-none border-0 bg-transparent py-2.5 pr-2 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
