@@ -171,7 +171,8 @@
 			if (container) {
 				container.classList.toggle('artifact-collapsed');
 				if (!container.classList.contains('artifact-collapsed')) {
-					resizeArtifactFrame(container);
+					// Delay so browser lays out the iframe before measuring
+					requestAnimationFrame(() => resizeArtifactFrame(container));
 				}
 			}
 			return;
@@ -186,7 +187,7 @@
 			// Auto-expand if collapsed
 			if (container.classList.contains('artifact-collapsed')) {
 				container.classList.remove('artifact-collapsed');
-				resizeArtifactFrame(container);
+				requestAnimationFrame(() => resizeArtifactFrame(container));
 			}
 
 			if (action === 'pin') handleArtifactSave(container);
@@ -241,18 +242,22 @@
 				if (!doc?.body) return;
 				doc.documentElement.style.setProperty('overflow', 'hidden', 'important');
 				doc.body.style.setProperty('overflow', 'hidden', 'important');
+				// Temporarily set iframe to a large height so content can expand fully
+				iframe.style.height = '10000px';
+				// Now measure the actual content height
 				const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight);
-				if (h > 0) iframe.style.height = `${h}px`;
+				iframe.style.height = `${Math.max(h, 200)}px`;
 			} catch {
 				iframe.style.height = '420px';
 			}
 		};
 		const onLoad = () => {
-			measure();
-			// Re-measure after async scripts (Chart.js, images, fonts)
-			setTimeout(measure, 300);
-			setTimeout(measure, 800);
-			setTimeout(measure, 1500);
+			// Initial measure + re-measure for async content (Chart.js, fonts, images)
+			requestAnimationFrame(() => {
+				measure();
+				setTimeout(measure, 500);
+				setTimeout(measure, 1500);
+			});
 		};
 		if (iframe.contentDocument?.readyState === 'complete') {
 			onLoad();
