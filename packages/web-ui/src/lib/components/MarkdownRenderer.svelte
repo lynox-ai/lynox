@@ -126,7 +126,7 @@
 				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
 				<button class="artifact-btn" data-action="export" title="Download HTML">${ICON_DOWNLOAD}</button>
 			</div>
-			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
+			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts allow-same-origin" scrolling="no" loading="lazy"></iframe>
 			<div class="artifact-source-wrap hidden"></div>
 		</div>`;
 	}
@@ -239,11 +239,13 @@
 		const measure = () => {
 			try {
 				const doc = iframe.contentDocument;
-				if (!doc?.body) return;
-				// Give iframe plenty of room so content renders at full height
-				iframe.style.height = '20000px';
-				// Force reflow then measure actual content
-				void doc.body.offsetHeight;
+				if (!doc?.body) {
+					iframe.style.height = '600px';
+					return;
+				}
+				// Shrink to 0 so scrollHeight reports true content height
+				iframe.style.height = '0px';
+				void doc.body.offsetHeight; // force reflow
 				const h = doc.documentElement.scrollHeight;
 				iframe.style.height = `${Math.max(h, 200)}px`;
 			} catch {
