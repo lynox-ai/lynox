@@ -691,8 +691,8 @@
 		</div>
 	</div>
 
-	<!-- Pipeline progress: sticky above input during execution -->
-	{#if activePipeline && (pipelineRunning || isStreaming)}
+	<!-- Pipeline progress: sticky above input during active execution only -->
+	{#if activePipeline && isStreaming && pipelineRunning}
 		<div class="border-t border-border bg-bg-subtle px-4 py-2">
 			<div class="max-w-3xl mx-auto">
 				<PipelineProgress pipeline={activePipeline} />
