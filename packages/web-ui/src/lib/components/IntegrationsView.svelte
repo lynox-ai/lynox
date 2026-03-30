@@ -79,9 +79,21 @@
 			const res = await fetch(`${getApiBase()}/google/auth`, { method: 'POST' });
 			if (res.ok) {
 				flow = (await res.json()) as DeviceFlow;
+				// Auto-open verification URL and copy code to clipboard
+				if (flow) {
+					window.open(flow.verificationUrl, '_blank', 'noopener');
+					navigator.clipboard.writeText(flow.userCode).then(() => {
+						addToast(t('integrations.google_code_copied'), 'success', 4000);
+					}).catch(() => {});
+				}
 			} else {
 				const err = (await res.json()) as { error?: string };
-				addToast(err.error ?? t('common.error'), 'error', 6000);
+				const errMsg = err.error ?? '';
+				if (errMsg.includes('invalid_client')) {
+					addToast(t('integrations.google_invalid_client'), 'error', 12000);
+				} else {
+					addToast(errMsg || t('common.error'), 'error', 6000);
+				}
 			}
 		} catch {
 			addToast(t('common.error'), 'error');
@@ -115,12 +127,154 @@
 		await loadGoogleStatus();
 	}
 
-	// --- Telegram ---
-	let telegramToken = $state('');
-	let telegramChatId = $state('');
-	let telegramSaving = $state(false);
-	let telegramSaved = $state(false);
+	// --- Telegram Wizard ---
+	type TgStep = 'idle' | 'token' | 'waiting' | 'detected' | 'error';
+	let tgStep = $state<TgStep>('idle');
+	let tgToken = $state('');
+	let tgBotName = $state('');
+	let tgBotUsername = $state('');
+	let tgDetectedChatId = $state<number | null>(null);
+	let tgDetectedName = $state('');
+	let tgError = $state('');
+	let tgValidating = $state(false);
+	let tgSaving = $state(false);
+	let tgDisconnecting = $state(false);
 	let telegramConfigured = $state(false);
+	let tgPollInterval: ReturnType<typeof setInterval> | null = null;
+
+	async function tgValidateToken() {
+		if (!tgToken.trim()) return;
+		tgValidating = true;
+		tgError = '';
+		try {
+			const res = await fetch(`${getApiBase()}/telegram/setup`, {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ token: tgToken.trim() }),
+			});
+			if (!res.ok) {
+				tgError = t('integrations.telegram_invalid_token');
+				tgStep = 'error';
+				tgValidating = false;
+				return;
+			}
+			const data = (await res.json()) as { botName: string; botUsername: string };
+			tgBotName = data.botName;
+			tgBotUsername = data.botUsername;
+			tgStep = 'waiting';
+			tgStartPolling();
+		} catch {
+			tgError = t('integrations.telegram_invalid_token');
+			tgStep = 'error';
+		}
+		tgValidating = false;
+	}
+
+	function tgStartPolling() {
+		tgStopPolling();
+		tgPollInterval = setInterval(async () => {
+			try {
+				const res = await fetch(`${getApiBase()}/telegram/setup`);
+				if (!res.ok) return;
+				const data = (await res.json()) as { status: string; chatId?: number; firstName?: string };
+				if (data.status === 'detected' && data.chatId) {
+					tgDetectedChatId = data.chatId;
+					tgDetectedName = data.firstName ?? '';
+					tgStep = 'detected';
+					tgStopPolling();
+				} else if (data.status === 'timeout') {
+					tgError = t('integrations.telegram_timeout');
+					tgStep = 'error';
+					tgStopPolling();
+				}
+			} catch { /* ignore */ }
+		}, 3000);
+		// Hard stop after 2.5 min (server timeout is 2 min)
+		setTimeout(() => { if (tgPollInterval) tgStopPolling(); }, 150_000);
+	}
+
+	function tgStopPolling() {
+		if (tgPollInterval) { clearInterval(tgPollInterval); tgPollInterval = null; }
+	}
+
+	async function tgSaveAndFinish() {
+		if (!tgDetectedChatId) return;
+		tgSaving = true;
+		try {
+			const [r1, r2] = await Promise.all([
+				fetch(`${getApiBase()}/secrets/TELEGRAM_BOT_TOKEN`, {
+					method: 'PUT', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ value: tgToken.trim() }),
+				}),
+				fetch(`${getApiBase()}/secrets/TELEGRAM_ALLOWED_CHAT_IDS`, {
+					method: 'PUT', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ value: String(tgDetectedChatId) }),
+				}),
+			]);
+			if (!r1.ok || !r2.ok) throw new Error();
+			// Cleanup setup state
+			await fetch(`${getApiBase()}/telegram/setup`, { method: 'DELETE' });
+			addToast(t('integrations.telegram_saved'), 'success');
+			tgReset();
+			await loadSecretStatuses();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
+		tgSaving = false;
+	}
+
+	async function tgDisconnect() {
+		tgDisconnecting = true;
+		try {
+			await Promise.all([
+				fetch(`${getApiBase()}/secrets/TELEGRAM_BOT_TOKEN`, { method: 'DELETE' }),
+				fetch(`${getApiBase()}/secrets/TELEGRAM_ALLOWED_CHAT_IDS`, { method: 'DELETE' }),
+			]);
+			await loadSecretStatuses();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
+		tgDisconnecting = false;
+	}
+
+	function tgCancel() {
+		tgStopPolling();
+		fetch(`${getApiBase()}/telegram/setup`, { method: 'DELETE' }).catch(() => {});
+		tgReset();
+	}
+
+	function tgReset() {
+		tgStep = 'idle';
+		tgToken = '';
+		tgBotName = '';
+		tgBotUsername = '';
+		tgDetectedChatId = null;
+		tgDetectedName = '';
+		tgError = '';
+		tgStopPolling();
+	}
+
+	// --- Anthropic API Key ---
+	let apiKey = $state('');
+	let apiKeySaving = $state(false);
+	let apiKeyConfigured = $state(false);
+
+	async function saveApiKey() {
+		if (!apiKey.trim()) return;
+		apiKeySaving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/ANTHROPIC_API_KEY`, {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: apiKey.trim() }),
+			});
+			if (!res.ok) throw new Error();
+			apiKey = '';
+			addToast(t('integrations.api_key_saved'), 'success');
+			await loadSecretStatuses();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
+		apiKeySaving = false;
+	}
 
 	// --- Web Search ---
 	let searchKey = $state('');
@@ -135,38 +289,12 @@
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { configured: { telegram: boolean; search: boolean } };
+			const data = (await res.json()) as { configured: { telegram: boolean; search: boolean; api_key: boolean } };
+			apiKeyConfigured = data.configured.api_key;
 			telegramConfigured = data.configured.telegram;
 			searchConfigured = data.configured.search;
 		} catch { /* ignore */ }
 		secretsLoading = false;
-	}
-
-	async function saveTelegram() {
-		if (!telegramToken.trim()) return;
-		telegramSaving = true;
-		try {
-			const res = await fetch(`${getApiBase()}/secrets/TELEGRAM_BOT_TOKEN`, {
-				method: 'PUT', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ value: telegramToken })
-			});
-			if (!res.ok) throw new Error();
-			if (telegramChatId.trim()) {
-				const r2 = await fetch(`${getApiBase()}/secrets/TELEGRAM_ALLOWED_CHAT_IDS`, {
-					method: 'PUT', headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ value: telegramChatId })
-				});
-				if (!r2.ok) throw new Error();
-			}
-			telegramToken = '';
-			telegramChatId = '';
-			telegramSaved = true;
-			setTimeout(() => (telegramSaved = false), 2000);
-			await loadSecretStatuses();
-		} catch {
-			addToast(t('common.save_failed'), 'error');
-		}
-		telegramSaving = false;
 	}
 
 	async function saveSearch() {
@@ -198,12 +326,56 @@
 
 	onDestroy(() => {
 		if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null; }
+		tgStopPolling();
 	});
 </script>
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('integrations.title')}</h1>
+
+	<!-- Anthropic API Key -->
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+		<div class="flex items-center justify-between mb-4">
+			<div>
+				<h2 class="font-medium">{t('integrations.anthropic')}</h2>
+				<p class="text-xs text-text-muted mt-1">{t('integrations.anthropic_desc')}</p>
+			</div>
+			{#if secretsLoading}
+				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
+			{:else if apiKeyConfigured}
+				<span class="text-xs text-success">{t('integrations.api_key_active')}</span>
+			{:else}
+				<span class="text-xs text-text-subtle">{t('integrations.not_configured')}</span>
+			{/if}
+		</div>
+
+		<div class="space-y-3">
+			{#if !apiKeyConfigured}
+				<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
+					<li>{t('integrations.anthropic_step1')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">console.anthropic.com</a></li>
+					<li>{t('integrations.anthropic_step2')}</li>
+				</ol>
+			{/if}
+			<div>
+				<label for="api-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.api_key_label')}</label>
+				<input
+					id="api-key"
+					bind:value={apiKey}
+					type="password"
+					placeholder="sk-ant-..."
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
+				/>
+			</div>
+			<button
+				onclick={saveApiKey}
+				disabled={!apiKey.trim() || apiKeySaving}
+				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+			>
+				{apiKeySaving ? t('settings.saving') : apiKeyConfigured ? t('integrations.api_key_update') : t('settings.save')}
+			</button>
+		</div>
+	</div>
 
 	<!-- Google Workspace -->
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
@@ -231,9 +403,13 @@
 				{#if googleCredSaved}
 					<p class="text-sm text-success">{t('integrations.credentials_saved')}</p>
 				{:else}
-					<p class="text-xs text-text-muted mb-2">
-						{t('integrations.credentials_hint')} <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">Google Cloud Console</a>
-					</p>
+					<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-4">
+						<li>{t('integrations.google_step1')} <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">Google Cloud Console</a> {t('integrations.google_step1_suffix')}</li>
+						<li>{t('integrations.google_step2')}</li>
+						<li>{t('integrations.google_step3')}</li>
+						<li>{t('integrations.google_step4')} <span class="font-semibold text-text">{t('integrations.google_step4_type')}</span> <span class="text-danger">{t('integrations.google_step4_warn')}</span></li>
+						<li>{t('integrations.google_step5')}</li>
+					</ol>
 					<div class="space-y-2">
 						<input
 							bind:value={googleClientId}
@@ -314,48 +490,130 @@
 			{#if secretsLoading}
 				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
 			{:else if telegramConfigured}
-				<span class="text-xs text-success">{t('integrations.telegram_configured')}</span>
+				<span class="text-xs text-success">{t('integrations.telegram_connected')}</span>
 			{:else}
 				<span class="text-xs text-text-subtle">{t('integrations.not_configured')}</span>
 			{/if}
 		</div>
 
-		{#if telegramSaved}
-			<p class="text-sm text-success">{t('integrations.telegram_saved')}</p>
-		{:else}
+		{#if telegramConfigured}
+			<!-- Connected state -->
+			<button
+				onclick={tgDisconnect}
+				disabled={tgDisconnecting}
+				class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 disabled:opacity-50"
+			>
+				{tgDisconnecting ? t('integrations.telegram_disconnecting') : t('integrations.telegram_disconnect')}
+			</button>
+
+		{:else if tgStep === 'idle'}
+			<!-- Not configured — show connect button -->
+			<button
+				onclick={() => (tgStep = 'token')}
+				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90"
+			>
+				{t('integrations.telegram_connect')}
+			</button>
+
+		{:else if tgStep === 'token'}
+			<!-- Step 1: Enter token -->
 			<div class="space-y-3">
+				<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
+					<li>{t('integrations.telegram_step1')} <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">@BotFather</a></li>
+					<li>{t('integrations.telegram_step2')}</li>
+					<li>{t('integrations.telegram_step3')}</li>
+				</ol>
 				<div>
 					<label for="tg-token" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.telegram_token')}</label>
 					<input
 						id="tg-token"
-						bind:value={telegramToken}
+						bind:value={tgToken}
 						type="password"
 						placeholder="123456:ABC-DEF..."
 						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
 					/>
-					<p class="text-xs text-text-subtle mt-1">
-						{t('integrations.telegram_token_hint')} <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">@BotFather</a>
-					</p>
 				</div>
-				<div>
-					<label for="tg-chat" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.telegram_chat_id')}</label>
-					<input
-						id="tg-chat"
-						bind:value={telegramChatId}
-						placeholder="123456789"
-						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
-					/>
-					<p class="text-xs text-text-subtle mt-1">
-						{t('integrations.telegram_chat_id_hint')} <code class="text-accent-text">https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code>
-					</p>
+				<div class="flex gap-2">
+					<button
+						onclick={tgValidateToken}
+						disabled={!tgToken.trim() || tgValidating}
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+					>
+						{tgValidating ? t('integrations.telegram_validating') : t('integrations.telegram_next')}
+					</button>
+					<button
+						onclick={tgCancel}
+						class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover"
+					>
+						{t('common.cancel')}
+					</button>
+				</div>
+			</div>
+
+		{:else if tgStep === 'waiting'}
+			<!-- Step 2: Waiting for message -->
+			<div class="space-y-3">
+				<p class="text-sm text-text-muted">
+					{t('integrations.telegram_send_message')} <a href="https://t.me/{tgBotUsername}" target="_blank" rel="noopener noreferrer" class="text-accent-text font-semibold hover:opacity-80">@{tgBotUsername}</a> {t('integrations.telegram_send_message_suffix')}
+				</p>
+				<div class="flex items-center gap-2 text-xs text-text-subtle">
+					<span class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent"></span>
+					{t('integrations.telegram_waiting')}
 				</div>
 				<button
-					onclick={saveTelegram}
-					disabled={!telegramToken.trim() || telegramSaving}
-					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+					onclick={tgCancel}
+					class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-sm text-text-muted hover:text-text hover:border-border-hover"
 				>
-					{telegramSaving ? t('settings.saving') : t('integrations.telegram_save')}
+					{t('common.cancel')}
 				</button>
+			</div>
+
+		{:else if tgStep === 'detected'}
+			<!-- Step 3: Chat ID detected -->
+			<div class="space-y-3">
+				<div class="rounded-[var(--radius-md)] border border-success/30 bg-success/10 p-3">
+					<p class="text-sm text-success font-medium">
+						&#10003; {t('integrations.telegram_detected')}: <span class="font-mono">{tgDetectedChatId}</span>
+						{#if tgDetectedName}
+							<span class="text-text-muted font-normal">({tgDetectedName})</span>
+						{/if}
+					</p>
+				</div>
+				<div class="flex gap-2">
+					<button
+						onclick={tgSaveAndFinish}
+						disabled={tgSaving}
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+					>
+						{tgSaving ? t('settings.saving') : t('integrations.telegram_save')}
+					</button>
+					<button
+						onclick={tgCancel}
+						class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover"
+					>
+						{t('common.cancel')}
+					</button>
+				</div>
+			</div>
+
+		{:else if tgStep === 'error'}
+			<!-- Error state -->
+			<div class="space-y-3">
+				<p class="text-sm text-danger">{tgError}</p>
+				<div class="flex gap-2">
+					<button
+						onclick={() => { tgError = ''; tgStep = 'token'; }}
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90"
+					>
+						{t('integrations.telegram_retry')}
+					</button>
+					<button
+						onclick={tgCancel}
+						class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover"
+					>
+						{t('common.cancel')}
+					</button>
+				</div>
 			</div>
 		{/if}
 	</div>
@@ -380,6 +638,13 @@
 			<p class="text-sm text-success">{t('integrations.search_saved')}</p>
 		{:else}
 			<div class="space-y-3">
+				{#if !searchConfigured}
+					<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
+						<li>{t('integrations.search_step1')} <a href="https://app.tavily.com/sign-in" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">tavily.com</a></li>
+						<li>{t('integrations.search_step2')}</li>
+						<li class="text-text-subtle">{t('integrations.search_step3')}</li>
+					</ol>
+				{/if}
 				<div>
 					<label for="search-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.tavily_label')}</label>
 					<input
@@ -389,9 +654,6 @@
 						placeholder="tvly-..."
 						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
 					/>
-					<p class="text-xs text-text-subtle mt-1">
-						{t('integrations.search_key_hint')} <a href="https://tavily.com" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">tavily.com</a>
-					</p>
 				</div>
 				<button
 					onclick={saveSearch}

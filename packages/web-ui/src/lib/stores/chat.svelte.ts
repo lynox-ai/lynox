@@ -164,7 +164,8 @@ export async function sendMessage(task: string, files?: FileAttachment[]): Promi
 
 async function _executeRun(task: string, files?: FileAttachment[]): Promise<void> {
 	chatError = null;
-	const sid = await ensureSession();
+	let retried = false;
+	let sid = await ensureSession();
 
 	// Find and un-queue if this message was already added as queued
 	const queuedIdx = messages.findIndex((m) => m.role === 'user' && m.queued && m.content.startsWith(task.slice(0, 50)));
@@ -185,11 +186,34 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 		payload['files'] = files;
 	}
 
-	const res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
+	let res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(payload)
 	});
+
+	// Session expired (e.g. after container restart) — recreate and retry
+	if (res.status === 404) {
+		sessionId = null;
+		sid = await ensureSession();
+		res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload)
+		});
+	}
+
+	// Rate limited — wait and retry once
+	if (res.status === 429 && !retried) {
+		const retryAfter = parseInt(res.headers.get('Retry-After') ?? '5', 10);
+		await new Promise(r => setTimeout(r, retryAfter * 1000));
+		retried = true;
+		res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload)
+		});
+	}
 
 	if (!res.ok || !res.body) {
 		isStreaming = false;

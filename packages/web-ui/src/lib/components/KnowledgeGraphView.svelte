@@ -250,7 +250,7 @@
 		{:else if graphNodes.length === 0}
 			<div class="flex items-center justify-center h-[500px] text-text-subtle text-sm">{t('kg.no_entities')}</div>
 		{:else}
-			<div class="flex gap-4">
+			<div class="flex gap-4 relative">
 				<div class="flex-1 min-w-0 rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 					<svg
 						bind:this={svgEl}
@@ -409,11 +409,17 @@
 </div>
 
 {#snippet detailPanel()}
-	<div class="w-80 shrink-0 rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-4 self-start sticky top-4 max-h-[calc(100vh-12rem)] overflow-y-auto scrollbar-thin">
+	<!-- Mobile: full-width overlay; Desktop: sticky sidebar -->
+	<div class="fixed inset-0 z-40 bg-bg/95 p-4 overflow-y-auto md:static md:inset-auto md:z-auto md:bg-bg-subtle md:w-80 md:shrink-0 md:rounded-[var(--radius-md)] md:border md:border-border md:p-4 md:self-start md:sticky md:top-4 md:max-h-[calc(100vh-12rem)] md:overflow-y-auto scrollbar-thin" style="padding-top: calc(1rem + env(safe-area-inset-top, 0px));">
 		<!-- Header -->
-		<div>
-			<h2 class="text-lg font-medium mb-1">{selected!.canonicalName}</h2>
-			<span class="text-xs rounded-full px-2.5 py-0.5 font-mono {typeColor(selected!.entityType)}">{selected!.entityType}</span>
+		<div class="flex items-start justify-between gap-2">
+			<div>
+				<h2 class="text-lg font-medium mb-1">{selected!.canonicalName}</h2>
+				<span class="text-xs rounded-full px-2.5 py-0.5 font-mono {typeColor(selected!.entityType)}">{selected!.entityType}</span>
+			</div>
+			<button onclick={() => { selected = null; }} class="shrink-0 p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label="Close">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+			</button>
 		</div>
 
 		{#if selected!.description}

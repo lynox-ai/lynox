@@ -214,9 +214,9 @@ export class Engine {
   }
 
   private _recreateClient(): void {
-    const apiKey = this.userConfig.api_key
-      ?? this.secretStore?.resolve('ANTHROPIC_API_KEY')
-      ?? process.env['ANTHROPIC_API_KEY'];
+    const apiKey = this.secretStore?.resolve('ANTHROPIC_API_KEY')
+      ?? process.env['ANTHROPIC_API_KEY']
+      ?? this.userConfig.api_key;
     const baseUrl = this.userConfig.api_base_url;
     this.client = apiKey
       ? new Anthropic({ apiKey, baseURL: baseUrl })
@@ -256,7 +256,8 @@ export class Engine {
     try {
       this.runHistory = new RunHistory();
       this._toolContext.runHistory = this.runHistory;
-    } catch {
+    } catch (err) {
+      process.stderr.write(`[lynox] RunHistory init failed: ${err instanceof Error ? err.message : String(err)} — history, threads, and tasks will be unavailable\n`);
       this.runHistory = null;
     }
 
@@ -265,7 +266,8 @@ export class Engine {
       try {
         const { ThreadStore } = await import('./thread-store.js');
         this._threadStore = new ThreadStore(this.runHistory.getDb());
-      } catch {
+      } catch (err) {
+        process.stderr.write(`[lynox] ThreadStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         this._threadStore = null;
       }
     }
@@ -426,7 +428,8 @@ export class Engine {
         const dataBlock = `<data_collections>\n${lines.join('\n')}\n</data_collections>`;
         this.briefing = this.briefing ? `${this.briefing}\n\n${dataBlock}` : dataBlock;
       }
-    } catch {
+    } catch (err) {
+      process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._dataStore = null;
     }
 
@@ -439,16 +442,17 @@ export class Engine {
         .register(artifactSaveTool)
         .register(artifactListTool)
         .register(artifactDeleteTool);
-    } catch {
+    } catch (err) {
+      process.stderr.write(`[lynox] ArtifactStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._artifactStore = null;
     }
 
     // Web search tool (conditional — requires API key)
-    const searchKey = process.env['TAVILY_API_KEY']
+    const searchKey = this.secretStore?.resolve('TAVILY_API_KEY')
+      ?? this.secretStore?.resolve('SEARCH_API_KEY')
+      ?? process.env['TAVILY_API_KEY']
       ?? process.env['BRAVE_API_KEY']
-      ?? this.userConfig.search_api_key
-      ?? this.secretStore?.resolve('TAVILY_API_KEY')
-      ?? this.secretStore?.resolve('SEARCH_API_KEY');
+      ?? this.userConfig.search_api_key;
     if (searchKey) {
       try {
         const { createSearchProvider, detectProviderType, createWebSearchTool } = await import('../integrations/search/index.js');
@@ -461,12 +465,12 @@ export class Engine {
     }
 
     // Google Workspace tools (conditional — requires client ID + secret)
-    const googleClientId = process.env['GOOGLE_CLIENT_ID']
-      ?? this.userConfig.google_client_id
-      ?? this.secretStore?.resolve('GOOGLE_CLIENT_ID');
-    const googleClientSecret = process.env['GOOGLE_CLIENT_SECRET']
-      ?? this.userConfig.google_client_secret
-      ?? this.secretStore?.resolve('GOOGLE_CLIENT_SECRET');
+    const googleClientId = this.secretStore?.resolve('GOOGLE_CLIENT_ID')
+      ?? process.env['GOOGLE_CLIENT_ID']
+      ?? this.userConfig.google_client_id;
+    const googleClientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
+      ?? process.env['GOOGLE_CLIENT_SECRET']
+      ?? this.userConfig.google_client_secret;
     if (googleClientId && googleClientSecret) {
       try {
         const { createGoogleTools } = await import('../integrations/google/index.js');

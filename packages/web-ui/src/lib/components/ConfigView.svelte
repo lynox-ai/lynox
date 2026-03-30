@@ -206,37 +206,6 @@
 					bind:value={config.max_monthly_cost_usd} class="{inputClass} font-mono" />
 			</div>
 
-			<!-- Backup -->
-			<p class={sectionClass}>{t('config.backup')}</p>
-
-			<div class={cardClass}>
-				<label for="backup-schedule" class="block text-sm font-medium mb-1">{t('config.backup_schedule')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.backup_schedule_desc')}</p>
-				<select id="backup-schedule"
-					value={config.backup_schedule ?? ''}
-					onchange={(e) => config.backup_schedule = (e.target as HTMLSelectElement).value || undefined}
-					class="{inputClass}">
-					<option value="">{t('config.backup_off')}</option>
-					<option value="0 3 * * *">{t('config.backup_daily')}</option>
-					<option value="0 3 * * 1">{t('config.backup_weekly')}</option>
-					<option value="0 3 1 * *">{t('config.backup_monthly')}</option>
-				</select>
-			</div>
-
-			<div class={cardClass}>
-				<label for="backup-retention" class="block text-sm font-medium mb-1">{t('config.backup_retention')}</label>
-				<input id="backup-retention" type="number" min="1" placeholder="30"
-					bind:value={config.backup_retention_days} class="{inputClass} font-mono" />
-			</div>
-
-			<div class="{cardClass} flex items-center justify-between">
-				<div>
-					<p class="text-sm font-medium">{t('config.backup_encrypt')}</p>
-					<p class="text-xs text-text-muted mt-1">{t('config.backup_encrypt_desc')}</p>
-				</div>
-				<button onclick={() => config.backup_encrypt = !config.backup_encrypt} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.backup_encrypt ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.backup_encrypt ? 'translate-x-4' : ''}"></span></button>
-			</div>
-
 			<!-- Knowledge -->
 			<p class={sectionClass}>{t('config.knowledge')}</p>
 
@@ -247,6 +216,13 @@
 					bind:value={config.memory_half_life_days} class="{inputClass} font-mono" />
 			</div>
 
+			<div class={cardClass}>
+				<label for="embedding" class="block text-sm font-medium mb-2">{t('config.embedding_provider')}</label>
+				<select id="embedding" bind:value={config.embedding_provider} class={inputClass}>
+					<option value="onnx">{t('config.embedding_onnx')}</option>
+					<option value="voyage">{t('config.embedding_voyage')}</option>
+				</select>
+			</div>
 
 			<!-- Limits -->
 			<p class={sectionClass}>{t('config.limits')}</p>

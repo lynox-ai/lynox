@@ -146,6 +146,7 @@
 	let batchFreetext = $state('');
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
+	let transcribing = $state(false);
 
 	const pendingChangeset = $derived(getPendingChangeset());
 	const changesetLoading = $derived(getChangesetLoading());
@@ -257,16 +258,21 @@
 				const reader = new FileReader();
 				reader.onload = async () => {
 					const base64 = (reader.result as string).split(',')[1] ?? '';
-					const res = await fetch(`${getApiBase()}/transcribe`, {
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({ audio: base64, filename: 'voice.webm' })
-					});
-					if (res.ok) {
-						const data = (await res.json()) as { text: string };
-						if (data.text.trim()) {
-							await sendMessage(`🎤 ${data.text.trim()}`);
+					transcribing = true;
+					try {
+						const res = await fetch(`${getApiBase()}/transcribe`, {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify({ audio: base64, filename: 'voice.webm' })
+						});
+						if (res.ok) {
+							const data = (await res.json()) as { text: string };
+							if (data.text.trim()) {
+								await sendMessage(`🎤 ${data.text.trim()}`);
+							}
 						}
+					} finally {
+						transcribing = false;
 					}
 				};
 				reader.readAsDataURL(blob);
@@ -828,33 +834,43 @@
 											batchAnswers[i] = (batchSelections[i] ?? []).join(', ');
 											batchAnswers = [...batchAnswers];
 										}}
-											class="rounded-[var(--radius-sm)] border px-2 py-0.5 text-xs transition-all {(batchSelections[i] ?? []).includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
+											class="rounded-[var(--radius-sm)] border px-2.5 py-1 text-xs transition-all {(batchSelections[i] ?? []).includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
 										>{option}</button>
 									{/each}
 								</div>
-								<button onclick={() => { if (batchAnswers[i]) answerPrompt(batchAnswers[i]!); }}
-									disabled={!(batchSelections[i] ?? []).length}
-									class="mt-1.5 rounded-[var(--radius-sm)] bg-accent px-3 py-0.5 text-xs text-text hover:opacity-90 disabled:opacity-30"
-								>{t('chat.send')}</button>
+								<div class="flex gap-2 mt-1.5">
+									<button onclick={() => { if (batchAnswers[i]) answerPrompt(batchAnswers[i]!); }}
+										disabled={!(batchSelections[i] ?? []).length}
+										class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-text hover:opacity-90 disabled:opacity-30"
+									>{t('chat.send')}</button>
+									<button onclick={() => answerPrompt('__dismissed__')}
+										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text-subtle hover:text-text transition-all"
+									>{t('chat.skip')}</button>
+								</div>
 							{:else}
 								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex gap-1.5">
-									<input bind:value={batchFreetext} placeholder={q.question} class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-xs outline-none focus:border-border-hover" />
-									<button type="submit" disabled={!batchFreetext.trim()} class="rounded-[var(--radius-sm)] bg-accent px-2 py-1 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
+									<input bind:value={batchFreetext} placeholder={q.question} class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[16px] md:text-xs outline-none focus:border-border-hover" />
+									<button type="submit" disabled={!batchFreetext.trim()} class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
+									<button type="button" onclick={() => answerPrompt('__dismissed__')} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-xs text-text-subtle hover:text-text transition-all">{t('chat.skip')}</button>
 								</form>
 							{/if}
 						</div>
 					{:else}
 						<!-- Compact: answered or unanswered -->
 						<button onclick={() => { if (batchAnswers[i]) { batchAnswers[i] = ''; batchSelections[i] = []; batchAnswers = [...batchAnswers]; batchSelections = [...batchSelections]; } batchFocusIdx = i; }}
-							class="w-full flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-1 text-xs text-left transition-all {batchAnswers[i] ? 'text-text-muted hover:bg-bg-muted' : 'text-text-subtle italic hover:bg-bg'}">
-							<span class="font-medium shrink-0 w-20 truncate">{q.header ?? '?'}</span>
+							class="w-full flex flex-col md:flex-row items-start md:items-center gap-1 md:gap-2 rounded-[var(--radius-sm)] px-3 py-1.5 text-xs text-left transition-all {batchAnswers[i] ? 'text-text-muted hover:bg-bg-muted' : 'text-text-subtle italic hover:bg-bg'}">
+							<span class="font-medium shrink-0 w-auto md:w-20 truncate">{q.header ?? '?'}</span>
 							<span class="{batchAnswers[i] ? 'text-accent-text' : ''} truncate">{batchAnswers[i] || q.question}</span>
 							{#if batchAnswers[i]}
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 shrink-0 text-text-subtle hover:text-accent-text ml-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle hover:text-accent-text ml-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
 							{/if}
 						</button>
 					{/if}
 				{/each}
+				<!-- Cancel batch -->
+				<button onclick={() => answerPrompt('__dismissed__')}
+					class="w-full text-center rounded-[var(--radius-sm)] px-3 py-1.5 text-xs text-text-subtle hover:text-text hover:bg-bg-muted transition-all mt-1"
+				>{t('chat.dismiss')}</button>
 			</div>
 		</div>
 	{/if}
@@ -869,10 +885,10 @@
 						<span class="text-accent-text font-medium">{ap.answer}</span>
 						<button
 							onclick={() => { abortRun(); answeredPrompts = []; addToast(t('chat.retry_hint'), 'info'); }}
-							class="text-text-subtle hover:text-accent-text transition-colors shrink-0 p-0.5"
+							class="text-text-subtle hover:text-accent-text transition-colors shrink-0 p-1.5"
 							title={t('chat.edit_answer')}
 						>
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
 						</button>
 					</div>
 				{/each}
@@ -887,7 +903,14 @@
 		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-2">
-				<pre class="text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
+				<div class="flex items-start gap-2">
+					<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
+					{#if !isPermissionGuard}
+						<button onclick={() => answerPrompt('__dismissed__')} class="shrink-0 p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+						</button>
+					{/if}
+				</div>
 
 				{#if isPermissionGuard}
 					<div class="flex flex-wrap gap-2">
@@ -902,6 +925,7 @@
 								class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-muted hover:text-text hover:border-accent hover:bg-accent/10 transition-all"
 							>{option}</button>
 						{/each}
+						<button onclick={() => answerPrompt('__dismissed__')} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.skip')}</button>
 					</div>
 				{:else}
 					<!-- Open-ended: user types in normal chat input below -->
@@ -918,8 +942,10 @@
 			<div class="max-w-3xl mx-auto flex flex-wrap gap-2 mb-2">
 				{#each pendingFiles as file, i}
 					<div class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-xs text-text-muted">
-						<span class="truncate max-w-32">{file.name}</span>
-						<button onclick={() => removeFile(i)} class="text-text-subtle hover:text-danger ml-1">x</button>
+						<span class="truncate max-w-24 md:max-w-32" title={file.name}>{file.name}</span>
+						<button onclick={() => removeFile(i)} class="text-text-subtle hover:text-danger ml-1 p-1" aria-label="Remove">
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+						</button>
 					</div>
 				{/each}
 			</div>
@@ -928,7 +954,17 @@
 		<div class="max-w-3xl mx-auto flex items-end gap-1.5 md:gap-2">
 			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 
-			{#if recording}
+			{#if transcribing}
+				<!-- Transcribing state -->
+				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-border bg-bg px-3 py-3">
+					<svg class="h-4 w-4 animate-spin text-accent shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+					</svg>
+					<span class="text-sm text-text-subtle">{t('chat.transcribing')}</span>
+				</div>
+				<div class="shrink-0 h-11 w-11"></div>
+			{:else if recording}
 				<!-- Recording state: [🗑  ● 0:03 ━━━━━  ⬛]  [➤] -->
 				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2">
 					<button onclick={() => { toggleVoice(); }} class="text-text-subtle hover:text-danger transition-colors shrink-0" aria-label="Discard">

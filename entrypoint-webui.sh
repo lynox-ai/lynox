@@ -25,6 +25,13 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   fi
 fi
 
+# Warn if data directories are not writable (Docker named volumes may be root-owned)
+for dir in "$HOME/.lynox" "$HOME/.cache/huggingface"; do
+  if [ ! -w "$dir" ] 2>/dev/null; then
+    echo "Warning: $dir is not writable by user $(id -u). Data persistence may fail." >&2
+  fi
+done
+
 # Start Engine HTTP API in background
 LYNOX_HTTP_PORT="${LYNOX_HTTP_PORT:-3100}" \
   node /app/dist/index.js --http-api &

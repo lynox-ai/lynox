@@ -290,11 +290,11 @@ export class BackupManager {
 
   // ── List ──
 
-  listBackups(): BackupManifest[] {
+  listBackups(): Array<BackupManifest & { backup_id: string }> {
     if (!existsSync(this.backupDir)) return [];
 
     const entries = readdirSync(this.backupDir, { withFileTypes: true });
-    const manifests: BackupManifest[] = [];
+    const manifests: Array<BackupManifest & { backup_id: string }> = [];
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -303,7 +303,7 @@ export class BackupManager {
       if (!existsSync(manifestPath)) continue;
       try {
         const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
-        manifests.push(manifest);
+        manifests.push({ ...manifest, backup_id: entry.name });
       } catch {
         // Skip corrupt manifests
       }
@@ -312,6 +312,14 @@ export class BackupManager {
     // Sort newest first
     manifests.sort((a, b) => b.created_at.localeCompare(a.created_at));
     return manifests;
+  }
+
+  /** Resolve a backup ID (directory name) to its full path, or null if not found. */
+  getBackupPath(backupId: string): string | null {
+    const dir = join(this.backupDir, backupId);
+    const manifestPath = join(dir, 'manifest.json');
+    if (!existsSync(manifestPath)) return null;
+    return dir;
   }
 
   // ── Prune ──

@@ -188,12 +188,12 @@
 
 			<!-- Preview panel -->
 			{#if previewFile}
-				<div class="w-1/2 shrink-0">
-					<div class="rounded-[var(--radius-md)] border border-border overflow-hidden sticky top-6">
+				<div class="fixed inset-0 z-40 bg-bg/95 md:static md:inset-auto md:z-auto md:bg-transparent md:w-1/2 md:shrink-0" style="padding-top: env(safe-area-inset-top, 0px);">
+					<div class="h-full md:h-auto rounded-none md:rounded-[var(--radius-md)] border-0 md:border border-border overflow-hidden md:sticky md:top-6">
 						<div class="px-4 py-2.5 border-b border-border bg-bg-subtle flex items-center justify-between">
 							<span class="text-xs font-mono text-text-muted truncate">{previewFile}</span>
-							<button onclick={() => previewFile = null} class="text-text-subtle hover:text-text p-0.5" aria-label="Close preview">
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+							<button onclick={() => previewFile = null} class="text-text-subtle hover:text-text p-1.5" aria-label="Close preview">
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
 							</button>
 						</div>
 						{#if previewLoading}

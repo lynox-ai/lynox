@@ -145,13 +145,13 @@ export class LynoxHTTPApi {
 
   private async _tryStartTelegram(config: ReturnType<typeof loadConfig>): Promise<void> {
     const store = this.engine?.getSecretStore();
-    const token = process.env['TELEGRAM_BOT_TOKEN']
-      ?? store?.resolve('TELEGRAM_BOT_TOKEN')
+    const token = store?.resolve('TELEGRAM_BOT_TOKEN')
+      ?? process.env['TELEGRAM_BOT_TOKEN']
       ?? config.telegram_bot_token;
     if (!token || !this.engine) return;
 
-    const allowedRaw = process.env['TELEGRAM_ALLOWED_CHAT_IDS']
-      ?? store?.resolve('TELEGRAM_ALLOWED_CHAT_IDS')
+    const allowedRaw = store?.resolve('TELEGRAM_ALLOWED_CHAT_IDS')
+      ?? process.env['TELEGRAM_ALLOWED_CHAT_IDS']
       ?? '';
     const allowedChatIds = allowedRaw
       ? String(allowedRaw).split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
@@ -359,19 +359,22 @@ export class LynoxHTTPApi {
     }
 
     // Rate limiting (uses resolved clientIp, proxy-aware)
-    const ip = clientIp;
-    const now = Date.now();
-    let rateEntry = this.rateCounts.get(ip);
-    if (!rateEntry || rateEntry.resetAt < now) {
-      rateEntry = { count: 0, resetAt: now + RATE_WINDOW_MS };
-      this.rateCounts.set(ip, rateEntry);
-    }
-    rateEntry.count++;
-    if (rateEntry.count > RATE_MAX) {
-      const retryAfter = Math.ceil((rateEntry.resetAt - now) / 1000);
-      res.setHeader('Retry-After', String(retryAfter));
-      errorResponse(res, 429, 'Too many requests');
-      return;
+    // Skip for loopback — Web UI proxy runs on same host
+    if (clientIp !== '127.0.0.1' && clientIp !== '::1') {
+      const ip = clientIp;
+      const now = Date.now();
+      let rateEntry = this.rateCounts.get(ip);
+      if (!rateEntry || rateEntry.resetAt < now) {
+        rateEntry = { count: 0, resetAt: now + RATE_WINDOW_MS };
+        this.rateCounts.set(ip, rateEntry);
+      }
+      rateEntry.count++;
+      if (rateEntry.count > RATE_MAX) {
+        const retryAfter = Math.ceil((rateEntry.resetAt - now) / 1000);
+        res.setHeader('Retry-After', String(retryAfter));
+        errorResponse(res, 429, 'Too many requests');
+        return;
+      }
     }
 
     // Parse body for POST/PUT/PATCH
@@ -1055,6 +1058,126 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { text });
     });
 
+    // ── Telegram Setup (chat ID auto-detection via Telegram Bot API) ──
+
+    // In-memory state for the setup wizard — only one setup at a time
+    let tgSetup: {
+      token: string;
+      botName: string;
+      botUsername: string;
+      updateOffset: number;
+      chatId: number | null;
+      firstName: string | null;
+      startedAt: number;
+    } | null = null;
+
+    const TG_SETUP_TIMEOUT_MS = 120_000; // 2 min
+
+    this.staticRoutes.set('POST /api/telegram/setup', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const token = b && typeof b['token'] === 'string' ? b['token'].trim() : '';
+      if (!token) { errorResponse(res, 400, 'token required'); return; }
+
+      // Validate token via getMe
+      let botName = '';
+      let botUsername = '';
+      try {
+        const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!meRes.ok) throw new Error('Invalid bot token');
+        const me = (await meRes.json()) as { ok: boolean; result: { first_name: string; username: string } };
+        if (!me.ok) throw new Error('Invalid bot token');
+        botName = me.result.first_name;
+        botUsername = me.result.username;
+      } catch {
+        errorResponse(res, 400, 'Invalid bot token');
+        return;
+      }
+
+      // Flush old updates — get last update_id so we only receive NEW messages
+      let updateOffset = 0;
+      try {
+        const flushRes = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&limit=1`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (flushRes.ok) {
+          const flushData = (await flushRes.json()) as { result: Array<{ update_id: number }> };
+          if (flushData.result.length > 0) {
+            updateOffset = flushData.result[flushData.result.length - 1]!.update_id + 1;
+          }
+        }
+      } catch { /* ignore flush errors */ }
+
+      tgSetup = { token, botName, botUsername, updateOffset, chatId: null, firstName: null, startedAt: Date.now() };
+      jsonResponse(res, 200, { botName, botUsername });
+    });
+
+    this.staticRoutes.set('GET /api/telegram/setup', async (_req, res) => {
+      if (!tgSetup) { jsonResponse(res, 200, { status: 'idle' }); return; }
+
+      // Timeout check
+      if (Date.now() - tgSetup.startedAt > TG_SETUP_TIMEOUT_MS) {
+        tgSetup = null;
+        jsonResponse(res, 200, { status: 'timeout' });
+        return;
+      }
+
+      // Already detected
+      if (tgSetup.chatId !== null) {
+        jsonResponse(res, 200, { status: 'detected', chatId: tgSetup.chatId, firstName: tgSetup.firstName });
+        return;
+      }
+
+      // Poll for new messages (short poll, 2s server-side timeout)
+      try {
+        const url = `https://api.telegram.org/bot${tgSetup.token}/getUpdates`
+          + `?offset=${tgSetup.updateOffset}&timeout=2&allowed_updates=${encodeURIComponent('["message"]')}`;
+        const pollRes = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+        if (!pollRes.ok) throw new Error('poll failed');
+
+        const pollData = (await pollRes.json()) as {
+          result: Array<{
+            update_id: number;
+            message?: { chat: { id: number }; from?: { first_name?: string } };
+          }>;
+        };
+
+        for (const update of pollData.result) {
+          // Advance offset regardless
+          tgSetup.updateOffset = update.update_id + 1;
+
+          if (update.message) {
+            tgSetup.chatId = update.message.chat.id;
+            tgSetup.firstName = update.message.from?.first_name ?? '';
+
+            // Send confirmation to the user in Telegram
+            try {
+              await fetch(`https://api.telegram.org/bot${tgSetup.token}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: tgSetup.chatId,
+                  text: '✓ Verbunden! Setup wird im Browser fortgesetzt.',
+                }),
+                signal: AbortSignal.timeout(5_000),
+              });
+            } catch { /* best effort */ }
+
+            jsonResponse(res, 200, { status: 'detected', chatId: tgSetup.chatId, firstName: tgSetup.firstName });
+            return;
+          }
+        }
+      } catch { /* poll error — return waiting */ }
+
+      jsonResponse(res, 200, { status: 'waiting' });
+    });
+
+    this.staticRoutes.set('DELETE /api/telegram/setup', async (_req, res) => {
+      tgSetup = null;
+      jsonResponse(res, 200, { ok: true });
+    });
+
     // ── Google Auth ──
     this.staticRoutes.set('GET /api/google/status', async (_req, res) => {
       const google = engine.getGoogleAuth();
@@ -1234,6 +1357,19 @@ export class LynoxHTTPApi {
         errorResponse(res, 500, err instanceof Error ? err.message : 'Backup failed');
       }
     });
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/backups/:id/restore', async (_req, res, params) => {
+      const bm = engine.getBackupManager();
+      if (!bm) { errorResponse(res, 503, 'Backup manager not available'); return; }
+      const backupPath = bm.getBackupPath(params['id']!);
+      if (!backupPath) { errorResponse(res, 404, 'Backup not found'); return; }
+      try {
+        const result = await bm.restoreBackup(backupPath);
+        jsonResponse(res, result.success ? 200 : 500, result);
+      } catch (err: unknown) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Restore failed');
+      }
+    }));
 
     // ── API Store ────────────────────────────────────────────────
 

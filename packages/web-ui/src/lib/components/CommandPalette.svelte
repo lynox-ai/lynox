@@ -93,7 +93,7 @@
 	<button class="fixed inset-0 z-50 bg-black/60" onclick={() => (open = false)} aria-label="Close"></button>
 
 	<!-- Palette -->
-	<div class="fixed inset-x-4 top-[20%] z-50 mx-auto max-w-lg rounded-[var(--radius-lg)] border border-border bg-bg shadow-2xl overflow-hidden">
+	<div class="fixed inset-x-2 md:inset-x-4 z-50 mx-auto max-w-lg rounded-[var(--radius-lg)] border border-border bg-bg shadow-2xl overflow-hidden" style="top: calc(1rem + env(safe-area-inset-top, 0px));">
 		<!-- Input -->
 		<div class="flex items-center gap-3 border-b border-border px-4 py-3">
 			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-text-subtle shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">

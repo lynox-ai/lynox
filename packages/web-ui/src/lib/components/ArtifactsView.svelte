@@ -129,8 +129,8 @@
 
 <!-- Delete confirmation -->
 {#if confirmDelete}
-	<div class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center" role="dialog" aria-modal="true">
-		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-sm space-y-4">
+	<div class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center" role="dialog" aria-modal="true" onclick={(e) => { if (e.target === e.currentTarget) confirmDelete = null; }} style="padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);">
+		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-sm mx-4 space-y-4">
 			<p class="text-sm text-text">{t('artifacts.confirm_delete')}</p>
 			<div class="flex gap-3 justify-end">
 				<button type="button" class="text-xs text-text-muted hover:text-text px-3 py-1.5" onclick={() => confirmDelete = null}>{t('artifacts.cancel')}</button>
@@ -142,10 +142,10 @@
 
 <!-- Fullscreen preview -->
 {#if selected}
-	<div class="fixed inset-0 z-[9999] bg-bg flex flex-col" role="dialog" aria-modal="true" aria-label={selected.title}>
+	<div class="fixed inset-0 z-[9999] bg-bg flex flex-col" role="dialog" aria-modal="true" aria-label={selected.title} style="padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);">
 		<!-- Toolbar -->
-		<div class="flex items-center gap-3 px-5 py-3 border-b border-border bg-bg-subtle shrink-0">
-			<button type="button" class="text-text-muted hover:text-text text-sm" onclick={closePreview}>← {t('artifacts.back')}</button>
+		<div class="flex items-center gap-3 px-4 md:px-5 py-3 border-b border-border bg-bg-subtle shrink-0">
+			<button type="button" class="text-text-muted hover:text-text text-sm p-1" onclick={closePreview}>← {t('artifacts.back')}</button>
 			<h2 class="text-sm font-medium text-text flex-1 truncate">{selected.title}</h2>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>
 			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>Export</button>

@@ -162,11 +162,19 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Backups
 	'backups.title': { de: 'Backups', en: 'Backups' },
+	'backups.desc': { de: 'Backups erstellen, wiederherstellen und planen', en: 'Create, restore and schedule backups' },
 	'backups.no_backups': { de: 'Keine Backups. Erstelle dein erstes Backup.', en: 'No backups. Create your first backup.' },
 	'backups.create': { de: 'Backup erstellen', en: 'Create backup' },
 	'backups.creating': { de: 'Erstelle Backup...', en: 'Creating backup...' },
 	'backups.encrypted': { de: 'Verschluesselt', en: 'Encrypted' },
 	'backups.files': { de: 'Dateien', en: 'files' },
+	'backups.restore': { de: 'Wiederherstellen', en: 'Restore' },
+	'backups.restoring': { de: 'Wiederherstellen...', en: 'Restoring...' },
+	'backups.restore_confirm': { de: 'Dieses Backup wirklich wiederherstellen? Ein Sicherheits-Backup wird vorher erstellt.', en: 'Restore this backup? A safety backup will be created first.' },
+	'backups.restore_success': { de: 'Backup wiederhergestellt. Bitte Engine neu starten.', en: 'Backup restored. Please restart the engine.' },
+	'backups.restore_failed': { de: 'Wiederherstellung fehlgeschlagen.', en: 'Restore failed.' },
+	'backups.cancel': { de: 'Abbrechen', en: 'Cancel' },
+	'backups.settings': { de: 'Backup-Einstellungen', en: 'Backup settings' },
 
 	// API Store
 	'apis.title': { de: 'API Profiles', en: 'API Profiles' },
@@ -218,11 +226,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
+	'chat.skip': { de: 'Ueberspringen', en: 'Skip' },
+	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.voice_unsupported': { de: '[Spracheingabe nicht verfuegbar]', en: '[Voice input not available]' },
 	'chat.analyze_files': { de: 'Analysiere diese Dateien.', en: 'Analyze these files.' },
 	'chat.mic_unavailable': { de: '[Mikrofon nicht verfuegbar]', en: '[Microphone not available]' },
 	'chat.attach_file': { de: 'Datei anhaengen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
+	'chat.transcribing': { de: 'Wird transkribiert…', en: 'Transcribing…' },
 	'chat.recording': { de: 'Aufnahme', en: 'Recording' },
 	'chat.thinking_label': { de: 'Thinking', en: 'Thinking' },
 	'chat.expand_all': { de: 'Alle aufklappen', en: 'Expand all' },
@@ -403,6 +414,14 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Integrations
 	'integrations.title': { de: 'Integrationen', en: 'Integrations' },
+	'integrations.anthropic': { de: 'Anthropic API', en: 'Anthropic API' },
+	'integrations.anthropic_desc': { de: 'Claude als KI-Modell fuer den Agent', en: 'Claude as AI model for the agent' },
+	'integrations.anthropic_step1': { de: 'API-Key erstellen auf', en: 'Create an API key at' },
+	'integrations.anthropic_step2': { de: 'Key kopieren und unten einfuegen', en: 'Copy the key and paste below' },
+	'integrations.api_key_label': { de: 'API Key', en: 'API Key' },
+	'integrations.api_key_active': { de: 'Aktiv', en: 'Active' },
+	'integrations.api_key_saved': { de: 'API-Key gespeichert.', en: 'API key saved.' },
+	'integrations.api_key_update': { de: 'Key aktualisieren', en: 'Update key' },
 	'integrations.google_workspace': { de: 'Google Workspace', en: 'Google Workspace' },
 	'integrations.google_services': { de: 'Gmail, Drive, Calendar, Sheets', en: 'Gmail, Drive, Calendar, Sheets' },
 	'integrations.connected': { de: 'Verbunden', en: 'Connected' },
@@ -416,9 +435,19 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.waiting_auth': { de: 'Warte auf Autorisierung...', en: 'Waiting for authorization...' },
 	'integrations.connect_google': { de: 'Mit Google verbinden', en: 'Connect with Google' },
 	'integrations.connecting': { de: 'Verbinden...', en: 'Connecting...' },
+	'integrations.google_code_copied': { de: 'Code kopiert — im geoeffneten Tab einfuegen', en: 'Code copied — paste in the opened tab' },
 	'integrations.credentials_hint': { de: 'Erstelle OAuth-Credentials in der', en: 'Create OAuth credentials in the' },
 	'integrations.credentials_saved': { de: 'Credentials gespeichert. Engine wird neu gestartet...', en: 'Credentials saved. Restarting engine...' },
 	'integrations.save_credentials': { de: 'Credentials speichern', en: 'Save credentials' },
+	'integrations.google_step1': { de: 'Oeffne die', en: 'Open the' },
+	'integrations.google_step1_suffix': { de: 'und erstelle ein Projekt (oder waehle ein bestehendes)', en: 'and create a project (or select an existing one)' },
+	'integrations.google_step2': { de: 'APIs & Services → Library → Gmail, Drive, Calendar, Sheets APIs aktivieren', en: 'APIs & Services → Library → Enable Gmail, Drive, Calendar, Sheets APIs' },
+	'integrations.google_step3': { de: 'APIs & Services → OAuth Consent Screen → Extern → deine E-Mail als Test-User hinzufuegen', en: 'APIs & Services → OAuth Consent Screen → External → add your email as test user' },
+	'integrations.google_step4': { de: 'Credentials → OAuth Client-ID erstellen → Typ:', en: 'Credentials → Create OAuth Client ID → Type:' },
+	'integrations.google_step4_type': { de: 'Desktop-App', en: 'Desktop app' },
+	'integrations.google_step4_warn': { de: '(nicht „Webanwendung"!)', en: '(not "Web application"!)' },
+	'integrations.google_step5': { de: 'Client-ID und Client-Secret kopieren und unten einfuegen', en: 'Copy Client ID and Client Secret and paste below' },
+	'integrations.google_invalid_client': { de: 'Falscher Client-Typ. Der OAuth-Client muss als „Desktop-App" erstellt werden, nicht als „Webanwendung".', en: 'Wrong client type. The OAuth client must be created as "Desktop app", not "Web application".' },
 
 	// Telegram
 	'integrations.telegram': { de: 'Telegram Bot', en: 'Telegram Bot' },
@@ -430,6 +459,24 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.telegram_configured': { de: 'Konfiguriert', en: 'Configured' },
 	'integrations.telegram_save': { de: 'Speichern', en: 'Save' },
 	'integrations.telegram_saved': { de: 'Gespeichert. Engine wird neu gestartet — Bot aktiviert sich automatisch.', en: 'Saved. Engine restarting — bot will activate automatically.' },
+	'integrations.telegram_step1': { de: 'Oeffne Telegram und suche nach', en: 'Open Telegram and search for' },
+	'integrations.telegram_step2': { de: '/newbot senden und den Anweisungen folgen (Name + Username waehlen)', en: 'Send /newbot and follow the instructions (choose name + username)' },
+	'integrations.telegram_step3': { de: 'Bot-Token kopieren und unten einfuegen', en: 'Copy the bot token and paste below' },
+	'integrations.telegram_step4': { de: 'Optional: Chat-ID ermitteln — dem Bot eine Nachricht schicken, dann', en: 'Optional: Find Chat ID — send the bot a message, then open' },
+	'integrations.telegram_step4_suffix': { de: 'aufrufen und chat.id kopieren', en: 'and copy the chat.id' },
+	'integrations.telegram_connect': { de: 'Mit Telegram verbinden', en: 'Connect with Telegram' },
+	'integrations.telegram_next': { de: 'Weiter', en: 'Continue' },
+	'integrations.telegram_validating': { de: 'Token pruefen...', en: 'Validating token...' },
+	'integrations.telegram_invalid_token': { de: 'Ungueltiger Bot-Token. Pruefe das Format (z.B. 123456:ABC-DEF...).', en: 'Invalid bot token. Check the format (e.g. 123456:ABC-DEF...).' },
+	'integrations.telegram_send_message': { de: 'Sende jetzt eine beliebige Nachricht an', en: 'Send any message to' },
+	'integrations.telegram_send_message_suffix': { de: 'in Telegram.', en: 'in Telegram.' },
+	'integrations.telegram_waiting': { de: 'Warte auf Nachricht...', en: 'Waiting for message...' },
+	'integrations.telegram_detected': { de: 'Chat-ID erkannt', en: 'Chat ID detected' },
+	'integrations.telegram_timeout': { de: 'Timeout — keine Nachricht empfangen. Versuche es erneut.', en: 'Timeout — no message received. Try again.' },
+	'integrations.telegram_connected': { de: 'Verbunden', en: 'Connected' },
+	'integrations.telegram_disconnect': { de: 'Verbindung trennen', en: 'Disconnect' },
+	'integrations.telegram_disconnecting': { de: 'Trennen...', en: 'Disconnecting...' },
+	'integrations.telegram_retry': { de: 'Erneut versuchen', en: 'Try again' },
 
 	// Web Search
 	'integrations.search': { de: 'Web Search', en: 'Web Search' },
@@ -439,6 +486,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.search_not_configured': { de: 'Nicht konfiguriert', en: 'Not configured' },
 	'integrations.search_saved': { de: 'Key gespeichert. Engine wird neu gestartet...', en: 'Key saved. Restarting engine...' },
 	'integrations.tavily_label': { de: 'Tavily API Key', en: 'Tavily API Key' },
+	'integrations.search_step1': { de: 'Kostenloses Konto erstellen auf', en: 'Create a free account at' },
+	'integrations.search_step2': { de: 'API-Key im Dashboard kopieren und unten einfuegen', en: 'Copy API key from dashboard and paste below' },
+	'integrations.search_step3': { de: 'Gratis-Tier: 1.000 Suchen/Monat', en: 'Free tier: 1,000 searches/month' },
 
 	// Memory
 	'memory.title': { de: 'Knowledge', en: 'Knowledge' },
@@ -501,6 +551,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'common.load_failed': { de: 'Laden fehlgeschlagen. Ist die Engine erreichbar?', en: 'Failed to load. Is the engine reachable?' },
 	'common.copied': { de: 'Kopiert', en: 'Copied' },
 	'common.copy': { de: 'Kopieren', en: 'Copy' },
+	'common.cancel': { de: 'Abbrechen', en: 'Cancel' },
 };
 
 export function setLocale(locale: Locale): void {
