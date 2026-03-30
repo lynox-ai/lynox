@@ -1,5 +1,5 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	onMount(() => goto('/app/activity', { replaceState: true }));
+	onMount(() => goto('/app/activity?tab=history', { replaceState: true }));
 </script>

@@ -1,10 +1,16 @@
 <script lang="ts">
+	import { page } from '$app/stores';
 	import { t } from '../i18n.svelte.js';
 	import MemoryView from './MemoryView.svelte';
 	import KnowledgeGraphView from './KnowledgeGraphView.svelte';
 	import MemoryInsightsView from './MemoryInsightsView.svelte';
 
 	let tab = $state<'knowledge' | 'graph' | 'insights'>('knowledge');
+
+	$effect(() => {
+		const p = $page.url.searchParams.get('tab');
+		if (p === 'graph' || p === 'insights') tab = p;
+	});
 
 	const tabs = [
 		{ id: 'knowledge' as const, labelKey: 'hub.knowledge.wissen' },

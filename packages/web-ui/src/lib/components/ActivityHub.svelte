@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { sendMessage } from '../stores/chat.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
@@ -9,6 +10,11 @@
 	let { onrerun }: { onrerun?: (task: string) => void } = $props();
 
 	let tab = $state<'dashboard' | 'history' | 'tasks'>('dashboard');
+
+	$effect(() => {
+		const p = $page.url.searchParams.get('tab');
+		if (p === 'history' || p === 'tasks') tab = p;
+	});
 
 	const tabs = [
 		{ id: 'dashboard' as const, labelKey: 'hub.activity.dashboard' },

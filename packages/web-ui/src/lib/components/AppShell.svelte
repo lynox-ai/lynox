@@ -1,10 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { newChat, resumeThread } from '../stores/chat.svelte.js';
-	import { loadThreads } from '../stores/threads.svelte.js';
+	import { onMount } from 'svelte';
+	import { slide } from 'svelte/transition';
+	import { newChat, resumeThread, getSessionId } from '../stores/chat.svelte.js';
+	import { loadThreads, getThreads, archiveThread } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
-	import ThreadList from './ThreadList.svelte';
 	import StatusBar from './StatusBar.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
@@ -16,20 +17,134 @@
 	} = $props();
 
 	let sidebarOpen = $state(false);
+	let expandedSection = $state<string | null>(null);
 
-	const nav = [
-		{ href: '/app', labelKey: 'nav.chat', exact: true, icon: 'chat', descKey: 'nav.desc.chat' },
-		{ href: '/app/knowledge', labelKey: 'nav.knowledge', exact: false, icon: 'brain', descKey: 'nav.desc.knowledge' },
-		{ href: '/app/contacts', labelKey: 'nav.contacts', exact: false, icon: 'contacts', descKey: 'nav.desc.contacts' },
-		{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts', descKey: 'nav.desc.artifacts' },
-		{ href: '/app/workflows', labelKey: 'nav.workflows', exact: false, icon: 'workflow', descKey: 'nav.desc.workflows' },
-		{ href: '/app/activity', labelKey: 'nav.activity', exact: false, icon: 'clock', descKey: 'nav.desc.activity' },
+	interface NavChild {
+		href: string;
+		labelKey: string;
+	}
+
+	interface NavItem {
+		href: string;
+		labelKey: string;
+		exact: boolean;
+		icon: string;
+		descKey?: string;
+		children?: NavChild[];
+		type?: 'threads';
+	}
+
+	const nav: NavItem[] = [
+		{
+			href: '/app', labelKey: 'nav.chat', exact: true, icon: 'chat',
+			descKey: 'nav.desc.chat', type: 'threads',
+		},
+		{
+			href: '/app/knowledge', labelKey: 'nav.knowledge', exact: false, icon: 'brain',
+			descKey: 'nav.desc.knowledge',
+			children: [
+				{ href: '/app/knowledge', labelKey: 'hub.knowledge.wissen' },
+				{ href: '/app/knowledge?tab=graph', labelKey: 'hub.knowledge.graph' },
+				{ href: '/app/knowledge?tab=insights', labelKey: 'hub.knowledge.insights' },
+			],
+		},
+		{
+			href: '/app/contacts', labelKey: 'nav.contacts', exact: false, icon: 'contacts',
+			descKey: 'nav.desc.contacts',
+		},
+		{
+			href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts',
+			descKey: 'nav.desc.artifacts',
+			children: [
+				{ href: '/app/artifacts', labelKey: 'hub.artifacts.gallery' },
+				{ href: '/app/artifacts?tab=files', labelKey: 'hub.artifacts.files' },
+			],
+		},
+		{
+			href: '/app/workflows', labelKey: 'nav.workflows', exact: false, icon: 'workflow',
+			descKey: 'nav.desc.workflows',
+			children: [
+				{ href: '/app/workflows', labelKey: 'hub.workflow.list' },
+				{ href: '/app/workflows?tab=analytics', labelKey: 'hub.workflow.analytics' },
+			],
+		},
+		{
+			href: '/app/activity', labelKey: 'nav.activity', exact: false, icon: 'clock',
+			descKey: 'nav.desc.activity',
+			children: [
+				{ href: '/app/activity?tab=history', labelKey: 'hub.activity.history' },
+				{ href: '/app/activity?tab=tasks', labelKey: 'hub.activity.tasks' },
+				{ href: '/app/activity', labelKey: 'hub.activity.dashboard' },
+			],
+		},
 	];
+
+	const hasChildren = (item: NavItem) => item.children != null || item.type === 'threads';
 
 	function isActive(href: string, exact: boolean): boolean {
 		const path = $page.url.pathname;
 		return exact ? path === href : path.startsWith(href);
 	}
+
+	function isSubActive(childHref: string): boolean {
+		const url = $page.url;
+		const child = new URL(childHref, url.origin);
+		if (url.pathname !== child.pathname) return false;
+		// Match query params (e.g. ?tab=graph)
+		for (const [k, v] of child.searchParams) {
+			if (url.searchParams.get(k) !== v) return false;
+		}
+		// If child has no params, only match when current URL also has no tab param
+		if (!child.searchParams.has('tab') && url.searchParams.has('tab')) return false;
+		return true;
+	}
+
+	function handleNavClick(item: NavItem, e: MouseEvent) {
+		if (hasChildren(item)) {
+			if (expandedSection === item.href) {
+				e.preventDefault();
+				expandedSection = null;
+				return;
+			}
+			expandedSection = item.href;
+		} else {
+			expandedSection = null;
+		}
+		sidebarOpen = false;
+	}
+
+	function handleSubClick() {
+		sidebarOpen = false;
+	}
+
+	function selectThread(id: string) {
+		void resumeThread(id).then(() => { void loadThreads(); });
+		sidebarOpen = false;
+		void goto('/app');
+	}
+
+	function timeAgo(dateStr: string): string {
+		const parsed = new Date(dateStr.endsWith('Z') || dateStr.includes('+') ? dateStr : dateStr + 'Z');
+		const diff = Date.now() - parsed.getTime();
+		if (Number.isNaN(diff)) return '';
+		const mins = Math.floor(diff / 60_000);
+		if (mins < 1) return 'now';
+		if (mins < 60) return `${mins}m`;
+		const hours = Math.floor(mins / 60);
+		if (hours < 24) return `${hours}h`;
+		const days = Math.floor(hours / 24);
+		return `${days}d`;
+	}
+
+	// Auto-expand section matching current route on mount
+	onMount(() => {
+		void loadThreads();
+		const path = $page.url.pathname;
+		const match = nav.find(item => item.exact ? path === item.href : path.startsWith(item.href));
+		if (match && hasChildren(match)) {
+			expandedSection = match.href;
+		}
+	});
 
 	$effect(() => {
 		function handleEscape(e: KeyboardEvent) {
@@ -105,16 +220,14 @@
 				</button>
 			</div>
 
-			<!-- Recent Threads -->
-			<ThreadList onselect={(id) => { void resumeThread(id).then(() => { void loadThreads(); }); sidebarOpen = false; goto('/app'); }} />
-
 			<!-- Nav Items -->
 			<ul class="flex-1 space-y-0.5 px-3 overflow-y-auto scrollbar-thin">
 				{#each nav as item}
 					<li>
+						<!-- Parent nav item -->
 						<a
 							href={item.href}
-							onclick={() => (sidebarOpen = false)}
+							onclick={(e) => handleNavClick(item, e)}
 							class="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm transition-all
 							{isActive(item.href, item.exact)
 								? 'bg-accent/10 text-accent-text border-l-2 border-accent'
@@ -128,26 +241,74 @@
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6z" /><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 7.125h3M7.125 10.5v3" /></svg>
 							{:else if item.icon === 'clock'}
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-							{:else if item.icon === 'bolt'}
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" /></svg>
-							{:else if item.icon === 'graph'}
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /></svg>
 							{:else if item.icon === 'contacts'}
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" /></svg>
-							{:else if item.icon === 'insights'}
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" /></svg>
 							{:else if item.icon === 'artifacts'}
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" /></svg>
-						{:else if item.icon === 'files'}
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" /></svg>
 							{/if}
-							<div>
-									<span>{t(item.labelKey)}</span>
-									{#if item.descKey}
-										<span class="block text-[10px] text-text-subtle font-normal tracking-normal">{t(item.descKey)}</span>
-									{/if}
-								</div>
+							<div class="flex-1 min-w-0">
+								<span>{t(item.labelKey)}</span>
+								{#if item.descKey}
+									<span class="block text-[10px] text-text-subtle font-normal tracking-normal">{t(item.descKey)}</span>
+								{/if}
+							</div>
+							{#if hasChildren(item)}
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									class="h-3 w-3 shrink-0 text-text-subtle transition-transform duration-150 {expandedSection === item.href ? 'rotate-90' : ''}"
+									fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"
+								><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+							{/if}
 						</a>
+
+						<!-- Sub-items: threads for Chat, static links for hubs -->
+						{#if expandedSection === item.href && item.type === 'threads'}
+							<div transition:slide={{ duration: 150 }}>
+								{#if getThreads().length > 0}
+									<ul class="mt-1 ml-5 space-y-0.5 max-h-64 overflow-y-auto scrollbar-thin">
+										{#each getThreads() as thread (thread.id)}
+											{@const isThreadActive = getSessionId() === thread.id}
+											<li class="group relative flex items-center rounded-[var(--radius-sm)] transition-all
+												{isThreadActive
+													? 'bg-accent/10 text-accent-text'
+													: 'text-text-muted hover:text-text hover:bg-bg-muted'}">
+												<button
+													onclick={() => selectThread(thread.id)}
+													class="flex-1 text-left px-2.5 py-1 text-xs truncate"
+												>
+													{thread.title || t('threads.no_title')}
+												</button>
+												<span class="text-[10px] text-text-subtle shrink-0 pr-2 group-hover:hidden">
+													{timeAgo(thread.updated_at)}
+												</span>
+												<button
+													onclick={(e) => { e.stopPropagation(); void archiveThread(thread.id); }}
+													class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"
+													aria-label={t('threads.archive')}
+												>&times;</button>
+											</li>
+										{/each}
+									</ul>
+								{/if}
+							</div>
+						{:else if expandedSection === item.href && item.children}
+							<ul transition:slide={{ duration: 150 }} class="mt-1 ml-5 space-y-0.5">
+								{#each item.children as child}
+									<li>
+										<a
+											href={child.href}
+											onclick={handleSubClick}
+											class="block px-2.5 py-1.5 text-xs rounded-[var(--radius-sm)] transition-all
+											{isSubActive(child.href)
+												? 'text-accent-text bg-accent/10'
+												: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+										>
+											{t(child.labelKey)}
+										</a>
+									</li>
+								{/each}
+							</ul>
+						{/if}
 					</li>
 				{/each}
 			</ul>
@@ -156,7 +317,7 @@
 			<div class="border-t border-border pt-2 mt-2 px-3 space-y-0.5" style="padding-bottom: env(safe-area-inset-bottom, 0.5rem);">
 				<a
 					href="/app/settings"
-					onclick={() => (sidebarOpen = false)}
+					onclick={() => { sidebarOpen = false; expandedSection = null; }}
 					class="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm transition-all
 					{isActive('/app/settings', false)
 						? 'bg-accent/10 text-accent-text border-l-2 border-accent'

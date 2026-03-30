@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/stores';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import WorkflowsView from './WorkflowsView.svelte';
@@ -34,6 +35,12 @@
 	];
 
 	let tab = $state<'list' | 'analytics'>('list');
+
+	$effect(() => {
+		const p = $page.url.searchParams.get('tab');
+		if (p === 'analytics') tab = p;
+	});
+
 	let days = $state(30);
 	let costStats = $state<CostStat[]>([]);
 	let stepStats = $state<StepStat[]>([]);
