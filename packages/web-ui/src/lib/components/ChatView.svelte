@@ -45,8 +45,10 @@
 		return result;
 	}
 
-	/** Tool calls that are already conveyed by the agent's text — hide from UI */
-	const HIDDEN_TOOLS = new Set(['plan_task', 'step_complete', 'artifact_list', 'data_store_list']);
+	/** Tool calls hidden from inline display (truly redundant or noisy) */
+	const HIDDEN_TOOLS = new Set(['artifact_list', 'data_store_list']);
+	/** Tool calls that get special rendering (not grouped with regular tools) */
+	const SPECIAL_TOOLS = new Set(['plan_task', 'step_complete']);
 
 	/** Tool call label: returns { action, subject } or null if hidden */
 	function toolCallLabel(tc: ToolCallInfo): { action: string; subject: string } | null {
@@ -72,19 +74,48 @@
 		}
 	}
 
-	/** Group consecutive tool calls with same action into one line */
-	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): Array<{ type: 'text'; text: string } | { type: 'tools'; action: string; subjects: string[] }> {
-		const result: Array<{ type: 'text'; text: string } | { type: 'tools'; action: string; subjects: string[] }> = [];
+	type GroupedBlock =
+		| { type: 'text'; text: string }
+		| { type: 'tools'; action: string; subjects: string[] }
+		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
+		| { type: 'step_done'; stepId: string; summary: string };
+
+	/** Group consecutive tool calls with same action, extract plan + step blocks */
+	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
+		const result: GroupedBlock[] = [];
 		for (const block of blocks) {
 			if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
 			} else if (block.type === 'tool_call') {
 				const tc = toolCalls[block.index];
 				if (!tc) continue;
+				if (HIDDEN_TOOLS.has(tc.name)) continue;
+
+				// Special: plan_task → collapsible plan
+				if (tc.name === 'plan_task') {
+					const inp = tc.input as Record<string, unknown> | undefined;
+					const summary = String(inp?.['summary'] ?? '');
+					const rawPhases = (inp?.['phases'] ?? []) as Array<{ name: string; steps?: string[] }>;
+					const phases = rawPhases.map(p => ({ name: p.name, steps: p.steps ?? [] }));
+					result.push({ type: 'plan', summary, phases });
+					continue;
+				}
+
+				// Special: step_complete → step done marker
+				if (tc.name === 'step_complete') {
+					const inp = tc.input as Record<string, unknown> | undefined;
+					result.push({
+						type: 'step_done',
+						stepId: String(inp?.['step_id'] ?? ''),
+						summary: String(inp?.['summary'] ?? ''),
+					});
+					continue;
+				}
+
+				// Regular tool call — group by action
 				const label = toolCallLabel(tc);
 				if (!label) continue;
 				const last = result[result.length - 1];
-				// Group consecutive calls with same action
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject) last.subjects.push(label.subject);
 				} else {
@@ -642,8 +673,34 @@
 
 						<!-- Interleaved blocks: grouped tool calls + text in chronological order -->
 						{#each msg.blocks?.length ? groupedToolCalls(msg.blocks, msg.toolCalls ?? []) : [] as gBlock, gIdx (gIdx)}
-							{#if gBlock.type === 'tools'}
-								<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 py-0.5">
+							{#if gBlock.type === 'plan'}
+								<details class="text-xs text-text-subtle border-l-2 border-accent/30 pl-3 py-1 my-1">
+									<summary class="cursor-pointer hover:text-text-muted font-medium text-text-muted">{gBlock.summary || 'Plan'}</summary>
+									<div class="mt-1.5 space-y-1">
+										{#each gBlock.phases as phase, pi}
+											<div>
+												<span class="font-medium text-text-muted">{pi + 1}. {phase.name}</span>
+												{#if phase.steps.length > 0}
+													<ul class="list-disc list-inside text-text-subtle/60 ml-2 mt-0.5">
+														{#each phase.steps as step}
+															<li>{step}</li>
+														{/each}
+													</ul>
+												{/if}
+											</div>
+										{/each}
+									</div>
+								</details>
+							{:else if gBlock.type === 'step_done'}
+								<div class="flex items-center gap-1.5 text-[11px] border-l-2 border-success/30 pl-3 py-0.5">
+									<span class="text-success text-[10px] font-bold flex-shrink-0">✓</span>
+									<span class="text-text-muted font-medium">{gBlock.stepId.replace(/-/g, ' ')}</span>
+									{#if gBlock.summary}
+										<span class="text-text-subtle/70">— {gBlock.summary}</span>
+									{/if}
+								</div>
+							{:else if gBlock.type === 'tools'}
+								<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 border-l-2 border-border pl-3 py-0.5">
 									<span class="inline-block h-1 w-1 rounded-full bg-success flex-shrink-0"></span>
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
 								</div>
