@@ -104,7 +104,7 @@
 	function buildArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
-		const overflowFix = `<style>html,body{overflow:hidden!important;max-width:100vw}</style>`;
+		const overflowFix = `<style>html,body{overflow-x:hidden!important;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
 			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${overflowFix}`);
@@ -240,23 +240,22 @@
 			try {
 				const doc = iframe.contentDocument;
 				if (!doc?.body) return;
-				doc.documentElement.style.setProperty('overflow', 'hidden', 'important');
-				doc.body.style.setProperty('overflow', 'hidden', 'important');
-				// Temporarily set iframe to a large height so content can expand fully
-				iframe.style.height = '10000px';
-				// Now measure the actual content height
-				const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight);
+				// Give iframe plenty of room so content renders at full height
+				iframe.style.height = '20000px';
+				// Force reflow then measure actual content
+				void doc.body.offsetHeight;
+				const h = doc.documentElement.scrollHeight;
 				iframe.style.height = `${Math.max(h, 200)}px`;
 			} catch {
-				iframe.style.height = '420px';
+				iframe.style.height = '600px';
 			}
 		};
 		const onLoad = () => {
-			// Initial measure + re-measure for async content (Chart.js, fonts, images)
 			requestAnimationFrame(() => {
 				measure();
+				// Re-measure for async content (Chart.js, fonts, images)
 				setTimeout(measure, 500);
-				setTimeout(measure, 1500);
+				setTimeout(measure, 2000);
 			});
 		};
 		if (iframe.contentDocument?.readyState === 'complete') {
@@ -650,7 +649,6 @@
 		display: block;
 		background: #0a0a1a;
 		color-scheme: dark;
-		overflow: hidden;
 	}
 	div :global(.artifact-collapsed .artifact-frame) {
 		display: none;
