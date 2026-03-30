@@ -104,7 +104,7 @@
 	function buildArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
-		const overflowFix = `<style>html,body{overflow-x:hidden;max-width:100vw}</style>`;
+		const overflowFix = `<style>html,body{overflow:hidden!important;max-width:100vw}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
 			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${overflowFix}`);
@@ -126,7 +126,7 @@
 				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
 				<button class="artifact-btn" data-action="export" title="Download HTML">${ICON_DOWNLOAD}</button>
 			</div>
-			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" loading="lazy"></iframe>
+			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
 			<div class="artifact-source-wrap hidden"></div>
 		</div>`;
 	}
@@ -239,21 +239,25 @@
 			try {
 				const doc = iframe.contentDocument;
 				if (!doc?.body) return;
-				// Kill scrollbars inside the iframe
-				doc.documentElement.style.overflow = 'hidden';
-				doc.body.style.overflow = 'hidden';
-				// Measure full content height
+				doc.documentElement.style.setProperty('overflow', 'hidden', 'important');
+				doc.body.style.setProperty('overflow', 'hidden', 'important');
 				const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight);
-				iframe.style.height = `${h}px`;
+				if (h > 0) iframe.style.height = `${h}px`;
 			} catch {
-				// Cross-origin fallback
 				iframe.style.height = '420px';
 			}
 		};
-		if (iframe.contentDocument?.readyState === 'complete') {
+		const onLoad = () => {
 			measure();
+			// Re-measure after async scripts (Chart.js, images, fonts)
+			setTimeout(measure, 300);
+			setTimeout(measure, 800);
+			setTimeout(measure, 1500);
+		};
+		if (iframe.contentDocument?.readyState === 'complete') {
+			onLoad();
 		} else {
-			iframe.addEventListener('load', measure, { once: true });
+			iframe.addEventListener('load', onLoad, { once: true });
 		}
 	}
 
