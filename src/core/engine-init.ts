@@ -19,7 +19,7 @@ import type {
   MemoryScopeType,
   DataStoreColumnDef,
 } from '../types/index.js';
-import { SCOPE_WEIGHTS } from '../types/index.js';
+import { scopeWeight } from './scope-resolver.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
 import { SecretVault } from './secret-vault.js';
@@ -462,7 +462,7 @@ export function initScopes(
   let briefingPart: string | undefined;
   if (scopes.length > 0) {
     const scopeList = scopes.map(s =>
-      `${s.type}:${s.id}${s.type === 'global' ? '' : ` (${SCOPE_WEIGHTS[s.type]})`}`
+      `${s.type}:${s.id}${s.type === 'global' ? '' : ` (${scopeWeight(s.type)})`}`
     ).join(', ');
     const autoNote = (memory?.['_autoScope'] === true && scopes.length > 1)
       ? ' Auto-scope active.' : '';
@@ -486,12 +486,14 @@ export async function initMemoryInstance(
   const maskFn = secretStore
     ? (text: string) => secretStore.maskSecrets(text)
     : undefined;
+  const { isFeatureEnabled } = await import('./features.js');
   const memory = new Memory(
     undefined,
     userConfig.api_key,
     userConfig.api_base_url,
     contextId,
     maskFn,
+    isFeatureEnabled('flat-file-memory'),
   );
 
   if (activeScopes.length > 0) {

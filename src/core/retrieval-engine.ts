@@ -6,7 +6,8 @@ import type {
   EntityRecord,
   KnowledgeRetrievalResult,
 } from '../types/index.js';
-import { SCOPE_WEIGHTS, MODEL_MAP, LYNOX_BETAS, NAMESPACE_HALF_LIFE } from '../types/index.js';
+import { MODEL_MAP, LYNOX_BETAS, NAMESPACE_HALF_LIFE } from '../types/index.js';
+import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { cosineSimilarity, blobToEmbed } from './embedding.js';
@@ -199,7 +200,7 @@ export class RetrievalEngine {
 
     // === Step 6: Scoring with decay + confidence + run boost ===
     for (const c of candidates) {
-      const scopeWeight = SCOPE_WEIGHTS[c.scopeType as MemoryScopeType] ?? 0.3;
+      const sw = scopeWeight(c.scopeType as MemoryScopeType);
       const decay = this._namespacedDecay(c.createdAt, c.namespace as MemoryNamespace);
 
       // Run boost: memories linked to successful runs score higher
@@ -216,7 +217,7 @@ export class RetrievalEngine {
       const confMult = (0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0)) * confirmDecay;
 
       c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost)
-        * scopeWeight * decay * confMult;
+        * sw * decay * confMult;
     }
 
     const aboveThreshold = candidates.filter(c => c.finalScore > threshold * 0.3);

@@ -12,6 +12,7 @@ import { writeFileAtomicSync } from '../core/atomic-write.js';
 import { getWorkspaceDir } from '../core/workspace.js';
 import { getErrorMessage } from '../core/utils.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
+import { readUserConfig } from '../core/config.js';
 
 interface OutputFile {
   path: string;
@@ -427,8 +428,23 @@ export class LynoxMCPServer {
   }
 
   private registerTools(): void {
+    const whitelist = readUserConfig().mcp_exposed_tools;
+    const shouldRegister = (name: string): boolean =>
+      !whitelist || whitelist.length === 0 || whitelist.includes(name);
+
+    // Wrapper that respects the whitelist — skips registration entirely for excluded tools.
+    const mcpServer = this.mcpServer;
+    const originalRegister = mcpServer.registerTool.bind(mcpServer);
+    mcpServer.registerTool = new Proxy(mcpServer.registerTool, {
+      apply(_target, thisArg, args: unknown[]) {
+        if (!shouldRegister(args[0] as string)) return undefined;
+        return Reflect.apply(originalRegister, thisArg, args);
+      },
+    });
+    const registerTool = mcpServer.registerTool.bind(mcpServer);
+
     // lynox_run — run a task, optionally in a persistent session
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_run',
       {
         description: 'Run an autonomous task with LYNOX agent',
@@ -459,7 +475,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_batch — submit a batch of requests
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_batch',
       {
         description: 'Submit a batch of tasks for async processing at reduced cost',
@@ -484,7 +500,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_status — check batch status
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_status',
       {
         description: 'Check the status of a batch by ID',
@@ -510,7 +526,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_memory — read memory namespace
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_memory',
       {
         description: 'Read LYNOX agent memory by namespace',
@@ -536,7 +552,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_reset — clear a session
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_reset',
       {
         description: 'Reset a LYNOX session by session ID',
@@ -554,7 +570,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_run_start — start an async run, returns run_id immediately
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_run_start',
       {
         description: 'Start an async LYNOX task and return a run_id for polling. Returns immediately before the task completes.',
@@ -827,7 +843,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_poll — poll for accumulated text from an async run
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_poll',
       {
         description: 'Poll the accumulated text from a running async LYNOX task. Returns done=true when finished. Pass cursor to get incremental events.',
@@ -884,7 +900,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_read_file — read a file from the lynox container, returned as base64
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_read_file',
       {
         description: 'Read a file from the LYNOX container and return its contents as base64. Path must be under /tmp/lynox-files/ or the working directory.',
@@ -940,7 +956,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_reply — send a reply to a run waiting for user input
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_reply',
       {
         description: 'Send a user reply to a LYNOX run waiting for input (approval or ask_user answer)',
@@ -965,7 +981,7 @@ export class LynoxMCPServer {
     );
 
     // lynox_abort — abort an in-flight agent run
-    this.mcpServer.registerTool(
+    registerTool(
       'lynox_abort',
       {
         description: 'Abort an in-flight LYNOX agent run by session ID.',

@@ -82,6 +82,7 @@ export class Memory implements IMemory {
   private readonly maskFn: ((text: string) => string) | null;
   private readonly apiKey: string | undefined;
   private readonly apiBaseURL: string | undefined;
+  private readonly _flatFileEnabled: boolean;
   private _activeScopes: MemoryScopeRef[] = [];
   private _autoScope = true;
   private _extractionTurnCount = 0;
@@ -100,6 +101,7 @@ export class Memory implements IMemory {
     apiBaseURL?: string | undefined,
     contextId?: string | undefined,
     maskFn?: ((text: string) => string) | undefined,
+    flatFileEnabled?: boolean | undefined,
   ) {
     this.client = apiKey
       ? new Anthropic({ apiKey, baseURL: apiBaseURL })
@@ -111,6 +113,7 @@ export class Memory implements IMemory {
     this.baseDir = path.join(workingDir ?? getLynoxDir(), DEFAULT_DIR);
     this.contextId = contextId ?? null;
     this.maskFn = maskFn ?? null;
+    this._flatFileEnabled = flatFileEnabled ?? true;
   }
 
   setActiveScopes(scopes: MemoryScopeRef[]): void {
@@ -152,10 +155,12 @@ export class Memory implements IMemory {
 
   async save(ns: MemoryNamespace, content: string): Promise<void> {
     const scope = this._defaultScope();
-    const dir = this._scopeDir(scope);
-    await ensureDir(dir);
     const trimmed = this._trimToLimit(content);
-    await fs.writeFile(this._scopeFilePath(ns, scope), trimmed, 'utf-8');
+    if (this._flatFileEnabled) {
+      const dir = this._scopeDir(scope);
+      await ensureDir(dir);
+      await fs.writeFile(this._scopeFilePath(ns, scope), trimmed, 'utf-8');
+    }
     this.cache.set(this._cacheKey(scope.type, scope.id, ns), trimmed);
   }
 
@@ -217,6 +222,8 @@ export class Memory implements IMemory {
   }
 
   async loadAll(): Promise<void> {
+    if (!this._flatFileEnabled) return;
+
     const defaultScope = this._defaultScope();
     const dir = this._scopeDir(defaultScope);
     await ensureDir(dir);
@@ -238,6 +245,7 @@ export class Memory implements IMemory {
    * Only affects lines with a [YYYY-MM-DD] prefix.
    */
   private async _pruneExpiredContext(): Promise<void> {
+    if (!this._flatFileEnabled) return;
     try {
       const cutoff = Date.now() - CONTEXT_TTL_DAYS * 86_400_000;
       const dateRe = /^\[(\d{4}-\d{2}-\d{2})\]\s/;
@@ -311,9 +319,11 @@ export class Memory implements IMemory {
 
     const raw = content ? `${content}\n${entry}` : entry;
     const updated = this._trimToLimit(raw);
-    const dir = this._scopeDir(scope);
-    await ensureDir(dir);
-    await fs.writeFile(this._scopeFilePath(ns, scope), updated, 'utf-8');
+    if (this._flatFileEnabled) {
+      const dir = this._scopeDir(scope);
+      await ensureDir(dir);
+      await fs.writeFile(this._scopeFilePath(ns, scope), updated, 'utf-8');
+    }
 
     // Update unified cache for this scope
     this.cache.set(this._cacheKey(scope.type, scope.id, ns), updated);
@@ -323,6 +333,11 @@ export class Memory implements IMemory {
     const key = this._cacheKey(scope.type, scope.id, ns);
     const cached = this.cache.get(key);
     if (cached !== undefined) return cached || null;
+
+    if (!this._flatFileEnabled) {
+      this.cache.set(key, '');
+      return null;
+    }
 
     try {
       const content = await fs.readFile(this._scopeFilePath(ns, scope), 'utf-8');
@@ -345,10 +360,11 @@ export class Memory implements IMemory {
 
     if (removed > 0) {
       const updated = filtered.join('\n');
-      const dir = this._scopeDir(scope);
-      await ensureDir(dir);
-      await fs.writeFile(this._scopeFilePath(ns, scope), updated, 'utf-8');
-
+      if (this._flatFileEnabled) {
+        const dir = this._scopeDir(scope);
+        await ensureDir(dir);
+        await fs.writeFile(this._scopeFilePath(ns, scope), updated, 'utf-8');
+      }
       this.cache.set(this._cacheKey(scope.type, scope.id, ns), updated);
     }
     return removed;
@@ -360,10 +376,11 @@ export class Memory implements IMemory {
 
     const raw = current.replace(oldText, newText);
     const updated = this._trimToLimit(raw);
-    const dir = this._scopeDir(scope);
-    await ensureDir(dir);
-    await fs.writeFile(this._scopeFilePath(ns, scope), updated, 'utf-8');
-
+    if (this._flatFileEnabled) {
+      const dir = this._scopeDir(scope);
+      await ensureDir(dir);
+      await fs.writeFile(this._scopeFilePath(ns, scope), updated, 'utf-8');
+    }
     this.cache.set(this._cacheKey(scope.type, scope.id, ns), updated);
     return true;
   }

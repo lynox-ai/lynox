@@ -79,6 +79,11 @@ vi.mock('@anthropic-ai/sdk', () => ({
   }),
 }));
 
+const mockReadUserConfig = vi.fn().mockReturnValue({});
+vi.mock('../core/config.js', () => ({
+  readUserConfig: (...args: unknown[]) => mockReadUserConfig(...args),
+}));
+
 // === Helpers ===
 
 function makeConfig(overrides?: Partial<LynoxConfig>): LynoxConfig {
@@ -124,6 +129,20 @@ describe('LynoxMCPServer', () => {
       expect(toolNames).toContain('lynox_read_file');
       expect(toolNames).toContain('lynox_abort');
       expect(toolNames).toContain('lynox_reply');
+    });
+
+    it('respects mcp_exposed_tools whitelist', () => {
+      mockReadUserConfig.mockReturnValue({ mcp_exposed_tools: ['lynox_run', 'lynox_poll'] });
+      new LynoxMCPServer(makeConfig());
+      const toolNames = mockRegisterTool.mock.calls.map((c: unknown[]) => c[0]);
+      expect(toolNames).toEqual(['lynox_run', 'lynox_poll']);
+      expect(mockRegisterTool).toHaveBeenCalledTimes(2);
+    });
+
+    it('registers all tools when mcp_exposed_tools is empty array', () => {
+      mockReadUserConfig.mockReturnValue({ mcp_exposed_tools: [] });
+      new LynoxMCPServer(makeConfig());
+      expect(mockRegisterTool).toHaveBeenCalledTimes(10);
     });
   });
 

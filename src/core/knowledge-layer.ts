@@ -275,7 +275,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   // === Entity Operations ===
 
-  async listEntities(opts?: { type?: string; limit?: number }): Promise<EntityRecord[]> {
+  async listEntities(opts?: { type?: string; limit?: number; offset?: number }): Promise<EntityRecord[]> {
     return this.db.listEntities(opts).map(toEntityRecord);
   }
 

@@ -193,6 +193,8 @@ export interface LynoxUserConfig {
   backup_gdrive?: boolean | undefined;
   /** Persistent MCP server connections. Loaded on every Engine.init(). */
   mcp_servers?: Array<{ name: string; url: string }> | undefined;
+  /** Whitelist of MCP tool names to expose. When set, only listed tools are registered. Default: all tools. */
+  mcp_exposed_tools?: string[] | undefined;
   /** Experience level: controls output style. 'business' (default) = UI-focused, no CLI/env hints. 'developer' = technical details, CLI commands, config snippets. */
   experience?: 'business' | 'developer' | undefined;
 }

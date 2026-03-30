@@ -377,16 +377,17 @@ export class AgentMemoryDb {
     this.db.prepare('UPDATE entities SET aliases = ? WHERE id = ?').run(JSON.stringify(aliases), entityId);
   }
 
-  listEntities(opts?: { type?: string | undefined; limit?: number | undefined }): EntityRow[] {
+  listEntities(opts?: { type?: string | undefined; limit?: number | undefined; offset?: number | undefined }): EntityRow[] {
     const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
+    const offset = Math.max(opts?.offset ?? 0, 0);
     if (opts?.type) {
       return this.db.prepare(`
-        SELECT * FROM entities WHERE entity_type = ? ORDER BY mention_count DESC LIMIT ?
-      `).all(opts.type, limit) as EntityRow[];
+        SELECT * FROM entities WHERE entity_type = ? ORDER BY mention_count DESC LIMIT ? OFFSET ?
+      `).all(opts.type, limit, offset) as EntityRow[];
     }
     return this.db.prepare(`
-      SELECT * FROM entities ORDER BY mention_count DESC LIMIT ?
-    `).all(limit) as EntityRow[];
+      SELECT * FROM entities ORDER BY mention_count DESC LIMIT ? OFFSET ?
+    `).all(limit, offset) as EntityRow[];
   }
 
   getEntityCount(): number {

@@ -133,11 +133,11 @@
 	async function loadSecretStatuses() {
 		secretsLoading = true;
 		try {
-			const res = await fetch(`${getApiBase()}/secrets`);
+			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { names: string[] };
-			telegramConfigured = data.names.includes('TELEGRAM_BOT_TOKEN');
-			searchConfigured = data.names.includes('TAVILY_API_KEY') || data.names.includes('SEARCH_API_KEY');
+			const data = (await res.json()) as { configured: { telegram: boolean; search: boolean } };
+			telegramConfigured = data.configured.telegram;
+			searchConfigured = data.configured.search;
 		} catch { /* ignore */ }
 		secretsLoading = false;
 	}

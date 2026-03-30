@@ -77,9 +77,9 @@
 
 	async function loadSentryStatus() {
 		try {
-			const res = await fetch(`${getApiBase()}/secrets`);
-			const data = (await res.json()) as { names: string[] };
-			sentryEnabled = data.names.includes('LYNOX_SENTRY_DSN');
+			const res = await fetch(`${getApiBase()}/secrets/status`);
+			const data = (await res.json()) as { configured: { sentry: boolean } };
+			sentryEnabled = data.configured.sentry;
 		} catch { /* ignore */ }
 	}
 

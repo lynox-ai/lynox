@@ -32,6 +32,7 @@ const mockSessionInstance = {
   onStream: null as unknown,
   promptUser: null as unknown,
   getModelTier: vi.fn().mockReturnValue('sonnet'),
+  getChangesetManager: vi.fn().mockReturnValue(null),
   sessionId: 'mock-session-id',
 };
 const mockGetOrCreate = vi.fn().mockReturnValue(mockSessionInstance);
@@ -89,7 +90,10 @@ vi.mock('../core/session-store.js', () => ({
 
 vi.mock('../core/config.js', () => ({
   loadConfig: vi.fn().mockReturnValue({ default_tier: 'opus' }),
-  readUserConfig: vi.fn().mockReturnValue({ default_tier: 'opus', thinking_mode: 'adaptive' }),
+  readUserConfig: vi.fn().mockReturnValue({
+    default_tier: 'opus', thinking_mode: 'adaptive',
+    api_key: 'sk-ant-secret-key', telegram_bot_token: '12345:ABC',
+  }),
   saveUserConfig: vi.fn(),
   reloadConfig: vi.fn(),
 }));
@@ -366,11 +370,16 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('config', () => {
-    it('GET returns user config', async () => {
+    it('GET returns user config with secrets redacted', async () => {
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);
-      const body = await res.json() as { default_tier: string };
-      expect(body.default_tier).toBe('opus');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['default_tier']).toBe('opus');
+      // Secrets must be stripped, replaced with _configured flags
+      expect(body['api_key']).toBeUndefined();
+      expect(body['telegram_bot_token']).toBeUndefined();
+      expect(body['api_key_configured']).toBe(true);
+      expect(body['telegram_bot_token_configured']).toBe(true);
     });
 
     it('PUT saves user config', async () => {
@@ -465,6 +474,64 @@ describe('LynoxHTTPApi', () => {
     it('POST /api/tasks/:id/complete completes a task', async () => {
       const res = await jsonFetch('/api/tasks/task-1/complete', { method: 'POST' });
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe('secrets/status', () => {
+    it('GET /api/secrets/status returns category booleans', async () => {
+      mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY', 'TELEGRAM_BOT_TOKEN']);
+      const res = await jsonFetch('/api/secrets/status');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { configured: Record<string, boolean>; count: number };
+      expect(body.configured.api_key).toBe(true);
+      expect(body.configured.telegram).toBe(true);
+      expect(body.configured.search).toBe(false);
+      expect(body.count).toBe(2);
+    });
+  });
+
+  describe('admin scope', () => {
+    it('single-token mode grants admin by default', async () => {
+      // LYNOX_HTTP_ADMIN_SECRET is not set — LYNOX_HTTP_SECRET is admin
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ default_tier: 'sonnet' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('rejects destructive endpoint with user token when admin secret is set', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      try {
+        // Use the regular LYNOX_HTTP_SECRET (user scope)
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ default_tier: 'sonnet' }),
+        });
+        expect(res.status).toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
+
+    it('allows destructive endpoint with admin token', async () => {
+      const adminToken = 'admin-secret-token-99999';
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', adminToken);
+      try {
+        const res = await fetch(`${baseUrl}/api/config`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ default_tier: 'sonnet' }),
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
     });
   });
 

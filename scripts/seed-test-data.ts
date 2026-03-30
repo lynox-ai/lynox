@@ -1,0 +1,1199 @@
+#!/usr/bin/env npx tsx
+/**
+ * Seed Test Data — Floods all 3 lynox databases with realistic data
+ * simulating ~90 days of business usage for lifecycle debugging.
+ *
+ * Usage:  cd core && npx tsx scripts/seed-test-data.ts [--clean]
+ *
+ * --clean: Wipe existing data before seeding (backs up first)
+ * Default: Appends to existing data (still backs up)
+ *
+ * Databases: agent-memory.db, history.db, datastore.db
+ */
+
+import { AgentMemoryDb } from '../src/core/agent-memory-db.js';
+import { RunHistory } from '../src/core/run-history.js';
+import { DataStore } from '../src/core/data-store.js';
+import { PatternEngine } from '../src/core/pattern-engine.js';
+import { ThreadStore } from '../src/core/thread-store.js';
+import { embedToBlob } from '../src/core/embedding.js';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { copyFileSync, existsSync, unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+
+// ── Config ──────────────────────────────────────────────────────
+
+const LYNOX_DIR = join(homedir(), '.lynox');
+const CLEAN = process.argv.includes('--clean');
+const EMBEDDING_DIM = 384;
+const NOW = new Date();
+const DAY_MS = 86_400_000;
+const CONTEXT_ID = 'seed-ctx-novatech';
+const SCOPE_TYPE = 'context';
+const SCOPE_ID = CONTEXT_ID;
+
+// ── Helpers ─────────────────────────────────────────────────────
+
+function daysAgo(days: number): string {
+  return new Date(NOW.getTime() - days * DAY_MS).toISOString();
+}
+
+function randomBetween(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function pick<T>(arr: readonly T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)]!;
+}
+
+/** Generate a normalized random embedding vector of given dimensions. */
+function randomEmbedding(dim = EMBEDDING_DIM): number[] {
+  const vec: number[] = [];
+  let mag = 0;
+  for (let i = 0; i < dim; i++) {
+    const v = Math.random() * 2 - 1;
+    vec.push(v);
+    mag += v * v;
+  }
+  mag = Math.sqrt(mag) || 1;
+  return vec.map(v => v / mag);
+}
+
+/** Deterministic embedding from text (like LocalProvider). */
+function textEmbedding(text: string, dim = EMBEDDING_DIM): number[] {
+  const vec = new Float64Array(dim);
+  const words = text.toLowerCase().split(/\s+/);
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!;
+    for (let j = 0; j < word.length; j++) {
+      const charCode = word.charCodeAt(j);
+      const idx = (charCode * 31 + j * 17 + i * 7) % dim;
+      vec[idx] = (vec[idx] ?? 0) + 1;
+    }
+  }
+  let magnitude = 0;
+  for (let i = 0; i < dim; i++) magnitude += (vec[i] ?? 0) ** 2;
+  magnitude = Math.sqrt(magnitude) || 1;
+  return Array.from(vec, v => v / magnitude);
+}
+
+// ── Backup ──────────────────────────────────────────────────────
+
+function backupDatabases(): void {
+  const timestamp = NOW.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  for (const name of ['agent-memory.db', 'history.db', 'datastore.db']) {
+    const src = join(LYNOX_DIR, name);
+    if (existsSync(src)) {
+      const dest = join(LYNOX_DIR, `${name}.backup-${timestamp}`);
+      copyFileSync(src, dest);
+      console.log(`  ✓ Backed up ${name} → ${dest.split('/').pop()}`);
+    }
+  }
+}
+
+// ── Data Definitions ────────────────────────────────────────────
+
+const PEOPLE = [
+  { name: 'Marcus Weber', type: 'person', desc: 'CEO & Founder of NovaTech', aliases: ['Marcus', 'M. Weber'] },
+  { name: 'Sarah Chen', type: 'person', desc: 'CTO at NovaTech', aliases: ['Sarah', 'S. Chen'] },
+  { name: 'Tom Richter', type: 'person', desc: 'Head of Sales', aliases: ['Tom', 'Richter'] },
+  { name: 'Lisa Hoffmann', type: 'person', desc: 'Marketing Lead', aliases: ['Lisa', 'L. Hoffmann'] },
+  { name: 'Jan Krüger', type: 'person', desc: 'Senior Developer', aliases: ['Jan', 'J. Krüger'] },
+  { name: 'Elena Petrov', type: 'person', desc: 'Product Manager', aliases: ['Elena', 'E. Petrov'] },
+  { name: 'David Park', type: 'person', desc: 'UX Designer', aliases: ['David', 'D. Park'] },
+  { name: 'Anna Müller', type: 'person', desc: 'Customer Success Manager', aliases: ['Anna', 'A. Müller'] },
+  { name: 'Michael Torres', type: 'person', desc: 'Freelance consultant', aliases: ['Michael', 'Torres'] },
+  { name: 'Sophie Laurent', type: 'person', desc: 'Investor, Horizon Ventures', aliases: ['Sophie', 'S. Laurent'] },
+  { name: 'Kai Yamamoto', type: 'person', desc: 'Enterprise client contact', aliases: ['Kai', 'K. Yamamoto'] },
+  { name: 'Natasha Volkov', type: 'person', desc: 'Partner at DigitalBridge Agency', aliases: ['Natasha', 'N. Volkov'] },
+  { name: 'Oliver Braun', type: 'person', desc: 'DevOps Engineer', aliases: ['Oliver', 'O. Braun'] },
+  { name: 'Maria Santos', type: 'person', desc: 'Data Analyst', aliases: ['Maria', 'M. Santos'] },
+  { name: 'Felix Neumann', type: 'person', desc: 'Support Engineer', aliases: ['Felix', 'F. Neumann'] },
+] as const;
+
+const ORGANIZATIONS = [
+  { name: 'NovaTech GmbH', type: 'organization', desc: 'B2B SaaS company, the primary business', aliases: ['NovaTech', 'NT'] },
+  { name: 'Horizon Ventures', type: 'organization', desc: 'Series A investor', aliases: ['Horizon', 'HV'] },
+  { name: 'DigitalBridge Agency', type: 'organization', desc: 'Marketing partner agency', aliases: ['DigitalBridge', 'DB Agency'] },
+  { name: 'CloudScale Inc.', type: 'organization', desc: 'Cloud infrastructure provider', aliases: ['CloudScale', 'CS'] },
+  { name: 'TechFlow Solutions', type: 'organization', desc: 'Integration partner', aliases: ['TechFlow', 'TFS'] },
+  { name: 'DataVault Corp', type: 'organization', desc: 'Enterprise customer (Fortune 500)', aliases: ['DataVault', 'DV'] },
+  { name: 'GreenLeaf Retail', type: 'organization', desc: 'E-commerce customer', aliases: ['GreenLeaf', 'GL'] },
+  { name: 'MedTech Pro', type: 'organization', desc: 'Healthcare SaaS customer', aliases: ['MedTech', 'MT'] },
+  { name: 'FinanceHub AG', type: 'organization', desc: 'Fintech customer', aliases: ['FinanceHub', 'FH'] },
+  { name: 'EduSpark', type: 'organization', desc: 'EdTech startup prospect', aliases: ['EduSpark', 'ES'] },
+] as const;
+
+const PRODUCTS = [
+  { name: 'NovaPlatform', type: 'product', desc: 'Core SaaS platform', aliases: ['Nova', 'the platform'] },
+  { name: 'NovaAPI', type: 'product', desc: 'REST API product tier', aliases: ['API tier', 'Nova API'] },
+  { name: 'NovaConnect', type: 'product', desc: 'Integration middleware', aliases: ['Connect', 'Nova Connect'] },
+  { name: 'NovaDash', type: 'product', desc: 'Analytics dashboard add-on', aliases: ['Dashboard', 'Nova Dash'] },
+  { name: 'NovaMobile', type: 'product', desc: 'Mobile companion app', aliases: ['Mobile app', 'Nova Mobile'] },
+] as const;
+
+const PROJECTS = [
+  { name: 'Q1 Product Launch', type: 'project', desc: 'NovaPlatform v2.0 release campaign', aliases: ['Q1 launch', 'v2 launch'] },
+  { name: 'Enterprise Onboarding', type: 'project', desc: 'White-glove onboarding for DataVault', aliases: ['DV onboarding', 'enterprise onboard'] },
+  { name: 'API Redesign', type: 'project', desc: 'REST → GraphQL migration', aliases: ['API v3', 'GraphQL migration'] },
+  { name: 'GDPR Compliance Audit', type: 'project', desc: 'Annual compliance review', aliases: ['GDPR audit', 'compliance'] },
+  { name: 'Series A Fundraise', type: 'project', desc: 'Raising €5M Series A', aliases: ['Series A', 'fundraise'] },
+  { name: 'Marketing Rebrand', type: 'project', desc: 'Brand refresh and website redesign', aliases: ['rebrand', 'brand refresh'] },
+  { name: 'Performance Sprint', type: 'project', desc: 'Reduce p95 latency below 200ms', aliases: ['perf sprint', 'latency fix'] },
+  { name: 'Mobile MVP', type: 'project', desc: 'First release of NovaMobile', aliases: ['mobile v1', 'mobile MVP'] },
+] as const;
+
+const CONCEPTS = [
+  { name: 'TypeScript', type: 'concept', desc: 'Primary programming language', aliases: ['TS', 'typescript'] },
+  { name: 'PostgreSQL', type: 'concept', desc: 'Primary database', aliases: ['Postgres', 'PG'] },
+  { name: 'GraphQL', type: 'concept', desc: 'API query language', aliases: ['GQL', 'graphql'] },
+  { name: 'Kubernetes', type: 'concept', desc: 'Container orchestration', aliases: ['K8s', 'k8s'] },
+  { name: 'OAuth2', type: 'concept', desc: 'Auth protocol', aliases: ['OAuth', 'oauth2'] },
+  { name: 'Stripe', type: 'concept', desc: 'Payment processing', aliases: ['stripe'] },
+  { name: 'Product-Led Growth', type: 'concept', desc: 'Go-to-market strategy', aliases: ['PLG', 'product-led'] },
+  { name: 'OKR Framework', type: 'concept', desc: 'Goal-setting methodology', aliases: ['OKRs', 'objectives'] },
+  { name: 'CI/CD Pipeline', type: 'concept', desc: 'Continuous integration/deployment', aliases: ['CI/CD', 'pipeline'] },
+  { name: 'Zero-Trust Security', type: 'concept', desc: 'Security architecture', aliases: ['zero-trust', 'ZT'] },
+] as const;
+
+const LOCATIONS = [
+  { name: 'Berlin', type: 'location', desc: 'HQ location', aliases: ['Berlin HQ'] },
+  { name: 'Munich', type: 'location', desc: 'Sales office', aliases: ['München', 'Munich office'] },
+  { name: 'San Francisco', type: 'location', desc: 'US market', aliases: ['SF', 'Bay Area'] },
+  { name: 'London', type: 'location', desc: 'UK/EU enterprise market', aliases: ['London office'] },
+  { name: 'Singapore', type: 'location', desc: 'APAC expansion target', aliases: ['SG', 'APAC hub'] },
+] as const;
+
+// Memories spanning knowledge, methods, learnings, status
+const KNOWLEDGE_MEMORIES = [
+  // Business knowledge
+  'NovaTech GmbH was founded in 2023 by Marcus Weber in Berlin. Initial focus was developer tools.',
+  'Horizon Ventures led the seed round of €800K in June 2023. Sophie Laurent is the board observer.',
+  'NovaPlatform v1.0 launched in September 2023 with 12 pilot customers.',
+  'DataVault Corp signed a €120K/year enterprise contract in November 2023, our largest deal.',
+  'GreenLeaf Retail uses NovaPlatform for inventory management and order tracking.',
+  'Sarah Chen joined as CTO in January 2024, previously at CloudScale Inc.',
+  'NovaTech has 18 employees as of March 2024. Engineering team is 9 people.',
+  'MRR reached €45K in February 2024, up from €12K in September 2023.',
+  'Tom Richter manages enterprise sales. His pipeline has 8 qualified leads worth €340K.',
+  'FinanceHub AG is in final contract negotiations for a €85K/year deal.',
+  'The API Redesign project started in January 2024 to migrate from REST to GraphQL.',
+  'PostgreSQL 16 was chosen for its JSONB performance improvements and logical replication.',
+  'NovaDash was launched as a paid add-on in December 2023. 40% of customers adopted it.',
+  'CloudScale Inc. provides our infrastructure. Monthly cost is €3.2K for production.',
+  'DigitalBridge Agency handles our content marketing. Monthly retainer is €4.5K.',
+  'GDPR Compliance Audit scheduled for Q2 2024. External auditor is TÜV Rheinland.',
+  'Customer churn rate is 3.2% monthly as of February 2024. Target is below 2%.',
+  'NPS score is 42 (last measured January 2024). Enterprise customers score 62.',
+  'Series A target is €5M at €25M pre-money valuation. Targeting close by June 2024.',
+  'EduSpark expressed interest in NovaPlatform for their learning management system.',
+  'Michael Torres consults on our go-to-market strategy. Engaged for 3 months.',
+  'The Performance Sprint reduced p95 API latency from 450ms to 180ms.',
+  'Mobile MVP is targeting a June 2024 launch for iOS and Android.',
+  'Lisa Hoffmann runs the Marketing Rebrand project. New brand guidelines are ready.',
+  'Oliver Braun set up the Kubernetes cluster on CloudScale with auto-scaling.',
+  'Maria Santos built the analytics pipeline using NovaDash and custom SQL.',
+  'Customer acquisition cost (CAC) is €2,400 per enterprise customer.',
+  'Lifetime value (LTV) estimate is €36,000 per enterprise customer (3-year avg).',
+  'LTV:CAC ratio is 15:1 which is excellent for B2B SaaS.',
+  'TechFlow Solutions is our integration partner for Salesforce and HubSpot connectors.',
+  'Felix Neumann handles tier-1 support. Average resolution time is 4.2 hours.',
+  'We use Stripe for payment processing. PCI compliance is handled by Stripe.',
+  'OAuth2 with PKCE is used for all API authentication.',
+  'Zero-Trust Security model adopted after the Q4 2023 security review.',
+  'CI/CD Pipeline runs on GitHub Actions. Average deploy time is 8 minutes.',
+  'Jan Krüger leads the API Redesign. GraphQL schema is 80% complete.',
+  'Elena Petrov manages the product roadmap. Q2 priorities are enterprise features.',
+  'David Park designed the new NovaDash UI. User testing scores improved 35%.',
+  'Anna Müller runs customer success. She manages 45 active accounts.',
+  'The Singapore expansion is planned for Q3 2024. Kai Yamamoto is the local contact.',
+  'Natasha Volkov from DigitalBridge proposed a joint webinar series.',
+  'MedTech Pro uses NovaConnect for HL7 FHIR integration with hospital systems.',
+  'Weekly team standup is Monday 9:30 AM CET. All-hands is first Friday of month.',
+  'Engineering velocity: average 28 story points per sprint (2-week sprints).',
+  'Tech debt ratio is estimated at 15%. Main areas: legacy REST endpoints and test coverage.',
+];
+
+const METHOD_MEMORIES = [
+  'For enterprise demos, always start with the ROI calculator before showing features.',
+  'Use the 5-step onboarding flow: intro call → sandbox setup → data import → training → go-live.',
+  'When debugging API latency, check the PostgreSQL slow query log first (> 100ms threshold).',
+  'For customer escalations, follow the HEAT method: Hear, Empathize, Apologize, Take action.',
+  'Sprint planning uses Fibonacci estimation. Stories above 13 points should be split.',
+  'Content marketing follows the hub-and-spoke model: 1 pillar post → 5 derivative pieces.',
+  'Sales qualification uses BANT framework: Budget, Authority, Need, Timeline.',
+  'Code reviews require 2 approvals for core modules, 1 for docs and tests.',
+  'Incident response: P1 = 15min response, P2 = 1hr, P3 = 4hr, P4 = next business day.',
+  'Database migrations always run in a transaction with rollback plan documented.',
+  'Feature flags use LaunchDarkly. All new features are behind flags for 2 weeks.',
+  'Monthly business review deck follows: metrics → pipeline → product → team → blockers.',
+  'For investor updates, use the Sequoia memo format: problem, solution, traction, team.',
+  'Customer health scoring: usage frequency (40%), support tickets (20%), NPS (20%), expansion (20%).',
+  'Performance testing protocol: baseline → change → measure → compare (p50, p95, p99).',
+];
+
+const LEARNING_MEMORIES = [
+  'Discovered that batch API calls reduce latency by 60% compared to individual requests.',
+  'GraphQL subscriptions cause memory leaks in the current WebSocket implementation.',
+  'Enterprise customers prefer PDF exports over CSV for compliance reporting.',
+  'The Kubernetes HPA works best with CPU threshold at 70%, not the default 80%.',
+  'Stripe webhook retries can cause duplicate payments if not handled idempotently.',
+  'NPS surveys sent on Tuesdays get 40% higher response rate than Fridays.',
+  'PostgreSQL VACUUM ANALYZE should run weekly on the events table (grows 2GB/month).',
+  'The mobile WebView approach was abandoned in favor of React Native for better UX.',
+  'Cold email outreach converts at 2.1% — warm intros convert at 12.4%.',
+  'Adding a chatbot to the docs reduced support tickets by 25%.',
+  'TypeScript strict mode caught 47 potential runtime errors during the migration.',
+  'Feature flag rollout at 10% → 25% → 50% → 100% reduces blast radius significantly.',
+  'Customer interviews revealed that the dashboard loading time is the #1 complaint.',
+  'A/B testing showed the simplified pricing page increased conversions by 18%.',
+  'The CI/CD pipeline was 40% faster after switching from Docker-in-Docker to Kaniko.',
+];
+
+const STATUS_MEMORIES = [
+  'API Redesign is 80% complete. Remaining: subscription types and batch mutations.',
+  'Series A fundraise: term sheet received from Horizon Ventures. Due diligence ongoing.',
+  'GDPR audit preparation: 6 of 8 documentation items completed.',
+  'Mobile MVP: iOS build is in TestFlight beta. Android is 2 weeks behind.',
+  'Marketing Rebrand: new website is live. Social media assets are being updated.',
+  'DataVault onboarding: data migration completed. Training sessions start next week.',
+  'Performance Sprint: completed ahead of schedule. p95 at 180ms (target was 200ms).',
+  'FinanceHub deal: legal review of contract terms. Expected close in 2 weeks.',
+  'EduSpark evaluation: they requested a custom demo for their LMS use case.',
+  'Kubernetes migration: production traffic fully on K8s. Old VM cluster decommissioned.',
+  'Q1 OKRs: 4 of 6 key results on track. Churn reduction and mobile launch are behind.',
+  'Hiring: 2 senior engineer positions open. 15 applications received, 4 in interview stage.',
+  'Customer health: 3 accounts flagged as at-risk (low usage in last 30 days).',
+  'Bug backlog: 12 open bugs, 3 critical (all in the billing module).',
+  'Infrastructure costs: trending 8% over budget due to increased DataVault usage.',
+];
+
+const TOOLS = [
+  'memory_store', 'memory_recall', 'write_file', 'read_file', 'bash',
+  'web_search', 'data_store_create', 'data_store_insert', 'data_store_query',
+  'ask_user', 'artifact_save', 'google_drive', 'send_email', 'calendar',
+  'api_request', 'data_store_aggregate',
+] as const;
+
+const TASK_TEMPLATES = [
+  'Summarize the latest sales pipeline status',
+  'Draft a follow-up email to {person}',
+  'Analyze last month revenue trends',
+  'Create a report on customer health scores',
+  'Update the project status for {project}',
+  'Research competitors in the {concept} space',
+  'Prepare the weekly team standup notes',
+  'Review and update the product roadmap',
+  'Generate a dashboard for {metric} KPIs',
+  'Draft investor update for {org}',
+  'Analyze support ticket trends',
+  'Create onboarding checklist for {org}',
+  'Optimize the {concept} configuration',
+  'Write documentation for {product} API',
+  'Plan the next sprint for {project}',
+  'Calculate CAC and LTV for Q1',
+  'Prepare GDPR compliance documentation',
+  'Set up monitoring alerts for {product}',
+  'Analyze churn risk for enterprise accounts',
+  'Draft partnership proposal for {org}',
+  'Create content calendar for next month',
+  'Review security audit findings',
+  'Build financial model for Series A',
+  'Automate the {concept} workflow',
+  'Set up data pipeline for {product} analytics',
+] as const;
+
+const THREAD_TITLES = [
+  'Weekly Sales Pipeline Review',
+  'DataVault Enterprise Onboarding',
+  'Q1 Product Launch Planning',
+  'Series A Due Diligence Prep',
+  'API Redesign Sprint Planning',
+  'Customer Churn Analysis',
+  'Marketing Rebrand Coordination',
+  'Performance Sprint Retrospective',
+  'GDPR Compliance Checklist',
+  'Mobile MVP Feature Prioritization',
+  'Infrastructure Cost Optimization',
+  'Investor Update Draft',
+  'Customer Health Score Review',
+  'Hiring Pipeline Management',
+  'Content Marketing Strategy',
+  'Bug Triage Session',
+  'OKR Progress Review',
+  'Partnership Strategy Discussion',
+  'Product Demo Preparation',
+  'Security Audit Follow-up',
+  'Monthly Business Review Prep',
+  'Singapore Expansion Planning',
+  'Support Ticket Analysis',
+  'Feature Flag Rollout Plan',
+  'Technical Debt Prioritization',
+  'Revenue Forecasting Model',
+  'Team Capacity Planning',
+  'Customer Interview Insights',
+  'Pricing Strategy Review',
+  'Year-End Planning Session',
+] as const;
+
+const RELATION_TYPES = [
+  'works_for', 'manages', 'uses', 'owns', 'located_in',
+  'part_of', 'depends_on', 'created_by', 'related_to', 'prefers',
+] as const;
+
+// ── Seeding Functions ───────────────────────────────────────────
+
+function seedAgentMemory(db: AgentMemoryDb): void {
+  console.log('\n📦 Seeding agent-memory.db...');
+  db.setEmbeddingDimensions(EMBEDDING_DIM);
+
+  // ── Entities ──
+  const entityIds: Map<string, string> = new Map();
+  const allEntities = [
+    ...PEOPLE.map(p => ({ ...p })),
+    ...ORGANIZATIONS.map(o => ({ ...o })),
+    ...PRODUCTS.map(p => ({ ...p })),
+    ...PROJECTS.map(p => ({ ...p })),
+    ...CONCEPTS.map(c => ({ ...c })),
+    ...LOCATIONS.map(l => ({ ...l })),
+  ];
+
+  // Raw SQL for backdating entities and memories
+  const rawDb = (db as any).db as import('better-sqlite3').Database;
+  const stmtBackdateEntity = rawDb.prepare(
+    `UPDATE entities SET first_seen_at = ?, last_seen_at = ? WHERE id = ?`,
+  );
+  const stmtBackdateMemory = rawDb.prepare(
+    `UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`,
+  );
+
+  for (const ent of allEntities) {
+    const daysOld = randomBetween(10, 85);
+    const id = db.createEntity({
+      canonicalName: ent.name,
+      entityType: ent.type,
+      aliases: [...ent.aliases],
+      description: ent.desc,
+      scopeType: SCOPE_TYPE,
+      scopeId: SCOPE_ID,
+      embedding: textEmbedding(ent.name + ' ' + ent.desc),
+    });
+    entityIds.set(ent.name, id);
+
+    // Simulate mention growth over time
+    const extraMentions = randomBetween(1, 30);
+    for (let i = 0; i < extraMentions; i++) {
+      db.incrementEntityMentions(id);
+    }
+
+    // Backdate entity timestamps
+    const firstSeen = daysAgo(daysOld);
+    const lastSeen = daysAgo(randomBetween(0, Math.min(daysOld, 5)));
+    stmtBackdateEntity.run(firstSeen, lastSeen, id);
+  }
+  console.log(`  ✓ ${allEntities.length} entities created (backdated 10-85 days)`);
+
+  // ── Relations ──
+  const relations: Array<[string, string, string, string]> = [
+    // People → Organizations
+    ['Marcus Weber', 'NovaTech GmbH', 'works_for', 'Marcus is CEO of NovaTech'],
+    ['Sarah Chen', 'NovaTech GmbH', 'works_for', 'Sarah is CTO of NovaTech'],
+    ['Tom Richter', 'NovaTech GmbH', 'works_for', 'Tom leads sales at NovaTech'],
+    ['Lisa Hoffmann', 'NovaTech GmbH', 'works_for', 'Lisa leads marketing at NovaTech'],
+    ['Jan Krüger', 'NovaTech GmbH', 'works_for', 'Jan is senior developer at NovaTech'],
+    ['Elena Petrov', 'NovaTech GmbH', 'works_for', 'Elena manages product at NovaTech'],
+    ['David Park', 'NovaTech GmbH', 'works_for', 'David handles UX at NovaTech'],
+    ['Anna Müller', 'NovaTech GmbH', 'works_for', 'Anna manages customer success'],
+    ['Oliver Braun', 'NovaTech GmbH', 'works_for', 'Oliver handles DevOps'],
+    ['Maria Santos', 'NovaTech GmbH', 'works_for', 'Maria is data analyst'],
+    ['Felix Neumann', 'NovaTech GmbH', 'works_for', 'Felix handles support'],
+    ['Sophie Laurent', 'Horizon Ventures', 'works_for', 'Sophie is partner at Horizon'],
+    ['Natasha Volkov', 'DigitalBridge Agency', 'works_for', 'Natasha is partner at DigitalBridge'],
+    ['Kai Yamamoto', 'DataVault Corp', 'works_for', 'Kai is our contact at DataVault'],
+    // Management
+    ['Marcus Weber', 'Sarah Chen', 'manages', 'Marcus oversees all C-level reports'],
+    ['Sarah Chen', 'Jan Krüger', 'manages', 'Sarah manages the engineering team'],
+    ['Sarah Chen', 'Oliver Braun', 'manages', 'Sarah manages DevOps'],
+    ['Tom Richter', 'Anna Müller', 'manages', 'Tom oversees customer-facing teams'],
+    // Products → Organization
+    ['NovaTech GmbH', 'NovaPlatform', 'owns', 'NovaTech owns the platform'],
+    ['NovaTech GmbH', 'NovaAPI', 'owns', 'NovaTech owns the API product'],
+    ['NovaTech GmbH', 'NovaConnect', 'owns', 'NovaTech owns the integration product'],
+    ['NovaTech GmbH', 'NovaDash', 'owns', 'NovaTech owns the dashboard product'],
+    ['NovaTech GmbH', 'NovaMobile', 'owns', 'NovaTech owns the mobile app'],
+    // Projects → People
+    ['Jan Krüger', 'API Redesign', 'manages', 'Jan leads the API redesign'],
+    ['Elena Petrov', 'Q1 Product Launch', 'manages', 'Elena drives the launch'],
+    ['Lisa Hoffmann', 'Marketing Rebrand', 'manages', 'Lisa runs the rebrand'],
+    ['Oliver Braun', 'Performance Sprint', 'manages', 'Oliver leads perf improvements'],
+    ['David Park', 'Mobile MVP', 'manages', 'David leads mobile UX'],
+    // Customer relationships
+    ['DataVault Corp', 'NovaPlatform', 'uses', 'DataVault is an enterprise customer'],
+    ['GreenLeaf Retail', 'NovaPlatform', 'uses', 'GreenLeaf uses for inventory'],
+    ['MedTech Pro', 'NovaConnect', 'uses', 'MedTech uses for HL7 integration'],
+    ['FinanceHub AG', 'NovaPlatform', 'uses', 'FinanceHub is in final negotiations'],
+    // Tech dependencies
+    ['NovaPlatform', 'PostgreSQL', 'depends_on', 'Platform uses PostgreSQL for data'],
+    ['NovaPlatform', 'TypeScript', 'depends_on', 'Platform built with TypeScript'],
+    ['NovaAPI', 'GraphQL', 'depends_on', 'API moving to GraphQL'],
+    ['NovaPlatform', 'Kubernetes', 'depends_on', 'Deployed on Kubernetes'],
+    ['NovaPlatform', 'Stripe', 'depends_on', 'Payment processing via Stripe'],
+    ['NovaPlatform', 'OAuth2', 'depends_on', 'Auth via OAuth2 PKCE'],
+    // Strategy
+    ['NovaTech GmbH', 'Product-Led Growth', 'uses', 'PLG is the go-to-market strategy'],
+    ['NovaTech GmbH', 'OKR Framework', 'uses', 'NovaTech uses OKRs for goal-setting'],
+    // Locations
+    ['NovaTech GmbH', 'Berlin', 'located_in', 'HQ is in Berlin'],
+    ['Tom Richter', 'Munich', 'located_in', 'Tom works from Munich office'],
+    ['Kai Yamamoto', 'Singapore', 'located_in', 'Kai is based in Singapore'],
+    // Investor
+    ['Horizon Ventures', 'NovaTech GmbH', 'related_to', 'Horizon is a seed investor'],
+    ['Sophie Laurent', 'Series A Fundraise', 'related_to', 'Sophie is involved in Series A'],
+    // Partners
+    ['DigitalBridge Agency', 'NovaTech GmbH', 'related_to', 'DigitalBridge is marketing partner'],
+    ['TechFlow Solutions', 'NovaConnect', 'related_to', 'TechFlow builds integrations'],
+    ['CloudScale Inc.', 'NovaPlatform', 'related_to', 'CloudScale provides infrastructure'],
+  ];
+
+  // We need a dummy memory ID for relations
+  const anchorMemoryId = db.createMemory({
+    text: 'NovaTech organizational knowledge base',
+    namespace: 'knowledge',
+    scopeType: SCOPE_TYPE,
+    scopeId: SCOPE_ID,
+    embedding: textEmbedding('NovaTech organizational knowledge base'),
+  });
+
+  let relCount = 0;
+  for (const [from, to, type, desc] of relations) {
+    const fromId = entityIds.get(from);
+    const toId = entityIds.get(to);
+    if (fromId && toId) {
+      db.createRelation(fromId, toId, type, desc, anchorMemoryId, 0.8 + Math.random() * 0.2);
+      relCount++;
+    }
+  }
+  console.log(`  ✓ ${relCount} relations created`);
+
+  // ── Memories ──
+  const allMemories = [
+    ...KNOWLEDGE_MEMORIES.map(t => ({ text: t, ns: 'knowledge' })),
+    ...METHOD_MEMORIES.map(t => ({ text: t, ns: 'methods' })),
+    ...LEARNING_MEMORIES.map(t => ({ text: t, ns: 'learnings' })),
+    ...STATUS_MEMORIES.map(t => ({ text: t, ns: 'status' })),
+  ];
+
+  const memoryIds: string[] = [];
+  for (let i = 0; i < allMemories.length; i++) {
+    const mem = allMemories[i]!;
+    // Spread memories: knowledge → older, status → newer
+    const maxAge = mem.ns === 'knowledge' ? 80 : mem.ns === 'methods' ? 60 : mem.ns === 'learnings' ? 40 : 15;
+    const memDaysOld = randomBetween(1, maxAge);
+    const id = db.createMemory({
+      text: mem.text,
+      namespace: mem.ns,
+      scopeType: SCOPE_TYPE,
+      scopeId: SCOPE_ID,
+      embedding: textEmbedding(mem.text),
+    });
+    memoryIds.push(id);
+    stmtBackdateMemory.run(daysAgo(memDaysOld), daysAgo(Math.max(0, memDaysOld - 2)), id);
+  }
+  console.log(`  ✓ ${allMemories.length} memories created (backdated by namespace age)`);
+
+  // ── Mentions (link memories to entities) ──
+  let mentionCount = 0;
+  for (const memId of memoryIds) {
+    const mem = db.getMemory(memId);
+    if (!mem) continue;
+    for (const [name, entId] of entityIds) {
+      if (mem.text.includes(name) || (name.includes(' ') && mem.text.includes(name.split(' ')[0]!))) {
+        db.createMention(memId, entId);
+        mentionCount++;
+      }
+    }
+  }
+  console.log(`  ✓ ${mentionCount} mentions created`);
+
+  // ── Extra Mentions for Orphan Entities ──
+  // NovaAPI, NovaMobile, Product-Led Growth, Munich, London have no natural text matches
+  const orphanKeywords: Array<{ entity: string; keywords: string[] }> = [
+    { entity: 'NovaAPI', keywords: ['API', 'api', 'REST', 'GraphQL', 'endpoint'] },
+    { entity: 'NovaMobile', keywords: ['mobile', 'Mobile', 'iOS', 'Android', 'app'] },
+    { entity: 'Product-Led Growth', keywords: ['PLG', 'product-led', 'go-to-market', 'growth'] },
+    { entity: 'Munich', keywords: ['Munich', 'München', 'sales office'] },
+    { entity: 'London', keywords: ['London', 'UK', 'EU enterprise'] },
+  ];
+  let orphanMentionCount = 0;
+  for (const { entity, keywords } of orphanKeywords) {
+    const entId = entityIds.get(entity);
+    if (!entId) continue;
+    for (const memId of memoryIds) {
+      const mem = db.getMemory(memId);
+      if (!mem) continue;
+      if (keywords.some(kw => mem.text.includes(kw))) {
+        db.createMention(memId, entId); // INSERT OR IGNORE — safe if already exists
+        orphanMentionCount++;
+      }
+    }
+  }
+  console.log(`  ✓ ${orphanMentionCount} extra mentions for orphan entities`);
+
+  // ── Cooccurrences ──
+  let coocCount = 0;
+  for (const memId of memoryIds) {
+    const mem = db.getMemory(memId);
+    if (!mem) continue;
+    const mentionedEntities: string[] = [];
+    for (const [name, entId] of entityIds) {
+      if (mem.text.includes(name) || (name.includes(' ') && mem.text.includes(name.split(' ')[0]!))) {
+        mentionedEntities.push(entId);
+      }
+    }
+    if (mentionedEntities.length >= 2) {
+      db.updateCooccurrencesBatch(mentionedEntities);
+      coocCount += mentionedEntities.length * (mentionedEntities.length - 1) / 2;
+    }
+  }
+  console.log(`  ✓ ~${coocCount} cooccurrences updated`);
+
+  // ── Boost Cooccurrence Counts ──
+  // Add randomBetween(3, 15) to the top 15 entity pairs to avoid weak cooccurrences
+  {
+    const topPairs = rawDb.prepare(
+      `SELECT entity_a_id, entity_b_id FROM cooccurrences ORDER BY count DESC LIMIT 15`,
+    ).all() as Array<{ entity_a_id: string; entity_b_id: string }>;
+
+    const stmtBoostCooc = rawDb.prepare(
+      `UPDATE cooccurrences SET count = count + ? WHERE entity_a_id = ? AND entity_b_id = ?`,
+    );
+    for (const pair of topPairs) {
+      stmtBoostCooc.run(randomBetween(3, 15), pair.entity_a_id, pair.entity_b_id);
+    }
+    console.log(`  ✓ Boosted cooccurrence counts for ${topPairs.length} top entity pairs`);
+  }
+
+  // ── Superseded memories (simulate contradiction resolution) ──
+  const supersedeChains = [
+    { old: 'MRR reached €45K in February 2024', new: 'MRR reached €52K in March 2024, up 15% MoM. Growth accelerating.' },
+    { old: 'NovaTech has 18 employees', new: 'NovaTech has 22 employees as of March 2024. Added 2 engineers, 1 designer, 1 sales.' },
+    { old: 'Customer churn rate is 3.2% monthly', new: 'Customer churn rate dropped to 2.8% in March 2024 after onboarding improvements.' },
+    { old: 'Tom Richter manages enterprise sales. His pipeline has 8 qualified leads', new: 'Tom Richter manages enterprise sales. Pipeline grown to 12 qualified leads worth €480K.' },
+    { old: 'Bug backlog: 12 open bugs', new: 'Bug backlog reduced to 7 open bugs, 1 critical. Billing module issues resolved.' },
+  ];
+
+  let supersedeCount = 0;
+  for (const chain of supersedeChains) {
+    const newId = db.createMemory({
+      text: chain.new,
+      namespace: 'status',
+      scopeType: SCOPE_TYPE,
+      scopeId: SCOPE_ID,
+      embedding: textEmbedding(chain.new),
+    });
+    // Find the old memory by text match
+    const oldMem = memoryIds.find(id => {
+      const m = db.getMemory(id);
+      return m && m.text.includes(chain.old.slice(0, 30));
+    });
+    if (oldMem) {
+      db.supersedMemory(oldMem, newId);
+      db.createSupersedes(newId, oldMem, 'Updated information');
+      supersedeCount++;
+    }
+  }
+  console.log(`  ✓ ${supersedeCount} supersede chains created`);
+
+  // ── Confidence Variation (simulate confirm/decay) ──
+  {
+    // Pick ~30 random memories and confirm them 1-5 times (raises confidence by +0.05 per call, capped at 1.0)
+    const shuffled = [...memoryIds].sort(() => Math.random() - 0.5);
+    const toConfirm = shuffled.slice(0, 30);
+    let confirmOps = 0;
+    for (const id of toConfirm) {
+      const times = randomBetween(1, 5);
+      for (let i = 0; i < times; i++) {
+        db.confirmMemory(id);
+        confirmOps++;
+      }
+    }
+
+    // Pick ~10 random memories and lower their confidence to 0.50-0.65 (simulating decay/lack of retrieval)
+    const toDecay = shuffled.slice(30, 40);
+    const stmtDecayConfidence = rawDb.prepare(
+      `UPDATE memories SET confidence = ? WHERE id = ?`,
+    );
+    for (const id of toDecay) {
+      const lowConf = 0.50 + Math.random() * 0.15; // 0.50-0.65
+      stmtDecayConfidence.run(Math.round(lowConf * 100) / 100, id);
+    }
+    console.log(`  ✓ Confidence variation: ${toConfirm.length} memories confirmed (${confirmOps} ops), ${toDecay.length} memories decayed`);
+  }
+
+  // ── Patterns ──
+  const patterns = [
+    { type: 'sequence', desc: 'Tool combination "memory_recall + write_file" correlates with success', meta: { tools: ['memory_recall', 'write_file'], occurrences: 28, successRate: 0.89 }, confidence: 0.82, evidence: 28 },
+    { type: 'sequence', desc: 'Tool combination "data_store_query + artifact_save" correlates with success', meta: { tools: ['data_store_query', 'artifact_save'], occurrences: 15, successRate: 0.93 }, confidence: 0.78, evidence: 15 },
+    { type: 'sequence', desc: 'Tool combination "web_search + memory_store" correlates with success', meta: { tools: ['web_search', 'memory_store'], occurrences: 22, successRate: 0.86 }, confidence: 0.75, evidence: 22 },
+    { type: 'sequence', desc: 'Tool combination "bash + write_file + memory_store" correlates with success', meta: { tools: ['bash', 'write_file', 'memory_store'], occurrences: 11, successRate: 0.91 }, confidence: 0.70, evidence: 11 },
+    { type: 'anti-pattern', desc: 'Primary tool "api_request" has high failure rate', meta: { tool: 'api_request', failureRate: 0.55, totalRuns: 18 }, confidence: 0.65, evidence: 18 },
+    { type: 'anti-pattern', desc: 'Primary tool "send_email" has high failure rate', meta: { tool: 'send_email', failureRate: 0.52, totalRuns: 8 }, confidence: 0.55, evidence: 8 },
+    { type: 'preference', desc: 'User prefers markdown artifacts over plain text for reports', meta: { format: 'markdown', contexts: ['reports', 'summaries', 'analysis'] }, confidence: 0.88, evidence: 35 },
+    { type: 'preference', desc: 'User prefers concise bullet points over long paragraphs', meta: { style: 'bullets', contexts: ['updates', 'reviews'] }, confidence: 0.85, evidence: 42 },
+    { type: 'schedule', desc: 'Sales pipeline review occurs weekly on Mondays', meta: { day: 'monday', frequency: 'weekly', task: 'pipeline review' }, confidence: 0.92, evidence: 12 },
+    { type: 'schedule', desc: 'Monthly business review on first Friday', meta: { day: 'first-friday', frequency: 'monthly', task: 'business review' }, confidence: 0.90, evidence: 3 },
+  ];
+
+  // Create patterns with final desired confidence directly, then set evidence_count via raw SQL
+  // (incrementPatternEvidence adds +0.05 per call and caps at 1.0, which would push all to 1.0)
+  const stmtSetEvidence = rawDb.prepare(
+    `UPDATE patterns SET evidence_count = ? WHERE id = ?`,
+  );
+  for (const p of patterns) {
+    const id = db.createPattern({
+      patternType: p.type,
+      description: p.desc,
+      confidence: p.confidence,
+      metadata: p.meta,
+    });
+    // Set evidence_count directly without boosting confidence
+    stmtSetEvidence.run(p.evidence, id);
+  }
+  console.log(`  ✓ ${patterns.length} patterns created (with target confidences)`);
+
+  // ── Metrics (time series simulation) ──
+  // Use raw SQL inserts with unique IDs to create proper time series
+  // (upsertMetric deduplicates by name+window+scope, which collapses daily snapshots)
+  const memDb = (db as any).db as import('better-sqlite3').Database;
+  const stmtInsertMetric = memDb.prepare(`
+    INSERT INTO metrics (id, metric_name, scope_type, scope_id, value, sample_count, window, computed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  let metricCount = 0;
+
+  // Daily success_rate snapshots (last 30 days) — shows evolution
+  for (let i = 29; i >= 0; i--) {
+    const date = daysAgo(i);
+    // Trend: improving from ~0.78 to ~0.93
+    const trend = 0.78 + (29 - i) * 0.005;
+    const noise = (Math.random() - 0.5) * 0.08;
+    stmtInsertMetric.run(randomUUID(), 'success_rate', SCOPE_TYPE, SCOPE_ID,
+      Math.min(1, Math.max(0.6, trend + noise)), randomBetween(3, 15), 'daily', date);
+    metricCount++;
+  }
+
+  // Daily avg_duration_ms (last 30 days) — shows optimization
+  for (let i = 29; i >= 0; i--) {
+    const date = daysAgo(i);
+    const trend = 22000 - (29 - i) * 250;  // improving: 22s → 14.5s
+    const noise = (Math.random() - 0.5) * 4000;
+    stmtInsertMetric.run(randomUUID(), 'avg_duration_ms', SCOPE_TYPE, SCOPE_ID,
+      Math.max(5000, trend + noise), randomBetween(3, 15), 'daily', date);
+    metricCount++;
+  }
+
+  // Daily total_cost_usd (last 30 days) — growing with usage
+  for (let i = 29; i >= 0; i--) {
+    const date = daysAgo(i);
+    const baseCost = i > 20 ? 0.08 : i > 10 ? 0.18 : 0.35;
+    const noise = Math.random() * baseCost * 0.5;
+    stmtInsertMetric.run(randomUUID(), 'total_cost_usd', SCOPE_TYPE, SCOPE_ID,
+      baseCost + noise, randomBetween(3, 15), 'daily', date);
+    metricCount++;
+  }
+
+  // Weekly success_rate (last 12 weeks)
+  for (let i = 11; i >= 0; i--) {
+    const date = daysAgo(i * 7);
+    const trend = 0.76 + (11 - i) * 0.015;
+    const noise = (Math.random() - 0.5) * 0.04;
+    stmtInsertMetric.run(randomUUID(), 'success_rate', SCOPE_TYPE, SCOPE_ID,
+      Math.min(1, Math.max(0.6, trend + noise)), randomBetween(20, 70), 'weekly', date);
+    metricCount++;
+  }
+
+  // Weekly avg_duration_ms (last 12 weeks)
+  for (let i = 11; i >= 0; i--) {
+    const date = daysAgo(i * 7);
+    const trend = 25000 - (11 - i) * 800;
+    const noise = (Math.random() - 0.5) * 3000;
+    stmtInsertMetric.run(randomUUID(), 'avg_duration_ms', SCOPE_TYPE, SCOPE_ID,
+      Math.max(5000, trend + noise), randomBetween(20, 70), 'weekly', date);
+    metricCount++;
+  }
+
+  // All-time tool usage metrics (via upsertMetric to avoid duplicates)
+  const toolMetrics = [
+    { name: 'tool_usage.memory_store', value: 145 },
+    { name: 'tool_usage.memory_recall', value: 198 },
+    { name: 'tool_usage.write_file', value: 89 },
+    { name: 'tool_usage.read_file', value: 112 },
+    { name: 'tool_usage.bash', value: 67 },
+    { name: 'tool_usage.web_search', value: 54 },
+    { name: 'tool_usage.data_store_query', value: 78 },
+    { name: 'tool_usage.data_store_insert', value: 42 },
+    { name: 'tool_usage.ask_user', value: 35 },
+    { name: 'tool_usage.artifact_save', value: 56 },
+    { name: 'tool_usage.google_drive', value: 12 },
+    { name: 'tool_usage.send_email', value: 8 },
+    { name: 'tool_usage.api_request', value: 18 },
+  ];
+  for (const m of toolMetrics) {
+    db.upsertMetric({ metricName: m.name, value: m.value, sampleCount: 200, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+    metricCount++;
+  }
+
+  // All-time aggregate KPIs
+  const aggMetrics = [
+    { name: 'total_runs', value: 480, sample: 480 },
+    { name: 'avg_duration_ms', value: 14200, sample: 480 },
+    { name: 'total_cost_usd', value: 12.85, sample: 480 },
+    { name: 'avg_runs_per_thread', value: 16, sample: 30 },
+    { name: 'cost_per_run', value: 0.0268, sample: 480 },
+  ];
+  for (const m of aggMetrics) {
+    db.upsertMetric({ metricName: m.name, value: m.value, sampleCount: m.sample, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+    metricCount++;
+  }
+
+  console.log(`  ✓ ${metricCount} metrics created (30 daily + 12 weekly + all_time)`);
+}
+
+function seedRunHistory(h: RunHistory): void {
+  console.log('\n📊 Seeding history.db...');
+
+  // Access internal db for raw SQL (date backdating)
+  const db = h['db'] as import('better-sqlite3').Database;
+
+  // ── Threads ──
+  const ts = new ThreadStore(db);
+  const threadIds: string[] = [];
+
+  const stmtBackdateThread = db.prepare(
+    `UPDATE threads SET created_at = ?, updated_at = ? WHERE id = ?`,
+  );
+  const stmtBackdateMsg = db.prepare(
+    `UPDATE thread_messages SET created_at = ? WHERE thread_id = ? AND seq >= 0`,
+  );
+
+  for (const title of THREAD_TITLES) {
+    const id = randomUUID();
+    threadIds.push(id);
+    const threadDaysOld = randomBetween(2, 85);
+    ts.createThread(id, {
+      title,
+      model_tier: pick(['sonnet', 'haiku', 'opus']),
+      context_id: CONTEXT_ID,
+    });
+
+    // Add messages to threads
+    const msgCount = randomBetween(4, 40);
+    const messages = [];
+    for (let i = 0; i < msgCount; i++) {
+      messages.push({
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        content: i % 2 === 0
+          ? `[Simulated user message #${i + 1} in thread "${title}"]`
+          : `[Simulated assistant response #${i + 1} with analysis and recommendations]`,
+      });
+    }
+    ts.appendMessages(id, messages as any[], 0);
+
+    const tokens = randomBetween(5000, 80000);
+    const cost = tokens * 0.000003 + randomBetween(1, 50) * 0.001;
+    ts.updateThread(id, {
+      message_count: msgCount,
+      total_tokens: tokens,
+      total_cost_usd: cost,
+      is_archived: Math.random() < 0.15,
+    });
+
+    // Backdate thread timestamps
+    const createdAt = daysAgo(threadDaysOld);
+    const updatedAt = daysAgo(Math.max(0, threadDaysOld - randomBetween(0, 10)));
+    stmtBackdateThread.run(createdAt, updatedAt, id);
+    stmtBackdateMsg.run(createdAt, id);
+  }
+  console.log(`  ✓ ${THREAD_TITLES.length} threads with messages created`);
+
+  // ── Runs ──
+  const allEntityNames = [...PEOPLE.map(p => p.name), ...ORGANIZATIONS.map(o => o.name)];
+  const allProjectNames = PROJECTS.map(p => p.name);
+  const allProductNames = PRODUCTS.map(p => p.name);
+  const allConceptNames = CONCEPTS.map(c => c.name);
+  const allOrgNames = ORGANIZATIONS.map(o => o.name);
+
+  let totalRuns = 0;
+  let totalToolCalls = 0;
+
+  // Prepared statement to backdate run created_at
+  const stmtBackdateRun = db.prepare(`UPDATE runs SET created_at = ? WHERE id = ?`);
+
+  // Spread 400 runs over 90 days with increasing density
+  for (let day = 90; day >= 0; day--) {
+    // More runs in recent days (simulate growing usage)
+    const runsToday = day > 60 ? randomBetween(1, 3)
+      : day > 30 ? randomBetween(3, 6)
+      : randomBetween(5, 10);
+
+    for (let r = 0; r < runsToday; r++) {
+      const sessionId = pick(threadIds);
+      const modelTier = pick(['sonnet', 'sonnet', 'sonnet', 'haiku', 'opus']);  // weighted toward sonnet
+      const modelId = modelTier === 'opus' ? 'claude-opus-4-6'
+        : modelTier === 'sonnet' ? 'claude-sonnet-4-6'
+        : 'claude-haiku-4-5-20251001';
+
+      // Generate realistic task text
+      let taskText = pick(TASK_TEMPLATES);
+      taskText = taskText
+        .replace('{person}', pick(allEntityNames))
+        .replace('{project}', pick(allProjectNames))
+        .replace('{product}', pick(allProductNames))
+        .replace('{concept}', pick(allConceptNames))
+        .replace('{org}', pick(allOrgNames))
+        .replace('{metric}', pick(['revenue', 'churn', 'NPS', 'pipeline', 'usage']));
+
+      const runId = h.insertRun({
+        sessionId,
+        taskText,
+        modelTier,
+        modelId,
+        promptHash: `ph-${randomUUID().slice(0, 8)}`,
+        runType: Math.random() < 0.05 ? 'batch_parent' : 'single',
+        contextId: CONTEXT_ID,
+      });
+
+      // Backdate the run to the target day (with random hour/minute)
+      const runDate = new Date(NOW.getTime() - day * DAY_MS);
+      runDate.setHours(randomBetween(8, 22), randomBetween(0, 59), randomBetween(0, 59));
+      stmtBackdateRun.run(runDate.toISOString().replace('T', ' ').slice(0, 19), runId);
+
+      // Status: mostly completed, some failed
+      const failed = Math.random() < 0.12;
+      const durationMs = failed
+        ? randomBetween(500, 5000)
+        : randomBetween(3000, 45000);
+      const tokensIn = randomBetween(500, 8000);
+      const tokensOut = randomBetween(200, 4000);
+      const costUsd = (tokensIn * 0.000003 + tokensOut * 0.000015) * (modelTier === 'opus' ? 5 : modelTier === 'sonnet' ? 1 : 0.2);
+
+      h.updateRun(runId, {
+        responseText: failed
+          ? `Error: ${pick(['API timeout', 'Rate limit exceeded', 'Invalid input', 'Permission denied', 'Connection reset'])}`
+          : `[Completed task: ${taskText}]`,
+        tokensIn,
+        tokensOut,
+        tokensCacheRead: randomBetween(0, tokensIn * 0.3),
+        tokensCacheWrite: randomBetween(0, tokensIn * 0.1),
+        costUsd,
+        durationMs,
+        userWaitMs: durationMs + randomBetween(100, 2000),
+        stopReason: failed ? 'error' : 'end_turn',
+        status: failed ? 'failed' : 'completed',
+        toolCallCount: 0,  // will update after adding tool calls
+      });
+
+      // ── Tool Calls per Run ──
+      const toolCount = failed
+        ? randomBetween(0, 2)
+        : randomBetween(1, 6);
+
+      for (let t = 0; t < toolCount; t++) {
+        const toolName = pick(TOOLS);
+        const toolDuration = randomBetween(50, 5000);
+        h.insertToolCall({
+          runId,
+          toolName,
+          inputJson: JSON.stringify({ query: taskText.slice(0, 50), step: t }),
+          outputJson: JSON.stringify({ success: !failed || t < toolCount - 1, result: `Step ${t + 1} output` }),
+          durationMs: toolDuration,
+          sequenceOrder: t,
+        });
+        totalToolCalls++;
+      }
+
+      if (toolCount > 0) {
+        h.updateRun(runId, { toolCallCount: toolCount });
+      }
+
+      totalRuns++;
+    }
+  }
+  console.log(`  ✓ ${totalRuns} runs created (spread over 90 days)`);
+  console.log(`  ✓ ${totalToolCalls} tool calls created`);
+}
+
+function seedDataStore(ds: DataStore): void {
+  console.log('\n🗃️  Seeding datastore.db...');
+
+  // ── Leads collection ──
+  ds.createCollection({
+    name: 'leads',
+    columns: [
+      { name: 'company', type: 'string' as const },
+      { name: 'contact', type: 'string' as const },
+      { name: 'email', type: 'string' as const },
+      { name: 'stage', type: 'string' as const },
+      { name: 'deal_value', type: 'number' as const },
+      { name: 'source', type: 'string' as const },
+      { name: 'created_date', type: 'date' as const },
+      { name: 'last_contact', type: 'date' as const },
+      { name: 'notes', type: 'string' as const },
+    ],
+    scope: { type: 'context', id: CONTEXT_ID },
+  });
+
+  const stages = ['prospect', 'qualified', 'proposal', 'negotiation', 'closed_won', 'closed_lost'] as const;
+  const sources = ['inbound', 'outbound', 'referral', 'event', 'website'] as const;
+  const leadCompanies = [
+    'DataVault Corp', 'FinanceHub AG', 'EduSpark', 'LogiTrans GmbH', 'HealthCore Systems',
+    'RetailMax', 'CyberShield AG', 'AgriSmart', 'FoodChain Pro', 'TravelWise',
+    'SmartFactory GmbH', 'UrbanPlan Tech', 'FitLife Digital', 'PetCare Plus', 'AutoDrive Systems',
+    'SolarWatt AG', 'CloudNine Media', 'LegalEase', 'InsureTech Pro', 'EstatePro GmbH',
+    'FashionForward', 'GameStudio Berlin', 'BioTech Solutions', 'AeroSpace Digital', 'MarineLog Systems',
+  ];
+
+  const leadRecords = leadCompanies.map((company, i) => {
+    const dayCreated = randomBetween(5, 80);
+    const dayContact = randomBetween(0, dayCreated);
+    return {
+      company,
+      contact: `Contact Person ${i + 1}`,
+      email: `contact${i + 1}@${company.toLowerCase().replace(/[^a-z]/g, '')}.com`,
+      stage: pick(stages),
+      deal_value: randomBetween(5, 200) * 1000,
+      source: pick(sources),
+      created_date: daysAgo(dayCreated).split('T')[0]!,
+      last_contact: daysAgo(dayContact).split('T')[0]!,
+      notes: `${pick(['Initial meeting went well', 'Needs follow-up demo', 'Budget approved', 'Waiting on legal', 'Champion identified', 'Decision in Q2'])}. ${pick(['High priority', 'Medium priority', 'Needs nurturing', 'Ready to close'])}`,
+    };
+  });
+
+  ds.insertRecords({ collection: 'leads', records: leadRecords });
+  console.log(`  ✓ leads: ${leadRecords.length} records`);
+
+  // ── Revenue collection ──
+  ds.createCollection({
+    name: 'revenue',
+    columns: [
+      { name: 'month', type: 'date' as const },
+      { name: 'mrr', type: 'number' as const },
+      { name: 'new_mrr', type: 'number' as const },
+      { name: 'churned_mrr', type: 'number' as const },
+      { name: 'expansion_mrr', type: 'number' as const },
+      { name: 'customers', type: 'number' as const },
+      { name: 'arpu', type: 'number' as const },
+      { name: 'churn_rate', type: 'number' as const },
+    ],
+    scope: { type: 'context', id: CONTEXT_ID },
+  });
+
+  const revenueData = [
+    { month: '2023-09-01', mrr: 12000, new_mrr: 12000, churned_mrr: 0, expansion_mrr: 0, customers: 12, arpu: 1000, churn_rate: 0 },
+    { month: '2023-10-01', mrr: 18500, new_mrr: 7200, churned_mrr: 700, expansion_mrr: 0, customers: 18, arpu: 1028, churn_rate: 0.038 },
+    { month: '2023-11-01', mrr: 28000, new_mrr: 10800, churned_mrr: 1300, expansion_mrr: 0, customers: 25, arpu: 1120, churn_rate: 0.046 },
+    { month: '2023-12-01', mrr: 34500, new_mrr: 8200, churned_mrr: 1700, expansion_mrr: 0, customers: 30, arpu: 1150, churn_rate: 0.049 },
+    { month: '2024-01-01', mrr: 38200, new_mrr: 5500, churned_mrr: 1800, expansion_mrr: 0, customers: 33, arpu: 1158, churn_rate: 0.047 },
+    { month: '2024-02-01', mrr: 45000, new_mrr: 8200, churned_mrr: 1400, expansion_mrr: 0, customers: 38, arpu: 1184, churn_rate: 0.032 },
+    { month: '2024-03-01', mrr: 52000, new_mrr: 9500, churned_mrr: 2500, expansion_mrr: 0, customers: 42, arpu: 1238, churn_rate: 0.028 },
+  ];
+
+  ds.insertRecords({ collection: 'revenue', records: revenueData });
+  console.log(`  ✓ revenue: ${revenueData.length} records`);
+
+  // ── Inventory / Product metrics ──
+  ds.createCollection({
+    name: 'product_metrics',
+    columns: [
+      { name: 'product', type: 'string' as const },
+      { name: 'week', type: 'date' as const },
+      { name: 'active_users', type: 'number' as const },
+      { name: 'api_calls', type: 'number' as const },
+      { name: 'p95_latency_ms', type: 'number' as const },
+      { name: 'error_rate', type: 'number' as const },
+      { name: 'uptime_pct', type: 'number' as const },
+    ],
+    scope: { type: 'context', id: CONTEXT_ID },
+  });
+
+  const products = ['NovaPlatform', 'NovaAPI', 'NovaConnect', 'NovaDash'];
+  const productRecords = [];
+  for (const product of products) {
+    for (let week = 12; week >= 0; week--) {
+      const baseUsers = product === 'NovaPlatform' ? 180 : product === 'NovaAPI' ? 120 : product === 'NovaConnect' ? 45 : 75;
+      const growth = (12 - week) * (baseUsers * 0.03);
+      productRecords.push({
+        product,
+        week: daysAgo(week * 7).split('T')[0]!,
+        active_users: Math.round(baseUsers + growth + randomBetween(-10, 10)),
+        api_calls: randomBetween(5000, 50000) * (product === 'NovaAPI' ? 3 : 1),
+        p95_latency_ms: product === 'NovaPlatform' ? randomBetween(150, 250) : randomBetween(80, 180),
+        error_rate: Math.round((Math.random() * 0.02 + 0.001) * 10000) / 10000,
+        uptime_pct: Math.round((99.8 + Math.random() * 0.19) * 100) / 100,
+      });
+    }
+  }
+
+  ds.insertRecords({ collection: 'product_metrics', records: productRecords });
+  console.log(`  ✓ product_metrics: ${productRecords.length} records`);
+
+  // ── Support tickets ──
+  ds.createCollection({
+    name: 'support_tickets',
+    columns: [
+      { name: 'ticket_id', type: 'string' as const },
+      { name: 'customer', type: 'string' as const },
+      { name: 'priority', type: 'string' as const },
+      { name: 'category', type: 'string' as const },
+      { name: 'status', type: 'string' as const },
+      { name: 'created', type: 'date' as const },
+      { name: 'resolved', type: 'date' as const },
+      { name: 'resolution_hours', type: 'number' as const },
+    ],
+    scope: { type: 'context', id: CONTEXT_ID },
+  });
+
+  const priorities = ['P1', 'P2', 'P3', 'P4'] as const;
+  const categories = ['billing', 'api', 'performance', 'feature_request', 'bug', 'onboarding', 'security'] as const;
+  const ticketStatuses = ['open', 'in_progress', 'resolved', 'resolved', 'resolved'] as const;
+  const customers = ['DataVault Corp', 'GreenLeaf Retail', 'MedTech Pro', 'FinanceHub AG', 'EduSpark', 'SmartFactory GmbH', 'CloudNine Media'];
+
+  const tickets = Array.from({ length: 60 }, (_, i) => {
+    const created = randomBetween(1, 70);
+    const status = pick(ticketStatuses);
+    const resolved = status === 'resolved' ? Math.max(0, created - randomBetween(0, 5)) : null;
+    return {
+      ticket_id: `TK-${String(1000 + i).padStart(4, '0')}`,
+      customer: pick(customers),
+      priority: pick(priorities),
+      category: pick(categories),
+      status,
+      created: daysAgo(created).split('T')[0]!,
+      resolved: resolved !== null ? daysAgo(resolved).split('T')[0]! : '',
+      resolution_hours: resolved !== null ? randomBetween(1, 72) : 0,
+    };
+  });
+
+  ds.insertRecords({ collection: 'support_tickets', records: tickets });
+  console.log(`  ✓ support_tickets: ${tickets.length} records`);
+
+  // ── Tasks / OKRs ──
+  ds.createCollection({
+    name: 'okrs',
+    columns: [
+      { name: 'objective', type: 'string' as const },
+      { name: 'key_result', type: 'string' as const },
+      { name: 'owner', type: 'string' as const },
+      { name: 'target', type: 'number' as const },
+      { name: 'current', type: 'number' as const },
+      { name: 'progress_pct', type: 'number' as const },
+      { name: 'quarter', type: 'string' as const },
+      { name: 'status', type: 'string' as const },
+    ],
+    scope: { type: 'context', id: CONTEXT_ID },
+  });
+
+  const okrs = [
+    { objective: 'Accelerate revenue growth', key_result: 'Reach €60K MRR', owner: 'Tom Richter', target: 60000, current: 52000, progress_pct: 87, quarter: 'Q1-2024', status: 'on_track' },
+    { objective: 'Accelerate revenue growth', key_result: 'Close 3 enterprise deals', owner: 'Tom Richter', target: 3, current: 2, progress_pct: 67, quarter: 'Q1-2024', status: 'at_risk' },
+    { objective: 'Accelerate revenue growth', key_result: 'Reduce churn to <2.5%', owner: 'Anna Müller', target: 2.5, current: 2.8, progress_pct: 72, quarter: 'Q1-2024', status: 'behind' },
+    { objective: 'Ship world-class product', key_result: 'Complete API v3 migration', owner: 'Jan Krüger', target: 100, current: 80, progress_pct: 80, quarter: 'Q1-2024', status: 'on_track' },
+    { objective: 'Ship world-class product', key_result: 'Launch NovaMobile MVP', owner: 'David Park', target: 100, current: 45, progress_pct: 45, quarter: 'Q1-2024', status: 'behind' },
+    { objective: 'Ship world-class product', key_result: 'p95 latency < 200ms', owner: 'Oliver Braun', target: 200, current: 180, progress_pct: 100, quarter: 'Q1-2024', status: 'completed' },
+    { objective: 'Build scalable team', key_result: 'Hire 4 engineers', owner: 'Sarah Chen', target: 4, current: 2, progress_pct: 50, quarter: 'Q1-2024', status: 'at_risk' },
+    { objective: 'Build scalable team', key_result: 'NPS > 50', owner: 'Anna Müller', target: 50, current: 42, progress_pct: 84, quarter: 'Q1-2024', status: 'on_track' },
+    { objective: 'Secure funding', key_result: 'Close Series A by June', owner: 'Marcus Weber', target: 100, current: 70, progress_pct: 70, quarter: 'Q1-2024', status: 'on_track' },
+    { objective: 'Secure funding', key_result: 'Prepare data room with 15 docs', owner: 'Marcus Weber', target: 15, current: 12, progress_pct: 80, quarter: 'Q1-2024', status: 'on_track' },
+  ];
+
+  ds.insertRecords({ collection: 'okrs', records: okrs });
+  console.log(`  ✓ okrs: ${okrs.length} records`);
+}
+
+// ── Main ────────────────────────────────────────────────────────
+
+function main(): void {
+  console.log('🌱 lynox Test Data Seeder');
+  console.log('========================');
+  console.log(`Mode: ${CLEAN ? 'CLEAN (wipe + seed)' : 'APPEND (add to existing)'}`);
+  console.log(`Target: ${LYNOX_DIR}`);
+
+  // Step 1: Backup
+  console.log('\n💾 Backing up databases...');
+  backupDatabases();
+
+  if (CLEAN) {
+    console.log('\n🧹 Cleaning databases...');
+    for (const name of ['agent-memory.db', 'history.db', 'datastore.db']) {
+      const p = join(LYNOX_DIR, name);
+      if (existsSync(p)) {
+        unlinkSync(p);
+        for (const ext of ['-wal', '-shm']) {
+          const walPath = p + ext;
+          if (existsSync(walPath)) unlinkSync(walPath);
+        }
+        console.log(`  ✓ Removed ${name}`);
+      }
+    }
+  }
+
+  // Step 2: Open databases
+  const memDb = new AgentMemoryDb(join(LYNOX_DIR, 'agent-memory.db'));
+  const runHistory = new RunHistory(join(LYNOX_DIR, 'history.db'));
+  const dataStore = new DataStore(join(LYNOX_DIR, 'datastore.db'));
+
+  try {
+    // Step 3: Seed
+    seedAgentMemory(memDb);
+    seedRunHistory(runHistory);
+    seedDataStore(dataStore);
+
+    // Step 4: Run pattern detection + KPI computation
+    console.log('\n🧠 Running pattern detection & KPI computation...');
+    const patternEngine = new PatternEngine(runHistory, memDb);
+    const newPatterns = patternEngine.detectPatterns();
+    patternEngine.computeKPIs();
+    console.log(`  ✓ ${newPatterns} new patterns detected from run history`);
+    console.log('  ✓ KPIs computed');
+
+    // Step 5: Summary
+    console.log('\n✅ Seeding complete!');
+    console.log('─'.repeat(50));
+
+    // Count everything
+    const counts = {
+      entities: memDb.getEntityCount(),
+      relations: memDb.getRelationCount(),
+      patterns: memDb.getPatternCount(),
+      memories: (memDb as any).db.prepare('SELECT COUNT(*) as cnt FROM memories').get().cnt,
+      metrics: (memDb as any).db.prepare('SELECT COUNT(*) as cnt FROM metrics').get().cnt,
+      runs: (runHistory as any).db.prepare('SELECT COUNT(*) as cnt FROM runs').get().cnt,
+      toolCalls: (runHistory as any).db.prepare('SELECT COUNT(*) as cnt FROM run_tool_calls').get().cnt,
+      threads: (runHistory as any).db.prepare('SELECT COUNT(*) as cnt FROM threads').get().cnt,
+      messages: (runHistory as any).db.prepare('SELECT COUNT(*) as cnt FROM thread_messages').get().cnt,
+    };
+
+    console.log(`  agent-memory.db:`);
+    console.log(`    Entities:  ${counts.entities}`);
+    console.log(`    Relations: ${counts.relations}`);
+    console.log(`    Memories:  ${counts.memories}`);
+    console.log(`    Patterns:  ${counts.patterns}`);
+    console.log(`    Metrics:   ${counts.metrics}`);
+    console.log(`  history.db:`);
+    console.log(`    Runs:       ${counts.runs}`);
+    console.log(`    Tool Calls: ${counts.toolCalls}`);
+    console.log(`    Threads:    ${counts.threads}`);
+    console.log(`    Messages:   ${counts.messages}`);
+    console.log(`  datastore.db:`);
+    console.log(`    Collections: leads, revenue, product_metrics, support_tickets, okrs`);
+
+  } finally {
+    memDb.close();
+    runHistory.close();
+    (dataStore as any).db.close();
+  }
+}
+
+main();
