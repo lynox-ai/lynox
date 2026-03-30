@@ -104,7 +104,7 @@
 	function buildArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
-		const overflowFix = `<style>html,body{overflow:hidden;max-width:100vw;max-height:100vh}</style>`;
+		const overflowFix = `<style>html,body{overflow-x:hidden;max-width:100vw}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
 			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${overflowFix}`);
@@ -164,11 +164,16 @@
 			return;
 		}
 
-		// Artifact toolbar toggle (collapsed → expanded)
+		// Artifact toolbar toggle (collapsed → expanded with auto-height)
 		const toggleTarget = target.closest('[data-action="toggle"]') as HTMLElement | null;
 		if (toggleTarget && !target.closest('.artifact-btn')) {
 			const container = toggleTarget.closest('.artifact-container') as HTMLElement;
-			if (container) container.classList.toggle('artifact-collapsed');
+			if (container) {
+				container.classList.toggle('artifact-collapsed');
+				if (!container.classList.contains('artifact-collapsed')) {
+					resizeArtifactFrame(container);
+				}
+			}
 			return;
 		}
 
@@ -181,6 +186,7 @@
 			// Auto-expand if collapsed
 			if (container.classList.contains('artifact-collapsed')) {
 				container.classList.remove('artifact-collapsed');
+				resizeArtifactFrame(container);
 			}
 
 			if (action === 'pin') handleArtifactSave(container);
@@ -223,6 +229,27 @@
 			a.click();
 		};
 		img.src = dataUrl;
+	}
+
+	/** Resize iframe to fit its content height */
+	function resizeArtifactFrame(container: HTMLElement) {
+		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
+		if (!iframe) return;
+		// Wait for iframe to load then measure content
+		const measure = () => {
+			try {
+				const doc = iframe.contentDocument;
+				if (doc?.body) {
+					const h = doc.body.scrollHeight;
+					iframe.style.height = `${Math.max(h + 16, 200)}px`;
+				}
+			} catch { /* cross-origin — keep min-height */ }
+		};
+		if (iframe.contentDocument?.readyState === 'complete') {
+			measure();
+		} else {
+			iframe.addEventListener('load', measure, { once: true });
+		}
 	}
 
 	function handleArtifactSource(container: HTMLElement) {
