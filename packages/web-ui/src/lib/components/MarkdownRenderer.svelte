@@ -236,28 +236,35 @@
 	function resizeArtifactFrame(container: HTMLElement) {
 		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
 		if (!iframe) return;
-		const measure = () => {
+		let lastH = 0;
+		const measure = (initial: boolean) => {
 			try {
 				const doc = iframe.contentDocument;
 				if (!doc?.body) {
 					iframe.style.height = '600px';
 					return;
 				}
-				// Shrink to 0 so scrollHeight reports true content height
-				iframe.style.height = '0px';
-				void doc.body.offsetHeight; // force reflow
+				if (initial) {
+					// First measure: shrink to 0 so scrollHeight reports true content height
+					iframe.style.height = '0px';
+					void doc.body.offsetHeight;
+				}
 				const h = doc.documentElement.scrollHeight;
-				iframe.style.height = `${Math.max(h, 200)}px`;
+				// Only update if height changed (avoids visual flash on re-measure)
+				if (h !== lastH && h > 0) {
+					iframe.style.height = `${Math.max(h, 200)}px`;
+					lastH = h;
+				}
 			} catch {
-				iframe.style.height = '600px';
+				if (!lastH) iframe.style.height = '600px';
 			}
 		};
 		const onLoad = () => {
 			requestAnimationFrame(() => {
-				measure();
-				// Re-measure for async content (Chart.js, fonts, images)
-				setTimeout(measure, 500);
-				setTimeout(measure, 2000);
+				measure(true);
+				// Silent re-measure for async content (Chart.js, fonts, images)
+				setTimeout(() => measure(false), 500);
+				setTimeout(() => measure(false), 2000);
 			});
 		};
 		if (iframe.contentDocument?.readyState === 'complete') {
