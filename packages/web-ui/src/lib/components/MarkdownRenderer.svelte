@@ -6,7 +6,13 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
 
-	let { content }: { content: string } = $props();
+	interface Props {
+		content: string;
+		/** When true, defer artifact iframe rendering (show code instead). */
+		streaming?: boolean;
+	}
+
+	let { content, streaming = false }: Props = $props();
 
 	let highlightedHtml = $state('');
 
@@ -383,7 +389,8 @@
 				|| (lang === 'html' && (code.includes('&lt;!DOCTYPE') || code.includes('&lt;html')));
 			return isRich && !richCache.has(code);
 		});
-		if (uncached.length === 0) return;
+		// While streaming, keep artifacts as syntax-highlighted code (no iframe)
+		if (uncached.length === 0 || streaming) return;
 
 		const timer = setTimeout(async () => {
 			for (const match of uncached) {
@@ -423,6 +430,12 @@
 		padding: 0.75rem 1rem;
 		font-size: 0.75rem;
 		line-height: 1.6;
+	}
+
+	/* Styled scrollbars for code blocks and pre elements */
+	div :global(pre) {
+		scrollbar-width: thin;
+		scrollbar-color: var(--color-border) transparent;
 	}
 
 	/* Tables */
@@ -580,6 +593,7 @@
 		border: none;
 		display: block;
 		background: #0a0a1a;
+		color-scheme: dark;
 	}
 	div :global(.artifact-close-btn) {
 		display: none;
@@ -598,6 +612,8 @@
 		word-break: break-all;
 		max-height: 420px;
 		overflow-y: auto;
+		scrollbar-width: thin;
+		scrollbar-color: var(--color-border) transparent;
 	}
 
 	div :global(.hidden) {

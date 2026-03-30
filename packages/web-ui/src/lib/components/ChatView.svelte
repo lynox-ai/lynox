@@ -378,6 +378,19 @@
 	const ctxBudget = $derived(getContextBudget());
 	const ctxWindow = $derived(getContextWindow());
 
+	// Active pipeline from the latest message (for sticky progress bar)
+	const activePipeline = $derived(
+		(() => {
+			for (let i = messages.length - 1; i >= 0; i--) {
+				if (messages[i]?.pipeline) return messages[i]!.pipeline!;
+			}
+			return null;
+		})(),
+	);
+	const pipelineRunning = $derived(
+		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
+	);
+
 	// Auto-focus textarea when chat is empty (new chat or initial load)
 	$effect(() => {
 		if (messages.length === 0 && !isStreaming && textareaEl) {
@@ -576,10 +589,6 @@
 							</details>
 						{/if}
 
-						{#if msg.pipeline}
-							<PipelineProgress pipeline={msg.pipeline} />
-						{/if}
-
 						{#each msg.toolCalls ?? [] as tc, tcIdx (tcIdx)}
 							<details class="tool-call-details rounded-[var(--radius-md)] border border-border bg-bg-subtle text-sm group">
 								<summary class="cursor-pointer px-3 py-2 text-text-muted hover:text-text flex items-center gap-2">
@@ -631,7 +640,7 @@
 
 						{#if msg.content}
 							<div class="relative group/copy">
-								<MarkdownRenderer content={msg.content} />
+								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
 								<button
 									onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
 									class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
@@ -681,6 +690,15 @@
 			{/if}
 		</div>
 	</div>
+
+	<!-- Pipeline progress: sticky above input during execution -->
+	{#if activePipeline && (pipelineRunning || isStreaming)}
+		<div class="border-t border-border bg-bg-subtle px-4 py-2">
+			<div class="max-w-3xl mx-auto">
+				<PipelineProgress pipeline={activePipeline} />
+			</div>
+		</div>
+	{/if}
 
 	<!-- Changeset review: show after run completes with file changes -->
 	{#if !isStreaming && (pendingChangeset || changesetLoading)}
