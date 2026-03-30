@@ -39,14 +39,9 @@ export { createEmbeddingProvider, cosineSimilarity } from './core/embedding.js';
 export { temporalDecay, MEMORY_HALF_LIFE_DAYS } from './core/memory-gc.js';
 export { PluginManager } from './core/plugins.js';
 export { runManifest, loadManifestFile, validateManifest } from './orchestrator/runner.js';
-export { LocalGateAdapter } from './orchestrator/gates.js';
-export { computePhases, validateGraph, CycleError } from './orchestrator/graph.js';
-export type { ExecutionPhase, GraphAnalysis } from './orchestrator/graph.js';
 export type {
   Manifest, ManifestStep, AgentDef, AgentOutput, RunState, RunHooks,
-  GateAdapter, GateDecision, GateSubmitParams,
 } from './orchestrator/types.js';
-export { GateRejectedError, GateExpiredError } from './orchestrator/types.js';
 export { globToRegex, extractMatchString, matchesPreApproval, buildApprovalSet, isCriticalTool } from './core/pre-approve.js';
 
 export { planDAG, estimatePipelineCost } from './core/dag-planner.js';
@@ -55,8 +50,6 @@ export { spawnInline, spawnPipeline, resolveModel } from './orchestrator/runtime
 export { retryManifest } from './orchestrator/runner.js';
 export { DagVisualizer } from './cli/dag-visualizer.js';
 export type { StepStatus, DagVisualizerOptions } from './cli/dag-visualizer.js';
-export { buildConditionContext, shouldRunStep, evaluateCondition } from './orchestrator/conditions.js';
-export { resolveTaskTemplate } from './orchestrator/context.js';
 export type { InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, SecretStoreLike, SecretEntry, SecretScope } from './types/index.js';
 export { SecretStore, SECRET_REF_PATTERN } from './core/secret-store.js';
 export { SecretVault, estimateKeyEntropy } from './core/secret-vault.js';

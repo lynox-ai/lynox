@@ -161,6 +161,15 @@ export class CRM {
     this.ds.insertRecords({ collection: 'contacts', records: [data as unknown as Record<string, unknown>] });
   }
 
+  /** Remove all contacts auto-created from knowledge graph entities. */
+  purgeKnowledgeGraphContacts(): number {
+    this.ensureSchema();
+    return this.ds.deleteRecords({
+      collection: 'contacts',
+      filter: { source: 'knowledge_graph' },
+    });
+  }
+
   /** List contacts with optional filter. */
   listContacts(filter?: Record<string, unknown>, limit = 50): ContactRecord[] {
     this.ensureSchema();

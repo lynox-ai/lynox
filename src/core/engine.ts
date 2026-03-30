@@ -527,23 +527,9 @@ export class Engine {
         this._crm = new CRM(this._dataStore);
         this._crm.ensureSchema();
 
-        // Auto-create CRM contacts from KG person + organization entities
-        channels.knowledgeEntity.subscribe((msg: unknown) => {
-          const data = msg as { event: string; id?: string; name?: string; type?: string };
-          if (data.event === 'entity_created' && data.name && this._crm
-            && (data.type === 'person' || data.type === 'organization')) {
-            try {
-              const existing = this._crm.findContact({ name: data.name });
-              if (!existing) {
-                this._crm.upsertContact({
-                  name: data.name,
-                  type: data.type === 'organization' ? 'partner' : undefined,
-                  source: 'knowledge_graph',
-                });
-              }
-            } catch { /* non-critical */ }
-          }
-        });
+        // One-time cleanup: remove contacts auto-created from KG entities
+        // (NER false positives polluted the contacts list with non-contact words)
+        this._crm.purgeKnowledgeGraphContacts();
       } catch {
         this._crm = null;
       }
