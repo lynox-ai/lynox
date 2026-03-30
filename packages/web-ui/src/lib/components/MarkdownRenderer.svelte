@@ -104,7 +104,7 @@
 	function buildArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
-		const overflowFix = `<style>html,body{overflow-x:hidden;max-width:100vw}</style>`;
+		const overflowFix = `<style>html,body{overflow:hidden;max-width:100vw;max-height:100vh}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
 			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${overflowFix}`);
@@ -597,7 +597,7 @@
 		display: block;
 		background: #0a0a1a;
 		color-scheme: dark;
-		overflow-x: hidden;
+		overflow: hidden;
 	}
 	div :global(.artifact-close-btn) {
 		display: none;
@@ -638,6 +638,7 @@
 	div :global(.artifact-fullscreen .artifact-frame) {
 		flex: 1;
 		height: auto;
+		overflow: auto;
 	}
 	div :global(.artifact-fullscreen .artifact-source-wrap) {
 		flex: 1;
