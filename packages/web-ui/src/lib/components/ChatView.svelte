@@ -45,31 +45,53 @@
 		return result;
 	}
 
-	/** User-facing description of a tool call */
+	/** Tool calls that are already conveyed by the agent's text — hide from UI */
+	const HIDDEN_TOOLS = new Set(['plan_task', 'step_complete', 'artifact_list', 'data_store_list']);
+
+	/** User-facing description of a tool call (empty string = hidden) */
 	function toolCallDetail(tc: ToolCallInfo): string {
+		if (HIDDEN_TOOLS.has(tc.name)) return '';
 		const inp = tc.input as Record<string, unknown> | undefined;
 		switch (tc.name) {
-			case 'data_store_query': return `Daten abgefragt: ${String(inp?.['collection'] ?? 'Tabelle')}`;
-			case 'data_store_insert': return `Daten gespeichert: ${String(inp?.['collection'] ?? 'Tabelle')}`;
+			case 'data_store_query': return String(inp?.['collection'] ?? 'Tabelle');
+			case 'data_store_insert': return `Gespeichert: ${String(inp?.['collection'] ?? 'Tabelle')}`;
 			case 'data_store_create': return `Tabelle erstellt: ${String(inp?.['collection'] ?? '')}`;
-			case 'data_store_list': return 'Tabellen aufgelistet';
-			case 'memory_store': return `Gemerkt: ${String(inp?.['content'] ?? '').slice(0, 60)}`;
-			case 'memory_recall': return `Wissen abgerufen: ${String(inp?.['query'] ?? '')}`;
-			case 'memory_update': return `Wissen aktualisiert`;
-			case 'write_file': return `Datei geschrieben: ${String(inp?.['path'] ?? '')}`;
-			case 'read_file': return `Datei gelesen: ${String(inp?.['path'] ?? '')}`;
-			case 'bash': return `Befehl: ${String(inp?.['command'] ?? '').slice(0, 80)}`;
-			case 'http_request': return `API-Anfrage: ${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}`;
-			case 'web_research': return `Web-Recherche: ${String(inp?.['query'] ?? '')}`;
-			case 'plan_task': return `Plan erstellt: ${String(inp?.['summary'] ?? '').slice(0, 60)}`;
-			case 'step_complete': return `Schritt abgeschlossen: ${String(inp?.['step_id'] ?? '')}`;
-			case 'run_pipeline': return `Pipeline gestartet: ${String(inp?.['name'] ?? '')}`;
-			case 'spawn_agent': return `Delegiert: ${String(inp?.['task'] ?? '').slice(0, 60)}`;
-			case 'artifact_save': return `Artifact gespeichert: ${String(inp?.['title'] ?? '')}`;
-			case 'artifact_list': return 'Artifacts aufgelistet';
-			case 'task_create': return `Aufgabe erstellt: ${String(inp?.['title'] ?? '')}`;
+			case 'memory_store': return `Gemerkt: ${String(inp?.['content'] ?? '').slice(0, 50)}`;
+			case 'memory_recall': return `Erinnert: ${String(inp?.['query'] ?? '')}`;
+			case 'memory_update': return 'Wissen aktualisiert';
+			case 'write_file': return `Datei: ${String(inp?.['path'] ?? '').split('/').pop()}`;
+			case 'read_file': return `Gelesen: ${String(inp?.['path'] ?? '').split('/').pop()}`;
+			case 'bash': return `$ ${String(inp?.['command'] ?? '').slice(0, 60)}`;
+			case 'http_request': return `${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}`;
+			case 'web_research': return `Recherche: ${String(inp?.['query'] ?? '')}`;
+			case 'run_pipeline': return `Pipeline: ${String(inp?.['name'] ?? '')}`;
+			case 'spawn_agent': return `Delegiert: ${String(inp?.['task'] ?? '').slice(0, 50)}`;
+			case 'artifact_save': return `Artifact: ${String(inp?.['title'] ?? '')}`;
+			case 'task_create': return `Aufgabe: ${String(inp?.['title'] ?? '')}`;
 			default: return tc.name;
 		}
+	}
+
+	/** Group consecutive visible tool calls of the same type into one line */
+	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): Array<{ type: 'text'; text: string } | { type: 'tools'; details: string[] }> {
+		const result: Array<{ type: 'text'; text: string } | { type: 'tools'; details: string[] }> = [];
+		for (const block of blocks) {
+			if (block.type === 'text' && block.text) {
+				result.push({ type: 'text', text: block.text });
+			} else if (block.type === 'tool_call') {
+				const tc = toolCalls[block.index];
+				if (!tc) continue;
+				const detail = toolCallDetail(tc);
+				if (!detail) continue; // hidden tool
+				const last = result[result.length - 1];
+				if (last && last.type === 'tools') {
+					last.details.push(detail);
+				} else {
+					result.push({ type: 'tools', details: [detail] });
+				}
+			}
+		}
+		return result;
 	}
 
 	let inputText = $state('');
@@ -617,18 +639,16 @@
 							</details>
 						{/if}
 
-						<!-- Interleaved blocks: tool calls + text in chronological order -->
-						{#each msg.blocks ?? [] as block, blockIdx (blockIdx)}
-							{#if block.type === 'tool_call' && msg.toolCalls?.[block.index]}
-								{@const tc = msg.toolCalls[block.index]}
-								{@const detail = toolCallDetail(tc)}
-								<div class="flex items-center gap-2 text-xs py-0.5">
-									<span class="inline-block h-1.5 w-1.5 rounded-full flex-shrink-0 {tc.status === 'running' ? 'bg-warning animate-pulse' : tc.status === 'done' ? 'bg-success' : 'bg-danger'}"></span>
-									<span class="text-text-subtle">{detail}</span>
+						<!-- Interleaved blocks: grouped tool calls + text in chronological order -->
+						{#each msg.blocks?.length ? groupedToolCalls(msg.blocks, msg.toolCalls ?? []) : [] as gBlock, gIdx (gIdx)}
+							{#if gBlock.type === 'tools'}
+								<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 py-0.5">
+									<span class="inline-block h-1 w-1 rounded-full bg-success flex-shrink-0"></span>
+									<span>{gBlock.details.join(', ')}</span>
 								</div>
-							{:else if block.type === 'text' && block.text}
+							{:else if gBlock.type === 'text' && gBlock.text}
 								<div class="relative group/copy">
-									<MarkdownRenderer content={block.text} streaming={isStreaming && msgIdx === messages.length - 1} />
+									<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
 									<button
 										onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
 										class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
@@ -641,12 +661,13 @@
 						{/each}
 						<!-- Fallback for legacy messages without blocks -->
 						{#if !msg.blocks?.length}
-							{#each msg.toolCalls ?? [] as tc, tcIdx (tcIdx)}
-								<div class="flex items-center gap-2 text-xs py-0.5">
-									<span class="inline-block h-1.5 w-1.5 rounded-full flex-shrink-0 {tc.status === 'running' ? 'bg-warning animate-pulse' : tc.status === 'done' ? 'bg-success' : 'bg-danger'}"></span>
-									<span class="text-text-subtle">{toolCallDetail(tc)}</span>
+							{@const visibleCalls = (msg.toolCalls ?? []).map(tc => toolCallDetail(tc)).filter(Boolean)}
+							{#if visibleCalls.length > 0}
+								<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 py-0.5">
+									<span class="inline-block h-1 w-1 rounded-full bg-success flex-shrink-0"></span>
+									<span>{visibleCalls.join(', ')}</span>
 								</div>
-							{/each}
+							{/if}
 							{#if msg.content}
 								<div class="relative group/copy">
 									<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
