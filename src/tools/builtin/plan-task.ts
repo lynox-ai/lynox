@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
-import { storePipeline } from './pipeline.js';
+import { storePipeline, getPipeline } from './pipeline.js';
+import { startTrackedPlan } from '../../core/plan-tracker.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -153,6 +154,8 @@ function convertToPipeline(summary: string, phases: PlanPhase[]): string {
     estimatedCost: costEstimate.totalCostUsd,
     createdAt: new Date().toISOString(),
     executed: false,
+    executionMode: 'tracked',
+    template: false,
   };
 
   storePipeline(pipelineId, planned);
@@ -260,13 +263,25 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
       }
     }
 
+    // Helper: start tracked plan after approval
+    const activateTracking = (pipelineId: string): void => {
+      const planned = getPipeline(pipelineId);
+      if (planned) {
+        startTrackedPlan(planned, agent.toolContext);
+      }
+    };
+
     // Auto-approve in non-interactive context
     if (!agent.promptUser) {
       if (hasPhases) {
         const pipelineId = convertToPipeline(input.summary, phases);
+        if (pipelineId) activateTracking(pipelineId);
+        const planned = pipelineId ? getPipeline(pipelineId) : undefined;
         return JSON.stringify({
           approved: true,
+          tracked: true,
           pipeline_id: pipelineId || undefined,
+          steps: planned?.steps.map(s => ({ id: s.id, task: s.task })),
           user_steps: userPhaseNames.length > 0 ? userPhaseNames : undefined,
           estimated_cost_usd: estimatedCostUsd,
         });
@@ -281,9 +296,13 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     if (['proceed', 'y', 'yes'].includes(normalized)) {
       if (hasPhases) {
         const pipelineId = convertToPipeline(input.summary, phases);
+        if (pipelineId) activateTracking(pipelineId);
+        const planned = pipelineId ? getPipeline(pipelineId) : undefined;
         return JSON.stringify({
           approved: true,
+          tracked: true,
           pipeline_id: pipelineId || undefined,
+          steps: planned?.steps.map(s => ({ id: s.id, task: s.task })),
           user_steps: userPhaseNames.length > 0 ? userPhaseNames : undefined,
         });
       }

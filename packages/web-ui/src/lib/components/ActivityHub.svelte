@@ -43,7 +43,7 @@
 			stats = (await statsRes.json()) as Stats;
 			// Cost chart data
 			try {
-				const costResp = await fetch(`${getApiBase()}/history/costs?days=14`);
+				const costResp = await fetch(`${getApiBase()}/history/cost/daily?days=14`);
 				if (costResp.ok) costDays = ((await costResp.json()) as { costs: CostDay[] }).costs ?? [];
 			} catch { /* non-critical */ }
 			const tasksData = (await tasksRes.json()) as { tasks: TaskRecord[] };
@@ -122,7 +122,7 @@
 						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 							<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle mb-3">{t('hub.activity.cost_chart')}</p>
 							<div class="flex items-end gap-1 h-24">
-								{#each costDays as day}
+								{#each costDays as day (day.day)}
 									<div class="flex-1 flex flex-col items-center gap-1 group relative">
 										<div
 											class="w-full rounded-t-sm bg-accent/60 hover:bg-accent transition-colors"
@@ -143,7 +143,7 @@
 						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 							<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle mb-3">{t('hub.activity.by_model')}</p>
 							<div class="space-y-2">
-								{#each stats.cost_by_model as model}
+								{#each stats.cost_by_model as model (model.model_id)}
 									<div class="flex items-center justify-between text-sm">
 										<span class="text-text-muted font-mono text-xs">{model.model_id}</span>
 										<span class="text-text">{formatCost(model.cost_usd)} <span class="text-text-subtle text-xs">({model.run_count} runs)</span></span>

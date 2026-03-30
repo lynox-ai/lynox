@@ -356,7 +356,7 @@
 				<p class="text-xs text-text-subtle">{t('history.no_cost_data')}</p>
 			{:else}
 				<div class="flex items-end gap-1 h-24">
-					{#each costData.slice().reverse() as day}
+					{#each costData.slice().reverse() as day (day.day)}
 						{@const pct = (day.cost_usd / costBarMax(costData)) * 100}
 						<div class="group flex-1 flex flex-col items-center justify-end h-full relative">
 							<div

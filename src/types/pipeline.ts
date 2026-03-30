@@ -33,6 +33,8 @@ export interface PipelineResult {
   totalCostUsd: number;
 }
 
+export type PipelineExecutionMode = 'tracked' | 'orchestrated';
+
 export interface PlannedPipeline {
   id: string;
   name: string;
@@ -42,6 +44,10 @@ export interface PlannedPipeline {
   estimatedCost: number;
   createdAt: string;
   executed: boolean;
+  /** 'tracked' = agent executes + step_complete, 'orchestrated' = sub-agent per step */
+  executionMode: PipelineExecutionMode;
+  /** Template pipelines can be re-executed (for scheduling) */
+  template: boolean;
 }
 
 // === Process Capture ===

@@ -81,6 +81,7 @@ export interface RunState {
 }
 
 export interface RunHooks {
+  onRunStart?: (() => void) | undefined;
   onStepStart?: ((stepId: string, agentName: string) => void) | undefined;
   onStepComplete?: ((output: AgentOutput) => void) | undefined;
   onStepSkipped?: ((stepId: string, reason: string) => void) | undefined;

@@ -30,8 +30,10 @@ export type StreamEvent =
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }
   | { type: 'continuation';  iteration: number; max: number;       agent: string }
 
+  | { type: 'pipeline_start'; pipelineId: string; name: string;
+      steps: Array<{ id: string; task: string; inputFrom?: string[] | undefined }>; agent: string }
   | { type: 'pipeline_progress'; stepId: string; status: 'started' | 'completed' | 'skipped' | 'failed';
-      detail?: string | undefined; durationMs?: number | undefined; agent: string }
+      detail?: string | undefined; durationMs?: number | undefined; elapsed?: number | undefined; agent: string }
   | { type: 'context_pressure'; droppedMessages: number; usagePercent: number; agent: string }
   | { type: 'context_budget'; systemTokens: number; toolTokens: number; messageTokens: number;
       totalTokens: number; maxTokens: number; usagePercent: number; agent: string }

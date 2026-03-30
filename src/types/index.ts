@@ -10,4 +10,4 @@ export * from './pipeline.js';
 export * from './security.js';
 export * from './modes.js';
 export * from './records.js';
-export type { ToolContext, ToolCallCountProvider } from '../core/tool-context.js';
+export type { ToolContext, ToolCallCountProvider, ActiveTrackedPlan, TrackedStepResult } from '../core/tool-context.js';

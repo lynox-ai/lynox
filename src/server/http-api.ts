@@ -67,7 +67,7 @@ function requiresAdmin(method: string, pathname: string): boolean {
 }
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
-const PROMPT_TIMEOUT_MS = 2 * 60_000; // 2 minutes
+const PROMPT_TIMEOUT_MS = 10 * 60_000; // 10 minutes — users need time to review plans
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';

@@ -24,6 +24,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
+	import PipelineProgress from './PipelineProgress.svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { goto } from '$app/navigation';
@@ -45,7 +46,7 @@
 
 	let inputText = $state('');
 	let messagesEl: HTMLDivElement;
-	let textareaEl: HTMLTextAreaElement;
+	let textareaEl = $state<HTMLTextAreaElement>();
 	let fileInputEl: HTMLInputElement;
 	let pendingFiles = $state<FileAttachment[]>([]);
 	let recording = $state(false);
@@ -575,7 +576,11 @@
 							</details>
 						{/if}
 
-						{#each msg.toolCalls ?? [] as tc}
+						{#if msg.pipeline}
+							<PipelineProgress pipeline={msg.pipeline} />
+						{/if}
+
+						{#each msg.toolCalls ?? [] as tc, tcIdx (tcIdx)}
 							<details class="tool-call-details rounded-[var(--radius-md)] border border-border bg-bg-subtle text-sm group">
 								<summary class="cursor-pointer px-3 py-2 text-text-muted hover:text-text flex items-center gap-2">
 									<span class="inline-block h-1.5 w-1.5 rounded-full {tc.status === 'running' ? 'bg-warning animate-pulse' : tc.status === 'done' ? 'bg-success' : 'bg-danger'}"></span>
@@ -588,6 +593,31 @@
 											<p class="text-xs text-success mt-2">
 												Written to <a href="/app/files" class="text-accent-text hover:underline font-mono">{tc.result.slice(11)}</a>
 											</p>
+										{:else if tc.name === 'run_pipeline' && tc.result.startsWith('{')}
+											{@const parsed = (() => { try { return JSON.parse(tc.result); } catch { return null; } })()}
+											{#if parsed?.steps}
+												<div class="mt-2 space-y-1">
+													<div class="flex items-center gap-2 text-xs text-text-subtle">
+														<span class="font-mono uppercase tracking-widest text-[10px]">{parsed.name ?? 'Pipeline'}</span>
+														<span class="text-text-muted">{parsed.status}</span>
+													</div>
+													{#each parsed.steps as step}
+														<div class="flex items-center gap-2 text-xs rounded-[var(--radius-sm)] border border-border px-2 py-1
+															{step.error ? 'border-danger/30 bg-danger/5' : step.skipped ? 'border-border bg-bg-muted' : 'border-success/30 bg-success/5'}">
+															<span class="flex-shrink-0">{step.error ? '\u2717' : step.skipped ? '\u2014' : '\u2713'}</span>
+															<span class="font-mono text-text-muted truncate">{step.stepId}</span>
+															{#if step.durationMs}
+																<span class="ml-auto text-[10px] text-text-subtle tabular-nums">{(step.durationMs / 1000).toFixed(1)}s</span>
+															{/if}
+															{#if step.costUsd}
+																<span class="text-[10px] text-text-subtle tabular-nums">${step.costUsd.toFixed(4)}</span>
+															{/if}
+														</div>
+													{/each}
+												</div>
+											{:else}
+												<pre class="whitespace-pre-wrap font-mono text-xs text-text-muted mt-2 max-h-40 overflow-y-auto">{tc.result.slice(0, 2000)}</pre>
+											{/if}
 										{:else}
 											<pre class="whitespace-pre-wrap font-mono text-xs text-text-muted mt-2 max-h-40 overflow-y-auto">{tc.result.slice(0, 2000)}</pre>
 											{#if tc.result.length > 2000}
@@ -750,7 +780,7 @@
 		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-2">
-				<p class="text-sm text-text-muted">{pendingPermission.question}</p>
+				<pre class="text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
 
 				{#if isPermissionGuard}
 					<div class="flex flex-wrap gap-2">
@@ -761,13 +791,11 @@
 					<div class="flex flex-wrap gap-2">
 						{#each visibleOptions as option}
 							<button
-								onclick={() => { if (selectedOptions.includes(option)) { selectedOptions = selectedOptions.filter(o => o !== option); } else { selectedOptions = [...selectedOptions, option]; } }}
-								class="rounded-[var(--radius-sm)] border px-3 py-1.5 text-sm transition-all {selectedOptions.includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
+								onclick={() => answerPrompt(option)}
+								class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-muted hover:text-text hover:border-accent hover:bg-accent/10 transition-all"
 							>{option}</button>
 						{/each}
 					</div>
-					<button onclick={() => answerPrompt(selectedOptions.join(', '))} disabled={selectedOptions.length === 0}
-						class="rounded-[var(--radius-sm)] bg-accent px-4 py-1.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity">{t('chat.send')}</button>
 				{:else}
 					<!-- Open-ended: user types in normal chat input below -->
 					<p class="text-xs text-text-subtle">{t('chat.hint')}</p>

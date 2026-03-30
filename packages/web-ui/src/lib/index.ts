@@ -67,6 +67,8 @@ export {
 export type {
 	ChatMessage,
 	ToolCallInfo,
+	PipelineInfo,
+	PipelineStepInfo,
 	PermissionPrompt,
 	FileAttachment,
 	ContextBudget,

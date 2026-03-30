@@ -1,6 +1,7 @@
 import { getApiBase } from '../config.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
+import { loadThreads } from './threads.svelte.js';
 
 export interface UsageInfo {
 	tokensIn: number;
@@ -14,9 +15,12 @@ export interface ChatMessage {
 	role: 'user' | 'assistant';
 	content: string;
 	toolCalls?: ToolCallInfo[];
+	pipeline?: PipelineInfo;
 	thinking?: string;
 	usage?: UsageInfo;
 	queued?: boolean;
+	/** @internal — tracks whether a tool call happened between text segments */
+	_toolSinceText?: boolean;
 }
 
 export interface ToolCallInfo {
@@ -24,6 +28,21 @@ export interface ToolCallInfo {
 	input: unknown;
 	result?: string;
 	status: 'running' | 'done' | 'error';
+}
+
+export interface PipelineStepInfo {
+	id: string;
+	task: string;
+	inputFrom?: string[];
+	status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+	elapsed?: number;
+	durationMs?: number;
+}
+
+export interface PipelineInfo {
+	pipelineId: string;
+	name: string;
+	steps: PipelineStepInfo[];
 }
 
 export interface PermissionPrompt {
@@ -208,6 +227,9 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 	pendingPermission = null;
 	persistChat();
 
+	// Refresh thread list so sidebar reflects updated ordering
+	void loadThreads();
+
 	// Process queue: send next queued message
 	if (messageQueue.length > 0) {
 		const next = messageQueue.shift()!;
@@ -221,9 +243,18 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 	if (!msg) return;
 
 	switch (type) {
-		case 'text':
-			msg.content += String(data['text'] ?? '');
+		case 'text': {
+			const text = String(data['text'] ?? '');
+			// Insert newline between text segments separated by tool calls
+			if (msg.content && text && msg._toolSinceText) {
+				if (!msg.content.endsWith('\n') && !msg.content.endsWith(' ')) {
+					msg.content += '\n\n';
+				}
+			}
+			msg.content += text;
+			msg._toolSinceText = false;
 			break;
+		}
 		case 'thinking':
 			msg.thinking = (msg.thinking ?? '') + String(data['thinking'] ?? '');
 			break;
@@ -237,6 +268,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				&& JSON.stringify(lastTc.input) === JSON.stringify(toolInput))) {
 				msg.toolCalls.push({ name: toolName, input: toolInput, status: 'running' });
 			}
+			msg._toolSinceText = true;
 			setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			break;
 		}
@@ -302,39 +334,40 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			}
 			break;
 		}
+		case 'pipeline_start': {
+			const steps = (data['steps'] as Array<{ id: string; task: string; inputFrom?: string[] }>) ?? [];
+			msg.pipeline = {
+				pipelineId: String(data['pipelineId'] ?? ''),
+				name: String(data['name'] ?? ''),
+				steps: steps.map(s => ({
+					id: String(s.id),
+					task: String(s.task),
+					inputFrom: s.inputFrom,
+					status: 'pending' as const,
+				})),
+			};
+			break;
+		}
 		case 'pipeline_progress': {
 			const stepId = String(data['stepId'] ?? '');
-			const status = String(data['status'] ?? '');
-			const detail = data['detail'] != null ? String(data['detail']) : undefined;
-			msg.toolCalls = msg.toolCalls ?? [];
+			const status = String(data['status'] ?? '') as PipelineStepInfo['status'];
+			const elapsed = data['elapsed'] as number | undefined;
+			const durationMs = data['durationMs'] as number | undefined;
 
-			if (status === 'started') {
-				// Update existing or add new pipeline step tracker
-				const existing = msg.toolCalls.find(
-					(tc) => tc.name === 'run_pipeline' && tc.input != null
-						&& (tc.input as Record<string, unknown>)['stepId'] === stepId && tc.status === 'running'
-				);
-				if (existing) {
-					existing.result = detail;
-				} else {
-					msg.toolCalls.push({
-						name: 'run_pipeline',
-						input: { stepId, detail },
-						status: 'running',
-					});
-				}
-			} else {
-				// completed / failed / skipped — mark the step done
-				const tc = msg.toolCalls.find(
-					(tc) => tc.name === 'run_pipeline'
-						&& (tc.input as Record<string, unknown>)?.['stepId'] === stepId
-						&& tc.status === 'running'
-				);
-				if (tc) {
-					tc.status = status === 'failed' ? 'error' : 'done';
-					tc.result = detail ?? status;
-				}
+			// Auto-create pipeline if pipeline_start was missed
+			if (!msg.pipeline) {
+				msg.pipeline = { pipelineId: '', name: '', steps: [] };
 			}
+
+			let step = msg.pipeline.steps.find(s => s.id === stepId);
+			if (!step) {
+				// Step not yet known — add it dynamically
+				step = { id: stepId, task: stepId, status: 'pending' };
+				msg.pipeline.steps.push(step);
+			}
+			step.status = status;
+			if (elapsed != null) step.elapsed = elapsed;
+			if (durationMs != null) step.durationMs = durationMs;
 			break;
 		}
 		case 'done':

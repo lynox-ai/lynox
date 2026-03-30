@@ -55,6 +55,7 @@ import {
   dataStoreDeleteTool,
   captureProcessTool,
   promoteProcessTool,
+  stepCompleteTool,
   apiSetupTool,
   artifactSaveTool,
   artifactListTool,
@@ -635,6 +636,7 @@ export class Engine {
     this._pipelinesEnabled = true;
     this.registry
       .register(runPipelineTool)
+      .register(stepCompleteTool)
       .register(captureProcessTool)
       .register(promoteProcessTool);
     // Update tool context with pipeline dependencies
@@ -727,6 +729,18 @@ export class Engine {
   getApiStore(): import('./api-store.js').ApiStore | null { return this._apiStore; }
   getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }
   getCRM(): import('./crm.js').CRM | null { return this._crm; }
+
+  /** Returns true if CRM tables (contacts/deals) contain actual records. */
+  hasCrmData(): boolean {
+    if (!this._dataStore) return false;
+    try {
+      const contacts = this._dataStore.getCollectionInfo('contacts');
+      const deals = this._dataStore.getCollectionInfo('deals');
+      return (contacts?.recordCount ?? 0) > 0 || (deals?.recordCount ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  }
 
   /** Start the background worker loop. Call from long-lived server modes (Telegram, MCP). */
   startWorkerLoop(intervalMs?: number | undefined): void {

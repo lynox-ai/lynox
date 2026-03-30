@@ -7,7 +7,7 @@ import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 const MAX_STEPS = 20;
-const DEFAULT_RESULT_BYTES = 51_200; // 50KB per step result
+const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
 const MAX_PLANS = 10;
 
 // Pipeline config accessed via agent.toolContext (userConfig, tools, streamHandler, runHistory)
@@ -32,6 +32,9 @@ export function getPipeline(id: string, runHistory?: RunHistory | null): Planned
     if (row) {
       try {
         const planned = JSON.parse(row.manifest_json) as PlannedPipeline;
+        // Backfill defaults for older records missing new fields
+        planned.executionMode ??= 'orchestrated';
+        planned.template ??= false;
         pipelineStore.set(planned.id, planned); // cache in memory
         return planned;
       } catch { /* ignore parse errors */ }
@@ -89,65 +92,50 @@ function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'st
   };
 }
 
-function buildProgressHooks(pipelineStreamHandler: StreamHandler | null): RunHooks {
+function buildProgressHooks(pipelineStreamHandler: StreamHandler | null, manifest?: Manifest): RunHooks {
   const handler = pipelineStreamHandler;
   if (!handler) return {};
 
   const HEARTBEAT_INTERVAL = 15_000;
-  const heartbeats = new Map<string, { timer: ReturnType<typeof setInterval> | null; startedAt: number }>();
-  let consolidatedTimer: ReturnType<typeof setInterval> | null = null;
-
-  const emitConsolidatedHeartbeat = (): void => {
-    if (heartbeats.size === 0) return;
-    if (heartbeats.size === 1) {
-      const [stepId, hb] = [...heartbeats.entries()][0]!;
-      const elapsed = Math.round((Date.now() - hb.startedAt) / 1000);
-      void handler({
-        type: 'pipeline_progress', stepId, status: 'started',
-        detail: `running ${elapsed}s...`, agent: 'pipeline',
-      });
-    } else {
-      const steps = [...heartbeats.entries()].map(([id, hb]) => {
-        const elapsed = Math.round((Date.now() - hb.startedAt) / 1000);
-        return `${id} ${elapsed}s`;
-      });
-      void handler({
-        type: 'pipeline_progress', stepId: `${heartbeats.size} steps`, status: 'started',
-        detail: `running: ${steps.join(', ')}`, agent: 'pipeline',
-      });
-    }
-  };
-
-  const ensureConsolidatedTimer = (): void => {
-    if (!consolidatedTimer) {
-      consolidatedTimer = setInterval(emitConsolidatedHeartbeat, HEARTBEAT_INTERVAL);
-    }
-  };
-
-  const stopConsolidatedTimer = (): void => {
-    if (heartbeats.size === 0 && consolidatedTimer) {
-      clearInterval(consolidatedTimer);
-      consolidatedTimer = null;
-    }
-  };
+  const heartbeats = new Map<string, { timer: ReturnType<typeof setInterval>; startedAt: number }>();
 
   const startHeartbeat = (stepId: string): void => {
-    heartbeats.set(stepId, { timer: null, startedAt: Date.now() });
-    ensureConsolidatedTimer();
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      void handler({
+        type: 'pipeline_progress', stepId, status: 'started',
+        detail: `running`, elapsed, agent: 'pipeline',
+      });
+    }, HEARTBEAT_INTERVAL);
+    heartbeats.set(stepId, { timer, startedAt });
   };
 
   const stopHeartbeat = (stepId: string): void => {
-    heartbeats.delete(stepId);
-    stopConsolidatedTimer();
+    const hb = heartbeats.get(stepId);
+    if (hb) {
+      clearInterval(hb.timer);
+      heartbeats.delete(stepId);
+    }
   };
 
   return {
-    onPhaseStart: (phaseIndex: number, stepIds: string[]) => {
-      const parallel = stepIds.length > 1 ? ` (${stepIds.length} parallel)` : '';
+    onRunStart: () => {
+      if (!manifest) return;
       void handler({
-        type: 'pipeline_progress', stepId: `phase-${phaseIndex + 1}`, status: 'started',
-        detail: `Phase ${phaseIndex + 1}${parallel}`, agent: 'pipeline',
+        type: 'pipeline_start',
+        pipelineId: manifest.name,
+        name: manifest.name,
+        steps: manifest.agents.map(a => ({
+          id: a.id,
+          task: a.task ?? a.id,
+          inputFrom: a.input_from,
+        })),
+        agent: 'pipeline',
       });
+    },
+    onPhaseStart: (_phaseIndex: number, _stepIds: string[]) => {
+      // Phase info is derived from manifest structure in the UI
     },
     onStepStart: (stepId: string, agentName: string) => {
       void handler({
@@ -294,9 +282,10 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       });
     }
 
-    const hooks = buildProgressHooks(deps.streamHandler);
+    const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const state = await runManifest(manifest, deps.config, {
       parentTools: deps.tools,
+      parentToolContext: deps.toolContext,
       hooks,
       runHistory: deps.runHistory ?? undefined,
     });
@@ -344,6 +333,7 @@ interface PipelineDeps {
   tools: ToolEntry[];
   streamHandler: StreamHandler | null;
   runHistory: RunHistory | null;
+  toolContext?: import('../../types/index.js').ToolContext | undefined;
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
@@ -362,7 +352,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
 
     try {
-      const hooks = buildProgressHooks(deps.streamHandler);
+      const hooks = buildProgressHooks(deps.streamHandler, prev.manifest);
       const state = await retryManifest(prev.manifest, prev.state, deps.config, {
         parentTools: deps.tools,
         hooks,
@@ -407,9 +397,10 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     validateManifest(manifest);
     planned.executed = true;
 
-    const hooks = buildProgressHooks(deps.streamHandler);
+    const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const state = await runManifest(manifest, deps.config, {
       parentTools: deps.tools,
+      parentToolContext: deps.toolContext,
       hooks,
       runHistory: deps.runHistory ?? undefined,
     });
@@ -519,12 +510,15 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
       return 'Error: Provide steps[] for inline execution or pipeline_id for a stored pipeline.';
     }
 
+    const pipelineToolContext = agent.toolContext;
+
     if (input.pipeline_id) {
       return executePipelineById(input, {
         config: pipelineConfig,
         tools: pipelineTools,
         streamHandler: pipelineStreamHandler,
         runHistory: pipelineRunHistory,
+        toolContext: pipelineToolContext,
       });
     }
 
@@ -533,6 +527,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         tools: pipelineTools,
         streamHandler: pipelineStreamHandler,
         runHistory: pipelineRunHistory,
+        toolContext: pipelineToolContext,
       });
   },
 };

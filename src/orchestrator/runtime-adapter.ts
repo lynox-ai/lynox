@@ -1,7 +1,7 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
 import { MODEL_MAP } from '../types/index.js';
-import type { IAgent, ToolEntry, LynoxUserConfig, ModelTier, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from './types.js';
 import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
@@ -9,7 +9,10 @@ import { resolveTools } from '../tools/resolve-tools.js';
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_pipeline']);
 
 // Core tools sufficient for most pipeline steps — avoids loading ~20 tool definitions (~3000 tokens/turn)
-const INLINE_CORE_TOOLS = new Set(['bash', 'read_file', 'write_file', 'http', 'ask_user']);
+const INLINE_CORE_TOOLS = new Set([
+  'bash', 'read_file', 'write_file', 'http', 'ask_user',
+  'data_store_query', 'data_store_insert', 'knowledge_search',
+]);
 
 /** Active pipeline step agents — aborted on ESC interrupt. */
 const activePipelineAgents = new Set<Agent>();
@@ -164,6 +167,7 @@ export async function spawnInline(
   parentTools: ToolEntry[],
   preApproval?: PreApprovalSet | undefined,
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
+  parentToolContext?: ToolContext | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -179,7 +183,7 @@ export async function spawnInline(
   const configTier = config.default_tier;
   const modelTier = (step.model ?? resolved?.model ?? configTier ?? 'sonnet') as ModelTier;
   const model = resolveModel(modelTier, 'sonnet');
-  const systemPrompt = 'You are a focused task agent. Complete the task precisely. Return structured output when possible.';
+  const systemPrompt = 'You are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.';
   // Use minimal tool set for inline steps unless role specifies custom tools
   const roleProfile = resolved
     ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
@@ -207,6 +211,7 @@ export async function spawnInline(
     apiBaseURL: config.api_base_url,
     preApproval,
     autonomy,
+    toolContext: parentToolContext,
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: modelTier === 'opus' ? 10 : 2, maxIterations: maxIter },
     onStream: (event: StreamEvent) => {

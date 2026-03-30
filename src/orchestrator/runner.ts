@@ -23,6 +23,7 @@ export interface RunManifestOptions {
   hooks?: RunHooks | undefined;
   mockResponses?: Map<string, string> | undefined;
   parentTools?: ToolEntry[] | undefined;
+  parentToolContext?: import('../types/index.js').ToolContext | undefined;
   cachedOutputs?: Map<string, AgentOutput> | undefined;
   depth?: number | undefined;
   runHistory?: RunHistory | undefined;
@@ -65,6 +66,8 @@ export async function runManifest(
       state.outputs.set(id, output);
     }
   }
+
+  options.hooks?.onRunStart?.();
 
   const mode = getExecutionMode(manifest);
   if (mode === 'parallel') {
@@ -227,7 +230,7 @@ async function executeStep(
       const stepModel = resolveModelForCost(step, 'sonnet');
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(costUsd - stepEstimate); // correct estimate to actual
     } else {

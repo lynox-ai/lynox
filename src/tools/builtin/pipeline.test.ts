@@ -94,6 +94,8 @@ function seedStoredPipeline(steps?: InlinePipelineStep[]): string {
     estimatedCost: 0.01,
     createdAt: new Date().toISOString(),
     executed: false,
+    executionMode: 'tracked',
+    template: false,
   };
   storePipeline(pipelineId, planned);
   return pipelineId;

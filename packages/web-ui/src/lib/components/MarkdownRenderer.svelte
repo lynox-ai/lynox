@@ -10,8 +10,27 @@
 
 	let highlightedHtml = $state('');
 
+	// Close unclosed code fences to prevent the entire response rendering as raw code.
+	// Only count valid fences: opening (```lang) and closing (``` alone on line).
+	// "```Pipeline erfolgreich" is NOT a valid closing fence.
+	function closeOpenFences(md: string): string {
+		const validFence = /^```\w*\s*$/gm;
+		const fenceCount = (md.match(validFence) ?? []).length;
+		return fenceCount % 2 !== 0 ? md + '\n```' : md;
+	}
+
+	// Fix missing line breaks between concatenated sentences (from streamed tool-call gaps).
+	// Pattern: period/exclamation/question followed directly by uppercase letter without space.
+	// Only applied outside code blocks to avoid breaking code content.
+	function fixSentenceSpacing(md: string): string {
+		const parts = md.split(/(```[\s\S]*?```)/g);
+		return parts.map((part, i) =>
+			i % 2 === 0 ? part.replace(/([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2') : part
+		).join('');
+	}
+
 	const baseHtml = $derived(
-		DOMPurify.sanitize(marked.parse(content, { async: false }) as string)
+		DOMPurify.sanitize(marked.parse(closeOpenFences(fixSentenceSpacing(content)), { async: false }) as string)
 	);
 
 	function decodeEntities(str: string): string {
@@ -313,7 +332,10 @@
 				const raw = match[2] ?? '';
 				const code = decodeEntities(raw);
 
-				if (lang === 'mermaid' || lang === 'artifact') {
+				// Treat html blocks containing full documents as artifacts
+				const isRichBlock = lang === 'mermaid' || lang === 'artifact'
+					|| (lang === 'html' && (code.includes('<!DOCTYPE') || code.includes('<html')));
+				if (isRichBlock) {
 					const cached = richCache.get(raw);
 					if (cached) return { original: match[0], result: cached };
 					// Uncached → show as syntax-highlighted code while waiting
@@ -354,9 +376,13 @@
 		});
 
 		// Debounce uncached rich blocks (prevents iframe flash during streaming)
-		const uncached = matches.filter(m =>
-			(m[1] === 'mermaid' || m[1] === 'artifact') && !richCache.has(m[2] ?? '')
-		);
+		const uncached = matches.filter(m => {
+			const lang = m[1] ?? '';
+			const code = m[2] ?? '';
+			const isRich = lang === 'mermaid' || lang === 'artifact'
+				|| (lang === 'html' && (code.includes('&lt;!DOCTYPE') || code.includes('&lt;html')));
+			return isRich && !richCache.has(code);
+		});
 		if (uncached.length === 0) return;
 
 		const timer = setTimeout(async () => {
@@ -366,7 +392,7 @@
 				const code = decodeEntities(raw);
 				try {
 					if (lang === 'mermaid') richCache.set(raw, await renderMermaid(code));
-					else richCache.set(raw, buildArtifact(code));
+					else richCache.set(raw, buildArtifact(code)); // artifact + html full docs
 				} catch { /* keep shiki fallback */ }
 			}
 			if (baseHtml === html) {

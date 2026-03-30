@@ -185,6 +185,8 @@ export const promoteProcessTool: ToolEntry<PromoteInput> = {
         estimatedCost: costEstimate.totalCostUsd,
         createdAt: new Date().toISOString(),
         executed: false,
+        executionMode: 'tracked',
+        template: true, // Promoted processes are always reusable templates
       };
 
       storePipeline(pipelineId, planned);

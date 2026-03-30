@@ -54,7 +54,9 @@ export async function renameThread(id: string, title: string): Promise<void> {
 }
 
 export function getThreads() {
-	return threads;
+	return threads.toSorted(
+		(a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+	);
 }
 export function getIsLoadingThreads() {
 	return isLoading;
