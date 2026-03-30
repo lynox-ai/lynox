@@ -11,7 +11,9 @@
 	});
 
 	function timeAgo(dateStr: string): string {
-		const diff = Date.now() - new Date(dateStr + 'Z').getTime();
+		const parsed = new Date(dateStr.endsWith('Z') || dateStr.includes('+') ? dateStr : dateStr + 'Z');
+		const diff = Date.now() - parsed.getTime();
+		if (Number.isNaN(diff)) return '';
 		const mins = Math.floor(diff / 60_000);
 		if (mins < 1) return 'now';
 		if (mins < 60) return `${mins}m`;
@@ -25,8 +27,8 @@
 {#if getThreads().length > 0}
 	<div class="px-3 mb-2">
 		<p class="text-[10px] uppercase tracking-wider text-text-subtle px-3 mb-1">{t('threads.recent')}</p>
-		<ul class="space-y-0.5 max-h-48 overflow-y-auto scrollbar-thin">
-			{#each getThreads().slice(0, 10) as thread (thread.id)}
+		<ul class="space-y-0.5 max-h-72 overflow-y-auto scrollbar-thin">
+			{#each getThreads() as thread (thread.id)}
 				{@const isActive = getSessionId() === thread.id}
 				<li class="group relative flex items-center rounded-[var(--radius-sm)] transition-all
 						{isActive

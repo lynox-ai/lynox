@@ -818,6 +818,7 @@
 				<button
 					onclick={toggleVoice}
 					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
+					aria-label={t('chat.send')}
 				>
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 				</button>
@@ -852,6 +853,7 @@
 					<button
 						onclick={() => abortRun()}
 						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-opacity"
+						aria-label={t('chat.abort')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
 					</button>
@@ -860,6 +862,7 @@
 						onclick={handleSend}
 						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
 						class="shrink-0 h-12 w-12 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
+						aria-label={t('chat.send')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 					</button>

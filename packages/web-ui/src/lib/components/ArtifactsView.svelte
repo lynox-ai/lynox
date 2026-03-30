@@ -92,11 +92,12 @@
 		{:else}
 			<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
 				{#each artifacts as artifact (artifact.id)}
-					<!-- svelte-ignore a11y_click_events_have_key_events -->
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div
-						class="group relative text-left rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 transition-colors hover:border-accent/40 hover:bg-bg-muted cursor-pointer"
+						class="group relative text-left rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 transition-colors hover:border-accent/40 hover:bg-bg-muted cursor-pointer w-full"
+						role="button"
+						tabindex="0"
 						onclick={() => openArtifact(artifact)}
+						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openArtifact(artifact); } }}
 					>
 						<div class="flex items-start gap-3">
 							<span class="text-accent-text text-lg mt-0.5 opacity-60">{typeIcon(artifact.type)}</span>
@@ -128,12 +129,8 @@
 
 <!-- Delete confirmation -->
 {#if confirmDelete}
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center" onclick={() => confirmDelete = null}>
-		<!-- svelte-ignore a11y_click_events_have_key_events -->
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-sm space-y-4" onclick={(e) => e.stopPropagation()}>
+	<div class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center" role="dialog" aria-modal="true">
+		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-sm space-y-4">
 			<p class="text-sm text-text">{t('artifacts.confirm_delete')}</p>
 			<div class="flex gap-3 justify-end">
 				<button type="button" class="text-xs text-text-muted hover:text-text px-3 py-1.5" onclick={() => confirmDelete = null}>{t('artifacts.cancel')}</button>
@@ -145,9 +142,7 @@
 
 <!-- Fullscreen preview -->
 {#if selected}
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="fixed inset-0 z-[9999] bg-bg flex flex-col">
+	<div class="fixed inset-0 z-[9999] bg-bg flex flex-col" role="dialog" aria-modal="true" aria-label={selected.title}>
 		<!-- Toolbar -->
 		<div class="flex items-center gap-3 px-5 py-3 border-b border-border bg-bg-subtle shrink-0">
 			<button type="button" class="text-text-muted hover:text-text text-sm" onclick={closePreview}>← {t('artifacts.back')}</button>

@@ -23,6 +23,7 @@
 		{ id: 'nav-knowledge', label: t('nav.knowledge'), group: t('cmd.nav'), action: () => goto('/app/knowledge'), keywords: 'knowledge memory wissen graph insights' },
 		{ id: 'nav-contacts', label: t('nav.contacts'), group: t('cmd.nav'), action: () => goto('/app/contacts'), keywords: 'contacts kontakte crm deals' },
 		{ id: 'nav-artifacts', label: t('nav.artifacts'), group: t('cmd.nav'), action: () => goto('/app/artifacts'), keywords: 'artifacts dashboards diagrams files' },
+		{ id: 'nav-workflows', label: t('nav.workflows'), group: t('cmd.nav'), action: () => goto('/app/workflows'), keywords: 'workflows pipelines automation dag' },
 		{ id: 'nav-activity', label: t('nav.activity'), group: t('cmd.nav'), action: () => goto('/app/activity'), keywords: 'activity history tasks runs kosten' },
 		{ id: 'nav-settings', label: t('nav.settings'), group: t('cmd.nav'), action: () => goto('/app/settings'), keywords: 'settings einstellungen config' },
 		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/keys'), keywords: 'keys api schluessel' },

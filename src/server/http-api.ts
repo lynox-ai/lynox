@@ -44,6 +44,27 @@ interface DynamicRoute {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
+
+// Keys stripped from GET /api/config responses (secrets that must not leak)
+// Keys stripped from GET /api/config responses (secrets that must not leak)
+const REDACTED_CONFIG_KEYS = new Set([
+  'api_key', 'voyage_api_key', 'telegram_bot_token',
+  'search_api_key', 'google_client_id', 'google_client_secret',
+]);
+
+// Two-tier auth: when LYNOX_HTTP_ADMIN_SECRET is set, these routes require admin scope.
+// When only LYNOX_HTTP_SECRET is set (single-token mode), it grants admin implicitly.
+type AuthScope = 'admin' | 'user';
+
+function requiresAdmin(method: string, pathname: string): boolean {
+  if (method === 'PUT' && pathname === '/api/config') return true;
+  if (method === 'POST' && pathname === '/api/vault/rotate') return true;
+  if (method === 'DELETE' && pathname.startsWith('/api/files')) return true;
+  if (method === 'GET' && pathname === '/api/secrets') return true;
+  if (method === 'PUT' && pathname.startsWith('/api/secrets/')) return true;
+  if (method === 'DELETE' && pathname.startsWith('/api/secrets/')) return true;
+  return false;
+}
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const PROMPT_TIMEOUT_MS = 2 * 60_000; // 2 minutes
@@ -291,16 +312,43 @@ export class LynoxHTTPApi {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     }
 
-    // Auth
+    // Auth — two-tier: LYNOX_HTTP_SECRET = user scope, LYNOX_HTTP_ADMIN_SECRET = admin scope.
+    // When only LYNOX_HTTP_SECRET is set, it implicitly grants admin (backwards compat).
+    let authScope: AuthScope = 'admin'; // default for no-secret (localhost) mode
     if (secret) {
       const auth = req.headers['authorization'] ?? '';
       const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
       const tokenBuf = Buffer.from(token);
       const secretBuf = Buffer.from(secret);
-      if (tokenBuf.length !== secretBuf.length || !timingSafeEqual(tokenBuf, secretBuf)) {
-        errorResponse(res, 401, 'Unauthorized');
-        return;
+      const adminSecret = process.env['LYNOX_HTTP_ADMIN_SECRET'];
+
+      if (adminSecret) {
+        // Two-tier mode: check admin token first, then user token
+        const adminBuf = Buffer.from(adminSecret);
+        const isAdmin = adminBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, adminBuf);
+        const isUser = secretBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, secretBuf);
+        if (isAdmin) {
+          authScope = 'admin';
+        } else if (isUser) {
+          authScope = 'user';
+        } else {
+          errorResponse(res, 401, 'Unauthorized');
+          return;
+        }
+      } else {
+        // Single-token mode — LYNOX_HTTP_SECRET grants admin
+        if (tokenBuf.length !== secretBuf.length || !timingSafeEqual(tokenBuf, secretBuf)) {
+          errorResponse(res, 401, 'Unauthorized');
+          return;
+        }
+        authScope = 'admin';
       }
+    }
+
+    // Admin scope check for destructive endpoints
+    if (requiresAdmin(method, pathname) && authScope !== 'admin') {
+      errorResponse(res, 403, 'Admin scope required');
+      return;
     }
 
     // Content-Length check (guard against NaN/negative from malformed headers)
@@ -706,11 +754,29 @@ export class LynoxHTTPApi {
     }));
 
     // ── Secrets ──
+    // Full name list — admin-scoped (enforced by requiresAdmin)
     this.staticRoutes.set('GET /api/secrets', async (_req, res) => {
       const store = engine.getSecretStore();
       if (!store) { errorResponse(res, 503, 'Secret store not initialized'); return; }
       const names = store.listNames();
       jsonResponse(res, 200, { names });
+    });
+
+    // Category-level booleans — available to all authenticated users
+    this.staticRoutes.set('GET /api/secrets/status', async (_req, res) => {
+      const store = engine.getSecretStore();
+      if (!store) { errorResponse(res, 503, 'Secret store not initialized'); return; }
+      const names = new Set(store.listNames());
+      jsonResponse(res, 200, {
+        configured: {
+          api_key: names.has('ANTHROPIC_API_KEY'),
+          telegram: names.has('TELEGRAM_BOT_TOKEN'),
+          search: names.has('TAVILY_API_KEY') || names.has('SEARCH_API_KEY') || names.has('BRAVE_API_KEY'),
+          google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
+          sentry: names.has('LYNOX_SENTRY_DSN'),
+        },
+        count: names.size,
+      });
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/secrets/:name', async (_req, res, params, body) => {
@@ -744,7 +810,14 @@ export class LynoxHTTPApi {
     this.staticRoutes.set('GET /api/config', async (_req, res) => {
       const { readUserConfig } = await import('../core/config.js');
       const config = readUserConfig();
-      jsonResponse(res, 200, config);
+      const redacted: Record<string, unknown> = { ...config };
+      for (const key of REDACTED_CONFIG_KEYS) {
+        if (key in redacted && redacted[key]) {
+          delete redacted[key];
+          redacted[`${key}_configured`] = true;
+        }
+      }
+      jsonResponse(res, 200, redacted);
     });
 
     this.staticRoutes.set('PUT /api/config', async (_req, res, _params, body) => {
@@ -814,6 +887,49 @@ export class LynoxHTTPApi {
       const data = history.getCostByDay(days);
       jsonResponse(res, 200, data);
     });
+
+    // ── Pipelines ──
+    this.staticRoutes.set('GET /api/pipelines', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+      const runs = history.getRecentPipelineRuns(limit);
+      jsonResponse(res, 200, { runs });
+    });
+
+    this.staticRoutes.set('GET /api/pipelines/stats/steps', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const days = parseInt(url.searchParams.get('days') ?? '30', 10);
+      const stats = history.getPipelineStepStats(days);
+      jsonResponse(res, 200, { stats });
+    });
+
+    this.staticRoutes.set('GET /api/pipelines/stats/cost', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const days = parseInt(url.searchParams.get('days') ?? '30', 10);
+      const stats = history.getPipelineCostStats(days);
+      jsonResponse(res, 200, { stats });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/pipelines/:id', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      const run = history.getPipelineRun(params['id']!);
+      if (!run) { errorResponse(res, 404, 'Pipeline run not found'); return; }
+      jsonResponse(res, 200, run);
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/pipelines/:id/steps', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      const steps = history.getPipelineStepResults(params['id']!);
+      jsonResponse(res, 200, { steps });
+    }));
 
     // ── Tasks ──
     this.staticRoutes.set('GET /api/tasks', async (req, res) => {
@@ -982,13 +1098,14 @@ export class LynoxHTTPApi {
       const typeFilter = url.searchParams.get('type') ?? '';
       const query = url.searchParams.get('q') ?? '';
       const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
       try {
         if (query) {
           const result = await kg.retrieve(query, [{ type: 'global', id: 'global' }], { topK: limit });
           const entities = result.entities ?? [];
           jsonResponse(res, 200, { entities });
         } else {
-          const listOpts: { type?: string; limit?: number } = { limit };
+          const listOpts: { type?: string; limit?: number; offset?: number } = { limit, offset };
           if (typeFilter) listOpts.type = typeFilter;
           const result = await kg.listEntities(listOpts);
           jsonResponse(res, 200, { entities: result });

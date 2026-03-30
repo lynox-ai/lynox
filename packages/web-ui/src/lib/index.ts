@@ -22,6 +22,8 @@ export { default as ArtifactsView } from './components/ArtifactsView.svelte';
 export { default as KnowledgeHub } from './components/KnowledgeHub.svelte';
 export { default as ArtifactsHub } from './components/ArtifactsHub.svelte';
 export { default as ActivityHub } from './components/ActivityHub.svelte';
+export { default as WorkflowsView } from './components/WorkflowsView.svelte';
+export { default as WorkflowsHub } from './components/WorkflowsHub.svelte';
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
 export { default as ChangesetReview } from './components/ChangesetReview.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';
