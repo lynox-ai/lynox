@@ -145,12 +145,12 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
 // --- Pipeline bridge ---
 
 /** Convert approved phases to a stored pipeline, return pipeline_id */
-function convertToPipeline(summary: string, phases: PlanPhase[]): string {
+function convertToPipeline(summary: string, phases: PlanPhase[], historicalAvg?: Record<string, number>): string {
   const pipelineSteps = phasesToPipelineSteps(phases);
   if (pipelineSteps.length === 0) return '';
 
   const pipelineId = randomUUID();
-  const costEstimate = estimatePipelineCost(pipelineSteps);
+  const costEstimate = estimatePipelineCost(pipelineSteps, historicalAvg);
 
   const planned: PlannedPipeline = {
     id: pipelineId,
@@ -260,13 +260,14 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     }
 
     const userPhaseNames = phases.filter(p => p.assignee === 'user').map(p => p.name);
+    const historicalAvg = agent.toolContext.runHistory?.getAvgStepCostByModelTier(30);
 
     // Pre-compute cost estimate for phased plans
     let estimatedCostUsd: number | undefined;
     if (hasPhases) {
       const previewSteps = phasesToPipelineSteps(phases);
       if (previewSteps.length > 0) {
-        estimatedCostUsd = estimatePipelineCost(previewSteps).totalCostUsd;
+        estimatedCostUsd = estimatePipelineCost(previewSteps, historicalAvg).totalCostUsd;
       }
     }
 
@@ -281,7 +282,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     // Auto-approve in non-interactive context
     if (!agent.promptUser) {
       if (hasPhases) {
-        const pipelineId = convertToPipeline(input.summary, phases);
+        const pipelineId = convertToPipeline(input.summary, phases, historicalAvg);
         if (pipelineId) activateTracking(pipelineId);
         const planned = pipelineId ? getPipeline(pipelineId) : undefined;
         return JSON.stringify({
@@ -302,7 +303,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
 
     if (['proceed', 'y', 'yes'].includes(normalized)) {
       if (hasPhases) {
-        const pipelineId = convertToPipeline(input.summary, phases);
+        const pipelineId = convertToPipeline(input.summary, phases, historicalAvg);
         if (pipelineId) activateTracking(pipelineId);
         const planned = pipelineId ? getPipeline(pipelineId) : undefined;
         return JSON.stringify({

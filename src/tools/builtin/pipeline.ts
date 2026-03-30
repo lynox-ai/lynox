@@ -203,6 +203,11 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
 
 function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHistory: RunHistory | null, resultLimit?: number): void {
   if (!pipelineRunHistory) return;
+  // Build step-id → model-tier lookup from manifest
+  const stepModelMap = new Map<string, string>();
+  for (const step of manifest.agents) {
+    stepModelMap.set(step.id, step.model ?? 'sonnet');
+  }
   try {
     pipelineRunHistory.insertPipelineRun({
       id: state.runId,
@@ -227,6 +232,7 @@ function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHist
         tokensIn: output.tokensIn,
         tokensOut: output.tokensOut,
         costUsd: output.costUsd,
+        modelTier: stepModelMap.get(output.stepId) ?? '',
       });
     }
   } catch {
@@ -273,7 +279,8 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
 
     validateManifest(manifest);
 
-    const costEstimate = estimatePipelineCost(steps);
+    const historicalAvg = deps.runHistory?.getAvgStepCostByModelTier(30);
+    const costEstimate = estimatePipelineCost(steps, historicalAvg);
     if (deps.streamHandler) {
       void deps.streamHandler({
         type: 'pipeline_progress', stepId: 'cost-estimate', status: 'started',

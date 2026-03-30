@@ -167,7 +167,8 @@ export const promoteProcessTool: ToolEntry<PromoteInput> = {
       }
 
       const pipelineId = randomUUID();
-      const costEstimate = estimatePipelineCost(pipelineSteps);
+      const historicalAvg = _runHistory.getAvgStepCostByModelTier(30);
+      const costEstimate = estimatePipelineCost(pipelineSteps, historicalAvg);
 
       // Build context from parameters with defaults or overrides
       const context: Record<string, unknown> = {};

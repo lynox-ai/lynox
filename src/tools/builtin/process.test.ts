@@ -37,6 +37,7 @@ function makeMockRunHistory() {
     updateProcessPromotion: vi.fn(),
     listProcesses: vi.fn().mockReturnValue([]),
     deleteProcess: vi.fn().mockReturnValue(true),
+    getAvgStepCostByModelTier: vi.fn().mockReturnValue({}),
     _store: processes,
   };
 }

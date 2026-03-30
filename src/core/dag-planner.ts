@@ -154,12 +154,19 @@ const COST_PER_STEP: Record<string, number> = {
   haiku: 0.005,
 };
 
-/** Rough cost estimate based on step count and model tier. */
-export function estimatePipelineCost(steps: InlinePipelineStep[]): PipelineCostEstimate {
+/**
+ * Cost estimate based on step count and model tier.
+ * Uses historical averages from past pipeline runs when available,
+ * falls back to fixed per-step rates otherwise.
+ */
+export function estimatePipelineCost(
+  steps: InlinePipelineStep[],
+  historicalAvgByTier?: Record<string, number>,
+): PipelineCostEstimate {
   const stepEstimates: StepCostEstimate[] = steps.map(step => {
     const model = resolveModel(step.model, 'sonnet');
     const tier = step.model ?? 'sonnet';
-    const estimatedCostUsd = COST_PER_STEP[tier] ?? 0.08;
+    const estimatedCostUsd = historicalAvgByTier?.[tier] ?? COST_PER_STEP[tier] ?? 0.08;
     return {
       stepId: step.id,
       model,

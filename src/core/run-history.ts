@@ -529,6 +529,10 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL DEFAULT (datetime('now'))
    );
    CREATE INDEX IF NOT EXISTS idx_thread_messages_thread ON thread_messages(thread_id, seq);`,
+
+  // v23: Track model tier on pipeline step results for history-based cost estimation
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (23);
+   ALTER TABLE pipeline_step_results ADD COLUMN model_tier TEXT NOT NULL DEFAULT '';`,
 ];
 
 export class RunHistory {
@@ -971,6 +975,10 @@ export class RunHistory {
     return analytics.getPipelineCostStats(this.db, days);
   }
 
+  getAvgStepCostByModelTier(days: number) {
+    return analytics.getAvgStepCostByModelTier(this.db, days);
+  }
+
   getSessionSummaries(contextId: string, days: number) {
     return analytics.getSessionSummaries(this.db, contextId, days);
   }
@@ -1179,6 +1187,7 @@ export class RunHistory {
     tokensIn?: number | undefined;
     tokensOut?: number | undefined;
     costUsd?: number | undefined;
+    modelTier?: string | undefined;
   }): void {
     persistence.insertPipelineStepResult(this.db, params);
   }

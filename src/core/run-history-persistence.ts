@@ -406,14 +406,16 @@ export function insertPipelineStepResult(db: Database.Database, params: {
   tokensIn?: number | undefined;
   tokensOut?: number | undefined;
   costUsd?: number | undefined;
+  modelTier?: string | undefined;
 }): void {
   db.prepare(`
-    INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result, error, duration_ms, tokens_in, tokens_out, cost_usd)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result, error, duration_ms, tokens_in, tokens_out, cost_usd, model_tier)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.pipelineRunId, params.stepId, params.status,
     params.result ?? '', params.error ?? null,
     params.durationMs ?? 0, params.tokensIn ?? 0, params.tokensOut ?? 0, params.costUsd ?? 0,
+    params.modelTier ?? '',
   );
 }
 

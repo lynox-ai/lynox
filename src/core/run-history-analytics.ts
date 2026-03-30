@@ -161,6 +161,26 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
   }>;
 }
 
+export function getAvgStepCostByModelTier(db: Database.Database, days: number): Record<string, number> {
+  const rows = db.prepare(`
+    SELECT model_tier, AVG(cost_usd) as avg_cost_usd, COUNT(*) as run_count
+    FROM pipeline_step_results psr
+    JOIN pipeline_runs pr ON psr.pipeline_run_id = pr.id
+    WHERE pr.started_at >= datetime('now', ?)
+      AND psr.status = 'completed'
+      AND psr.model_tier != ''
+      AND psr.cost_usd > 0
+    GROUP BY model_tier
+    HAVING COUNT(*) >= 3
+  `).all(`-${days} days`) as Array<{ model_tier: string; avg_cost_usd: number; run_count: number }>;
+
+  const result: Record<string, number> = {};
+  for (const row of rows) {
+    result[row.model_tier] = row.avg_cost_usd;
+  }
+  return result;
+}
+
 export function getSessionSummaries(db: Database.Database, contextId: string, days: number): Array<{
   session_id: string; run_count: number; total_cost_usd: number;
   avg_duration_ms: number; model_ids: string; tool_call_count: number;
