@@ -407,12 +407,9 @@
 				if (isRichBlock) {
 					const cached = richCache.get(raw);
 					if (cached) return { original: match[0], result: cached };
-					// Uncached → show as syntax-highlighted code while waiting
-					try {
-						return { original: match[0], result: await codeToHtml(code, { lang: 'html', theme: 'github-dark' }) };
-					} catch {
-						return { original: match[0], result: match[0] };
-					}
+					// Uncached during streaming → show placeholder instead of raw code
+					const placeholder = `<div class="artifact-placeholder"><span class="artifact-placeholder-dot"></span><span>Artifact wird erstellt...</span></div>`;
+					return { original: match[0], result: placeholder };
 				}
 
 				try {
@@ -605,6 +602,28 @@
 	div :global(.diagram-btn:hover) {
 		color: var(--color-text);
 		background: var(--color-bg-subtle);
+	}
+
+	/* ── Artifact placeholder during streaming ─────────── */
+	div :global(.artifact-placeholder) {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.75rem 1rem;
+		margin: 0.75rem 0;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-muted);
+		font-size: 0.75rem;
+		color: var(--color-text-subtle);
+	}
+	div :global(.artifact-placeholder-dot) {
+		display: inline-block;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--color-warning);
+		animation: pulse 1.5s ease-in-out infinite;
 	}
 
 	/* ── Artifacts ──────────────────────────────────────── */
