@@ -62,6 +62,14 @@ On first run, the wizard guides you through:
 
 Everything is saved to `~/.lynox/config.json`. The vault key goes into `~/.lynox/.env`.
 
+:::caution[Save your vault key]
+Your vault key encrypts all stored API keys and backups. **Save it to a password manager now** — if you lose it, encrypted data cannot be recovered.
+
+You can view and copy your vault key anytime in **Settings → Config → Security**.
+
+For Docker users: pass it as `-e LYNOX_VAULT_KEY=your-key` so it persists across container restarts.
+:::
+
 ## First Run
 
 After setup, lynox opens the Web UI at [localhost:3000](http://localhost:3000).

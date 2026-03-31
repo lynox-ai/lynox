@@ -28,11 +28,13 @@ The vault key is your master encryption key. Keep it safe:
 - It's generated during setup and stored in `~/.lynox/.env`
 - The setup wizard can add it to your shell profile for auto-loading
 - For Docker, pass it as `LYNOX_VAULT_KEY` environment variable
-- **If you lose the vault key, encrypted secrets cannot be recovered** — but you can re-enter them
+- **View and copy** your vault key anytime in **Settings → Config → Security**
+- **Save it to a password manager** — if you lose the vault key, encrypted secrets cannot be recovered (but you can re-enter them)
+- Store your vault key **separately from your backups** — if both are lost, the data is unrecoverable
 
 ### Key rotation
 
-You can rotate the vault key via the Web UI (Settings → Keys) or the API. This re-encrypts all stored secrets with a new key.
+You can rotate the vault key via the Web UI (Settings → Config → Security) or the API. This re-encrypts all stored secrets with a new key.
 
 ## Permission Guard
 

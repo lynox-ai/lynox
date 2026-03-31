@@ -73,6 +73,35 @@
 	}
 
 	// Sentry opt-in
+	// Vault key
+	let vaultKey = $state<string | null>(null);
+	let vaultConfigured = $state(false);
+	let vaultRevealed = $state(false);
+	let vaultCopied = $state(false);
+
+	async function loadVaultKey() {
+		try {
+			const res = await fetch(`${getApiBase()}/vault/key`);
+			if (!res.ok) return;
+			const data = (await res.json()) as { configured: boolean; key: string | null };
+			vaultConfigured = data.configured;
+			vaultKey = data.key;
+		} catch { /* ignore — endpoint may not exist on older engines */ }
+	}
+
+	function maskKey(key: string): string {
+		if (key.length <= 8) return '••••••••';
+		return key.slice(0, 4) + '••••••••' + key.slice(-4);
+	}
+
+	async function copyVaultKey() {
+		if (!vaultKey) return;
+		await navigator.clipboard.writeText(vaultKey);
+		vaultCopied = true;
+		addToast(t('config.vault_key_copied'), 'success');
+		setTimeout(() => (vaultCopied = false), 2000);
+	}
+
 	let sentryEnabled = $state(false);
 
 	async function loadSentryStatus() {
@@ -128,6 +157,7 @@
 
 	$effect(() => {
 		loadConfig();
+		loadVaultKey();
 		loadSentryStatus();
 		loadCurrentVersion();
 	});
@@ -234,6 +264,36 @@
 					bind:value={config.max_http_requests_per_hour} class="{inputClass} font-mono" />
 			</div>
 
+
+			<!-- Security -->
+			<p class={sectionClass}>{t('config.security')}</p>
+
+			<div class={cardClass}>
+				<p class="text-sm font-medium mb-1">{t('config.vault_key')}</p>
+				<p class="text-xs text-text-muted mb-3">{t('config.vault_key_desc')}</p>
+				{#if vaultConfigured && vaultKey}
+					<div class="flex items-center gap-2 mb-2">
+						<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
+							{vaultRevealed ? vaultKey : maskKey(vaultKey)}
+						</code>
+						<button
+							onclick={() => (vaultRevealed = !vaultRevealed)}
+							class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0"
+						>
+							{vaultRevealed ? t('config.hide') : t('config.reveal')}
+						</button>
+						<button
+							onclick={copyVaultKey}
+							class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {vaultCopied ? 'text-success border-success/30' : ''}"
+						>
+							{t('config.copy')}
+						</button>
+					</div>
+					<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
+				{:else}
+					<p class="text-xs text-text-muted">{t('config.vault_key_not_configured')}</p>
+				{/if}
+			</div>
 
 			<!-- Privacy -->
 			<p class={sectionClass}>{t('config.privacy')}</p>
