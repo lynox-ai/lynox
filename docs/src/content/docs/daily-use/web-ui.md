@@ -11,6 +11,8 @@ The Web UI is where you interact with lynox day-to-day. It runs at [localhost:30
 
 The main view. Type a message or drop a file to start a conversation. lynox streams responses in real time, showing tool calls inline as they happen.
 
+![Chat view with sales pipeline review](../../../assets/screenshots/chat.jpg)
+
 During workflows, a **progress bar** appears above the input showing each step as it executes.
 
 ### Threads
@@ -38,15 +40,27 @@ Browse what lynox has learned — organized into four namespaces:
 - **Status** — Current state of projects and tasks
 - **Learnings** — Insights from past interactions
 
+![Knowledge memory view](../../../assets/screenshots/knowledge.jpg)
+
 You can edit or delete any memory entry.
 
 ### Knowledge Graph
 
 Visual explorer for entities and their relationships. See how contacts, companies, projects, and concepts are connected. Click any entity to see its details and related nodes.
 
+![Knowledge Graph with entities and relationships](../../../assets/screenshots/graph.jpg)
+
+### Insights
+
+Success rates, cost trends, detected patterns, and per-thread analytics. All computed from your actual usage data.
+
+![Memory Insights dashboard](../../../assets/screenshots/insights.jpg)
+
 ### Workflows
 
 View and manage your automated workflows. See execution history, success rates, and upcoming schedules. Expand any workflow to inspect individual steps and their results.
+
+![Workflows with pipeline runs](../../../assets/screenshots/workflows.jpg)
 
 ### Tasks
 
@@ -56,9 +70,13 @@ Your task board — create tasks manually or let lynox create them during conver
 
 History of all runs — what was asked, which model was used, token cost, and duration. Filter by date, model, or status. Useful for reviewing what lynox did in background tasks.
 
+![Activity dashboard with cost breakdown](../../../assets/screenshots/activity.jpg)
+
 ### Contacts & CRM
 
 Browse your contact database and deals. lynox builds this automatically from your conversations and integrations. See interaction history for any contact.
+
+![Contacts with deals tab](../../../assets/screenshots/contacts.jpg)
 
 ## Settings
 

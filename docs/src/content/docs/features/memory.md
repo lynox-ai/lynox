@@ -20,9 +20,13 @@ Memory is organized into four namespaces:
 
 lynox extracts and categorizes information automatically during conversations. You can also store memories manually — just tell lynox to remember something.
 
+![Knowledge memory view](../../../assets/screenshots/knowledge.jpg)
+
 ## Knowledge Graph
 
 Behind the namespaces, lynox builds a **Knowledge Graph** — a network of entities and their relationships.
+
+![Knowledge Graph — entities and relationships](../../../assets/screenshots/graph.jpg)
 
 ### What gets tracked
 
@@ -45,6 +49,8 @@ Open the **Knowledge Graph** view in the Web UI to explore visually. Click any e
 - Confidence and last-updated timestamps
 
 ## Pattern Detection
+
+![Memory Insights — patterns, trends, and analytics](../../../assets/screenshots/insights.jpg)
 
 lynox notices recurring patterns in your behavior:
 

@@ -9,6 +9,8 @@ lynox includes a lightweight CRM and structured data store. Both are built autom
 
 ## Contacts
 
+![Contacts with deals tab](../../../assets/screenshots/contacts.jpg)
+
 lynox tracks people and organizations you interact with. Contacts are created automatically when mentioned in conversations, emails, or calendar events.
 
 Each contact stores:

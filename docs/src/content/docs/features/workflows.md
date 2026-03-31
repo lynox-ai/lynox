@@ -33,6 +33,8 @@ The role determines which model is used, what tools are available, and how auton
 
 ## Background Tasks
 
+![Workflows — pipeline runs with steps, costs, and duration](../../../assets/screenshots/workflows.jpg)
+
 lynox can run tasks in the background — scheduled or triggered. Results are delivered via your notification channel (Web UI, Telegram, or both).
 
 ### Creating tasks

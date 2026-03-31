@@ -64,7 +64,11 @@ Everything is saved to `~/.lynox/config.json`. The vault key goes into `~/.lynox
 
 ## First Run
 
-After setup, lynox opens the Web UI at [localhost:3000](http://localhost:3000). Try something:
+After setup, lynox opens the Web UI at [localhost:3000](http://localhost:3000).
+
+![lynox Web UI after first launch](../../../assets/screenshots/new-chat.jpg)
+
+Try something:
 
 - *"Summarize this PDF"* — drop a file into the chat
 - *"What happened in my Gmail today?"* — after connecting Google Workspace
