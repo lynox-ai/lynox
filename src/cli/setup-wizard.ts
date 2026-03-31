@@ -238,6 +238,8 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       writeFileAtomicSync(envPath, `LYNOX_VAULT_KEY=${vaultKey}\n`);
       process.env['LYNOX_VAULT_KEY'] = vaultKey;
       stdout.write(`  ${GREEN}✓${RESET} Encryption enabled.\n`);
+      stdout.write(`  ${YELLOW}!${RESET} ${BOLD}Save your vault key${RESET} to a password manager — if lost, encrypted data cannot be recovered.\n`);
+      stdout.write(`  ${DIM}You can view it anytime in Settings → Config → Security.${RESET}\n`);
 
       // Close readline before raw-mode prompts (confirm uses stdin raw mode)
       if (stdin.isTTY) rl.close();
@@ -246,6 +248,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       process.env['LYNOX_VAULT_KEY'] = vaultKey;
       stdout.write(`  ${GREEN}✓${RESET} Encryption enabled. Add to your shell profile:\n`);
       stdout.write(`  ${BOLD}export LYNOX_VAULT_KEY='${vaultKey}'${RESET}\n`);
+      stdout.write(`  ${YELLOW}!${RESET} ${BOLD}Save this key${RESET} to a password manager — if lost, encrypted data cannot be recovered.\n`);
       if (stdin.isTTY) rl.close();
     }
 

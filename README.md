@@ -27,14 +27,21 @@ You need an [Anthropic API key](https://console.anthropic.com/) — the setup wi
 
 Already have Node.js 22+? `npx @lynox-ai/core` works too.
 
-### Docker
+### Docker (recommended for always-on)
 
 ```bash
-docker run -it --rm \
+docker run -d --name lynox -p 3000:3000 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -v ~/.lynox:/home/lynox/.lynox \
-  ghcr.io/lynox-ai/lynox:latest
+  --restart unless-stopped \
+  ghcr.io/lynox-ai/lynox:webui
 ```
+
+Open [localhost:3000](http://localhost:3000). Find your access token with `docker logs lynox`.
+
+## Documentation
+
+Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, integrations, features, API reference.
 
 ## How it works
 
