@@ -21,6 +21,14 @@ export default defineConfig({
       head: [
         {
           tag: 'script',
+          attrs: { is: 'inline' },
+          content: `if (!localStorage.getItem('starlight-theme')) {
+            document.documentElement.setAttribute('data-theme', 'dark');
+            localStorage.setItem('starlight-theme', 'dark');
+          }`,
+        },
+        {
+          tag: 'script',
           content: `document.addEventListener('DOMContentLoaded', () => {
             const link = document.querySelector('.site-title');
             if (link) link.href = 'https://lynox.ai';
