@@ -761,6 +761,74 @@ function seedAgentMemory(db: AgentMemoryDb): void {
   console.log(`  ✓ ${metricCount} metrics created (30 daily + 12 weekly + all_time)`);
 }
 
+// ── Realistic Thread Conversations ─────────────────────────────
+
+const THREAD_CONVERSATIONS: Record<string, Array<{ role: 'user' | 'assistant'; content: string }>> = {
+  'Weekly Sales Pipeline Review': [
+    { role: 'user', content: 'Give me an overview of the current sales pipeline.' },
+    { role: 'assistant', content: '**Sales Pipeline Summary**\n\nI pulled the latest data from your CRM:\n\n| Stage | Deals | Value |\n|-------|-------|-------|\n| Qualified | 12 | €340K |\n| Proposal | 5 | €180K |\n| Negotiation | 3 | €210K |\n| Closing | 2 | €95K |\n\n**Total pipeline value: €825K**\n\nNotable changes since last week:\n- DataVault moved to Negotiation (€120K)\n- 3 new leads from the Berlin conference\n- CloudBridge deal is at risk — no response in 14 days' },
+    { role: 'user', content: 'What should we focus on this week?' },
+    { role: 'assistant', content: 'Based on the pipeline analysis, I recommend three priorities:\n\n1. **Close DataVault** — They requested final pricing. Tom should send the enterprise quote today. This is our largest deal this quarter.\n\n2. **Re-engage CloudBridge** — 14 days of silence is a red flag. I drafted a "checking in" email for Anna. Want me to send it?\n\n3. **Qualify Berlin leads** — 3 new contacts from the event. I stored their details in Contacts. Schedule discovery calls this week before they go cold.\n\nShall I create tasks for these?' },
+    { role: 'user', content: 'Yes, create tasks and send that email to CloudBridge.' },
+    { role: 'assistant', content: 'Done.\n\n- ✅ Task created: "Send DataVault enterprise quote" → assigned to Tom, due today\n- ✅ Task created: "Discovery calls with Berlin leads" → assigned to Anna, due Friday\n- ✅ Email sent to CloudBridge (Michael Torres): "Quick check-in on the NovaPlatform evaluation"\n\nI\'ll monitor for a reply and notify you.' },
+  ],
+  'Q1 Product Launch Planning': [
+    { role: 'user', content: 'We need to plan the Q1 launch for NovaConnect. What\'s the current status?' },
+    { role: 'assistant', content: 'Here\'s where we stand with NovaConnect:\n\n**Development:** 85% complete\n- Core API integration: ✅ Done\n- OAuth2 flow: ✅ Done\n- Webhook system: 🔄 In progress (Jan estimates 3 days)\n- Rate limiting: ⏳ Not started\n\n**Marketing:** 40% complete\n- Landing page draft: ✅ Done\n- Blog post: 🔄 Lisa is writing\n- Email campaign: ⏳ Not started\n- Partner announcements: ⏳ Waiting on legal\n\n**Blockers:**\n- Legal review for partner API terms (Elena is following up)\n- Need sign-off from Marcus on pricing tiers' },
+    { role: 'user', content: 'Set the launch date to March 15. What needs to happen before then?' },
+    { role: 'assistant', content: 'Launch date locked: **March 15**. Here\'s the countdown plan:\n\n**Week 1 (now → Feb 28)**\n- Jan finishes webhook system + rate limiting\n- Elena gets legal sign-off on API terms\n- Marcus approves pricing (I scheduled a 30-min slot for Thursday)\n\n**Week 2 (Mar 1–7)**\n- QA sprint: security review + load testing\n- Lisa finalizes blog post + email sequence\n- David ships landing page to production\n\n**Week 3 (Mar 8–14)**\n- Soft launch to beta customers (DataVault, Meridian)\n- Partner notifications go out\n- Support docs published\n\n**March 15 — Public launch**\n\nI created a workflow that checks progress daily and alerts you if anything falls behind. Want me to notify the team?' },
+    { role: 'user', content: 'Yes, notify everyone and set up the daily check.' },
+    { role: 'assistant', content: 'All set:\n\n- 📧 Sent launch plan to: Sarah, Jan, Lisa, Elena, David, Marcus\n- 🔄 Daily workflow created: checks task completion at 9:00 AM, alerts you on delays\n- 📅 Added "NovaConnect Launch" to the team calendar\n- 📊 Tracking board created in DataStore with status for all 14 launch tasks\n\nI\'ll give you a progress update every morning.' },
+  ],
+  'Customer Churn Analysis': [
+    { role: 'user', content: 'We lost 3 customers last month. Analyze why.' },
+    { role: 'assistant', content: 'I analyzed the 3 churned accounts and found clear patterns:\n\n**1. PixelForge Studios** (€2.4K/mo)\n- Reason: Switched to a cheaper competitor\n- Warning signs: Support tickets increased 3x in December, login frequency dropped 60%\n- Last contact: Jan 5 — complained about API latency\n\n**2. GreenTech Solutions** (€1.8K/mo)\n- Reason: Budget cuts — downsized team from 15 to 8\n- Warning signs: Reduced seat count in November, no feature requests in 2 months\n- Last contact: Dec 12 — asked about downgrade options\n\n**3. Nordic Retail Group** (€3.2K/mo)\n- Reason: Acquired by larger company that uses SAP\n- Warning signs: None — external event\n- Last contact: Jan 15 — friendly farewell\n\n**Total MRR lost: €7.4K**' },
+    { role: 'user', content: 'What can we do to prevent this going forward?' },
+    { role: 'assistant', content: 'Three actionable recommendations:\n\n**1. Health Score Monitoring** (prevents cases like PixelForge)\n- I built a customer health score combining: login frequency, support tickets, feature usage, NPS\n- 4 accounts are currently "at risk": CloudBridge, TechStart, FlowMotion, Alpine Digital\n- I\'ll alert you when any account drops below the threshold\n\n**2. Proactive Downsell** (prevents cases like GreenTech)\n- When usage drops >30%, automatically flag for Anna to offer a smaller plan\n- Better to keep them at €800/mo than lose €1.8K/mo\n\n**3. Annual Contracts with Discount** (reduces overall churn)\n- Offer 15% discount for annual commitment\n- Currently 78% of customers are monthly — high risk\n\nWant me to set up the health score monitoring as a daily workflow?' },
+  ],
+  'DataVault Enterprise Onboarding': [
+    { role: 'user', content: 'DataVault signed the enterprise contract. Start the onboarding.' },
+    { role: 'assistant', content: 'Congratulations! DataVault is your largest enterprise deal at **€120K/year**.\n\nI\'ve initiated the onboarding sequence:\n\n**Week 1: Setup**\n- ✅ Created DataVault workspace with enterprise config\n- ✅ Invited Michael Torres (CTO) and 4 team members\n- ✅ Provisioned dedicated API endpoints\n- 📋 Sent onboarding questionnaire (integration needs, data migration, training schedule)\n\n**Week 2: Integration**\n- Custom API setup based on their PostgreSQL stack\n- Data migration from their legacy CRM\n- SSO configuration (they use Okta)\n\n**Week 3: Training**\n- 2× training sessions for their team\n- Admin training for Michael\n\n**Week 4: Go-live**\n- Parallel run with old system\n- Sign-off meeting\n\nAnna is the primary contact. I\'ll track all milestones.' },
+  ],
+  'Pricing Strategy Review': [
+    { role: 'user', content: 'Our conversion rate dropped from 4.2% to 2.8% last month. Could it be pricing?' },
+    { role: 'assistant', content: 'I analyzed the data and pricing is likely a factor. Here\'s what I found:\n\n**Conversion funnel breakdown:**\n- Website → Signup: 12% (unchanged)\n- Signup → Trial: 68% (unchanged)\n- Trial → Paid: **2.8%** (was 4.2%) ← the drop is here\n\n**What changed:**\n- We raised the Starter plan from €29 to €49 on Jan 15\n- The drop started exactly on Jan 16\n- Competitor PipelineHQ launched a €19/mo plan on Jan 10\n\n**Key metric:** 73% of churned trials cited "too expensive for my stage" in the exit survey.\n\n**Price sensitivity analysis:**\n- At €29: estimated 4.5% conversion → €13K MRR from new signups\n- At €39: estimated 3.5% conversion → €13.6K MRR\n- At €49: actual 2.8% conversion → €13.7K MRR\n\nRevenue per tier is almost flat, but at €49 we\'re losing volume and market share.' },
+    { role: 'user', content: 'What do you recommend?' },
+    { role: 'assistant', content: 'I\'d recommend a **tiered approach** rather than rolling back:\n\n**Option A: Add a Solo plan at €19/mo** (recommended)\n- Limited to 1 user, 1K API calls\n- Captures the "too expensive" segment\n- Creates an upgrade path to Starter (€49)\n- Low support cost — self-serve only\n\n**Projected impact:**\n- Solo conversions: ~3% at €19 = €5.7K additional MRR\n- 20% of Solo users upgrade within 6 months\n- Net new MRR: +€8.2K/mo within 6 months\n\n**Option B: Rollback Starter to €29**\n- Simple but leaves money on the table for power users\n- We\'d need to grandfather existing €49 customers\n\nI lean toward Option A. Should I draft the pricing page copy and update the billing config?' },
+    { role: 'user', content: 'Go with Option A. Draft everything.' },
+    { role: 'assistant', content: 'On it. Here\'s what I\'m preparing:\n\n1. ✅ **Pricing page copy** — saved as artifact "Solo Plan Pricing Copy"\n2. ✅ **Feature comparison table** — Solo vs Starter vs Pro\n3. 📋 **Billing config** — drafted Stripe product for Solo plan\n4. 📋 **Email campaign** — re-engagement for churned trials: "We heard you. Introducing Solo."\n5. 📋 **Internal brief** — for Tom\'s sales team on how to position the upgrade path\n\nI also updated the DataStore with the new pricing tiers and projected revenue models.\n\nMarcus should approve before we push to production. Want me to schedule a 15-min review with him?' },
+  ],
+  'Monthly Business Review Prep': [
+    { role: 'user', content: 'Prepare the monthly business review for March.' },
+    { role: 'assistant', content: '**March Business Review — Draft**\n\n📊 **Revenue**\n- MRR: €47.2K (+8.3% MoM)\n- ARR run-rate: €566K\n- New MRR: €6.1K (12 new customers)\n- Churned MRR: €2.3K (2 customers)\n- Net revenue retention: 112%\n\n👥 **Customers**\n- Total: 89 (+12, -2)\n- Enterprise: 4 (DataVault onboarded this month)\n- NPS: 52 → 58\n\n🚀 **Product**\n- Features shipped: 14\n- Uptime: 99.94%\n- API latency p95: 180ms (improved from 240ms)\n\n💰 **Burn & Runway**\n- Monthly burn: €32K\n- Cash: €840K\n- Runway: 26 months (at current burn)\n\n📈 **Key wins:**\n- DataVault enterprise deal closed (€120K ARR)\n- NovaConnect beta launched to 3 partners\n- Hired 2 engineers (start April)\n\n⚠️ **Risks:**\n- 4 accounts flagged as at-risk\n- Marketing spend ROI declining (CAC up 15%)\n\nWant me to generate the slides?' },
+  ],
+  'Partnership Strategy Discussion': [
+    { role: 'user', content: 'Horizon Ventures wants to explore a strategic partnership. What do we know about them?' },
+    { role: 'assistant', content: 'Here\'s everything I have on **Horizon Ventures**:\n\n**Company Profile:**\n- B2B SaaS VC fund, Berlin-based\n- AUM: ~€200M\n- Focus: Early-stage enterprise software (Series A)\n- Notable portfolio: StreamKit, DataLayer, CloudBridge\n\n**Key People:**\n- Julia Bergmann — Managing Partner (met Marcus at Berlin Tech Week)\n- Michael Torres — Portfolio Operations (also CTO at DataVault)\n\n**Our Connection:**\n- Marcus had coffee with Julia on Feb 12 — she mentioned co-investment interest\n- DataVault (their portfolio company) is our largest customer\n- They hosted a roundtable we attended in January\n\n**Potential partnership angles:**\n1. Portfolio introductions (8 companies in their portfolio match our ICP)\n2. Co-marketing at their annual summit\n3. Strategic investment as part of our Series A\n\nJulia\'s assistant emailed yesterday to schedule a follow-up. Want me to draft a reply?' },
+  ],
+  'Bug Triage Session': [
+    { role: 'user', content: 'We got 5 new bug reports overnight. Triage them.' },
+    { role: 'assistant', content: 'I reviewed all 5 tickets from the support queue:\n\n**🔴 Critical (fix today)**\n1. **#1247** — API returns 500 on bulk import >1000 rows\n   - Affects: DataVault (enterprise), 3 other customers\n   - Root cause: Memory spike in batch processor\n   - Assigned to: Jan\n\n**🟡 High (fix this week)**\n2. **#1248** — Webhook retries not respecting backoff\n   - Affects: 2 customers using webhook integrations\n   - Likely: Race condition in retry queue\n   - Assigned to: Jan\n\n3. **#1249** — Dashboard charts blank after timezone change\n   - Affects: Singapore users (3 accounts)\n   - Likely: UTC offset not applied in chart queries\n   - Assigned to: David\n\n**🟢 Low (next sprint)**\n4. **#1250** — Typo in German localization ("Einstelungen")\n5. **#1251** — Export CSV missing header row for custom fields\n\nI created Jira tickets for all 5 and notified the team. Jan is already looking at #1247.' },
+  ],
+};
+
+/** Get realistic messages for a thread, falling back to generic business conversation. */
+function getThreadMessages(title: string): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (THREAD_CONVERSATIONS[title]) {
+    return THREAD_CONVERSATIONS[title];
+  }
+  // Generic business conversation for threads without specific content
+  const genericPairs = [
+    { role: 'user' as const, content: `Let's review the current status of ${title.toLowerCase()}.` },
+    { role: 'assistant' as const, content: `I pulled together the latest data. Here's the overview:\n\n**Current Status:** On track with minor adjustments needed.\n\n**Key Metrics:**\n- Progress: 72% complete\n- Timeline: 3 days ahead of schedule\n- Budget: Within 5% of allocation\n\n**Recent Updates:**\n- Sarah completed the technical review yesterday\n- Tom's team provided the Q1 numbers\n- Elena flagged 2 items that need your input\n\nWant me to dive deeper into any of these areas?` },
+    { role: 'user' as const, content: 'What are the open items that need my attention?' },
+    { role: 'assistant' as const, content: `There are 3 items requiring your input:\n\n1. **Budget approval** — Elena needs sign-off on the €15K allocation for external tooling. The ROI analysis shows 4x payback in 6 months.\n\n2. **Timeline decision** — We can either ship the full scope by March 30 or release a smaller version by March 15 and iterate. Sarah recommends the phased approach.\n\n3. **Stakeholder review** — Marcus wants a 15-minute walkthrough before we present to the team. I blocked Thursday 2 PM.\n\nShall I prepare a summary document for the stakeholder review?` },
+    { role: 'user' as const, content: 'Approve the budget and go with the phased approach. Prepare the summary.' },
+    { role: 'assistant' as const, content: `Done:\n\n- ✅ Budget approved — notified Elena\n- ✅ Updated timeline to phased release (March 15 → v1, March 30 → full)\n- ✅ Summary document drafted — saved as artifact\n- 📅 Confirmed Marcus walkthrough for Thursday 2 PM\n\nI'll track the March 15 milestone and alert you if anything slips.` },
+  ];
+  return genericPairs;
+}
+
 function seedRunHistory(h: RunHistory): void {
   console.log('\n📊 Seeding history.db...');
 
@@ -788,23 +856,14 @@ function seedRunHistory(h: RunHistory): void {
       context_id: CONTEXT_ID,
     });
 
-    // Add messages to threads
-    const msgCount = randomBetween(4, 40);
-    const messages = [];
-    for (let i = 0; i < msgCount; i++) {
-      messages.push({
-        role: i % 2 === 0 ? 'user' : 'assistant',
-        content: i % 2 === 0
-          ? `[Simulated user message #${i + 1} in thread "${title}"]`
-          : `[Simulated assistant response #${i + 1} with analysis and recommendations]`,
-      });
-    }
-    ts.appendMessages(id, messages as any[], 0);
+    // Add realistic messages to threads
+    const threadMessages = getThreadMessages(title);
+    ts.appendMessages(id, threadMessages as any[], 0);
 
     const tokens = randomBetween(5000, 80000);
     const cost = tokens * 0.000003 + randomBetween(1, 50) * 0.001;
     ts.updateThread(id, {
-      message_count: msgCount,
+      message_count: threadMessages.length,
       total_tokens: tokens,
       total_cost_usd: cost,
       is_archived: Math.random() < 0.15,
