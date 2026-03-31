@@ -7,6 +7,7 @@ export default defineConfig({
     pool: 'forks',
     coverage: {
       provider: 'v8',
+      reporter: ['text', 'json-summary'],
       include: ['src/core/**', 'src/tools/**', 'src/orchestrator/**'],
       exclude: ['**/*.test.ts', '**/*.bench.ts'],
       thresholds: {
