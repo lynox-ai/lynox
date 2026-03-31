@@ -30,19 +30,25 @@ LYNOX_HTTP_SECRET=your-token lynox --http-api
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `LYNOX_HTTP_PORT` | `3100` | Server port |
-| `LYNOX_HTTP_SECRET` | — | Bearer token for auth. Without it, binds to localhost only |
+| `LYNOX_HTTP_SECRET` | Auto-generated in Docker | Auth token for API + Web UI login. Without it, binds to localhost only |
 | `LYNOX_DATA_DIR` | `~/.lynox` | Data directory (same as `--data-dir`) |
 
 ## Authentication
 
-When `LYNOX_HTTP_SECRET` is set:
-- Server binds to `0.0.0.0` (network-accessible)
-- All requests (except `/health`) require `Authorization: Bearer <token>`
-- Token comparison uses `crypto.timingSafeEqual` (timing-safe)
+`LYNOX_HTTP_SECRET` controls authentication for **both** the Engine HTTP API and the Web UI:
 
-When not set:
-- Server binds to `127.0.0.1` (localhost only)
-- No authentication required
+**Engine HTTP API** (port 3100, internal):
+- When set: binds to `0.0.0.0`, all requests (except `/health`) require `Authorization: Bearer <token>`
+- When not set: binds to `127.0.0.1` (localhost only), no authentication
+
+**Web UI** (port 3000, user-facing):
+- When set: shows a login page — users enter the token to access the UI. Session is stored as a signed, httpOnly cookie (7 days)
+- When not set: no login required (localhost-only mode)
+- Rate limited: 5 failed login attempts per 15 minutes per IP
+
+In Docker (`ghcr.io/lynox-ai/lynox:webui`), a token is **auto-generated** on startup if not set — find it with `docker logs lynox`. Set `LYNOX_HTTP_SECRET` explicitly to use your own token.
+
+Token comparison uses `crypto.timingSafeEqual` (timing-safe) in both API and Web UI.
 
 ## API Versioning
 

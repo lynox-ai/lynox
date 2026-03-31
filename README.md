@@ -128,7 +128,14 @@ If you prefer a terminal-based interface:
 npx @lynox-ai/core --repl
 ```
 
-Or use Docker: `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui`
+Or use Docker:
+
+```bash
+docker run -d -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... \
+  -v ~/.lynox:/home/lynox/.lynox ghcr.io/lynox-ai/lynox:webui
+```
+
+The Web UI is password-protected. Find the auto-generated access token with `docker logs lynox`.
 
 ### Telegram (mobile)
 

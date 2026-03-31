@@ -6,7 +6,7 @@ sidebar:
 ---
 
 :::tip[Don't want to set up Docker manually?]
-Use the **[deploy page](https://lynox.ai/deploy)** — enter your API key, choose "New cloud server" or "I already have a server", and get everything generated in your browser. The self-hosted path gives you a downloadable `.env` file, `docker run` command, and `docker-compose.yml`. Auto-updates included.
+Use the **[Getting Started page](https://lynox.ai/getting-started)** — switch to the "Cloud server" tab, enter your API key, choose a provider, and get a cloud-init script generated in your browser. Auto-updates and access token included.
 :::
 
 ## Quick Start
@@ -156,11 +156,14 @@ When lynox runs on a server, there are several ways to interact with it:
 | **MCP HTTP** | External integrations (IDE) | Add `LYNOX_MCP_SECRET`, expose port 3042 |
 | **SSH + CLI** | Admin/debugging | `docker exec -it lynox node /app/dist/index.js` |
 
-**Web UI** is the primary interface — chat, settings, integrations, run history, knowledge browser. Use `Dockerfile.web-ui` for the combined Engine + Web UI image:
+**Web UI** is the primary interface — chat, settings, integrations, run history, knowledge browser. Use the `webui` tag for the combined Engine + Web UI image:
 
 ```bash
-docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui
+docker run -d -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... \
+  -v ~/.lynox:/home/lynox/.lynox ghcr.io/lynox-ai/lynox:webui
 ```
+
+The Web UI is **password-protected**. An access token is auto-generated on startup — find it with `docker logs lynox`. To set your own token, pass `LYNOX_HTTP_SECRET`.
 
 **Telegram** is a secondary channel for mobile use. Configure it in Web UI → Settings → Integrations.
 
@@ -182,6 +185,7 @@ docker run -d \
   --cpus 2.0 \
   -e ANTHROPIC_API_KEY \
   -e LYNOX_VAULT_KEY \
+  -e LYNOX_HTTP_SECRET \
   -e LYNOX_MCP_SECRET \
   -e TELEGRAM_BOT_TOKEN \
   -e TELEGRAM_ALLOWED_CHAT_IDS \
@@ -204,6 +208,7 @@ docker run -d \
 |----------|-----------|
 | `ANTHROPIC_API_KEY` | lynox won't start |
 | `LYNOX_VAULT_KEY` | Data stored in plaintext |
+| `LYNOX_HTTP_SECRET` | Auto-generated on startup (Web UI login token) |
 | `LYNOX_MCP_SECRET` | Anyone on the network can run agent tasks |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Anyone on Telegram can use your bot |
 
@@ -267,6 +272,7 @@ All persistent data lives inside `~/.lynox/`: backups (`backups/`), API profiles
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
 | `ANTHROPIC_BASE_URL` | No | Custom API endpoint (proxies) |
 | `LYNOX_VAULT_KEY` | Recommended | Encrypt data at rest |
+| `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
 | `LYNOX_MCP_SECRET` | Production | MCP HTTP bearer token |
 | `LYNOX_MCP_PORT` | No | MCP port (default: 3042) |
 | `LYNOX_HTTP_PORT` | No | Engine HTTP API port (default: 3100) |

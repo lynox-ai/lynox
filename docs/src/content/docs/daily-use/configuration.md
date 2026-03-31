@@ -209,7 +209,7 @@ Controls the `output_config.effort` parameter (accuracy level). Set via config, 
 | `ANTHROPIC_BASE_URL` | -- | Custom API endpoint (for proxies) |
 | `LYNOX_VAULT_KEY` | -- | Encrypts secrets vault, run history, and OAuth tokens at rest. Auto-loaded from `~/.lynox/.env` on startup (with symlink, ownership, and permission validation). Generate: `openssl rand -base64 48` |
 | `LYNOX_HTTP_PORT` | `3100` | Engine HTTP API port |
-| `LYNOX_HTTP_SECRET` | -- | Bearer token for Engine HTTP API auth. Without it, binds to localhost only |
+| `LYNOX_HTTP_SECRET` | Auto-generated in Docker | Auth token for Engine HTTP API + Web UI login. Auto-generated on startup if not set. Without it, Engine binds to localhost only and Web UI has no login gate |
 | `LYNOX_WEBUI_URL` | `http://localhost:5173` | Web UI URL opened by default `lynox` command |
 | `LYNOX_MCP_SECRET` | -- | Bearer token for MCP HTTP auth. Required for network-exposed deployments. Can also be stored in vault. Generate: `openssl rand -hex 32` |
 | `LYNOX_MCP_PORT` | `3042` | MCP HTTP server port |

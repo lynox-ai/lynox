@@ -34,8 +34,16 @@ docker run -d --name lynox \
 
 This starts the engine and Web UI in a single container. Your data is stored in `~/.lynox/` and persists across restarts and updates.
 
+An **access token** is generated automatically and printed to the console. Find it with:
+
+```bash
+docker logs lynox
+```
+
+You'll need this token to log in to the Web UI.
+
 :::tip[Need a server?]
-Any VPS with Docker works. [Hetzner](https://console.hetzner.cloud) (€3.79/mo), [DigitalOcean](https://m.do.co/c/29187cab6dc1) ($6/mo), or [Vultr](https://www.vultr.com/?ref=9887227-9J) ($5/mo) are good options. lynox needs ~300 MB RAM — the smallest plan is enough.
+Any VPS with Docker works. [Hetzner](https://console.hetzner.cloud) (€3.79/mo), [DigitalOcean](https://m.do.co/c/29187cab6dc1) ($6/mo), or [Vultr](https://www.vultr.com/?ref=9887227-9J) ($5/mo) are good options. lynox needs ~300 MB RAM — the smallest plan is enough. Some links are affiliate links.
 :::
 
 ### Alternative: npm (for developers)
@@ -52,7 +60,7 @@ On first run, a setup wizard configures your API key and encryption. Then lynox 
 
 ## 3. Open Your Browser
 
-Go to **http://localhost:3000** (or your server IP). The Web UI is ready.
+Go to **http://localhost:3000** (or your server IP). Enter the access token from the previous step. The Web UI is ready.
 
 Talk to lynox like you would to a colleague:
 
@@ -109,7 +117,7 @@ After setup, lynox takes care of itself:
 
 ## HTTPS & Remote Access
 
-If you're running on a remote server, add HTTPS with one of these:
+The Web UI is password-protected by default — an access token is required to log in. For remote access, add HTTPS so the token isn't transmitted in plaintext:
 
 **Caddy** (automatic HTTPS):
 ```bash
@@ -121,6 +129,19 @@ caddy reverse-proxy --from yourdomain.com --to localhost:3000
 ```bash
 cloudflared tunnel --url http://localhost:3000
 ```
+
+:::tip[Custom access token]
+To set your own token instead of the auto-generated one, pass it as an environment variable:
+```bash
+docker run -d --name lynox \
+  -p 3000:3000 \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e LYNOX_HTTP_SECRET=your-custom-token \
+  -v ~/.lynox:/home/lynox/.lynox \
+  --restart unless-stopped \
+  ghcr.io/lynox-ai/lynox:webui
+```
+:::
 
 ---
 
@@ -136,6 +157,8 @@ Everything lives in **one folder**: `~/.lynox/`. Move it to a new server, and ly
 
 **"API key rejected"** — Must start with `sk-ant-`, be active in [console.anthropic.com](https://console.anthropic.com/).
 
-**Can't access Web UI** — Check that port 3000 is open. On a VPS, you may need to allow it in your firewall.
+**Can't access Web UI** — Check that port 3000 is open. On a VPS, you may need to allow it in your firewall. If you see a login page, find your access token with `docker logs lynox`.
+
+**Lost access token** — Restart the container without `LYNOX_HTTP_SECRET` set to generate a new one: `docker restart lynox && docker logs lynox`.
 
 **Telegram bot not responding** — Check that no other instance uses the same bot token.

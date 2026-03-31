@@ -207,12 +207,15 @@
 	let audioAnalyser: AnalyserNode | null = null;
 	let waveformBars = $state<number[]>(new Array(24).fill(3));
 	let waveformRaf: number | null = null;
+	let recordingDiscarded = false;
+	let activeAudioCtx: AudioContext | null = null;
+	let activeStream: MediaStream | null = null;
+	let recordingStartedByTouch = false;
 
 	function updateWaveform() {
 		if (!audioAnalyser || !recording) return;
 		const data = new Uint8Array(audioAnalyser.frequencyBinCount);
 		audioAnalyser.getByteFrequencyData(data);
-		// Sample 24 bars from frequency data
 		const step = Math.floor(data.length / 24);
 		const bars: number[] = [];
 		for (let i = 0; i < 24; i++) {
@@ -223,16 +226,27 @@
 		waveformRaf = requestAnimationFrame(updateWaveform);
 	}
 
-	async function toggleVoice() {
-		if (recording && mediaRecorder) {
-			mediaRecorder.stop();
-			return;
-		}
+	function cleanupRecording() {
+		recording = false;
+		recordingSeconds = 0;
+		if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
+		if (waveformRaf) { cancelAnimationFrame(waveformRaf); waveformRaf = null; }
+		audioAnalyser = null;
+		if (activeAudioCtx) { void activeAudioCtx.close(); activeAudioCtx = null; }
+		if (activeStream) { activeStream.getTracks().forEach((track) => track.stop()); activeStream = null; }
+		mediaRecorder = null;
+		waveformBars = new Array(24).fill(3);
+	}
+
+	async function startRecording() {
+		if (recording) return;
+		recordingDiscarded = false;
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			activeStream = stream;
 
-			// Set up audio analyser for waveform visualization
 			const audioCtx = new AudioContext();
+			activeAudioCtx = audioCtx;
 			const source = audioCtx.createMediaStreamSource(stream);
 			const analyser = audioCtx.createAnalyser();
 			analyser.fftSize = 128;
@@ -244,15 +258,9 @@
 
 			recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 			recorder.onstop = async () => {
-				stream.getTracks().forEach((track) => track.stop());
-				recording = false;
-				recordingSeconds = 0;
-				if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
-				if (waveformRaf) { cancelAnimationFrame(waveformRaf); waveformRaf = null; }
-				audioAnalyser = null;
-				void audioCtx.close();
-				mediaRecorder = null;
-				waveformBars = new Array(24).fill(3);
+				const discarded = recordingDiscarded;
+				cleanupRecording();
+				if (discarded) return;
 
 				const blob = new Blob(chunks, { type: 'audio/webm' });
 				const reader = new FileReader();
@@ -287,6 +295,17 @@
 		} catch {
 			addToast(t('chat.mic_unavailable'), 'error');
 		}
+	}
+
+	function stopRecording() {
+		if (!recording || !mediaRecorder) return;
+		mediaRecorder.stop();
+	}
+
+	function discardRecording() {
+		if (!recording || !mediaRecorder) return;
+		recordingDiscarded = true;
+		mediaRecorder.stop();
 	}
 
 	// Standalone onboarding: check if API key is configured
@@ -965,9 +984,9 @@
 				</div>
 				<div class="shrink-0 h-11 w-11"></div>
 			{:else if recording}
-				<!-- Recording state: [🗑  ● 0:03 ━━━━━  ⬛]  [➤] -->
+				<!-- Recording state: [🗑  ● 0:03 ━━━━━]  [➤] -->
 				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2">
-					<button onclick={() => { toggleVoice(); }} class="text-text-subtle hover:text-danger transition-colors shrink-0" aria-label="Discard">
+					<button onclick={discardRecording} class="text-text-subtle hover:text-danger transition-colors shrink-0" aria-label="Discard">
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
 					</button>
 					<span class="h-2 w-2 rounded-full bg-danger animate-pulse shrink-0"></span>
@@ -981,13 +1000,10 @@
 							></div>
 						{/each}
 					</div>
-					<button onclick={toggleVoice} class="text-danger hover:text-text transition-colors shrink-0" aria-label="Stop">
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="2" /></svg>
-					</button>
 				</div>
 				<!-- Send button during recording -->
 				<button
-					onclick={toggleVoice}
+					onclick={stopRecording}
 					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
 					aria-label={t('chat.send')}
 				>
@@ -1037,10 +1053,32 @@
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 					</button>
 				{:else}
+					<!-- Touch: hold to record, release to send. Mouse: click to toggle. -->
 					<button
-						onclick={toggleVoice}
+						onpointerdown={(e) => {
+							if (e.pointerType === 'touch') {
+								e.preventDefault();
+								recordingStartedByTouch = true;
+								startRecording();
+							} else {
+								if (recording) { stopRecording(); } else { startRecording(); }
+							}
+						}}
+						onpointerup={() => {
+							if (recordingStartedByTouch) {
+								recordingStartedByTouch = false;
+								stopRecording();
+							}
+						}}
+						onpointerleave={() => {
+							if (recordingStartedByTouch) {
+								recordingStartedByTouch = false;
+								stopRecording();
+							}
+						}}
+						oncontextmenu={(e) => e.preventDefault()}
 						disabled={!ready}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-all self-end"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all self-end select-none touch-none"
 						aria-label={t('chat.voice_input')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">

@@ -15,6 +15,18 @@ if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; 
   esac
 fi
 
+# Auto-generate access token if not set (Docker always exposes port 3000)
+if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
+  LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
+  export LYNOX_HTTP_SECRET
+  echo ""
+  echo "========================================"
+  echo "  Access Token (enter in browser):"
+  echo "  ${LYNOX_HTTP_SECRET}"
+  echo "========================================"
+  echo ""
+fi
+
 # Require ANTHROPIC_API_KEY
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   CONFIG_FILE="$HOME/.lynox/config.json"
@@ -50,6 +62,7 @@ done
 # Start Web UI
 echo "Starting Web UI on port ${PORT:-3000}..."
 LYNOX_ENGINE_URL="http://127.0.0.1:${LYNOX_HTTP_PORT:-3100}" \
+LYNOX_HTTP_SECRET="${LYNOX_HTTP_SECRET:-}" \
 PORT="${PORT:-3000}" \
   node /app/web-ui/index.js &
 WEBUI_PID=$!
