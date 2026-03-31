@@ -147,6 +147,14 @@ vi.mock('../tools/builtin/index.js', () => ({
   stepCompleteTool: { definition: { name: 'step_complete' }, handler: vi.fn() },
   setProcessConfig: vi.fn(),
   apiSetupTool: { definition: { name: 'api_setup' }, handler: vi.fn() },
+  dataStoreCreateTool: { definition: { name: 'data_store_create' }, handler: vi.fn() },
+  dataStoreInsertTool: { definition: { name: 'data_store_insert' }, handler: vi.fn() },
+  dataStoreQueryTool: { definition: { name: 'data_store_query' }, handler: vi.fn() },
+  dataStoreListTool: { definition: { name: 'data_store_list' }, handler: vi.fn() },
+  dataStoreDeleteTool: { definition: { name: 'data_store_delete' }, handler: vi.fn() },
+  artifactSaveTool: { definition: { name: 'artifact_save' }, handler: vi.fn() },
+  artifactListTool: { definition: { name: 'artifact_list' }, handler: vi.fn() },
+  artifactDeleteTool: { definition: { name: 'artifact_delete' }, handler: vi.fn() },
 }));
 
 vi.mock('./changeset.js', () => ({
@@ -182,6 +190,34 @@ vi.mock('./task-manager.js', () => ({
     this.list = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.getWeekSummary = vi.fn().mockReturnValue({ overdue: [], dueToday: [], dueThisWeek: [], inProgress: [] });
+  }),
+}));
+
+vi.mock('./artifact-store.js', () => ({
+  ArtifactStore: vi.fn().mockImplementation(function () {
+    // @ts-expect-error mock constructor
+    this.save = vi.fn();
+    // @ts-expect-error mock constructor
+    this.list = vi.fn().mockReturnValue([]);
+    // @ts-expect-error mock constructor
+    this.delete = vi.fn();
+  }),
+}));
+
+vi.mock('./data-store.js', () => ({
+  DataStore: vi.fn().mockImplementation(function () {
+    // @ts-expect-error mock constructor
+    this.listCollections = vi.fn().mockReturnValue([
+      { name: 'test', scopeType: 'global', scopeId: '', recordCount: 1, updatedAt: '2026-01-01' },
+    ]);
+    // @ts-expect-error mock constructor
+    this.createCollection = vi.fn();
+    // @ts-expect-error mock constructor
+    this.insertRecord = vi.fn();
+    // @ts-expect-error mock constructor
+    this.query = vi.fn().mockReturnValue([]);
+    // @ts-expect-error mock constructor
+    this.deleteCollection = vi.fn();
   }),
 }));
 
@@ -232,6 +268,12 @@ vi.mock('./run-history.js', () => ({
     this.listScopes = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.close = vi.fn();
+    // @ts-expect-error mock constructor
+    this.getDb = vi.fn().mockReturnValue({
+      prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
+      exec: vi.fn(),
+      transaction: vi.fn().mockImplementation((fn: unknown) => fn),
+    });
   }),
 }));
 
@@ -269,8 +311,8 @@ describe('Engine + Session (Orchestrator)', () => {
 
       expect(Memory).toHaveBeenCalled();
 
-      // Registry should have register called for each builtin tool (17 core + 3 pipeline/process + 5 datastore = 25)
-      expect(mockRegister).toHaveBeenCalledTimes(27);
+      // Registry should have register called for each builtin tool (18 core + 4 pipeline/process + 3 artifact + 5 datastore = 30)
+      expect(mockRegister).toHaveBeenCalledTimes(30);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -335,8 +377,8 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 25 tools total (17 core + 3 pipeline/process + 5 datastore)
-      expect(mockRegister).toHaveBeenCalledTimes(27);
+      // 30 tools total (18 core + 4 pipeline/process + 3 artifact + 5 datastore)
+      expect(mockRegister).toHaveBeenCalledTimes(30);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

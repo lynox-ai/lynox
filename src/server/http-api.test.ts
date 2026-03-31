@@ -33,6 +33,7 @@ const mockSessionInstance = {
   promptUser: null as unknown,
   getModelTier: vi.fn().mockReturnValue('sonnet'),
   getChangesetManager: vi.fn().mockReturnValue(null),
+  getAgent: vi.fn().mockReturnValue(null),
   sessionId: 'mock-session-id',
 };
 const mockGetOrCreate = vi.fn().mockReturnValue(mockSessionInstance);
@@ -126,6 +127,7 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
 
 beforeAll(async () => {
   vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+  vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
   api = new LynoxHTTPApi();
   await api.init();
   await api.start(TEST_PORT);
@@ -537,10 +539,13 @@ describe('LynoxHTTPApi', () => {
 
   describe('rate limiting', () => {
     it('returns 429 after exceeding limit', async () => {
-      // Health endpoint is checked before rate limiting, so use an authenticated endpoint
-      // Send enough requests to exceed 120/min limit (accounting for requests from other tests)
+      // Rate limiting skips loopback IPs, so use X-Forwarded-For with a non-loopback IP
+      // (LYNOX_TRUST_PROXY=true is set in beforeAll)
+      const fakeIp = '203.0.113.42';
       const promises = Array.from({ length: 130 }, () =>
-        jsonFetch('/api/secrets').then(r => r.status)
+        fetch(`${baseUrl}/api/secrets`, {
+          headers: { ...authHeaders(), 'X-Forwarded-For': fakeIp },
+        }).then(r => r.status)
       );
       const statuses = await Promise.all(promises);
       expect(statuses).toContain(429);
