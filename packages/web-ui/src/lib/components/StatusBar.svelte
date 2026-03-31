@@ -7,6 +7,28 @@
 	let activeTasks = $state(0);
 	let todayCost = $state(0);
 	let todayRuns = $state(0);
+	let panelOpen = $state(false);
+
+	interface SecretsStatus { configured: Record<string, boolean>; count: number }
+	interface RunStats {
+		total_runs: number;
+		total_tokens_in: number;
+		total_tokens_out: number;
+		total_cost_usd: number;
+		avg_duration_ms: number;
+		cost_by_model: Array<{ model_id: string; cost_usd: number; run_count: number }>;
+	}
+	interface KgStats {
+		memoryCount: number;
+		entityCount: number;
+		relationCount: number;
+		communityCount: number;
+		patternCount?: number;
+	}
+
+	let secrets = $state<SecretsStatus | null>(null);
+	let stats = $state<RunStats | null>(null);
+	let kgStats = $state<KgStats | null>(null);
 
 	async function poll() {
 		try {
@@ -33,36 +55,220 @@
 		} catch { /* silent */ }
 	}
 
+	async function loadPanelData() {
+		try {
+			const [secretsRes, statsRes, kgRes] = await Promise.all([
+				fetch(`${getApiBase()}/secrets/status`).catch(() => null),
+				fetch(`${getApiBase()}/history/stats`).catch(() => null),
+				fetch(`${getApiBase()}/kg/stats`).catch(() => null),
+			]);
+			if (secretsRes?.ok) secrets = (await secretsRes.json()) as SecretsStatus;
+			if (statsRes?.ok) stats = (await statsRes.json()) as RunStats;
+			if (kgRes?.ok) kgStats = (await kgRes.json()) as KgStats;
+		} catch { /* silent */ }
+	}
+
+	function togglePanel() {
+		panelOpen = !panelOpen;
+		if (panelOpen) void loadPanelData();
+	}
+
+	function closePanel() {
+		panelOpen = false;
+	}
+
+	function formatDuration(ms: number): string {
+		if (ms < 1000) return `${Math.round(ms)}ms`;
+		return `${(ms / 1000).toFixed(1)}s`;
+	}
+
+	function shortModel(id: string): string {
+		return id.replace(/^(anthropic|openai|google)[./]/, '').replace(/-\d{8}$/, '');
+	}
+
 	poll();
 	const interval = setInterval(poll, 30_000);
 	onDestroy(() => clearInterval(interval));
+
+	$effect(() => {
+		if (!panelOpen) return;
+		function onKey(e: KeyboardEvent) { if (e.key === 'Escape') closePanel(); }
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	});
 </script>
 
-<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle h-8 px-1 overflow-x-auto scrollbar-none">
-	<!-- Engine Status -->
-	<a href="/app" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+<!-- Mobile: minimal engine indicator -->
+<div class="flex md:hidden items-center justify-center border-t border-border bg-bg-subtle h-7 px-2">
+	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
-	</a>
+		<span class="text-border mx-1">|</span>
+		<span class="text-accent-text">{activeTasks}</span> {t('status.tasks_active')}
+		<span class="text-border mx-1">|</span>
+		${todayCost.toFixed(2)}
+	</button>
+</div>
+
+<!-- Desktop: full status bar -->
+<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle h-8 px-1 overflow-x-auto scrollbar-none">
+	<!-- Engine Status (clickable) -->
+	<button onclick={togglePanel} class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
+		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
+	</button>
 
 	<span class="text-border">|</span>
 
 	<!-- Active Tasks -->
-	<a href="/app/tasks" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<a href="/app/activity?tab=tasks" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		<span class="text-accent-text">{activeTasks}</span> {t('status.tasks_active')}
 	</a>
 
 	<span class="text-border">|</span>
 
 	<!-- Today's Cost -->
-	<a href="/app/history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<a href="/app/activity?tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		${todayCost.toFixed(2)} {t('status.today')}
 	</a>
 
 	<span class="text-border">|</span>
 
 	<!-- Today's Runs -->
-	<a href="/app/history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<a href="/app/activity?tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		{todayRuns} {t('status.runs')} {t('status.today')}
 	</a>
 </div>
+
+<!-- Status Panel Overlay -->
+{#if panelOpen}
+	<button class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" onclick={closePanel} aria-label="Close"></button>
+	<div class="fixed z-50 bottom-8 md:bottom-9 left-2 right-2 md:left-auto md:right-auto md:w-96 bg-bg-subtle border border-border rounded-[var(--radius-lg)] shadow-2xl overflow-hidden" style="md:margin-left: 0.5rem;">
+		<!-- Header -->
+		<div class="flex items-center justify-between px-4 py-3 border-b border-border">
+			<h3 class="text-sm font-semibold text-text">{t('status.panel_title')}</h3>
+			<button onclick={closePanel} class="h-6 w-6 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors">&times;</button>
+		</div>
+
+		<div class="max-h-[60vh] overflow-y-auto scrollbar-thin p-4 space-y-4 text-sm">
+			<!-- Engine Connection -->
+			<div class="flex items-center gap-2">
+				<span class="inline-block h-2 w-2 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
+				<span class="font-medium text-text">{engineOk === true ? t('status.connected') : t('status.disconnected')}</span>
+			</div>
+
+			<!-- API Keys -->
+			{#if secrets}
+				<div>
+					<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.api_keys')}</p>
+					<div class="grid grid-cols-2 gap-1.5">
+						{#each [
+							['api_key', t('status.api_key')],
+							['telegram', t('status.telegram')],
+							['search', t('status.search')],
+							['google', t('status.google')],
+							['sentry', t('status.sentry')],
+						] as [key, label]}
+							<div class="flex items-center gap-1.5 text-xs">
+								{#if secrets.configured[key]}
+									<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-success shrink-0" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" /></svg>
+								{:else}
+									<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-text-subtle shrink-0" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" /></svg>
+								{/if}
+								<span class="{secrets.configured[key] ? 'text-text' : 'text-text-subtle'}">{label}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			<!-- Usage Today -->
+			<div>
+				<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.usage_today')}</p>
+				<div class="grid grid-cols-2 gap-2">
+					<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
+						<p class="text-lg font-semibold text-text">${todayCost.toFixed(2)}</p>
+						<p class="text-xs text-text-subtle">{t('status.cost')}</p>
+					</div>
+					<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
+						<p class="text-lg font-semibold text-text">{todayRuns}</p>
+						<p class="text-xs text-text-subtle">{t('status.runs')}</p>
+					</div>
+				</div>
+			</div>
+
+			<!-- Total Usage -->
+			{#if stats}
+				<div>
+					<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.usage_total')}</p>
+					<div class="grid grid-cols-3 gap-2">
+						<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
+							<p class="text-base font-semibold text-text">{stats.total_runs}</p>
+							<p class="text-xs text-text-subtle">{t('status.runs')}</p>
+						</div>
+						<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
+							<p class="text-base font-semibold text-text">${stats.total_cost_usd.toFixed(2)}</p>
+							<p class="text-xs text-text-subtle">{t('status.cost')}</p>
+						</div>
+						<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
+							<p class="text-base font-semibold text-text">{formatDuration(stats.avg_duration_ms)}</p>
+							<p class="text-xs text-text-subtle">{t('status.avg_duration')}</p>
+						</div>
+					</div>
+					{#if stats.cost_by_model.length > 0}
+						<p class="text-xs text-text-subtle mt-2 mb-1">{t('status.cost_by_model')}</p>
+						<div class="space-y-1">
+							{#each stats.cost_by_model as m}
+								<div class="flex items-center justify-between text-xs">
+									<span class="text-text-muted font-mono truncate mr-2">{shortModel(m.model_id)}</span>
+									<span class="text-text shrink-0">${m.cost_usd.toFixed(3)} <span class="text-text-subtle">({m.run_count})</span></span>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/if}
+
+			<!-- Knowledge Graph -->
+			{#if kgStats && (kgStats.entityCount > 0 || kgStats.memoryCount > 0)}
+				<div>
+					<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.knowledge')}</p>
+					<div class="grid grid-cols-2 gap-1.5 text-xs">
+						<div class="flex justify-between bg-bg-muted rounded-[var(--radius-sm)] px-3 py-1.5">
+							<span class="text-text-subtle">{t('status.entities')}</span>
+							<span class="text-text font-medium">{kgStats.entityCount}</span>
+						</div>
+						<div class="flex justify-between bg-bg-muted rounded-[var(--radius-sm)] px-3 py-1.5">
+							<span class="text-text-subtle">{t('status.relations')}</span>
+							<span class="text-text font-medium">{kgStats.relationCount}</span>
+						</div>
+						<div class="flex justify-between bg-bg-muted rounded-[var(--radius-sm)] px-3 py-1.5">
+							<span class="text-text-subtle">{t('status.memories')}</span>
+							<span class="text-text font-medium">{kgStats.memoryCount}</span>
+						</div>
+						{#if kgStats.communityCount > 0}
+							<div class="flex justify-between bg-bg-muted rounded-[var(--radius-sm)] px-3 py-1.5">
+								<span class="text-text-subtle">{t('status.communities')}</span>
+								<span class="text-text font-medium">{kgStats.communityCount}</span>
+							</div>
+						{/if}
+						{#if kgStats.patternCount != null && kgStats.patternCount > 0}
+							<div class="flex justify-between bg-bg-muted rounded-[var(--radius-sm)] px-3 py-1.5">
+								<span class="text-text-subtle">{t('status.patterns')}</span>
+								<span class="text-text font-medium">{kgStats.patternCount}</span>
+							</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			<!-- Active Tasks -->
+			{#if activeTasks > 0}
+				<div class="flex items-center justify-between text-xs">
+					<span class="text-text-subtle">{t('status.tasks_active')}</span>
+					<a href="/app/activity?tab=tasks" onclick={closePanel} class="text-accent-text hover:underline">{activeTasks} Tasks</a>
+				</div>
+			{/if}
+		</div>
+	</div>
+{/if}
