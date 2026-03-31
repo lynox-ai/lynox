@@ -43,10 +43,10 @@ Any VPS with Docker works. [Hetzner](https://console.hetzner.cloud) (€3.79/mo)
 If you prefer running without Docker:
 
 ```bash
-npx @lynox-ai/core --init
+npx @lynox-ai/core
 ```
 
-This starts a setup wizard that configures your API key and encryption. After setup, `npx @lynox-ai/core` starts the Engine and opens the Web UI in your browser. Requires Node.js 22+.
+On first run, a setup wizard configures your API key and encryption. Then lynox starts the Engine and opens the Web UI in your browser — all in one command. Requires Node.js 22+.
 
 ---
 
