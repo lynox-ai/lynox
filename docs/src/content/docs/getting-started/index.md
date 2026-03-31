@@ -1,127 +1,93 @@
 ---
-title: "Getting Started"
-description: "One command. One API key. Open your browser."
+title: Getting Started
+description: Install lynox and run your first session.
 sidebar:
   order: 1
 ---
 
-## 1. Get an API Key
+## Prerequisites
 
-lynox needs an Anthropic API key to connect to the AI.
+- **Node.js 22+** — [nodejs.org](https://nodejs.org)
+- **Anthropic API Key** — [console.anthropic.com](https://console.anthropic.com/settings/keys)
 
-1. Go to [console.anthropic.com](https://console.anthropic.com/) and create an account
-2. Click **API Keys** → **Create Key**
-3. Copy the key (starts with `sk-ant-`)
+Anthropic charges per usage — a typical business day costs **$1–5**. You can set spending limits in their console and in lynox.
 
-Anthropic charges per usage — a typical business day costs **$1–5**. You can set a spending limit in their console.
+## Install
 
----
-
-## 2. Start lynox
-
-### Self-hosted (recommended)
-
-Run this on your server or local machine — Docker is all you need:
-
-```bash
-docker run -d --name lynox \
-  -p 3000:3000 \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v ~/.lynox:/home/lynox/.lynox \
-  --restart unless-stopped \
-  ghcr.io/lynox-ai/lynox:webui
-```
-
-This starts the engine and Web UI in a single container. Your data is stored in `~/.lynox/` and persists across restarts and updates.
-
-An **access token** is generated automatically and printed to the console. Find it with:
-
-```bash
-docker logs lynox
-```
-
-You'll need this token to log in to the Web UI.
-
-:::tip[Need a server?]
-Any VPS with Docker works. [Hetzner](https://console.hetzner.cloud) (€3.79/mo), [DigitalOcean](https://m.do.co/c/29187cab6dc1) ($6/mo), or [Vultr](https://www.vultr.com/?ref=9887227-9J) ($5/mo) are good options. lynox needs ~300 MB RAM — the smallest plan is enough. Some links are affiliate links.
-:::
-
-### Alternative: npm (for developers)
-
-If you prefer running without Docker:
+### Option 1: npx (quickest)
 
 ```bash
 npx @lynox-ai/core
 ```
 
-On first run, a setup wizard configures your API key and encryption. Then lynox starts the Engine and opens the Web UI in your browser — all in one command. Requires Node.js 22+.
+Starts the setup wizard on first run, then opens the Web UI.
 
----
-
-## 3. Open Your Browser
-
-Go to **http://localhost:3000** (or your server IP). Enter the access token from the previous step. The Web UI is ready.
-
-Talk to lynox like you would to a colleague:
-
-- *"Check my emails and tell me what's important"*
-- *"Research [topic] and give me the key points"*
-- *"What meetings do I have this week?"*
-- *"Summarize this document"* (drag and drop a file)
-
-:::note[Don't worry about automation yet]
-Just use lynox for everyday tasks. After you've done something a few times, lynox will suggest turning it into an automated workflow.
-:::
-
----
-
-## Add Integrations
-
-All optional. Add them whenever you're ready — via **Web UI → Settings → Integrations** or by passing environment variables to Docker.
-
-| Integration | What it does | Docker env var |
-|-------------|-------------|----------------|
-| **Google Workspace** | Gmail, Sheets, Drive, Calendar, Docs | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
-| **Telegram** | Use lynox from your phone — voice, text, photos | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS` |
-| **Web Search** | Live web research ([Tavily](https://tavily.com), free: 1K/month) | `TAVILY_API_KEY` |
-| **Any REST API** | Connect any service via the [API Store](/features/api-store/) | — (configured in Web UI) |
-
-### Docker with integrations
+### Option 2: Docker (recommended for always-on)
 
 ```bash
-docker run -d --name lynox \
-  -p 3000:3000 \
+docker run -d --name lynox -p 3000:3000 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e TELEGRAM_BOT_TOKEN=your-bot-token \
-  -e TAVILY_API_KEY=tvly-... \
   -v ~/.lynox:/home/lynox/.lynox \
-  --restart unless-stopped \
   ghcr.io/lynox-ai/lynox:webui
 ```
 
----
+Open [localhost:3000](http://localhost:3000). An **access token** is generated on first start — find it with `docker logs lynox`. You'll need it to log in.
 
-## What Happens Automatically
+:::tip[Custom access token]
+Set your own token with `-e LYNOX_HTTP_SECRET=your-token` instead of using the auto-generated one.
+:::
 
-After setup, lynox takes care of itself:
+### Option 3: Install script
 
-| What | How |
-|------|-----|
-| **Updates** | Pull a new image anytime, or use [Watchtower](https://containrrr.dev/watchtower/) for daily auto-updates |
-| **Encryption** | AES-256-GCM, key generated on first start |
-| **Restarts** | `--restart unless-stopped` handles crashes and reboots |
-| **Knowledge** | Grows with every conversation — fully automatic |
-| **Backups** | Configurable in Web UI → Settings → Backups (Google Drive) |
+```bash
+curl -fsSL https://lynox.ai/install.sh | sh
+```
 
----
+### Option 4: Clone & run
+
+```bash
+git clone https://github.com/lynox-ai/lynox.git
+cd lynox
+npm install
+npm run dev
+```
+
+## Setup Wizard
+
+On first run, the wizard guides you through:
+
+1. **Prerequisites check** — Node.js version, directory permissions, network connectivity
+2. **API Key** — Paste your Anthropic API key (starts with `sk-`). It's verified immediately.
+3. **Encryption** — A vault key is generated automatically. The wizard offers to add it to your shell profile so it loads on every session.
+
+Everything is saved to `~/.lynox/config.json`. The vault key goes into `~/.lynox/.env`.
+
+## First Run
+
+After setup, lynox opens the Web UI at [localhost:3000](http://localhost:3000). Try something:
+
+- *"Summarize this PDF"* — drop a file into the chat
+- *"What happened in my Gmail today?"* — after connecting Google Workspace
+- *"Monitor example.com every day and alert me if something changes"*
+- *"Create a weekly report template for my team"*
+
+lynox remembers context across conversations. The more you use it, the more it learns about your business.
+
+## Entry Modes
+
+| Mode | Command | Use case |
+|------|---------|----------|
+| **Web UI** | `npx @lynox-ai/core` | Primary interface — chat, settings, integrations |
+| **One-shot** | `npx @lynox-ai/core "your task"` | Run a single task from the terminal |
+| **REPL** | `npx @lynox-ai/core --repl` | Interactive terminal session |
+| **Docker** | `docker run ... ghcr.io/lynox-ai/lynox:webui` | Always-on with Web UI |
 
 ## HTTPS & Remote Access
 
-The Web UI is password-protected by default — an access token is required to log in. For remote access, add HTTPS so the token isn't transmitted in plaintext:
+When running lynox on a server, add HTTPS so the access token isn't transmitted in plaintext:
 
 **Caddy** (automatic HTTPS):
 ```bash
-# Install Caddy, then:
 caddy reverse-proxy --from yourdomain.com --to localhost:3000
 ```
 
@@ -130,35 +96,22 @@ caddy reverse-proxy --from yourdomain.com --to localhost:3000
 cloudflared tunnel --url http://localhost:3000
 ```
 
-:::tip[Custom access token]
-To set your own token instead of the auto-generated one, pass it as an environment variable:
-```bash
-docker run -d --name lynox \
-  -p 3000:3000 \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e LYNOX_HTTP_SECRET=your-custom-token \
-  -v ~/.lynox:/home/lynox/.lynox \
-  --restart unless-stopped \
-  ghcr.io/lynox-ai/lynox:webui
-```
-:::
-
----
-
-## Data & Portability
-
-Everything lives in **one folder**: `~/.lynox/`. Move it to a new server, and lynox picks up where it left off — knowledge, config, history, everything.
-
----
-
 ## Troubleshooting
 
-**Container won't start** — Check `docker logs lynox`. Most common: missing or invalid API key.
+**Container won't start** — Check `docker logs lynox`. Most common cause: missing or invalid API key.
 
-**"API key rejected"** — Must start with `sk-ant-`, be active in [console.anthropic.com](https://console.anthropic.com/).
+**"API key rejected"** — Must start with `sk-ant-` and be active in [console.anthropic.com](https://console.anthropic.com/).
 
-**Can't access Web UI** — Check that port 3000 is open. On a VPS, you may need to allow it in your firewall. If you see a login page, find your access token with `docker logs lynox`.
+**Can't access Web UI** — Check that port 3000 is open. On a VPS, you may need to allow it in your firewall.
 
-**Lost access token** — Restart the container without `LYNOX_HTTP_SECRET` set to generate a new one: `docker restart lynox && docker logs lynox`.
+**Lost access token** — Restart the container without `LYNOX_HTTP_SECRET` to generate a new one: `docker restart lynox && docker logs lynox`.
 
 **Telegram bot not responding** — Check that no other instance uses the same bot token.
+
+## Next Steps
+
+- [Web UI Guide](/daily-use/web-ui/) — Learn the interface
+- [Configuration](/daily-use/configuration/) — Customize model, cost limits, and more
+- [Telegram](/integrations/telegram/) — Mobile access via Telegram bot
+- [Google Workspace](/integrations/google-workspace/) — Connect Gmail, Calendar, Drive
+- [Docker Deployment](/daily-use/docker/) — Production setup with Docker Compose

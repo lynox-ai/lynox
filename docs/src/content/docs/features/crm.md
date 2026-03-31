@@ -1,126 +1,97 @@
 ---
-title: "CRM"
-description: "Contact and deal pipeline management"
+title: CRM & Data
+description: Contact tracking, deals, and structured data storage.
 sidebar:
-  order: 2
+  order: 5
 ---
 
-lynox remembers everyone you work with — clients, partners, contacts, and deals. Just mention people in conversation and lynox tracks them automatically. Ask *"What's the status with [client]?"* or *"Show me my open deals"* anytime via Telegram.
+lynox includes a lightweight CRM and structured data store. Both are built automatically from your conversations and integrations — no manual data entry required.
 
-No setup needed. No data entry. lynox learns from your conversations and organizes contacts, companies, and deals automatically.
+## Contacts
 
-## How It Works
+lynox tracks people and organizations you interact with. Contacts are created automatically when mentioned in conversations, emails, or calendar events.
 
-```
-Knowledge Graph (automatic)
-    → Entities: "Lisa Weber works at Acme AG"
-    → Relationships: "Acme AG interested in Pro Package"
-    → Primary source for "what do I know about X?"
+Each contact stores:
 
-DataStore (agent-driven)
-    → contacts: tracked when business-relevant
-    → deals: pipeline with stages and values
-    → interactions: significant touchpoints logged
+- Name and type (person, company, etc.)
+- Interaction history — when and how you communicated
+- Related entities from the Knowledge Graph
+- Notes and context from conversations
 
-Agent decides
-    → Recognizes business-relevant person → adds to contacts
-    → User discusses opportunity → creates deal
-    → Important call/meeting → logs interaction
-    → NOT every Telegram message is tracked
-```
+### Browsing contacts
 
-The CRM schema is created on first Engine startup. Contact creation is agent-driven, not automatic.
+Open the **Contacts** view in the Web UI to see your full contact database. Click any contact to see their details and interaction timeline.
 
-## Schema
+### Via chat
 
-Three DataStore tables, auto-created:
+- *"What do I know about [name]?"*
+- *"When did I last talk to [contact]?"*
+- *"Show me all contacts at [company]"*
 
-### contacts
-| Column | Type | Description |
-|--------|------|-------------|
-| `name` | string | Contact name (unique key, used for upsert) |
-| `email` | string | Email address |
-| `phone` | string | Phone number |
-| `company` | string | Company/organization |
-| `type` | string | `prospect`, `lead`, `customer`, `partner`, `other` |
-| `source` | string | `telegram`, `email`, `web`, `manual` |
-| `channel_id` | string | External ID (e.g. `telegram:12345`) |
-| `language` | string | Preferred language (auto-detected from Telegram) |
-| `notes` | string | Free-text notes |
+## Deals
 
-### deals
-| Column | Type | Description |
-|--------|------|-------------|
-| `title` | string | Deal name (unique with contact_name) |
-| `contact_name` | string | Associated contact |
-| `value` | number | Deal value |
-| `currency` | string | Currency (default: CHF) |
-| `stage` | string | Pipeline stage |
-| `next_action` | string | Next step to take |
-| `due_date` | date | Deadline for next action |
+Track business opportunities and their progress:
 
-**Pipeline stages:** `lead` → `qualified` → `proposal` → `negotiation` → `won` / `lost`
+- Deal name, value, and stage
+- Associated contacts and companies
+- Status history and next steps
 
-### interactions
-| Column | Type | Description |
-|--------|------|-------------|
-| `contact_name` | string | Associated contact |
-| `type` | string | `message`, `email`, `call`, `meeting`, `note` |
-| `channel` | string | `telegram`, `email`, `web`, `manual` |
-| `summary` | string | Interaction summary (auto-truncated) |
-| `date` | date | Timestamp |
+Deals are created when you discuss business opportunities with lynox. You can also create them explicitly:
 
-## Agent-Driven Contact Management
+- *"Create a deal: Website redesign for Acme Corp, 15k, proposal stage"*
+- *"Move the Acme deal to negotiation"*
+- *"What deals are in the pipeline?"*
 
-Contacts are NOT auto-created from every message. The agent decides when someone is business-relevant:
+## Data Store
 
-- User mentions "Lisa from Acme called about pricing" → agent recognizes business relevance, creates contact + logs interaction
-- User sends a casual test message → nothing tracked
-- User says "Add Roland as a lead" → agent creates contact explicitly
+The Data Store is a general-purpose structured storage system. It organizes data into **collections** — think of them as lightweight tables.
 
-The Knowledge Graph automatically captures people and companies mentioned in any conversation. The DataStore `contacts` table is for explicit business tracking (leads, pipeline).
+### Use cases
 
-## Conversational CRM
+- Expense tracking
+- Project logs
+- Inventory lists
+- Any structured data lynox collects during tasks
 
-You interact with the CRM through natural conversation:
+### Browsing data
 
-```
-"Zeig mir alle meine Leads"
-→ data_store_query on contacts WHERE type = 'lead'
+Access via the Web UI under Settings → Data, or via chat:
 
-"Erstelle einen Deal für Lisa: Pro Paket, CHF 4800"
-→ data_store_insert into deals
+- *"Show me the expenses collection"*
+- *"Add an entry to the project log"*
 
-"Wie steht meine Pipeline?"
-→ data_store_query on deals, aggregation by stage
+## API Store
 
-"Erinnere mich in 3 Tagen bei Roland nachzufragen"
-→ task_create with due_date + contact context
+lynox can connect to external REST APIs on your behalf. The API Store manages credentials and endpoint configurations.
 
-"Was weiß ich über Acme AG?"
-→ Knowledge Graph: relationships + DataStore: contact + deals + interactions
-```
+### Setting up an API
 
-## Knowledge Graph Integration
+1. Go to Settings → APIs in the Web UI
+2. Add a new API profile with:
+   - Base URL
+   - Authentication (API key, Bearer token, Basic auth)
+   - Default headers
 
-The CRM data is automatically indexed in the Knowledge Graph:
-- Contact entities: "Lisa Weber works at Acme AG"
-- Relationships: "Acme AG is a customer since March 2026"
-- Context: "Roland prefers email communication"
-- Deal history: "v-skin.ch Pro deal at CHF 4800 in negotiation"
+Or let lynox set it up during a conversation:
 
-This means when you ask "What do I know about Roland?", lynox combines structured CRM data with semantic knowledge.
+- *"Connect to the Stripe API — here's my key: sk_live_..."*
 
-## CLI Access
+### Using APIs
 
-CRM data is stored in standard DataStore tables. Use existing commands:
+Once configured, lynox can make authenticated requests:
 
-```bash
-/data list              # See contacts, deals, interactions tables
-```
+- *"Check my Stripe balance"*
+- *"Get the latest orders from my Shopify store"*
+- *"Query the weather API for Munich"*
 
-Or ask the agent directly — it knows about the CRM tables and can query them.
+API credentials are stored in the encrypted vault.
 
-## Configuration
+## CRM Stats
 
-No configuration needed. The CRM is initialized automatically when the DataStore is available. To disable, don't initialize the DataStore (set via Engine config).
+The Web UI shows aggregate CRM statistics:
+
+- Total contacts and recent interactions
+- Deal pipeline overview (by stage)
+- Activity trends over time
+
+Access via the Contacts view or the Insights dashboard.

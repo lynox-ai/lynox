@@ -6,7 +6,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'lynox',
-      description: 'One system that learns your business — replaces your CRM, workflows, outreach, and monitoring.',
+      description: 'Run your business. Not your tools.',
       logo: {
         src: './src/assets/logo.svg',
         replacesTitle: false,
@@ -32,6 +32,7 @@ export default defineConfig({
       sidebar: [
         { label: 'Getting Started', autogenerate: { directory: 'getting-started' } },
         { label: 'Daily Use', autogenerate: { directory: 'daily-use' } },
+        { label: 'Integrations', autogenerate: { directory: 'integrations' } },
         { label: 'Features', autogenerate: { directory: 'features' } },
         { label: 'For Developers', autogenerate: { directory: 'developers' } },
       ],

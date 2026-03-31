@@ -1,143 +1,116 @@
 ---
-title: "Extension Points"
-description: "Hooks, CLI commands, feature flags, and notification router"
+title: Extension Points
+description: Extend lynox with custom tools, roles, and plugins.
 sidebar:
-  order: 8
+  order: 3
 ---
 
-Extension points allow `lynox-pro` (or custom plugins) to hook into core functionality without modifying core source code. All extension points are additive — core works standalone without any extensions registered.
+lynox is designed to be extended without modifying core source code. There are several ways to add functionality.
 
-## 1. Orchestrator Hooks
+## Custom MCP Servers
 
-Lifecycle hooks for extending the Engine's init, agent creation, run, and shutdown phases.
+The simplest way to extend lynox is by connecting external MCP servers. These add new tools that lynox can use during conversations.
 
-```typescript
-import type { LynoxHooks, RunContext } from 'lynox';
+### Register via CLI
 
-const hooks: LynoxHooks = {
-  async onInit(engine) {
-    // Called after core init (Engine created, memory loaded, WorkerLoop started)
-    // Receives Engine (not Lynox/Session). Use for tenant setup, license validation, etc.
-  },
-
-  onBeforeCreateAgent(tools) {
-    // Filter or add tools before agent creation
-    return tools.filter(t => t.definition.name !== 'restricted_tool');
-  },
-
-  onAfterRun(runId, costUsd, context: RunContext) {
-    // Called after each run completes
-    // context: { runId, contextId, modelTier, durationMs, source }
-    // Use for tenant billing, analytics, etc.
-  },
-
-  async onShutdown() {
-    // Called during shutdown, before DB/vault close
-  },
-};
-
-engine.registerHooks(hooks);
+```bash
+/mcp my-server https://my-mcp-server.example.com/sse
 ```
 
-All hook methods are optional. Hook errors are logged to the `costWarning` debug channel instead of silently swallowed.
+### Register via config
 
-## 2. CLI Command Registry
-
-Register custom slash commands without modifying the core REPL.
-
-```typescript
-import { registerCommand } from 'lynox';
-import type { SlashCommandHandler } from 'lynox';
-
-const tenantCommand: SlashCommandHandler = async (parts, session, ctx) => {
-  const sub = parts[1];
-  if (sub === 'list') {
-    ctx.stdout.write('Listing tenants...\n');
-  }
-  return true; // command handled
-};
-
-registerCommand('/tenant', tenantCommand);
-```
-
-Registered commands are checked before aliases in the REPL dispatch.
-
-## 3. Feature Flags
-
-Register dynamic feature flags for Pro features.
-
-```typescript
-import { registerFeature, isFeatureEnabled } from 'lynox';
-
-registerFeature('advanced-analytics', 'LYNOX_FEATURE_ANALYTICS', false);
-
-if (isFeatureEnabled('advanced-analytics')) {
-  // Load analytics module
+```json
+{
+  "mcp_servers": [
+    { "name": "my-server", "url": "https://my-mcp-server.example.com/sse" }
+  ]
 }
 ```
 
-Core flags (`tenants`, `triggers`, `plugins`, `worker-pool`) are immutable. Dynamic flags are registered at runtime and checked the same way.
+Once registered, the tools from the MCP server are available in all sessions. lynox discovers capabilities automatically via the MCP protocol.
 
-## 4. Notification Router
+## Plugins
 
-Register custom notification channels for background task results and inquiries.
+Plugins can extend lynox's functionality at a deeper level. Enable or disable them in your config:
 
-```typescript
-import type { NotificationChannel, NotificationMessage } from 'lynox';
-
-class SlackNotificationChannel implements NotificationChannel {
-  readonly id = 'slack';
-
-  async send(message: NotificationMessage): Promise<void> {
-    // Send to Slack via webhook, Socket Mode, etc.
-  }
-
-  async handleFollowUp(action: string, taskId: string): Promise<void> {
-    // Handle follow-up button clicks (Details, Retry, Explain)
+```json
+{
+  "plugins": {
+    "my-plugin": true
   }
 }
-
-engine.notificationRouter.register(new SlackNotificationChannel());
 ```
 
-The `NotificationRouter` is available on the `Engine` instance after `init()`. Core ships with `TelegramNotificationChannel` (registered automatically when Telegram is configured). Pro can register additional channels (e.g., Slack, email, webhooks).
+Plugins are loaded at startup and can register additional tools, modify behavior, or add new capabilities.
 
-## Pro Code (Extracted)
+## Custom Roles
 
-Pro code lives in the separate `lynox-pro` repository. Pro registers externally via the extension points listed above:
+Beyond the four built-in roles (Researcher, Creator, Operator, Collector), you can define custom roles that set specific model tiers, tool restrictions, and autonomy levels.
 
-- **Tenant CLI** (`/tenant`): Registered via `registerCommand()`.
-- **Tenant cost tracking**: Registered as an `onAfterRun` hook via `engine.registerHooks()`.
-- **Worker pool lifecycle**: Registered as `onInit`/`onShutdown` hooks via `engine.registerHooks()`.
-- **Slack integration**: Lives in `lynox-pro` as a separate service.
+## Custom Agents
 
-## Registration Pattern
+Place agent definitions in a directory and configure it:
 
-Pro extensions (or custom plugins) register at import time:
+```json
+{
+  "agents_dir": "./agents"
+}
+```
+
+Agents are specialized configurations that combine a system prompt with tool access rules for specific use cases.
+
+## Workflow Manifests
+
+Define multi-step workflows as YAML or JSON manifests:
+
+```json
+{
+  "manifests_dir": "./workflows"
+}
+```
+
+Manifests describe step sequences, dependencies, and conditions. lynox executes them as pipelines with progress tracking.
+
+## Programmatic API
+
+If you're building on top of lynox as a library:
 
 ```typescript
-// lynox-pro/src/index.ts
-import { registerCommand, registerFeature, Engine } from 'lynox';
-import { createTenantHook, createWorkerPoolHook } from 'lynox';
-
-// Register Pro commands
-registerCommand('/tenant', tenantCommand);
-
-// Register Pro feature flags
-registerFeature('advanced-analytics', 'LYNOX_FEATURE_ANALYTICS', false);
+import { Engine, Session, ToolRegistry } from '@lynox-ai/core';
+import type { ToolDefinition } from '@lynox-ai/core/types';
 ```
 
-Then in the entry point:
+The main exports include:
+
+- **Engine** — Core singleton, manages sessions and background tasks
+- **Session** — Per-conversation context with streaming
+- **ToolRegistry** — Register and manage tools
+- **WorkerLoop** — Schedule and run background tasks
+- **Memory** — Access the memory system
+- **TaskManager** — Manage tasks programmatically
+
+### Registering a custom tool
+
 ```typescript
-import 'lynox-pro'; // side-effect: registers commands, feature flags
-import { Engine } from 'lynox';
+const registry = new ToolRegistry();
 
-const engine = new Engine({});
-engine.registerHooks(createTenantHook()); // Reads RunContext.tenantId
-engine.registerHooks(createWorkerPoolHook(4));
-await engine.init(); // Starts WorkerLoop, NotificationRouter, etc.
-
-const session = engine.createSession({ model: 'sonnet' });
-session.tenantId = 'my-tenant'; // Set active tenant for billing
-const result = await session.run('Your task here');
+registry.register({
+  name: 'my_tool',
+  description: 'Does something useful',
+  input_schema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'The input query' }
+    },
+    required: ['query']
+  },
+  handler: async (input, context) => {
+    // Your tool logic here
+    return { result: `Processed: ${input.query}` };
+  }
+});
 ```
+
+## License Note
+
+lynox is licensed under the Elastic License 2.0 (ELv2). You can use, modify, and self-host it freely. The only restriction: you cannot offer lynox as a managed/hosted service to third parties.
