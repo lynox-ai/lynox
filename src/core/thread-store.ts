@@ -12,6 +12,7 @@ export interface ThreadRecord {
   summary: string | null;
   summary_up_to: number;
   is_archived: number; // SQLite boolean
+  is_favorite: number; // SQLite boolean
   created_at: string;
   updated_at: string;
 }
@@ -61,8 +62,8 @@ export class ThreadStore {
     const limit = opts?.limit ?? 50;
     const includeArchived = opts?.includeArchived ?? false;
     const sql = includeArchived
-      ? 'SELECT * FROM threads ORDER BY updated_at DESC LIMIT ?'
-      : 'SELECT * FROM threads WHERE is_archived = 0 ORDER BY updated_at DESC LIMIT ?';
+      ? 'SELECT * FROM threads ORDER BY is_favorite DESC, updated_at DESC LIMIT ?'
+      : 'SELECT * FROM threads WHERE is_archived = 0 ORDER BY is_favorite DESC, updated_at DESC LIMIT ?';
     return this.db.prepare(sql).all(limit) as ThreadRecord[];
   }
 
@@ -74,6 +75,7 @@ export class ThreadStore {
     total_tokens?: number | undefined;
     total_cost_usd?: number | undefined;
     is_archived?: boolean | undefined;
+    is_favorite?: boolean | undefined;
   }): void {
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -85,6 +87,7 @@ export class ThreadStore {
     if (updates.total_tokens !== undefined) { sets.push('total_tokens = ?'); params.push(updates.total_tokens); }
     if (updates.total_cost_usd !== undefined) { sets.push('total_cost_usd = ?'); params.push(updates.total_cost_usd); }
     if (updates.is_archived !== undefined) { sets.push('is_archived = ?'); params.push(updates.is_archived ? 1 : 0); }
+    if (updates.is_favorite !== undefined) { sets.push('is_favorite = ?'); params.push(updates.is_favorite ? 1 : 0); }
 
     if (sets.length === 0) return;
 

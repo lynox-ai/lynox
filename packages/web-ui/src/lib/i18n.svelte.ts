@@ -28,6 +28,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.no_title': { de: 'Neuer Chat', en: 'New Chat' },
 	'threads.archive': { de: 'Archivieren', en: 'Archive' },
 	'threads.delete': { de: 'Löschen', en: 'Delete' },
+	'threads.favorite': { de: 'Favorit', en: 'Favorite' },
+	'threads.unfavorite': { de: 'Favorit entfernen', en: 'Unfavorite' },
 
 	// Command Palette
 	'cmd.placeholder': { de: 'Suche oder Aktion...', en: 'Search or action...' },
@@ -234,6 +236,13 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Chat
 	'chat.welcome': { de: 'Was kann ich fuer dich tun?', en: 'What can I help you with?' },
+	'chat.greeting_morning': { de: 'Guten Morgen.', en: 'Good morning.' },
+	'chat.greeting_afternoon': { de: 'Guten Tag.', en: 'Good afternoon.' },
+	'chat.greeting_evening': { de: 'Guten Abend.', en: 'Good evening.' },
+	'chat.stat_runs': { de: 'Runs heute', en: 'Runs today' },
+	'chat.stat_cost': { de: 'Kosten heute', en: 'Cost today' },
+	'chat.stat_tasks': { de: 'Tasks aktiv', en: 'Tasks active' },
+	'chat.stat_entities': { de: 'Entities', en: 'Entities' },
 	'chat.placeholder': { de: 'Nachricht eingeben...', en: 'Type a message...' },
 	'chat.send': { de: 'Senden', en: 'Send' },
 	'chat.stop': { de: 'Stop', en: 'Stop' },
@@ -381,6 +390,17 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.http_rate_limit': { de: 'HTTP Requests / Stunde', en: 'HTTP requests / hour' },
 	'config.http_rate_limit_desc': { de: 'Rate Limit fuer das HTTP Tool. Leer = kein Limit.', en: 'Rate limit for the HTTP tool. Empty = no limit.' },
 	'config.search_provider': { de: 'Suchmaschine', en: 'Search provider' },
+
+	// Security
+	'config.security': { de: 'Sicherheit', en: 'Security' },
+	'config.vault_key': { de: 'Vault Key', en: 'Vault Key' },
+	'config.vault_key_desc': { de: 'Verschluesselt deine gespeicherten API Keys und Backups. Sichere diesen Key an einem sicheren Ort (z.B. Passwort-Manager).', en: 'Encrypts your stored API keys and backups. Save this key in a secure location (e.g. password manager).' },
+	'config.vault_key_not_configured': { de: 'Kein Vault Key konfiguriert. Fuehre den Setup-Wizard aus: lynox init', en: 'No vault key configured. Run the setup wizard: lynox init' },
+	'config.vault_key_copied': { de: 'Vault Key kopiert', en: 'Vault key copied' },
+	'config.vault_key_warning': { de: 'Wenn du diesen Key verlierst, koennen verschluesselte Daten nicht wiederhergestellt werden.', en: 'If you lose this key, encrypted data cannot be recovered.' },
+	'config.reveal': { de: 'Anzeigen', en: 'Reveal' },
+	'config.hide': { de: 'Verbergen', en: 'Hide' },
+	'config.copy': { de: 'Kopieren', en: 'Copy' },
 
 	// Bug Reporting
 	'config.privacy': { de: 'Datenschutz', en: 'Privacy' },

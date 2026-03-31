@@ -533,6 +533,11 @@ const MIGRATIONS: string[] = [
   // v23: Track model tier on pipeline step results for history-based cost estimation
   `INSERT OR IGNORE INTO schema_version (version) VALUES (23);
    ALTER TABLE pipeline_step_results ADD COLUMN model_tier TEXT NOT NULL DEFAULT '';`,
+
+  // v24: Favorite/pin threads
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (24);
+   ALTER TABLE threads ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
+   CREATE INDEX IF NOT EXISTS idx_threads_favorite ON threads(is_favorite);`,
 ];
 
 export class RunHistory {

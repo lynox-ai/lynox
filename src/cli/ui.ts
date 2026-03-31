@@ -3,75 +3,27 @@ export { RESET, BOLD, DIM, RED, GREEN, MAGENTA, BLUE, GRAY, YELLOW };
 import { sleep } from '../core/utils.js';
 import { TOOL_DISPLAY_NAMES } from '../types/index.js';
 
-// Bot icon with brand gradient (8 lines tall)
-const ASCII_LYNOX = [
-  '       █            █',
-  '    ▄██████████████████▄',
-  '  ▄██████████████████████▄',
-  ' ▄████████████████████████▄',
-  ' ██████████████████████████',
-  ' ██████  ●  ████  ●  ██████',
-  ' ██████████████████████████',
-  ' ▀████████████████████████▀',
-];
-const ASCII_MAX_COLS = Math.max(...ASCII_LYNOX.map(r => r.length));
-const INFO_COL = ASCII_MAX_COLS + 2;
-
 // Brand Purple: close to rgb(101,37,239) — #6525EF
-const BRAND_PALETTE = [93, 93, 99, 99, 135, 135, 99, 99, 93, 93];
-const BRAND_ROW_COLORS: number[][] = Array.from({ length: ASCII_LYNOX.length }, (_, r) => {
-  const shift = r;
-  return BRAND_PALETTE.map((_, i) => BRAND_PALETTE[(i + shift) % BRAND_PALETTE.length]!);
-});
+const BRAND = 99;
+const brandColor = (text: string) => `\x1b[38;5;${BRAND}m${text}\x1b[0m`;
 
+/** Styled brand name — used by setup-wizard and banner */
 export function renderGradientArt(): string {
-  let out = '';
-  for (let r = 0; r < ASCII_LYNOX.length; r++) {
-    const row = ASCII_LYNOX[r]!;
-    const palette = BRAND_ROW_COLORS[r]!;
-    for (let col = 0; col < row.length; col++) {
-      const ch = row[col]!;
-      if (ch === ' ') {
-        out += ch;
-      } else {
-        const pIdx = Math.floor((col / ASCII_MAX_COLS) * palette.length);
-        const c = palette[pIdx] ?? palette[palette.length - 1]!;
-        out += `\x1b[38;5;${c}m${ch}\x1b[0m`;
-      }
-    }
-    out += '\n';
-  }
-  return out;
+  return `  ${brandColor(BOLD + 'lynox' + RESET)}\n`;
 }
 
-function buildSideInfo(
+function buildBannerLines(
   model: string, thinking: string, effort: string, memory: string,
-  mcpCount: number, toolCount: number, versionStr?: string | undefined,
-): Record<number, string> {
+  _mcpCount: number, toolCount: number, versionStr?: string | undefined,
+): string[] {
   const version = `${DIM}v${versionStr ?? '0.0.0'}${RESET}`;
-  return {
-    3: `\x1b[1m\x1b[38;5;99mlynox\x1b[0m ${version}`,
-    5: `${DIM}model:${RESET} ${BLUE}${model}${RESET}`,
-    6: `${DIM}thinking:${RESET} ${thinking}  ${DIM}accuracy:${RESET} ${effort}`,
-    7: `${DIM}knowledge:${RESET} ${memory}  ${DIM}tools:${RESET} ${toolCount}`,
-  };
-}
-
-function renderArtWithInfo(sideInfo: Record<number, string>): string {
-  const artLines = renderGradientArt().trimEnd().split('\n');
-  let out = '';
-  for (let i = 0; i < artLines.length; i++) {
-    const line = artLines[i]!;
-    const info = sideInfo[i];
-    if (info !== undefined) {
-      const visible = stripAnsi(line).length;
-      const pad = Math.max(1, INFO_COL - visible);
-      out += line + ' '.repeat(pad) + info + '\n';
-    } else {
-      out += line + '\n';
-    }
-  }
-  return out;
+  return [
+    `  ${BOLD}${brandColor('lynox')}${RESET} ${version}`,
+    '',
+    `  ${DIM}model:${RESET}     ${BLUE}${model}${RESET}`,
+    `  ${DIM}thinking:${RESET}  ${thinking}  ${DIM}accuracy:${RESET} ${effort}`,
+    `  ${DIM}knowledge:${RESET} ${memory}  ${DIM}tools:${RESET}    ${toolCount}`,
+  ];
 }
 
 export function renderBanner(
@@ -83,8 +35,8 @@ export function renderBanner(
   toolCount: number,
   versionStr?: string | undefined,
 ): string {
-  const sideInfo = buildSideInfo(model, thinking, effort, memory, mcpCount, toolCount, versionStr);
-  return '\n' + renderArtWithInfo(sideInfo) + '\n';
+  const lines = buildBannerLines(model, thinking, effort, memory, mcpCount, toolCount, versionStr);
+  return '\n' + lines.join('\n') + '\n\n';
 }
 
 export function renderToolCall(name: string, input: unknown): string {
@@ -147,95 +99,19 @@ export async function animateBanner(
   toolCount: number,
   versionStr?: string | undefined,
 ): Promise<void> {
+  const lines = buildBannerLines(model, thinking, effort, memory, mcpCount, toolCount, versionStr);
+
   if (!output.isTTY) {
     output.write(renderBanner(model, thinking, effort, memory, mcpCount, toolCount, versionStr));
     return;
   }
 
-  const rowCount = ASCII_LYNOX.length;
-  const sideInfo = buildSideInfo(model, thinking, effort, memory, mcpCount, toolCount, versionStr);
-
-  // Per-character color: brand gradient for position (r, col)
-  const gradientC = (r: number, col: number): number => {
-    const palette = BRAND_ROW_COLORS[r]!;
-    const pIdx = Math.floor((col / ASCII_MAX_COLS) * palette.length);
-    return palette[pIdx] ?? palette[palette.length - 1]!;
-  };
-
-  // Render a row with per-character color function
-  const renderRow = (r: number, getColor: (r: number, col: number) => number): string => {
-    const row = ASCII_LYNOX[r]!;
-    let line = '';
-    for (let col = 0; col < row.length; col++) {
-      const ch = row[col]!;
-      if (ch === ' ') { line += ch; continue; }
-      line += `\x1b[38;5;${getColor(r, col)}m${ch}\x1b[0m`;
-    }
-    return line;
-  };
-
-  // Draw a full frame with per-character color control
-  const draw = (colorFn: (r: number, col: number) => number, infoVisible?: Set<number>): void => {
-    output.write(`\x1b[${rowCount}A`);
-    for (let r = 0; r < rowCount; r++) {
-      const line = renderRow(r, colorFn);
-      const info = infoVisible !== undefined && infoVisible.has(r) ? sideInfo[r] : undefined;
-      if (info !== undefined) {
-        const visible = stripAnsi(line).length;
-        const pad = Math.max(1, INFO_COL - visible);
-        output.write(`\x1b[2K${line}${' '.repeat(pad)}${info}\n`);
-      } else {
-        output.write(`\x1b[2K${line}\n`);
-      }
-    }
-  };
-
-  // Reserve space
+  // Staggered line reveal
   output.write('\n');
-  for (let r = 0; r < rowCount; r++) output.write('\n');
-
-  // Phase 1: Fade from deep purple — body materializes (~250ms)
-  const purpleSteps = [53, 54, 55, 92];
-  for (const shade of purpleSteps) {
-    draw(() => shade);
-    await sleep(50);
+  for (const line of lines) {
+    output.write(line + '\n');
+    if (line.length > 0) await sleep(60);
   }
-  draw(gradientC);
-  await sleep(50);
-
-  // Phase 2: Iris line sweep left→right on eye area rows 4-6 (~250ms)
-  const sweepW = 4;
-  for (let pos = -sweepW; pos <= ASCII_MAX_COLS + sweepW; pos += 3) {
-    draw((r, col) => {
-      if (r < 4 || r > 6) return gradientC(r, col);
-      // Eye area: white sweep head, gradient behind
-      if (col >= pos - sweepW && col <= pos) return 231;
-      return gradientC(r, col);
-    });
-    await sleep(18);
-  }
-  draw(gradientC);
-
-  // Phase 3: Double iris flash — bot "wakes up" (~280ms)
-  await sleep(40);
-  draw((r, col) => (r >= 4 && r <= 6) ? 231 : gradientC(r, col));
-  await sleep(90);
-  draw(gradientC);
-  await sleep(50);
-  draw((r, col) => (r >= 4 && r <= 6) ? 231 : gradientC(r, col));
-  await sleep(70);
-  draw(gradientC);
-
-  // Phase 4: Info reveal with stagger (~240ms)
-  await sleep(40);
-  const infoRowIds = [3, 5, 6, 7];
-  const visibleInfo = new Set<number>();
-  for (const id of infoRowIds) {
-    visibleInfo.add(id);
-    draw(gradientC, visibleInfo);
-    await sleep(60);
-  }
-
   output.write('\n');
 }
 

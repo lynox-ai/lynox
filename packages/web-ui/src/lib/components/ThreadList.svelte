@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { t } from '../i18n.svelte.js';
-	import { getThreads, loadThreads, archiveThread, getIsLoadingThreads } from '../stores/threads.svelte.js';
+	import { getThreads, loadThreads, archiveThread, toggleFavorite, getIsLoadingThreads } from '../stores/threads.svelte.js';
 	import { getSessionId } from '../stores/chat.svelte.js';
 
 	let { onselect }: { onselect: (threadId: string) => void } = $props();
@@ -94,9 +94,18 @@
 						>
 							{thread.title || t('threads.no_title')}
 						</button>
-						<span class="text-xs text-text-subtle shrink-0 pr-2 group-hover:hidden">
-							{timeAgo(thread.updated_at)}
-						</span>
+						{#if thread.is_favorite}
+							<span class="text-accent text-xs shrink-0 pr-1 group-hover:hidden">&#9733;</span>
+						{:else}
+							<span class="text-xs text-text-subtle shrink-0 pr-2 group-hover:hidden">
+								{timeAgo(thread.updated_at)}
+							</span>
+						{/if}
+						<button
+							onclick={(e: MouseEvent) => { e.stopPropagation(); void toggleFavorite(thread.id); }}
+							class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-accent hover:bg-accent/10 text-xs transition-colors"
+							aria-label={thread.is_favorite ? t('threads.unfavorite') : t('threads.favorite')}
+						>{thread.is_favorite ? '\u2605' : '\u2606'}</button>
 						<button
 							onclick={(e: MouseEvent) => { e.stopPropagation(); void archiveThread(thread.id); }}
 							class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"

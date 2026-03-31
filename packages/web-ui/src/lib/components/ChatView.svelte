@@ -29,6 +29,42 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { goto } from '$app/navigation';
+	import { onMount } from 'svelte';
+
+	// Dashboard stats for empty state
+	let dashStats = $state<{ runs: number; cost: number; tasks: number; entities: number }>({ runs: 0, cost: 0, tasks: 0, entities: 0 });
+
+	async function loadDashStats() {
+		try {
+			const [costRes, tasksRes, kgRes] = await Promise.all([
+				fetch(`${getApiBase()}/history/cost/daily?days=1`),
+				fetch(`${getApiBase()}/tasks?status=in_progress`),
+				fetch(`${getApiBase()}/kg/stats`),
+			]);
+			if (costRes.ok) {
+				const data = (await costRes.json()) as { days: { cost_usd: number; run_count: number }[] };
+				const today = data.days?.[0];
+				if (today) { dashStats.runs = today.run_count; dashStats.cost = today.cost_usd; }
+			}
+			if (tasksRes.ok) {
+				const data = (await tasksRes.json()) as { tasks: unknown[] };
+				dashStats.tasks = data.tasks?.length ?? 0;
+			}
+			if (kgRes.ok) {
+				const data = (await kgRes.json()) as { entityCount: number };
+				dashStats.entities = data.entityCount ?? 0;
+			}
+		} catch { /* non-critical */ }
+	}
+
+	function getGreeting(): string {
+		const h = new Date().getHours();
+		if (h < 12) return t('chat.greeting_morning');
+		if (h < 18) return t('chat.greeting_afternoon');
+		return t('chat.greeting_evening');
+	}
+
+	onMount(() => { void loadDashStats(); });
 
 	// Mask any secret-like patterns (API keys, tokens) that might leak into display
 	const SECRET_PATTERNS = [
@@ -646,18 +682,39 @@
 						<p class="text-center text-xs text-text-subtle">{t('onboard.api_key_secure')}</p>
 					</div>
 				{:else}
-					<!-- Ready state with example prompts -->
-					<div class="w-full max-w-lg px-4 space-y-6">
+					<!-- Dashboard empty state -->
+					<div class="w-full max-w-xl px-4 space-y-8">
 						<div class="text-center">
 							{#if justCompleted}
 								<h2 class="text-2xl font-light tracking-tight text-text mb-2">{t('onboard.ready_title')}</h2>
 								<p class="text-sm text-text-muted">{t('onboard.ready_hint')}</p>
 							{:else}
-								<h2 class="text-2xl font-light tracking-tight text-text-muted mb-2">lynox</h2>
+								<h2 class="text-2xl font-light tracking-tight text-text mb-1">{getGreeting()}</h2>
 								<p class="text-sm text-text-subtle">{t('chat.welcome')}</p>
 							{/if}
 						</div>
 
+						<!-- Stat tiles -->
+						<div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+							<a href="/app/activity?tab=history" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 text-center hover:border-border-hover transition-all group">
+								<p class="text-2xl font-semibold text-text group-hover:text-accent-text transition-colors">{dashStats.runs}</p>
+								<p class="text-xs text-text-subtle mt-1">{t('chat.stat_runs')}</p>
+							</a>
+							<a href="/app/activity?tab=history" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 text-center hover:border-border-hover transition-all group">
+								<p class="text-2xl font-semibold text-text group-hover:text-accent-text transition-colors">${dashStats.cost.toFixed(2)}</p>
+								<p class="text-xs text-text-subtle mt-1">{t('chat.stat_cost')}</p>
+							</a>
+							<a href="/app/activity?tab=tasks" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 text-center hover:border-border-hover transition-all group">
+								<p class="text-2xl font-semibold text-text group-hover:text-accent-text transition-colors">{dashStats.tasks}</p>
+								<p class="text-xs text-text-subtle mt-1">{t('chat.stat_tasks')}</p>
+							</a>
+							<a href="/app/knowledge" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 text-center hover:border-border-hover transition-all group">
+								<p class="text-2xl font-semibold text-text group-hover:text-accent-text transition-colors">{dashStats.entities}</p>
+								<p class="text-xs text-text-subtle mt-1">{t('chat.stat_entities')}</p>
+							</a>
+						</div>
+
+						<!-- Quick action prompts -->
 						<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
 							{#each examples as example}
 								<button

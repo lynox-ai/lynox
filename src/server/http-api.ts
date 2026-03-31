@@ -58,6 +58,7 @@ type AuthScope = 'admin' | 'user';
 
 function requiresAdmin(method: string, pathname: string): boolean {
   if (method === 'PUT' && pathname === '/api/config') return true;
+  if (method === 'GET' && pathname === '/api/vault/key') return true;
   if (method === 'POST' && pathname === '/api/vault/rotate') return true;
   if (method === 'DELETE' && pathname.startsWith('/api/files')) return true;
   if (method === 'GET' && pathname === '/api/secrets') return true;
@@ -704,6 +705,7 @@ export class LynoxHTTPApi {
       threadStore.updateThread(params['id']!, {
         title: typeof b?.['title'] === 'string' ? b['title'] : undefined,
         is_archived: typeof b?.['is_archived'] === 'boolean' ? b['is_archived'] : undefined,
+        is_favorite: typeof b?.['is_favorite'] === 'boolean' ? b['is_favorite'] : undefined,
       });
       jsonResponse(res, 200, { ok: true });
     }));
@@ -1427,6 +1429,15 @@ export class LynoxHTTPApi {
     }));
 
     // ── Vault ─────────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/vault/key', async (_req, res) => {
+      const key = process.env['LYNOX_VAULT_KEY'];
+      if (!key) {
+        jsonResponse(res, 200, { configured: false, key: null });
+        return;
+      }
+      jsonResponse(res, 200, { configured: true, key });
+    });
 
     this.staticRoutes.set('POST /api/vault/rotate', async (_req, res, _params, body) => {
       const b = body as Record<string, unknown> | null;

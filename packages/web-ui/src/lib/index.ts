@@ -81,6 +81,7 @@ export {
 	archiveThread,
 	deleteThread,
 	renameThread,
+	toggleFavorite,
 	getThreads,
 	getIsLoadingThreads,
 } from './stores/threads.svelte.js';

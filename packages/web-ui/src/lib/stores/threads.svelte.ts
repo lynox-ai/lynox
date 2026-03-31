@@ -7,6 +7,7 @@ export interface Thread {
 	message_count: number;
 	total_cost_usd: number;
 	is_archived: number;
+	is_favorite: number;
 	created_at: string;
 	updated_at: string;
 }
@@ -53,10 +54,23 @@ export async function renameThread(id: string, title: string): Promise<void> {
 	if (thread) thread.title = title;
 }
 
+export async function toggleFavorite(id: string): Promise<void> {
+	const thread = threads.find((t) => t.id === id);
+	if (!thread) return;
+	const newValue = thread.is_favorite ? false : true;
+	await fetch(`${getApiBase()}/threads/${id}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ is_favorite: newValue }),
+	});
+	thread.is_favorite = newValue ? 1 : 0;
+}
+
 export function getThreads() {
-	return threads.toSorted(
-		(a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
-	);
+	return threads.toSorted((a, b) => {
+		if (a.is_favorite !== b.is_favorite) return b.is_favorite - a.is_favorite;
+		return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+	});
 }
 export function getIsLoadingThreads() {
 	return isLoading;
