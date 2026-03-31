@@ -377,7 +377,7 @@
 			</ul>
 
 			<!-- Bottom: Settings + User -->
-			<div class="border-t border-border px-3 py-2" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
+			<div class="border-t border-border px-3 py-3" style="padding-bottom: env(safe-area-inset-bottom, 0.75rem);">
 				<a
 					href="/app/settings"
 					onclick={() => { sidebarOpen = false; expandedSection = null; }}
