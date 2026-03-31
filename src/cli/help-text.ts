@@ -28,9 +28,9 @@ export function completer(line: string): [string[], string] {
 }
 
 export const MODEL_ALIASES: Record<string, ModelTier> = {
-  'opus': 'opus', 'apex': 'opus',
-  'sonnet': 'sonnet', 'fast': 'sonnet',
-  'haiku': 'haiku', 'micro': 'haiku',
+  'opus': 'opus',
+  'sonnet': 'sonnet',
+  'haiku': 'haiku',
 };
 
 export const HELP_TEXT_BASICS = `${BOLD}Basics${RESET}

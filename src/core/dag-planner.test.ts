@@ -147,7 +147,7 @@ describe('planDAG', () => {
     expect(system).toContain('Project context:');
   });
 
-  it('uses lynox-micro model by default', async () => {
+  it('uses haiku model by default', async () => {
     mockCreate.mockResolvedValueOnce(makeToolUseResponse({
       steps: [{ id: 's1', task: 'do it' }],
       reasoning: 'ok',

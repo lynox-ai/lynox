@@ -6,13 +6,13 @@ describe('MODEL_MAP', () => {
     expect(Object.keys(MODEL_MAP)).toHaveLength(3);
   });
 
-  it('contains lynox, lynox-fast, lynox-micro', () => {
+  it('contains opus, sonnet, haiku', () => {
     expect(MODEL_MAP['opus']).toBeDefined();
     expect(MODEL_MAP['sonnet']).toBeDefined();
     expect(MODEL_MAP['haiku']).toBeDefined();
   });
 
-  it('uses full model IDs (not short aliases)', () => {
+  it('uses full model IDs', () => {
     for (const [, value] of Object.entries(MODEL_MAP)) {
       expect(value).toMatch(/^claude-/);
       expect(value.length).toBeGreaterThan(10);

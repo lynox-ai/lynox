@@ -95,13 +95,13 @@ Available in REPL mode:
 | `/help all` | Show all commands |
 | `/exit` | Exit lynox |
 
-## Model Aliases
+## Model Names
 
-| Alias | Model |
-|-------|-------|
-| `opus`, `apex` | Claude Opus (most capable) |
-| `sonnet`, `fast` | Claude Sonnet (balanced) |
-| `haiku`, `micro` | Claude Haiku (fastest) |
+| Name | Model |
+|------|-------|
+| `opus` | Claude Opus (most capable) |
+| `sonnet` | Claude Sonnet (balanced) |
+| `haiku` | Claude Haiku (fastest) |
 
 ## Exit Codes
 
