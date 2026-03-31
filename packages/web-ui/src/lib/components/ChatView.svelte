@@ -31,30 +31,79 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 
-	// Dashboard stats for empty state
-	let dashStats = $state<{ runs: number; cost: number; tasks: number; entities: number }>({ runs: 0, cost: 0, tasks: 0, entities: 0 });
+	// Welcome screen state
+	let displayName = $state('');
 
-	async function loadDashStats() {
+	// First-visit security card
+	let showSecurityCard = $state(false);
+	let securityVaultKey = $state<string | null>(null);
+	let securityKeyRevealed = $state(false);
+
+	async function loadSecurityState() {
+		if (typeof localStorage === 'undefined') return;
+		if (localStorage.getItem('lynox-security-dismissed')) return;
 		try {
-			const [costRes, tasksRes, kgRes] = await Promise.all([
-				fetch(`${getApiBase()}/history/cost/daily?days=1`),
-				fetch(`${getApiBase()}/tasks?status=in_progress`),
-				fetch(`${getApiBase()}/kg/stats`),
-			]);
-			if (costRes.ok) {
-				const data = (await costRes.json()) as { days: { cost_usd: number; run_count: number }[] };
-				const today = data.days?.[0];
-				if (today) { dashStats.runs = today.run_count; dashStats.cost = today.cost_usd; }
-			}
-			if (tasksRes.ok) {
-				const data = (await tasksRes.json()) as { tasks: unknown[] };
-				dashStats.tasks = data.tasks?.length ?? 0;
-			}
-			if (kgRes.ok) {
-				const data = (await kgRes.json()) as { entityCount: number };
-				dashStats.entities = data.entityCount ?? 0;
-			}
-		} catch { /* non-critical */ }
+			const res = await fetch(`${getApiBase()}/vault/key`);
+			if (!res.ok) return;
+			const data = (await res.json()) as { configured: boolean; key: string | null };
+			securityVaultKey = data.key;
+			showSecurityCard = true;
+		} catch { /* ignore — older engine */ }
+	}
+
+	function dismissSecurityCard() {
+		showSecurityCard = false;
+		localStorage.setItem('lynox-security-dismissed', '1');
+	}
+
+	async function copySecurityKey() {
+		if (!securityVaultKey) return;
+		await navigator.clipboard.writeText(securityVaultKey);
+		addToast(t('config.vault_key_copied'), 'success');
+	}
+
+	// Prompt chips
+	function sendPromptChip(text: string) {
+		inputText = text;
+		void sendMessage(text, []);
+	}
+
+	const QUOTES = [
+		{ text: 'The best way to predict the future is to create it.', author: 'Peter Drucker' },
+		{ text: 'Vision without execution is hallucination.', author: 'Thomas Edison' },
+		{ text: 'The only way to do great work is to love what you do.', author: 'Steve Jobs' },
+		{ text: 'Innovation distinguishes between a leader and a follower.', author: 'Steve Jobs' },
+		{ text: 'Move fast and make things.', author: 'Mark Zuckerberg' },
+		{ text: 'Stay hungry, stay foolish.', author: 'Stewart Brand' },
+		{ text: 'Think different.', author: 'Apple' },
+		{ text: 'The people who are crazy enough to think they can change the world are the ones who do.', author: 'Steve Jobs' },
+		{ text: 'Your time is limited. Don\'t waste it living someone else\'s life.', author: 'Steve Jobs' },
+		{ text: 'Done is better than perfect.', author: 'Sheryl Sandberg' },
+		{ text: 'If you\'re not embarrassed by the first version, you launched too late.', author: 'Reid Hoffman' },
+		{ text: 'The future belongs to those who believe in the beauty of their dreams.', author: 'Eleanor Roosevelt' },
+		{ text: 'Make something people want.', author: 'Y Combinator' },
+		{ text: 'First, solve the problem. Then, write the code.', author: 'John Johnson' },
+		{ text: 'Simplicity is the ultimate sophistication.', author: 'Leonardo da Vinci' },
+		{ text: 'What would you attempt to do if you knew you could not fail?', author: 'Robert Schuller' },
+		{ text: 'The only limit to our realization of tomorrow is our doubts of today.', author: 'Franklin D. Roosevelt' },
+		{ text: 'Build something 100 people love, not something 1 million people kind of like.', author: 'Paul Graham' },
+		{ text: 'Opportunities don\'t happen. You create them.', author: 'Chris Grosser' },
+		{ text: 'Everything around you was built by people no smarter than you.', author: 'Steve Jobs' },
+		{ text: 'Don\'t find customers for your products. Find products for your customers.', author: 'Seth Godin' },
+		{ text: 'Ideas are easy. Implementation is hard.', author: 'Guy Kawasaki' },
+		{ text: 'The secret of getting ahead is getting started.', author: 'Mark Twain' },
+		{ text: 'What gets measured gets managed.', author: 'Peter Drucker' },
+		{ text: 'Culture eats strategy for breakfast.', author: 'Peter Drucker' },
+		{ text: 'Fall in love with the problem, not the solution.', author: 'Uri Levine' },
+		{ text: 'We are what we repeatedly do. Excellence is not an act, but a habit.', author: 'Aristotle' },
+		{ text: 'The way to get started is to quit talking and begin doing.', author: 'Walt Disney' },
+		{ text: 'It always seems impossible until it\'s done.', author: 'Nelson Mandela' },
+		{ text: 'Be the change you wish to see in the world.', author: 'Mahatma Gandhi' },
+	];
+
+	function getTodaysQuote() {
+		const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
+		return QUOTES[dayOfYear % QUOTES.length]!;
 	}
 
 	function getGreeting(): string {
@@ -64,7 +113,19 @@
 		return t('chat.greeting_evening');
 	}
 
-	onMount(() => { void loadDashStats(); });
+	async function loadDisplayName() {
+		try {
+			const res = await fetch(`${getApiBase()}/config`);
+			if (res.ok) {
+				const data = (await res.json()) as Record<string, unknown>;
+				if (typeof data['display_name'] === 'string' && data['display_name']) {
+					displayName = data['display_name'];
+				}
+			}
+		} catch { /* non-critical */ }
+	}
+
+	onMount(() => { void loadDisplayName(); void loadSecurityState(); });
 
 	// Mask any secret-like patterns (API keys, tokens) that might leak into display
 	const SECRET_PATTERNS = [
@@ -494,17 +555,6 @@
 		}
 	}
 
-	function sendExample(prompt: string) {
-		inputText = prompt;
-		handleSend();
-	}
-
-	const examples = $derived([
-		t('onboard.example_emails'),
-		t('onboard.example_research'),
-		t('onboard.example_remember'),
-		t('onboard.example_task'),
-	]);
 
 	$effect(() => { checkApiKey(); });
 
@@ -682,49 +732,78 @@
 						<p class="text-center text-xs text-text-subtle">{t('onboard.api_key_secure')}</p>
 					</div>
 				{:else}
-					<!-- Dashboard empty state -->
-					<div class="w-full max-w-xl px-4 space-y-8">
-						<div class="text-center">
-							{#if justCompleted}
-								<h2 class="text-2xl font-light tracking-tight text-text mb-2">{t('onboard.ready_title')}</h2>
-								<p class="text-sm text-text-muted">{t('onboard.ready_hint')}</p>
-							{:else}
-								<h2 class="text-2xl font-light tracking-tight text-text mb-1">{getGreeting()}</h2>
-								<p class="text-sm text-text-subtle">{t('chat.welcome')}</p>
+					<!-- Welcome screen -->
+					<div class="w-full max-w-xl px-4 welcome-fade">
+						{#if justCompleted}
+							<div class="text-center">
+							<h2 class="text-2xl font-light tracking-tight text-text mb-2">{t('onboard.ready_title')}</h2>
+							<p class="text-sm text-text-muted">{t('onboard.ready_hint')}</p>
+							</div>
+						{:else}
+							<!-- Greeting -->
+							<div class="text-center mb-8">
+								<div class="icon-entrance mb-4">
+									<img src="/icon.svg" alt="" class="icon-float mx-auto w-14 h-14" />
+								</div>
+								<h1 class="text-2xl md:text-3xl font-light tracking-tight text-text welcome-greeting">
+									{getGreeting()}{#if displayName}, {displayName}{/if}.
+								</h1>
+							</div>
+
+							<!-- Security card (first visit only) -->
+							{#if showSecurityCard}
+								<div class="rounded-[var(--radius-md)] border border-accent/20 bg-accent/5 p-4 mb-6">
+									<div class="flex items-start gap-3">
+										<svg class="shrink-0 mt-0.5 text-accent-text" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+										<div class="flex-1 min-w-0">
+											<p class="text-sm font-medium text-text mb-1">{t('onboard.security_title')}</p>
+											{#if securityVaultKey}
+												<p class="text-xs text-text-muted mb-3">{t('onboard.security_body')}</p>
+												{#if securityKeyRevealed}
+													<code class="block rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-xs font-mono text-text-muted break-all mb-3 select-all">{securityVaultKey}</code>
+												{/if}
+												<div class="flex flex-wrap gap-2">
+													{#if !securityKeyRevealed}
+														<button onclick={() => securityKeyRevealed = true} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_show')}</button>
+													{:else}
+														<button onclick={copySecurityKey} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('config.copy')}</button>
+													{/if}
+													<button onclick={() => goto('/app/settings/config')} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_settings')}</button>
+													<button onclick={dismissSecurityCard} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_dismiss')}</button>
+												</div>
+											{:else}
+												<p class="text-xs text-warning/80">{t('onboard.security_no_key')}</p>
+												<button onclick={dismissSecurityCard} class="mt-2 rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_dismiss')}</button>
+											{/if}
+										</div>
+									</div>
+								</div>
 							{/if}
-						</div>
 
-						<!-- Stat tiles -->
-						<div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-							<a href="/app/activity?tab=history" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 text-center hover:border-border-hover transition-all group">
-								<p class="text-2xl font-semibold text-text group-hover:text-accent-text transition-colors">{dashStats.runs}</p>
-								<p class="text-xs text-text-subtle mt-1">{t('chat.stat_runs')}</p>
-							</a>
-							<a href="/app/activity?tab=history" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 text-center hover:border-border-hover transition-all group">
-								<p class="text-2xl font-semibold text-text group-hover:text-accent-text transition-colors">${dashStats.cost.toFixed(2)}</p>
-								<p class="text-xs text-text-subtle mt-1">{t('chat.stat_cost')}</p>
-							</a>
-							<a href="/app/activity?tab=tasks" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 text-center hover:border-border-hover transition-all group">
-								<p class="text-2xl font-semibold text-text group-hover:text-accent-text transition-colors">{dashStats.tasks}</p>
-								<p class="text-xs text-text-subtle mt-1">{t('chat.stat_tasks')}</p>
-							</a>
-							<a href="/app/knowledge" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 text-center hover:border-border-hover transition-all group">
-								<p class="text-2xl font-semibold text-text group-hover:text-accent-text transition-colors">{dashStats.entities}</p>
-								<p class="text-xs text-text-subtle mt-1">{t('chat.stat_entities')}</p>
-							</a>
-						</div>
-
-						<!-- Quick action prompts -->
-						<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-							{#each examples as example}
-								<button
-									onclick={() => sendExample(example)}
-									class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 text-left text-sm text-text-muted hover:text-text hover:border-border-hover transition-all"
-								>
-									{example}
+							<!-- Prompt chips -->
+							<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-3">{t('onboard.try_prompt')}</p>
+							<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-6">
+								<button onclick={() => sendPromptChip(t('onboard.prompt_email'))} class="prompt-chip">
+									<span class="prompt-chip-text">{t('onboard.prompt_email')}</span>
 								</button>
-							{/each}
-						</div>
+								<button onclick={() => sendPromptChip(t('onboard.prompt_pdf'))} class="prompt-chip">
+									<span class="prompt-chip-text">{t('onboard.prompt_pdf')}</span>
+								</button>
+								<button onclick={() => sendPromptChip(t('onboard.prompt_report'))} class="prompt-chip">
+									<span class="prompt-chip-text">{t('onboard.prompt_report')}</span>
+								</button>
+								<button onclick={() => sendPromptChip(t('onboard.prompt_research'))} class="prompt-chip">
+									<span class="prompt-chip-text">{t('onboard.prompt_research')}</span>
+								</button>
+							</div>
+
+							<!-- Docs link -->
+							<div class="text-center">
+								<a href="https://docs.lynox.ai/getting-started/" target="_blank" rel="noopener noreferrer" class="text-xs text-text-subtle hover:text-accent-text transition-colors">
+									{t('onboard.docs_link')} &rarr;
+								</a>
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>
@@ -1012,7 +1091,7 @@
 	{/if}
 
 	<!-- Input -->
-	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-6 md:py-4" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
+	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl mx-auto flex flex-wrap gap-2 mb-2">
@@ -1027,7 +1106,7 @@
 			</div>
 		{/if}
 
-		<div class="max-w-3xl mx-auto flex items-end gap-1.5 md:gap-2">
+		<div class="max-w-3xl mx-auto flex items-center gap-1.5 md:gap-2">
 			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 
 			{#if transcribing}
@@ -1071,7 +1150,7 @@
 				<button
 					onclick={() => fileInputEl.click()}
 					disabled={!ready}
-					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-opacity self-end outline-none focus:outline-none"
+					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-opacity outline-none focus:outline-none"
 					aria-label={t('chat.attach_file')}
 				>
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
@@ -1095,7 +1174,7 @@
 				{#if isStreaming && !pendingPermission}
 					<button
 						onclick={() => abortRun()}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-all self-end"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-all"
 						aria-label={t('chat.abort')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
@@ -1104,7 +1183,7 @@
 					<button
 						onclick={handleSend}
 						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all self-end"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
 						aria-label={t('chat.send')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
@@ -1135,7 +1214,7 @@
 						}}
 						oncontextmenu={(e) => e.preventDefault()}
 						disabled={!ready}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all self-end select-none touch-none"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
 						aria-label={t('chat.voice_input')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
@@ -1145,28 +1224,71 @@
 				{/if}
 			{/if}
 		</div>
-		<div class="hidden md:flex mt-1.5 max-w-3xl mx-auto items-center justify-between gap-3">
-			<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
-				{pendingPermission ? t('chat.hint') : isStreaming ? (queueLength > 0 ? `${queueLength} ${t('chat.hint_queued')}` : t('chat.hint_streaming')) : t('chat.hint')}
-			</p>
-			<div class="flex items-center gap-2 ml-auto">
-				{#if queueLength > 0}
-					<button onclick={cancelQueue} class="text-[11px] font-mono uppercase tracking-widest text-danger hover:text-danger/80 transition-colors shrink-0">
-						{t('chat.cancel_queue')}
-					</button>
-				{/if}
-				{#if ctxBudget}
-					{@const pct = ctxBudget.usagePercent}
-					{@const color = pct >= 80 ? 'bg-danger' : pct >= 50 ? 'bg-warning' : 'bg-accent'}
-					{@const textColor = pct >= 80 ? 'text-danger' : pct >= 50 ? 'text-warning' : 'text-text-subtle'}
-					<div class="flex items-center gap-1.5 shrink-0" title="{formatK(ctxBudget.totalTokens)} / {formatK(ctxBudget.maxTokens)} {t('status.context_tokens')}{ctxModel ? ` · ${ctxModel}` : ''}">
-						<div class="w-16 h-1 rounded-full bg-border overflow-hidden">
-							<div class="{color} h-full rounded-full transition-all duration-500" style="width: {Math.min(pct, 100)}%"></div>
-						</div>
-						<span class="text-[10px] font-mono {textColor}">{pct}%</span>
-					</div>
-				{/if}
+		{#if isStreaming && queueLength > 0}
+			<div class="hidden md:flex mt-1.5 max-w-3xl mx-auto items-center gap-3">
+				<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
+					{queueLength} {t('chat.hint_queued')}
+				</p>
+				<button onclick={cancelQueue} class="text-[11px] font-mono uppercase tracking-widest text-danger hover:text-danger/80 transition-colors shrink-0">
+					{t('chat.cancel_queue')}
+				</button>
 			</div>
-		</div>
+		{/if}
 	</div>
 </div>
+
+<style>
+	@keyframes fadeUp {
+		from { opacity: 0; transform: translateY(12px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+	@keyframes iconEntrance {
+		0% { opacity: 0; transform: scale(0.5) rotate(-10deg); }
+		60% { opacity: 1; transform: scale(1.08) rotate(2deg); }
+		100% { opacity: 1; transform: scale(1) rotate(0deg); }
+	}
+	@keyframes iconFloat {
+		0%, 100% { transform: translateY(0); }
+		50% { transform: translateY(-6px); }
+	}
+	@keyframes iconGlow {
+		0%, 100% { filter: drop-shadow(0 0 8px rgba(101, 37, 239, 0.3)); }
+		50% { filter: drop-shadow(0 0 20px rgba(101, 37, 239, 0.6)); }
+	}
+	.welcome-fade :global(.icon-entrance) {
+		animation: iconEntrance 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+	}
+	.welcome-fade :global(.icon-float) {
+		animation: iconFloat 4s ease-in-out infinite, iconGlow 4s ease-in-out infinite;
+	}
+	.welcome-fade :global(.welcome-greeting) {
+		animation: fadeUp 0.8s ease-out 0.3s both;
+	}
+	.welcome-fade :global(blockquote) {
+		animation: fadeUp 0.8s ease-out 0.6s both;
+	}
+	:global(.prompt-chip) {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.75rem 1rem;
+		border-radius: var(--radius-md);
+		border: 1px solid var(--color-border, #1a1a4a);
+		background: var(--color-bg-subtle, #0a0a1a);
+		cursor: pointer;
+		transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+		text-align: left;
+	}
+	:global(.prompt-chip:hover) {
+		border-color: var(--color-accent, #6525EF);
+		box-shadow: 0 0 16px rgba(101, 37, 239, 0.08);
+		background: var(--color-bg-muted, #0c0c20);
+	}
+	:global(.prompt-chip-text) {
+		font-size: 0.8125rem;
+		color: var(--color-text-muted, #8888aa);
+	}
+	:global(.prompt-chip:hover .prompt-chip-text) {
+		color: var(--color-text, #e8e8f0);
+	}
+</style>

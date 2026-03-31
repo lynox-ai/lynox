@@ -27,6 +27,18 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   echo ""
 fi
 
+# Vault key guidance
+if [ -z "${LYNOX_VAULT_KEY:-}" ]; then
+  echo "  Note: No LYNOX_VAULT_KEY set."
+  echo "  API keys and backups will not be encrypted."
+  echo "  Add -e LYNOX_VAULT_KEY=\$(openssl rand -base64 48)"
+  echo ""
+else
+  echo "  Vault key active — data is encrypted."
+  echo "  Save your key in a password manager."
+  echo ""
+fi
+
 # Require ANTHROPIC_API_KEY
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   CONFIG_FILE="$HOME/.lynox/config.json"
