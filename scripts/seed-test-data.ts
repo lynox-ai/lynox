@@ -16,10 +16,11 @@ import { RunHistory } from '../src/core/run-history.js';
 import { DataStore } from '../src/core/data-store.js';
 import { PatternEngine } from '../src/core/pattern-engine.js';
 import { ThreadStore } from '../src/core/thread-store.js';
+import { CRM } from '../src/core/crm.js';
 import { embedToBlob } from '../src/core/embedding.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { copyFileSync, existsSync, unlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, unlinkSync, mkdirSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 // ── Config ──────────────────────────────────────────────────────
@@ -1171,6 +1172,252 @@ function seedDataStore(ds: DataStore): void {
   console.log(`  ✓ okrs: ${okrs.length} records`);
 }
 
+// ── Knowledge Memory Files ──────────────────────────────────────
+
+function seedMemoryFiles(): void {
+  console.log('\n📝 Seeding memory files...');
+  const memDir = join(LYNOX_DIR, 'memory', 'global');
+  mkdirSync(memDir, { recursive: true });
+
+  const files: Record<string, string> = {
+    'knowledge.txt': `NovaTech GmbH was founded in 2023 by Marcus Weber in Berlin. Focus: B2B SaaS for enterprise operations.
+DataVault Corp is our largest enterprise customer (€120K/year). CTO: Michael Torres. Stack: PostgreSQL + custom ETL.
+Horizon Ventures (Julia Bergmann) is our Series A lead investor candidate. AUM ~€200M, focus on early-stage enterprise.
+GreenLeaf Retail signed last month (€2.4K/mo). Uses NovaPlatform for inventory management. Contact: Nina Ortega.
+MedTech Pro is a mid-market customer (€4.8K/mo). Regulatory compliance is their top priority. Contact: Dr. Felix Neumann.
+Current MRR: €47.2K. ARR run-rate: €566K. 89 active customers across 4 products.
+NovaPlatform is the flagship product. 180 active users, p95 latency 180ms, 99.94% uptime.
+NovaAPI handles 150K+ calls/day. Rate limiting and webhook system are the newest features.
+NovaConnect launched in beta to 3 partners. Full public launch planned for March 15.
+NovaDash is the analytics dashboard. 75 active users, mostly used for executive reporting.
+Singapore expansion planned for Q2. Target: 5 pilot customers in fintech vertical.
+CAC is currently €340. LTV/CAC ratio: 4.2x. Payback period: 8 months.
+Marcus Weber handles investor relations and company strategy. Prefers concise bullet points.
+Sarah Chen (CTO) leads engineering. Deep expertise in distributed systems and PostgreSQL.
+Tom Richter (Head of Sales) manages the pipeline. Runs weekly review every Monday at 9 AM.`,
+
+    'methods.txt': `Sales qualification uses BANT framework: Budget, Authority, Need, Timeline.
+Customer onboarding follows 5 steps: Welcome call → Integration setup → Data migration → Training → Go-live sign-off.
+Bug triage classification: P1 (data loss/security) → fix today, P2 (broken workflow) → fix this week, P3/P4 → next sprint.
+Weekly standup format: What shipped → What's blocked → What's next. Keep under 15 minutes.
+Enterprise proposals include: Technical overview, security questionnaire, SLA terms, pricing tiers, case studies.
+Content calendar runs on a 2-week sprint: Week 1 = draft + review, Week 2 = publish + distribute.
+Sprint planning uses T-shirt sizing (S/M/L/XL). Anything bigger than L gets broken into sub-tasks.
+Cold email sequence: 3 touches over 10 days. Subject line A/B tested. Current best: 2.1% reply rate.
+Monthly business review structure: Revenue → Product → Customers → Team → Outlook.
+Churn prevention: Health score drops below 60 → Anna reaches out within 24 hours.`,
+
+    'status.txt': `NovaConnect launch: March 15. Webhook system in progress (Jan, 3 days), rate limiting not started.
+Series A fundraising: Term sheet received from Horizon Ventures. Due diligence prep at 70%.
+API v3 migration: 80% complete. Breaking changes documented. Customer migration guide drafted.
+Q1 hiring: 2 of 4 engineers hired (started April). 2 more interviews scheduled this week.
+Marketing rebrand: Logo finalized. Website copy 60% done. Launch aligned with NovaConnect release.
+Singapore pilot: 2 fintech prospects identified. Julia Bergmann offered portfolio introductions.
+Infrastructure costs: Optimized in February. Saved €1.2K/mo by right-sizing Kubernetes pods.
+Support backlog: 12 open tickets. 3 P2 (webhook + timezone + bulk import). Average resolution: 18 hours.`,
+
+    'learnings.txt': `Batch API calls reduce latency by 60% compared to sequential requests. Implemented in NovaAPI v2.3.
+Annual contracts with 15% discount reduce churn significantly. 78% of customers are still monthly — high risk.
+Cold outreach converts at 2.1% reply rate. Best performing channel: LinkedIn + personalized follow-up.
+Customer health score combining login frequency + support tickets + feature usage predicts churn 3 weeks early.
+Solo pricing tier at €19/mo could capture price-sensitive segment without cannibalizing Starter (€49) revenue.
+PostgreSQL JSONB outperforms document stores for our use case. 40% faster queries, simpler operations.
+Markdown artifacts preferred over plain text for reports. Users engage 3x more with formatted output.
+German-speaking markets respond better to "du" (informal) in product copy. Formal "Sie" in legal/enterprise.
+Proactive downsell (offer smaller plan before churn) retains 40% of at-risk accounts.
+Documentation with code examples gets 5x more page views than prose-only docs.`,
+  };
+
+  for (const [filename, content] of Object.entries(files)) {
+    writeFileSync(join(memDir, filename), content, 'utf-8');
+  }
+  console.log(`  ✓ ${Object.keys(files).length} memory files created (knowledge, methods, status, learnings)`);
+}
+
+// ── CRM Contacts & Deals ────────────────────────────────────────
+
+function seedCRM(ds: DataStore): void {
+  console.log('\n👥 Seeding CRM (contacts, deals, interactions)...');
+  const crm = new CRM(ds);
+  crm.ensureSchema();
+
+  const contacts = [
+    { name: 'Michael Torres', email: 'michael@datavault.io', company: 'DataVault Corp', type: 'customer', source: 'email', language: 'en', notes: 'Enterprise CTO. Technical decision maker.', tags: '["enterprise","technical"]' },
+    { name: 'Julia Bergmann', email: 'julia@horizonvc.com', company: 'Horizon Ventures', type: 'partner', source: 'web', language: 'de', notes: 'Series A lead investor. Met at Berlin Tech Week.', tags: '["investor","series-a"]' },
+    { name: 'Nina Ortega', email: 'nina@greenleaf.co', company: 'GreenLeaf Retail', type: 'customer', source: 'email', language: 'en', notes: 'Inventory manager. Signed last month.', tags: '["mid-market"]' },
+    { name: 'Felix Neumann', email: 'f.neumann@medtech-pro.de', company: 'MedTech Pro', type: 'customer', source: 'web', language: 'de', notes: 'Dr. Compliance-focused. Needs GDPR documentation.', tags: '["mid-market","compliance"]' },
+    { name: 'Sophie Laurent', email: 'sophie@cloudbridge.io', company: 'CloudBridge', type: 'prospect', source: 'web', language: 'en', notes: 'Evaluating NovaPlatform. No response in 14 days.', tags: '["at-risk"]' },
+    { name: 'Kenji Tanaka', email: 'kenji@techstart.sg', company: 'TechStart SG', type: 'lead', source: 'web', language: 'en', notes: 'Singapore fintech. Interested in NovaConnect API.', tags: '["singapore","fintech"]' },
+    { name: 'Anna Fischer', email: 'anna.f@alpinedigital.ch', company: 'Alpine Digital', type: 'customer', source: 'manual', language: 'de', notes: 'Swiss agency. Uses NovaDash for client reporting.', tags: '["agency","swiss"]' },
+    { name: 'Rajesh Patel', email: 'rajesh@flowmotion.io', company: 'FlowMotion', type: 'customer', source: 'email', language: 'en', notes: 'Heavy API user. Interested in API v3 batch endpoints.', tags: '["api-heavy"]' },
+    { name: 'Lena Schmidt', email: 'lena@smartfactory.de', company: 'SmartFactory GmbH', type: 'customer', source: 'web', language: 'de', notes: 'Manufacturing IoT. Uses custom API integrations.', tags: '["enterprise","iot"]' },
+    { name: 'Carlos Mendez', email: 'carlos@meridian.lat', company: 'Meridian Analytics', type: 'customer', source: 'email', language: 'en', notes: 'Beta tester for NovaConnect. Positive feedback.', tags: '["beta","analytics"]' },
+    { name: 'Emma Wilson', email: 'emma@cloudnine.media', company: 'CloudNine Media', type: 'lead', source: 'web', language: 'en', notes: 'Content agency. Interested in NovaDash.', tags: '["media","lead"]' },
+    { name: 'Thomas Huber', email: 'thomas@financehub.ch', company: 'FinanceHub AG', type: 'customer', source: 'manual', language: 'de', notes: 'Swiss fintech. Compliance and security priority.', tags: '["fintech","swiss"]' },
+  ];
+
+  for (const c of contacts) {
+    crm.upsertContact({ name: c.name, email: c.email, company: c.company, type: c.type as any, source: c.source as any, language: c.language, notes: c.notes });
+  }
+  console.log(`  ✓ ${contacts.length} contacts created`);
+
+  const deals = [
+    { title: 'Enterprise Platform License', contact_name: 'Michael Torres', value: 120000, stage: 'won', next_action: 'Onboarding kickoff', due_date: daysAgo(-5).split('T')[0] },
+    { title: 'Series A Investment', contact_name: 'Julia Bergmann', value: 2000000, stage: 'negotiation', next_action: 'Due diligence review', due_date: daysAgo(-14).split('T')[0] },
+    { title: 'NovaPlatform Annual', contact_name: 'Nina Ortega', value: 28800, stage: 'won', next_action: '', due_date: '' },
+    { title: 'MedTech Compliance Package', contact_name: 'Felix Neumann', value: 57600, stage: 'proposal', next_action: 'Send GDPR docs', due_date: daysAgo(-3).split('T')[0] },
+    { title: 'CloudBridge Evaluation', contact_name: 'Sophie Laurent', value: 36000, stage: 'qualified', next_action: 'Re-engage', due_date: daysAgo(0).split('T')[0] },
+    { title: 'Singapore Pilot', contact_name: 'Kenji Tanaka', value: 18000, stage: 'lead', next_action: 'Discovery call', due_date: daysAgo(-7).split('T')[0] },
+    { title: 'FlowMotion API Upgrade', contact_name: 'Rajesh Patel', value: 42000, stage: 'proposal', next_action: 'Send migration guide', due_date: daysAgo(-5).split('T')[0] },
+    { title: 'SmartFactory Integration', contact_name: 'Lena Schmidt', value: 84000, stage: 'negotiation', next_action: 'Technical review', due_date: daysAgo(-2).split('T')[0] },
+  ];
+
+  for (const d of deals) {
+    crm.upsertDeal({ title: d.title, contact_name: d.contact_name, value: d.value, currency: 'EUR', stage: d.stage as any, next_action: d.next_action, due_date: d.due_date });
+  }
+  console.log(`  ✓ ${deals.length} deals created`);
+
+  const interactions = [
+    { contact_name: 'Michael Torres', type: 'meeting', channel: 'web', summary: 'Onboarding kickoff. Discussed integration timeline and SSO.', date: daysAgo(2) },
+    { contact_name: 'Michael Torres', type: 'email', channel: 'email', summary: 'Sent enterprise API docs and security questionnaire.', date: daysAgo(5) },
+    { contact_name: 'Julia Bergmann', type: 'meeting', channel: 'web', summary: 'Coffee with Marcus. Series A terms and portfolio synergies.', date: daysAgo(8) },
+    { contact_name: 'Sophie Laurent', type: 'email', channel: 'email', summary: 'Follow-up on evaluation. No response yet.', date: daysAgo(14) },
+    { contact_name: 'Felix Neumann', type: 'call', channel: 'manual', summary: 'GDPR compliance requirements. Needs DPA agreement.', date: daysAgo(6) },
+    { contact_name: 'Kenji Tanaka', type: 'email', channel: 'web', summary: 'Inbound inquiry about NovaConnect for fintech workflows.', date: daysAgo(3) },
+    { contact_name: 'Lena Schmidt', type: 'meeting', channel: 'web', summary: 'Technical deep-dive on IoT data integration with Jan.', date: daysAgo(4) },
+    { contact_name: 'Carlos Mendez', type: 'email', channel: 'email', summary: 'NovaConnect beta feedback: positive on webhooks.', date: daysAgo(7) },
+  ];
+
+  for (const i of interactions) {
+    crm.logInteraction({ contact_name: i.contact_name, type: i.type as any, channel: i.channel as any, summary: i.summary, date: i.date });
+  }
+  console.log(`  ✓ ${interactions.length} interactions created`);
+}
+
+// ── Tasks & Pipeline Runs ───────────────────────────────────────
+
+function seedTasksAndPipelines(h: RunHistory): void {
+  console.log('\n🔄 Seeding tasks & pipeline runs...');
+  const db = h['db'] as import('better-sqlite3').Database;
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL, description TEXT,
+      status TEXT DEFAULT 'open',
+      priority TEXT DEFAULT 'medium',
+      assignee TEXT DEFAULT 'lynox',
+      scope_type TEXT, scope_id TEXT,
+      due_date TEXT, tags TEXT DEFAULT '[]',
+      parent_task_id TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      completed_at TEXT,
+      schedule_cron TEXT, next_run_at TEXT, last_run_at TEXT,
+      last_run_result TEXT, last_run_status TEXT,
+      task_type TEXT DEFAULT 'manual',
+      watch_config TEXT, max_retries INTEGER DEFAULT 3, retry_count INTEGER DEFAULT 0,
+      notification_channel TEXT, pipeline_id TEXT
+    );
+    CREATE TABLE IF NOT EXISTS pipeline_runs (
+      id TEXT PRIMARY KEY,
+      manifest_name TEXT NOT NULL,
+      status TEXT DEFAULT 'running',
+      manifest_json TEXT,
+      total_duration_ms INTEGER DEFAULT 0,
+      total_cost_usd REAL DEFAULT 0,
+      total_tokens_in INTEGER DEFAULT 0, total_tokens_out INTEGER DEFAULT 0,
+      step_count INTEGER DEFAULT 0, parent_run_id TEXT,
+      error TEXT,
+      started_at TEXT DEFAULT (datetime('now')),
+      completed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS pipeline_step_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pipeline_run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      status TEXT DEFAULT 'success',
+      result TEXT, error TEXT,
+      duration_ms INTEGER DEFAULT 0,
+      tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0
+    );
+  `);
+
+  const tasks = [
+    { title: 'Weekly sales pipeline review', status: 'completed', priority: 'high', assignee: 'lynox', task_type: 'scheduled', schedule_cron: '0 9 * * 1' },
+    { title: 'Monitor competitor pricing pages', status: 'completed', priority: 'medium', assignee: 'lynox', task_type: 'watch' },
+    { title: 'Daily customer health check', status: 'completed', priority: 'high', assignee: 'lynox', task_type: 'scheduled', schedule_cron: '0 8 * * *' },
+    { title: 'Send DataVault enterprise quote', status: 'completed', priority: 'urgent', assignee: 'user', task_type: 'manual' },
+    { title: 'Prepare March business review', status: 'completed', priority: 'high', assignee: 'lynox', task_type: 'manual' },
+    { title: 'Monthly churn risk analysis', status: 'completed', priority: 'medium', assignee: 'lynox', task_type: 'scheduled', schedule_cron: '0 9 1 * *' },
+    { title: 'Re-engage CloudBridge', status: 'open', priority: 'high', assignee: 'user', task_type: 'manual' },
+    { title: 'NovaConnect launch checklist', status: 'in_progress', priority: 'urgent', assignee: 'lynox', task_type: 'manual' },
+    { title: 'Discovery calls with Berlin leads', status: 'open', priority: 'medium', assignee: 'user', task_type: 'manual' },
+    { title: 'Weekly content publishing', status: 'completed', priority: 'low', assignee: 'lynox', task_type: 'scheduled', schedule_cron: '0 10 * * 3' },
+  ];
+
+  const insertTask = db.prepare(`INSERT OR REPLACE INTO tasks (id,title,status,priority,assignee,task_type,schedule_cron,last_run_status,scope_type,scope_id,created_at,updated_at,completed_at,last_run_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  for (const t of tasks) {
+    const id = randomUUID().slice(0, 8);
+    const created = daysAgo(randomBetween(5, 40));
+    const completed = t.status === 'completed' ? daysAgo(randomBetween(0, 5)) : null;
+    const lastRun = t.task_type === 'scheduled' ? daysAgo(randomBetween(0, 3)) : null;
+    insertTask.run(id, t.title, t.status, t.priority, t.assignee, t.task_type, t.schedule_cron ?? null, t.status === 'completed' ? 'completed' : null, 'context', CONTEXT_ID, created, daysAgo(randomBetween(0, 3)), completed, lastRun);
+  }
+  console.log(`  ✓ ${tasks.length} tasks created`);
+
+  const pipelines = [
+    { name: 'Weekly Sales Pipeline Review', steps: ['memory_recall', 'data_store_query', 'web_search', 'artifact_save'] },
+    { name: 'Customer Health Analysis', steps: ['data_store_query', 'memory_recall', 'data_store_aggregate'] },
+    { name: 'Monthly Business Review', steps: ['data_store_query', 'data_store_aggregate', 'memory_recall', 'artifact_save', 'send_email'] },
+    { name: 'Competitor Price Monitor', steps: ['web_search', 'memory_recall', 'memory_store'] },
+    { name: 'Daily Email Triage', steps: ['gmail_search', 'memory_recall', 'send_email'] },
+    { name: 'Lead Qualification Report', steps: ['data_store_query', 'web_search', 'memory_recall', 'artifact_save'] },
+    { name: 'Churn Risk Alert', steps: ['data_store_query', 'data_store_aggregate', 'send_email'] },
+    { name: 'NovaConnect Launch Tracker', steps: ['memory_recall', 'data_store_query', 'calendar'] },
+  ];
+
+  const insertPipeline = db.prepare(`INSERT INTO pipeline_runs (id,manifest_name,status,manifest_json,step_count,total_duration_ms,total_cost_usd,total_tokens_in,total_tokens_out,started_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+  const insertStep = db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id,step_id,status,duration_ms,tokens_in,tokens_out,cost_usd) VALUES (?,?,?,?,?,?,?)`);
+
+  let totalPipelineRuns = 0;
+  for (const p of pipelines) {
+    const manifest = JSON.stringify({ name: p.name, steps: p.steps.map(s => ({ id: s, tool: s })) });
+    for (let r = 0; r < randomBetween(3, 8); r++) {
+      const runId = randomUUID();
+      const started = daysAgo(randomBetween(1, 60));
+      const dur = p.steps.length * randomBetween(2000, 8000);
+      const tIn = p.steps.length * randomBetween(800, 3000);
+      const tOut = p.steps.length * randomBetween(300, 1500);
+      const cost = tIn * 0.000003 + tOut * 0.000015;
+      insertPipeline.run(runId, p.name, 'completed', manifest, p.steps.length, dur, cost, tIn, tOut, started, started);
+      for (const step of p.steps) {
+        insertStep.run(runId, step, 'success', randomBetween(1000, 8000), randomBetween(500, 3000), randomBetween(200, 1500), cost / p.steps.length);
+      }
+      totalPipelineRuns++;
+    }
+  }
+  console.log(`  ✓ ${totalPipelineRuns} pipeline runs (${pipelines.length} workflows)`);
+}
+
+// ── API Profiles Cleanup ────────────────────────────────────────
+
+function cleanApiProfiles(): void {
+  console.log('\n🔌 Cleaning API profiles...');
+  const apisDir = join(LYNOX_DIR, 'apis');
+  if (existsSync(apisDir)) {
+    const files = readdirSync(apisDir).filter(f => f.endsWith('.json'));
+    for (const f of files) {
+      rmSync(join(apisDir, f));
+    }
+    console.log(`  ✓ Removed ${files.length} old API profiles`);
+  } else {
+    mkdirSync(apisDir, { recursive: true });
+    console.log('  ✓ Created apis directory');
+  }
+}
+
 // ── Main ────────────────────────────────────────────────────────
 
 function main(): void {
@@ -1184,7 +1431,7 @@ function main(): void {
   backupDatabases();
 
   if (CLEAN) {
-    console.log('\n🧹 Cleaning databases...');
+    console.log('\n🧹 Cleaning databases & files...');
     for (const name of ['agent-memory.db', 'history.db', 'datastore.db']) {
       const p = join(LYNOX_DIR, name);
       if (existsSync(p)) {
@@ -1196,6 +1443,14 @@ function main(): void {
         console.log(`  ✓ Removed ${name}`);
       }
     }
+    // Clean memory files
+    const memDir = join(LYNOX_DIR, 'memory');
+    if (existsSync(memDir)) {
+      rmSync(memDir, { recursive: true });
+      console.log('  ✓ Removed memory files');
+    }
+    // Clean API profiles
+    cleanApiProfiles();
   }
 
   // Step 2: Open databases
@@ -1207,7 +1462,10 @@ function main(): void {
     // Step 3: Seed
     seedAgentMemory(memDb);
     seedRunHistory(runHistory);
+    seedTasksAndPipelines(runHistory);
     seedDataStore(dataStore);
+    seedCRM(dataStore);
+    seedMemoryFiles();
 
     // Step 4: Run pattern detection + KPI computation
     console.log('\n🧠 Running pattern detection & KPI computation...');
@@ -1245,8 +1503,20 @@ function main(): void {
     console.log(`    Tool Calls: ${counts.toolCalls}`);
     console.log(`    Threads:    ${counts.threads}`);
     console.log(`    Messages:   ${counts.messages}`);
+    const crmCounts = {
+      contacts: (dataStore as any).db.prepare("SELECT COUNT(*) as cnt FROM ds_contacts").get()?.cnt ?? 0,
+      deals: (dataStore as any).db.prepare("SELECT COUNT(*) as cnt FROM ds_deals").get()?.cnt ?? 0,
+      interactions: (dataStore as any).db.prepare("SELECT COUNT(*) as cnt FROM ds_interactions").get()?.cnt ?? 0,
+      tasks: (runHistory as any).db.prepare('SELECT COUNT(*) as cnt FROM tasks').get()?.cnt ?? 0,
+      pipelines: (runHistory as any).db.prepare('SELECT COUNT(*) as cnt FROM pipeline_runs').get()?.cnt ?? 0,
+    };
     console.log(`  datastore.db:`);
     console.log(`    Collections: leads, revenue, product_metrics, support_tickets, okrs`);
+    console.log(`    CRM: ${crmCounts.contacts} contacts, ${crmCounts.deals} deals, ${crmCounts.interactions} interactions`);
+    console.log(`  tasks & workflows:`);
+    console.log(`    Tasks:     ${crmCounts.tasks}`);
+    console.log(`    Pipelines: ${crmCounts.pipelines}`);
+    console.log(`  memory files: knowledge, methods, status, learnings`);
 
   } finally {
     memDb.close();

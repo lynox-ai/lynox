@@ -61,6 +61,23 @@ PORT=3300 LYNOX_ENGINE_URL="http://127.0.0.1:$LYNOX_HTTP_PORT" \
 WEBUI_PID=$!
 
 sleep 1
+
+# Load seeded memory files into engine cache via API
+MEMORY_DIR="$HOME/.lynox/memory/global"
+if [ -d "$MEMORY_DIR" ]; then
+  for ns in knowledge methods status learnings; do
+    FILE="$MEMORY_DIR/$ns.txt"
+    if [ -f "$FILE" ]; then
+      CONTENT=$(cat "$FILE")
+      curl -s -X PUT "http://127.0.0.1:$LYNOX_HTTP_PORT/api/memory/$ns" \
+        -H "Content-Type: application/json" \
+        -d "{\"content\": $(printf '%s' "$CONTENT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" \
+        >/dev/null 2>&1
+    fi
+  done
+  echo "Memory files loaded into engine."
+fi
+
 echo ""
 echo "════════════════════════════════════"
 echo "  lynox demo ready"
