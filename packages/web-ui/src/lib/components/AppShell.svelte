@@ -377,11 +377,11 @@
 			</ul>
 
 			<!-- Bottom: Settings + User -->
-			<div class="border-t border-border px-2 py-2 md:px-3" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
+			<div class="border-t border-border px-3 py-2" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
 				<a
 					href="/app/settings"
 					onclick={() => { sidebarOpen = false; expandedSection = null; }}
-					class="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-3 py-2.5 text-sm transition-all
+					class="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm transition-all
 					{isActive('/app/settings', false)
 						? 'bg-accent/10 text-accent-text border-l-2 border-accent'
 						: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
