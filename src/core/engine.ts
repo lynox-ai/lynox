@@ -1,6 +1,5 @@
 import { join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
-import { channels } from './observability.js';
 import type {
   LynoxConfig,
   LynoxUserConfig,

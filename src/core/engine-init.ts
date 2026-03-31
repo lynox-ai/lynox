@@ -3,10 +3,9 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
-import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import type Anthropic from '@anthropic-ai/sdk';
 import { getErrorMessage } from './utils.js';
 import { writeFileAtomicSync } from './atomic-write.js';

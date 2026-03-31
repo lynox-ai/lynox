@@ -2,7 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://docs.lynox.dev',
+  site: 'https://docs.lynox.ai',
   integrations: [
     starlight({
       title: 'lynox',
@@ -23,7 +23,7 @@ export default defineConfig({
           tag: 'script',
           content: `document.addEventListener('DOMContentLoaded', () => {
             const link = document.querySelector('.site-title');
-            if (link) link.href = 'https://lynox.dev';
+            if (link) link.href = 'https://lynox.ai';
           });`,
         },
       ],

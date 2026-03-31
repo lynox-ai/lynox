@@ -11,7 +11,7 @@ import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';

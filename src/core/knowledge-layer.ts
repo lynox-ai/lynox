@@ -3,7 +3,6 @@ import type {
   IKnowledgeLayer,
   MemoryNamespace,
   MemoryScopeRef,
-  MemoryScopeType,
   EntityRecord,
   RelationRecord,
   ContradictionInfo,

@@ -1,7 +1,7 @@
 import type { IMemory, MemoryScopeRef, IKnowledgeLayer } from '../types/index.js';
 import { ALL_NAMESPACES } from '../types/index.js';
 import type { EmbeddingProvider } from './embedding.js';
-import { cosineSimilarity, blobToEmbed } from './embedding.js';
+import { blobToEmbed } from './embedding.js';
 import type { RunHistory } from './run-history.js';
 
 /** Half-life for temporal decay in days. Memories older than this lose ~50% of their score. */

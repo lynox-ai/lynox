@@ -4,7 +4,7 @@
 // Follow-up suggestion buttons after completion.
 
 import { createReadStream, existsSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 import type { Telegraf } from 'telegraf';
 import type { StreamEvent } from '../../types/index.js';
 import {
