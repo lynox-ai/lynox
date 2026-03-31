@@ -171,31 +171,6 @@ If any are missing, the agent is told to research the API documentation first.
 /api show <id>    # Show full details of a profile
 ```
 
-## SDK Usage
-
-```typescript
-import { ApiStore } from '@lynox-ai/core';
-
-const store = new ApiStore();
-store.loadFromDirectory('/path/to/apis');
-
-// Or register programmatically
-store.register({
-  id: 'my-api',
-  name: 'My API',
-  base_url: 'https://api.example.com',
-  description: 'Does things',
-  rate_limit: { requests_per_minute: 60 },
-});
-
-// Check rate limit before request
-const blocked = store.checkRateLimit('api.example.com');
-if (blocked) console.log(blocked); // "API rate limit reached..."
-
-// Get system prompt context
-const promptContext = store.formatForSystemPrompt();
-```
-
 ## Why This Matters
 
 Without API profiles, agents:

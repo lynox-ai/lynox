@@ -121,47 +121,6 @@ CRM data is stored in standard DataStore tables. Use existing commands:
 
 Or ask the agent directly — it knows about the CRM tables and can query them.
 
-## SDK Usage
-
-```typescript
-import { Engine, CRM } from '@lynox-ai/core';
-
-const engine = new Engine({});
-await engine.init();
-
-const crm = engine.getCRM();
-
-// Agent-driven contact creation
-crm.upsertContact({
-  name: 'Lisa Weber',
-  email: 'lisa@acme.ch',
-  company: 'Acme AG',
-  type: 'lead',
-  source: 'telegram',
-});
-
-// Create a deal
-crm.upsertDeal({
-  title: 'Pro Package',
-  contact_name: 'Lisa Weber',
-  value: 4800,
-  stage: 'proposal',
-  due_date: '2026-04-01T00:00:00Z',
-});
-
-// Query pipeline
-const pipeline = crm.getPipelineSummary();
-// → [{ stage: 'proposal', count: 1, total_value: 4800 }]
-
-// Log interaction
-crm.logInteraction({
-  contact_name: 'Lisa Weber',
-  type: 'email',
-  channel: 'email',
-  summary: 'Sent proposal for Pro Package',
-});
-```
-
 ## Configuration
 
 No configuration needed. The CRM is initialized automatically when the DataStore is available. To disable, don't initialize the DataStore (set via Engine config).

@@ -134,7 +134,6 @@ Or use Docker: `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/
 
 Create a bot via [@BotFather](https://t.me/BotFather), add the token in Web UI → Settings → Integrations.
 
-For SDK usage, see [docs/sdk.md](docs/sdk.md) and [`examples/`](examples/).
 
 ## Documentation
 

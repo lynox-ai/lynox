@@ -153,7 +153,7 @@ When lynox runs on a server, there are several ways to interact with it:
 |---------|----------|-------|
 | **Web UI** | Primary interface for everyone | Use `Dockerfile.web-ui`, port 3000 |
 | **Telegram** | Mobile / on-the-go tasks | Add bot token in Web UI → Settings → Integrations |
-| **MCP HTTP** | External integrations (IDE, SDK) | Add `LYNOX_MCP_SECRET`, expose port 3042 |
+| **MCP HTTP** | External integrations (IDE) | Add `LYNOX_MCP_SECRET`, expose port 3042 |
 | **SSH + CLI** | Admin/debugging | `docker exec -it lynox node /app/dist/index.js` |
 
 **Web UI** is the primary interface — chat, settings, integrations, run history, knowledge browser. Use `Dockerfile.web-ui` for the combined Engine + Web UI image:

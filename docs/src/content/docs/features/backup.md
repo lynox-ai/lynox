@@ -158,35 +158,6 @@ When `backup_schedule` is configured and the WorkerLoop is running (Telegram, MC
 - `0` disables auto-deletion
 - Manual pruning: `/backup prune`
 
-## SDK Usage
-
-```typescript
-import { BackupManager } from '@lynox-ai/core';
-import { getLynoxDir } from '@lynox-ai/core';
-
-const manager = new BackupManager(getLynoxDir(), {
-  backupDir: '/path/to/backups',
-  retentionDays: 30,
-  encrypt: true,
-}, process.env['LYNOX_VAULT_KEY'] ?? null);
-
-// Create
-const result = await manager.createBackup();
-console.log(result.success, result.path);
-
-// List
-const backups = manager.listBackups();
-
-// Verify
-const check = manager.verifyBackup(backups[0].path);
-
-// Restore (creates safety backup first)
-const restore = await manager.restoreBackup(backupPath);
-
-// Prune
-const pruned = manager.pruneBackups(30);
-```
-
 ## Google Drive Backup
 
 When Google auth is configured with `drive.file` scope, backups are automatically uploaded to Google Drive after each local backup.

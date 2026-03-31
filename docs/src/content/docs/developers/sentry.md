@@ -125,28 +125,6 @@ Sentry has built-in alerting. Configure in your Sentry project under **Alerts**:
 
 No custom Telegram or webhook integration is needed — Sentry handles notification routing.
 
-## SDK Usage
-
-When using lynox as a library, you can initialize Sentry yourself or let the Engine handle it:
-
-```typescript
-import { Engine } from '@lynox-ai/core';
-
-// Option 1: Via config (Engine handles init)
-const engine = new Engine({ });
-// Set LYNOX_SENTRY_DSN env var or sentry_dsn in config
-await engine.init();
-
-// Option 2: Direct API
-import { initSentry, captureError, addToolBreadcrumb } from '@lynox-ai/core';
-
-await initSentry('https://key@org.ingest.de.sentry.io/id');
-// Now all errors in Session.run() are automatically captured
-
-// Manual breadcrumbs (optional)
-addToolBreadcrumb('my-tool', true, 250);
-```
-
 ## Self-Hosted Sentry
 
 lynox works with self-hosted Sentry instances. Point the DSN to your server:
