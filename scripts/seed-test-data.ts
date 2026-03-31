@@ -345,7 +345,97 @@ const RELATION_TYPES = [
 
 // ── Seeding Functions ───────────────────────────────────────────
 
-function seedAgentMemory(db: AgentMemoryDb): void {
+/**
+ * Compute daily/weekly/all-time metrics from actual run data in history.db.
+ * This ensures Insights charts and forecasts are consistent with seeded runs.
+ */
+function computeMetricsFromRuns(memDb: AgentMemoryDb, runHistory: RunHistory): number {
+  const histDb = (runHistory as any).db as import('better-sqlite3').Database;
+  const agentDb = (memDb as any).db as import('better-sqlite3').Database;
+  const stmtInsert = agentDb.prepare(`
+    INSERT INTO metrics (id, metric_name, scope_type, scope_id, value, sample_count, window, computed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  let count = 0;
+
+  // ── Daily metrics (last 90 days) ──
+  const dailyRows = histDb.prepare(`
+    SELECT date(created_at) as day,
+           COUNT(*) as total,
+           SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+           AVG(duration_ms) as avg_dur,
+           SUM(cost_usd) as total_cost
+    FROM runs
+    GROUP BY day
+    ORDER BY day
+  `).all() as Array<{ day: string; total: number; completed: number; avg_dur: number; total_cost: number }>;
+
+  for (const row of dailyRows) {
+    const date = new Date(row.day + 'T12:00:00Z').toISOString();
+    const successRate = row.total > 0 ? row.completed / row.total : 0;
+    stmtInsert.run(randomUUID(), 'success_rate', SCOPE_TYPE, SCOPE_ID, successRate, row.total, 'daily', date);
+    stmtInsert.run(randomUUID(), 'avg_duration_ms', SCOPE_TYPE, SCOPE_ID, row.avg_dur, row.total, 'daily', date);
+    stmtInsert.run(randomUUID(), 'total_cost_usd', SCOPE_TYPE, SCOPE_ID, row.total_cost, row.total, 'daily', date);
+    count += 3;
+  }
+
+  // ── Weekly metrics (last 12 weeks) ──
+  const weeklyRows = histDb.prepare(`
+    SELECT strftime('%Y-W%W', created_at) as week,
+           MIN(date(created_at)) as week_start,
+           COUNT(*) as total,
+           SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+           AVG(duration_ms) as avg_dur,
+           SUM(cost_usd) as total_cost
+    FROM runs
+    GROUP BY week
+    ORDER BY week
+  `).all() as Array<{ week: string; week_start: string; total: number; completed: number; avg_dur: number; total_cost: number }>;
+
+  for (const row of weeklyRows) {
+    const date = new Date(row.week_start + 'T12:00:00Z').toISOString();
+    const successRate = row.total > 0 ? row.completed / row.total : 0;
+    stmtInsert.run(randomUUID(), 'success_rate', SCOPE_TYPE, SCOPE_ID, successRate, row.total, 'weekly', date);
+    stmtInsert.run(randomUUID(), 'avg_duration_ms', SCOPE_TYPE, SCOPE_ID, row.avg_dur, row.total, 'weekly', date);
+    stmtInsert.run(randomUUID(), 'total_cost_usd', SCOPE_TYPE, SCOPE_ID, row.total_cost, row.total, 'weekly', date);
+    count += 3;
+  }
+
+  // ── All-time aggregates ──
+  const allTime = histDb.prepare(`
+    SELECT COUNT(*) as total_runs,
+           SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+           AVG(duration_ms) as avg_dur,
+           SUM(cost_usd) as total_cost
+    FROM runs
+  `).get() as { total_runs: number; completed: number; avg_dur: number; total_cost: number };
+
+  const threadCount = histDb.prepare(`SELECT COUNT(*) as cnt FROM threads`).get() as { cnt: number };
+
+  memDb.upsertMetric({ metricName: 'total_runs', value: allTime.total_runs, sampleCount: allTime.total_runs, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+  memDb.upsertMetric({ metricName: 'success_rate', value: allTime.completed / allTime.total_runs, sampleCount: allTime.total_runs, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+  memDb.upsertMetric({ metricName: 'avg_duration_ms', value: allTime.avg_dur, sampleCount: allTime.total_runs, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+  memDb.upsertMetric({ metricName: 'total_cost_usd', value: allTime.total_cost, sampleCount: allTime.total_runs, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+  memDb.upsertMetric({ metricName: 'cost_per_run', value: allTime.total_cost / allTime.total_runs, sampleCount: allTime.total_runs, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+  memDb.upsertMetric({ metricName: 'avg_runs_per_thread', value: allTime.total_runs / threadCount.cnt, sampleCount: threadCount.cnt, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+  count += 6;
+
+  // ── Tool usage (from actual tool calls) ──
+  const toolRows = histDb.prepare(`
+    SELECT tool_name, COUNT(*) as cnt
+    FROM run_tool_calls
+    GROUP BY tool_name
+  `).all() as Array<{ tool_name: string; cnt: number }>;
+
+  for (const t of toolRows) {
+    memDb.upsertMetric({ metricName: `tool_usage.${t.tool_name}`, value: t.cnt, sampleCount: allTime.total_runs, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
+    count++;
+  }
+
+  return count;
+}
+
+function seedAgentMemory(db: AgentMemoryDb, runHistory: RunHistory): void {
   console.log('\n📦 Seeding agent-memory.db...');
   db.setEmbeddingDimensions(EMBEDDING_DIM);
 
@@ -663,103 +753,11 @@ function seedAgentMemory(db: AgentMemoryDb): void {
   }
   console.log(`  ✓ ${patterns.length} patterns created (with target confidences)`);
 
-  // ── Metrics (time series simulation) ──
-  // Use raw SQL inserts with unique IDs to create proper time series
-  // (upsertMetric deduplicates by name+window+scope, which collapses daily snapshots)
-  const memDb = (db as any).db as import('better-sqlite3').Database;
-  const stmtInsertMetric = memDb.prepare(`
-    INSERT INTO metrics (id, metric_name, scope_type, scope_id, value, sample_count, window, computed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  let metricCount = 0;
-
-  // Daily success_rate snapshots (last 30 days) — shows evolution
-  for (let i = 29; i >= 0; i--) {
-    const date = daysAgo(i);
-    // Trend: improving from ~0.78 to ~0.93
-    const trend = 0.78 + (29 - i) * 0.005;
-    const noise = (Math.random() - 0.5) * 0.08;
-    stmtInsertMetric.run(randomUUID(), 'success_rate', SCOPE_TYPE, SCOPE_ID,
-      Math.min(1, Math.max(0.6, trend + noise)), randomBetween(3, 15), 'daily', date);
-    metricCount++;
-  }
-
-  // Daily avg_duration_ms (last 30 days) — shows optimization
-  for (let i = 29; i >= 0; i--) {
-    const date = daysAgo(i);
-    const trend = 22000 - (29 - i) * 250;  // improving: 22s → 14.5s
-    const noise = (Math.random() - 0.5) * 4000;
-    stmtInsertMetric.run(randomUUID(), 'avg_duration_ms', SCOPE_TYPE, SCOPE_ID,
-      Math.max(5000, trend + noise), randomBetween(3, 15), 'daily', date);
-    metricCount++;
-  }
-
-  // Daily total_cost_usd (last 30 days) — growing with usage
-  for (let i = 29; i >= 0; i--) {
-    const date = daysAgo(i);
-    const baseCost = i > 20 ? 0.08 : i > 10 ? 0.18 : 0.35;
-    const noise = Math.random() * baseCost * 0.5;
-    stmtInsertMetric.run(randomUUID(), 'total_cost_usd', SCOPE_TYPE, SCOPE_ID,
-      baseCost + noise, randomBetween(3, 15), 'daily', date);
-    metricCount++;
-  }
-
-  // Weekly success_rate (last 12 weeks)
-  for (let i = 11; i >= 0; i--) {
-    const date = daysAgo(i * 7);
-    const trend = 0.76 + (11 - i) * 0.015;
-    const noise = (Math.random() - 0.5) * 0.04;
-    stmtInsertMetric.run(randomUUID(), 'success_rate', SCOPE_TYPE, SCOPE_ID,
-      Math.min(1, Math.max(0.6, trend + noise)), randomBetween(20, 70), 'weekly', date);
-    metricCount++;
-  }
-
-  // Weekly avg_duration_ms (last 12 weeks)
-  for (let i = 11; i >= 0; i--) {
-    const date = daysAgo(i * 7);
-    const trend = 25000 - (11 - i) * 800;
-    const noise = (Math.random() - 0.5) * 3000;
-    stmtInsertMetric.run(randomUUID(), 'avg_duration_ms', SCOPE_TYPE, SCOPE_ID,
-      Math.max(5000, trend + noise), randomBetween(20, 70), 'weekly', date);
-    metricCount++;
-  }
-
-  // All-time tool usage metrics (via upsertMetric to avoid duplicates)
-  const toolMetrics = [
-    { name: 'tool_usage.memory_store', value: 145 },
-    { name: 'tool_usage.memory_recall', value: 198 },
-    { name: 'tool_usage.write_file', value: 89 },
-    { name: 'tool_usage.read_file', value: 112 },
-    { name: 'tool_usage.bash', value: 67 },
-    { name: 'tool_usage.web_search', value: 54 },
-    { name: 'tool_usage.data_store_query', value: 78 },
-    { name: 'tool_usage.data_store_insert', value: 42 },
-    { name: 'tool_usage.ask_user', value: 35 },
-    { name: 'tool_usage.artifact_save', value: 56 },
-    { name: 'tool_usage.google_drive', value: 12 },
-    { name: 'tool_usage.send_email', value: 8 },
-    { name: 'tool_usage.api_request', value: 18 },
-  ];
-  for (const m of toolMetrics) {
-    db.upsertMetric({ metricName: m.name, value: m.value, sampleCount: 200, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
-    metricCount++;
-  }
-
-  // All-time aggregate KPIs
-  const aggMetrics = [
-    { name: 'total_runs', value: 480, sample: 480 },
-    { name: 'avg_duration_ms', value: 14200, sample: 480 },
-    { name: 'total_cost_usd', value: 12.85, sample: 480 },
-    { name: 'avg_runs_per_thread', value: 16, sample: 30 },
-    { name: 'cost_per_run', value: 0.0268, sample: 480 },
-  ];
-  for (const m of aggMetrics) {
-    db.upsertMetric({ metricName: m.name, value: m.value, sampleCount: m.sample, window: 'all_time', scopeType: SCOPE_TYPE, scopeId: SCOPE_ID });
-    metricCount++;
-  }
-
-  console.log(`  ✓ ${metricCount} metrics created (30 daily + 12 weekly + all_time)`);
+  // ── Metrics — computed from actual seeded run data ──
+  // Note: runs must be seeded in history.db BEFORE calling this function
+  console.log('  Computing metrics from actual run data...');
+  const metricCount = computeMetricsFromRuns(db, runHistory);
+  console.log(`  ✓ ${metricCount} metrics created (daily + weekly + all_time from real runs)`);
 }
 
 // ── Realistic Thread Conversations ─────────────────────────────
@@ -1459,9 +1457,9 @@ function main(): void {
   const dataStore = new DataStore(join(LYNOX_DIR, 'datastore.db'));
 
   try {
-    // Step 3: Seed
-    seedAgentMemory(memDb);
+    // Step 3: Seed (runs first, then agent-memory computes metrics from runs)
     seedRunHistory(runHistory);
+    seedAgentMemory(memDb, runHistory);
     seedTasksAndPipelines(runHistory);
     seedDataStore(dataStore);
     seedCRM(dataStore);
