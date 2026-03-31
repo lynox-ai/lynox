@@ -37,13 +37,7 @@ Open [localhost:3000](http://localhost:3000). An **access token** is generated o
 Set your own token with `-e LYNOX_HTTP_SECRET=your-token` instead of using the auto-generated one.
 :::
 
-### Option 3: Install script
-
-```bash
-curl -fsSL https://lynox.ai/install.sh | sh
-```
-
-### Option 4: Clone & run
+### Option 3: Clone & run
 
 ```bash
 git clone https://github.com/lynox-ai/lynox.git

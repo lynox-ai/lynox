@@ -20,12 +20,10 @@ One system that learns your business — replaces your CRM, workflows, outreach,
 ## Quick start
 
 ```bash
-curl -fsSL https://lynox.ai/install.sh | sh
+npx @lynox-ai/core
 ```
 
-You need an [Anthropic API key](https://console.anthropic.com/) — the setup wizard asks for it. That's all.
-
-Already have Node.js 22+? `npx @lynox-ai/core` works too.
+You need Node.js 22+ and an [Anthropic API key](https://console.anthropic.com/) — the setup wizard asks for it. That's all.
 
 ### Docker (recommended for always-on)
 
@@ -83,12 +81,6 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 ## Install
 
 **Fastest** — open a terminal and paste:
-
-```bash
-curl -fsSL https://lynox.ai/install.sh | sh
-```
-
-**With Node.js 22+:**
 
 ```bash
 npx @lynox-ai/core
