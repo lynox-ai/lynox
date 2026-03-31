@@ -8,8 +8,9 @@ export default defineConfig({
       title: 'lynox',
       description: 'Run your business. Not your tools.',
       logo: {
-        src: './src/assets/logo.svg',
-        replacesTitle: false,
+        light: './src/assets/logo-light.svg',
+        dark: './src/assets/logo-dark.svg',
+        replacesTitle: true,
       },
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/lynox-ai/lynox' },
