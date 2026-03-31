@@ -62,7 +62,6 @@
 		addToast(t('config.vault_key_copied'), 'success');
 	}
 
-	// Prompt chips
 	function sendPromptChip(text: string) {
 		inputText = text;
 		void sendMessage(text, []);
@@ -783,25 +782,13 @@
 							<!-- Prompt chips -->
 							<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-3">{t('onboard.try_prompt')}</p>
 							<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-6">
-								<button onclick={() => sendPromptChip(t('onboard.prompt_email'))} class="prompt-chip">
-									<span class="prompt-chip-text">{t('onboard.prompt_email')}</span>
-								</button>
-								<button onclick={() => sendPromptChip(t('onboard.prompt_pdf'))} class="prompt-chip">
-									<span class="prompt-chip-text">{t('onboard.prompt_pdf')}</span>
-								</button>
-								<button onclick={() => sendPromptChip(t('onboard.prompt_report'))} class="prompt-chip">
-									<span class="prompt-chip-text">{t('onboard.prompt_report')}</span>
-								</button>
-								<button onclick={() => sendPromptChip(t('onboard.prompt_research'))} class="prompt-chip">
-									<span class="prompt-chip-text">{t('onboard.prompt_research')}</span>
-								</button>
+								<button onclick={() => sendPromptChip(t('onboard.prompt_capabilities'))} class="prompt-chip"><span class="prompt-chip-text">{t('onboard.prompt_capabilities')}</span></button>
+								<button onclick={() => sendPromptChip(t('onboard.prompt_remember'))} class="prompt-chip"><span class="prompt-chip-text">{t('onboard.prompt_remember')}</span></button>
+								<button onclick={() => sendPromptChip(t('onboard.prompt_pdf'))} class="prompt-chip"><span class="prompt-chip-text">{t('onboard.prompt_pdf')}</span></button>
+								<button onclick={() => sendPromptChip(t('onboard.prompt_research'))} class="prompt-chip"><span class="prompt-chip-text">{t('onboard.prompt_research')}</span></button>
 							</div>
-
-							<!-- Docs link -->
 							<div class="text-center">
-								<a href="https://docs.lynox.ai/getting-started/" target="_blank" rel="noopener noreferrer" class="text-xs text-text-subtle hover:text-accent-text transition-colors">
-									{t('onboard.docs_link')} &rarr;
-								</a>
+								<a href="https://docs.lynox.ai/getting-started/" target="_blank" rel="noopener noreferrer" class="text-xs text-text-subtle hover:text-accent-text transition-colors">{t('onboard.docs_link')} &rarr;</a>
 							</div>
 						{/if}
 					</div>
@@ -1091,7 +1078,7 @@
 	{/if}
 
 	<!-- Input -->
-	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
+	<div class="border-t border-border bg-bg-subtle px-2 py-px md:px-4 md:py-px" style="padding-bottom: env(safe-area-inset-bottom, 0px);">
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl mx-auto flex flex-wrap gap-2 mb-2">
@@ -1118,7 +1105,7 @@
 					</svg>
 					<span class="text-sm text-text-subtle">{t('chat.transcribing')}</span>
 				</div>
-				<div class="shrink-0 h-11 w-11"></div>
+				<div class="shrink-0 h-9 w-9"></div>
 			{:else if recording}
 				<!-- Recording state: [🗑  ● 0:03 ━━━━━]  [➤] -->
 				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2">
@@ -1140,20 +1127,20 @@
 				<!-- Send button during recording -->
 				<button
 					onclick={stopRecording}
-					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
+					class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
 					aria-label={t('chat.send')}
 				>
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 				</button>
 			{:else}
 				<!-- Normal: 📎  [Nachricht eingeben...]  ➤ -->
 				<button
 					onclick={() => fileInputEl.click()}
 					disabled={!ready}
-					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-opacity outline-none focus:outline-none"
+					class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-opacity outline-none focus:outline-none"
 					aria-label={t('chat.attach_file')}
 				>
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
 					</svg>
 				</button>
@@ -1167,14 +1154,14 @@
 						placeholder={pendingPermission && !inBatchMode ? t('chat.placeholder_answer') : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 						rows="1"
 						disabled={!ready && !pendingPermission}
-						class="flex-1 resize-none border-0 bg-transparent px-4 py-2.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
+						class="flex-1 resize-none border-0 bg-transparent px-3 py-1.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
 					></textarea>
 				</div>
 
 				{#if isStreaming && !pendingPermission}
 					<button
 						onclick={() => abortRun()}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-all"
+						class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-all"
 						aria-label={t('chat.abort')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
@@ -1183,10 +1170,10 @@
 					<button
 						onclick={handleSend}
 						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
+						class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
 						aria-label={t('chat.send')}
 					>
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 					</button>
 				{:else}
 					<!-- Touch: hold to record, release to send. Mouse: click to toggle. -->
@@ -1214,10 +1201,10 @@
 						}}
 						oncontextmenu={(e) => e.preventDefault()}
 						disabled={!ready}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
+						class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
 						aria-label={t('chat.voice_input')}
 					>
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
 						</svg>
 					</button>
@@ -1270,7 +1257,6 @@
 	:global(.prompt-chip) {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
 		padding: 0.75rem 1rem;
 		border-radius: var(--radius-md);
 		border: 1px solid var(--color-border, #1a1a4a);

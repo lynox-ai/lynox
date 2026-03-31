@@ -324,9 +324,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.security_dismiss': { de: 'Verstanden', en: 'Got it' },
 	'onboard.security_no_key': { de: 'Kein Vault Key gesetzt. Daten werden nicht verschluesselt.', en: 'No vault key set. Data is not encrypted.' },
 	'onboard.try_prompt': { de: 'Probier etwas:', en: 'Try something:' },
+	'onboard.prompt_capabilities': { de: 'Was kannst du alles?', en: 'What can you do?' },
+	'onboard.prompt_remember': { de: 'Merke dir: mein Unternehmen heisst...', en: 'Remember: my company is called...' },
 	'onboard.prompt_pdf': { de: 'Fasse dieses PDF zusammen', en: 'Summarize this PDF' },
-	'onboard.prompt_email': { de: 'Was war heute in meiner Mail?', en: "What happened in my email today?" },
-	'onboard.prompt_report': { de: 'Erstelle einen Weekly Report', en: 'Create a weekly report' },
 	'onboard.prompt_research': { de: 'Recherchiere [Thema] fuer mich', en: 'Research [topic] for me' },
 	'onboard.docs_link': { de: 'Alle Features entdecken', en: 'Explore all features' },
 

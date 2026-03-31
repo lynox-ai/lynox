@@ -27,15 +27,19 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   echo ""
 fi
 
-# Vault key guidance
+# Auto-generate vault key if not set (persist to volume)
 if [ -z "${LYNOX_VAULT_KEY:-}" ]; then
-  echo "  Note: No LYNOX_VAULT_KEY set."
-  echo "  API keys and backups will not be encrypted."
-  echo "  Add -e LYNOX_VAULT_KEY=\$(openssl rand -base64 48)"
+  LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(36).toString('base64'))")
+  export LYNOX_VAULT_KEY
+  # Persist to volume so it survives restarts
+  mkdir -p "$HOME/.lynox"
+  printf 'LYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  echo "  Vault key generated and saved to volume."
+  echo "  Save it to a password manager: Settings → Config → Security"
   echo ""
 else
   echo "  Vault key active — data is encrypted."
-  echo "  Save your key in a password manager."
   echo ""
 fi
 
