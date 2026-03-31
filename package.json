@@ -77,6 +77,12 @@
     "telegraf": "^4.16.3",
     "zod": "^4.3.6"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["better-sqlite3", "onnxruntime-node"],
+    "overrides": {
+      "path-to-regexp": "^8.4.0"
+    }
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.3.5",
