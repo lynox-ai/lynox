@@ -34,6 +34,7 @@
 :root {
   --sl-font-system: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
   --sl-font-system-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+  --sl-nav-height: 4.5rem;
 }
 
 /* ── Light Mode ── */
