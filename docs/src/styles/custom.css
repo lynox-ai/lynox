@@ -1,5 +1,43 @@
-/* lynox brand colors */
-/* Light mode: accent-low = light bg, accent-high = dark text */
+/* ════════════════════════════════════════════════
+   lynox docs — aligned with lynox.ai design system
+   Tokens from pro/packages/web/src/styles/global.css
+   ════════════════════════════════════════════════ */
+
+/* ── Brand Fonts ── */
+
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/space-grotesk-latin.woff2') format('woff2');
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('/fonts/ibm-plex-mono-400-latin.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('/fonts/ibm-plex-mono-700-latin.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── Typography ── */
+
+:root {
+  --sl-font-system: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --sl-font-system-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+}
+
+/* ── Light Mode ── */
+
 :root {
   --sl-color-accent-low: #ede8ff;
   --sl-color-accent: #6525EF;
@@ -7,15 +45,118 @@
   --sl-color-text-accent: #4a15c0;
 }
 
-/* Dark mode: accent-low = dark bg, accent-high = light text */
+/* ── Dark Mode — lynox.ai design system ── */
+
 :root[data-theme='dark'] {
+  /* Backgrounds — from --color-bg-* */
+  --sl-color-bg: #050510;
+  --sl-color-bg-nav: #0a0a1a;
+  --sl-color-bg-sidebar: #08081a;
+  --sl-color-bg-inline-code: #0c0c20;
+  --sl-color-black: #050510;
+
+  /* Gray scale — mapped from website text/border tokens */
+  --sl-color-gray-1: #e8e8f0;
+  --sl-color-gray-2: #8888aa;
+  --sl-color-gray-3: #7e7eaa;
+  --sl-color-gray-4: #2a2a5a;
+  --sl-color-gray-5: #1a1a4a;
+  --sl-color-gray-6: #0a0a1a;
+
+  /* Text */
+  --sl-color-text: #e8e8f0;
+  --sl-color-white: #e8e8f0;
+  --sl-color-text-accent: #9B8AFF;
+
+  /* Borders — from --color-border-* */
+  --sl-color-hairline-light: #1a1a4a;
+  --sl-color-hairline: #15153a;
+  --sl-color-hairline-shade: #0a0a1a;
+
+  /* Accent — brand violet */
   --sl-color-accent-low: #1e1660;
   --sl-color-accent: #9B8AFF;
   --sl-color-accent-high: #c4b8ff;
-  --sl-color-text-accent: #9B8AFF;
+
+  /* Backdrop */
+  --sl-color-backdrop-overlay: rgba(5, 5, 16, 0.75);
 }
 
-/* Slightly tighter content for readability */
+/* ── Global refinements ── */
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Subtle violet gradient on dark bg — matches website body */
+:root[data-theme='dark'] body {
+  background:
+    radial-gradient(ellipse 80% 50% at 50% 0%, rgba(101, 37, 239, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 40% at 50% 85%, rgba(101, 37, 239, 0.04) 0%, transparent 50%),
+    var(--sl-color-bg);
+}
+
+/* Heading letter-spacing — matches website h1-h6 */
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6) {
+  letter-spacing: -0.02em;
+}
+
+/* Content width for readability */
 .sl-markdown-content {
   max-width: 75ch;
+}
+
+/* ── Code blocks — deeper dark ── */
+
+:root[data-theme='dark'] .expressive-code {
+  --ec-frm-edBg: #08081a;
+  --ec-frm-edActTabBg: #0c0c20;
+  --ec-frm-edTabBarBg: #050510;
+  --ec-brdCol: #1a1a4a;
+}
+
+/* ── Sidebar refinements ── */
+
+:root[data-theme='dark'] .sidebar-pane {
+  border-color: #15153a;
+}
+
+/* ── Hero page (splash) — tighter spacing ── */
+
+.hero {
+  border-bottom-color: #15153a;
+}
+
+/* ── Card links (homepage) ── */
+
+:root[data-theme='dark'] .card {
+  border-color: #1a1a4a;
+  background: #0a0a1a;
+}
+
+:root[data-theme='dark'] .card:hover {
+  border-color: #2a2a5a;
+  box-shadow: 0 0 20px rgba(101, 37, 239, 0.06);
+}
+
+/* ── Aside blocks ── */
+
+:root[data-theme='dark'] .starlight-aside {
+  border-color: #1a1a4a;
+  background: #0a0a1a;
+}
+
+/* ── Table of contents ── */
+
+:root[data-theme='dark'] starlight-toc a[aria-current='true'] {
+  color: #9B8AFF;
+}
+
+/* ── Search modal ── */
+
+:root[data-theme='dark'] dialog.pagefind-ui {
+  --pagefind-ui-background: #0a0a1a;
+  --pagefind-ui-border: #1a1a4a;
+  --pagefind-ui-text: #e8e8f0;
 }
