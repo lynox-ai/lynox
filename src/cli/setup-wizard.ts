@@ -8,7 +8,7 @@ import { saveUserConfig, getLynoxDir, ensureLynoxDir, reloadConfig } from '../co
 import { writeFileAtomicSync } from '../core/atomic-write.js';
 import type { LynoxUserConfig, ModelTier } from '../types/index.js';
 import { BOLD, DIM, GREEN, RED, YELLOW, RESET } from './ansi.js';
-import { confirm, multiSelect } from './interactive.js';
+import { confirm } from './interactive.js';
 import { renderGradientArt } from './ui.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { getErrorMessage } from '../core/utils.js';
@@ -151,53 +151,6 @@ async function validateApiKey(key: string): Promise<{ valid: boolean; error?: st
 }
 
 // ---------------------------------------------------------------------------
-// Telegram chat ID detection
-// ---------------------------------------------------------------------------
-
-async function detectTelegramChatId(token: string): Promise<number | null> {
-  let Telegraf: typeof import('telegraf').Telegraf;
-  try {
-    const telegrafMod = await import('telegraf');
-    Telegraf = telegrafMod.Telegraf;
-  } catch {
-    return null;
-  }
-
-  stdout.write(`  ${DIM}Waiting for your Telegram message...${RESET}`);
-
-  return new Promise<number | null>((resolve) => {
-    const bot = new Telegraf(token);
-    const progressHint = setTimeout(() => {
-      stdout.write(`\r  ${DIM}Still waiting... make sure you sent a message to your bot in Telegram.${RESET}`);
-    }, 30_000);
-    const timeout = setTimeout(() => {
-      clearTimeout(progressHint);
-      stdout.write(`\r  ${YELLOW}⚠${RESET} Timeout (2 min). Enter your chat ID manually below.              \n`);
-      stdout.write(`  ${DIM}To find it: open https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates${RESET}\n`);
-      stdout.write(`  ${DIM}after messaging your bot. Look for "chat":{"id": YOUR_NUMBER }${RESET}\n`);
-      bot.stop('timeout');
-      resolve(null);
-    }, 120_000);
-
-    bot.on('message', (ctx) => {
-      clearTimeout(timeout);
-      clearTimeout(progressHint);
-      stdout.write(`\r  ${GREEN}✓${RESET} Chat ID: ${BOLD}${ctx.chat.id}${RESET}                    \n`);
-      void ctx.reply('✓ Connected! Setup continues in the terminal.').catch(() => {});
-      // Small delay so the reply is sent before the bot stops
-      setTimeout(() => { bot.stop('detected'); resolve(ctx.chat.id); }, 500);
-    });
-
-    bot.launch().catch((err: unknown) => {
-      clearTimeout(timeout);
-      clearTimeout(progressHint);
-      stdout.write(`\r  ${RED}✗${RESET} ${getErrorMessage(err)}\n`);
-      resolve(null);
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Wizard
 // ---------------------------------------------------------------------------
 
@@ -286,7 +239,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       process.env['LYNOX_VAULT_KEY'] = vaultKey;
       stdout.write(`  ${GREEN}✓${RESET} Encryption enabled.\n`);
 
-      // Close readline before raw-mode prompts (confirm, multiSelect use stdin raw mode)
+      // Close readline before raw-mode prompts (confirm uses stdin raw mode)
       if (stdin.isTTY) rl.close();
       await offerShellProfileInjection(rl);
     } catch {
@@ -298,92 +251,11 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
 
     const tier: ModelTier = 'sonnet';
 
-    // ── Integrations (checklist) ────────────────────────────────
-    stdout.write(`\n  ${BOLD}Connect integrations${RESET}\n`);
-
-    type Integration = 'google' | 'telegram' | 'websearch';
-    const selected = await multiSelect<Integration>([
-      { label: 'Google Workspace', value: 'google',    hint: 'Gmail, Sheets, Calendar' },
-      { label: 'Telegram',         value: 'telegram',  hint: 'use lynox from your phone' },
-      { label: 'Web Research',     value: 'websearch', hint: 'live research via Tavily' },
-    ], stdin.isTTY ? undefined : { rl });
-
-    const wantGoogle = selected.includes('google');
-    const wantTelegram = selected.includes('telegram');
-    const wantSearch = selected.includes('websearch');
-
-    // Re-open readline for credential text input
-    if (stdin.isTTY && (wantGoogle || wantTelegram || wantSearch)) {
-      rl = createInterface({ input: stdin, output: stdout, terminal: true });
-    }
-
-    // ── Collect credentials for selected integrations ───────────
-    let googleClientId = '';
-    let googleClientSecret = '';
-    if (wantGoogle) {
-      stdout.write(`\n  ${BOLD}Google Workspace${RESET}\n`);
-      stdout.write(`${DIM}  GCP Console → APIs & Services → Credentials → OAuth 2.0${RESET}\n`);
-      googleClientId = (await rl.question(`  ${BOLD}Client ID:${RESET} `)).trim();
-      if (googleClientId) {
-        googleClientSecret = (await rl.question(`  ${BOLD}Client Secret:${RESET} `)).trim();
-        stdout.write(`  ${GREEN}✓${RESET} Run ${BOLD}/google auth${RESET} after setup to connect.\n`);
-      }
-    }
-
-    let telegramToken = '';
-    let telegramChatIds: number[] | undefined;
-    if (wantTelegram) {
-      stdout.write(`\n  ${BOLD}Telegram${RESET}\n`);
-      stdout.write(`${DIM}  Create a bot: open Telegram → @BotFather → /newbot${RESET}\n`);
-      telegramToken = (await rl.question(`  ${BOLD}Bot token:${RESET} `)).trim();
-      if (telegramToken) {
-        stdout.write(`  ${DIM}Now send any message to your bot in Telegram.${RESET}\n`);
-        const chatId = await detectTelegramChatId(telegramToken);
-        if (chatId !== null) {
-          telegramChatIds = [chatId];
-          stdout.write(`  ${GREEN}✓${RESET} Telegram ready.\n`);
-        } else {
-          const manual = (await rl.question(`  ${BOLD}Chat ID:${RESET} `)).trim();
-          if (manual) {
-            const parsed = parseInt(manual, 10);
-            if (Number.isFinite(parsed)) {
-              telegramChatIds = [parsed];
-            }
-          }
-          stdout.write(telegramChatIds?.length
-            ? `  ${GREEN}✓${RESET} Telegram ready.\n`
-            : `  ${YELLOW}⚠${RESET} No chat ID — bot starts in setup mode.\n`);
-        }
-      }
-    }
-
-    let searchKey = '';
-    if (wantSearch) {
-      stdout.write(`\n  ${BOLD}Web Research${RESET}\n`);
-      stdout.write(`${DIM}  Free: tavily.com (1K requests/month)${RESET}\n`);
-      searchKey = (await rl.question(`  ${BOLD}Tavily key:${RESET} `)).trim();
-      if (searchKey) stdout.write(`  ${GREEN}✓${RESET} Enabled.\n`);
-    }
-
     // ── Save ────────────────────────────────────────────────────
     const config: LynoxUserConfig = {
       api_key: apiKey,
       default_tier: tier,
     };
-    if (telegramToken) {
-      config.telegram_bot_token = telegramToken;
-      if (telegramChatIds && telegramChatIds.length > 0) {
-        config.telegram_allowed_chat_ids = telegramChatIds;
-      }
-    }
-    if (searchKey) {
-      config.search_api_key = searchKey;
-      config.search_provider = 'tavily';
-    }
-    if (googleClientId && googleClientSecret) {
-      config.google_client_id = googleClientId;
-      config.google_client_secret = googleClientSecret;
-    }
     saveUserConfig(config);
     reloadConfig();
 
@@ -391,12 +263,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     stdout.write(`\n  ${GREEN}${BOLD}✓ Setup complete${RESET}\n\n`);
     stdout.write(`  API Key        ${GREEN}✓${RESET}\n`);
     stdout.write(`  Encryption     ${GREEN}✓${RESET}\n`);
-    if (googleClientId) stdout.write(`  Google         ${GREEN}✓${RESET} ${DIM}/google auth${RESET}\n`);
-    if (telegramToken) stdout.write(`  Telegram       ${telegramChatIds?.length ? `${GREEN}✓${RESET}` : `${YELLOW}setup mode${RESET}`}\n`);
-    if (searchKey) stdout.write(`  Web Research   ${GREEN}✓${RESET}\n`);
-    if (!googleClientId && !telegramToken && !searchKey) {
-      stdout.write(`${DIM}  Add integrations anytime: /google, /telegram, /config${RESET}\n`);
-    }
+    stdout.write(`${DIM}  Add integrations in the Web UI: Settings → Integrations${RESET}\n`);
     stdout.write('\n');
 
     return config;

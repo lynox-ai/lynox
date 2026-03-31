@@ -16,7 +16,7 @@ import type {
   TabQuestion,
   IAgent,
 } from '../types/index.js';
-import { MODEL_MAP } from '../types/index.js';
+import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW } from '../types/index.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -86,6 +86,7 @@ export class Session {
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
   private _changesetManager: ChangesetManager | null = null;
+  private _isCompacting = false;
   onStream: StreamHandler | null = null;
   private _promptUser: ((question: string, options?: string[]) => Promise<string>) | null = null;
   private _promptTabs: ((questions: TabQuestion[]) => Promise<string[]>) | null = null;
@@ -438,6 +439,11 @@ export class Session {
       // Trigger engine-level GC counter
       this.engine.incrementRunCount();
 
+      // Auto-compact if context is filling up (soft compaction before hard truncation kicks in)
+      if (!this._isCompacting) {
+        void this._autoCompactIfNeeded();
+      }
+
       return result;
     } catch (err: unknown) {
       // Sentry capture — structured error with tags
@@ -529,6 +535,73 @@ export class Session {
   reset(): void {
     if (this.agent) {
       this.agent.reset();
+    }
+  }
+
+  /**
+   * Compact the conversation: summarize history into a concise summary,
+   * reset messages, and inject the summary as synthetic context.
+   * Used by CLI /compact command and auto-compaction.
+   */
+  async compact(focus?: string): Promise<{ success: boolean; summary: string }> {
+    const prompt = focus
+      ? `Summarize the key points of our conversation so far, focusing on: ${focus}. Be extremely concise — bullet points only.`
+      : 'Summarize the key points of our conversation so far. Be extremely concise — bullet points only.';
+    let summary = '';
+    try {
+      summary = await this.run(prompt);
+    } catch {
+      // Compaction prompt failed — reset anyway to free context
+    }
+    this.reset();
+    if (summary) {
+      this.loadMessages([
+        { role: 'user' as const, content: 'What have we discussed so far?' },
+        { role: 'assistant' as const, content: `[Conversation summary]\n${summary}` },
+      ]);
+      return { success: true, summary };
+    }
+    return { success: false, summary: '' };
+  }
+
+  /**
+   * Estimate current context usage percentage.
+   * Uses the same CHARS_PER_TOKEN constant as agent truncation.
+   */
+  getContextUsagePercent(): number {
+    if (!this.agent) return 0;
+    const messages = this.agent.getMessages();
+    const msgLen = JSON.stringify(messages).length;
+    const estimatedTokens = msgLen / CHARS_PER_TOKEN;
+    const maxCtx = CONTEXT_WINDOW[MODEL_MAP[this._model]] ?? 200_000;
+    return Math.round(estimatedTokens / maxCtx * 100);
+  }
+
+  /**
+   * Auto-compact if context usage exceeds 75%.
+   * Runs after each successful run() to prevent context overflow.
+   * Guard flag prevents recursive compaction since compact() calls run().
+   */
+  private async _autoCompactIfNeeded(): Promise<void> {
+    if (this._isCompacting || !this.agent) return;
+    const usagePercent = this.getContextUsagePercent();
+    if (usagePercent <= 75) return;
+
+    this._isCompacting = true;
+    try {
+      const result = await this.compact();
+      if (result.success && this.onStream) {
+        void this.onStream({
+          type: 'context_compacted',
+          summary: result.summary,
+          previousUsagePercent: usagePercent,
+          agent: this.agent.name,
+        });
+      }
+    } catch {
+      // Auto-compaction failed — not fatal, hard truncation will handle it
+    } finally {
+      this._isCompacting = false;
     }
   }
 

@@ -281,6 +281,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'changeset.sensitive_warning': { de: 'Sensitiver Pfad', en: 'Sensitive path' },
 	'changeset.review_pending': { de: 'Bitte pruefe die ausstehenden Aenderungen bevor du weiterschreibst.', en: 'Please review the pending changes before sending another message.' },
 
+	// Context management
+	'context.compacted': { de: 'Kontext automatisch komprimiert (war {pct}% voll)', en: 'Context auto-compacted (was {pct}% full)' },
+
 	// Onboarding (kept for web-ui setup hints)
 	'onboard.welcome': { de: 'Willkommen bei lynox', en: 'Welcome to lynox' },
 	'onboard.standalone_hint': { de: 'Gib deinen Anthropic API Key ein, um loszulegen.', en: 'Enter your Anthropic API key to get started.' },

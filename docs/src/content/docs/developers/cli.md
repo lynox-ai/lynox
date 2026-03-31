@@ -1,19 +1,27 @@
 ---
 title: "CLI Reference"
-description: "Interactive REPL, slash commands, flags, and watch mode"
+description: "Web UI default, interactive REPL, slash commands, flags, and watch mode"
 sidebar:
   order: 4
 ---
 
 ## Modes
 
+### Default: Engine + Web UI
+
+```bash
+lynox
+```
+
+Starts the Engine HTTP API and opens the Web UI in your browser. This is the default when running `lynox` without flags in a terminal. The Engine listens on port 3100 (configurable via `LYNOX_HTTP_PORT`). Set `LYNOX_WEBUI_URL` to override the browser URL (default: `http://localhost:5173`).
+
 ### Interactive REPL
 
 ```bash
-node dist/index.js
+lynox --repl
 ```
 
-Full-featured REPL with animated bot icon banner, syntax-highlighted markdown output, interactive dialogs, footer bar, and tab-autocomplete for slash commands.
+Full-featured REPL with animated bot icon banner, syntax-highlighted markdown output, interactive dialogs, footer bar, and tab-autocomplete for slash commands. Use `--resume` to restore the latest session (implies `--repl`).
 
 Input safeguards prevent runaway execution:
 - **Control char sanitization** — non-printable characters (0x00-0x08, 0x0b, 0x0c, 0x0e-0x1f) are stripped before processing
@@ -58,7 +66,8 @@ See [MCP Server](/developers/mcp-server/) for details.
 
 | Flag | Description |
 |------|-------------|
-| `--resume` | Restore the latest saved session |
+| `--repl` | Start interactive REPL in terminal (instead of Web UI) |
+| `--resume` | Restore the latest saved session (implies `--repl`) |
 | `--project <dir>` | Change working directory and load project config |
 | `--watch <dir>` | Enable watch mode on directory |
 | `--on-change "task"` | Task to run on file changes (with `--watch`) |
@@ -488,12 +497,10 @@ On first run without an API key (TTY mode), an interactive setup wizard runs aut
 
 1. **Prerequisites** — checks Node.js 22+, `~/.lynox` directory, network. Retries up to 3 times with actionable fix commands
 2. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Distinguishes invalid keys from rate limits and server errors. Up to 5 attempts with escalating hints. Encryption enabled automatically (AES-256-GCM vault key saved to `~/.lynox/.env` with `0o600`)
-3. **Integrations** — interactive multi-select checklist (all optional):
-   - **Google Workspace** — OAuth 2.0 credentials. Auth completed later via `/google auth`
-   - **Telegram** — bot token + auto-detected chat ID (30s progress hint, 2min timeout with manual instructions)
-   - **Web search** — Tavily API key for `web_research` tool
 
-Writes `~/.lynox/config.json` with secure permissions (0o700 dir, 0o600 file). After setup, lynox starts a conversation to learn about your business — stored in the knowledge graph.
+Integrations (Google, Telegram, Web Search) are configured in the **Web UI → Settings → Integrations** after setup.
+
+Writes `~/.lynox/config.json` with secure permissions (0o700 dir, 0o600 file). After setup, lynox continues to the default mode (Engine + Web UI, or REPL if `--repl`).
 
 See [Getting Started](/getting-started/) for a detailed walkthrough of each step.
 

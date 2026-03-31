@@ -661,6 +661,21 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true, accepted, rolledBack });
     }));
 
+    // ── Compact (context management) ──
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/compact', async (_req, res, params, body) => {
+      const sessionId = params['id']!;
+      const session = this.sessionStore.get(sessionId);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      if (this.runningSessions.has(sessionId)) {
+        errorResponse(res, 409, 'Cannot compact while a run is in progress');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const focus = typeof b?.['focus'] === 'string' ? b['focus'] : undefined;
+      const result = await session.compact(focus);
+      jsonResponse(res, 200, { ok: result.success, summary: result.summary });
+    }));
+
     // ── Threads ──
     this.staticRoutes.set('GET /api/threads', async (req, res) => {
       const threadStore = engine.getThreadStore();

@@ -73,14 +73,11 @@ On first run without an API key (TTY mode), a streamlined wizard guides through 
 
 1. **Prerequisites** — checks Node.js version, `~/.lynox` directory (with concrete fix commands on failure), and network connectivity. Retries up to 3 times — fix the issue, press Enter to retry
 2. **API key** — validates format (`sk-` prefix, 20+ characters) and live-verifies against the Anthropic API. Distinguishes between invalid keys, rate limits (429), server errors (5xx), and connectivity issues. Up to 5 attempts with escalating hints (link to console, whitespace check). Only connectivity failures are accepted without verification. Encryption is enabled automatically (vault key generated and saved to `~/.lynox/.env` with mode `0o600`). Accuracy defaults to Balanced (sonnet)
-3. **Integrations checklist** — interactive multi-select (arrow keys + Space to toggle + Enter to confirm). Three options, all optional:
-   - **Google Workspace** — OAuth 2.0 client ID + secret for Gmail, Sheets, Drive, Calendar, Docs. Actual auth deferred to `/google auth` command
-   - **Telegram** — bot token + auto-detect chat ID by spinning up the bot and waiting for a message (30s progress hint, 2min timeout with manual `getUpdates` instructions). Falls back to manual entry
-   - **Web Research** — Tavily API key for the `web_research` tool (free tier: 1K/month)
+Integrations (Google Workspace, Telegram, Web Search) are configured after setup in the **Web UI → Settings → Integrations**.
 
 **Security**: Vault key file written atomically with `0o600` permissions. Auto-load on startup validates: no symlinks, owner-only access, base64 format. Shell profile injection uses `basename($SHELL)`, append-only with duplicate guard, single quotes in fallback. Config written with `0o700` dir / `0o600` file. See [Security](/features/security/#vault-key-auto-load-security).
 
-**Seamless flow**: Vault key is set in `process.env` immediately, config cache invalidated — the REPL starts with encryption active, no restart needed. `--init` continues directly into the REPL instead of exiting.
+**Seamless flow**: Vault key is set in `process.env` immediately, config cache invalidated — the Engine starts with encryption active, no restart needed. `--init` continues directly into the default mode (Engine + Web UI) instead of exiting.
 
 **Docker**: The entrypoint auto-loads `~/.lynox/.env` on startup. Run `docker run -it ... --init` to use the wizard in a container.
 
@@ -211,6 +208,9 @@ Controls the `output_config.effort` parameter (accuracy level). Set via config, 
 | `ANTHROPIC_API_KEY` | -- | Anthropic API key (required) |
 | `ANTHROPIC_BASE_URL` | -- | Custom API endpoint (for proxies) |
 | `LYNOX_VAULT_KEY` | -- | Encrypts secrets vault, run history, and OAuth tokens at rest. Auto-loaded from `~/.lynox/.env` on startup (with symlink, ownership, and permission validation). Generate: `openssl rand -base64 48` |
+| `LYNOX_HTTP_PORT` | `3100` | Engine HTTP API port |
+| `LYNOX_HTTP_SECRET` | -- | Bearer token for Engine HTTP API auth. Without it, binds to localhost only |
+| `LYNOX_WEBUI_URL` | `http://localhost:5173` | Web UI URL opened by default `lynox` command |
 | `LYNOX_MCP_SECRET` | -- | Bearer token for MCP HTTP auth. Required for network-exposed deployments. Can also be stored in vault. Generate: `openssl rand -hex 32` |
 | `LYNOX_MCP_PORT` | `3042` | MCP HTTP server port |
 | `LYNOX_EMBEDDING_PROVIDER` | `onnx` | Override embedding provider (`onnx`, `voyage`, `local`) |

@@ -2,6 +2,7 @@ import { getApiBase } from '../config.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
+import { addToast } from './toast.svelte.js';
 
 export interface UsageInfo {
 	tokensIn: number;
@@ -422,6 +423,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'changeset_ready':
 			void fetchChangeset();
 			break;
+		case 'context_compacted': {
+			const prevPct = data['previousUsagePercent'] as number | undefined;
+			contextBudget = null;
+			addToast(t('context.compacted').replace('{pct}', String(prevPct ?? '?')), 'info', 5000);
+			break;
+		}
 	}
 }
 

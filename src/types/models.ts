@@ -9,6 +9,9 @@ export const MODEL_MAP: Record<ModelTier, string> = {
   'haiku':  'claude-haiku-4-5-20251001',
 };
 
+/** Approximate characters per token for context estimation. */
+export const CHARS_PER_TOKEN = 3.5;
+
 export const CONTEXT_WINDOW: Record<string, number> = {
   'claude-opus-4-6':         1_000_000,
   'claude-sonnet-4-6':         200_000,

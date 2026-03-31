@@ -19,7 +19,7 @@ npx vitest run       # 115 test files / ~2680 tests
 npx vitest run tests/online/  # 22 real API tests
 
 # Web UI (@lynox-ai/web-ui)
-cd packages/web-ui && pnpm run dev        # standalone dev server (needs Engine --http-api running)
+cd packages/web-ui && pnpm run dev        # standalone dev server (needs Engine running: `lynox` or `lynox --http-api`)
 cd packages/web-ui && pnpm run build      # build standalone SvelteKit app
 cd packages/web-ui && pnpm run package    # build library (dist/) for pro/pwa import
 cd packages/web-ui && pnpm run typecheck  # svelte-check

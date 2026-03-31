@@ -16,7 +16,7 @@ import type {
   SecretStoreLike,
   ChangesetManagerLike,
 } from '../types/index.js';
-import { LYNOX_BETAS, CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, MAX_CONTINUATIONS } from '../types/index.js';
+import { LYNOX_BETAS, CHARS_PER_TOKEN, CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, MAX_CONTINUATIONS } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -85,8 +85,9 @@ export class Agent implements IAgent {
    * English text ≈ 4 chars/token, code/JSON ≈ 3, mixed ≈ 3.5.
    * Conservative enough to prevent context overflow; the 85% safety margin in
    * _truncateHistory provides additional buffer.
+   * @deprecated Use the shared CHARS_PER_TOKEN from types/models.ts
    */
-  private static readonly CHARS_PER_TOKEN = 3.5;
+  private static readonly CHARS_PER_TOKEN = CHARS_PER_TOKEN;
 
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
   private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;

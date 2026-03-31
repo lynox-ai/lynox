@@ -352,11 +352,12 @@ async function runCLI(): Promise<void> {
     stdout.write(`lynox ${pkg.version}
 
 Usage:
-  lynox                         Interactive REPL (setup wizard on first run)
+  lynox                         Start Engine + open Web UI (setup wizard on first run)
   lynox "<task>"                Run a single task and exit
   cat file | lynox "<task>"     Process piped input with a task
   lynox init                    Run the setup wizard
-  lynox --http-api              Start Engine HTTP API server
+  lynox --repl                  Start interactive REPL in terminal
+  lynox --http-api              Start Engine HTTP API server (headless)
   lynox --mcp-server            Start as MCP server (stdio)
   lynox --mcp-server --transport sse   Start as MCP server (HTTP/SSE)
   lynox --telegram              Start Telegram bot mode
@@ -366,11 +367,12 @@ Options:
   --help, -h                    Show this help
   --version, -v                 Show version
   --init                        Run setup wizard
+  --repl                        Start interactive REPL (instead of Web UI)
   --project <dir>               Set project directory
   --manifest <file>             Run a workflow manifest
   --task "<title>"              Create a background task and exit
   --output <file>               Save output to file
-  --resume                      Resume previous session
+  --resume                      Resume previous session (implies --repl)
   --data-dir <dir>              Override data directory (default: ~/.lynox)
 
 Environment:
@@ -379,6 +381,7 @@ Environment:
   LYNOX_DATA_DIR                Override data directory (same as --data-dir)
   LYNOX_HTTP_PORT               HTTP API port (default: 3100)
   LYNOX_HTTP_SECRET             HTTP API Bearer token (enables network binding)
+  LYNOX_WEBUI_URL               Web UI URL to open (default: http://localhost:5173)
   TELEGRAM_BOT_TOKEN            Auto-start Telegram bot mode
   TAVILY_API_KEY                Enable web search tool
 
@@ -442,14 +445,14 @@ Docs: https://docs.lynox.dev
       stderr.write('No API key configured. Run "lynox init" to set up.\n');
       process.exit(1);
     }
-    // Continue into REPL — vault key is already in process.env, config reloaded
+    // Continue to default mode (HTTP API + Web UI, or REPL if --repl)
   } else if (!hasApiKey() && stdin.isTTY) {
     const wizardResult = await runSetupWizard();
     if (!wizardResult) {
       stderr.write('No API key configured. Run "lynox init" to set up.\n');
       process.exit(1);
     }
-    // Continue into REPL — vault key is already in process.env, config reloaded
+    // Continue to default mode (HTTP API + Web UI, or REPL if --repl)
   }
 
   // === MCP Server mode ===
@@ -727,7 +730,50 @@ Docs: https://docs.lynox.dev
     return;
   }
 
-  // === Interactive REPL ===
+  // === Default: Engine HTTP API + Web UI (when TTY, no special flags) ===
+  if (stdin.isTTY && !args.includes('--repl') && !args.includes('--resume')) {
+    if (!hasApiKey()) {
+      stderr.write('No API key configured. Run "lynox init" to set up.\n');
+      process.exit(1);
+    }
+    const { LynoxHTTPApi } = await import('./server/http-api.js');
+    const rawPort = parseInt(process.env['LYNOX_HTTP_PORT'] ?? '3100', 10);
+    const port = Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : 3100;
+    const api = new LynoxHTTPApi();
+    await api.init();
+    await api.start(port);
+
+    const webUiUrl = process.env['LYNOX_WEBUI_URL'] ?? 'http://localhost:5173';
+
+    stderr.write(`\n  ${BOLD}lynox${RESET} ${DIM}v${pkg.version}${RESET}\n`);
+    stderr.write(`  ${DIM}Engine API:${RESET}  http://127.0.0.1:${port}\n`);
+    stderr.write(`  ${DIM}Web UI:${RESET}     ${webUiUrl}\n`);
+    stderr.write(`  ${DIM}Press Ctrl+C to stop.${RESET}\n\n`);
+
+    // Open browser (best-effort, no shell injection via execFile)
+    try {
+      const { execFile } = await import('node:child_process');
+      const cmd = process.platform === 'darwin' ? 'open'
+        : process.platform === 'win32' ? 'start'
+        : 'xdg-open';
+      execFile(cmd, [webUiUrl], () => { /* ignore errors */ });
+    } catch { /* best-effort */ }
+
+    // Graceful shutdown
+    let shuttingDown = false;
+    const graceful = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      stderr.write(`\n[lynox] ${signal} received — shutting down…\n`);
+      try { await api.shutdown(); } catch { /* best-effort */ }
+      process.exit(0);
+    };
+    process.on('SIGINT', () => void graceful('SIGINT'));
+    process.on('SIGTERM', () => void graceful('SIGTERM'));
+    return;
+  }
+
+  // === Interactive REPL (--repl or --resume) ===
   // Init must complete before reading tool counts
   session = await ensureSession();
   const mcpCount = session.getRegistry().getMCPServers().length;

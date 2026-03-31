@@ -37,7 +37,8 @@ export type StreamEvent =
   | { type: 'context_pressure'; droppedMessages: number; usagePercent: number; agent: string }
   | { type: 'context_budget'; systemTokens: number; toolTokens: number; messageTokens: number;
       totalTokens: number; maxTokens: number; usagePercent: number; agent: string }
-  | { type: 'changeset_ready'; fileCount: number; agent: string };
+  | { type: 'changeset_ready'; fileCount: number; agent: string }
+  | { type: 'context_compacted'; summary: string; previousUsagePercent: number; agent: string };
 
 export type StreamHandler = (event: StreamEvent) => void | Promise<void>;
 

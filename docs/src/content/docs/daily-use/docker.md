@@ -135,7 +135,8 @@ The `ghcr.io/lynox-ai/lynox` image contains everything — CLI, Telegram bot, MC
 
 | What you set | What runs |
 |--------------|-----------|
-| *(nothing)* | Interactive CLI REPL |
+| *(nothing)* | Engine HTTP API + opens Web UI |
+| `--repl` | Interactive CLI REPL |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot (auto-starts alongside CLI) |
 | `--mcp-server` | MCP server (stdio or HTTP) |
 | All of the above | All modes run in the same container |
@@ -268,6 +269,8 @@ All persistent data lives inside `~/.lynox/`: backups (`backups/`), API profiles
 | `LYNOX_VAULT_KEY` | Recommended | Encrypt data at rest |
 | `LYNOX_MCP_SECRET` | Production | MCP HTTP bearer token |
 | `LYNOX_MCP_PORT` | No | MCP port (default: 3042) |
+| `LYNOX_HTTP_PORT` | No | Engine HTTP API port (default: 3100) |
+| `LYNOX_WEBUI_URL` | No | Web UI URL for browser auto-open (default: http://localhost:5173) |
 | `LYNOX_WORKSPACE` | No | Workspace root (default: /workspace) |
 | `LYNOX_EMBEDDING_PROVIDER` | No | `onnx` / `voyage` / `local` |
 | `TELEGRAM_BOT_TOKEN` | No | Enable Telegram bot |

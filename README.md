@@ -108,10 +108,10 @@ See [Docker docs](docs/docker.md) for Telegram, encryption, and production deplo
 
 ## Your first run
 
-After setup you're in the interactive REPL:
+After setup, lynox starts the Engine HTTP API and opens the Web UI in your browser:
 
-```
-❯ What can you do?
+```bash
+npx @lynox-ai/core    # Starts Engine + opens Web UI
 ```
 
 One-shot mode — run a task and exit:
@@ -120,13 +120,12 @@ One-shot mode — run a task and exit:
 npx @lynox-ai/core "Summarize the last 5 commits in this repo"
 ```
 
-### Web UI (recommended)
+### Interactive REPL (for developers)
 
-Start the Engine with HTTP API, then open the Web UI:
+If you prefer a terminal-based interface:
 
 ```bash
-npx @lynox-ai/core --http-api  # Engine on port 3100
-cd packages/web-ui && npm start # Web UI on port 3000
+npx @lynox-ai/core --repl
 ```
 
 Or use Docker: `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui`

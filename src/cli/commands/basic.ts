@@ -22,27 +22,20 @@ export async function handleClear(_parts: string[], session: Session, ctx: CLICt
 }
 
 export async function handleCompact(parts: string[], session: Session, ctx: CLICtx): Promise<boolean> {
-  const focus = parts.slice(1).join(' ');
-  const summaryPrompt = focus
-    ? `Summarize the key points of our conversation so far, focusing on: ${focus}. Be extremely concise — bullet points only.`
-    : 'Summarize the key points of our conversation so far. Be extremely concise — bullet points only.';
-  let summary = '';
+  const focus = parts.slice(1).join(' ') || undefined;
   try {
     spinner.start('Compacting conversation...');
-    summary = await session.run(summaryPrompt);
+    const result = await session.compact(focus);
+    spinner.stop();
+    state.lastResponse = '';
+    if (result.success) {
+      ctx.stdout.write(`${GREEN}✓${RESET} Conversation compacted.${focus ? ` Focus: ${focus}` : ''}\n`);
+    } else {
+      ctx.stdout.write('Conversation reset (compaction failed).\n');
+    }
   } catch {
     spinner.stop();
-  }
-  session.reset();
-  state.lastResponse = '';
-  if (summary) {
-    // Inject synthetic context so the agent has awareness of prior conversation
-    session.loadMessages([
-      { role: 'user', content: 'What have we discussed so far?' },
-      { role: 'assistant', content: `[Conversation summary]\n${summary}` },
-    ]);
-    ctx.stdout.write(`${GREEN}✓${RESET} Conversation compacted.${focus ? ` Focus: ${focus}` : ''}\n`);
-  } else {
+    state.lastResponse = '';
     ctx.stdout.write('Conversation reset (compaction failed).\n');
   }
   return true;

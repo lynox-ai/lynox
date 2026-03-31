@@ -9,8 +9,13 @@ The Engine HTTP API exposes lynox as a REST + SSE server. It powers the [Web UI]
 
 ## Starting
 
+The Engine HTTP API starts automatically when you run `lynox` (default mode). For headless/server use:
+
 ```bash
-# Start HTTP API (default port 3100)
+# Default: starts Engine + opens browser
+lynox
+
+# Headless (no browser, for servers/Docker)
 lynox --http-api
 
 # With custom data directory (for multi-user / PWA)
@@ -121,6 +126,10 @@ Response: SSE stream (Content-Type: text/event-stream)
 | `prompt` | `{ question, options? }` | Permission/input prompt (reply via `/reply`) |
 | `turn_end` | `{ stop_reason, usage }` | Turn complete with token usage |
 | `error` | `{ error }` | Error during run |
+| `context_pressure` | `{ droppedMessages, usagePercent, agent }` | Messages dropped due to context overflow |
+| `context_budget` | `{ systemTokens, toolTokens, messageTokens, totalTokens, maxTokens, usagePercent, agent }` | Context usage breakdown (emitted when >70%) |
+| `context_compacted` | `{ summary, previousUsagePercent, agent }` | Auto-compaction occurred (context was >75% full) |
+| `changeset_ready` | `{ fileCount, agent }` | File changes ready for review |
 | `done` | `{ result }` | Run complete, stream ends |
 
 **Replying to prompts:**
@@ -141,6 +150,33 @@ Response: { "ok": true }
 ```
 
 The run also aborts automatically if the client disconnects (SSE connection closes).
+
+### Context Compaction
+
+Manually compact the conversation history into a summary. Auto-compaction also runs after each run when context exceeds 75%.
+
+```
+POST /api/sessions/:id/compact
+Body: { "focus"?: "specific topic to focus on" }
+Response: { "ok": true, "summary": "bullet point summary..." }
+```
+
+Returns 409 if a run is currently in progress.
+
+### Changeset Review
+
+When `changeset_review` is enabled and the workspace is active, file writes are backed up. After a run, if files were modified, the `changeset_ready` SSE event fires.
+
+```
+GET /api/sessions/:id/changeset
+Response: { "hasChanges": true, "files": [{ "file", "status", "diff", "added", "removed" }] }
+```
+
+```
+POST /api/sessions/:id/changeset/review
+Body: { "action": "accept"|"rollback"|"partial", "rolledBackFiles"?: ["path"] }
+Response: { "ok": true, "accepted": 3, "rolledBack": 1 }
+```
 
 ### Memory
 
@@ -217,7 +253,7 @@ POST   /api/tasks/:id/complete   → TaskRecord
 | **Streaming** | Real SSE (push) | Polling (1s interval) |
 | **Auth** | Bearer token | Bearer token |
 | **Port** | 3100 (default) | 3042 (default) |
-| **Flag** | `--http-api` | `--mcp-server` |
+| **Flag** | Default (or `--http-api` for headless) | `--mcp-server` |
 
 Both can run simultaneously on different ports if needed.
 
