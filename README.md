@@ -92,8 +92,8 @@ npx @lynox-ai/core
 
 ```bash
 git clone https://github.com/lynox-ai/lynox.git
-cd lynox && npm install
-npm run dev
+cd lynox && pnpm install
+pnpm run dev
 ```
 
 ### Docker
@@ -103,7 +103,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 docker compose up
 ```
 
-See [Docker docs](docs/docker.md) for Telegram, encryption, and production deployment.
+See [Docker docs](https://docs.lynox.ai/daily-use/docker/) for Telegram, encryption, and production deployment.
 
 ## Your first run
 

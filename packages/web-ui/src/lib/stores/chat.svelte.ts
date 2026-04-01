@@ -636,14 +636,36 @@ export function getSessionId() {
 	return sessionId;
 }
 
+let _resumeGeneration = 0;
+
 export async function resumeThread(threadId: string): Promise<void> {
+	// Race-condition guard: if another resumeThread call starts, this one aborts
+	const gen = ++_resumeGeneration;
+
+	// Clear state immediately so UI doesn't show stale data
+	messages = [];
+	sessionId = threadId;
+	chatError = null;
+	isStreaming = false;
+	pendingPermission = null;
+	pendingChangeset = null;
+	changesetLoading = false;
+	messageQueue = [];
+	contextBudget = null;
+	clearContext();
+	persistChatNow();
+
 	// Create backend session from persisted thread
 	const res = await fetch(`${getApiBase()}/sessions`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ threadId }),
 	});
-	if (!res.ok) return;
+	if (gen !== _resumeGeneration) return; // superseded by newer click
+	if (!res.ok) {
+		chatError = t('chat.error_connection');
+		return;
+	}
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
 	if (data.model) sessionModel = data.model;
@@ -651,6 +673,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 
 	// Load messages for display
 	const msgRes = await fetch(`${getApiBase()}/threads/${threadId}/messages`);
+	if (gen !== _resumeGeneration) return; // superseded by newer click
 	if (msgRes.ok) {
 		const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
 		messages = msgData.messages.map((m) => ({
@@ -660,13 +683,6 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}));
 	}
 
-	chatError = null;
-	pendingPermission = null;
-	pendingChangeset = null;
-	changesetLoading = false;
-	messageQueue = [];
-	contextBudget = null;
-	clearContext();
 	persistChatNow();
 }
 

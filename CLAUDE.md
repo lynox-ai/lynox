@@ -15,7 +15,7 @@ pnpm run lint        # eslint src/
 pnpm run build       # tsc → dist/
 pnpm run dev         # watch mode with tsx
 pnpm run security    # security scan + vitest security tests
-npx vitest run       # 115 test files / ~2680 tests
+npx vitest run       # 115 test files / ~2691 tests
 npx vitest run tests/online/  # 22 real API tests
 
 # Web UI (@lynox-ai/web-ui)
@@ -33,9 +33,9 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — 67 modules: engine, session, thread-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
-- `src/cli/` — Terminal UI + 14 command handler modules
-- `src/tools/` — 17 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
+- `src/core/` — 72 modules: engine, session, thread-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
+- `src/cli/` — 20 Terminal UI modules + 7 command handlers
+- `src/tools/` — 30 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Telegram, Google Workspace, Web Search
 - `src/server/` — MCP server (stdio + HTTP SSE), Engine HTTP API (REST + SSE for PWA)
@@ -90,10 +90,10 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Testing
 
-110 offline test files / ~2658 tests. Co-located *.test.ts.
-19 security audit tests in tests/security/.
+110 offline test files / ~2669 tests. Co-located *.test.ts.
+1 security audit test file with 19 test cases in tests/security/.
 5 online test files / 22 tests (real Haiku API).
-Coverage enforced on src/core/, src/tools/, src/orchestrator/ (>=70%).
+Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/integrations/ (lines >=65%, functions >=60%, branches >=50%, statements >=65%).
 
 ## Git
 

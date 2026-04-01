@@ -7,8 +7,8 @@ Thanks for your interest in contributing to lynox.
 ```bash
 git clone https://github.com/lynox-ai/lynox.git
 cd lynox
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 Requirements: Node.js 22+.
@@ -16,12 +16,12 @@ Requirements: Node.js 22+.
 ## Development Workflow
 
 ```bash
-npm run dev          # Watch mode with hot reload
-npm run typecheck    # tsc --noEmit — must pass with zero errors
-npm run lint         # eslint src/ — must pass with zero errors
-npm run build        # tsc → dist/
-npx vitest run       # 103 files / ~2481 tests — all must pass
-npm run coverage     # coverage report (CI enforces ≥80%)
+pnpm run dev          # Watch mode with hot reload
+pnpm run typecheck    # tsc --noEmit — must pass with zero errors
+pnpm run lint         # eslint src/ — must pass with zero errors
+pnpm run build        # tsc → dist/
+npx vitest run        # 115 files / ~2669 tests — all must pass
+pnpm run coverage     # coverage report (CI enforces ≥65% lines, ≥60% functions, ≥50% branches, ≥65% statements)
 ```
 
 Run a single test file:
@@ -38,14 +38,14 @@ lynox uses [lefthook](https://github.com/evilmartians/lefthook) for pre-commit (
 brew install lefthook gitleaks
 ```
 
-Hooks are auto-installed by `npm install` via the `prepare` script.
+Hooks are auto-installed by `pnpm install` via the `prepare` script.
 
 ## Code Standards
 
 - **ESM-only** — All imports use `.js` extensions
 - **TypeScript strict mode** — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `useUnknownInCatchVariables`
 - **Zero `any`** — Use `unknown` plus type narrowing (catch variables are `unknown`)
-- **ESLint enforced** — `npm run lint` must pass. Rules in `eslint.config.js`: no-explicit-any, no-floating-promises, consistent-type-imports, no-unused-vars, eqeqeq, no-console, no-eval
+- **ESLint enforced** — `pnpm run lint` must pass. Rules in `eslint.config.js`: no-explicit-any, no-floating-promises, consistent-type-imports, no-unused-vars, eqeqeq, no-console, no-eval
 - **Single type source** — All types live in `src/types/index.ts`
 - **Co-located tests** — `*.test.ts` next to source files
 
@@ -54,7 +54,7 @@ Hooks are auto-installed by `npm install` via the `prepare` script.
 1. Fork the repository
 2. Create a feature branch from `main`
 3. Make your changes
-4. Ensure `npm run typecheck`, `npm run lint`, and `npx vitest run` pass
+4. Ensure `pnpm run typecheck`, `pnpm run lint`, and `npx vitest run` pass
 5. Open a PR with a clear description of what and why
 
 Keep PRs focused — one concern per PR.
@@ -67,7 +67,7 @@ Keep PRs focused — one concern per PR.
 
 ## Understanding the Codebase
 
-See [docs/architecture.md](docs/architecture.md) for the module map, data flow, and design decisions.
+See [Architecture](https://docs.lynox.ai/developers/architecture/) for the module map, data flow, and design decisions.
 
 ## Reporting Bugs
 

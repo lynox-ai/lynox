@@ -157,9 +157,10 @@
 	}
 
 	function selectThread(id: string) {
-		void resumeThread(id).then(() => { void loadThreads(); });
 		sidebarOpen = false;
-		void goto('/app');
+		void goto('/app').then(() => {
+			void resumeThread(id).then(() => { void loadThreads(); });
+		});
 	}
 
 	function formatThreadDate(dateStr: string): string {

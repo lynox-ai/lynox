@@ -1,7 +1,7 @@
 {
   "files": [
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/data-store.bench.ts",
+      "filepath": "tests/performance/data-store.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/data-store.bench.ts > DataStore — collection lifecycle",
@@ -192,7 +192,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/embedding.bench.ts",
+      "filepath": "tests/performance/embedding.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/embedding.bench.ts > Embedding — LocalProvider",
@@ -492,7 +492,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/entity-extractor.bench.ts",
+      "filepath": "tests/performance/entity-extractor.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/entity-extractor.bench.ts > Entity Extraction — regex tier",
@@ -627,7 +627,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/history-truncation.bench.ts",
+      "filepath": "tests/performance/history-truncation.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/history-truncation.bench.ts > History Truncation — message count gate",
@@ -847,7 +847,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/knowledge-graph.bench.ts",
+      "filepath": "tests/performance/knowledge-graph.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/knowledge-graph.bench.ts > Knowledge Graph — init",
@@ -1117,7 +1117,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/memory.bench.ts",
+      "filepath": "tests/performance/memory.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/memory.bench.ts > Memory — save + load",
@@ -1372,7 +1372,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/security.bench.ts",
+      "filepath": "tests/performance/security.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/security.bench.ts > Security — detectInjectionAttempt",
@@ -1747,7 +1747,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/online/agent-loop.bench.ts",
+      "filepath": "tests/performance/online/agent-loop.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/online/agent-loop.bench.ts > Online: Agent Loop",
@@ -1785,7 +1785,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/online/dag-planner.bench.ts",
+      "filepath": "tests/performance/online/dag-planner.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/online/dag-planner.bench.ts > Online: DAG Planner",
@@ -1870,7 +1870,7 @@
       ]
     },
     {
-      "filepath": "/Users/rafaelburlet/projects/lynox-workspace/core/tests/performance/online/retrieval-pipeline.bench.ts",
+      "filepath": "tests/performance/online/retrieval-pipeline.bench.ts",
       "groups": [
         {
           "fullName": "tests/performance/online/retrieval-pipeline.bench.ts > Online: Retrieval Pipeline",

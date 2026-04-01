@@ -970,7 +970,7 @@
 		{/if}
 
 		<div class="mx-auto max-w-3xl space-y-5">
-			{#each messages as msg, msgIdx}
+			{#each messages as msg, msgIdx (msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.role === 'user'}
 					<div class="flex justify-end">
 						<button
