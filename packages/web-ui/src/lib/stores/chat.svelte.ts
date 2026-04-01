@@ -218,7 +218,14 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 
 	if (!res.ok || !res.body) {
 		isStreaming = false;
-		chatError = res.status === 409 ? t('chat.error_busy') : t('chat.error_start');
+		const errMsg = res.status === 409
+			? t('chat.error_busy')
+			: res.status === 401
+				? t('chat.error_auth')
+				: t('chat.error_start');
+		chatError = errMsg;
+		const msg = messages[assistantIdx];
+		if (msg) msg.content = errMsg;
 		return;
 	}
 
@@ -250,6 +257,8 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 		}
 	} catch {
 		chatError = t('chat.error_connection');
+		const connMsg = messages[assistantIdx];
+		if (connMsg && !connMsg.content) connMsg.content = t('chat.error_connection');
 	} finally {
 		try { reader.cancel(); } catch { /* already closed */ }
 	}
@@ -417,9 +426,13 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		}
 		case 'done':
 			break;
-		case 'error':
-			chatError = String(data['error'] ?? 'Unknown error');
+		case 'error': {
+			const errText = String(data['error'] ?? 'Unknown error');
+			chatError = errText;
+			const errMsg = messages[idx];
+			if (errMsg && !errMsg.content) errMsg.content = errText;
 			break;
+		}
 		case 'changeset_ready':
 			void fetchChangeset();
 			break;

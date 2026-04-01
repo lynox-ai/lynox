@@ -21,7 +21,7 @@ export async function loadThreads(): Promise<void> {
 		const res = await fetch(`${getApiBase()}/threads?limit=50`);
 		if (res.ok) {
 			const data = (await res.json()) as { threads: Thread[] };
-			threads = data.threads;
+			threads = data.threads.filter((t) => t.message_count > 0);
 		}
 	} catch {
 		// Silently fail — thread list is non-critical

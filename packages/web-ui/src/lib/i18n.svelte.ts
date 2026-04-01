@@ -231,8 +231,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'common.ok': { de: 'OK', en: 'OK' },
 
 	// Chat errors
-	'chat.error_start': { de: 'Run konnte nicht gestartet werden', en: 'Failed to start run' },
-	'chat.error_connection': { de: 'Verbindung unterbrochen', en: 'Connection lost' },
+	'chat.error_start': { de: 'Etwas ist schiefgelaufen. Versuche es nochmal oder prüfe die [Einstellungen](/app/settings).', en: 'Something went wrong. Try again or check your [settings](/app/settings).' },
+	'chat.error_auth': { de: 'Dein API-Schlüssel ist ungültig oder abgelaufen. [Einstellungen öffnen](/app/settings)', en: 'Your API key is invalid or expired. [Open settings](/app/settings)' },
+	'chat.error_connection': { de: 'Verbindung zum Server verloren. Prüfe deine Internetverbindung und versuche es nochmal.', en: 'Lost connection to the server. Check your internet and try again.' },
 
 	// Chat
 	'chat.welcome': { de: 'Was kann ich für dich tun?', en: 'What can I help you with?' },

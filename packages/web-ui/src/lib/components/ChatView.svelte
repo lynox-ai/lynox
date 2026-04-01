@@ -953,7 +953,7 @@
 
 			{#if chatError}
 				<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between">
-					<span>{chatError}</span>
+					<span>{@html chatError.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="underline hover:opacity-80">$1</a>')}</span>
 					<button onclick={clearError} class="text-xs opacity-60 hover:opacity-100">{t('common.ok')}</button>
 				</div>
 			{/if}

@@ -162,6 +162,21 @@
 		void goto('/app');
 	}
 
+	function formatThreadDate(dateStr: string): string {
+		const parsed = new Date(dateStr.endsWith('Z') || dateStr.includes('+') ? dateStr : dateStr + 'Z');
+		if (Number.isNaN(parsed.getTime())) return dateStr;
+		const now = new Date();
+		const isToday = parsed.toDateString() === now.toDateString();
+		const yesterday = new Date(now);
+		yesterday.setDate(yesterday.getDate() - 1);
+		const isYesterday = parsed.toDateString() === yesterday.toDateString();
+		const locale = getLocale() === 'de' ? 'de-DE' : 'en-US';
+		const time = parsed.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
+		if (isToday) return time;
+		if (isYesterday) return `${getLocale() === 'de' ? 'Gestern' : 'Yesterday'} ${time}`;
+		return parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' }) + ` ${time}`;
+	}
+
 	function timeAgo(dateStr: string): string {
 		const parsed = new Date(dateStr.endsWith('Z') || dateStr.includes('+') ? dateStr : dateStr + 'Z');
 		const diff = Date.now() - parsed.getTime();
@@ -295,7 +310,7 @@
 														onclick={() => { if (swipedThreadId) { closeSwipe(); return; } selectThread(thread.id); }}
 														class="flex-1 text-left px-2.5 py-2 text-sm truncate"
 													>
-														{thread.title || t('threads.no_title')}
+														{thread.title || formatThreadDate(thread.created_at)}
 													</button>
 													{#if thread.is_favorite}
 														<span class="text-accent text-xs shrink-0 pr-1 group-hover:hidden">&#9733;</span>
