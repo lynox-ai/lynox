@@ -223,7 +223,7 @@
 
 		<!-- Left Sidebar -->
 		<nav
-			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle pb-3 transition-transform md:static md:w-52 md:translate-x-0
+			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle pb-3 transition-transform md:static md:w-56 md:translate-x-0
 			{sidebarOpen ? 'translate-x-0' : '-translate-x-full'}"
 			style="padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem);"
 		>
@@ -285,7 +285,7 @@
 						{#if expandedSection === item.href && item.type === 'threads'}
 							<div transition:slide={{ duration: 150 }}>
 								{#if getThreads().length > 0}
-									<ul class="mt-1 ml-2 space-y-0.5 max-h-72 overflow-y-auto scrollbar-thin">
+									<ul class="mt-1 space-y-0.5 max-h-72 overflow-y-auto scrollbar-thin">
 										{#each getThreads() as thread (thread.id)}
 											{@const isThreadActive = getSessionId() === thread.id}
 											<li class="relative overflow-hidden rounded-[var(--radius-sm)]">
@@ -308,14 +308,14 @@
 												>
 													<button
 														onclick={() => { if (swipedThreadId) { closeSwipe(); return; } selectThread(thread.id); }}
-														class="flex-1 text-left px-2.5 py-2 text-sm truncate"
+														class="flex-1 text-left px-2 py-2 text-sm truncate"
 													>
 														{thread.title || formatThreadDate(thread.created_at)}
 													</button>
 													{#if thread.is_favorite}
 														<span class="text-accent text-xs shrink-0 pr-1 group-hover:hidden">&#9733;</span>
 													{:else}
-														<span class="text-xs text-text-subtle shrink-0 pr-2 group-hover:hidden">
+														<span class="text-[10px] text-text-subtle shrink-0 pr-1 group-hover:hidden tabular-nums">
 															{timeAgo(thread.updated_at)}
 														</span>
 													{/if}

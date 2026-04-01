@@ -65,8 +65,8 @@
 </script>
 
 {#if getThreads().length > 0}
-	<div class="px-3 mb-2">
-		<p class="text-xs uppercase tracking-wider text-text-subtle px-3 mb-1">{t('threads.recent')}</p>
+	<div class="px-2 mb-2">
+		<p class="text-xs uppercase tracking-wider text-text-subtle px-2 mb-1">{t('threads.recent')}</p>
 		<ul class="space-y-0.5 max-h-72 overflow-y-auto scrollbar-thin">
 			{#each getThreads() as thread (thread.id)}
 				{@const isActive = getSessionId() === thread.id}
@@ -90,14 +90,14 @@
 					>
 						<button
 							onclick={() => { if (swipedThreadId) { closeSwipe(); return; } onselect(thread.id); }}
-							class="flex-1 text-left px-3 py-2 text-sm truncate"
+							class="flex-1 text-left px-2 py-2 text-sm truncate"
 						>
 							{thread.title || t('threads.no_title')}
 						</button>
 						{#if thread.is_favorite}
 							<span class="text-accent text-xs shrink-0 pr-1 group-hover:hidden">&#9733;</span>
 						{:else}
-							<span class="text-xs text-text-subtle shrink-0 pr-2 group-hover:hidden">
+							<span class="text-[10px] text-text-subtle shrink-0 pr-1 group-hover:hidden tabular-nums">
 								{timeAgo(thread.updated_at)}
 							</span>
 						{/if}
