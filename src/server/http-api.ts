@@ -42,6 +42,11 @@ interface DynamicRoute {
   handler: RouteHandler;
 }
 
+interface ProviderStatus {
+  indicator: 'none' | 'minor' | 'major' | 'critical' | 'unknown';
+  description: string;
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
@@ -136,6 +141,7 @@ export class LynoxHTTPApi {
   private readonly staticRoutes = new Map<string, RouteHandler>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
+  private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
 
   async init(): Promise<void> {
     const config = loadConfig();
@@ -294,6 +300,13 @@ export class LynoxHTTPApi {
       return;
     }
 
+    // Provider status — cached Anthropic statuspage check (unauthenticated, public data)
+    if (method === 'GET' && (pathname === '/api/provider/status')) {
+      const status = await this.getProviderStatus();
+      jsonResponse(res, 200, status);
+      return;
+    }
+
     // CORS — restrict to allowed origins (or allow all for localhost-only mode)
     const requestOrigin = req.headers['origin'] ?? '';
     const corsOrigin = ALLOWED_ORIGINS.length > 0
@@ -419,6 +432,43 @@ export class LynoxHTTPApi {
     }
 
     errorResponse(res, 404, 'Not found');
+  }
+
+  // ── Provider status (cached) ──────────────────────────────────────────────
+
+  private async getProviderStatus(): Promise<ProviderStatus> {
+    const now = Date.now();
+    if (this.providerStatusCache && now < this.providerStatusCache.expiresAt) {
+      return this.providerStatusCache.data;
+    }
+
+    const fallback: ProviderStatus = { indicator: 'unknown', description: 'Status unavailable' };
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch('https://status.anthropic.com/api/v2/status.json', {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        this.providerStatusCache = { data: fallback, expiresAt: now + 30_000 };
+        return fallback;
+      }
+
+      const body = (await res.json()) as { status?: { indicator?: string; description?: string } };
+      const indicator = body.status?.indicator;
+      const data: ProviderStatus = {
+        indicator: indicator === 'none' || indicator === 'minor' || indicator === 'major' || indicator === 'critical'
+          ? indicator : 'unknown',
+        description: body.status?.description ?? 'Unknown',
+      };
+      this.providerStatusCache = { data, expiresAt: now + 60_000 };
+      return data;
+    } catch {
+      this.providerStatusCache = { data: fallback, expiresAt: now + 30_000 };
+      return fallback;
+    }
   }
 
   // ── Route registration ───────────────────────────────────────────────────

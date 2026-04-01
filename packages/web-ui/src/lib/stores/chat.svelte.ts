@@ -219,12 +219,19 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 
 	if (!res.ok || !res.body) {
 		isStreaming = false;
-		chatError = res.status === 409
-			? t('chat.error_busy')
-			: res.status === 401
-				? t('chat.error_auth')
-				: t('chat.error_start');
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
+		const detail = (chatErrorDetail ?? '').toLowerCase();
+		if (res.status === 409) {
+			chatError = t('chat.error_busy');
+		} else if (res.status === 401 || detail.includes('authentication')) {
+			chatError = t('chat.error_auth');
+		} else if (res.status === 429 || detail.includes('rate_limit')) {
+			chatError = t('chat.error_rate_limit');
+		} else if (res.status === 529 || detail.includes('overloaded')) {
+			chatError = t('chat.error_overloaded');
+		} else {
+			chatError = t('chat.error_start');
+		}
 		// Remove empty assistant message
 		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 		return;
@@ -287,13 +294,15 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'text': {
 			const text = String(data['text'] ?? '');
 			// Intercept raw API error responses leaked as text
-			if (/^\d{3}\s*\{.*"error"/.test(text.trim())) {
+			// Matches: "429 {...}" (status-prefixed) or '{"type":"error",...}' (raw JSON)
+			if (/^\d{3}\s*\{.*"error"/i.test(text.trim()) || /^\{.*"type"\s*:\s*"error"/i.test(text.trim())) {
 				chatErrorDetail = text;
-				if (text.includes('authentication') || text.includes('401')) {
+				const lower = text.toLowerCase();
+				if (lower.includes('authentication') || lower.includes('401')) {
 					chatError = t('chat.error_auth');
-				} else if (text.includes('rate_limit') || text.includes('429')) {
+				} else if (lower.includes('rate_limit') || lower.includes('429')) {
 					chatError = t('chat.error_rate_limit');
-				} else if (text.includes('overloaded') || text.includes('529')) {
+				} else if (lower.includes('overloaded') || lower.includes('529')) {
 					chatError = t('chat.error_overloaded');
 				} else {
 					chatError = t('chat.error_start');
@@ -443,14 +452,16 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'done':
 			break;
 		case 'error': {
-			const rawErr = String(data['error'] ?? 'Unknown error');
+			// Agent sends { message: '...' }, http-api catch sends { error: '...' }
+			const rawErr = String(data['error'] ?? data['message'] ?? 'Unknown error');
 			chatErrorDetail = rawErr;
 			// Map known API errors to user-friendly messages
-			if (rawErr.includes('authentication') || rawErr.includes('401')) {
+			const lower = rawErr.toLowerCase();
+			if (lower.includes('authentication') || lower.includes('401')) {
 				chatError = t('chat.error_auth');
-			} else if (rawErr.includes('rate_limit') || rawErr.includes('429')) {
+			} else if (lower.includes('rate_limit') || lower.includes('429')) {
 				chatError = t('chat.error_rate_limit');
-			} else if (rawErr.includes('overloaded') || rawErr.includes('529')) {
+			} else if (lower.includes('overloaded') || lower.includes('529')) {
 				chatError = t('chat.error_overloaded');
 			} else {
 				chatError = t('chat.error_start');

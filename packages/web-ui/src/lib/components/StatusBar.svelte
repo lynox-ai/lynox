@@ -5,6 +5,7 @@
 	import { getContextBudget, getSessionModel } from '../stores/chat.svelte.js';
 
 	let engineOk = $state<boolean | null>(null);
+	let apiStatus = $state<'none' | 'minor' | 'major' | 'critical' | 'unknown' | null>(null);
 	let activeTasks = $state(0);
 	let todayCost = $state(0);
 	let todayRuns = $state(0);
@@ -33,13 +34,23 @@
 
 	async function poll() {
 		try {
-			const [healthRes, tasksRes, dailyRes] = await Promise.all([
+			const [healthRes, tasksRes, dailyRes, providerRes] = await Promise.all([
 				fetch(`${getApiBase()}/health`).catch(() => null),
 				fetch(`${getApiBase()}/tasks?status=in_progress`).catch(() => null),
 				fetch(`${getApiBase()}/history/cost/daily?days=1`).catch(() => null),
+				fetch(`${getApiBase()}/provider/status`).catch(() => null),
 			]);
 
 			engineOk = healthRes?.ok ?? false;
+
+			if (providerRes?.ok) {
+				const data = (await providerRes.json()) as { indicator: string };
+				const ind = data.indicator;
+				apiStatus = ind === 'none' || ind === 'minor' || ind === 'major' || ind === 'critical'
+					? ind : 'unknown';
+			} else {
+				apiStatus = 'unknown';
+			}
 
 			if (tasksRes?.ok) {
 				const data = (await tasksRes.json()) as { tasks: unknown[] };
@@ -105,7 +116,8 @@
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
 		<span class="text-border mx-1">|</span>
-		<span class="text-accent-text">{activeTasks}</span> {t('status.tasks_active')}
+		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatus === 'none' ? 'bg-success' : apiStatus === 'minor' ? 'bg-warning' : apiStatus === 'major' || apiStatus === 'critical' ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
+		{apiStatus === 'none' ? t('status.api_ok') : apiStatus === 'minor' ? t('status.api_degraded') : apiStatus === 'major' || apiStatus === 'critical' ? t('status.api_down') : t('status.api_unknown')}
 		<span class="text-border mx-1">|</span>
 		${todayCost.toFixed(2)}
 	</button>
@@ -118,6 +130,14 @@
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
 	</button>
+
+	<span class="text-border">|</span>
+
+	<!-- API Status -->
+	<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="Anthropic API">
+		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatus === 'none' ? 'bg-success' : apiStatus === 'minor' ? 'bg-warning' : apiStatus === 'major' || apiStatus === 'critical' ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
+		{apiStatus === 'none' ? t('status.api_ok') : apiStatus === 'minor' ? t('status.api_degraded') : apiStatus === 'major' || apiStatus === 'critical' ? t('status.api_down') : t('status.api_unknown')}
+	</span>
 
 	<span class="text-border">|</span>
 
@@ -169,7 +189,13 @@
 			<!-- Engine Connection -->
 			<div class="flex items-center gap-2">
 				<span class="inline-block h-2 w-2 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
-				<span class="font-medium text-text">{engineOk === true ? t('status.connected') : t('status.disconnected')}</span>
+				<span class="font-medium text-text">Engine: {engineOk === true ? t('status.connected') : t('status.disconnected')}</span>
+			</div>
+
+			<!-- Anthropic API Status -->
+			<div class="flex items-center gap-2">
+				<span class="inline-block h-2 w-2 rounded-full {apiStatus === 'none' ? 'bg-success' : apiStatus === 'minor' ? 'bg-warning' : apiStatus === 'major' || apiStatus === 'critical' ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
+				<span class="font-medium text-text">Anthropic API: {apiStatus === 'none' ? t('status.api_ok') : apiStatus === 'minor' ? t('status.api_degraded') : apiStatus === 'major' || apiStatus === 'critical' ? t('status.api_down') : t('status.api_unknown')}</span>
 			</div>
 
 			<!-- API Keys -->
