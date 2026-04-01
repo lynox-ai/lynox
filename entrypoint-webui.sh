@@ -80,6 +80,7 @@ done
 
 # Start Web UI
 echo "Starting Web UI on port ${PORT:-3000}..."
+echo "  Phone access: Settings → Mobile Access → scan QR code" >&2
 LYNOX_ENGINE_URL="http://127.0.0.1:${LYNOX_HTTP_PORT:-3100}" \
 LYNOX_HTTP_SECRET="${LYNOX_HTTP_SECRET:-}" \
 PORT="${PORT:-3000}" \

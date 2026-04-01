@@ -69,9 +69,9 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 ## Key capabilities
 
 - **Knowledge Graph** — Learns entities, relationships, and contradictions across your business. 100 languages, fully local.
-- **Web UI** — Primary interface. Chat, knowledge browser, run history, settings, integrations. Installable as PWA.
+- **Web UI** — Primary interface. Chat, knowledge browser, run history, settings, integrations. Installable as PWA. QR code login for instant phone access.
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
-- **Telegram Bot** — Secondary mobile interface. Voice, photos, files, follow-up suggestions.
+- **Telegram Bot** — Mobile notifications and quick tasks. Voice, photos, files, follow-up suggestions.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
 - **MCP Server** — Connect to Claude Desktop, Cursor, or any MCP client via stdio or HTTP.
 - **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it.

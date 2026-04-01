@@ -7,6 +7,8 @@ sidebar:
 
 The Web UI is where you interact with lynox day-to-day. It runs at [localhost:3000](http://localhost:3000) and works as a PWA — install it on your device for a native app feel.
 
+**Phone access:** Open Settings → Mobile Access, scan the QR code with your phone — you're logged in instantly. For access outside your WiFi, see [Remote Access](/daily-use/remote-access/).
+
 ## Chat
 
 The main view. Type a message or drop a file to start a conversation. lynox streams responses in real time, showing tool calls inline as they happen.
