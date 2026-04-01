@@ -39,6 +39,15 @@ export async function archiveThread(id: string): Promise<void> {
 	threads = threads.filter((t) => t.id !== id);
 }
 
+export async function unarchiveThread(id: string): Promise<void> {
+	await fetch(`${getApiBase()}/threads/${id}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ is_archived: false }),
+	});
+	await loadThreads();
+}
+
 export async function deleteThread(id: string): Promise<void> {
 	await fetch(`${getApiBase()}/threads/${id}`, { method: 'DELETE' });
 	threads = threads.filter((t) => t.id !== id);

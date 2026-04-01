@@ -79,6 +79,7 @@ export type {
 export {
 	loadThreads,
 	archiveThread,
+	unarchiveThread,
 	deleteThread,
 	renameThread,
 	toggleFavorite,

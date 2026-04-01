@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { unarchiveThread } from '../stores/threads.svelte.js';
 
 	interface RunRecord {
 		id: string;
@@ -375,7 +376,7 @@
 						</div>
 					{/each}
 				</div>
-				<div class="flex justify-between mt-1 text-[10px] text-text-subtle">
+				<div class="flex justify-between mt-1 text-xs md:text-[10px] text-text-subtle">
 					<span>{costData[costData.length - 1]?.day}</span>
 					<span>{costData[0]?.day}</span>
 				</div>
@@ -446,30 +447,44 @@
 			{#each groupedRuns as group (group.threadId)}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 					<!-- Thread header -->
-					<button
-						onclick={() => {
-							const next = new Set(expandedThreads);
-							if (next.has(group.threadId)) next.delete(group.threadId);
-							else next.add(group.threadId);
-							expandedThreads = next;
-						}}
-						class="w-full px-4 py-3 text-left hover:bg-bg-muted transition-colors flex items-center gap-3"
-					>
-						<span class="text-text-subtle text-xs shrink-0">{expandedThreads.has(group.threadId) ? '▾' : '▸'}</span>
-						<div class="flex-1 min-w-0">
-							<div class="flex items-center gap-2">
-								<span class="text-sm font-medium text-text truncate">{group.title}</span>
-								{#if group.isArchived}
-									<span class="text-[9px] uppercase tracking-widest text-text-subtle bg-bg-muted rounded px-1.5 py-0.5">{t('history.archived')}</span>
-								{/if}
+					<div class="flex items-center">
+						<button
+							onclick={() => {
+								const next = new Set(expandedThreads);
+								if (next.has(group.threadId)) next.delete(group.threadId);
+								else next.add(group.threadId);
+								expandedThreads = next;
+							}}
+							class="flex-1 min-w-0 px-4 py-3 text-left hover:bg-bg-muted transition-colors flex items-center gap-3"
+						>
+							<span class="text-text-subtle text-xs shrink-0">{expandedThreads.has(group.threadId) ? '▾' : '▸'}</span>
+							<div class="flex-1 min-w-0">
+								<div class="flex items-center gap-2">
+									<span class="text-sm font-medium text-text truncate">{group.title}</span>
+									{#if group.isArchived}
+										<span class="text-[9px] uppercase tracking-widest text-text-subtle bg-bg-muted rounded px-1.5 py-0.5">{t('history.archived')}</span>
+									{/if}
+								</div>
+								<div class="flex gap-3 mt-0.5 text-xs text-text-muted">
+									<span>{group.runs.length} {group.runs.length === 1 ? 'Run' : 'Runs'}</span>
+									<span>${group.totalCost.toFixed(4)}</span>
+									<span>{formatDateTime(group.lastActivity)}</span>
+								</div>
 							</div>
-							<div class="flex gap-3 mt-0.5 text-xs text-text-muted">
-								<span>{group.runs.length} {group.runs.length === 1 ? 'Run' : 'Runs'}</span>
-								<span>${group.totalCost.toFixed(4)}</span>
-								<span>{formatDateTime(group.lastActivity)}</span>
-							</div>
-						</div>
-					</button>
+						</button>
+						{#if group.isArchived}
+							<button
+								onclick={async () => {
+									await unarchiveThread(group.threadId);
+									const th = threads.find((t) => t.id === group.threadId);
+									if (th) th.is_archived = 0;
+								}}
+								class="shrink-0 mr-3 text-[9px] uppercase tracking-widest text-accent-text bg-accent/10 hover:bg-accent/20 rounded px-1.5 py-0.5 transition-colors"
+							>
+								{t('threads.unarchive')}
+							</button>
+						{/if}
+					</div>
 
 					<!-- Expanded runs -->
 					{#if expandedThreads.has(group.threadId)}
@@ -598,8 +613,8 @@
 										{t('history.tool_calls')} ({toolCalls.length})
 									</p>
 									{#each toolCalls as tc, idx}
-										<details class="mb-1 rounded border border-border bg-bg text-xs">
-											<summary class="px-2 py-1 cursor-pointer text-text-muted hover:text-text">
+										<details class="mb-1.5 md:mb-1 rounded border border-border bg-bg text-sm md:text-xs">
+											<summary class="px-3 md:px-2 py-1.5 md:py-1 cursor-pointer text-text-muted hover:text-text">
 												<span class="font-mono">{tc.tool_name}</span>
 												<span class="ml-2 text-text-subtle">{tc.duration_ms}ms</span>
 											</summary>
@@ -608,7 +623,7 @@
 													<pre class="whitespace-pre-wrap font-mono text-text-subtle">{tc.input_json.slice(0, 500)}</pre>
 													<button
 														onclick={() => { expandedInputs = new Set([...expandedInputs, idx]); }}
-														class="text-accent-text text-[11px] hover:underline mt-1"
+														class="text-accent-text text-[13px] md:text-[11px] hover:underline mt-1"
 													>
 														{t('history.show_more')} ({tc.input_json.length.toLocaleString()} chars)
 													</button>
@@ -617,7 +632,7 @@
 													{#if tc.input_json.length > 500}
 														<button
 															onclick={() => { const next = new Set(expandedInputs); next.delete(idx); expandedInputs = next; }}
-															class="text-accent-text text-[11px] hover:underline mt-1"
+															class="text-accent-text text-[13px] md:text-[11px] hover:underline mt-1"
 														>
 															{t('history.show_less')}
 														</button>

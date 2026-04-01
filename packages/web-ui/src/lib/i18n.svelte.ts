@@ -27,6 +27,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.recent': { de: 'Letzte Chats', en: 'Recent Chats' },
 	'threads.no_title': { de: 'Neuer Chat', en: 'New Chat' },
 	'threads.archive': { de: 'Archivieren', en: 'Archive' },
+	'threads.unarchive': { de: 'Wiederherstellen', en: 'Unarchive' },
 	'threads.delete': { de: 'Löschen', en: 'Delete' },
 	'threads.favorite': { de: 'Favorit', en: 'Favorite' },
 	'threads.unfavorite': { de: 'Favorit entfernen', en: 'Unfavorite' },
