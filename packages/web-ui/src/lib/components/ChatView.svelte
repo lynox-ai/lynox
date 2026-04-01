@@ -875,26 +875,29 @@
 								</details>
 							{:else if gBlock.type === 'step_done'}
 								{@const stepName = gBlock.stepId.replace(/-/g, ' ').replace(/^\w/, c => c.toUpperCase())}
-								<div class="flex items-start gap-1.5 text-[11px] border-l-2 border-success/30 pl-3 py-0.5">
-									<span class="text-success text-[10px] font-bold flex-shrink-0 mt-px">✓</span>
+								<div class="flex items-start gap-2 md:gap-1.5 text-[13px] md:text-[11px] border-l-2 border-success/30 pl-3 py-1 md:py-0.5">
+									<span class="text-success text-xs md:text-[10px] font-bold flex-shrink-0 mt-px">✓</span>
 									<span class="text-text-muted"><span class="font-medium">{stepName}</span>{#if gBlock.summary}<span class="text-text-subtle/70"> — {gBlock.summary.length > 120 ? gBlock.summary.slice(0, 120) + '...' : gBlock.summary}</span>{/if}</span>
 								</div>
 							{:else if gBlock.type === 'tools'}
-								<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 border-l-2 border-border pl-3 py-0.5">
-									<span class="inline-block h-1 w-1 rounded-full bg-success flex-shrink-0"></span>
+								<div class="flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 border-l-2 border-border pl-3 py-1 md:py-0.5">
+									<span class="inline-block h-1.5 w-1.5 md:h-1 md:w-1 rounded-full bg-success flex-shrink-0"></span>
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
 								</div>
 							{:else if gBlock.type === 'text' && gBlock.text}
+								{@const hasArtifact = gBlock.text.includes('```html') && (gBlock.text.includes('<!DOCTYPE') || gBlock.text.includes('<html'))}
 								<div class="relative group/copy">
 									<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
-									<button
-										onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
-										class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
-										title={t('common.copy')}
-									>
-										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
-								</button>
-							</div>
+									{#if !hasArtifact}
+										<button
+											onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
+											class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
+											title={t('common.copy')}
+										>
+											<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+										</button>
+									{/if}
+								</div>
 						{/if}
 						{/each}
 						<!-- Fallback for legacy messages without blocks -->
@@ -902,22 +905,25 @@
 							{@const legacyGroups = groupedToolCalls((msg.toolCalls ?? []).map((_, i) => ({ type: 'tool_call' as const, index: i })), msg.toolCalls ?? [])}
 							{#each legacyGroups as lg}
 								{#if lg.type === 'tools'}
-									<div class="flex items-center gap-1.5 text-[11px] text-text-subtle/70 py-0.5">
-										<span class="inline-block h-1 w-1 rounded-full bg-success flex-shrink-0"></span>
+									<div class="flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 py-1 md:py-0.5">
+										<span class="inline-block h-1.5 w-1.5 md:h-1 md:w-1 rounded-full bg-success flex-shrink-0"></span>
 										<span>{lg.action}{lg.subjects.length > 0 ? ': ' + lg.subjects.join(', ') : ''}</span>
 									</div>
 								{/if}
 							{/each}
 							{#if msg.content}
+								{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
 								<div class="relative group/copy">
 									<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
-									<button
-										onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
-										class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
-										title={t('common.copy')}
-									>
-										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
-									</button>
+									{#if !hasArtifact}
+										<button
+											onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
+											class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
+											title={t('common.copy')}
+										>
+											<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+										</button>
+									{/if}
 								</div>
 							{/if}
 						{/if}

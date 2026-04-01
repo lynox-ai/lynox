@@ -108,8 +108,9 @@
 		let fullHtml: string;
 		if (clean.includes('<html')) {
 			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${overflowFix}`);
+			fullHtml = fullHtml.includes('</body>') ? fullHtml.replace('</body>', `${RESIZE_SCRIPT}</body>`) : fullHtml + RESIZE_SCRIPT;
 		} else {
-			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}${overflowFix}</head><body>${clean}</body></html>`;
+			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}${overflowFix}</head><body>${clean}${RESIZE_SCRIPT}</body></html>`;
 		}
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
@@ -120,11 +121,11 @@
 			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
 				<span class="artifact-label">${safeTitle}</span>
 				<span class="artifact-toggle-hint">Click to open</span>
-				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CAMERA}</button>
+				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CLIPBOARD}</button>
+				<button class="artifact-btn" data-action="export" title="Download image">${ICON_DOWNLOAD}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
 				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
-				<button class="artifact-btn" data-action="export" title="Download HTML">${ICON_DOWNLOAD}</button>
 			</div>
 			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
 			<div class="artifact-source-wrap hidden"></div>
@@ -137,8 +138,11 @@
 	const ICON_CODE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 4L2 8l3.5 4M10.5 4L14 8l-3.5 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_EXPAND = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
-	const ICON_CAMERA = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 5.5A1.5 1.5 0 013.5 4h1.17a1 1 0 00.83-.45l.67-1.1A1 1 0 017 2h2a1 1 0 01.83.45l.67 1.1a1 1 0 00.83.45h1.17A1.5 1.5 0 0114 5.5v6a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-6z" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8.5" r="2" stroke="currentColor" stroke-width="1.3"/></svg>`;
+	const ICON_CLIPBOARD = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 3A1.5 1.5 0 017 1.5h2A1.5 1.5 0 0110.5 3M5.5 3H4a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1V4a1 1 0 00-1-1h-1.5M5.5 3h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_CLOSE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+
+	/** Injected into artifact iframes — posts height via postMessage for cross-origin resize */
+	const RESIZE_SCRIPT = '<script>(function(){function s(){parent.postMessage({type:"lynox-resize",h:document.documentElement.scrollHeight},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
 
 	// ── Event delegation ─────────────────────────────────────
 
@@ -232,46 +236,11 @@
 		img.src = dataUrl;
 	}
 
-	/** Resize iframe to show full content — no scrollbars */
+	/** Ask iframe to re-measure and post its height via postMessage */
 	function resizeArtifactFrame(container: HTMLElement) {
 		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
 		if (!iframe) return;
-		let lastH = 0;
-		const measure = (initial: boolean) => {
-			try {
-				const doc = iframe.contentDocument;
-				if (!doc?.body) {
-					iframe.style.height = '600px';
-					return;
-				}
-				if (initial) {
-					// First measure: shrink to 0 so scrollHeight reports true content height
-					iframe.style.height = '0px';
-					void doc.body.offsetHeight;
-				}
-				const h = doc.documentElement.scrollHeight;
-				// Only update if height changed (avoids visual flash on re-measure)
-				if (h !== lastH && h > 0) {
-					iframe.style.height = `${Math.max(h, 200)}px`;
-					lastH = h;
-				}
-			} catch {
-				if (!lastH) iframe.style.height = '600px';
-			}
-		};
-		const onLoad = () => {
-			requestAnimationFrame(() => {
-				measure(true);
-				// Silent re-measure for async content (Chart.js, fonts, images)
-				setTimeout(() => measure(false), 500);
-				setTimeout(() => measure(false), 2000);
-			});
-		};
-		if (iframe.contentDocument?.readyState === 'complete') {
-			onLoad();
-		} else {
-			iframe.addEventListener('load', onLoad, { once: true });
-		}
+		try { iframe.contentWindow?.postMessage('lynox-measure', '*'); } catch { /* cross-origin safe */ }
 	}
 
 	function handleArtifactSource(container: HTMLElement) {
@@ -305,23 +274,12 @@
 		}
 	}
 
-	function handleArtifactExport(container: HTMLElement) {
+	/** Render artifact to canvas via html2canvas in a temporary iframe */
+	async function renderArtifactToCanvas(container: HTMLElement): Promise<HTMLCanvasElement | null> {
 		const encoded = container.dataset['html'] ?? '';
-		const html = decodeURIComponent(escape(atob(encoded)));
-		const blob = new Blob([html], { type: 'text/html' });
-		const a = document.createElement('a');
-		a.href = URL.createObjectURL(blob);
-		a.download = `artifact-${Date.now()}.html`;
-		a.click();
-		URL.revokeObjectURL(a.href);
-	}
-
-	async function handleArtifactScreenshot(container: HTMLElement) {
-		// Render artifact HTML in a temporary iframe for html2canvas.
-		// Security: strip all scripts via DOMPurify so allow-same-origin is safe.
-		const encoded = container.dataset['html'] ?? '';
-		if (!encoded) return;
+		if (!encoded) return null;
 		const rawHtml = decodeURIComponent(escape(atob(encoded)));
+		// Security: strip all scripts via DOMPurify so allow-same-origin is safe
 		const html = DOMPurify.sanitize(rawHtml, { WHOLE_DOCUMENT: true, ADD_TAGS: ['style', 'link', 'meta'] });
 
 		const tmp = document.createElement('iframe');
@@ -332,37 +290,54 @@
 
 		try {
 			await new Promise<void>((resolve) => { tmp.onload = () => resolve(); });
-
-			// Wait for content to render
 			await new Promise(r => setTimeout(r, 500));
 
 			const doc = tmp.contentDocument;
-			if (!doc) { addToast('Screenshot failed', 'error'); return; }
+			if (!doc) return null;
 			const { default: html2canvas } = await import('html2canvas');
-			const canvas = await html2canvas(doc.body, {
+			return await html2canvas(doc.body, {
 				backgroundColor: '#0a0a1a',
 				scale: 2,
 				useCORS: true,
 				width: 800,
 			});
-
-			canvas.toBlob(blob => {
-				if (!blob) return;
-				navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
-					addToast('Screenshot copied', 'success');
-				}).catch(() => {
-					const a = document.createElement('a');
-					a.href = URL.createObjectURL(blob);
-					a.download = `artifact-${Date.now()}.png`;
-					a.click();
-					URL.revokeObjectURL(a.href);
-				});
-			}, 'image/png');
 		} catch {
-			addToast('Screenshot failed', 'error');
+			return null;
 		} finally {
 			document.body.removeChild(tmp);
 		}
+	}
+
+	async function handleArtifactExport(container: HTMLElement) {
+		const canvas = await renderArtifactToCanvas(container);
+		if (!canvas) { addToast('Export failed', 'error'); return; }
+		canvas.toBlob(blob => {
+			if (!blob) return;
+			const a = document.createElement('a');
+			a.href = URL.createObjectURL(blob);
+			const title = container.dataset['title'] ?? 'artifact';
+			a.download = `${title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
+			a.click();
+			URL.revokeObjectURL(a.href);
+		}, 'image/png');
+	}
+
+	async function handleArtifactScreenshot(container: HTMLElement) {
+		const canvas = await renderArtifactToCanvas(container);
+		if (!canvas) { addToast('Screenshot failed', 'error'); return; }
+		canvas.toBlob(blob => {
+			if (!blob) return;
+			navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
+				addToast('Screenshot copied', 'success');
+			}).catch(() => {
+				// Fallback: download if clipboard unavailable
+				const a = document.createElement('a');
+				a.href = URL.createObjectURL(blob);
+				a.download = `artifact-${Date.now()}.png`;
+				a.click();
+				URL.revokeObjectURL(a.href);
+			});
+		}, 'image/png');
 	}
 
 	function handleArtifactSave(container: HTMLElement) {
@@ -387,6 +362,24 @@
 		}
 		window.addEventListener('keydown', handleEscape);
 		return () => window.removeEventListener('keydown', handleEscape);
+	});
+
+	// ── PostMessage listener for iframe height ────────────────
+	$effect(() => {
+		function handleMessage(e: MessageEvent) {
+			if (e.data?.type !== 'lynox-resize') return;
+			const h = e.data.h;
+			if (typeof h !== 'number' || h <= 0) return;
+			const iframes = document.querySelectorAll('.artifact-frame') as NodeListOf<HTMLIFrameElement>;
+			for (const iframe of iframes) {
+				if (iframe.contentWindow === e.source) {
+					iframe.style.height = `${Math.max(h, 200)}px`;
+					break;
+				}
+			}
+		}
+		window.addEventListener('message', handleMessage);
+		return () => window.removeEventListener('message', handleMessage);
 	});
 
 	// ── Code block processing ────────────────────────────────

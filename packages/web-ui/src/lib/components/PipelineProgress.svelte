@@ -69,7 +69,7 @@
 <div class="pipeline-progress rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 	<!-- Header -->
 	<div class="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-bg-subtle/50">
-		<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">Pipeline</span>
+		<span class="text-xs md:text-[10px] font-mono uppercase tracking-widest text-text-subtle">Pipeline</span>
 		{#if allDone}
 			<span class="h-1.5 w-1.5 rounded-full bg-success"></span>
 		{:else if hasFailed}
@@ -93,7 +93,7 @@
 			<div class="flex gap-1.5 {phase.length === 1 ? 'justify-center' : ''}">
 				{#each phase as step (step.id)}
 					<div
-						class="flex-1 min-w-0 rounded-[var(--radius-sm)] border px-2 py-1 text-xs transition-colors
+						class="flex-1 min-w-0 rounded-[var(--radius-sm)] border px-2.5 md:px-2 py-1.5 md:py-1 text-sm md:text-xs transition-colors
 							{step.status === 'completed' ? 'border-success/30 bg-success/5' :
 							 step.status === 'failed' ? 'border-danger/30 bg-danger/5' :
 							 step.status === 'running' ? 'border-warning/30 bg-warning/5' :
@@ -105,11 +105,11 @@
 							{#if step.status === 'running'}
 								<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse flex-shrink-0"></span>
 							{:else if step.status === 'completed'}
-								<span class="text-success flex-shrink-0 text-[10px] font-bold">{statusIcon('completed')}</span>
+								<span class="text-success flex-shrink-0 text-xs md:text-[10px] font-bold">{statusIcon('completed')}</span>
 							{:else if step.status === 'failed'}
-								<span class="text-danger flex-shrink-0 text-[10px] font-bold">{statusIcon('failed')}</span>
+								<span class="text-danger flex-shrink-0 text-xs md:text-[10px] font-bold">{statusIcon('failed')}</span>
 							{:else if step.status === 'skipped'}
-								<span class="text-text-subtle flex-shrink-0 text-[10px]">{statusIcon('skipped')}</span>
+								<span class="text-text-subtle flex-shrink-0 text-xs md:text-[10px]">{statusIcon('skipped')}</span>
 							{:else}
 								<span class="inline-block h-1.5 w-1.5 rounded-full bg-text-subtle/30 flex-shrink-0"></span>
 							{/if}
@@ -119,7 +119,7 @@
 
 							<!-- Time -->
 							{#if formatElapsed(step)}
-								<span class="ml-auto text-[10px] text-text-subtle tabular-nums flex-shrink-0">{formatElapsed(step)}</span>
+								<span class="ml-auto text-xs md:text-[10px] text-text-subtle tabular-nums flex-shrink-0">{formatElapsed(step)}</span>
 							{/if}
 						</div>
 					</div>
