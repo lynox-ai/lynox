@@ -84,6 +84,7 @@ Access via the gear icon or navigate to `/app/settings/`.
 
 | Section | What it does |
 |---------|-------------|
+| **Mobile Access** | QR code to connect your phone — scan once, auto-login, install as PWA |
 | **Config** | Model selection, cost limits, greeting, memory settings |
 | **Keys** | Manage your encrypted vault — API keys and secrets |
 | **Integrations** | Connect Telegram, Google Workspace |

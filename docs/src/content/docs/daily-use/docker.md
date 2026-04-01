@@ -63,11 +63,11 @@ docker compose up -d
 
 ## Environment Variables
 
-Only `ANTHROPIC_API_KEY` is required. Everything else is optional:
+`ANTHROPIC_API_KEY` is needed for AI responses. Without it, the container still starts in browse mode (you can view data but not chat). Everything else is optional:
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
+| `ANTHROPIC_API_KEY` | Recommended | Anthropic API key (browse mode without it) |
 | `ANTHROPIC_BASE_URL` | No | Custom API endpoint (for proxies) |
 | `LYNOX_VAULT_KEY` | Recommended | Encryption key for secrets at rest |
 | `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
