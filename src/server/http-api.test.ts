@@ -538,9 +538,9 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('rate limiting', () => {
-    it('returns 429 after exceeding limit', async () => {
-      // Rate limiting skips loopback IPs, so use X-Forwarded-For with a non-loopback IP
-      // (LYNOX_TRUST_PROXY=true is set in beforeAll)
+    it('loopback gets higher rate limit (spoofed X-Forwarded-For ignored for limit tier)', async () => {
+      // Security: rate limiter uses socket IP (not X-Forwarded-For) for loopback detection.
+      // Loopback gets RATE_MAX_LOOPBACK (600), so 130 requests should all succeed.
       const fakeIp = '203.0.113.42';
       const promises = Array.from({ length: 130 }, () =>
         fetch(`${baseUrl}/api/secrets`, {
@@ -548,7 +548,9 @@ describe('LynoxHTTPApi', () => {
         }).then(r => r.status)
       );
       const statuses = await Promise.all(promises);
-      expect(statuses).toContain(429);
+      // All should pass — loopback socket gets the higher 600-request limit
+      expect(statuses).not.toContain(429);
+      expect(statuses.every(s => s === 200)).toBe(true);
     });
   });
 });

@@ -311,8 +311,9 @@ describe('Engine + Session (Orchestrator)', () => {
 
       expect(Memory).toHaveBeenCalled();
 
-      // Registry should have register called for each builtin tool (18 core + 4 pipeline/process + 3 artifact + 5 datastore = 30)
-      expect(mockRegister).toHaveBeenCalledTimes(30);
+      // Registry should have register called for each builtin tool
+      // 18 core + 5 datastore + 3 artifact + 5 google + 4 pipeline = 35
+      expect(mockRegister).toHaveBeenCalledTimes(35);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -377,8 +378,8 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 30 tools total (18 core + 4 pipeline/process + 3 artifact + 5 datastore)
-      expect(mockRegister).toHaveBeenCalledTimes(30);
+      // 35 tools total (18 core + 5 datastore + 3 artifact + 5 google + 4 pipeline)
+      expect(mockRegister).toHaveBeenCalledTimes(35);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
