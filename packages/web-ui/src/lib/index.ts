@@ -63,6 +63,8 @@ export {
 	submitChangesetReview,
 	getPendingChangeset,
 	getChangesetLoading,
+	getRetryStatus,
+	getIsOffline,
 } from './stores/chat.svelte.js';
 
 export type {

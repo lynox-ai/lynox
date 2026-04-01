@@ -27,6 +27,7 @@ export type StreamEvent =
   | { type: 'spawn';       agents: string[]; estimatedCostUSD?: number | undefined; agent: string }
   | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  agent: string }
   | { type: 'error';       message: string;                        agent: string }
+  | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }
   | { type: 'continuation';  iteration: number; max: number;       agent: string }
 

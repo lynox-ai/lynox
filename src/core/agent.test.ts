@@ -523,11 +523,12 @@ describe('Agent', () => {
       expect(result).toBe('Recovered');
       expect(mockProcess).toHaveBeenCalledTimes(3);
 
-      const errorCalls = onStream.mock.calls.filter(
-        (c: unknown[]) => (c[0] as { type: string }).type === 'error',
+      const retryCalls = onStream.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { type: string }).type === 'retry',
       );
-      expect(errorCalls).toHaveLength(2);
-      expect((errorCalls[0]![0] as { message: string }).message).toContain('retrying');
+      expect(retryCalls).toHaveLength(2);
+      expect((retryCalls[0]![0] as { attempt: number }).attempt).toBe(1);
+      expect((retryCalls[0]![0] as { maxAttempts: number }).maxAttempts).toBe(4);
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 2000;
     });
 

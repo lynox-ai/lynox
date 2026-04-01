@@ -131,6 +131,14 @@ let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let changesetLoading = $state(false);
+let retryStatus = $state<{ attempt: number; maxAttempts: number } | null>(null);
+let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
+
+// Offline detection
+if (typeof window !== 'undefined') {
+	window.addEventListener('offline', () => { isOffline = true; });
+	window.addEventListener('online', () => { isOffline = false; });
+}
 
 async function ensureSession(): Promise<string> {
 	if (sessionId) return sessionId;
@@ -166,8 +174,39 @@ export async function sendMessage(task: string, files?: FileAttachment[]): Promi
 	await _executeRun(task, files);
 }
 
+/** Map HTTP status + error detail to a user-friendly i18n message. */
+function mapApiError(status: number, detail: string): string {
+	const lower = detail.toLowerCase();
+	if (status === 409) return t('chat.error_busy');
+	if (status === 401 || lower.includes('authentication') || lower.includes('invalid_api_key') || lower.includes('invalid x-api-key'))
+		return t('chat.error_auth');
+	if (lower.includes('insufficient_quota') || lower.includes('billing') || lower.includes('credit'))
+		return t('chat.error_insufficient_quota');
+	if (lower.includes('content_policy') || lower.includes('content policy') || lower.includes('safety'))
+		return t('chat.error_content_policy');
+	if (lower.includes('model_not_found') || lower.includes('model not found') || lower.includes('not available'))
+		return t('chat.error_model_unavailable');
+	if (lower.includes('context_length') || lower.includes('too many tokens') || lower.includes('maximum context'))
+		return t('chat.error_context_length');
+	if (lower.includes('invalid_request') || status === 400)
+		return t('chat.error_invalid_request');
+	if (status === 429 || lower.includes('rate_limit'))
+		return t('chat.error_rate_limit');
+	if (status === 529 || lower.includes('overloaded'))
+		return t('chat.error_overloaded');
+	return t('chat.error_start');
+}
+
 async function _executeRun(task: string, files?: FileAttachment[]): Promise<void> {
 	chatError = null;
+	retryStatus = null;
+
+	// Offline check
+	if (typeof navigator !== 'undefined' && !navigator.onLine) {
+		chatError = t('chat.error_offline');
+		return;
+	}
+
 	let retried = false;
 	let sid = await ensureSession();
 
@@ -226,18 +265,7 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 	if (!res.ok || !res.body) {
 		isStreaming = false;
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
-		const detail = (chatErrorDetail ?? '').toLowerCase();
-		if (res.status === 409) {
-			chatError = t('chat.error_busy');
-		} else if (res.status === 401 || detail.includes('authentication')) {
-			chatError = t('chat.error_auth');
-		} else if (res.status === 429 || detail.includes('rate_limit')) {
-			chatError = t('chat.error_rate_limit');
-		} else if (res.status === 529 || detail.includes('overloaded')) {
-			chatError = t('chat.error_overloaded');
-		} else {
-			chatError = t('chat.error_start');
-		}
+		chatError = mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
 		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
@@ -281,6 +309,7 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 
 	isStreaming = false;
 	pendingPermission = null;
+	retryStatus = null;
 	persistChat();
 
 	// Refresh thread list so sidebar reflects updated ordering
@@ -305,16 +334,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// Matches: "429 {...}" (status-prefixed) or '{"type":"error",...}' (raw JSON)
 			if (/^\d{3}\s*\{.*"error"/i.test(text.trim()) || /^\{.*"type"\s*:\s*"error"/i.test(text.trim())) {
 				chatErrorDetail = text;
-				const lower = text.toLowerCase();
-				if (lower.includes('authentication') || lower.includes('401')) {
-					chatError = t('chat.error_auth');
-				} else if (lower.includes('rate_limit') || lower.includes('429')) {
-					chatError = t('chat.error_rate_limit');
-				} else if (lower.includes('overloaded') || lower.includes('529')) {
-					chatError = t('chat.error_overloaded');
-				} else {
-					chatError = t('chat.error_start');
-				}
+				const statusMatch = text.trim().match(/^(\d{3})/);
+				chatError = mapApiError(statusMatch ? parseInt(statusMatch[1]!, 10) : 0, text);
 				if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
 				break;
 			}
@@ -383,6 +404,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			};
 			break;
 		case 'turn_end': {
+			retryStatus = null;
 			const usage = data['usage'] as Record<string, number> | undefined;
 			if (usage) {
 				const inTok = (usage['input_tokens'] ?? 0)
@@ -459,21 +481,18 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		}
 		case 'done':
 			break;
+		case 'retry': {
+			const attempt = data['attempt'] as number;
+			const maxAttempts = data['maxAttempts'] as number;
+			retryStatus = { attempt, maxAttempts };
+			break;
+		}
 		case 'error': {
+			retryStatus = null;
 			// Agent sends { message: '...' }, http-api catch sends { error: '...' }
 			const rawErr = String(data['error'] ?? data['message'] ?? 'Unknown error');
 			chatErrorDetail = rawErr;
-			// Map known API errors to user-friendly messages
-			const lower = rawErr.toLowerCase();
-			if (lower.includes('authentication') || lower.includes('401')) {
-				chatError = t('chat.error_auth');
-			} else if (lower.includes('rate_limit') || lower.includes('429')) {
-				chatError = t('chat.error_rate_limit');
-			} else if (lower.includes('overloaded') || lower.includes('529')) {
-				chatError = t('chat.error_overloaded');
-			} else {
-				chatError = t('chat.error_start');
-			}
+			chatError = mapApiError(0, rawErr);
 			// Remove empty assistant message and mark user message as failed
 			if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
 			if (messages[userIdx]) messages[userIdx]!.failed = true;
@@ -573,6 +592,12 @@ export function getContextWindow() {
 }
 export function getContextBudget() {
 	return contextBudget;
+}
+export function getRetryStatus() {
+	return retryStatus;
+}
+export function getIsOffline() {
+	return isOffline;
 }
 export function clearError() {
 	chatError = null;

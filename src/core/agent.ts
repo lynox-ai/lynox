@@ -503,10 +503,10 @@ export class Agent implements IAgent {
         if (attempt < Agent.MAX_RETRIES && isRetryable(err)) {
           const delay = Agent.RETRY_BASE_MS * Math.pow(2, attempt);
           if (this.onStream) {
-            const msg = err instanceof APIError
+            const reason = err instanceof APIError
               ? `${err.status ?? (err.error as { type?: string } | undefined)?.type ?? 'unknown'}: ${err.message}`
               : String(err);
-            await this.onStream({ type: 'error', message: `API error (attempt ${attempt + 1}/${Agent.MAX_RETRIES + 1}): ${msg} — retrying in ${delay / 1000}s`, agent: this.name });
+            await this.onStream({ type: 'retry', attempt: attempt + 1, maxAttempts: Agent.MAX_RETRIES + 1, delayMs: delay, reason, agent: this.name });
           }
           await sleep(delay, signal);
           continue;

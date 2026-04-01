@@ -9,6 +9,8 @@
 		getPendingPermission,
 		getChatError,
 		getChatErrorDetail,
+		getRetryStatus,
+		getIsOffline,
 		clearError,
 		cancelQueue,
 		downloadExport,
@@ -35,10 +37,54 @@
 	// Welcome screen state
 	let displayName = $state('');
 
-	// First-visit security card
-	let showSecurityCard = $state(false);
-	let securityVaultKey = $state<string | null>(null);
-	let securityKeyRevealed = $state(false);
+	// Onboarding chips (sequential steps)
+	const ONBOARDING_CHIPS = [
+		{ key: 'chip_1', descKey: 'chip_1_desc' },
+		{ key: 'chip_2', descKey: 'chip_2_desc' },
+		{ key: 'chip_3', descKey: 'chip_3_desc' },
+	] as const;
+
+	let onboardingStep = $state(0); // 0-based: which step is current
+	let onboardingDismissed = $state(false);
+
+	function loadOnboardingState() {
+		if (typeof localStorage === 'undefined') return;
+		const saved = localStorage.getItem('lynox-onboarding-step');
+		if (saved === 'done') { onboardingDismissed = true; return; }
+		if (saved) onboardingStep = Math.min(parseInt(saved, 10), ONBOARDING_CHIPS.length);
+	}
+
+	function advanceOnboarding() {
+		const next = onboardingStep + 1;
+		if (next >= ONBOARDING_CHIPS.length) {
+			onboardingDismissed = true;
+			localStorage.setItem('lynox-onboarding-step', 'done');
+		} else {
+			onboardingStep = next;
+			localStorage.setItem('lynox-onboarding-step', String(next));
+		}
+	}
+
+	function skipOnboarding() {
+		onboardingDismissed = true;
+		localStorage.setItem('lynox-onboarding-step', 'done');
+	}
+
+	function handleChipClick(idx: number) {
+		if (idx !== onboardingStep) return; // only current step is clickable
+		const chip = ONBOARDING_CHIPS[idx];
+		if (!chip) return;
+		const prompt = t(`onboard.${chip.key}` as 'onboard.chip_1');
+		advanceOnboarding();
+		sendMessage(prompt);
+	}
+
+	const showOnboarding = $derived(
+		!onboardingDismissed && onboardingStep < ONBOARDING_CHIPS.length
+	);
+
+	// Vault key hint — deferred until after first chat
+	let securityLoadTriggered = false;
 
 	async function loadSecurityState() {
 		if (typeof localStorage === 'undefined') return;
@@ -47,21 +93,19 @@
 			const res = await fetch(`${getApiBase()}/vault/key`);
 			if (!res.ok) return;
 			const data = (await res.json()) as { configured: boolean; key: string | null };
-			securityVaultKey = data.key;
-			showSecurityCard = true;
+			if (data.key) {
+				addToast(t('onboard.security_toast'), 'info', 8000);
+				localStorage.setItem('lynox-security-dismissed', '1');
+			}
 		} catch { /* ignore — older engine */ }
 	}
 
-	function dismissSecurityCard() {
-		showSecurityCard = false;
-		localStorage.setItem('lynox-security-dismissed', '1');
-	}
-
-	async function copySecurityKey() {
-		if (!securityVaultKey) return;
-		await navigator.clipboard.writeText(securityVaultKey);
-		addToast(t('config.vault_key_copied'), 'success');
-	}
+	$effect(() => {
+		if (messages.length > 0 && !securityLoadTriggered) {
+			securityLoadTriggered = true;
+			void loadSecurityState();
+		}
+	});
 
 
 
@@ -303,7 +347,7 @@
 		} catch { /* non-critical */ }
 	}
 
-	onMount(() => { void loadDisplayName(); void loadSecurityState(); });
+	onMount(() => { void loadDisplayName(); loadOnboardingState(); });
 
 	// Mask any secret-like patterns (API keys, tokens) that might leak into display
 	const SECRET_PATTERNS = [
@@ -745,6 +789,8 @@
 	const pendingPermission = $derived(getPendingPermission());
 	const chatError = $derived(getChatError());
 	const chatErrorDetail = $derived(getChatErrorDetail());
+	const retryStatus = $derived(getRetryStatus());
+	const isOffline = $derived(getIsOffline());
 	const ready = $derived(hasApiKey !== false);
 	const ctxModel = $derived(getSessionModel());
 	const ctxBudget = $derived(getContextBudget());
@@ -932,37 +978,66 @@
 								</div>
 							{/if}
 
-							<!-- Security card (first visit only) -->
-							{#if showSecurityCard}
-								<div class="rounded-[var(--radius-md)] border border-accent/20 bg-accent/5 p-4 mb-6">
-									<div class="flex items-start gap-3">
-										<svg class="shrink-0 mt-0.5 text-accent-text" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-										<div class="flex-1 min-w-0">
-											<p class="text-sm font-medium text-text mb-1">{t('onboard.security_title')}</p>
-											{#if securityVaultKey}
-												<p class="text-xs text-text-muted mb-2">{t('onboard.security_body')}</p>
-												<button onclick={copySecurityKey} class="w-full rounded-[var(--radius-sm)] bg-bg px-3 py-2 mb-2 text-xs font-mono text-text-muted text-left overflow-x-auto whitespace-nowrap cursor-pointer hover:text-text hover:border-border-hover transition-all border border-transparent hover:border-border" title="Click to copy">
-													{securityVaultKey}
-												</button>
-												<div class="flex gap-2">
-													<button onclick={() => goto('/app/settings/config')} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_settings')}</button>
-													<button onclick={dismissSecurityCard} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_dismiss')}</button>
+							<!-- Onboarding chips (sequential) -->
+							{#if showOnboarding}
+								<div class="mt-6 space-y-2.5">
+									<p class="text-center text-sm text-text-muted mb-4">{t('onboard.ready_hint')}</p>
+									{#each ONBOARDING_CHIPS as chip, idx}
+										{@const isDone = idx < onboardingStep}
+										{@const isCurrent = idx === onboardingStep}
+										{@const isFuture = idx > onboardingStep}
+										<button
+											onclick={() => handleChipClick(idx)}
+											disabled={!isCurrent}
+											class="w-full rounded-[var(--radius-md)] border p-4 text-left transition-all {
+												isDone ? 'border-accent/30 bg-accent/5 opacity-60' :
+												isCurrent ? 'border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 cursor-pointer' :
+												'border-border/50 bg-bg-subtle opacity-40'
+											}"
+										>
+											<div class="flex items-center gap-3">
+												<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm {
+													isDone ? 'bg-accent/20 text-accent-text' :
+													isCurrent ? 'bg-accent/20 text-accent-text' :
+													'bg-bg-muted text-text-subtle'
+												}">
+													{#if isDone}
+														<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+													{:else}
+														{idx + 1}
+													{/if}
+												</span>
+												<div class="flex-1 min-w-0">
+													<div class="flex items-center gap-2">
+														<span class="text-sm font-medium {isDone ? 'text-text-muted line-through' : isCurrent ? 'text-text' : 'text-text-subtle'}">
+															{t(`onboard.${chip.key}` as 'onboard.chip_1')}
+														</span>
+														{#if isDone}
+															<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step_done')}</span>
+														{:else if isCurrent}
+															<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 1}/{ONBOARDING_CHIPS.length}</span>
+														{/if}
+													</div>
+													<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
 												</div>
-											{:else}
-												<p class="text-xs text-warning/80">{t('onboard.security_no_key')}</p>
-												<button onclick={dismissSecurityCard} class="mt-2 rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_dismiss')}</button>
-											{/if}
-										</div>
-									</div>
+												{#if isCurrent}
+													<svg class="shrink-0 text-accent-text" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+												{/if}
+											</div>
+										</button>
+									{/each}
+									<button onclick={skipOnboarding} class="w-full text-center text-xs text-text-subtle hover:text-text-muted transition-colors mt-3 py-1">
+										{t('onboard.skip_onboarding')}
+									</button>
 								</div>
+							{:else}
+								<!-- Daily quote (shown after onboarding or for returning users) -->
+								{@const quote = getTodaysQuote()}
+								<blockquote class="text-center mt-2">
+									<p class="text-sm italic text-text-muted leading-relaxed">&ldquo;{quote.text}&rdquo;</p>
+									<footer class="mt-1.5 text-xs text-text-subtle">&mdash; {quote.author}</footer>
+								</blockquote>
 							{/if}
-
-							<!-- Daily quote -->
-							{@const quote = getTodaysQuote()}
-							<blockquote class="text-center mt-2">
-								<p class="text-sm italic text-text-muted leading-relaxed">&ldquo;{quote.text}&rdquo;</p>
-								<footer class="mt-1.5 text-xs text-text-subtle">&mdash; {quote.author}</footer>
-							</blockquote>
 						{/if}
 					</div>
 				{/if}
@@ -1097,6 +1172,20 @@
 					{/if}
 					<button onclick={() => downloadExport('md')} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">↓ Export</button>
 					<button onclick={async () => { const { exportAsJSON } = await import('../stores/chat.svelte.js'); await navigator.clipboard.writeText(exportAsJSON()); addToast(t('common.copied'), 'success', 1500); }} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">⎘ JSON</button>
+				</div>
+			{/if}
+
+			{#if isOffline}
+				<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-2.5 text-sm text-warning flex items-center gap-2">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 5.636a9 9 0 010 12.728M5.636 5.636a9 9 0 000 12.728M12 12h.01M8.464 8.464a5 5 0 000 7.072M15.536 8.464a5 5 0 010 7.072" /><line x1="4" y1="4" x2="20" y2="20" stroke="currentColor" stroke-width="2" /></svg>
+					<span>{t('chat.error_offline')}</span>
+				</div>
+			{/if}
+
+			{#if retryStatus}
+				<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-2.5 text-sm text-warning flex items-center gap-2">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+					<span>{t('chat.retry').replace('{attempt}', String(retryStatus.attempt)).replace('{max}', String(retryStatus.maxAttempts))}</span>
 				</div>
 			{/if}
 
