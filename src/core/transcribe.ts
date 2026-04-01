@@ -32,7 +32,7 @@ function runCommand(cmd: string, args: string[]): Promise<{ stdout: string; stde
   });
 }
 
-export async function transcribeAudio(buffer: Buffer, filename: string): Promise<string | null> {
+export async function transcribeAudio(buffer: Buffer, filename: string, language?: string): Promise<string | null> {
   if (!HAS_WHISPER) return null;
 
   const id = randomUUID().slice(0, 8);
@@ -48,7 +48,7 @@ export async function transcribeAudio(buffer: Buffer, filename: string): Promise
       '-i', inputPath, '-ar', '16000', '-ac', '1', '-f', 'wav', '-y', wavPath,
     ]);
     const { stdout } = await runCommand(WHISPER_CLI!, [
-      '-m', WHISPER_MODEL!, '-f', wavPath, '--language', 'auto', '--no-timestamps',
+      '-m', WHISPER_MODEL!, '-f', wavPath, '--language', language ?? 'auto', '--no-timestamps',
     ]);
     const text = stdout.trim();
     cleanup();

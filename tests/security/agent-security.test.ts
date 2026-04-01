@@ -164,7 +164,9 @@ describe('Agent Security Audit', () => {
       const workerContent = readFileSync(join(SRC, 'core/worker-loop.ts'), 'utf-8');
       expect(workerContent).toContain('localhost');
       expect(workerContent).toContain('127.0.0.1');
-      expect(workerContent).toContain('192.168.');
+      // DNS-based SSRF protection: resolves hostname and checks actual IP ranges
+      expect(workerContent, 'worker-loop.ts must use DNS lookup for SSRF checks').toContain('lookup');
+      expect(workerContent).toContain('private URLs are not allowed');
     });
 
     it('EXTERNAL_TOOLS covers all external tool handlers', () => {

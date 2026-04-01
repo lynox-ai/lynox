@@ -99,7 +99,7 @@
 		return { title: '', clean: code };
 	}
 
-	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
+	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
 	function buildArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
@@ -126,7 +126,7 @@
 				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
 				<button class="artifact-btn" data-action="export" title="Download HTML">${ICON_DOWNLOAD}</button>
 			</div>
-			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts allow-same-origin" scrolling="no" loading="lazy"></iframe>
+			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
 			<div class="artifact-source-wrap hidden"></div>
 		</div>`;
 	}
@@ -317,25 +317,27 @@
 	}
 
 	async function handleArtifactScreenshot(container: HTMLElement) {
-		// Render artifact HTML in a temporary unsandboxed iframe for html2canvas
+		// Render artifact HTML in a temporary iframe for html2canvas.
+		// Security: strip all scripts via DOMPurify so allow-same-origin is safe.
 		const encoded = container.dataset['html'] ?? '';
 		if (!encoded) return;
-		const html = decodeURIComponent(escape(atob(encoded)));
+		const rawHtml = decodeURIComponent(escape(atob(encoded)));
+		const html = DOMPurify.sanitize(rawHtml, { WHOLE_DOCUMENT: true, ADD_TAGS: ['style', 'link', 'meta'] });
 
 		const tmp = document.createElement('iframe');
+		tmp.setAttribute('sandbox', 'allow-same-origin');
 		tmp.style.cssText = 'position:fixed;left:-9999px;top:0;width:800px;height:600px;border:none';
+		tmp.srcdoc = html;
 		document.body.appendChild(tmp);
 
 		try {
-			const doc = tmp.contentDocument;
-			if (!doc) { addToast('Screenshot failed', 'error'); return; }
-			doc.open();
-			doc.write(html);
-			doc.close();
+			await new Promise<void>((resolve) => { tmp.onload = () => resolve(); });
 
 			// Wait for content to render
 			await new Promise(r => setTimeout(r, 500));
 
+			const doc = tmp.contentDocument;
+			if (!doc) { addToast('Screenshot failed', 'error'); return; }
 			const { default: html2canvas } = await import('html2canvas');
 			const canvas = await html2canvas(doc.body, {
 				backgroundColor: '#0a0a1a',

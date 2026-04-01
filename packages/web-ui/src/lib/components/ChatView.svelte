@@ -407,7 +407,7 @@
 						const res = await fetch(`${getApiBase()}/transcribe`, {
 							method: 'POST',
 							headers: { 'Content-Type': 'application/json' },
-							body: JSON.stringify({ audio: base64, filename: 'voice.webm' })
+							body: JSON.stringify({ audio: base64, filename: 'voice.webm', language: getLocale() })
 						});
 						if (res.ok) {
 							const data = (await res.json()) as { text: string };

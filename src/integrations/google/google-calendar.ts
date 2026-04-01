@@ -320,8 +320,11 @@ async function handleUpdateEvent(auth: GoogleAuth, input: CalendarInput): Promis
   const updates: Record<string, unknown> = {};
 
   // Apply updates from the updates field or individual fields
-  if (input.updates) {
-    Object.assign(updates, input.updates);
+  if (input.updates && typeof input.updates === 'object') {
+    for (const [key, value] of Object.entries(input.updates)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+      updates[key] = value;
+    }
   }
   if (input.summary) updates['summary'] = input.summary;
   if (input.description) updates['description'] = input.description;

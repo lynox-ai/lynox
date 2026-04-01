@@ -19,12 +19,12 @@ fi
 if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
   export LYNOX_HTTP_SECRET
-  echo ""
-  echo "========================================"
-  echo "  Access Token (enter in browser):"
-  echo "  ${LYNOX_HTTP_SECRET}"
-  echo "========================================"
-  echo ""
+  echo "" >&2
+  echo "========================================" >&2
+  echo "  Access Token (enter in browser):" >&2
+  echo "  ${LYNOX_HTTP_SECRET}" >&2
+  echo "========================================" >&2
+  echo "" >&2
 fi
 
 # Auto-generate vault key if not set (persist to volume)

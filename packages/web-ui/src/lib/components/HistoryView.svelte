@@ -289,9 +289,15 @@
 	}
 
 	function highlightMatch(text: string, query: string): string {
-		if (!query.trim()) return text;
-		const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-		return text.replace(new RegExp(`(${escaped})`, 'gi'), '<mark class="bg-accent/30 text-inherit rounded-sm px-0.5">$1</mark>');
+		if (!query.trim()) return escapeHtml(text);
+		const safeText = escapeHtml(text);
+		const safeQuery = escapeHtml(query);
+		const escaped = safeQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		return safeText.replace(new RegExp(`(${escaped})`, 'gi'), '<mark class="bg-accent/30 text-inherit rounded-sm px-0.5">$1</mark>');
+	}
+
+	function escapeHtml(str: string): string {
+		return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 	}
 
 	function formatDateTime(iso: string): string {

@@ -1,10 +1,6 @@
 // === Telegram Bot ===
 // Telegraf setup, message routing, commands.
 
-import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
-import { execFile as nodeExecFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
 import { executeRun, hasActiveRun, resolveInput, abortRun, getFollowUpTask } from './telegram-runner.js';
@@ -12,61 +8,9 @@ import { getTaskInquiry, clearTaskInquiry, getTaskFollowUp } from './telegram-ca
 import { sessionMap, startEvictionTimer, stopEvictionTimer } from './telegram-session.js';
 import type { TelegramEngine } from './telegram-session.js';
 import { t, detectLang } from './telegram-i18n.js';
-import { getErrorMessage } from '../../core/utils.js';
 import { createRateLimiterFromEnv } from '../../core/rate-limiter.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
-
-// --- Voice transcription via whisper.cpp ---
-
-const WHISPER_PATHS = [
-  '/usr/local/bin/whisper-cli',
-  '/opt/homebrew/bin/whisper-cli',
-];
-const WHISPER_MODEL_PATHS = [
-  '/usr/share/whisper/ggml-base.bin',
-  join(process.env['HOME'] ?? '', '.local/share/whisper/ggml-base.bin'),
-];
-
-const WHISPER_CLI = WHISPER_PATHS.find(p => existsSync(p));
-const WHISPER_MODEL = WHISPER_MODEL_PATHS.find(p => existsSync(p));
-const HAS_WHISPER = !!WHISPER_CLI && !!WHISPER_MODEL;
-
-function runCommand(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    nodeExecFile(cmd, args, { timeout: 60_000 }, (err, stdout, stderr) => {
-      if (err) reject(err);
-      else resolve({ stdout, stderr });
-    });
-  });
-}
-
-async function transcribeAudio(buffer: Buffer, filename: string): Promise<string | null> {
-  if (!HAS_WHISPER) return null;
-
-  const id = randomUUID().slice(0, 8);
-  const inputPath = join('/tmp', `whisper-in-${id}-${filename}`);
-  const wavPath = join('/tmp', `whisper-${id}.wav`);
-  const cleanup = () => {
-    try { unlinkSync(inputPath); } catch { /* ok */ }
-    try { unlinkSync(wavPath); } catch { /* ok */ }
-  };
-  try {
-    writeFileSync(inputPath, buffer);
-    await runCommand('ffmpeg', [
-      '-i', inputPath, '-ar', '16000', '-ac', '1', '-f', 'wav', '-y', wavPath,
-    ]);
-    const { stdout } = await runCommand(WHISPER_CLI!, [
-      '-m', WHISPER_MODEL!, '-f', wavPath, '--language', 'auto', '--no-timestamps',
-    ]);
-    const text = stdout.trim();
-    cleanup();
-    return text || null;
-  } catch (err: unknown) {
-    cleanup();
-    process.stderr.write(`Whisper transcription failed: ${getErrorMessage(err)}\n`);
-    return null;
-  }
-}
+import { HAS_WHISPER, transcribeAudio } from '../../core/transcribe.js';
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;    // 4MB — Claude's limit is ~5MB base64
 const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // 10MB — practical limit for file analysis
@@ -352,7 +296,7 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       const buffer = Buffer.from(arrayBuffer);
 
       void ctx.reply(t('msg.voice_transcribing', lang));
-      const text = await transcribeAudio(buffer, `voice-${chatId}.ogg`);
+      const text = await transcribeAudio(buffer, `voice-${chatId}.ogg`, lang);
       if (!text) {
         void ctx.reply(t('msg.voice_failed', lang));
         return;

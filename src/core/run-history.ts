@@ -1416,9 +1416,10 @@ export class RunHistory {
     let count = 0;
 
     // Re-encrypt runs (task_text, response_text)
+    const encPrefix = `${ENCRYPTED_PREFIX}%`;
     const runs = this.db.prepare(
-      `SELECT id, task_text, response_text FROM runs WHERE task_text LIKE '${ENCRYPTED_PREFIX}%' OR response_text LIKE '${ENCRYPTED_PREFIX}%'`,
-    ).all() as Array<{ id: string; task_text: string; response_text: string }>;
+      `SELECT id, task_text, response_text FROM runs WHERE task_text LIKE ? OR response_text LIKE ?`,
+    ).all(encPrefix, encPrefix) as Array<{ id: string; task_text: string; response_text: string }>;
 
     const updateRun = this.db.prepare('UPDATE runs SET task_text = ?, response_text = ? WHERE id = ?');
     for (const row of runs) {
@@ -1434,8 +1435,8 @@ export class RunHistory {
 
     // Re-encrypt tool calls (input_json, output_json)
     const calls = this.db.prepare(
-      `SELECT id, input_json, output_json FROM run_tool_calls WHERE input_json LIKE '${ENCRYPTED_PREFIX}%' OR output_json LIKE '${ENCRYPTED_PREFIX}%'`,
-    ).all() as Array<{ id: string; input_json: string; output_json: string }>;
+      `SELECT id, input_json, output_json FROM run_tool_calls WHERE input_json LIKE ? OR output_json LIKE ?`,
+    ).all(encPrefix, encPrefix) as Array<{ id: string; input_json: string; output_json: string }>;
 
     const updateCall = this.db.prepare('UPDATE run_tool_calls SET input_json = ?, output_json = ? WHERE id = ?');
     for (const row of calls) {

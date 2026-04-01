@@ -40,9 +40,16 @@ async function proxy({ request, params, url }: Parameters<RequestHandler>[0]): P
 		});
 	}
 
+	const safeHeaders = new Headers();
+	const FORWARDED_HEADERS = ['content-type', 'content-length', 'content-disposition', 'cache-control', 'etag', 'last-modified'];
+	for (const name of FORWARDED_HEADERS) {
+		const value = engineRes.headers.get(name);
+		if (value) safeHeaders.set(name, value);
+	}
+
 	return new Response(engineRes.body, {
 		status: engineRes.status,
-		headers: engineRes.headers
+		headers: safeHeaders,
 	});
 }
 

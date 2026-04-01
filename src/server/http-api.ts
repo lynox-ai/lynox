@@ -17,6 +17,7 @@ import { Engine } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { SessionStore } from '../core/session-store.js';
 import type { StreamEvent } from '../types/index.js';
+import { LynoxUserConfigSchema } from '../types/schemas.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,7 @@ function requiresAdmin(method: string, pathname: string): boolean {
 }
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
+const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
 const PROMPT_TIMEOUT_MS = 10 * 60_000; // 10 minutes — users need time to review plans
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
@@ -359,9 +361,11 @@ export class LynoxHTTPApi {
       return;
     }
 
-    // Rate limiting (uses resolved clientIp, proxy-aware)
-    // Skip for loopback — Web UI proxy runs on same host
-    if (clientIp !== '127.0.0.1' && clientIp !== '::1') {
+    // Rate limiting (always applied — uses socket IP for loopback detection to prevent spoofing)
+    {
+      const socketIp = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
+      const isLoopback = socketIp === '127.0.0.1' || socketIp === '::1';
+      const limit = isLoopback ? RATE_MAX_LOOPBACK : RATE_MAX;
       const ip = clientIp;
       const now = Date.now();
       let rateEntry = this.rateCounts.get(ip);
@@ -370,7 +374,7 @@ export class LynoxHTTPApi {
         this.rateCounts.set(ip, rateEntry);
       }
       rateEntry.count++;
-      if (rateEntry.count > RATE_MAX) {
+      if (rateEntry.count > limit) {
         const retryAfter = Math.ceil((rateEntry.resetAt - now) / 1000);
         res.setHeader('Retry-After', String(retryAfter));
         errorResponse(res, 429, 'Too many requests');
@@ -740,10 +744,14 @@ export class LynoxHTTPApi {
     }));
 
     // ── Memory ──
+    const VALID_MEMORY_NS = new Set(['knowledge', 'methods', 'status', 'learnings']);
+    type MemoryNs = 'knowledge' | 'methods' | 'status' | 'learnings';
+
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/memory/:ns', async (_req, res, params) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
       const content = await memory.load(ns);
       jsonResponse(res, 200, { content });
     }));
@@ -751,7 +759,8 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
       const content = body && typeof body === 'object' && 'content' in body ? String((body as Record<string, unknown>)['content']) : '';
       await memory.save(ns, content);
       jsonResponse(res, 200, { ok: true });
@@ -760,7 +769,8 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
       const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
       await memory.append(ns, text);
       jsonResponse(res, 200, { ok: true });
@@ -769,7 +779,8 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/memory/:ns', async (req, res, params) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const pattern = url.searchParams.get('pattern') ?? '';
       const deleted = await memory.delete(ns, pattern);
@@ -779,7 +790,8 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
-      const ns = params['ns'] as 'knowledge' | 'methods' | 'status' | 'learnings';
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
       const b = body as Record<string, unknown> | null;
       const oldText = b && typeof b['old'] === 'string' ? b['old'] : '';
       const newText = b && typeof b['new'] === 'string' ? b['new'] : '';
@@ -857,7 +869,12 @@ export class LynoxHTTPApi {
     this.staticRoutes.set('PUT /api/config', async (_req, res, _params, body) => {
       const { saveUserConfig, reloadConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
-      saveUserConfig(body as Record<string, unknown>);
+      const parsed = LynoxUserConfigSchema.safeParse(body);
+      if (!parsed.success) {
+        errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
+        return;
+      }
+      saveUserConfig(parsed.data as Record<string, unknown>);
       reloadConfig();
       engine.reloadUserConfig();
       jsonResponse(res, 200, { ok: true });
@@ -979,7 +996,12 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!taskManager) { errorResponse(res, 503, 'Task manager not initialized'); return; }
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid task'); return; }
-      const task = taskManager.create(body as Parameters<typeof taskManager.create>[0]);
+      const b = body as Record<string, unknown>;
+      const title = typeof b['title'] === 'string' ? b['title'] : undefined;
+      const description = typeof b['description'] === 'string' ? b['description'] : undefined;
+      const assignee = typeof b['assignee'] === 'string' ? b['assignee'] : undefined;
+      if (!title) { errorResponse(res, 400, 'Missing required field: title'); return; }
+      const task = taskManager.create({ title, description: description ?? title, assignee });
       jsonResponse(res, 201, task);
     });
 
@@ -1068,9 +1090,10 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const audioData = b && typeof b['audio'] === 'string' ? b['audio'] : '';
       const filename = b && typeof b['filename'] === 'string' ? b['filename'] : 'audio.webm';
+      const language = b && typeof b['language'] === 'string' ? b['language'] : undefined;
       if (!audioData) { errorResponse(res, 400, 'Missing audio (base64)'); return; }
       const buffer = Buffer.from(audioData, 'base64');
-      const text = await transcribeAudio(buffer, filename);
+      const text = await transcribeAudio(buffer, filename, language);
       if (!text) { errorResponse(res, 422, 'Transcription failed'); return; }
       jsonResponse(res, 200, { text });
     });
