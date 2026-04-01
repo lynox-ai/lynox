@@ -122,6 +122,7 @@ let currentRunId = $state<string | null>(null);
 let isStreaming = $state(false);
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let chatError = $state<string | null>(null);
+let chatErrorDetail = $state<string | null>(null);
 let messageQueue = $state<QueuedMessage[]>([]);
 let sessionModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
@@ -218,14 +219,14 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 
 	if (!res.ok || !res.body) {
 		isStreaming = false;
-		const errMsg = res.status === 409
+		chatError = res.status === 409
 			? t('chat.error_busy')
 			: res.status === 401
 				? t('chat.error_auth')
 				: t('chat.error_start');
-		chatError = errMsg;
-		const msg = messages[assistantIdx];
-		if (msg) msg.content = errMsg;
+		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
+		// Remove empty assistant message
+		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 		return;
 	}
 
@@ -257,8 +258,8 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 		}
 	} catch {
 		chatError = t('chat.error_connection');
-		const connMsg = messages[assistantIdx];
-		if (connMsg && !connMsg.content) connMsg.content = t('chat.error_connection');
+		chatErrorDetail = null;
+		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 	} finally {
 		try { reader.cancel(); } catch { /* already closed */ }
 	}
@@ -285,6 +286,21 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 	switch (type) {
 		case 'text': {
 			const text = String(data['text'] ?? '');
+			// Intercept raw API error responses leaked as text
+			if (/^\d{3}\s*\{.*"error"/.test(text.trim())) {
+				chatErrorDetail = text;
+				if (text.includes('authentication') || text.includes('401')) {
+					chatError = t('chat.error_auth');
+				} else if (text.includes('rate_limit') || text.includes('429')) {
+					chatError = t('chat.error_rate_limit');
+				} else if (text.includes('overloaded') || text.includes('529')) {
+					chatError = t('chat.error_overloaded');
+				} else {
+					chatError = t('chat.error_start');
+				}
+				if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
+				break;
+			}
 			// Insert newline between text segments separated by tool calls
 			if (msg.content && text && msg._toolSinceText) {
 				if (!msg.content.endsWith('\n') && !msg.content.endsWith(' ')) {
@@ -427,10 +443,20 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'done':
 			break;
 		case 'error': {
-			const errText = String(data['error'] ?? 'Unknown error');
-			chatError = errText;
-			const errMsg = messages[idx];
-			if (errMsg && !errMsg.content) errMsg.content = errText;
+			const rawErr = String(data['error'] ?? 'Unknown error');
+			chatErrorDetail = rawErr;
+			// Map known API errors to user-friendly messages
+			if (rawErr.includes('authentication') || rawErr.includes('401')) {
+				chatError = t('chat.error_auth');
+			} else if (rawErr.includes('rate_limit') || rawErr.includes('429')) {
+				chatError = t('chat.error_rate_limit');
+			} else if (rawErr.includes('overloaded') || rawErr.includes('529')) {
+				chatError = t('chat.error_overloaded');
+			} else {
+				chatError = t('chat.error_start');
+			}
+			// Remove empty assistant message
+			if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
 			break;
 		}
 		case 'changeset_ready':
@@ -516,6 +542,9 @@ export function getPendingPermission() {
 export function getChatError() {
 	return chatError;
 }
+export function getChatErrorDetail() {
+	return chatErrorDetail;
+}
 export function getSessionModel() {
 	return sessionModel;
 }
@@ -527,6 +556,7 @@ export function getContextBudget() {
 }
 export function clearError() {
 	chatError = null;
+	chatErrorDetail = null;
 }
 export function getPendingChangeset() {
 	return pendingChangeset;
