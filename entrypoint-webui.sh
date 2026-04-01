@@ -43,13 +43,16 @@ else
   echo ""
 fi
 
-# Require ANTHROPIC_API_KEY
+# Check ANTHROPIC_API_KEY (warn but don't exit — browse mode still works)
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   CONFIG_FILE="$HOME/.lynox/config.json"
   if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"api_key"' "$CONFIG_FILE" 2>/dev/null; then
-    echo "Error: ANTHROPIC_API_KEY is required" >&2
-    echo "  docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ..." >&2
-    exit 1
+    echo "" >&2
+    echo "  Warning: ANTHROPIC_API_KEY not set" >&2
+    echo "  AI responses disabled — browse mode only" >&2
+    echo "  Set: docker run -e ANTHROPIC_API_KEY=sk-ant-... ..." >&2
+    echo "" >&2
+    export ANTHROPIC_API_KEY="sk-ant-not-configured"
   fi
 fi
 

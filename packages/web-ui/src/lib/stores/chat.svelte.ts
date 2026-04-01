@@ -26,6 +26,8 @@ export interface ChatMessage {
 	thinking?: string;
 	usage?: UsageInfo;
 	queued?: boolean;
+	/** Message failed to send (API error, connection lost, etc.) */
+	failed?: boolean;
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
 }
@@ -170,12 +172,16 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 	let sid = await ensureSession();
 
 	// Find and un-queue if this message was already added as queued
+	let userMsgIdx: number;
 	const queuedIdx = messages.findIndex((m) => m.role === 'user' && m.queued && m.content.startsWith(task.slice(0, 50)));
 	if (queuedIdx !== -1) {
 		messages[queuedIdx]!.queued = false;
+		messages[queuedIdx]!.failed = false;
+		userMsgIdx = queuedIdx;
 	} else {
 		const fileNames = files?.map((f) => f.name).join(', ');
 		messages.push({ role: 'user', content: fileNames ? `${task}\n📎 ${fileNames}` : task });
+		userMsgIdx = messages.length - 1;
 	}
 
 	const assistantIdx = messages.length;
@@ -232,8 +238,9 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 		} else {
 			chatError = t('chat.error_start');
 		}
-		// Remove empty assistant message
+		// Remove empty assistant message and mark user message as failed
 		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
 		return;
 	}
 
@@ -257,7 +264,7 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 				} else if (line.startsWith('data: ') && eventType) {
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
-						handleSSEEvent(eventType, data, assistantIdx);
+						handleSSEEvent(eventType, data, assistantIdx, userMsgIdx);
 					} catch { /* skip malformed SSE events */ }
 					eventType = '';
 				}
@@ -267,6 +274,7 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 		chatError = t('chat.error_connection');
 		chatErrorDetail = null;
 		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
 	} finally {
 		try { reader.cancel(); } catch { /* already closed */ }
 	}
@@ -286,7 +294,7 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 	}
 }
 
-function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number): void {
+function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number, userIdx: number): void {
 	const msg = messages[idx];
 	if (!msg) return;
 
@@ -466,8 +474,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			} else {
 				chatError = t('chat.error_start');
 			}
-			// Remove empty assistant message
+			// Remove empty assistant message and mark user message as failed
 			if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
+			if (messages[userIdx]) messages[userIdx]!.failed = true;
 			break;
 		}
 		case 'changeset_ready':

@@ -30,7 +30,8 @@
     "html2canvas": "^1.4.1",
     "marked": "^17.0.5",
     "mermaid": "^11.6.0",
-    "shiki": "^4.0.2"
+    "shiki": "^4.0.2",
+    "uqr": "^0.1.2"
   },
   "devDependencies": {
     "@sveltejs/adapter-node": "^5.2.12",

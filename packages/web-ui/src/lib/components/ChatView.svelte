@@ -974,11 +974,13 @@
 				{#if msg.role === 'user'}
 					<div class="flex justify-end">
 						<button
-							onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
-							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
+							onclick={() => { if (msg.failed) { sendMessage(msg.content); msg.failed = false; } else { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); } }}
+							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
 							{msg.content}
-							{#if msg.queued}
+							{#if msg.failed}
+								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-danger/70 mt-1">{t('chat.send_failed')}</span>
+							{:else if msg.queued}
 								<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle ml-2">{t('chat.queued')}</span>
 							{/if}
 						</button>

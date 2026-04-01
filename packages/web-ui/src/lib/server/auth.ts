@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 const SESSION_MAX_AGE_S = 7 * 24 * 60 * 60; // 7 days
 
@@ -100,5 +100,38 @@ setInterval(() => {
 	const now = Date.now();
 	for (const [ip, entry] of attempts) {
 		if (now >= entry.resetAt) attempts.delete(ip);
+	}
+}, 60_000).unref();
+
+// ── One-time link codes (for QR login) ────────────────────────────
+
+interface LinkCode {
+	code: string;
+	expiresAt: number;
+}
+
+const linkCodes = new Map<string, LinkCode>();
+const LINK_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Create a one-time link code that can be used once to authenticate. */
+export function createLinkCode(): string {
+	const code = randomBytes(32).toString('base64url');
+	linkCodes.set(code, { code, expiresAt: Date.now() + LINK_CODE_TTL_MS });
+	return code;
+}
+
+/** Validate and consume a one-time link code. Returns true if valid. */
+export function consumeLinkCode(code: string): boolean {
+	const entry = linkCodes.get(code);
+	if (!entry) return false;
+	linkCodes.delete(code);
+	return Date.now() < entry.expiresAt;
+}
+
+// Cleanup expired codes
+setInterval(() => {
+	const now = Date.now();
+	for (const [code, entry] of linkCodes) {
+		if (now >= entry.expiresAt) linkCodes.delete(code);
 	}
 }, 60_000).unref();

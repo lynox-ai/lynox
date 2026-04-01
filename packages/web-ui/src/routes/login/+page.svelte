@@ -13,7 +13,7 @@
 <div class="flex min-h-screen items-center justify-center bg-bg px-4">
 	<div class="w-full max-w-sm">
 		<div class="mb-8 flex flex-col items-center gap-4">
-			<img src="/logo.svg" alt="lynox" class="h-10" />
+			<img src="/logo.svg" alt="lynox" class="h-20" />
 			<p class="text-sm text-text-muted">Enter your access token to continue.</p>
 		</div>
 
