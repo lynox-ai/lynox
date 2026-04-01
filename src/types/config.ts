@@ -129,6 +129,7 @@ export interface LynoxUserConfig {
   manifests_dir?: string | undefined;
   workspace_dir?: string | undefined;
   user_id?: string | undefined;
+  display_name?: string | undefined;
   organization_id?: string | undefined;
   client_id?: string | undefined;
   /** Enable changeset review mode: backup files before write, review post-run. Default: true for interactive CLI. */

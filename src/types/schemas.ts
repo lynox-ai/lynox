@@ -100,6 +100,7 @@ export const LynoxUserConfigSchema = z.object({
   manifests_dir:        z.string().optional(),
   workspace_dir:        z.string().optional(),
   user_id:              z.string().optional(),
+  display_name:         z.string().optional(),
   organization_id:      z.string().optional(),
   client_id:            z.string().optional(),
   changeset_review:     z.boolean().optional(),

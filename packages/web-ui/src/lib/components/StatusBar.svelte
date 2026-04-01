@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
+	import { getContextBudget, getSessionModel } from '../stores/chat.svelte.js';
 
 	let engineOk = $state<boolean | null>(null);
 	let activeTasks = $state(0);
@@ -138,6 +139,20 @@
 	<a href="/app/activity?tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		{todayRuns} {t('status.runs')} {t('status.today')}
 	</a>
+
+	<!-- Context Window -->
+	{#if getContextBudget()}
+		{@const pct = getContextBudget()?.usagePercent ?? 0}
+		{@const color = pct >= 80 ? 'bg-danger' : pct >= 50 ? 'bg-warning' : 'bg-accent'}
+		{@const textColor = pct >= 80 ? 'text-danger' : pct >= 50 ? 'text-warning' : 'text-text-subtle'}
+		<span class="text-border">|</span>
+		<div class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="{getContextBudget()?.totalTokens ?? 0} / {getContextBudget()?.maxTokens ?? 0} tokens{getSessionModel() ? ` · ${getSessionModel()}` : ''}">
+			<div class="w-16 h-1 rounded-full bg-border overflow-hidden">
+				<div class="{color} h-full rounded-full transition-all duration-500" style="width: {Math.min(pct, 100)}%"></div>
+			</div>
+			<span class="text-[10px] font-mono {textColor}">{pct}%</span>
+		</div>
+	{/if}
 </div>
 
 <!-- Status Panel Overlay -->

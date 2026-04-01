@@ -26,7 +26,7 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
-	import { t } from '../i18n.svelte.js';
+	import { t, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
@@ -62,10 +62,7 @@
 		addToast(t('config.vault_key_copied'), 'success');
 	}
 
-	function sendPromptChip(text: string) {
-		inputText = text;
-		void sendMessage(text, []);
-	}
+
 
 	const QUOTES = [
 		{ text: 'The best way to predict the future is to create it.', author: 'Peter Drucker' },
@@ -105,11 +102,53 @@
 		return QUOTES[dayOfYear % QUOTES.length]!;
 	}
 
-	function getGreeting(): string {
+	const GREETINGS: Record<string, Array<{ de: string; en: string; punct?: string }>> = {
+		night:    [
+			{ de: 'Noch wach', en: 'Still up', punct: '?' },
+			{ de: 'Nachtschicht', en: 'Night owl', punct: '?' },
+			{ de: 'Die besten Ideen kommen nachts', en: 'The best ideas come at night' },
+		],
+		early:    [
+			{ de: 'Früh dran heute', en: 'Up early today' },
+			{ de: 'Der frühe Vogel', en: 'Early bird' },
+			{ de: 'Guten Morgen', en: 'Good morning' },
+		],
+		morning:  [
+			{ de: 'Guten Morgen', en: 'Good morning' },
+			{ de: 'Bereit für Grosses', en: 'Ready for big things', punct: '?' },
+			{ de: 'Auf geht\'s', en: 'Let\'s go' },
+		],
+		lunch:    [
+			{ de: 'Mahlzeit', en: 'Lunchtime' },
+			{ de: 'Kurze Pause', en: 'Quick break', punct: '?' },
+		],
+		afternoon:[
+			{ de: 'Guten Tag', en: 'Good afternoon' },
+			{ de: 'Produktiver Nachmittag', en: 'Productive afternoon', punct: '?' },
+			{ de: 'Endspurt', en: 'Home stretch' },
+		],
+		evening:  [
+			{ de: 'Guten Abend', en: 'Good evening' },
+			{ de: 'Feierabend', en: 'After hours', punct: '?' },
+			{ de: 'Schönen Abend', en: 'Nice evening' },
+		],
+	};
+
+	function getGreeting(): { text: string; punct: string } {
 		const h = new Date().getHours();
-		if (h < 12) return t('chat.greeting_morning');
-		if (h < 18) return t('chat.greeting_afternoon');
-		return t('chat.greeting_evening');
+		let slot: string;
+		if (h >= 23 || h < 5) slot = 'night';
+		else if (h < 8) slot = 'early';
+		else if (h < 12) slot = 'morning';
+		else if (h < 14) slot = 'lunch';
+		else if (h < 18) slot = 'afternoon';
+		else slot = 'evening';
+
+		const pool = GREETINGS[slot]!;
+		const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
+		const pick = pool[dayOfYear % pool.length]!;
+		const lang = getLocale();
+		return { text: lang === 'de' ? pick.de : pick.en, punct: pick.punct ?? '.' };
 	}
 
 	async function loadDisplayName() {
@@ -740,14 +779,17 @@
 							</div>
 						{:else}
 							<!-- Greeting -->
-							<div class="text-center mb-8">
-								<div class="icon-entrance mb-4">
-									<img src="/icon.svg" alt="" class="icon-float mx-auto w-14 h-14" />
+							{#if true}
+								{@const greeting = getGreeting()}
+								<div class="text-center mb-8">
+									<div class="icon-entrance mb-4">
+										<img src="/icon.svg" alt="" class="icon-float mx-auto w-14 h-14" />
+									</div>
+									<h1 class="text-2xl md:text-3xl font-light tracking-tight text-text welcome-greeting">
+										{greeting.text}{#if displayName}, {displayName}{/if}{greeting.punct}
+									</h1>
 								</div>
-								<h1 class="text-2xl md:text-3xl font-light tracking-tight text-text welcome-greeting">
-									{getGreeting()}{#if displayName}, {displayName}{/if}.
-								</h1>
-							</div>
+							{/if}
 
 							<!-- Security card (first visit only) -->
 							{#if showSecurityCard}
@@ -757,16 +799,11 @@
 										<div class="flex-1 min-w-0">
 											<p class="text-sm font-medium text-text mb-1">{t('onboard.security_title')}</p>
 											{#if securityVaultKey}
-												<p class="text-xs text-text-muted mb-3">{t('onboard.security_body')}</p>
-												{#if securityKeyRevealed}
-													<code class="block rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-xs font-mono text-text-muted break-all mb-3 select-all">{securityVaultKey}</code>
-												{/if}
-												<div class="flex flex-wrap gap-2">
-													{#if !securityKeyRevealed}
-														<button onclick={() => securityKeyRevealed = true} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_show')}</button>
-													{:else}
-														<button onclick={copySecurityKey} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('config.copy')}</button>
-													{/if}
+												<p class="text-xs text-text-muted mb-2">{t('onboard.security_body')}</p>
+												<button onclick={copySecurityKey} class="w-full rounded-[var(--radius-sm)] bg-bg px-3 py-2 mb-2 text-xs font-mono text-text-muted text-left overflow-x-auto whitespace-nowrap cursor-pointer hover:text-text hover:border-border-hover transition-all border border-transparent hover:border-border" title="Click to copy">
+													{securityVaultKey}
+												</button>
+												<div class="flex gap-2">
 													<button onclick={() => goto('/app/settings/config')} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_settings')}</button>
 													<button onclick={dismissSecurityCard} class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">{t('onboard.security_dismiss')}</button>
 												</div>
@@ -779,17 +816,12 @@
 								</div>
 							{/if}
 
-							<!-- Prompt chips -->
-							<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-3">{t('onboard.try_prompt')}</p>
-							<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-6">
-								<button onclick={() => sendPromptChip(t('onboard.prompt_capabilities'))} class="prompt-chip"><span class="prompt-chip-text">{t('onboard.prompt_capabilities')}</span></button>
-								<button onclick={() => sendPromptChip(t('onboard.prompt_remember'))} class="prompt-chip"><span class="prompt-chip-text">{t('onboard.prompt_remember')}</span></button>
-								<button onclick={() => sendPromptChip(t('onboard.prompt_pdf'))} class="prompt-chip"><span class="prompt-chip-text">{t('onboard.prompt_pdf')}</span></button>
-								<button onclick={() => sendPromptChip(t('onboard.prompt_research'))} class="prompt-chip"><span class="prompt-chip-text">{t('onboard.prompt_research')}</span></button>
-							</div>
-							<div class="text-center">
-								<a href="https://docs.lynox.ai/getting-started/" target="_blank" rel="noopener noreferrer" class="text-xs text-text-subtle hover:text-accent-text transition-colors">{t('onboard.docs_link')} &rarr;</a>
-							</div>
+							<!-- Daily quote -->
+							{@const quote = getTodaysQuote()}
+							<blockquote class="text-center mt-2">
+								<p class="text-sm italic text-text-muted leading-relaxed">&ldquo;{quote.text}&rdquo;</p>
+								<footer class="mt-1.5 text-xs text-text-subtle">&mdash; {quote.author}</footer>
+							</blockquote>
 						{/if}
 					</div>
 				{/if}
@@ -1078,7 +1110,7 @@
 	{/if}
 
 	<!-- Input -->
-	<div class="border-t border-border bg-bg-subtle px-2 py-px md:px-4 md:py-px" style="padding-bottom: env(safe-area-inset-bottom, 0px);">
+	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl mx-auto flex flex-wrap gap-2 mb-2">
@@ -1105,7 +1137,7 @@
 					</svg>
 					<span class="text-sm text-text-subtle">{t('chat.transcribing')}</span>
 				</div>
-				<div class="shrink-0 h-9 w-9"></div>
+				<div class="shrink-0 h-11 w-11"></div>
 			{:else if recording}
 				<!-- Recording state: [🗑  ● 0:03 ━━━━━]  [➤] -->
 				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2">
@@ -1127,20 +1159,20 @@
 				<!-- Send button during recording -->
 				<button
 					onclick={stopRecording}
-					class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
+					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
 					aria-label={t('chat.send')}
 				>
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 				</button>
 			{:else}
 				<!-- Normal: 📎  [Nachricht eingeben...]  ➤ -->
 				<button
 					onclick={() => fileInputEl.click()}
 					disabled={!ready}
-					class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-opacity outline-none focus:outline-none"
+					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text disabled:opacity-30 transition-opacity outline-none focus:outline-none"
 					aria-label={t('chat.attach_file')}
 				>
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
 					</svg>
 				</button>
@@ -1154,14 +1186,14 @@
 						placeholder={pendingPermission && !inBatchMode ? t('chat.placeholder_answer') : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 						rows="1"
 						disabled={!ready && !pendingPermission}
-						class="flex-1 resize-none border-0 bg-transparent px-3 py-1.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
+						class="flex-1 resize-none border-0 bg-transparent px-4 py-2.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
 					></textarea>
 				</div>
 
 				{#if isStreaming && !pendingPermission}
 					<button
 						onclick={() => abortRun()}
-						class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-all"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger hover:bg-danger/25 transition-all"
 						aria-label={t('chat.abort')}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
@@ -1170,10 +1202,10 @@
 					<button
 						onclick={handleSend}
 						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
-						class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
 						aria-label={t('chat.send')}
 					>
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 					</button>
 				{:else}
 					<!-- Touch: hold to record, release to send. Mouse: click to toggle. -->
@@ -1201,10 +1233,10 @@
 						}}
 						oncontextmenu={(e) => e.preventDefault()}
 						disabled={!ready}
-						class="shrink-0 h-9 w-9 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
+						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
 						aria-label={t('chat.voice_input')}
 					>
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
 						</svg>
 					</button>
