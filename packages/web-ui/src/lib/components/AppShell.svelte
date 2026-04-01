@@ -195,41 +195,7 @@
 </script>
 
 <div class="fixed inset-0 flex flex-col overflow-hidden bg-bg" style="padding-top: env(safe-area-inset-top);">
-	<!-- Top Bar -->
-	<header class="flex items-center justify-between h-12 px-4 border-b border-border bg-bg shrink-0">
-		<!-- Left: hamburger (mobile) + logo -->
-		<div class="flex items-center gap-3">
-			<button onclick={() => (sidebarOpen = true)} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label="Open menu">
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-					<path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" />
-				</svg>
-			</button>
-			<img src="/logo-brand.svg" alt="lynox" class="h-5 w-auto" />
-		</div>
-
-		<!-- Center: Cmd+K hint -->
-		<button onclick={() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))} aria-label={t('cmd.placeholder')} class="hidden md:flex items-center gap-2 text-xs text-text-subtle hover:text-text transition-colors rounded-[var(--radius-md)] border border-border px-3 py-1.5">
-			<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
-			<span>{t('cmd.placeholder')}</span>
-			<kbd class="text-[10px] font-mono bg-bg-muted px-1 py-0.5 rounded">⌘K</kbd>
-		</button>
-
-		<!-- Right: locale toggle + user -->
-		<div class="flex items-center gap-3">
-			<button
-				onclick={() => setLocale(getLocale() === 'de' ? 'en' : 'de')}
-				class="text-xs font-mono text-text-subtle hover:text-text transition-colors"
-				aria-label="Switch language"
-			>
-				{getLocale() === 'de' ? 'EN' : 'DE'}
-			</button>
-			{#if userSlot}
-				{@render userSlot()}
-			{/if}
-		</div>
-	</header>
-
-	<!-- Body: sidebar + main + context panel -->
+	<!-- Body: sidebar (full height) + right column -->
 	<div class="flex flex-1 min-h-0 overflow-hidden">
 		<!-- Mobile overlay -->
 		{#if sidebarOpen}
@@ -392,17 +358,54 @@
 			</div>
 		</nav>
 
-		<!-- Main Content -->
-		<main class="flex-1 min-w-0 flex flex-col overflow-hidden">
-			<div class="flex-1 min-h-0 flex overflow-hidden">
-				<div class="flex-1 min-w-0 overflow-y-auto scrollbar-thin">
-					{@render children()}
+		<!-- Right column: header + main content -->
+		<div class="flex-1 min-w-0 flex flex-col overflow-hidden">
+			<!-- Header (above chat area) -->
+			<header class="flex items-center justify-between h-12 px-4 border-b border-border bg-bg shrink-0">
+				<!-- Left: hamburger (mobile) + logo -->
+				<div class="flex items-center gap-3">
+					<button onclick={() => (sidebarOpen = true)} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label="Open menu">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+							<path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" />
+						</svg>
+					</button>
+					<img src="/logo-brand.svg" alt="lynox" class="h-5 w-auto" />
 				</div>
 
-				<!-- Context Panel (right sidebar, auto-fills from chat context) -->
-				<ContextPanel />
-			</div>
-		</main>
+				<!-- Center: Cmd+K hint -->
+				<button onclick={() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))} aria-label={t('cmd.placeholder')} class="hidden md:flex items-center gap-2 text-xs text-text-subtle hover:text-text transition-colors rounded-[var(--radius-md)] border border-border px-3 py-1.5">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
+					<span>{t('cmd.placeholder')}</span>
+					<kbd class="text-[10px] font-mono bg-bg-muted px-1 py-0.5 rounded">⌘K</kbd>
+				</button>
+
+				<!-- Right: locale toggle + user -->
+				<div class="flex items-center gap-3">
+					<button
+						onclick={() => setLocale(getLocale() === 'de' ? 'en' : 'de')}
+						class="text-xs font-mono text-text-subtle hover:text-text transition-colors"
+						aria-label="Switch language"
+					>
+						{getLocale() === 'de' ? 'EN' : 'DE'}
+					</button>
+					{#if userSlot}
+						{@render userSlot()}
+					{/if}
+				</div>
+			</header>
+
+			<!-- Main Content -->
+			<main class="flex-1 min-w-0 flex flex-col overflow-hidden">
+				<div class="flex-1 min-h-0 flex overflow-hidden">
+					<div class="flex-1 min-w-0 overflow-y-auto scrollbar-thin">
+						{@render children()}
+					</div>
+
+					<!-- Context Panel (right sidebar, auto-fills from chat context) -->
+					<ContextPanel />
+				</div>
+			</main>
+		</div>
 	</div>
 
 	<!-- Status Bar -->

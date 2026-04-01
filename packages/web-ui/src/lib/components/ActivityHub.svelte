@@ -33,6 +33,19 @@
 	interface CostDay { day: string; cost_usd: number; run_count: number; }
 	interface TaskRecord { id: string; title: string; status: string; priority?: string; assignee?: string; schedule_cron?: string; }
 
+	function cronToHuman(cron: string): string {
+		if (cron === '0 * * * *') return t('tasks.every_hour');
+		const m = cron.match(/^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/);
+		if (!m) return cron;
+		const hour = m[2];
+		const day = m[3];
+		const weekday = m[4];
+		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
+		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${hour}:${m[1]?.padStart(2, '0')}`;
+		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${hour}:${m[1]?.padStart(2, '0')}`;
+		return `${t('tasks.daily_at')} ${hour}:${m[1]?.padStart(2, '0')}`;
+	}
+
 	let stats = $state<Stats | null>(null);
 	let costDays = $state<CostDay[]>([]);
 	let tasks = $state<TaskRecord[]>([]);
@@ -189,7 +202,7 @@
 								{#each scheduledTasks.slice(0, 5) as task}
 									<div class="flex items-center justify-between text-sm">
 										<span class="text-text truncate">{task.title}</span>
-										<span class="text-[10px] font-mono text-text-subtle">{task.schedule_cron}</span>
+										<span class="text-[10px] text-text-subtle">{cronToHuman(task.schedule_cron ?? '')}</span>
 									</div>
 								{/each}
 							</div>
