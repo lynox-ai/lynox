@@ -30,13 +30,22 @@
 	// Only applied outside code blocks to avoid breaking code content.
 	function fixSentenceSpacing(md: string): string {
 		const parts = md.split(/(```[\s\S]*?```)/g);
-		return parts.map((part, i) =>
-			i % 2 === 0 ? part.replace(/([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2') : part
-		).join('');
+		return parts.map((part, i) => {
+			if (i % 2 !== 0) return part; // inside code block — skip
+			// Apply per-line, skip table rows (contain pipe) to avoid breaking tables
+			return part.split('\n').map(line =>
+				line.includes('|') ? line : line.replace(/([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2')
+			).join('\n');
+		}).join('');
+	}
+
+	// Wrap <table> elements in a scrollable container for wide tables.
+	function wrapTables(html: string): string {
+		return html.replace(/<table\b[^>]*>/g, '<div class="table-wrap">$&').replace(/<\/table>/g, '</table></div>');
 	}
 
 	const baseHtml = $derived(
-		DOMPurify.sanitize(marked.parse(closeOpenFences(fixSentenceSpacing(content)), { async: false }) as string)
+		wrapTables(DOMPurify.sanitize(marked.parse(closeOpenFences(fixSentenceSpacing(content)), { async: false }) as string))
 	);
 
 	function decodeEntities(str: string): string {
@@ -494,11 +503,17 @@
 	}
 
 	/* Tables */
+	div :global(.table-wrap) {
+		overflow-x: auto;
+		margin: 1rem 0;
+		-webkit-overflow-scrolling: touch;
+		scrollbar-width: thin;
+		scrollbar-color: var(--color-border) transparent;
+	}
 	div :global(table) {
 		width: 100%;
 		border-collapse: collapse;
 		font-size: 0.8125rem;
-		margin: 1rem 0;
 	}
 	div :global(th) {
 		text-align: left;
@@ -509,11 +524,13 @@
 		font-size: 0.75rem;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
+		white-space: nowrap;
 	}
 	div :global(td) {
 		padding: 0.4rem 0.75rem;
 		border-bottom: 1px solid var(--color-border);
 		color: var(--color-text-muted);
+		word-break: break-word;
 	}
 	div :global(tr:last-child td) {
 		border-bottom: none;
