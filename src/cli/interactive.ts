@@ -248,6 +248,100 @@ export async function multiSelect<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Secret input (masked)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a secret from stdin with masking. Shows ● for each character,
+ * reveals the last 4 chars for confirmation (e.g., ●●●●●●●●●●wAA).
+ * Falls back to readline on non-TTY (no masking possible).
+ */
+export async function readSecret(
+  prompt: string,
+  rl?: import('node:readline/promises').Interface | undefined,
+): Promise<string> {
+  if (!stdin.isTTY || rl) {
+    // Non-TTY fallback — no masking possible (CI, piped input)
+    const injected = rl;
+    let fallbackRl: import('node:readline/promises').Interface;
+    if (injected) {
+      fallbackRl = injected;
+    } else {
+      const { createInterface } = await import('node:readline/promises');
+      fallbackRl = createInterface({ input: stdin, output: stdout });
+    }
+    try {
+      return (await fallbackRl.question(`  ${prompt} `)).trim();
+    } finally {
+      if (!injected) fallbackRl.close();
+    }
+  }
+
+  stdout.write(`  ${prompt} `);
+  let buf = '';
+
+  return new Promise<string>((resolve) => {
+    stdin.setRawMode(true);
+    stdin.resume();
+    const prevEncoding = stdin.readableEncoding;
+    stdin.setEncoding('utf8');
+
+    const redraw = (): void => {
+      // Clear current line after prompt
+      const masked = buf.length <= 4
+        ? buf
+        : '●'.repeat(buf.length - 4) + buf.slice(-4);
+      stdout.write(`\r  ${prompt} ${masked}\x1b[K`);
+    };
+
+    const cleanup = (): void => {
+      stdin.setRawMode(false);
+      stdin.removeListener('data', onKey);
+      stdin.pause();
+      if (prevEncoding) stdin.setEncoding(prevEncoding);
+    };
+
+    const onKey = (data: string): void => {
+      for (const ch of data) {
+        // Enter — submit
+        if (ch === '\r' || ch === '\n') {
+          cleanup();
+          stdout.write('\n');
+          resolve(buf.trim());
+          return;
+        }
+        // Ctrl+C / Escape — abort
+        if (ch === '\x03' || ch === '\x1b') {
+          cleanup();
+          stdout.write('\n');
+          resolve('');
+          return;
+        }
+        // Backspace / Delete
+        if (ch === '\x7f' || ch === '\b') {
+          if (buf.length > 0) buf = buf.slice(0, -1);
+          redraw();
+          continue;
+        }
+        // Ctrl+U — clear line
+        if (ch === '\x15') {
+          buf = '';
+          redraw();
+          continue;
+        }
+        // Ignore other control chars
+        if (ch.charCodeAt(0) < 32) continue;
+        // Regular character
+        buf += ch;
+        redraw();
+      }
+    };
+
+    stdin.on('data', onKey);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Fallbacks for non-TTY (tests, piped input)
 // ---------------------------------------------------------------------------
 

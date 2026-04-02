@@ -8,7 +8,7 @@ import { saveUserConfig, getLynoxDir, ensureLynoxDir, reloadConfig } from '../co
 import { writeFileAtomicSync } from '../core/atomic-write.js';
 import type { LynoxUserConfig, ModelTier } from '../types/index.js';
 import { BOLD, DIM, GREEN, RED, YELLOW, RESET } from './ansi.js';
-import { confirm } from './interactive.js';
+import { confirm, readSecret } from './interactive.js';
 import { renderGradientArt } from './ui.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { getErrorMessage } from '../core/utils.js';
@@ -199,7 +199,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     let apiKey = '';
     const MAX_KEY_ATTEMPTS = 5;
     for (let keyAttempt = 1; keyAttempt <= MAX_KEY_ATTEMPTS; keyAttempt++) {
-      const input = await rl.question(`  ${BOLD}Key:${RESET} `);
+      const input = await readSecret(`${BOLD}Key:${RESET}`, stdin.isTTY ? undefined : rl);
       if (!input.trim()) {
         stdout.write(`  ${DIM}Cancelled.${RESET}\n`);
         return null;
@@ -232,7 +232,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     }
 
     // ── Encryption (always on, no prompt) ────────────────────────
-    const vaultKey = randomBytes(36).toString('base64');
+    const vaultKey = randomBytes(48).toString('base64');
     const envPath = join(getLynoxDir(), '.env');
     try {
       writeFileAtomicSync(envPath, `LYNOX_VAULT_KEY=${vaultKey}\n`);
@@ -246,9 +246,10 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       await offerShellProfileInjection(rl);
     } catch {
       process.env['LYNOX_VAULT_KEY'] = vaultKey;
-      stdout.write(`  ${GREEN}✓${RESET} Encryption enabled. Add to your shell profile:\n`);
-      stdout.write(`  ${BOLD}export LYNOX_VAULT_KEY='${vaultKey}'${RESET}\n`);
-      stdout.write(`  ${YELLOW}!${RESET} ${BOLD}Save this key${RESET} to a password manager — if lost, encrypted data cannot be recovered.\n`);
+      const { stderr } = await import('node:process');
+      stderr.write(`  ${GREEN}✓${RESET} Encryption enabled. Add to your shell profile:\n`);
+      stderr.write(`  ${BOLD}export LYNOX_VAULT_KEY='${vaultKey}'${RESET}\n`);
+      stderr.write(`  ${YELLOW}!${RESET} ${BOLD}Save this key${RESET} to a password manager — if lost, encrypted data cannot be recovered.\n`);
       if (stdin.isTTY) rl.close();
     }
 
