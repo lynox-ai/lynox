@@ -60,7 +60,7 @@
 		</form>
 
 		<p class="mt-6 text-center text-xs text-text-subtle">
-			Token from setup guide. Lost it? <code class="rounded bg-surface-hover px-1.5 py-0.5 font-mono text-xs">docker logs lynox</code>
+			Token from setup guide. Lost it? <code class="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-xs">docker logs lynox</code>
 		</p>
 	</div>
 </div>

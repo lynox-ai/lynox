@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { timeAgo } from '../utils/time.js';
 
 	interface PipelineRun {
 		id: string;
@@ -92,15 +93,8 @@
 		return `$${usd.toFixed(4)}`;
 	}
 
-	function timeAgo(iso: string): string {
-		const diff = Date.now() - new Date(iso).getTime();
-		const mins = Math.floor(diff / 60_000);
-		if (mins < 1) return t('workflow.just_now');
-		if (mins < 60) return `${mins}m`;
-		const hours = Math.floor(mins / 60);
-		if (hours < 24) return `${hours}h`;
-		const days = Math.floor(hours / 24);
-		return `${days}d`;
+	function wfTimeAgo(iso: string): string {
+		return timeAgo(iso, t('workflow.just_now'));
 	}
 
 	function parseManifestSteps(json: string): Array<{ id: string; task: string; input_from?: string[]; model?: string }> {
@@ -166,7 +160,7 @@
 								<span>{run.step_count} {t('workflow.steps')}</span>
 								<span>{formatDuration(run.total_duration_ms)}</span>
 								<span>{formatCost(run.total_cost_usd)}</span>
-								<span>{timeAgo(run.started_at)}</span>
+								<span>{wfTimeAgo(run.started_at)}</span>
 							</div>
 						</div>
 

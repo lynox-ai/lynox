@@ -459,6 +459,21 @@
 	let selectedOptions = $state<string[]>([]);
 	let answeredPrompts = $state<{ question: string; answer: string }[]>([]);
 
+	// Prompt timeout countdown
+	let promptSecondsLeft = $state<number | null>(null);
+	$effect(() => {
+		const p = pendingPermission;
+		if (!p?.timeoutMs || !p.receivedAt) { promptSecondsLeft = null; return; }
+		const update = () => {
+			const elapsed = Date.now() - p.receivedAt!;
+			const left = Math.max(0, Math.ceil((p.timeoutMs! - elapsed) / 1000));
+			promptSecondsLeft = left;
+		};
+		update();
+		const timer = setInterval(update, 1000);
+		return () => clearInterval(timer);
+	});
+
 	// Secret prompt state
 	let secretValue = $state('');
 	let secretConsented = $state(false);
@@ -703,6 +718,10 @@
 
 	async function saveInlineKey() {
 		if (!setupKey.trim()) return;
+		if (!setupKey.trim().startsWith('sk-ant-')) {
+			addToast(t('onboard.api_key_format'), 'error', 4000);
+			return;
+		}
 		setupSaving = true;
 		try {
 			await fetch(`${getApiBase()}/secrets/ANTHROPIC_API_KEY`, {
@@ -813,12 +832,6 @@
 	});
 
 	const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-
-	function normalizeImageType(type: string): string {
-		if (SUPPORTED_IMAGE_TYPES.has(type)) return type;
-		if (type.startsWith('image/')) return 'image/png'; // fallback: treat as PNG
-		return type;
-	}
 
 	function handlePaste(e: ClipboardEvent) {
 		const items = e.clipboardData?.items;
@@ -976,7 +989,12 @@
 	function autoResize(e: Event) {
 		const el = e.target as HTMLTextAreaElement;
 		el.style.height = 'auto';
-		const maxH = window.innerWidth < 768 ? 200 : 150;
+		let maxH = 150;
+		if (window.innerWidth < 768) {
+			// Account for virtual keyboard: use visualViewport height if available
+			const vh = window.visualViewport?.height ?? window.innerHeight;
+			maxH = Math.min(200, Math.floor(vh * 0.3));
+		}
 		el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
 		el.style.overflowY = el.scrollHeight > maxH ? 'auto' : 'hidden';
 	}
@@ -1241,7 +1259,7 @@
 			{/if}
 
 			{#if isOffline}
-				<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-2.5 text-sm text-warning flex items-center gap-2">
+				<div role="status" class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-2.5 text-sm text-warning flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 5.636a9 9 0 010 12.728M5.636 5.636a9 9 0 000 12.728M12 12h.01M8.464 8.464a5 5 0 000 7.072M15.536 8.464a5 5 0 010 7.072" /><line x1="4" y1="4" x2="20" y2="20" stroke="currentColor" stroke-width="2" /></svg>
 					<span>{t('chat.error_offline')}</span>
 				</div>
@@ -1255,7 +1273,8 @@
 			{/if}
 
 			{#if chatError}
-				<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
+				<div role="alert" class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
 					<span class="flex-1">{@html chatError
 						.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 						.replace(/\[([^\]]+)\]\(((https?:\/\/)[^)]+)\)/g, '<a href="$2" class="underline hover:opacity-80">$1</a>')}</span>
@@ -1283,7 +1302,7 @@
 
 	<!-- Changeset review: show after run completes with file changes -->
 	{#if !isStreaming && (pendingChangeset || changesetLoading)}
-		<div class="border-t border-border bg-bg-subtle px-4 py-3">
+		<div class="border-t border-border bg-bg-subtle px-4 py-3" data-changeset-review>
 			<div class="max-w-3xl mx-auto">
 				{#if changesetLoading}
 					<div class="text-xs text-text-muted font-mono animate-pulse">{t('changeset.loading')}</div>
@@ -1391,11 +1410,16 @@
 			<div class="max-w-3xl mx-auto space-y-2">
 				<div class="flex items-start gap-2">
 					<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
-					{#if !isPermissionGuard}
-						<button onclick={() => answerPrompt('__dismissed__')} class="shrink-0 p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-						</button>
-					{/if}
+					<div class="flex items-center gap-1.5 shrink-0">
+						{#if promptSecondsLeft != null}
+							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}">{Math.floor(promptSecondsLeft / 60)}:{String(promptSecondsLeft % 60).padStart(2, '0')}</span>
+						{/if}
+						{#if !isPermissionGuard}
+							<button onclick={() => answerPrompt('__dismissed__')} class="p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+							</button>
+						{/if}
+					</div>
 				</div>
 
 				{#if isPermissionGuard}

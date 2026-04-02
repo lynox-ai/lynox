@@ -4,8 +4,9 @@
 	import { onMount } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { newChat, resumeThread, getSessionId } from '../stores/chat.svelte.js';
-	import { loadThreads, getThreads, archiveThread, toggleFavorite } from '../stores/threads.svelte.js';
+	import { loadThreads, getThreads, archiveThread, toggleFavorite, onActiveThreadRemoved } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
+	import { timeAgo } from '../utils/time.js';
 	import StatusBar from './StatusBar.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
@@ -178,18 +179,12 @@
 		return parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' }) + ` ${time}`;
 	}
 
-	function timeAgo(dateStr: string): string {
-		const parsed = new Date(dateStr.endsWith('Z') || dateStr.includes('+') ? dateStr : dateStr + 'Z');
-		const diff = Date.now() - parsed.getTime();
-		if (Number.isNaN(diff)) return '';
-		const mins = Math.floor(diff / 60_000);
-		if (mins < 1) return 'now';
-		if (mins < 60) return `${mins}m`;
-		const hours = Math.floor(mins / 60);
-		if (hours < 24) return `${hours}h`;
-		const days = Math.floor(hours / 24);
-		return `${days}d`;
-	}
+	// When the active thread is archived/deleted, navigate to new chat
+	onActiveThreadRemoved(() => {
+		newChat();
+		void loadThreads();
+		goto('/app');
+	});
 
 	// Auto-expand section matching current route on mount
 	onMount(() => {
@@ -286,13 +281,13 @@
 						{#if expandedSection === item.href && item.type === 'threads'}
 							<div transition:slide={{ duration: 150 }}>
 								{#if getThreads().length > 0}
-									<ul class="mt-1 space-y-0.5 max-h-72 overflow-y-auto scrollbar-thin">
+									<ul class="mt-1 space-y-0.5 max-h-72 overflow-y-auto scrollbar-thin" aria-label={t('threads.recent')}>
 										{#each getThreads() as thread (thread.id)}
 											{@const isThreadActive = getSessionId() === thread.id}
 											<li class="relative overflow-hidden rounded-[var(--radius-sm)]">
 												<!-- Swipe archive action (mobile) -->
 												<button
-													onclick={(e) => { e.stopPropagation(); void archiveThread(thread.id); closeSwipe(); }}
+													onclick={(e) => { e.stopPropagation(); void archiveThread(thread.id, getSessionId()); closeSwipe(); }}
 													class="absolute inset-y-0 right-0 z-0 flex items-center px-4 bg-danger/20 text-danger text-sm font-medium"
 													aria-label={t('threads.archive')}
 												>{t('threads.archive')}</button>
@@ -326,7 +321,7 @@
 														aria-label={thread.is_favorite ? t('threads.unfavorite') : t('threads.favorite')}
 													>{thread.is_favorite ? '\u2605' : '\u2606'}</button>
 													<button
-														onclick={(e: MouseEvent) => { e.stopPropagation(); void archiveThread(thread.id); }}
+														onclick={(e: MouseEvent) => { e.stopPropagation(); void archiveThread(thread.id, getSessionId()); }}
 														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"
 														aria-label={t('threads.archive')}
 													>&times;</button>

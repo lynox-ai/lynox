@@ -103,7 +103,7 @@
 					<p class="font-mono text-[11px] truncate min-w-0 flex-1 select-all">{loginUrl}</p>
 					<button
 						onclick={copyUrl}
-						class="shrink-0 rounded-[var(--radius-sm)] border border-border px-2.5 py-1 hover:bg-surface-hover transition-colors"
+						class="shrink-0 rounded-[var(--radius-sm)] border border-border px-2.5 py-1 hover:bg-bg-muted transition-colors"
 					>
 						{t('common.copy')}
 					</button>

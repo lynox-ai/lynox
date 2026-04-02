@@ -27,7 +27,6 @@ export { default as WorkflowsHub } from './components/WorkflowsHub.svelte';
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
 export { default as ChangesetReview } from './components/ChangesetReview.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';
-export { default as ThreadList } from './components/ThreadList.svelte';
 export { default as MobileAccess } from './components/MobileAccess.svelte';
 
 // Toast
@@ -88,6 +87,7 @@ export {
 	toggleFavorite,
 	getThreads,
 	getIsLoadingThreads,
+	onActiveThreadRemoved,
 } from './stores/threads.svelte.js';
 export type { Thread } from './stores/threads.svelte.js';
 

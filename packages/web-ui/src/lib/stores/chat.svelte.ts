@@ -57,6 +57,10 @@ export interface PipelineInfo {
 export interface PermissionPrompt {
 	question: string;
 	options?: string[];
+	/** Timeout in ms from server — used for countdown display */
+	timeoutMs?: number;
+	/** Timestamp when the prompt was received */
+	receivedAt?: number;
 }
 
 interface QueuedMessage {
@@ -120,7 +124,6 @@ export interface ChangesetFileInfo {
 const persisted = loadPersistedChat();
 let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
-let currentRunId = $state<string | null>(null);
 let isStreaming = $state(false);
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string } | null>(null);
@@ -136,10 +139,27 @@ let changesetLoading = $state(false);
 let retryStatus = $state<{ attempt: number; maxAttempts: number } | null>(null);
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
-// Offline detection
+// Offline detection + auto-retry on reconnect
 if (typeof window !== 'undefined') {
 	window.addEventListener('offline', () => { isOffline = true; });
-	window.addEventListener('online', () => { isOffline = false; });
+	window.addEventListener('online', () => {
+		isOffline = false;
+		// Auto-retry the last failed message
+		const lastFailed = [...messages].reverse().find((m) => m.role === 'user' && m.failed);
+		if (lastFailed && !isStreaming) {
+			lastFailed.failed = false;
+			lastFailed.queued = true;
+			messageQueue.push({ task: lastFailed.content });
+			chatError = null;
+			// Small delay to let network stabilize
+			setTimeout(() => {
+				if (messageQueue.length > 0) {
+					const next = messageQueue.shift()!;
+					void _executeRun(next.task, next.files);
+				}
+			}, 500);
+		}
+	});
 }
 
 async function ensureSession(): Promise<string> {
@@ -161,7 +181,11 @@ export interface FileAttachment {
 export async function sendMessage(task: string, files?: FileAttachment[]): Promise<void> {
 	// Block if changeset review is pending — user must review before next run
 	if (pendingChangeset) {
-		chatError = t('changeset.review_pending');
+		addToast(t('changeset.review_pending'), 'info', 4000);
+		// Scroll changeset into view if visible
+		setTimeout(() => {
+			document.querySelector('[data-changeset-review]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		}, 100);
 		return;
 	}
 
@@ -252,10 +276,12 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 		});
 	}
 
-	// Rate limited — wait and retry once
+	// Rate limited — show feedback, wait, and retry once
 	if (res.status === 429 && !retried) {
 		const retryAfter = parseInt(res.headers.get('Retry-After') ?? '5', 10);
+		retryStatus = { attempt: 1, maxAttempts: 1 };
 		await new Promise(r => setTimeout(r, retryAfter * 1000));
+		retryStatus = null;
 		retried = true;
 		res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
 			method: 'POST',
@@ -402,7 +428,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'prompt':
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
-				options: data['options'] as string[] | undefined
+				options: data['options'] as string[] | undefined,
+				timeoutMs: data['timeoutMs'] as number | undefined,
+				receivedAt: Date.now(),
 			};
 			break;
 		case 'secret_prompt':
@@ -707,7 +735,6 @@ export function newChat() {
 	// Thread persists in DB — just detach from current session
 	messages = [];
 	sessionId = null;
-	currentRunId = null;
 	isStreaming = false;
 	pendingPermission = null;
 	pendingSecretPrompt = null;

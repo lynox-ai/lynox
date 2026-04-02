@@ -1,4 +1,6 @@
 import { getApiBase } from '../config.svelte.js';
+import { addToast } from './toast.svelte.js';
+import { t } from '../i18n.svelte.js';
 
 export interface Thread {
 	id: string;
@@ -15,6 +17,13 @@ export interface Thread {
 let threads = $state<Thread[]>([]);
 let isLoading = $state(false);
 
+/** Callback invoked when the active thread is removed (archived/deleted). Consumer should navigate away. */
+let _onActiveThreadRemoved: ((id: string) => void) | null = null;
+
+export function onActiveThreadRemoved(cb: (id: string) => void): void {
+	_onActiveThreadRemoved = cb;
+}
+
 export async function loadThreads(): Promise<void> {
 	isLoading = true;
 	try {
@@ -30,49 +39,74 @@ export async function loadThreads(): Promise<void> {
 	}
 }
 
-export async function archiveThread(id: string): Promise<void> {
-	await fetch(`${getApiBase()}/threads/${id}`, {
+export async function archiveThread(id: string, activeSessionId?: string | null): Promise<void> {
+	const res = await fetch(`${getApiBase()}/threads/${id}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ is_archived: true }),
 	});
+	if (!res.ok) {
+		addToast(t('threads.error_archive'), 'error');
+		return;
+	}
 	threads = threads.filter((t) => t.id !== id);
+	if (activeSessionId && activeSessionId === id) _onActiveThreadRemoved?.(id);
 }
 
 export async function unarchiveThread(id: string): Promise<void> {
-	await fetch(`${getApiBase()}/threads/${id}`, {
+	const res = await fetch(`${getApiBase()}/threads/${id}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ is_archived: false }),
 	});
+	if (!res.ok) {
+		addToast(t('threads.error_unarchive'), 'error');
+		return;
+	}
 	await loadThreads();
 }
 
-export async function deleteThread(id: string): Promise<void> {
-	await fetch(`${getApiBase()}/threads/${id}`, { method: 'DELETE' });
+export async function deleteThread(id: string, activeSessionId?: string | null): Promise<void> {
+	const res = await fetch(`${getApiBase()}/threads/${id}`, { method: 'DELETE' });
+	if (!res.ok) {
+		addToast(t('threads.error_delete'), 'error');
+		return;
+	}
 	threads = threads.filter((t) => t.id !== id);
+	if (activeSessionId && activeSessionId === id) _onActiveThreadRemoved?.(id);
 }
 
 export async function renameThread(id: string, title: string): Promise<void> {
-	await fetch(`${getApiBase()}/threads/${id}`, {
+	const prev = threads.find((t) => t.id === id)?.title;
+	const thread = threads.find((t) => t.id === id);
+	if (thread) thread.title = title;
+	const res = await fetch(`${getApiBase()}/threads/${id}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ title }),
 	});
-	const thread = threads.find((t) => t.id === id);
-	if (thread) thread.title = title;
+	if (!res.ok) {
+		if (thread && prev != null) thread.title = prev;
+		addToast(t('threads.error_rename'), 'error');
+	}
 }
 
 export async function toggleFavorite(id: string): Promise<void> {
 	const thread = threads.find((t) => t.id === id);
 	if (!thread) return;
 	const newValue = thread.is_favorite ? false : true;
-	await fetch(`${getApiBase()}/threads/${id}`, {
+	// Optimistic update
+	thread.is_favorite = newValue ? 1 : 0;
+	const res = await fetch(`${getApiBase()}/threads/${id}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ is_favorite: newValue }),
 	});
-	thread.is_favorite = newValue ? 1 : 0;
+	if (!res.ok) {
+		// Rollback
+		thread.is_favorite = newValue ? 0 : 1;
+		addToast(t('threads.error_favorite'), 'error');
+	}
 }
 
 export function getThreads() {
