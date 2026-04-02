@@ -68,6 +68,21 @@ export async function detectContradictions(
   return results;
 }
 
+/**
+ * Lightweight heuristic check: does the new text contradict the existing text?
+ * Used by KnowledgeLayer to bypass dedup when a dedup candidate contains
+ * contradictory signals (number change, negation, state change).
+ *
+ * No DB/embedding needed — pure text comparison.
+ */
+export function hasHeuristicContradiction(newText: string, existingText: string): boolean {
+  return (
+    checkNegation(newText, existingText) ||
+    checkNumberChange(newText, existingText) ||
+    checkStateChange(newText, existingText)
+  );
+}
+
 // === Heuristic Contradiction Checks ===
 
 /** Negation patterns in multiple languages. */

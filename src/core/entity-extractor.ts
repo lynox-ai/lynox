@@ -22,8 +22,8 @@ export interface ExtractionResult {
 
 // === Tier 1: Regex-based extraction (zero cost, always runs) ===
 
-/** Title prefixes that indicate a person name follows. */
-const TITLE_RE = /\b(?:Herr|Frau|Mr\.?|Mrs\.?|Ms\.?|Dr\.?)\s+([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)/g;
+/** Title prefixes that indicate a person name follows. Supports hyphenated names (Hans-Peter Müller). */
+const TITLE_RE = /\b(?:Herr|Frau|Mr\.?|Mrs\.?|Ms\.?|Dr\.?)\s+([A-ZÄÖÜ][a-zäöüß]+(?:-[A-ZÄÖÜ][a-zäöüß]+)*(?:\s+[A-ZÄÖÜ][a-zäöüß]+(?:-[A-ZÄÖÜ][a-zäöüß]+)*)?)/g;
 
 /** "client Thomas", "user Alex", "partner Maria", "Kunde Thomas" */
 const ROLE_NAME_RE = /\b(?:client|user|partner|colleague|boss|contact|customer|Kunde|Kundin|Partnerin|Kollegin?)\s+([A-ZÄÖÜ][a-zäöüß]+)/gi;

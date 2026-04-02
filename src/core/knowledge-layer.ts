@@ -21,7 +21,7 @@ import { EntityResolver, toEntityRecord } from './entity-resolver.js';
 import { RetrievalEngine } from './retrieval-engine.js';
 import type { RetrievalOptions } from './retrieval-engine.js';
 import { extractEntities } from './entity-extractor.js';
-import { detectContradictions } from './contradiction-detector.js';
+import { detectContradictions, hasHeuristicContradiction } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { PatternEngine } from './pattern-engine.js';
 import type { RunHistory } from './run-history.js';
@@ -106,16 +106,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // 1. Embed the text
     const embedding = options?.reuseEmbedding ?? await this.embeddingProvider.embed(trimmedText);
 
-    // 2. Dedup check
+    // 2. Dedup check — but bypass dedup when contradiction signals are present
     const similar = this.db.findSimilarMemories(embedding, 1, DEDUP_THRESHOLD, {
       namespace, scopeTypes: [scope.type], activeOnly: true,
     });
 
     if (similar.length > 0) {
-      // Boost confidence of the existing memory — repeated storage = confirmation
-      const existingId = similar[0]!.id;
-      this.db.confirmMemory(existingId);
-      return { memoryId: existingId, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
+      const candidate = similar[0]!;
+      // If the texts contain contradictory signals (different numbers, negation,
+      // state change), this is an update — not a duplicate. Skip dedup and let
+      // the contradiction detector handle it.
+      if (!hasHeuristicContradiction(trimmedText, candidate.text)) {
+        this.db.confirmMemory(candidate.id);
+        return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
+      }
+      // Fall through to contradiction detection
     }
 
     // 3. Contradiction detection
