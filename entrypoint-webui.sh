@@ -19,17 +19,22 @@ fi
 if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
   export LYNOX_HTTP_SECRET
+  # Persist to file so user can retrieve without docker logs
+  printf '%s' "$LYNOX_HTTP_SECRET" > /tmp/lynox-access-token
+  chmod 600 /tmp/lynox-access-token
   echo "" >&2
   echo "========================================" >&2
   echo "  Access Token (enter in browser):" >&2
   echo "  ${LYNOX_HTTP_SECRET}" >&2
   echo "========================================" >&2
+  echo "  Retrieve later: docker exec lynox cat /tmp/lynox-access-token" >&2
+  echo "  Suppress this:  set LYNOX_HTTP_SECRET in your docker run command" >&2
   echo "" >&2
 fi
 
 # Auto-generate vault key if not set (persist to volume)
 if [ -z "${LYNOX_VAULT_KEY:-}" ]; then
-  LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(36).toString('base64'))")
+  LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64'))")
   export LYNOX_VAULT_KEY
   # Persist to volume so it survives restarts
   mkdir -p "$HOME/.lynox"
@@ -52,7 +57,7 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     echo "  AI responses disabled — browse mode only" >&2
     echo "  Set: docker run -e ANTHROPIC_API_KEY=sk-ant-... ..." >&2
     echo "" >&2
-    export ANTHROPIC_API_KEY="sk-ant-not-configured"
+    export ANTHROPIC_API_KEY="not-configured"
   fi
 fi
 

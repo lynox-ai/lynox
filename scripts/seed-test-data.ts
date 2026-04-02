@@ -1565,6 +1565,224 @@ function seedTasksAndPipelines(h: RunHistory): void {
   console.log(`  ✓ ${totalPipelineRuns} pipeline runs (${pipelines.length} workflows)`);
 }
 
+// ── Artifacts ──────────────────────────────────────────────────
+
+function seedArtifacts(): void {
+  console.log('\n🎨 Seeding artifacts...');
+  const artifactsDir = join(LYNOX_DIR, 'artifacts');
+  mkdirSync(artifactsDir, { recursive: true });
+
+  const artifacts: Array<{ id: string; title: string; description: string; type: 'html' | 'mermaid' | 'svg'; content: string; daysAgo: number }> = [
+    {
+      id: 'a1b2c3d4',
+      title: 'Revenue Dashboard Q1',
+      description: 'Interactive revenue dashboard with MRR, churn, and growth metrics',
+      type: 'html',
+      daysAgo: 5,
+      content: `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Revenue Dashboard Q1</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e4e4e7;padding:24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}
+.card{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:20px}
+.card h3{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#71717a;margin-bottom:8px}
+.card .value{font-size:28px;font-weight:300;letter-spacing:-0.5px}
+.card .delta{font-size:13px;margin-top:4px}
+.up{color:#22c55e}.down{color:#ef4444}
+.chart{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:20px;margin-bottom:16px}
+.chart h3{font-size:14px;font-weight:500;margin-bottom:16px}
+.bar-row{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.bar-label{width:60px;font-size:12px;color:#a1a1aa;text-align:right}
+.bar{height:24px;border-radius:4px;background:linear-gradient(90deg,#7c3aed,#a78bfa);min-width:4px;transition:width 0.5s}
+.bar-val{font-size:12px;color:#a1a1aa;min-width:60px}
+</style></head><body>
+<h1 style="font-size:20px;font-weight:400;margin-bottom:20px">NovaTech — Revenue Q1 2026</h1>
+<div class="grid">
+<div class="card"><h3>MRR</h3><div class="value">CHF 42,800</div><div class="delta up">+12.3% vs last quarter</div></div>
+<div class="card"><h3>ARR</h3><div class="value">CHF 513,600</div><div class="delta up">+18.7% YoY</div></div>
+<div class="card"><h3>Churn Rate</h3><div class="value">2.1%</div><div class="delta up">-0.4pp improved</div></div>
+<div class="card"><h3>New Customers</h3><div class="value">28</div><div class="delta up">+8 vs Q4</div></div>
+</div>
+<div class="chart"><h3>Monthly Revenue (CHF)</h3>
+<div class="bar-row"><span class="bar-label">Jan</span><div class="bar" style="width:72%"></div><span class="bar-val">38,200</span></div>
+<div class="bar-row"><span class="bar-label">Feb</span><div class="bar" style="width:82%"></div><span class="bar-val">40,500</span></div>
+<div class="bar-row"><span class="bar-label">Mar</span><div class="bar" style="width:100%"></div><span class="bar-val">42,800</span></div>
+</div>
+<div class="chart"><h3>Revenue by Plan</h3>
+<div class="bar-row"><span class="bar-label">Enterprise</span><div class="bar" style="width:55%"></div><span class="bar-val">CHF 23,540</span></div>
+<div class="bar-row"><span class="bar-label">Pro</span><div class="bar" style="width:35%"></div><span class="bar-val">CHF 14,980</span></div>
+<div class="bar-row"><span class="bar-label">Starter</span><div class="bar" style="width:10%"></div><span class="bar-val">CHF 4,280</span></div>
+</div>
+</body></html>`,
+    },
+    {
+      id: 'e5f6a7b8',
+      title: 'Sales Pipeline Flow',
+      description: 'Mermaid diagram showing the lead-to-close sales pipeline',
+      type: 'mermaid',
+      daysAgo: 12,
+      content: `graph TD
+    A[New Lead] -->|Qualify| B{Score > 60?}
+    B -->|Yes| C[Discovery Call]
+    B -->|No| D[Nurture Sequence]
+    D -->|Re-engage| A
+    C -->|Interested| E[Demo Scheduled]
+    C -->|Not Ready| D
+    E -->|Positive| F[Proposal Sent]
+    E -->|Objections| G[Follow-up]
+    G -->|Resolved| F
+    G -->|Lost| H[Lost — Reason Logged]
+    F -->|Accepted| I[Negotiation]
+    F -->|Rejected| H
+    I -->|Signed| J[🎉 Won — Onboarding]
+    I -->|Stalled| G
+
+    style A fill:#7c3aed,stroke:#5b21b6,color:#fff
+    style J fill:#22c55e,stroke:#16a34a,color:#fff
+    style H fill:#ef4444,stroke:#dc2626,color:#fff
+    style B fill:#18181b,stroke:#7c3aed,color:#e4e4e7`,
+    },
+    {
+      id: 'c9d0e1f2',
+      title: 'Weekly Sales Report',
+      description: 'Automated weekly sales performance summary with key metrics',
+      type: 'html',
+      daysAgo: 2,
+      content: `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Weekly Sales Report</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e4e4e7;padding:24px;max-width:640px}
+h1{font-size:18px;font-weight:400;margin-bottom:4px}
+.subtitle{color:#71717a;font-size:13px;margin-bottom:20px}
+table{width:100%;border-collapse:collapse;margin-bottom:20px}
+th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#71717a;padding:8px 12px;border-bottom:1px solid #27272a}
+td{padding:10px 12px;border-bottom:1px solid #18181b;font-size:14px}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.highlight{background:#7c3aed20;border-radius:6px}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500}
+.won{background:#22c55e20;color:#22c55e}.lost{background:#ef444420;color:#ef4444}.open{background:#3b82f620;color:#3b82f6}
+.section{margin-bottom:20px}
+.section h2{font-size:14px;font-weight:500;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #27272a}
+.metric{display:flex;justify-content:space-between;padding:6px 0;font-size:13px}
+.metric .label{color:#a1a1aa}.metric .val{font-weight:500}
+</style></head><body>
+<h1>Sales Report — Week 13</h1>
+<p class="subtitle">March 24–28, 2026 · Generated by lynox</p>
+<div class="section"><h2>Pipeline Activity</h2>
+<div class="metric"><span class="label">New leads</span><span class="val">12</span></div>
+<div class="metric"><span class="label">Demos completed</span><span class="val">5</span></div>
+<div class="metric"><span class="label">Proposals sent</span><span class="val">3</span></div>
+<div class="metric"><span class="label">Deals closed</span><span class="val">2 · CHF 18,400</span></div>
+</div>
+<table><thead><tr><th>Deal</th><th>Contact</th><th>Value</th><th>Status</th></tr></thead><tbody>
+<tr class="highlight"><td>DataSync Pro</td><td>Marcus Weber</td><td class="num">CHF 12,000</td><td><span class="tag won">Won</span></td></tr>
+<tr class="highlight"><td>API Gateway</td><td>Lena Fischer</td><td class="num">CHF 6,400</td><td><span class="tag won">Won</span></td></tr>
+<tr><td>Cloud Migration</td><td>Thomas Huber</td><td class="num">CHF 24,000</td><td><span class="tag open">Proposal</span></td></tr>
+<tr><td>Analytics Suite</td><td>Sarah Meier</td><td class="num">CHF 8,800</td><td><span class="tag open">Demo</span></td></tr>
+<tr><td>Security Audit</td><td>Jan Kowalski</td><td class="num">CHF 4,200</td><td><span class="tag lost">Lost</span></td></tr>
+</tbody></table>
+<div class="section"><h2>Key Takeaways</h2>
+<div class="metric"><span class="label">Win rate</span><span class="val">40% (2/5)</span></div>
+<div class="metric"><span class="label">Avg deal size</span><span class="val">CHF 9,200</span></div>
+<div class="metric"><span class="label">Pipeline value</span><span class="val">CHF 32,800</span></div>
+</div>
+</body></html>`,
+    },
+    {
+      id: 'a3b4c5d6',
+      title: 'Customer Journey Map',
+      description: 'Visual customer journey from awareness to advocacy',
+      type: 'mermaid',
+      daysAgo: 20,
+      content: `graph LR
+    subgraph Awareness
+        A1[Blog / SEO] --> A2[Social Media]
+        A2 --> A3[Referral]
+    end
+    subgraph Consideration
+        A1 --> B1[Landing Page]
+        A2 --> B1
+        A3 --> B1
+        B1 --> B2[Free Trial]
+        B1 --> B3[Demo Request]
+    end
+    subgraph Decision
+        B2 --> C1[Onboarding]
+        B3 --> C2[Sales Call]
+        C2 --> C1
+        C1 --> C3{Convert?}
+    end
+    subgraph Retention
+        C3 -->|Yes| D1[Active User]
+        D1 --> D2[Support]
+        D1 --> D3[Feature Requests]
+        D2 --> D1
+        D3 --> D1
+    end
+    subgraph Advocacy
+        D1 --> E1[NPS Survey]
+        E1 -->|Promoter| E2[Referral Program]
+        E2 --> A3
+    end
+
+    style A1 fill:#7c3aed,stroke:#5b21b6,color:#fff
+    style D1 fill:#22c55e,stroke:#16a34a,color:#fff
+    style E2 fill:#f59e0b,stroke:#d97706,color:#fff`,
+    },
+    {
+      id: 'f7e8d9c0',
+      title: 'Competitor Analysis Matrix',
+      description: 'Feature comparison across key competitors',
+      type: 'html',
+      daysAgo: 8,
+      content: `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Competitor Analysis</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e4e4e7;padding:24px}
+h1{font-size:18px;font-weight:400;margin-bottom:16px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#71717a;padding:10px;border-bottom:2px solid #27272a}
+td{padding:10px;border-bottom:1px solid #18181b;font-size:13px}
+.us{background:#7c3aed10}
+.yes{color:#22c55e}.no{color:#ef4444}.partial{color:#f59e0b}
+.score{display:inline-block;width:36px;height:36px;border-radius:50%;text-align:center;line-height:36px;font-size:13px;font-weight:600}
+.s-high{background:#22c55e20;color:#22c55e}.s-mid{background:#f59e0b20;color:#f59e0b}.s-low{background:#ef444420;color:#ef4444}
+</style></head><body>
+<h1>Competitive Landscape — March 2026</h1>
+<table><thead><tr><th>Feature</th><th class="us">NovaTech</th><th>CompA</th><th>CompB</th><th>CompC</th></tr></thead><tbody>
+<tr><td>AI-powered analytics</td><td class="us yes">✓ Native</td><td class="yes">✓</td><td class="partial">◐ Basic</td><td class="no">✗</td></tr>
+<tr><td>Real-time dashboards</td><td class="us yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="partial">◐</td></tr>
+<tr><td>API integrations</td><td class="us">42 connectors</td><td>28</td><td>15</td><td>35</td></tr>
+<tr><td>Self-hosted option</td><td class="us yes">✓</td><td class="no">✗</td><td class="no">✗</td><td class="yes">✓</td></tr>
+<tr><td>SSO / SAML</td><td class="us yes">✓</td><td class="yes">✓</td><td class="partial">◐ Enterprise only</td><td class="yes">✓</td></tr>
+<tr><td>Data retention controls</td><td class="us yes">✓ GDPR</td><td class="partial">◐</td><td class="no">✗</td><td class="yes">✓</td></tr>
+<tr><td>Mobile app</td><td class="us partial">◐ PWA</td><td class="yes">✓ Native</td><td class="no">✗</td><td class="partial">◐ PWA</td></tr>
+<tr><td><strong>Overall Score</strong></td><td class="us"><span class="score s-high">92</span></td><td><span class="score s-high">78</span></td><td><span class="score s-mid">54</span></td><td><span class="score s-mid">68</span></td></tr>
+</tbody></table>
+</body></html>`,
+    },
+  ];
+
+  const index = artifacts.map(a => ({
+    id: a.id,
+    title: a.title,
+    description: a.description,
+    type: a.type,
+    createdAt: daysAgo(a.daysAgo),
+    updatedAt: daysAgo(Math.max(0, a.daysAgo - randomBetween(0, 2))),
+    threadId: '',
+  }));
+
+  writeFileSync(join(artifactsDir, 'index.json'), JSON.stringify(index, null, 2), 'utf-8');
+  for (const a of artifacts) {
+    writeFileSync(join(artifactsDir, `${a.id}.html`), a.content, 'utf-8');
+  }
+  console.log(`  ✓ ${artifacts.length} artifacts (${artifacts.filter(a => a.type === 'html').length} HTML, ${artifacts.filter(a => a.type === 'mermaid').length} Mermaid)`);
+}
+
 // ── API Profiles Cleanup ────────────────────────────────────────
 
 function cleanApiProfiles(): void {
@@ -1613,6 +1831,12 @@ function main(): void {
       rmSync(memDir, { recursive: true });
       console.log('  ✓ Removed memory files');
     }
+    // Clean artifacts
+    const artDir = join(LYNOX_DIR, 'artifacts');
+    if (existsSync(artDir)) {
+      rmSync(artDir, { recursive: true });
+      console.log('  ✓ Removed artifacts');
+    }
     // Clean API profiles
     cleanApiProfiles();
   }
@@ -1630,6 +1854,7 @@ function main(): void {
     seedDataStore(dataStore);
     seedCRM(dataStore);
     seedMemoryFiles();
+    seedArtifacts();
 
     // Step 4: Run pattern detection + KPI computation
     console.log('\n🧠 Running pattern detection & KPI computation...');
@@ -1681,6 +1906,7 @@ function main(): void {
     console.log(`    Tasks:     ${crmCounts.tasks}`);
     console.log(`    Pipelines: ${crmCounts.pipelines}`);
     console.log(`  memory files: knowledge, methods, status, learnings`);
+    console.log(`  artifacts: 5 (3 HTML dashboards, 2 Mermaid diagrams)`);
 
   } finally {
     memDb.close();
