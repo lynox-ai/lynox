@@ -125,23 +125,20 @@ export { setNetworkPolicy, clearNetworkPolicy } from './tools/builtin/http.js';
 export { setIsolationEnv, clearIsolationEnv } from './tools/builtin/bash.js';
 export { setTenantWorkspace, clearTenantWorkspace, ensureContextWorkspace } from './core/workspace.js';
 
-// === CLI Command Registry ===
+// === CLI Command Registry (no-op, REPL removed — kept for backward compatibility) ===
 
 export type SlashCommandHandler = (
   parts: string[],
   session: import('./core/session.js').Session,
-  ctx: { stdout: NodeJS.WriteStream; cliPrompt?: (prompt: string, options?: string[]) => Promise<string> },
+  ctx: { stdout: NodeJS.WriteStream },
 ) => Promise<boolean>;
 
-const _commandRegistry = new Map<string, SlashCommandHandler>();
-
-export function registerCommand(name: string, handler: SlashCommandHandler): void {
-  _commandRegistry.set(name.startsWith('/') ? name : `/${name}`, handler);
+export function registerCommand(_name: string, _handler: SlashCommandHandler): void {
+  // No-op: interactive REPL has been removed. Slash commands are no longer supported.
 }
 
-// === CLI REPL ===
+// === CLI ===
 
-import { createInterface } from 'node:readline/promises';
 import { readSync } from 'node:fs';
 import { stdin, stdout, stderr, argv } from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -151,123 +148,26 @@ import { homedir } from 'node:os';
 
 import { Engine } from './core/engine.js';
 import type { Session } from './core/session.js';
-import type { StreamEvent, TabQuestion } from './types/index.js';
+import type { StreamEvent } from './types/index.js';
 import { MODEL_MAP } from './types/index.js';
 import { hasApiKey, setDataDir } from './core/config.js';
 import { runSetupWizard } from './cli/setup-wizard.js';
 
-import { animateBanner, renderError, renderWarning, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from './cli/ui.js';
-import { PROMPT_READY } from './cli/spinner.js';
-import { InteractiveDialog } from './cli/dialog.js';
+import { renderError, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from './cli/ui.js';
 import { Watchdog } from './cli/watchdog.js';
-import { SlashAutocomplete, buildCommandDefs } from './cli/autocomplete.js';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json') as { version: string };
 import { writeFileAtomicSync } from './core/atomic-write.js';
 import { getErrorMessage } from './core/utils.js';
-import { reviewChangeset } from './cli/changeset-review.js';
 
-// New modular imports
-import { state, spinner, md, footer, toolsUsed } from './cli/cli-state.js';
-import { loadHistory, appendHistory, loadSessionFile } from './cli/cli-helpers.js';
-import { COMMANDS, COMMAND_ALIASES, completer, HELP_TEXT_FULL } from './cli/help-text.js';
+import { state, spinner, toolsUsed } from './cli/cli-state.js';
 import { streamHandler as _streamHandler } from './cli/stream-handler.js';
-import {
-  handleClear, handleCompact, handleSave, handleLoad, handleExport,
-  handleHistory, handleHelp, handleExit,
-  handleGit, handlePr, handleDiff,
-  handleConfig, handleStatus, pkg,
-  handleModel, handleAccuracy, handleCost, handleContext,
-  handleMode, handleRoles,
-  handleTools, handleMcp,
-  handleVault,
-} from './cli/commands/index.js';
-import type { InternalHandler, CLICtx } from './cli/commands/types.js';
-
-// === Command dispatch map ===
-
-import { loadAliases } from './cli/cli-helpers.js';
-
-const DISPATCH: Record<string, InternalHandler> = {
-  '/clear': handleClear, '/reset': handleClear,
-  '/compact': handleCompact,
-  '/save': handleSave,
-  '/load': handleLoad,
-  '/export': handleExport,
-  '/history': handleHistory,
-  '/help': handleHelp,
-  '/exit': handleExit, '/quit': handleExit,
-  '/git': handleGit,
-  '/pr': handlePr,
-  '/diff': handleDiff,
-  '/config': handleConfig,
-  '/status': handleStatus,
-  '/model': handleModel,
-  '/accuracy': handleAccuracy,
-  '/cost': handleCost,
-  '/context': handleContext,
-  '/mode': handleMode,
-  '/roles': handleRoles,
-  '/tools': handleTools,
-  '/mcp': handleMcp,
-  '/vault': handleVault,
-};
 
 // Wrapped stream handler that binds stdout
 function streamHandler(event: StreamEvent): void {
   _streamHandler(event, stdout);
-}
-
-async function handleCommand(line: string, session: Session): Promise<boolean> {
-  const trimmedLine = line.trim();
-  const firstWord = trimmedLine.split(/\s+/)[0]!;
-
-  // Resolve command aliases (e.g. /diff → /git diff, /chain → /pipeline chain)
-  if (firstWord in COMMAND_ALIASES) {
-    const alias = COMMAND_ALIASES[firstWord]!;
-    const rest = trimmedLine.slice(firstWord.length).trim();
-    const resolved = rest ? `${alias} ${rest}` : alias;
-    return handleCommand(resolved, session);
-  }
-
-  const parts = trimmedLine.split(/\s+/);
-  const cmd = parts[0]!;
-
-  const ctx: CLICtx = state.cliPrompt
-    ? { stdout, cliPrompt: state.cliPrompt }
-    : { stdout };
-
-  // Check dispatch map
-  const handler = DISPATCH[cmd];
-  if (handler) {
-    return handler(parts, session, ctx);
-  }
-
-  // Check registered extension commands (Pro)
-  const registeredHandler = _commandRegistry.get(cmd);
-  if (registeredHandler) {
-    // SlashCommandHandler type does not have `| undefined` on cliPrompt (exactOptionalPropertyTypes)
-    const regCtx = state.cliPrompt
-      ? { stdout, cliPrompt: state.cliPrompt } as const
-      : { stdout } as const;
-    return registeredHandler(parts, session, regCtx);
-  }
-
-  // Check user aliases
-  const aliases = loadAliases();
-  const aliasKey = cmd.slice(1); // strip leading /
-  if (aliasKey && aliases[aliasKey]) {
-    try {
-      spinner.start('Running alias...');
-      await session.run(aliases[aliasKey]!);
-    } catch (err: unknown) {
-      spinner.stop();
-      stderr.write(renderError(getErrorMessage(err)));
-    }
-    return true;
-  }
-
-  stdout.write(`Unknown command: ${cmd}\n`);
-  stdout.write('Type /help for available commands.\n');
-  return true;
 }
 
 /**
@@ -356,7 +256,6 @@ Usage:
   lynox "<task>"                Run a single task and exit
   cat file | lynox "<task>"     Process piped input with a task
   lynox init                    Run the setup wizard
-  lynox --repl                  Start interactive REPL in terminal
   lynox --http-api              Start Engine HTTP API server (headless)
   lynox --mcp-server            Start as MCP server (stdio)
   lynox --mcp-server --transport sse   Start as MCP server (HTTP/SSE)
@@ -367,12 +266,10 @@ Options:
   --help, -h                    Show this help
   --version, -v                 Show version
   --init                        Run setup wizard
-  --repl                        Start interactive REPL (instead of Web UI)
   --project <dir>               Set project directory
   --manifest <file>             Run a workflow manifest
   --task "<title>"              Create a background task and exit
   --output <file>               Save output to file
-  --resume                      Resume previous session (implies --repl)
   --data-dir <dir>              Override data directory (default: ~/.lynox)
 
 Environment:
@@ -445,14 +342,14 @@ Docs: https://docs.lynox.dev
       stderr.write('No API key configured. Run "lynox init" to set up.\n');
       process.exit(1);
     }
-    // Continue to default mode (HTTP API + Web UI, or REPL if --repl)
+    // Continue to default mode (HTTP API + Web UI)
   } else if (!hasApiKey() && stdin.isTTY) {
     const wizardResult = await runSetupWizard();
     if (!wizardResult) {
       stderr.write('No API key configured. Run "lynox init" to set up.\n');
       process.exit(1);
     }
-    // Continue to default mode (HTTP API + Web UI, or REPL if --repl)
+    // Continue to default mode (HTTP API + Web UI)
   }
 
   // === MCP Server mode ===
@@ -529,14 +426,6 @@ Docs: https://docs.lynox.dev
     return session;
   };
 
-  // === Sprint 2b: --resume flag ===
-  if (args.includes('--resume')) {
-    session = await ensureSession();
-    if (loadSessionFile(session)) {
-      stderr.write(`${GREEN}✓${RESET} Resumed previous session.\n`);
-    }
-  }
-
   // === --manifest flag ===
   const manifestIdx = args.indexOf('--manifest');
   const manifestFlag = manifestIdx !== -1 ? args[manifestIdx + 1] : undefined;
@@ -547,8 +436,12 @@ Docs: https://docs.lynox.dev
     const { loadConfig: getConfig } = await import('./core/config.js');
     const cfg = getConfig();
     let gateAdapter: import('./orchestrator/types.js').GateAdapter | undefined;
-    if (state.cliPrompt) {
-      gateAdapter = new LocalAdapter(state.cliPrompt);
+    if (stdin.isTTY) {
+      const { confirm } = await import('./cli/interactive.js');
+      gateAdapter = new LocalAdapter(async (q: string) => {
+        const approved = await confirm(q);
+        return approved ? 'Yes, approve' : 'No, reject';
+      });
     }
     try {
       const manifest = loadMf(resolve(manifestFlag));
@@ -730,8 +623,8 @@ Docs: https://docs.lynox.dev
     return;
   }
 
-  // === Default: Engine HTTP API + Web UI (when TTY, no special flags) ===
-  if (stdin.isTTY && !args.includes('--repl') && !args.includes('--resume')) {
+  // === Default: Engine HTTP API + Web UI ===
+  if (stdin.isTTY) {
     if (!hasApiKey()) {
       stderr.write('No API key configured. Run "lynox init" to set up.\n');
       process.exit(1);
@@ -773,477 +666,10 @@ Docs: https://docs.lynox.dev
     return;
   }
 
-  // === Interactive REPL (--repl or --resume) ===
-  // Init must complete before reading tool counts
-  session = await ensureSession();
-  const mcpCount = session.getRegistry().getMCPServers().length;
-  const toolCount = session.getRegistry().getEntries().length + 1; // +1 for web_search
-
-  const thinkingLabel = session.getThinking() ? 'adaptive' : 'disabled';
-  const effortLabel = session.getEffort() ?? 'high';
-  const memoryLabel = session.getMemory() ? 'local' : 'none';
-  await animateBanner(stdout, MODEL_MAP[session.getModelTier()], thinkingLabel, effortLabel, memoryLabel, mcpCount, toolCount, pkg.version);
-
-  // === Footer bar (inline status after each response) ===
-  if (stdout.isTTY) {
-    footer.activate();
-  }
-
-  // Load command history
-  const history = loadHistory();
-
-  const rl = createInterface({ input: stdin, output: stdout, terminal: true, history, completer });
-  rl.setPrompt(PROMPT_READY);
-
-  // === Stdin listener management (shared by dialog and ESC handler) ===
-  // Detach ALL stdin listeners (data + keypress) during dialog to prevent
-  // readline's emitKeypressEvents and prompt rendering from interfering.
-  const detachStdin = () => {
-    const data = stdin.rawListeners('data').slice();
-    const keypress = stdin.rawListeners('keypress').slice();
-    stdin.removeAllListeners('data');
-    stdin.removeAllListeners('keypress');
-    return { data, keypress };
-  };
-  const reattachStdin = (saved: { data: Function[]; keypress: Function[] }) => {
-    // Ensure rawMode is on before reattaching — dialogs set rawMode(false) in cleanup,
-    // but readline's emitKeypressEvents needs rawMode to parse arrow keys correctly.
-    if (stdin.isTTY && !stdin.isRaw) stdin.setRawMode(true);
-    for (const fn of saved.data) {
-      stdin.on('data', fn as (...args: unknown[]) => void);
-    }
-    for (const fn of saved.keypress) {
-      stdin.on('keypress', fn as (...args: unknown[]) => void);
-    }
-  };
-
-  // === Slash command autocomplete (/ trigger) ===
-  const commandDefs = buildCommandDefs(COMMANDS, HELP_TEXT_FULL);
-  const slashComplete = new SlashAutocomplete(commandDefs);
-  let atPrompt = false;
-
-  const showPrompt = () => {
-    rl.prompt();
-    atPrompt = true;
-  };
-
-  // Detect '/' at position 0 via keypress, then take over stdin for autocomplete.
-  // Uses setImmediate so readline finishes processing the keystroke first.
-  //
-  // Readline internal state access:
-  // `(rl as unknown as { line: string }).line` reads the current input buffer.
-  // `{ line: string; cursor: number }` resets cursor after completion.
-  //
-  // Why: Node.js readline has no public API to read/clear the current input
-  // buffer. Slash-command autocomplete needs to detect '/' at position 0, take
-  // over stdin, and clear readline's buffer after completion. Without this,
-  // readline would echo stale characters.
-  //
-  // Stability: These internals have been stable since Node.js 12+. The readline
-  // module is effectively frozen (node:readline/promises wraps the same state).
-  // If a Node.js update breaks this, autocomplete would fail gracefully (stale
-  // characters in prompt, not a crash).
-  if (stdin.isTTY) {
-    stdin.on('keypress', (_str: string | undefined, key: { name?: string; sequence?: string }) => {
-      if (!atPrompt || key.sequence !== '/') return;
-      const rlLine = (rl as unknown as { line: string }).line;
-      if (rlLine !== '/') return; // only trigger at position 0
-
-      atPrompt = false;
-      setImmediate(() => {
-        // Clear readline's echoed '/' and take over
-        rl.pause();
-        const saved = detachStdin();
-        stdout.write('\r\x1b[K'); // clear the prompt line readline wrote
-        stdin.setRawMode(true);
-        stdin.resume();
-        void slashComplete.run(stdin, stdout, '/').then((result) => {
-          reattachStdin(saved);
-          // Clear readline's internal buffer (it still has '/')
-          (rl as unknown as { line: string; cursor: number }).line = '';
-          (rl as unknown as { line: string; cursor: number }).cursor = 0;
-          rl.resume();
-          if (result && result.trim()) {
-            const cmd = result.trim();
-            appendHistory(cmd);
-            stdout.write(`${PROMPT_READY}${cmd}\n`);
-            void handleCommand(cmd, session).then((shouldContinue) => {
-              if (!shouldContinue) {
-                void engine.shutdown().then(() => process.exit(0));
-                return;
-              }
-              showPrompt();
-            });
-          } else {
-            showPrompt();
-          }
-        });
-      });
-    });
-  }
-
-  // === Interactive Dialog + ESC interrupt ===
-  let activeEscHandler: ((data: Buffer) => void) | null = null;
-
-  if (stdin.isTTY) {
-    const dialog = new InteractiveDialog(stdin, stdout);
-
-    session.promptUser = async (question: string, options?: string[]): Promise<string> => {
-      spinner.stop();
-      // Remove ESC handler first so it's not included in saved listeners
-      if (activeEscHandler) {
-        stdin.removeListener('data', activeEscHandler);
-      }
-      const saved = detachStdin();
-      const answer = await dialog.prompt(question, options);
-      reattachStdin(saved);
-      // Re-enable ESC handler after dialog
-      if (activeEscHandler) {
-        stdin.on('data', activeEscHandler);
-        stdin.resume();
-      }
-      // ESC pressed — abort the agent run so it stops asking
-      if (!answer) {
-        session.abort();
-        return 'User canceled.';
-      }
-      return answer;
-    };
-    session.promptTabs = async (questions: TabQuestion[]): Promise<string[]> => {
-      spinner.stop();
-      if (activeEscHandler) {
-        stdin.removeListener('data', activeEscHandler);
-      }
-      const saved = detachStdin();
-      const answers = await dialog.tabbedPrompt(questions);
-      reattachStdin(saved);
-      if (activeEscHandler) {
-        stdin.on('data', activeEscHandler);
-        stdin.resume();
-      }
-      // ESC on first tab — abort the agent run
-      if (answers.length === 0) {
-        session.abort();
-      }
-      return answers;
-    };
-
-    session.promptSecret = async (name: string, prompt: string, _keyType?: string): Promise<boolean> => {
-      spinner.stop();
-      if (activeEscHandler) {
-        stdin.removeListener('data', activeEscHandler);
-      }
-      const saved = detachStdin();
-      stdout.write(`\n  🔐 ${prompt}\n  (stored encrypted, never sent to AI)\n  ${name}: `);
-      // Masked stdin read
-      const value = await new Promise<string>((resolve) => {
-        let buf = '';
-        stdin.setRawMode(true);
-        stdin.resume();
-        const onData = (data: Buffer): void => {
-          const ch = data.toString('utf-8');
-          if (ch === '\r' || ch === '\n') {
-            stdin.removeListener('data', onData);
-            stdin.setRawMode(false);
-            stdout.write('\n');
-            resolve(buf);
-          } else if (ch === '\x03' || ch === '\x1b') {
-            // Ctrl+C or ESC → cancel
-            stdin.removeListener('data', onData);
-            stdin.setRawMode(false);
-            stdout.write('\n');
-            resolve('');
-          } else if (ch === '\x7f' || ch === '\b') {
-            // Backspace
-            if (buf.length > 0) {
-              buf = buf.slice(0, -1);
-              stdout.write('\b \b');
-            }
-          } else {
-            buf += ch;
-            stdout.write('*');
-          }
-        };
-        stdin.on('data', onData);
-      });
-      reattachStdin(saved);
-      if (activeEscHandler) {
-        stdin.on('data', activeEscHandler);
-        stdin.resume();
-      }
-      if (!value) return false;
-      // Store directly in vault
-      const secretStore = session.getSecretStore();
-      if (secretStore?.set) {
-        secretStore.set(name, value);
-        secretStore.recordConsent(name);
-        return true;
-      }
-      return false;
-    };
-
-    // CLI-only dialog (no abort logic — for slash commands like /model)
-    state.cliPrompt = async (question: string, options?: string[]): Promise<string> => {
-      rl.pause();
-      const saved = detachStdin();
-      const answer = await dialog.prompt(question, options);
-      reattachStdin(saved);
-      (rl as unknown as { line: string; cursor: number }).line = '';
-      (rl as unknown as { line: string; cursor: number }).cursor = 0;
-      rl.resume();
-      return answer;
-    };
-  }
-
-  // SIGINT: hard exit — better-sqlite3 db.close() throws a native C++ mutex
-  // exception (std::system_error) that JS try/catch cannot intercept.
-  // SQLite WAL mode is crash-safe; the WAL file auto-recovers on next open.
-  process.on('SIGINT', () => {
-    spinner.stop();
-    stdout.write('\n');
-    process.kill(process.pid, 'SIGKILL');
-  });
-
-  // === Initial greeting — lynox introduces itself proactively ===
-  const userCfg = session.getUserConfig();
-  let greetingShown = false;
-  if (stdin.isTTY && userCfg.greeting !== false) {
-    const { existsSync, readdirSync } = await import('node:fs');
-    const memDir = join(homedir(), '.lynox', 'memory');
-    const isFirstSession = !existsSync(memDir) || readdirSync(memDir).length === 0;
-
-    let greetingText = '';
-    spinner.start('...');
-    session.onStream = (event: StreamEvent) => {
-      if (event.type === 'text') {
-        greetingText += event.text;
-      }
-    };
-
-    if (isFirstSession) {
-      // First session: natural onboarding conversation — agent asks about the business.
-      // Uses configured model with memory extraction so answers are remembered.
-      // Ensure thinking is adaptive (wizard doesn't set it, default may be disabled).
-      session.setThinking({ type: 'adaptive' });
-      const allToolNames = session.getRegistry().getEntries().map(e => e.definition.name);
-      const memoryTools = ['memory_store', 'memory_recall'];
-      const excludeTools = allToolNames.filter(n => !memoryTools.includes(n));
-      session._recreateAgent({ maxIterations: 2, excludeTools });
-      try {
-        const timeout = new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('Greeting timed out')), 30_000),
-        );
-        await Promise.race([session.run(
-          'This is the user\'s very first session. Welcome them warmly in 2-3 sentences. ' +
-          'Refer to yourself as "lynox" (lowercase). ' +
-          'Briefly say what you are (a digital coworker that learns their business over time). ' +
-          'Then suggest something small and concrete to start with — like checking their emails, ' +
-          'summarizing a file, or looking at recent git activity. ' +
-          'Do NOT ask what they want to automate or what their biggest problem is — ' +
-          'they don\'t know what\'s possible yet. Let them experience it first. ' +
-          'Write in the user\'s language (detect from system locale or default to English).',
-        ), timeout]);
-      } catch (err: unknown) {
-        const msg = getErrorMessage(err);
-        const isApiError = msg.includes('authentication') || msg.includes('invalid x-api-key')
-          || msg.includes('API key') || msg.includes('401')
-          || msg.includes('credit balance') || msg.includes('billing');
-        if (isApiError) {
-          stderr.write(renderWarning(`API error: ${msg}`));
-        }
-      }
-      session._recreateAgent();
-    } else {
-      // Returning user: quick greeting via Haiku (cheap, fast, no tools)
-      const taskBriefing = session.getTaskManager()?.getBriefingSummary(session.getActiveScopes()) ?? '';
-      const memoryContent = session.getAgent()?.memory?.render() ?? '';
-      const greetingContext = [taskBriefing, memoryContent].filter(Boolean).join('\n\n');
-      const greetingPrompt = greetingContext
-        ? `Context:\n${greetingContext}\n\nGreet the user in 1-2 short sentences. Mention the project name and any useful context from above. Do NOT describe what you are doing, do NOT report bugs or issues, do NOT give advice — just a friendly, brief welcome. No feature lists, no tool narration.`
-        : 'Greet the user in 1-2 short sentences. Be brief and friendly. No feature lists, no tool narration.';
-      const savedTier = session.getModelTier();
-      const savedThinking = session.getThinking();
-      session.setModel('haiku');
-      session.setThinking({ type: 'disabled' });
-      session.setSkipMemoryExtraction(true);
-      const allToolNames = session.getRegistry().getEntries().map(e => e.definition.name);
-      session._recreateAgent({ maxIterations: 1, excludeTools: allToolNames });
-      try {
-        const timeout = new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('Greeting timed out')), 15_000),
-        );
-        await Promise.race([session.run(greetingPrompt), timeout]);
-      } catch (err: unknown) {
-        const msg = getErrorMessage(err);
-        const isApiError = msg.includes('authentication') || msg.includes('invalid x-api-key')
-          || msg.includes('API key') || msg.includes('401')
-          || msg.includes('credit balance') || msg.includes('billing');
-        if (isApiError) {
-          stderr.write(renderWarning(`API error: ${msg}`));
-        }
-      }
-      session.setSkipMemoryExtraction(false);
-      session.setModel(savedTier);
-      session.setThinking(savedThinking ?? { type: 'adaptive' });
-      session._recreateAgent();
-    }
-
-    spinner.stop();
-    session.onStream = streamHandler;
-    if (greetingText.trim()) {
-      stdout.write(`👾 `);
-      stdout.write(md.push(greetingText));
-      stdout.write(md.flush());
-      stdout.write('\n');
-      md.reset();
-      greetingShown = true;
-    }
-  }
-
-  // Onboarding hint when no greeting was shown
-  if (stdin.isTTY && !greetingShown) {
-    stdout.write(`${DIM}Type a question or /help for commands.${RESET}\n`);
-  }
-
-  showPrompt();
-
-  let lastBusyEnd = 0;
-  let lastInput = '';
-  let lastInputTime = 0;
-  const recentRunTimestamps: number[] = [];
-
-  for await (const line of rl) {
-    atPrompt = false;
-    const sanitized = line.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
-    const trimmed = sanitized.trim();
-    if (!trimmed) {
-      showPrompt();
-      continue;
-    }
-
-    // Discard ghost lines buffered during a previous run/command
-    if (Date.now() - lastBusyEnd < 150) {
-      showPrompt();
-      continue;
-    }
-
-    // Skip identical consecutive inputs within 2s (buffered keystroke dedup)
-    if (trimmed === lastInput && Date.now() - lastInputTime < 2000) {
-      showPrompt();
-      continue;
-    }
-    lastInput = trimmed;
-    lastInputTime = Date.now();
-
-    appendHistory(trimmed);
-
-    if (trimmed.startsWith('/')) {
-      rl.pause();
-      const shouldContinue = await handleCommand(trimmed, session);
-      lastBusyEnd = Date.now();
-      rl.resume();
-      if (!shouldContinue) {
-        break;
-      }
-      showPrompt();
-      continue;
-    }
-
-    // Rate limit: max 3 runs in 5 seconds to prevent runaway loops
-    recentRunTimestamps.push(Date.now());
-    while (recentRunTimestamps.length > 0 && recentRunTimestamps[0]! < Date.now() - 5000) {
-      recentRunTimestamps.shift();
-    }
-    if (recentRunTimestamps.length > 3) {
-      recentRunTimestamps.length = 0;
-      stderr.write(renderWarning('Too many runs in quick succession — pausing to prevent a loop.'));
-      showPrompt();
-      continue;
-    }
-
-    // Set up ESC interrupt
-    let aborted = false;
-    const escHandler = (data: Buffer) => {
-      if (data[0] === 0x03) {
-        // Ctrl+C in raw mode — hard kill to avoid native C++ mutex crash.
-        // process.exit() runs cleanup handlers that may touch SQLite.
-        spinner.stop();
-        stdout.write('\n');
-        process.kill(process.pid, 'SIGKILL');
-      }
-      if (data[0] === 0x1b && data.length === 1 && !aborted) {
-        aborted = true;
-        session.abort();
-        spinner.stop();
-        stdout.write(md.flush());
-        stdout.write(`\n  ${DIM}[interrupted]${RESET}\n`);
-      }
-    };
-
-    if (stdin.isTTY) {
-      rl.pause();
-      stdin.setRawMode(true);
-      activeEscHandler = escHandler;
-      stdin.on('data', escHandler);
-      stdin.resume();
-    }
-
-    try {
-      state.lastResponse = '';
-      state.responseStarted = false;
-      state.turnStartMs = Date.now();
-      spinner.start('Thinking...');
-      await session.run(trimmed);
-
-      // Post-run changeset review
-      const changesetMgr = session.getChangesetManager();
-      if (changesetMgr?.hasChanges()) {
-        // Remove ESC handler temporarily so readKey works
-        if (stdin.isTTY && activeEscHandler) {
-          stdin.removeListener('data', activeEscHandler);
-        }
-        try {
-          const changes = changesetMgr.getChanges();
-          const result = await reviewChangeset(changes, stdin, stdout);
-          if (result.action === 'rollback') {
-            changesetMgr.rollbackAll();
-            stdout.write(`${DIM}All changes rolled back.${RESET}\n`);
-          } else if (result.action === 'partial') {
-            changesetMgr.rollbackFiles(result.rolledBackFiles);
-            stdout.write(`${DIM}Accepted ${result.acceptedFiles.length}, rolled back ${result.rolledBackFiles.length} files.${RESET}\n`);
-          } else {
-            changesetMgr.acceptAll();
-            stdout.write(`${DIM}Changes accepted.${RESET}\n`);
-          }
-        } finally {
-          changesetMgr.cleanup();
-          // Re-attach ESC handler
-          if (stdin.isTTY && activeEscHandler) {
-            stdin.on('data', activeEscHandler);
-          }
-        }
-      }
-    } catch (err: unknown) {
-      spinner.stop();
-      if (!aborted) {
-        const msg = getErrorMessage(err);
-        stderr.write(renderError(msg));
-      }
-    } finally {
-      if (stdin.isTTY) {
-        stdin.removeListener('data', escHandler);
-        activeEscHandler = null;
-        // Do NOT setRawMode(false) — readline needs raw mode for arrow key handling.
-        // rl.resume() will take over raw mode management.
-      }
-      lastBusyEnd = Date.now();
-      rl.resume();
-    }
-    showPrompt();
-  }
-
+  // === Fallback: no matching mode ===
+  stderr.write('No input provided. Run "lynox --help" for usage.\n');
   await engine.shutdown();
-  process.exit(0);
+  process.exit(1);
 }
 
 // Entry point detection

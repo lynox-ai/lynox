@@ -3,7 +3,14 @@ title: CRM & Data
 description: Contact tracking, deals, and structured data storage.
 sidebar:
   order: 5
+  badge:
+    text: Beta
+    variant: caution
 ---
+
+:::caution[Beta Feature]
+CRM and DataStore are functional but limited in scope. Advanced features like deal pipelines, segmentation, and visual dashboards are planned for future releases.
+:::
 
 lynox includes a lightweight CRM and structured data store. Both are built automatically from your conversations and integrations — no manual data entry required.
 

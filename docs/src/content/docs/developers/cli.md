@@ -5,11 +5,11 @@ sidebar:
   order: 1
 ---
 
-The CLI is lynox's developer-oriented interface. It supports three modes of operation.
+The CLI is lynox's automation-oriented interface. All interactive features are in the Web UI.
 
 ## Entry Modes
 
-### Interactive (default)
+### Web UI (default)
 
 ```bash
 npx @lynox-ai/core
@@ -25,75 +25,31 @@ npx @lynox-ai/core "Summarize the last 5 commits"
 
 Runs a single task, streams the response to stdout, and exits. Great for scripting and CI.
 
-### REPL
+### Piped Input
 
 ```bash
-npx @lynox-ai/core --repl
+cat report.csv | npx @lynox-ai/core "Analyze this data"
 ```
 
-Interactive terminal session with slash commands, streaming output, and markdown rendering.
+Combines piped input with a task prompt.
 
 ## Flags
 
 | Flag | Description |
 |------|-------------|
-| `--repl` | Start in REPL mode (terminal interface) |
-| `--mcp` | Start as MCP server (stdio) |
 | `--http-api` | Start Engine HTTP API only (no Web UI) |
+| `--mcp-server` | Start as MCP server (stdio) |
+| `--mcp-server --transport sse` | Start as MCP server (HTTP/SSE) |
+| `--telegram` | Start Telegram bot mode |
+| `--manifest <file>` | Run a workflow manifest |
+| `--watch <glob> --on-change "<task>"` | Watch files and run task on change |
+| `--task "<title>"` | Create a background task and exit |
+| `--output <file>` | Save output to file |
+| `--project <dir>` | Set project directory |
+| `--data-dir <dir>` | Override data directory (default: `~/.lynox`) |
 | `--init` | Re-run the setup wizard |
 | `--version` | Show version (no API key required) |
 | `--help` | Show help (no API key required) |
-
-## Slash Commands
-
-Available in REPL mode:
-
-### Session
-
-| Command | Description |
-|---------|-------------|
-| `/clear` | Reset conversation (memory preserved) |
-| `/compact [focus]` | Summarize conversation to free context window |
-| `/save` | Save current session to disk |
-| `/load [name]` | Restore a saved session |
-| `/export [file]` | Export last response to a file |
-| `/history [search]` | Browse command history |
-
-### Model
-
-| Command | Description |
-|---------|-------------|
-| `/model [name]` | Switch model — `opus`, `sonnet`, `haiku` |
-| `/accuracy [level]` | Set thinking depth |
-| `/cost` | Show token usage and cost for current session |
-| `/context` | Show context window usage |
-
-### Project
-
-| Command | Description |
-|---------|-------------|
-| `/git [cmd]` | Git operations — `status`, `diff`, `log`, `branch` |
-| `/pr` | Generate a PR description from current changes |
-| `/diff` | Show current diff |
-| `/config` | Open settings |
-| `/status` | Show version, model, mode, and active tools |
-
-### Tools & Roles
-
-| Command | Description |
-|---------|-------------|
-| `/tools` | List all available tools |
-| `/mcp <name> <url>` | Register an MCP server |
-| `/mode` | Show current session status |
-| `/roles` | Show available roles |
-
-### System
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show basic help |
-| `/help all` | Show all commands |
-| `/exit` | Exit lynox |
 
 ## Model Names
 

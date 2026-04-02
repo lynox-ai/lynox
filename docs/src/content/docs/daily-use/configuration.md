@@ -119,5 +119,4 @@ Environment variables take precedence over config files. Alternatively, credenti
 You can edit config in three ways:
 
 1. **Web UI** — Settings → Config
-2. **CLI** — `/config` command in REPL mode
-3. **Direct** — Edit `~/.lynox/config.json` manually (restart required)
+2. **Direct** — Edit `~/.lynox/config.json` manually (restart required)

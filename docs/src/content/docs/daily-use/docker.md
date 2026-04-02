@@ -17,11 +17,13 @@ Docker is the recommended way to run lynox in production. Two images are availab
 ```bash
 docker run -d --name lynox -p 3000:3000 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e LYNOX_HTTP_SECRET=your-access-token \
   -v ~/.lynox:/home/lynox/.lynox \
+  --restart unless-stopped \
   ghcr.io/lynox-ai/lynox:webui
 ```
 
-Open [localhost:3000](http://localhost:3000). Find your access token with `docker logs lynox`.
+Open [localhost:3000](http://localhost:3000) and enter your access token. The [setup guide](https://lynox.ai/getting-started) generates one for you. If omitted, a token is auto-generated — find it with `docker logs lynox`.
 
 ## Docker Compose (recommended)
 

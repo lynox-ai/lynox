@@ -27,14 +27,16 @@ Starts the setup wizard on first run, then opens the Web UI.
 ```bash
 docker run -d --name lynox -p 3000:3000 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e LYNOX_HTTP_SECRET=your-access-token \
   -v ~/.lynox:/home/lynox/.lynox \
+  --restart unless-stopped \
   ghcr.io/lynox-ai/lynox:webui
 ```
 
-Open [localhost:3000](http://localhost:3000). An **access token** is generated on first start — find it with `docker logs lynox`. You'll need it to log in.
+Open [localhost:3000](http://localhost:3000) and enter your access token to log in.
 
-:::tip[Custom access token]
-Set your own token with `-e LYNOX_HTTP_SECRET=your-token` instead of using the auto-generated one.
+:::tip[Token from setup guide]
+The [setup guide](https://lynox.ai/getting-started) generates a secure token for you and includes it in the command. If you omit `LYNOX_HTTP_SECRET`, one is auto-generated — find it with `docker logs lynox`.
 :::
 
 ### Option 3: Clone & run
@@ -42,8 +44,8 @@ Set your own token with `-e LYNOX_HTTP_SECRET=your-token` instead of using the a
 ```bash
 git clone https://github.com/lynox-ai/lynox.git
 cd lynox
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 ## Setup Wizard
@@ -85,7 +87,6 @@ lynox remembers context across conversations. The more you use it, the more it l
 |------|---------|----------|
 | **Web UI** | `npx @lynox-ai/core` | Primary interface — chat, settings, integrations |
 | **One-shot** | `npx @lynox-ai/core "your task"` | Run a single task from the terminal |
-| **REPL** | `npx @lynox-ai/core --repl` | Interactive terminal session |
 | **Docker** | `docker run ... ghcr.io/lynox-ai/lynox:webui` | Always-on with Web UI |
 
 ## HTTPS & Remote Access
@@ -110,7 +111,7 @@ cloudflared tunnel --url http://localhost:3000
 
 **Can't access Web UI** — Check that port 3000 is open. On a VPS, you may need to allow it in your firewall.
 
-**Lost access token** — Restart the container without `LYNOX_HTTP_SECRET` to generate a new one: `docker restart lynox && docker logs lynox`.
+**Lost access token** — Set a new one: `docker rm -f lynox` and re-run with a new `-e LYNOX_HTTP_SECRET=...`. Or omit it entirely to auto-generate one visible via `docker logs lynox`.
 
 **Telegram bot not responding** — Check that no other instance uses the same bot token.
 

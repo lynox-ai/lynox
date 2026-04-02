@@ -161,3 +161,52 @@ html {
   --pagefind-ui-border: #1a1a4a;
   --pagefind-ui-text: #e8e8f0;
 }
+
+/* ── Legal footer links ── */
+
+.legal-links {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--sl-color-hairline-light);
+  font-size: 0.75rem;
+}
+
+.legal-links a {
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+}
+
+.legal-links a:hover {
+  color: var(--sl-color-text);
+}
+
+.legal-links span {
+  color: var(--sl-color-gray-4);
+}
+
+/* ── Legal sidebar links ── */
+
+.sidebar-legal {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 1rem 0.5rem;
+  margin-top: auto;
+  font-size: 0.6875rem;
+}
+
+.sidebar-legal a {
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+}
+
+.sidebar-legal a:hover {
+  color: var(--sl-color-text);
+}
+
+.sidebar-legal span {
+  color: var(--sl-color-gray-4);
+}

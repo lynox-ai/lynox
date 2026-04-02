@@ -15,10 +15,11 @@ export default defineConfig({
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/lynox-ai/lynox' },
       ],
-      editLink: {
-        baseUrl: 'https://github.com/lynox-ai/lynox/edit/main/docs/',
-      },
       customCss: ['./src/styles/custom.css'],
+      components: {
+        Footer: './src/components/Footer.astro',
+        Sidebar: './src/components/Sidebar.astro',
+      },
       head: [
         {
           tag: 'script',

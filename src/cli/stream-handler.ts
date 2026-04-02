@@ -252,7 +252,7 @@ export function streamHandler(event: StreamEvent, stdout: NodeJS.WriteStream): v
     case 'context_pressure': {
       if (event.droppedMessages > 0) {
         state.sessionTruncated = true;
-        stderr.write(`\n\x1b[33m⚠ ${event.droppedMessages} message(s) compacted to fit context (${event.usagePercent}% used) — use /compact or /clear to free space, /save to preserve full history${RESET}\n`);
+        stderr.write(`\n\x1b[33m⚠ ${event.droppedMessages} message(s) compacted to fit context (${event.usagePercent}% used)${RESET}\n`);
       }
       break;
     }

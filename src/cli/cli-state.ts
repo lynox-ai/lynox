@@ -7,11 +7,9 @@
 
 import type { Session } from '../core/session.js';
 import { MODEL_MAP } from '../types/index.js';
-import { Spinner, PROMPT_READY } from './spinner.js';
+import { Spinner } from './spinner.js';
 import { MarkdownStreamer } from './markdown.js';
 import { FooterBar } from './footer.js';
-
-export { PROMPT_READY };
 
 // ── Mutable state ──────────────────────────────────────────────────────
 
@@ -20,7 +18,6 @@ export const state = {
   lastResponse: '',
   responseStarted: false,
   currentModelId: MODEL_MAP['sonnet'],
-  cliPrompt: null as ((question: string, options?: string[]) => Promise<string>) | null,
   activeSession: null as Session | null,
   thinkingStarted: false,
   showThinkingRendered: false,

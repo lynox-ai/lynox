@@ -30,12 +30,13 @@ You need Node.js 22+ and an [Anthropic API key](https://console.anthropic.com/) 
 ```bash
 docker run -d --name lynox -p 3000:3000 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e LYNOX_HTTP_SECRET=your-access-token \
   -v ~/.lynox:/home/lynox/.lynox \
   --restart unless-stopped \
   ghcr.io/lynox-ai/lynox:webui
 ```
 
-Open [localhost:3000](http://localhost:3000). Find your access token with `docker logs lynox`.
+Open [localhost:3000](http://localhost:3000) and enter your access token. The [setup guide](https://lynox.ai/getting-started) generates one for you. If omitted, find it with `docker logs lynox`.
 
 ## Documentation
 
@@ -119,23 +120,6 @@ One-shot mode — run a task and exit:
 npx @lynox-ai/core "Summarize the last 5 commits in this repo"
 ```
 
-### Interactive REPL (for developers)
-
-If you prefer a terminal-based interface:
-
-```bash
-npx @lynox-ai/core --repl
-```
-
-Or use Docker:
-
-```bash
-docker run -d -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v ~/.lynox:/home/lynox/.lynox ghcr.io/lynox-ai/lynox:webui
-```
-
-The Web UI is password-protected. Find the auto-generated access token with `docker logs lynox`.
-
 ### Telegram (mobile)
 
 Create a bot via [@BotFather](https://t.me/BotFather), add the token in Web UI → Settings → Integrations.
@@ -151,6 +135,15 @@ Architecture, tools, integrations, security, and deployment details are in [`doc
 - [GitHub Issues](https://github.com/lynox-ai/lynox/issues) — Bug reports, feature requests
 - [Contributing](CONTRIBUTING.md) — Development setup and guidelines
 - [Security](SECURITY.md) — Responsible disclosure
+
+## Disclaimer
+
+This software is provided **"as is"**, without warranty of any kind. By using lynox, you acknowledge that:
+
+- **You are solely responsible** for your installation, data, security, and compliance with applicable laws.
+- **AI-generated output may be inaccurate.** Do not rely on it for critical decisions without independent verification.
+- **We are not liable** for any damage, data loss, or costs arising from your use of the software, including API costs charged by AI providers.
+- **You use this software at your own risk.** See our full [Terms of Service](https://lynox.ai/terms) for details.
 
 ## License
 

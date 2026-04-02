@@ -34,7 +34,7 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
 - `src/core/` — 72 modules: engine, session, thread-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
-- `src/cli/` — 20 Terminal UI modules + 7 command handlers
+- `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, setup wizard, watchdog)
 - `src/tools/` — 30 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Telegram, Google Workspace, Web Search
@@ -59,8 +59,9 @@ SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component l
 
 Pro/pwa imports `@lynox-ai/web-ui` and wraps View components with Lucia auth + onboarding.
 
-**Interface priority:** Web UI (primary) → Telegram (secondary, mobile) → CLI (developer).
+**Interface priority:** Web UI (primary) → Telegram (secondary, mobile) → CLI (headless/automation).
 Telegram is pure task execution — setup/admin redirects to Web UI.
+No interactive REPL — CLI is for single-task, watch, manifest, and server modes only.
 
 Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by category:
 - `getting-started/`, `daily-use/`, `features/`, `developers/`
@@ -90,8 +91,8 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Testing
 
-110 offline test files / ~2669 tests. Co-located *.test.ts.
-1 security audit test file with 19 test cases in tests/security/.
+107 offline test files / ~2638 tests. Co-located *.test.ts.
+2 security test files in tests/security/.
 5 online test files / 22 tests (real Haiku API).
 Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/integrations/ (lines >=65%, functions >=60%, branches >=50%, statements >=65%).
 

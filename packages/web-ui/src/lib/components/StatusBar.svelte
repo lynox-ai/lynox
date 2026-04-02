@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
 	import { getContextBudget, getSessionModel } from '../stores/chat.svelte.js';
 
@@ -180,6 +180,15 @@
 			<span class="text-[10px] font-mono {textColor}">{pct}%</span>
 		</div>
 	{/if}
+
+	<!-- Legal (right-aligned) -->
+	<div class="flex items-center gap-2 ml-auto px-3 shrink-0">
+		<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/agb/' : 'terms'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.terms')}</a>
+		<span class="text-border">·</span>
+		<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/datenschutz/' : 'privacy'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.privacy')}</a>
+		<span class="text-border">·</span>
+		<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/impressum/' : 'imprint'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.imprint')}</a>
+	</div>
 </div>
 
 <!-- Status Panel Overlay -->
@@ -317,6 +326,15 @@
 					<a href="/app/activity?tab=tasks" onclick={closePanel} class="text-accent-text hover:underline">{activeTasks} Tasks</a>
 				</div>
 			{/if}
+
+			<!-- Legal -->
+			<div class="flex items-center gap-3 pt-3 border-t border-border text-[11px] text-text-subtle">
+				<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/agb/' : 'terms'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.terms')}</a>
+				<span class="text-border">·</span>
+				<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/datenschutz/' : 'privacy'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.privacy')}</a>
+				<span class="text-border">·</span>
+				<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/impressum/' : 'imprint'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.imprint')}</a>
+			</div>
 		</div>
 	</div>
 {/if}
