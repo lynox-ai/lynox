@@ -59,7 +59,7 @@ export class ThreadStore {
     limit?: number | undefined;
     includeArchived?: boolean | undefined;
   }): ThreadRecord[] {
-    const limit = opts?.limit ?? 50;
+    const limit = Math.min(opts?.limit ?? 50, 200);
     const includeArchived = opts?.includeArchived ?? false;
     const sql = includeArchived
       ? 'SELECT * FROM threads ORDER BY is_favorite DESC, updated_at DESC LIMIT ?'

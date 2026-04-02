@@ -172,10 +172,11 @@
 		const yesterday = new Date(now);
 		yesterday.setDate(yesterday.getDate() - 1);
 		const isYesterday = parsed.toDateString() === yesterday.toDateString();
-		const locale = getLocale() === 'de' ? 'de-DE' : 'en-US';
+		const lang = getLocale();
+		const locale = lang === 'de' ? 'de-DE' : 'en-US';
 		const time = parsed.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 		if (isToday) return time;
-		if (isYesterday) return `${getLocale() === 'de' ? 'Gestern' : 'Yesterday'} ${time}`;
+		if (isYesterday) return `${lang === 'de' ? 'Gestern' : 'Yesterday'} ${time}`;
 		return parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' }) + ` ${time}`;
 	}
 
@@ -226,7 +227,7 @@
 			<!-- New Chat -->
 			<div class="px-3 mb-2">
 				<button
-					onclick={() => { newChat(); void loadThreads(); sidebarOpen = false; goto('/app'); }}
+					onclick={() => { newChat(); void loadThreads(); sidebarOpen = false; if ($page.url.pathname !== '/app') goto('/app'); }}
 					class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all text-left flex items-center gap-2"
 				>
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">

@@ -17,6 +17,7 @@ import { Engine } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { SessionStore } from '../core/session-store.js';
 import type { StreamEvent } from '../types/index.js';
+import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -512,13 +513,12 @@ export class LynoxHTTPApi {
         effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
       });
       const tier = session.getModelTier();
-      const CONTEXT_SIZES: Record<string, number> = { opus: 1_000_000, sonnet: 200_000, haiku: 200_000 };
       const threadStore = engine.getThreadStore();
       const thread = threadStore?.getThread(sessionId);
       jsonResponse(res, 201, {
         sessionId,
         model: tier,
-        contextWindow: CONTEXT_SIZES[tier] ?? 200_000,
+        contextWindow: CONTEXT_WINDOW[MODEL_MAP[tier]] ?? 200_000,
         threadId: sessionId,
         resumed: !!threadId && !!thread,
       });
@@ -600,7 +600,7 @@ export class LynoxHTTPApi {
           }, PROMPT_TIMEOUT_MS);
 
           this.pendingPrompts.set(sessionId, { question, options, resolve, timeout });
-          const data = JSON.stringify({ question, options });
+          const data = JSON.stringify({ question, options, timeoutMs: PROMPT_TIMEOUT_MS });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         });
       };

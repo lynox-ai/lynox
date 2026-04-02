@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { formatCost } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
 	import { getContextBudget, getSessionModel } from '../stores/chat.svelte.js';
@@ -12,14 +13,6 @@
 	let panelOpen = $state(false);
 
 	interface SecretsStatus { configured: Record<string, boolean>; count: number }
-	interface RunStats {
-		total_runs: number;
-		total_tokens_in: number;
-		total_tokens_out: number;
-		total_cost_usd: number;
-		avg_duration_ms: number;
-		cost_by_model: Array<{ model_id: string; cost_usd: number; run_count: number }>;
-	}
 	interface KgStats {
 		memoryCount: number;
 		entityCount: number;
@@ -29,7 +22,6 @@
 	}
 
 	let secrets = $state<SecretsStatus | null>(null);
-	let stats = $state<RunStats | null>(null);
 	let kgStats = $state<KgStats | null>(null);
 
 	async function poll() {
@@ -69,13 +61,11 @@
 
 	async function loadPanelData() {
 		try {
-			const [secretsRes, statsRes, kgRes] = await Promise.all([
+			const [secretsRes, kgRes] = await Promise.all([
 				fetch(`${getApiBase()}/secrets/status`).catch(() => null),
-				fetch(`${getApiBase()}/history/stats`).catch(() => null),
 				fetch(`${getApiBase()}/kg/stats`).catch(() => null),
 			]);
 			if (secretsRes?.ok) secrets = (await secretsRes.json()) as SecretsStatus;
-			if (statsRes?.ok) stats = (await statsRes.json()) as RunStats;
 			if (kgRes?.ok) kgStats = (await kgRes.json()) as KgStats;
 		} catch { /* silent */ }
 	}
@@ -89,18 +79,31 @@
 		panelOpen = false;
 	}
 
-	function formatDuration(ms: number): string {
-		if (ms < 1000) return `${Math.round(ms)}ms`;
-		return `${(ms / 1000).toFixed(1)}s`;
+	let pollInterval: ReturnType<typeof setInterval> | null = null;
+
+	function startPolling() {
+		if (pollInterval) return;
+		poll();
+		pollInterval = setInterval(poll, 30_000);
 	}
 
-	function shortModel(id: string): string {
-		return id.replace(/^(anthropic|openai|google)[./]/, '').replace(/-\d{8}$/, '');
+	function stopPolling() {
+		if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
 	}
 
-	poll();
-	const interval = setInterval(poll, 30_000);
-	onDestroy(() => clearInterval(interval));
+	startPolling();
+
+	// Pause polling when tab is hidden to save battery/network
+	$effect(() => {
+		function onVisibility() {
+			if (document.hidden) stopPolling();
+			else startPolling();
+		}
+		document.addEventListener('visibilitychange', onVisibility);
+		return () => document.removeEventListener('visibilitychange', onVisibility);
+	});
+
+	onDestroy(() => stopPolling());
 
 	$effect(() => {
 		if (!panelOpen) return;
@@ -119,7 +122,7 @@
 		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatus === 'none' ? 'bg-success' : apiStatus === 'minor' ? 'bg-warning' : apiStatus === 'major' || apiStatus === 'critical' ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{apiStatus === 'none' ? t('status.api_ok') : apiStatus === 'minor' ? t('status.api_degraded') : apiStatus === 'major' || apiStatus === 'critical' ? t('status.api_down') : t('status.api_unknown')}
 		<span class="text-border mx-1">|</span>
-		${todayCost.toFixed(2)}
+		{formatCost(todayCost)}
 	</button>
 </div>
 
@@ -150,7 +153,7 @@
 
 	<!-- Today's Cost -->
 	<a href="/app/activity?tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
-		${todayCost.toFixed(2)} {t('status.today')}
+		{formatCost(todayCost)} {t('status.today')}
 	</a>
 
 	<span class="text-border">|</span>
@@ -244,7 +247,7 @@
 				<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.usage_today')}</p>
 				<div class="grid grid-cols-2 gap-2">
 					<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
-						<p class="text-lg font-semibold text-text">${todayCost.toFixed(2)}</p>
+						<p class="text-lg font-semibold text-text">{formatCost(todayCost)}</p>
 						<p class="text-xs text-text-subtle">{t('status.cost')}</p>
 					</div>
 					<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
@@ -253,38 +256,6 @@
 					</div>
 				</div>
 			</div>
-
-			<!-- Total Usage -->
-			{#if stats}
-				<div>
-					<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.usage_total')}</p>
-					<div class="grid grid-cols-3 gap-2">
-						<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
-							<p class="text-base font-semibold text-text">{stats.total_runs}</p>
-							<p class="text-xs text-text-subtle">{t('status.runs')}</p>
-						</div>
-						<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
-							<p class="text-base font-semibold text-text">${stats.total_cost_usd.toFixed(2)}</p>
-							<p class="text-xs text-text-subtle">{t('status.cost')}</p>
-						</div>
-						<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
-							<p class="text-base font-semibold text-text">{formatDuration(stats.avg_duration_ms)}</p>
-							<p class="text-xs text-text-subtle">{t('status.avg_duration')}</p>
-						</div>
-					</div>
-					{#if stats.cost_by_model.length > 0}
-						<p class="text-xs text-text-subtle mt-2 mb-1">{t('status.cost_by_model')}</p>
-						<div class="space-y-1">
-							{#each stats.cost_by_model as m}
-								<div class="flex items-center justify-between text-xs">
-									<span class="text-text-muted font-mono truncate mr-2">{shortModel(m.model_id)}</span>
-									<span class="text-text shrink-0">${m.cost_usd.toFixed(3)} <span class="text-text-subtle">({m.run_count})</span></span>
-								</div>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			{/if}
 
 			<!-- Knowledge Graph -->
 			{#if kgStats && (kgStats.entityCount > 0 || kgStats.memoryCount > 0)}

@@ -1,4 +1,5 @@
 import { getApiBase } from '../config.svelte.js';
+import { estimateCost } from '../format.js';
 import { t } from '../i18n.svelte.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
@@ -160,6 +161,8 @@ if (typeof window !== 'undefined') {
 			}, 500);
 		}
 	});
+	// Flush pending persist on tab close to prevent data loss
+	window.addEventListener('beforeunload', () => persistChatNow());
 }
 
 async function ensureSession(): Promise<string> {
@@ -446,14 +449,17 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			retryStatus = null;
 			const usage = data['usage'] as Record<string, number> | undefined;
 			if (usage) {
-				const inTok = (usage['input_tokens'] ?? 0)
-					+ (usage['cache_creation_input_tokens'] ?? 0)
-					+ (usage['cache_read_input_tokens'] ?? 0);
-				const outTok = usage['output_tokens'] ?? 0;
+				const baseTok = usage['input_tokens'] ?? 0;
 				const cacheRead = usage['cache_read_input_tokens'] ?? 0;
 				const cacheWrite = usage['cache_creation_input_tokens'] ?? 0;
-				// Rough cost estimate (Sonnet pricing as default)
-				const costUsd = (inTok * 3 + outTok * 15 + cacheWrite * 3.75 + cacheRead * 0.3) / 1_000_000;
+				const inTok = baseTok + cacheWrite + cacheRead;
+				const outTok = usage['output_tokens'] ?? 0;
+				const costUsd = estimateCost(sessionModel, {
+					input_tokens: baseTok,
+					output_tokens: outTok,
+					cache_creation_input_tokens: cacheWrite,
+					cache_read_input_tokens: cacheRead,
+				});
 				const prev = msg.usage;
 				msg.usage = {
 					tokensIn: (prev?.tokensIn ?? 0) + inTok,
@@ -753,10 +759,15 @@ export function getSessionId() {
 }
 
 let _resumeGeneration = 0;
+let _resumeController: AbortController | null = null;
 
 export async function resumeThread(threadId: string): Promise<void> {
 	// Race-condition guard: if another resumeThread call starts, this one aborts
 	const gen = ++_resumeGeneration;
+	// Cancel previous in-flight requests
+	_resumeController?.abort();
+	const controller = new AbortController();
+	_resumeController = controller;
 
 	// Clear state immediately so UI doesn't show stale data
 	messages = [];
@@ -771,35 +782,44 @@ export async function resumeThread(threadId: string): Promise<void> {
 	clearContext();
 	persistChatNow();
 
-	// Create backend session from persisted thread
-	const res = await fetch(`${getApiBase()}/sessions`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ threadId }),
-	});
-	if (gen !== _resumeGeneration) return; // superseded by newer click
-	if (!res.ok) {
+	try {
+		// Create backend session from persisted thread
+		const res = await fetch(`${getApiBase()}/sessions`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ threadId }),
+			signal: controller.signal,
+		});
+		if (gen !== _resumeGeneration) return; // superseded by newer click
+		if (!res.ok) {
+			chatError = t('chat.error_connection');
+			return;
+		}
+		const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
+		sessionId = data.sessionId;
+		if (data.model) sessionModel = data.model;
+		if (data.contextWindow) contextWindow = data.contextWindow;
+
+		// Load messages for display
+		const msgRes = await fetch(`${getApiBase()}/threads/${threadId}/messages`, {
+			signal: controller.signal,
+		});
+		if (gen !== _resumeGeneration) return; // superseded by newer click
+		if (msgRes.ok) {
+			const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
+			messages = msgData.messages.map((m) => ({
+				role: m.role as 'user' | 'assistant',
+				content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
+				toolCalls: extractToolCalls(m.content),
+			}));
+		}
+
+		persistChatNow();
+	} catch (err: unknown) {
+		// Silently ignore abort errors from superseded requests
+		if (err instanceof DOMException && err.name === 'AbortError') return;
 		chatError = t('chat.error_connection');
-		return;
 	}
-	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
-	sessionId = data.sessionId;
-	if (data.model) sessionModel = data.model;
-	if (data.contextWindow) contextWindow = data.contextWindow;
-
-	// Load messages for display
-	const msgRes = await fetch(`${getApiBase()}/threads/${threadId}/messages`);
-	if (gen !== _resumeGeneration) return; // superseded by newer click
-	if (msgRes.ok) {
-		const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
-		messages = msgData.messages.map((m) => ({
-			role: m.role as 'user' | 'assistant',
-			content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
-			toolCalls: extractToolCalls(m.content),
-		}));
-	}
-
-	persistChatNow();
 }
 
 function extractContentText(content: unknown): string {

@@ -8,17 +8,27 @@
 		type Artifact,
 		type ArtifactMeta,
 	} from '../stores/artifacts.svelte.js';
+	import { tick } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
 	let selected = $state<Artifact | null>(null);
 	let confirmDelete = $state<string | null>(null);
+	let deleteDialogRef = $state<HTMLDivElement | null>(null);
+	let deleteDialogTrigger: HTMLElement | null = null;
 
 	const artifacts = $derived(getArtifacts());
 	const isLoading = $derived(getIsLoadingArtifacts());
 
 	$effect(() => {
 		loadArtifacts();
+	});
+
+	// Focus dialog when it opens
+	$effect(() => {
+		if (confirmDelete) {
+			void tick().then(() => deleteDialogRef?.focus());
+		}
 	});
 
 	async function openArtifact(meta: ArtifactMeta) {
@@ -117,7 +127,7 @@
 						<button
 							type="button"
 							class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-text-subtle hover:text-danger text-xs p-1"
-							onclick={(e) => { e.stopPropagation(); confirmDelete = artifact.id; }}
+							onclick={(e) => { e.stopPropagation(); deleteDialogTrigger = e.currentTarget as HTMLElement; confirmDelete = artifact.id; }}
 							title={t('artifacts.delete')}
 						>✕</button>
 					</div>
@@ -129,11 +139,18 @@
 
 <!-- Delete confirmation -->
 {#if confirmDelete}
-	<div class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center" role="dialog" aria-modal="true" onclick={(e) => { if (e.target === e.currentTarget) confirmDelete = null; }} style="padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);">
+	<div
+		bind:this={deleteDialogRef}
+		class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center"
+		role="dialog" aria-modal="true" tabindex="-1"
+		onclick={(e) => { if (e.target === e.currentTarget) { confirmDelete = null; deleteDialogTrigger?.focus(); } }}
+		onkeydown={(e) => { if (e.key === 'Escape') { confirmDelete = null; deleteDialogTrigger?.focus(); } }}
+		style="padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);"
+	>
 		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-sm mx-4 space-y-4">
 			<p class="text-sm text-text">{t('artifacts.confirm_delete')}</p>
 			<div class="flex gap-3 justify-end">
-				<button type="button" class="text-xs text-text-muted hover:text-text px-3 py-1.5" onclick={() => confirmDelete = null}>{t('artifacts.cancel')}</button>
+				<button type="button" class="text-xs text-text-muted hover:text-text px-3 py-1.5" onclick={() => { confirmDelete = null; deleteDialogTrigger?.focus(); }}>{t('artifacts.cancel')}</button>
 				<button type="button" class="text-xs text-danger hover:text-red-400 border border-danger/30 rounded-[var(--radius-sm)] px-3 py-1.5" onclick={() => handleDelete(confirmDelete!)}>{t('artifacts.delete')}</button>
 			</div>
 		</div>

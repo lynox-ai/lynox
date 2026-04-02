@@ -92,6 +92,7 @@ export class Agent implements IAgent {
   private _runningMsgLen = 0;
   private _loopToolCount = 0;
   private _pendingMemory: Promise<void>[] = [];
+  private _settledMemory = new WeakSet<Promise<void>>();
   private static readonly MAX_PENDING_MEMORY = 10;
   skipMemoryExtraction = false;
 
@@ -154,7 +155,7 @@ export class Agent implements IAgent {
   }
 
   loadMessages(messages: BetaMessageParam[]): void {
-    this.messages = [...messages];
+    this.messages = messages;
   }
 
   abort(): void {
@@ -163,12 +164,14 @@ export class Agent implements IAgent {
 
   /** Schedule a memory extraction, draining oldest if at concurrency cap. */
   private _scheduleMemoryExtraction(promise: Promise<void>): void {
-    // Drain completed promises
-    this._pendingMemory = this._pendingMemory.filter(p => {
-      let settled = false;
-      p.then(() => { settled = true; }, () => { settled = true; });
-      return !settled;
-    });
+    if (!promise) return; // guard: maybeUpdate can return void
+    // Track settlement asynchronously so completed promises are drained on next call
+    promise.then(
+      () => { this._settledMemory.add(promise); },
+      () => { this._settledMemory.add(promise); },
+    );
+    // Drain promises that settled since last call
+    this._pendingMemory = this._pendingMemory.filter(p => !this._settledMemory.has(p));
     // If still at cap, wait for the oldest to complete before adding more
     if (this._pendingMemory.length >= Agent.MAX_PENDING_MEMORY) {
       const oldest = this._pendingMemory.shift()!;
