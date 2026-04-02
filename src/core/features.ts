@@ -10,19 +10,16 @@
 
 export type FeatureFlag =
   | 'plugins'
-  | 'worker-pool'
   | 'flat-file-memory';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'plugins': 'LYNOX_FEATURE_PLUGINS',
-  'worker-pool': 'LYNOX_FEATURE_WORKER_POOL',
   'flat-file-memory': 'LYNOX_FEATURE_FLAT_FILE_MEMORY',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   'plugins': true,
-  'worker-pool': false,
   'flat-file-memory': false,
 };
 

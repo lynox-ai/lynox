@@ -1,7 +1,6 @@
 // === 4.1 Model Tiers ===
 
 export type ModelTier = 'opus' | 'sonnet' | 'haiku';
-export const MODEL_TIER_SET: ReadonlySet<ModelTier> = new Set(['opus', 'sonnet', 'haiku']);
 
 export const MODEL_MAP: Record<ModelTier, string> = {
   'opus':   'claude-opus-4-6',
@@ -40,4 +39,3 @@ export type ThinkingMode =
   | { type: 'disabled' };
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
-export const EFFORT_LEVEL_SET: ReadonlySet<EffortLevel> = new Set(['low', 'medium', 'high', 'max']);

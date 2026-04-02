@@ -82,15 +82,6 @@ export class Agent implements IAgent {
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
   private static RETRY_BASE_MS = 2000;
 
-  /**
-   * Approximate characters per token for Anthropic models.
-   * English text ≈ 4 chars/token, code/JSON ≈ 3, mixed ≈ 3.5.
-   * Conservative enough to prevent context overflow; the 85% safety margin in
-   * _truncateHistory provides additional buffer.
-   * @deprecated Use the shared CHARS_PER_TOKEN from types/models.ts
-   */
-  private static readonly CHARS_PER_TOKEN = CHARS_PER_TOKEN;
-
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
   private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
   private messages: BetaMessageParam[] = [];
@@ -366,7 +357,7 @@ export class Agent implements IAgent {
       ];
     }
 
-    const msgTokens = this._estimateMsgLen() / Agent.CHARS_PER_TOKEN;
+    const msgTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
     const totalTokens = msgTokens + overheadTokens;
     const maxCtx = CONTEXT_WINDOW[this.model] ?? 200_000;
     // Budget for messages = total context minus overhead, with 15% safety margin
@@ -403,14 +394,14 @@ export class Agent implements IAgent {
       ];
 
       if (this.onStream && dropped > 0) {
-        const newUsage = (this._estimateMsgLen() / Agent.CHARS_PER_TOKEN + overheadTokens) / maxCtx * 100;
+        const newUsage = (this._estimateMsgLen() / CHARS_PER_TOKEN + overheadTokens) / maxCtx * 100;
         void this.onStream({ type: 'context_pressure', droppedMessages: dropped, usagePercent: Math.round(newUsage), agent: this.name });
       }
     }
 
     // Second pass: truncate large content blocks if still oversized.
     // Keep the last user message intact; trim from oldest to newest.
-    const afterDrop = this._estimateMsgLen() / Agent.CHARS_PER_TOKEN + overheadTokens;
+    const afterDrop = this._estimateMsgLen() / CHARS_PER_TOKEN + overheadTokens;
     if (afterDrop >= maxCtx * 0.85) {
       const TARGET_CHARS_PER_MSG = 8000 * ctxScale;
       for (let i = 0; i < this.messages.length - 1; i++) {
@@ -446,15 +437,15 @@ export class Agent implements IAgent {
     // Estimate overhead from system prompt + tools so truncation accounts for it.
     // MCP servers resolve server-side into tool definitions that consume context but
     // aren't visible client-side. Estimate ~500 tokens per MCP server as buffer.
-    const systemTokens = JSON.stringify(systemBlocks).length / Agent.CHARS_PER_TOKEN;
-    const toolTokens = JSON.stringify(toolsDef).length / Agent.CHARS_PER_TOKEN;
+    const systemTokens = JSON.stringify(systemBlocks).length / CHARS_PER_TOKEN;
+    const toolTokens = JSON.stringify(toolsDef).length / CHARS_PER_TOKEN;
     const mcpOverhead = (this.mcpServers?.length ?? 0) * 500;
     const overheadTokens = systemTokens + toolTokens + mcpOverhead;
     this._truncateHistory(overheadTokens);
 
     // Emit context budget breakdown when usage exceeds 70% (helps debugging context pressure)
     if (this.onStream) {
-      const messageTokens = this._estimateMsgLen() / Agent.CHARS_PER_TOKEN;
+      const messageTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
       const totalTokens = messageTokens + overheadTokens;
       const maxCtx = CONTEXT_WINDOW[this.model] ?? 200_000;
       const usagePercent = Math.round(totalTokens / maxCtx * 100);

@@ -9,80 +9,11 @@ import { z } from 'zod';
 const ModelTierSchema = z.enum(['opus', 'sonnet', 'haiku']);
 const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'max']);
 const AutonomyLevelSchema = z.enum(['supervised', 'guided', 'autonomous']);
-const MemoryScopeTypeSchema = z.enum(['global', 'context', 'user']);
-
 const ThinkingModeSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('enabled'), budget_tokens: z.number() }),
   z.object({ type: z.literal('adaptive') }),
   z.object({ type: z.literal('disabled') }),
 ]);
-
-const MemoryScopeRefSchema = z.object({
-  type: MemoryScopeTypeSchema,
-  id: z.string(),
-});
-
-// === Role ===
-
-export const RoleSchema = z.object({
-  id:          z.string().min(1),
-  name:        z.string().min(1),
-  description: z.string().min(1),
-  version:     z.string().min(1),
-
-  // Capability
-  systemPrompt:  z.string().min(1),
-  allowedTools:  z.array(z.string()).optional(),
-  deniedTools:   z.array(z.string()).optional(),
-  outputFormat:  z.enum(['text', 'json', 'markdown']).optional(),
-  memoryScope:   MemoryScopeRefSchema.optional(),
-
-  // Autonomy
-  autonomy: AutonomyLevelSchema.optional(),
-
-  // Tuning
-  model:         ModelTierSchema.optional(),
-  thinking:      ThinkingModeSchema.optional(),
-  effort:        EffortLevelSchema.optional(),
-  maxIterations: z.number().optional(),
-  maxBudgetUsd:  z.number().optional(),
-
-  // Meta
-  extends: z.string().optional(),
-  tags:    z.array(z.string()).optional(),
-  source:  z.enum(['builtin', 'user', 'project']).optional(),
-});
-
-// === Playbook ===
-
-export const PlaybookParameterSchema = z.object({
-  name:         z.string().min(1),
-  description:  z.string().min(1),
-  type:         z.enum(['string', 'number', 'date', 'boolean']),
-  required:     z.boolean(),
-  defaultValue: z.unknown().optional(),
-});
-
-export const PlaybookPhaseSchema = z.object({
-  name:            z.string().min(1),
-  description:     z.string().min(1),
-  recommendedRole: z.string().optional(),
-  verification:    z.string().optional(),
-  dependsOn:       z.array(z.string()).optional(),
-});
-
-export const PlaybookSchema = z.object({
-  id:             z.string().min(1),
-  name:           z.string().min(1),
-  description:    z.string().min(1),
-  version:        z.string().min(1),
-  phases:         z.array(PlaybookPhaseSchema).min(1),
-  parameters:     z.array(PlaybookParameterSchema).optional(),
-  applicableWhen: z.string().optional(),
-  extends:        z.string().optional(),
-  tags:           z.array(z.string()).optional(),
-  source:         z.enum(['builtin', 'user', 'project']).optional(),
-});
 
 // === LynoxUserConfig ===
 

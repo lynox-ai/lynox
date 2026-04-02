@@ -61,8 +61,7 @@ export function verifyBackup(backupDir: string, files: BackupFileEntry[]): Verif
   for (const entry of files) {
     const fullPath = `${backupDir}/${entry.path}`;
 
-    // Skip directory entries (checked via their contents) + legacy kuzu_dir
-    if (entry.type === 'directory' || entry.type as string === 'kuzu_dir') {
+    if (entry.type === 'directory') {
       if (!existsSync(fullPath)) {
         errors.push(`Missing directory: ${entry.path}`);
       }

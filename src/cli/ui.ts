@@ -87,8 +87,6 @@ export function renderPermission(description: string): string {
   return `\n${MAGENTA}${BOLD}${description}${RESET}\n`;
 }
 
-export { wordWrap } from './ansi.js';
-
 export async function animateBanner(
   output: NodeJS.WriteStream,
   model: string,

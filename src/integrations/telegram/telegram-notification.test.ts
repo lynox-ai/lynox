@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { NotificationMessage } from '../../core/notification-router.js';
-import {
-  TelegramNotificationChannel,
-  getTaskInquiry,
-  clearTaskInquiry,
-} from './telegram-notification.js';
+import { TelegramNotificationChannel } from './telegram-notification.js';
+import { getTaskInquiry, clearTaskInquiry } from './telegram-callbacks.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

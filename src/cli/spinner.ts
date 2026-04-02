@@ -44,5 +44,3 @@ export class Spinner {
     return this.timer !== null;
   }
 }
-
-export const PROMPT_READY = `${GREEN}❯${RESET} `;

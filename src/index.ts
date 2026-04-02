@@ -48,13 +48,11 @@ export { planDAG, estimatePipelineCost } from './core/dag-planner.js';
 export type { DagPlanResult } from './core/dag-planner.js';
 export { spawnInline, spawnPipeline, resolveModel } from './orchestrator/runtime-adapter.js';
 export { retryManifest } from './orchestrator/runner.js';
-export { DagVisualizer } from './cli/dag-visualizer.js';
-export type { StepStatus, DagVisualizerOptions } from './cli/dag-visualizer.js';
 export type { InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, SecretStoreLike, SecretEntry, SecretScope } from './types/index.js';
 export { SecretStore, SECRET_REF_PATTERN } from './core/secret-store.js';
 export { SecretVault, estimateKeyEntropy } from './core/secret-vault.js';
 export type { VaultEntry, VaultOptions } from './core/secret-vault.js';
-export { resolveActiveScopes, resolveWriteScope, scopeWeight, scopeToDir, parseScopeString, formatScopeRef, isMoreSpecific, inferScopeFromContext, SCOPE_ORDER, SEMANTIC_OVERRIDE_THRESHOLD, buildEmbeddingsMap } from './core/scope-resolver.js';
+export { resolveActiveScopes, scopeWeight, scopeToDir, parseScopeString, formatScopeRef, isMoreSpecific, inferScopeFromContext, SCOPE_ORDER, SEMANTIC_OVERRIDE_THRESHOLD } from './core/scope-resolver.js';
 export type { ScopeContext, ScopeOverride } from './core/scope-resolver.js';
 export { classifyScope } from './core/scope-classifier.js';
 export type { ScopeClassification } from './types/index.js';
@@ -62,8 +60,6 @@ export { runMemoryGc } from './core/memory-gc.js';
 export { TaskManager } from './core/task-manager.js';
 export type { TaskCreateParams, TaskUpdateParams, WeekSummary } from './core/task-manager.js';
 export type { GcOptions, GcResult } from './core/memory-gc.js';
-export { showApprovalDialog, autoApproveDefaults } from './cli/approval-dialog.js';
-export type { ApprovalDialogResult } from './cli/approval-dialog.js';
 export { detectProjectRoot } from './core/project.js';
 export type { ProjectInfo } from './core/project.js';
 export { resolveContext } from './core/context.js';
@@ -109,33 +105,19 @@ export {
 } from './core/sentry.js';
 
 // === ToolContext ===
-export { createToolContext, applyNetworkPolicy, applyHttpRateLimits } from './core/tool-context.js';
+export { createToolContext } from './core/tool-context.js';
 
 // === Utilities needed by Pro ===
 export { writeFileAtomicSync, ensureDirSync, ensureDir } from './core/atomic-write.js';
 export { getErrorMessage, sleep } from './core/utils.js';
 export { renderTable } from './cli/ui.js';
 export { ChangesetManager } from './core/changeset.js';
-export { reviewChangeset } from './cli/changeset-review.js';
 export { planTaskTool } from './tools/builtin/plan-task.js';
 export { RESET, BOLD, DIM, RED, GREEN, BLUE, MAGENTA, GRAY, stripAnsi } from './cli/ansi.js';
 
-// === Tool knobs for tenant isolation enforcement ===
-export { setNetworkPolicy, clearNetworkPolicy } from './tools/builtin/http.js';
-export { setIsolationEnv, clearIsolationEnv } from './tools/builtin/bash.js';
-export { setTenantWorkspace, clearTenantWorkspace, ensureContextWorkspace } from './core/workspace.js';
+// === Workspace ===
+export { setTenantWorkspace, ensureContextWorkspace } from './core/workspace.js';
 
-// === CLI Command Registry (no-op, REPL removed — kept for backward compatibility) ===
-
-export type SlashCommandHandler = (
-  parts: string[],
-  session: import('./core/session.js').Session,
-  ctx: { stdout: NodeJS.WriteStream },
-) => Promise<boolean>;
-
-export function registerCommand(_name: string, _handler: SlashCommandHandler): void {
-  // No-op: interactive REPL has been removed. Slash commands are no longer supported.
-}
 
 // === CLI ===
 

@@ -181,9 +181,6 @@ export function getLynoxDir(): string {
   return getUserConfigDir();
 }
 
-export function getProjectLynoxDir(): string {
-  return getProjectConfigDir();
-}
 
 export function ensureLynoxDir(): string {
   const dir = getUserConfigDir();

@@ -9,14 +9,10 @@ import type {
 } from '../../core/notification-router.js';
 import {
   setTaskFollowUps,
-  getTaskFollowUp,
   setTaskInquiry,
   getTaskInquiry,
   clearTaskInquiry,
 } from './telegram-callbacks.js';
-
-// Re-export for backward compatibility (telegram-bot.ts dynamic imports)
-export { getTaskFollowUp, getTaskInquiry, clearTaskInquiry };
 
 // ---------------------------------------------------------------------------
 // Minimal bot interface (matches Telegraf instance shape)

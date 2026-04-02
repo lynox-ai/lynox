@@ -86,11 +86,6 @@ export interface ProcessRecord {
 export type TaskStatus = 'open' | 'in_progress' | 'completed';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
-export type TaskAssignee = 'user' | 'lynox' | string;
-
-export type TaskType = 'manual' | 'scheduled' | 'watch';
-export type TaskRunStatus = 'success' | 'failed' | 'timeout';
-
 export interface TaskRecord {
   id: string;
   title: string;

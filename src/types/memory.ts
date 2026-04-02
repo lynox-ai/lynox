@@ -19,7 +19,6 @@ export interface LynoxContext {
 // === Memory Scopes ===
 
 export type MemoryScopeType = 'global' | 'context' | 'user';
-export const SCOPE_TYPE_SET: ReadonlySet<MemoryScopeType> = new Set(['global', 'context', 'user']);
 
 export interface MemoryScopeRef {
   type: MemoryScopeType;
@@ -61,9 +60,6 @@ export interface IMemory {
 // === Knowledge Graph ===
 
 export type EntityType = 'person' | 'organization' | 'project' | 'product' | 'concept' | 'location' | 'collection';
-export const ENTITY_TYPE_SET: ReadonlySet<EntityType> = new Set([
-  'person', 'organization', 'project', 'product', 'concept', 'location', 'collection',
-]);
 
 /** Namespace-specific temporal decay half-lives in days. */
 export const NAMESPACE_HALF_LIFE: Record<MemoryNamespace, number> = {

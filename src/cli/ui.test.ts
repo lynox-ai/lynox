@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import {
-  wordWrap,
   renderBanner,
   renderToolCall,
   renderToolResult,
@@ -11,6 +10,7 @@ import {
   renderTable,
   RESET, BOLD, DIM, RED, GREEN, MAGENTA, BLUE, GRAY,
 } from './ui.js';
+import { wordWrap } from './ansi.js';
 
 describe('wordWrap', () => {
   it('wraps text at specified width', () => {

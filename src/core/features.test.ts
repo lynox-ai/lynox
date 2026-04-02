@@ -7,7 +7,6 @@ describe('features', () => {
   const envVars = [
     'LYNOX_FEATURE_TRIGGERS',
     'LYNOX_FEATURE_PLUGINS',
-    'LYNOX_FEATURE_WORKER_POOL',
     'LYNOX_FEATURE_CUSTOM',
   ];
 
@@ -33,7 +32,6 @@ describe('features', () => {
   describe('isFeatureEnabled', () => {
     it('returns correct defaults for core flags', () => {
       expect(isFeatureEnabled('plugins')).toBe(true);
-      expect(isFeatureEnabled('worker-pool')).toBe(false);
     });
 
     it('returns true when env var set to "1"', () => {
@@ -51,11 +49,6 @@ describe('features', () => {
       expect(isFeatureEnabled('plugins')).toBe(false);
     });
 
-    it('returns false when env var set to "false"', () => {
-      process.env['LYNOX_FEATURE_WORKER_POOL'] = 'false';
-      expect(isFeatureEnabled('worker-pool')).toBe(false);
-    });
-
     it('returns false for unknown flag', () => {
       expect(isFeatureEnabled('nonexistent')).toBe(false);
     });
@@ -67,7 +60,6 @@ describe('features', () => {
 
       const flags = getFeatureFlags();
       expect(flags['plugins']).toBe(true);
-      expect(flags['worker-pool']).toBe(false);
     });
 
     it('includes dynamic flags', () => {
@@ -82,7 +74,6 @@ describe('features', () => {
   describe('getFeatureEnvVar', () => {
     it('returns correct env var name for core flags', () => {
       expect(getFeatureEnvVar('plugins')).toBe('LYNOX_FEATURE_PLUGINS');
-      expect(getFeatureEnvVar('worker-pool')).toBe('LYNOX_FEATURE_WORKER_POOL');
     });
 
     it('returns undefined for unknown flag', () => {

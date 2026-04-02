@@ -1,7 +1,6 @@
 // === Autonomy & Tool Display ===
 
 export type AutonomyLevel = 'supervised' | 'guided' | 'autonomous';
-export const AUTONOMY_LEVEL_SET: ReadonlySet<AutonomyLevel> = new Set(['supervised', 'guided', 'autonomous']);
 
 /** Customer-facing display names for tools (internal -> user-visible) */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
