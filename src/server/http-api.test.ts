@@ -129,6 +129,7 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
 beforeAll(async () => {
   vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
   vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+  vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
   api = new LynoxHTTPApi();
   await api.init();
   await api.start(TEST_PORT);

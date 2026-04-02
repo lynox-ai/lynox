@@ -36,7 +36,12 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
   const setupMode = !allowedChatIds || allowedChatIds.length === 0;
   if (setupMode) {
     if (process.env['LYNOX_TELEGRAM_OPEN_ACCESS'] === 'true') {
-      process.stderr.write('\n⚠ SECURITY WARNING: LYNOX_TELEGRAM_OPEN_ACCESS=true — bot is accessible to ALL Telegram users.\n  Set TELEGRAM_ALLOWED_CHAT_IDS env var to restrict access.\n\n');
+      process.stderr.write(
+        '\n🛑 LYNOX_TELEGRAM_OPEN_ACCESS is no longer supported.\n'
+        + '  Open access gives every Telegram user full engine access (bash, files, memory).\n'
+        + '  Set TELEGRAM_ALLOWED_CHAT_IDS instead. Start the bot without it to see your chat ID.\n\n',
+      );
+      throw new Error('LYNOX_TELEGRAM_OPEN_ACCESS removed for security. Use TELEGRAM_ALLOWED_CHAT_IDS.');
     } else {
       // Setup mode: show chat ID to any user, don't process tasks
       process.stderr.write('\nLYNOX Telegram: Setup mode — no TELEGRAM_ALLOWED_CHAT_IDS configured.\n  Bot will show chat IDs to users. Set the IDs and restart.\n\n');

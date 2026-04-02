@@ -107,7 +107,7 @@ export class SecretVault {
     this._migrate();
 
     // Derive encryption key
-    const passphrase = options?.masterKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
+    const passphrase = options?.masterKey ?? process.env['LYNOX_VAULT_KEY'];
     if (!passphrase) {
       throw new Error(
         'Vault master key required. Set LYNOX_VAULT_KEY env var or pass masterKey option.',

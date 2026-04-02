@@ -257,6 +257,16 @@ export class LynoxHTTPApi {
 
     const host = secret ? '0.0.0.0' : '127.0.0.1';
     const protocol = useTls ? 'https' : 'http';
+
+    // Refuse to expose auth tokens in plaintext unless explicitly allowed
+    if (secret && !useTls && process.env['LYNOX_ALLOW_PLAIN_HTTP'] !== 'true') {
+      throw new Error(
+        'Refusing to bind HTTP API on 0.0.0.0 without TLS — Bearer tokens would be sent in plaintext.\n'
+        + 'Fix: set LYNOX_TLS_CERT + LYNOX_TLS_KEY, use a TLS reverse proxy, '
+        + 'or set LYNOX_ALLOW_PLAIN_HTTP=true to override.',
+      );
+    }
+
     this.server.listen(port, host, () => {
       const authStatus = secret ? '(auth enabled)' : '(localhost only)';
       process.stderr.write(`LYNOX HTTP API listening on ${protocol}://${host}:${port} ${authStatus}\n`);
@@ -264,7 +274,7 @@ export class LynoxHTTPApi {
         process.stderr.write(`  IP allowlist: ${ALLOWED_IPS.join(', ')}\n`);
       }
       if (secret && !useTls) {
-        process.stderr.write(`Warning: HTTP API exposed without TLS. Use LYNOX_TLS_CERT + LYNOX_TLS_KEY or a reverse proxy.\n`);
+        process.stderr.write(`⚠ Warning: HTTP API exposed without TLS (LYNOX_ALLOW_PLAIN_HTTP=true). Use a reverse proxy.\n`);
       }
     });
 
@@ -323,9 +333,11 @@ export class LynoxHTTPApi {
 
     // CORS — restrict to allowed origins (or allow all for localhost-only mode)
     const requestOrigin = req.headers['origin'] ?? '';
+    // Localhost origins accepted in no-auth mode; with auth require explicit LYNOX_ALLOWED_ORIGINS
+    const isLocalhostOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(requestOrigin);
     const corsOrigin = ALLOWED_ORIGINS.length > 0
       ? (ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
-      : (secret ? '' : '*'); // no secret = localhost-only = allow all; with secret = require explicit whitelist
+      : (secret ? '' : (isLocalhostOrigin ? requestOrigin : ''));
 
     if (method === 'OPTIONS') {
       res.writeHead(204, {
@@ -1254,9 +1266,11 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Already detected
+      // Already detected — return result and clear sensitive token from memory
       if (tgSetup.chatId !== null) {
-        jsonResponse(res, 200, { status: 'detected', chatId: tgSetup.chatId, firstName: tgSetup.firstName });
+        const { chatId, firstName } = tgSetup;
+        tgSetup = null;
+        jsonResponse(res, 200, { status: 'detected', chatId, firstName });
         return;
       }
 

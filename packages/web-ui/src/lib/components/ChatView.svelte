@@ -1256,7 +1256,9 @@
 
 			{#if chatError}
 				<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
-					<span class="flex-1">{@html chatError.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="underline hover:opacity-80">$1</a>')}</span>
+					<span class="flex-1">{@html chatError
+						.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+						.replace(/\[([^\]]+)\]\(((https?:\/\/)[^)]+)\)/g, '<a href="$2" class="underline hover:opacity-80">$1</a>')}</span>
 					<div class="flex items-center gap-2 shrink-0">
 						{#if chatErrorDetail}
 							<button onclick={async () => { await navigator.clipboard.writeText(chatErrorDetail ?? ''); addToast(t('chat.error_copy_detail'), 'success', 1500); }} class="text-xs opacity-60 hover:opacity-100" title={t('chat.error_copy_detail')}>

@@ -72,7 +72,7 @@ function createMockEngine() {
 describe('telegram-bot', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env['LYNOX_TELEGRAM_OPEN_ACCESS'] = 'true';
+    delete process.env['LYNOX_TELEGRAM_OPEN_ACCESS'];
   });
 
   afterEach(() => {
@@ -82,7 +82,7 @@ describe('telegram-bot', () => {
   it('creates bot and registers handlers', async () => {
     const engine = createMockEngine();
 
-    await startTelegramBot({ token: 'test-token', engine: engine as never });
+    await startTelegramBot({ token: 'test-token', allowedChatIds: [123], engine: engine as never });
 
     // Should register commands
     expect(mockCommand).toHaveBeenCalledWith('start', expect.any(Function));
@@ -117,19 +117,16 @@ describe('telegram-bot', () => {
     await stopTelegramBot();
   });
 
-  it('does not set up allowlist middleware with LYNOX_TELEGRAM_OPEN_ACCESS', async () => {
+  it('rejects LYNOX_TELEGRAM_OPEN_ACCESS with error', async () => {
+    process.env['LYNOX_TELEGRAM_OPEN_ACCESS'] = 'true';
     const engine = createMockEngine();
 
-    await startTelegramBot({ token: 'test-token', engine: engine as never });
-
-    // Should not register allowlist middleware (open access mode)
-    expect(mockUse).not.toHaveBeenCalled();
-
-    await stopTelegramBot();
+    await expect(
+      startTelegramBot({ token: 'test-token', engine: engine as never }),
+    ).rejects.toThrow('LYNOX_TELEGRAM_OPEN_ACCESS removed for security');
   });
 
   it('starts in setup mode without allowedChatIds', async () => {
-    delete process.env['LYNOX_TELEGRAM_OPEN_ACCESS'];
     const engine = createMockEngine();
 
     // Should NOT throw — starts in setup mode instead
@@ -140,7 +137,7 @@ describe('telegram-bot', () => {
   it('stopTelegramBot calls bot.stop()', async () => {
     const engine = createMockEngine();
 
-    await startTelegramBot({ token: 'test-token', engine: engine as never });
+    await startTelegramBot({ token: 'test-token', allowedChatIds: [123], engine: engine as never });
     await stopTelegramBot();
 
     expect(mockStop).toHaveBeenCalledWith('shutdown');
@@ -151,7 +148,7 @@ describe('telegram-bot', () => {
 
     const removeListenerSpy = vi.spyOn(process, 'removeListener');
 
-    await startTelegramBot({ token: 'test-token', engine: engine as never });
+    await startTelegramBot({ token: 'test-token', allowedChatIds: [123], engine: engine as never });
     await stopTelegramBot();
 
     expect(removeListenerSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
@@ -165,9 +162,9 @@ describe('telegram-bot', () => {
 
     const sigintBefore = process.listenerCount('SIGINT');
 
-    await startTelegramBot({ token: 'test-token', engine: engine as never });
+    await startTelegramBot({ token: 'test-token', allowedChatIds: [123], engine: engine as never });
     await stopTelegramBot();
-    await startTelegramBot({ token: 'test-token', engine: engine as never });
+    await startTelegramBot({ token: 'test-token', allowedChatIds: [123], engine: engine as never });
     await stopTelegramBot();
 
     expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
@@ -176,7 +173,7 @@ describe('telegram-bot', () => {
   it('registers callback_query handler that supports follow-up type', async () => {
     const engine = createMockEngine();
 
-    await startTelegramBot({ token: 'test-token', engine: engine as never });
+    await startTelegramBot({ token: 'test-token', allowedChatIds: [123], engine: engine as never });
 
     // callback_query handler should be registered
     expect(mockOn).toHaveBeenCalledWith('callback_query', expect.any(Function));
