@@ -5,13 +5,13 @@ let current = $state<Locale>('de');
 const translations: Record<string, Record<Locale, string>> = {
 	// Nav
 	'nav.chat': { de: 'Chat', en: 'Chat' },
-	'nav.knowledge': { de: 'Knowledge', en: 'Knowledge' },
-	'nav.settings': { de: 'Settings', en: 'Settings' },
+	'nav.knowledge': { de: 'Wissen', en: 'Knowledge' },
+	'nav.settings': { de: 'Einstellungen', en: 'Settings' },
 	'nav.new_chat': { de: 'Neuer Chat', en: 'New Chat' },
-	'nav.artifacts': { de: 'Artifacts', en: 'Artifacts' },
+	'nav.artifacts': { de: 'Artefakte', en: 'Artifacts' },
 
 	// Artifacts
-	'artifacts.title': { de: 'Artifacts', en: 'Artifacts' },
+	'artifacts.title': { de: 'Artefakte', en: 'Artifacts' },
 	'artifacts.items': { de: 'Einträge', en: 'items' },
 	'artifacts.loading': { de: 'Lade Artifacts...', en: 'Loading artifacts...' },
 	'artifacts.empty': { de: 'Noch keine Artifacts gespeichert. Der Agent erstellt hier Dashboards, Diagramme und Reports.', en: 'No saved artifacts yet. The agent creates dashboards, diagrams, and reports here.' },
@@ -33,6 +33,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.error_delete': { de: 'Thread konnte nicht gelöscht werden', en: 'Failed to delete thread' },
 	'threads.error_rename': { de: 'Thread konnte nicht umbenannt werden', en: 'Failed to rename thread' },
 	'threads.error_favorite': { de: 'Favorit konnte nicht geändert werden', en: 'Failed to update favorite' },
+	'threads.rename': { de: 'Umbenennen', en: 'Rename' },
+	'threads.delete': { de: 'Löschen', en: 'Delete' },
+	'threads.confirm_delete': { de: 'Thread endgültig löschen?', en: 'Permanently delete this thread?' },
 
 	// Command Palette
 	'cmd.placeholder': { de: 'Suche oder Aktion...', en: 'Search or action...' },
@@ -51,9 +54,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.desc.knowledge': { de: 'Was lynox sich merkt', en: 'What lynox remembers' },
 	'nav.desc.contacts': { de: 'Deine Kunden und Deals (Beta)', en: 'Your clients and deals (beta)' },
 	'nav.desc.artifacts': { de: 'Dashboards, Diagramme, Reports', en: 'Dashboards, diagrams, reports' },
-	'nav.activity': { de: 'Activity', en: 'Activity' },
+	'nav.activity': { de: 'Aktivität', en: 'Activity' },
 	'nav.desc.activity': { de: 'Runs, Kosten, Aufgaben', en: 'Runs, costs, tasks' },
-	'nav.workflows': { de: 'Workflows', en: 'Workflows' },
+	'nav.workflows': { de: 'Abläufe', en: 'Workflows' },
 	'nav.desc.workflows': { de: 'Pipelines und Automatisierungen', en: 'Pipelines and automations' },
 
 	// Hub tabs
@@ -106,6 +109,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow.avg_cost': { de: 'Avg. Kosten', en: 'Avg. cost' },
 	'workflow.avg_duration': { de: 'Avg. Dauer', en: 'Avg. duration' },
 	'workflow.runs': { de: 'Runs', en: 'Runs' },
+	'workflow.run': { de: 'Run', en: 'Run' },
 	'workflow.step_performance': { de: 'Step-Performance', en: 'Step Performance' },
 	'workflow.step': { de: 'Step', en: 'Step' },
 	'workflow.workflow_name': { de: 'Workflow', en: 'Workflow' },
@@ -176,7 +180,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'backups.restore': { de: 'Wiederherstellen', en: 'Restore' },
 	'backups.restoring': { de: 'Wiederherstellen...', en: 'Restoring...' },
 	'backups.restore_confirm': { de: 'Dieses Backup wirklich wiederherstellen? Ein Sicherheits-Backup wird vorher erstellt.', en: 'Restore this backup? A safety backup will be created first.' },
-	'backups.restore_success': { de: 'Backup wiederhergestellt. Bitte Engine neu starten.', en: 'Backup restored. Please restart the engine.' },
+	'backups.restore_success': { de: 'Backup wiederhergestellt. Engine wird neu gestartet…', en: 'Backup restored. Engine restarting…' },
 	'backups.restore_failed': { de: 'Wiederherstellung fehlgeschlagen.', en: 'Restore failed.' },
 	'backups.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'backups.settings': { de: 'Backup-Einstellungen', en: 'Backup settings' },
@@ -202,6 +206,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.engine_ok': { de: 'Engine OK', en: 'Engine OK' },
 	'status.engine_error': { de: 'Engine Fehler', en: 'Engine Error' },
 	'status.api_ok': { de: 'API OK', en: 'API OK' },
+	'status.api_key_invalid': { de: 'API-Schlüssel ungültig', en: 'API Key Invalid' },
 	'status.api_degraded': { de: 'API beeinträchtigt', en: 'API degraded' },
 	'status.api_down': { de: 'API Störung', en: 'API down' },
 	'status.api_unknown': { de: 'API ?', en: 'API ?' },
@@ -232,6 +237,11 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	'common.ok': { de: 'OK', en: 'OK' },
 
+	// Setup Banner
+	'banner.api_key_missing': { de: 'Kein API-Schlüssel konfiguriert — KI-Antworten sind deaktiviert.', en: 'No API key configured — AI responses are disabled.' },
+	'banner.api_key_action': { de: 'API Key einrichten', en: 'Configure API Key' },
+	'banner.dismiss': { de: 'Ausblenden', en: 'Dismiss' },
+
 	// Chat errors
 	'chat.error_start': { de: 'Etwas ist schiefgelaufen. Versuche es nochmal oder prüfe die [Einstellungen](/app/settings).', en: 'Something went wrong. Try again or check your [settings](/app/settings).' },
 	'chat.error_auth': { de: 'Dein API-Schlüssel ist ungültig oder abgelaufen. [Einstellungen öffnen](/app/settings)', en: 'Your API key is invalid or expired. [Open settings](/app/settings)' },
@@ -244,7 +254,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_model_unavailable': { de: 'Das gewählte KI-Modell ist nicht verfügbar. Prüfe die [Einstellungen](/app/settings).', en: 'The selected AI model is not available. Check your [settings](/app/settings).' },
 	'chat.error_context_length': { de: 'Die Konversation ist zu lang. Starte einen neuen Chat.', en: 'The conversation is too long. Start a new chat.' },
 	'chat.error_offline': { de: 'Keine Internetverbindung. Stelle die Verbindung wieder her und versuche es nochmal.', en: 'No internet connection. Reconnect and try again.' },
-	'chat.error_copy_detail': { de: 'Fehlerdetails kopiert', en: 'Error details copied' },
+	'chat.error_copy_detail': { de: 'Fehlerdetails kopieren', en: 'Copy error details' },
 	'chat.retry': { de: 'Wiederhole… Versuch {attempt}/{max}', en: 'Retrying… attempt {attempt}/{max}' },
 
 	// Chat

@@ -4,10 +4,11 @@
 	import { onMount } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { newChat, resumeThread, getSessionId } from '../stores/chat.svelte.js';
-	import { loadThreads, getThreads, archiveThread, toggleFavorite, onActiveThreadRemoved } from '../stores/threads.svelte.js';
+	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 	import StatusBar from './StatusBar.svelte';
+	import SetupBanner from './SetupBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
 	import type { Snippet } from 'svelte';
@@ -22,6 +23,28 @@
 	let swipedThreadId = $state<string | null>(null);
 	let dragStartX = 0;
 	let dragNode: HTMLElement | null = null;
+	let renamingThreadId = $state<string | null>(null);
+	let renameValue = $state('');
+
+	function startRename(threadId: string, currentTitle: string) {
+		renamingThreadId = threadId;
+		renameValue = currentTitle;
+	}
+	async function commitRename(threadId: string) {
+		const trimmed = renameValue.trim();
+		if (trimmed && renamingThreadId === threadId) {
+			await renameThread(threadId, trimmed);
+		}
+		renamingThreadId = null;
+	}
+	function cancelRename() {
+		renamingThreadId = null;
+	}
+	async function confirmDelete(threadId: string) {
+		if (confirm(t('threads.confirm_delete'))) {
+			await deleteThread(threadId, getSessionId());
+		}
+	}
 
 	function closeSwipe() {
 		if (!swipedThreadId) return;
@@ -303,12 +326,24 @@
 														? 'bg-accent/10 text-accent-text'
 														: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 												>
+													{#if renamingThreadId === thread.id}
+													<input
+														type="text"
+														bind:value={renameValue}
+														onblur={() => commitRename(thread.id)}
+														onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') commitRename(thread.id); if (e.key === 'Escape') cancelRename(); }}
+														class="flex-1 px-2 py-1.5 text-sm bg-bg border border-accent/40 rounded-[var(--radius-sm)] outline-none text-text"
+														autofocus
+													/>
+												{:else}
 													<button
 														onclick={() => { if (swipedThreadId) { closeSwipe(); return; } selectThread(thread.id); }}
+														ondblclick={() => startRename(thread.id, thread.title || formatThreadDate(thread.created_at))}
 														class="flex-1 text-left px-2 py-2 text-sm truncate"
 													>
 														{thread.title || formatThreadDate(thread.created_at)}
 													</button>
+												{/if}
 													{#if thread.is_favorite}
 														<span class="text-accent text-xs shrink-0 pr-1 group-hover:hidden">&#9733;</span>
 													{:else}
@@ -325,7 +360,16 @@
 														onclick={(e: MouseEvent) => { e.stopPropagation(); void archiveThread(thread.id, getSessionId()); }}
 														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"
 														aria-label={t('threads.archive')}
+														title={t('threads.archive')}
 													>&times;</button>
+													<button
+														onclick={(e: MouseEvent) => { e.stopPropagation(); void confirmDelete(thread.id); }}
+														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"
+														aria-label={t('threads.delete')}
+														title={t('threads.delete')}
+													>
+														<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
+													</button>
 												</div>
 											</li>
 										{/each}
@@ -405,6 +449,9 @@
 					{/if}
 				</div>
 			</header>
+
+			<!-- Setup warnings -->
+			<SetupBanner />
 
 			<!-- Main Content -->
 			<main class="flex-1 min-w-0 flex flex-col overflow-hidden">

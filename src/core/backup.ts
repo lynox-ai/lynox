@@ -233,17 +233,15 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
     }
 
-    // Safety: create backup of current state before restore
-    const safetyBackup = await this.createBackup();
-    if (!safetyBackup.success) {
-      return {
-        success: false,
-        pre_restore_backup_path: '',
-        files_restored: 0,
-        duration_ms: Date.now() - start,
-        error: `Cannot create safety backup before restore: ${safetyBackup.error ?? 'unknown'}`,
-      };
-    }
+    // Safety: attempt backup of current state before restore (best-effort, don't block restore on failure)
+    let safetyPath = '';
+    try {
+      const safetyBackup = await this.createBackup();
+      if (safetyBackup.success) {
+        safetyPath = safetyBackup.path;
+      }
+      // If safety backup fails (e.g. corrupted DB from previous failed restore), proceed anyway
+    } catch { /* safety backup is best-effort */ }
 
     try {
       let filesRestored = 0;
@@ -272,14 +270,14 @@ export class BackupManager {
 
       return {
         success: true,
-        pre_restore_backup_path: safetyBackup.path,
+        pre_restore_backup_path: safetyPath,
         files_restored: filesRestored,
         duration_ms: Date.now() - start,
       };
     } catch (err: unknown) {
       return {
         success: false,
-        pre_restore_backup_path: safetyBackup.path,
+        pre_restore_backup_path: safetyPath,
         files_restored: 0,
         duration_ms: Date.now() - start,
         error: err instanceof Error ? err.message : String(err),

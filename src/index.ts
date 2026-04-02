@@ -605,34 +605,43 @@ Docs: https://docs.lynox.dev
     return;
   }
 
-  // === Default: Engine HTTP API + Web UI ===
+  // === Default: Engine HTTP API (+ Web UI if available) ===
   if (stdin.isTTY) {
     if (!hasApiKey()) {
       stderr.write('No API key configured. Run "lynox init" to set up.\n');
       process.exit(1);
     }
     const { LynoxHTTPApi } = await import('./server/http-api.js');
-    const rawPort = parseInt(process.env['LYNOX_HTTP_PORT'] ?? '3100', 10);
-    const port = Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : 3100;
     const api = new LynoxHTTPApi();
     await api.init();
+
+    // Default port: 3000 when Web UI is embedded, 3100 for API-only
+    const defaultPort = api.hasWebUi() ? 3000 : 3100;
+    const rawPort = parseInt(process.env['LYNOX_HTTP_PORT'] ?? String(defaultPort), 10);
+    const port = Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : defaultPort;
     await api.start(port);
 
-    const webUiUrl = process.env['LYNOX_WEBUI_URL'] ?? 'http://localhost:5173';
+    const url = `http://localhost:${port}`;
 
     stderr.write(`\n  ${BOLD}lynox${RESET} ${DIM}v${pkg.version}${RESET}\n`);
-    stderr.write(`  ${DIM}Engine API:${RESET}  http://127.0.0.1:${port}\n`);
-    stderr.write(`  ${DIM}Web UI:${RESET}     ${webUiUrl}\n`);
+    if (api.hasWebUi()) {
+      stderr.write(`  ${DIM}Web UI + API:${RESET}  ${url}\n`);
+    } else {
+      stderr.write(`  ${DIM}Engine API:${RESET}    ${url}\n`);
+      stderr.write(`  ${DIM}(Web UI not found — run \`cd packages/web-ui && pnpm run build\` first)${RESET}\n`);
+    }
     stderr.write(`  ${DIM}Press Ctrl+C to stop.${RESET}\n\n`);
 
     // Open browser (best-effort, no shell injection via execFile)
-    try {
-      const { execFile } = await import('node:child_process');
-      const cmd = process.platform === 'darwin' ? 'open'
-        : process.platform === 'win32' ? 'start'
-        : 'xdg-open';
-      execFile(cmd, [webUiUrl], () => { /* ignore errors */ });
-    } catch { /* best-effort */ }
+    if (api.hasWebUi()) {
+      try {
+        const { execFile } = await import('node:child_process');
+        const cmd = process.platform === 'darwin' ? 'open'
+          : process.platform === 'win32' ? 'start'
+          : 'xdg-open';
+        execFile(cmd, [url], () => { /* ignore errors */ });
+      } catch { /* best-effort */ }
+    }
 
     // Graceful shutdown
     let shuttingDown = false;

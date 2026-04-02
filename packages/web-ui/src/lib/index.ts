@@ -53,6 +53,7 @@ export {
 	getIsStreaming,
 	getPendingPermission,
 	getChatError,
+	getAuthError,
 	clearError,
 	getSessionModel,
 	getContextWindow,

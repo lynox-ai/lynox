@@ -49,11 +49,10 @@ SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component l
 - `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume, interleaved ContentBlock rendering (text + tool_call blocks in chronological order)
 - `src/lib/stores/threads.svelte.ts` — Thread list store (load, archive, delete, rename)
 - `src/lib/stores/artifacts.svelte.ts` — Artifact gallery store (save, load, delete)
-- `src/lib/config.svelte.ts` — configurable `apiBase` (/api/engine for standalone, /api/proxy for cloud)
+- `src/lib/config.svelte.ts` — configurable `apiBase` (/api for standalone, /api/proxy for cloud)
 - `src/lib/i18n.svelte.ts` — DE/EN translations (reactive, runtime switchable)
 - `src/lib/index.ts` — barrel export for library consumers
 - `src/routes/` — standalone app routes (thin wrappers around View components)
-- `src/routes/api/engine/[...path]/` — proxy to Engine HTTP API (single-user, no auth)
 
 **Chat rendering:** Tool calls render as user-facing inline text (e.g. "Daten abgefragt: revenue") interleaved with markdown content in chronological order via `ContentBlock[]`. Artifacts defer iframe rendering during streaming (syntax-highlighted code shown instead) to prevent flicker. PipelineProgress shows as a sticky bar above the input during workflow execution.
 
@@ -110,5 +109,7 @@ Healthcheck: `GET /health` → `{"status":"ok"}` on MCP port.
 Hardened: no bash, no apt, no perl, no SUID, read-only root.
 
 **Engine + Web UI** (`Dockerfile.web-ui`): Combined image for self-hosted single-user deployment.
-Entrypoint: entrypoint-webui.sh (starts Engine --http-api + SvelteKit web-ui).
+Single process: Engine HTTP API auto-loads SvelteKit handler as fallback for non-API routes.
+Entrypoint: entrypoint-webui.sh (env setup, then `exec node dist/index.js --http-api`).
+Web UI handler resolved from `/app/web-ui/handler.js` (adapter-node export).
 `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui`

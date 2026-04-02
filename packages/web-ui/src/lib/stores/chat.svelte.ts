@@ -131,6 +131,7 @@ let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: strin
 let secretPromptGeneration = $state(0);
 let chatError = $state<string | null>(null);
 let chatErrorDetail = $state<string | null>(null);
+let authError = $state(false);
 let messageQueue = $state<QueuedMessage[]>([]);
 let sessionModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
@@ -207,8 +208,10 @@ export async function sendMessage(task: string, files?: FileAttachment[]): Promi
 function mapApiError(status: number, detail: string): string {
 	const lower = detail.toLowerCase();
 	if (status === 409) return t('chat.error_busy');
-	if (status === 401 || lower.includes('authentication') || lower.includes('invalid_api_key') || lower.includes('invalid x-api-key'))
+	if (status === 401 || lower.includes('authentication') || lower.includes('invalid_api_key') || lower.includes('invalid x-api-key')) {
+		authError = true;
 		return t('chat.error_auth');
+	}
 	if (lower.includes('insufficient_quota') || lower.includes('billing') || lower.includes('credit'))
 		return t('chat.error_insufficient_quota');
 	if (lower.includes('content_policy') || lower.includes('content policy') || lower.includes('safety'))
@@ -681,6 +684,9 @@ export function getChatError() {
 export function getChatErrorDetail() {
 	return chatErrorDetail;
 }
+export function getAuthError() {
+	return authError;
+}
 export function getSessionModel() {
 	return sessionModel;
 }
@@ -699,6 +705,7 @@ export function getIsOffline() {
 export function clearError() {
 	chatError = null;
 	chatErrorDetail = null;
+	authError = false;
 }
 export function getPendingChangeset() {
 	return pendingChangeset;

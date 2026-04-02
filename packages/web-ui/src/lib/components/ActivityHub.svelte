@@ -164,9 +164,9 @@
 
 					<!-- Cost Chart (14 days) -->
 					{#if costDays.length > 0}
-						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
+						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 overflow-hidden">
 							<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle mb-3">{t('hub.activity.cost_chart')}</p>
-							<div class="flex gap-1 h-24">
+							<div class="flex gap-0.5 sm:gap-1 h-24 overflow-x-auto scrollbar-none">
 								{#each costDays as day (day.day)}
 									<div class="flex-1 flex flex-col items-center gap-1 group relative">
 										<div class="flex-1 w-full flex items-end">

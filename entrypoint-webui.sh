@@ -1,6 +1,27 @@
 #!/bin/sh
 set -e
 
+# ── Pre-flight: verify volume mount ──────────────────────────
+# Without a volume mount, the vault key and all data are lost on restart.
+PREFLIGHT_FILE="$HOME/.lynox/.volume-check"
+if printf 'ok' > "$PREFLIGHT_FILE" 2>/dev/null && [ -f "$PREFLIGHT_FILE" ]; then
+  rm -f "$PREFLIGHT_FILE"
+else
+  echo "" >&2
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
+  echo "  WARNING: Volume mount not detected or not writable!" >&2
+  echo "  Data will be LOST when this container restarts." >&2
+  echo "" >&2
+  echo "  Add to your docker run command:" >&2
+  echo "    -v ~/.lynox:/home/lynox/.lynox" >&2
+  echo "" >&2
+  echo "  Or in docker-compose.yml:" >&2
+  echo "    volumes:" >&2
+  echo "      - \${HOME}/.lynox:/home/lynox/.lynox" >&2
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
+  echo "" >&2
+fi
+
 # Load vault key from .env if it exists
 ENV_FILE="$HOME/.lynox/.env"
 if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; then
@@ -15,7 +36,7 @@ if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; 
   esac
 fi
 
-# Auto-generate access token if not set (Docker always exposes port 3000)
+# Auto-generate access token if not set
 if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
   export LYNOX_HTTP_SECRET
@@ -36,7 +57,6 @@ fi
 if [ -z "${LYNOX_VAULT_KEY:-}" ]; then
   LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64'))")
   export LYNOX_VAULT_KEY
-  # Persist to volume so it survives restarts
   mkdir -p "$HOME/.lynox"
   printf 'LYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
@@ -61,38 +81,14 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   fi
 fi
 
-# Warn if data directories are not writable (Docker named volumes may be root-owned)
+# Warn if data directories are not writable
 for dir in "$HOME/.lynox" "$HOME/.cache/huggingface"; do
   if [ ! -w "$dir" ] 2>/dev/null; then
     echo "Warning: $dir is not writable by user $(id -u). Data persistence may fail." >&2
   fi
 done
 
-# Start Engine HTTP API in background
-LYNOX_HTTP_PORT="${LYNOX_HTTP_PORT:-3100}" \
-  node /app/dist/index.js --http-api &
-ENGINE_PID=$!
-
-# Wait for Engine health
-echo "Waiting for Engine..."
-for i in $(seq 1 30); do
-  if wget -q -O /dev/null "http://127.0.0.1:${LYNOX_HTTP_PORT:-3100}/health" 2>/dev/null; then
-    echo "Engine ready."
-    break
-  fi
-  sleep 0.5
-done
-
-# Start Web UI
-echo "Starting Web UI on port ${PORT:-3000}..."
+# Single process: Engine auto-loads Web UI handler from /app/web-ui/handler.js
+echo "Starting lynox on port ${LYNOX_HTTP_PORT:-3000}..."
 echo "  Phone access: Settings → Mobile Access → scan QR code" >&2
-LYNOX_ENGINE_URL="http://127.0.0.1:${LYNOX_HTTP_PORT:-3100}" \
-LYNOX_HTTP_SECRET="${LYNOX_HTTP_SECRET:-}" \
-PORT="${PORT:-3000}" \
-  node /app/web-ui/index.js &
-WEBUI_PID=$!
-
-# Graceful shutdown
-trap "kill $WEBUI_PID $ENGINE_PID 2>/dev/null; wait" TERM INT
-
-wait
+exec node /app/dist/index.js --http-api

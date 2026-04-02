@@ -187,7 +187,7 @@
 													{successRate}%
 												</span>
 											</div>
-											<span class="text-xs font-mono text-text-subtle">{stat.run_count} {t('workflow.runs')}</span>
+											<span class="text-xs font-mono text-text-subtle">{stat.run_count} {stat.run_count === 1 ? t('workflow.run') : t('workflow.runs')}</span>
 										</div>
 										<!-- Cost bar -->
 										<div class="w-full h-1.5 rounded-full bg-border overflow-hidden mb-2">

@@ -93,6 +93,12 @@ lynox remembers context across conversations. The more you use it, the more it l
 
 When running lynox on a server, add HTTPS so the access token isn't transmitted in plaintext:
 
+When using a reverse proxy, set `ORIGIN` so session cookies get the correct `Secure` flag:
+
+```bash
+docker run ... -e ORIGIN=https://yourdomain.com ghcr.io/lynox-ai/lynox:webui
+```
+
 **Caddy** (automatic HTTPS):
 ```bash
 caddy reverse-proxy --from yourdomain.com --to localhost:3000
@@ -102,6 +108,39 @@ caddy reverse-proxy --from yourdomain.com --to localhost:3000
 ```bash
 cloudflared tunnel --url http://localhost:3000
 ```
+
+## Validate Your Setup
+
+After starting lynox, verify everything is working:
+
+1. **Container running** — `docker ps` shows `lynox` with status `Up` and `(healthy)`
+2. **Access token visible** — `docker logs lynox` shows the access token block
+3. **Web UI loads** — Open [localhost:3000](http://localhost:3000) and enter the token
+4. **Engine connected** — Status bar (bottom) shows a green dot next to "Engine"
+5. **API key works** — Send a test message like "Hello" — you get an AI response
+6. **Data persists** — `ls ~/.lynox/` shows `config.json`, `.env`, and database files
+
+If step 5 fails with "API Key Invalid", check your `ANTHROPIC_API_KEY`. If step 6 shows an empty directory, your volume mount isn't working (see below).
+
+## Common Mistakes
+
+:::danger[Missing volume mount]
+Without `-v ~/.lynox:/home/lynox/.lynox`, your vault key and all data are lost when the container restarts. This is the single most common cause of data loss. The entrypoint prints a warning if it detects this.
+:::
+
+**Wrong image tag** — `ghcr.io/lynox-ai/lynox:latest` is the engine-only image (Telegram + MCP, no Web UI). For the Web UI, use `:webui`:
+```bash
+docker run ... ghcr.io/lynox-ai/lynox:webui
+```
+
+**API key not set** — The container starts without `ANTHROPIC_API_KEY`, but AI responses are disabled. The Web UI loads normally — check the status bar for "API Key Invalid".
+
+**Port already in use** — If port 3000 is taken, map to a different host port:
+```bash
+docker run -p 8080:3000 ...
+```
+
+**Vault key lost** — If you see "Vault key generated" on every restart, your volume isn't persisting. Stop the container, ensure `~/.lynox` exists and is writable, then restart.
 
 ## Troubleshooting
 

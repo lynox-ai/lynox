@@ -3,7 +3,7 @@
 	import { formatCost } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
-	import { getContextBudget, getSessionModel } from '../stores/chat.svelte.js';
+	import { getContextBudget, getSessionModel, getAuthError } from '../stores/chat.svelte.js';
 
 	let engineOk = $state<boolean | null>(null);
 	let apiStatus = $state<'none' | 'minor' | 'major' | 'critical' | 'unknown' | null>(null);
@@ -23,6 +23,22 @@
 
 	let secrets = $state<SecretsStatus | null>(null);
 	let kgStats = $state<KgStats | null>(null);
+
+	const hasAuthError = $derived(getAuthError());
+	function apiStatusClass(): string {
+		if (hasAuthError) return 'bg-danger';
+		if (apiStatus === 'none') return 'bg-success';
+		if (apiStatus === 'minor') return 'bg-warning';
+		if (apiStatus === 'major' || apiStatus === 'critical') return 'bg-danger';
+		return 'bg-text-subtle animate-pulse';
+	}
+	function apiStatusLabel(): string {
+		if (hasAuthError) return t('status.api_key_invalid');
+		if (apiStatus === 'none') return t('status.api_ok');
+		if (apiStatus === 'minor') return t('status.api_degraded');
+		if (apiStatus === 'major' || apiStatus === 'critical') return t('status.api_down');
+		return t('status.api_unknown');
+	}
 
 	async function poll() {
 		try {
@@ -119,8 +135,8 @@
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
 		<span class="text-border mx-1">|</span>
-		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatus === 'none' ? 'bg-success' : apiStatus === 'minor' ? 'bg-warning' : apiStatus === 'major' || apiStatus === 'critical' ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
-		{apiStatus === 'none' ? t('status.api_ok') : apiStatus === 'minor' ? t('status.api_degraded') : apiStatus === 'major' || apiStatus === 'critical' ? t('status.api_down') : t('status.api_unknown')}
+		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatusClass()}"></span>
+		{apiStatusLabel()}
 		<span class="text-border mx-1">|</span>
 		{formatCost(todayCost)}
 	</button>
@@ -138,8 +154,8 @@
 
 	<!-- API Status -->
 	<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="Anthropic API">
-		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatus === 'none' ? 'bg-success' : apiStatus === 'minor' ? 'bg-warning' : apiStatus === 'major' || apiStatus === 'critical' ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
-		{apiStatus === 'none' ? t('status.api_ok') : apiStatus === 'minor' ? t('status.api_degraded') : apiStatus === 'major' || apiStatus === 'critical' ? t('status.api_down') : t('status.api_unknown')}
+		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatusClass()}"></span>
+		{apiStatusLabel()}
 	</span>
 
 	<span class="text-border">|</span>
@@ -213,8 +229,8 @@
 
 			<!-- Anthropic API Status -->
 			<div class="flex items-center gap-2">
-				<span class="inline-block h-2 w-2 rounded-full {apiStatus === 'none' ? 'bg-success' : apiStatus === 'minor' ? 'bg-warning' : apiStatus === 'major' || apiStatus === 'critical' ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
-				<span class="font-medium text-text">Anthropic API: {apiStatus === 'none' ? t('status.api_ok') : apiStatus === 'minor' ? t('status.api_degraded') : apiStatus === 'major' || apiStatus === 'critical' ? t('status.api_down') : t('status.api_unknown')}</span>
+				<span class="inline-block h-2 w-2 rounded-full {apiStatusClass()}"></span>
+				<span class="font-medium text-text">Anthropic API: {apiStatusLabel()}</span>
 			</div>
 
 			<!-- API Keys -->

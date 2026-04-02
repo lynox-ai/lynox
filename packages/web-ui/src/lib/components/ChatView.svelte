@@ -1054,7 +1054,7 @@
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
 					<span class="flex-1">{@html chatError
 						.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-						.replace(/\[([^\]]+)\]\(((https?:\/\/)[^)]+)\)/g, '<a href="$2" class="underline hover:opacity-80">$1</a>')}</span>
+						.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="underline hover:opacity-80">$1</a>')}</span>
 					<div class="flex items-center gap-2 shrink-0">
 						{#if chatErrorDetail}
 							<button onclick={async () => { await navigator.clipboard.writeText(chatErrorDetail ?? ''); addToast(t('chat.error_copy_detail'), 'success', 1500); }} class="text-xs opacity-60 hover:opacity-100" title={t('chat.error_copy_detail')}>

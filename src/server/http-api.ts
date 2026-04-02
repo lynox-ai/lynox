@@ -10,9 +10,10 @@
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { timingSafeEqual, randomUUID } from 'node:crypto';
+import { readFileSync, accessSync } from 'node:fs';
+import { resolve, dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { SessionStore } from '../core/session-store.js';
@@ -143,6 +144,7 @@ function parseDynamicRoute(method: string, path: string, handler: RouteHandler):
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
   private server: Server | null = null;
+  private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
   private readonly pendingPrompts = new Map<string, PendingPrompt>();
   private readonly pendingSecretPrompts = new Map<string, PendingSecretPrompt>();
@@ -153,13 +155,80 @@ export class LynoxHTTPApi {
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
 
+  /** Whether the Web UI handler is loaded (determines default port and bind behavior). */
+  hasWebUi(): boolean { return this.webUiHandler !== null; }
+
   async init(): Promise<void> {
     const config = loadConfig();
     this.engine = new Engine({ model: config.default_tier });
     await this.engine.init();
     this.engine.startWorkerLoop();
     this._registerRoutes();
+    await this._tryLoadWebUiHandler();
     await this._tryStartTelegram(config);
+  }
+
+  // ── Web UI handler (optional) ─────────────────────────────────────────
+
+  private async _tryLoadWebUiHandler(): Promise<void> {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const candidates: string[] = [];
+
+    // 1. Explicit path via env var (Docker / custom deploy)
+    if (process.env['LYNOX_WEBUI_HANDLER']) {
+      candidates.push(process.env['LYNOX_WEBUI_HANDLER']);
+    }
+    // 2. Docker layout: /app/dist/server/ → /app/web-ui/handler.js
+    candidates.push(join(thisDir, '../../web-ui/handler.js'));
+    // 3. Monorepo dev (after build): src/server/ → packages/web-ui/build/handler.js
+    candidates.push(join(thisDir, '../../packages/web-ui/build/handler.js'));
+
+    for (const candidate of candidates) {
+      try {
+        const abs = resolve(candidate);
+        accessSync(abs); // fast existence check before dynamic import
+        const mod = await import(pathToFileURL(abs).href) as { handler?: unknown };
+        if (typeof mod.handler === 'function') {
+          this.webUiHandler = mod.handler as (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+          process.stderr.write(`Web UI loaded from ${abs}\n`);
+          return;
+        }
+      } catch { /* try next */ }
+    }
+    // No handler found — engine-only mode (not an error)
+  }
+
+  // ── Session cookie verification (shared auth with Web UI) ─────────────
+
+  private _verifySessionCookie(req: IncomingMessage, secret: string): boolean {
+    const cookieHeader = req.headers['cookie'];
+    if (!cookieHeader) return false;
+
+    const match = /(?:^|;\s*)lynox_session=([^;]+)/.exec(cookieHeader);
+    if (!match?.[1]) return false;
+
+    const token = decodeURIComponent(match[1]);
+    const dot = token.indexOf('.');
+    if (dot === -1) return false;
+
+    const ts = token.slice(0, dot);
+    const sig = token.slice(dot + 1);
+    if (!ts || !sig) return false;
+
+    const timestamp = parseInt(ts, 10);
+    if (Number.isNaN(timestamp)) return false;
+    if (Math.floor(Date.now() / 1000) - timestamp > 7 * 24 * 60 * 60) return false;
+
+    try {
+      const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+      const expected = createHmac('sha256', key).update(ts).digest('hex');
+      const sigBuf = Buffer.from(sig, 'hex');
+      const expBuf = Buffer.from(expected, 'hex');
+      if (sigBuf.length !== expBuf.length) return false;
+      return timingSafeEqual(sigBuf, expBuf);
+    } catch {
+      return false;
+    }
   }
 
   private async _tryStartTelegram(config: ReturnType<typeof loadConfig>): Promise<void> {
@@ -193,10 +262,8 @@ export class LynoxHTTPApi {
     const handler = async (req: IncomingMessage, res: ServerResponse) => {
       const start = Date.now();
 
-      // Security headers on ALL responses
+      // Security headers safe for all responses (API + Web UI)
       res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('X-Frame-Options', 'DENY');
-      res.setHeader('Content-Security-Policy', "default-src 'none'");
       res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
       if (useTls) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
 
@@ -256,11 +323,14 @@ export class LynoxHTTPApi {
       this.server = createServer(handler);
     }
 
-    const host = secret ? '0.0.0.0' : '127.0.0.1';
+    // When Web UI is embedded, always bind to 0.0.0.0 (Web UI has session-cookie auth).
+    // API-only mode: bind to 0.0.0.0 only with auth, else localhost only.
+    const host = this.webUiHandler ? '0.0.0.0' : (secret ? '0.0.0.0' : '127.0.0.1');
     const protocol = useTls ? 'https' : 'http';
 
-    // Refuse to expose auth tokens in plaintext unless explicitly allowed
-    if (secret && !useTls && process.env['LYNOX_ALLOW_PLAIN_HTTP'] !== 'true') {
+    // Refuse to expose Bearer tokens in plaintext (API-only mode without TLS).
+    // When Web UI is embedded, auth uses session cookies — allow plain HTTP behind reverse proxy.
+    if (secret && !useTls && !this.webUiHandler && process.env['LYNOX_ALLOW_PLAIN_HTTP'] !== 'true') {
       throw new Error(
         'Refusing to bind HTTP API on 0.0.0.0 without TLS — Bearer tokens would be sent in plaintext.\n'
         + 'Fix: set LYNOX_TLS_CERT + LYNOX_TLS_KEY, use a TLS reverse proxy, '
@@ -319,11 +389,22 @@ export class LynoxHTTPApi {
       ? '/api/' + url.pathname.slice('/api/v1/'.length)
       : url.pathname;
 
-    // Health check (unauthenticated)
+    // Health check (unauthenticated — used by both container probes and Web UI status bar)
     if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
       jsonResponse(res, 200, { status: 'ok' });
       return;
     }
+
+    // ── Non-API routes → Web UI handler (if available) ──────────────────
+    // SvelteKit handles its own auth (session cookies), body parsing, and CSP.
+    if (!pathname.startsWith('/api/') && this.webUiHandler) {
+      await this.webUiHandler(req, res);
+      return;
+    }
+
+    // ── API routes: security headers, auth, rate limiting, dispatch ──────
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
 
     // Provider status — cached Anthropic statuspage check (unauthenticated, public data)
     if (method === 'GET' && (pathname === '/api/provider/status')) {
@@ -355,36 +436,47 @@ export class LynoxHTTPApi {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     }
 
-    // Auth — two-tier: LYNOX_HTTP_SECRET = user scope, LYNOX_HTTP_ADMIN_SECRET = admin scope.
+    // Auth — Bearer token OR session cookie (same-origin Web UI).
+    // Two-tier: LYNOX_HTTP_SECRET = user scope, LYNOX_HTTP_ADMIN_SECRET = admin scope.
     // When only LYNOX_HTTP_SECRET is set, it implicitly grants admin (backwards compat).
     let authScope: AuthScope = 'admin'; // default for no-secret (localhost) mode
     if (secret) {
       const auth = req.headers['authorization'] ?? '';
-      const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-      const tokenBuf = Buffer.from(token);
-      const secretBuf = Buffer.from(secret);
+      const bearerToken = auth.startsWith('Bearer ') ? auth.slice(7) : '';
       const adminSecret = process.env['LYNOX_HTTP_ADMIN_SECRET'];
 
-      if (adminSecret) {
-        // Two-tier mode: check admin token first, then user token
-        const adminBuf = Buffer.from(adminSecret);
-        const isAdmin = adminBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, adminBuf);
-        const isUser = secretBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, secretBuf);
-        if (isAdmin) {
-          authScope = 'admin';
-        } else if (isUser) {
-          authScope = 'user';
+      if (bearerToken) {
+        // Bearer token auth (external clients, MCP, Telegram)
+        const tokenBuf = Buffer.from(bearerToken);
+        const secretBuf = Buffer.from(secret);
+
+        if (adminSecret) {
+          const adminBuf = Buffer.from(adminSecret);
+          const isAdmin = adminBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, adminBuf);
+          const isUser = secretBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, secretBuf);
+          if (isAdmin) {
+            authScope = 'admin';
+          } else if (isUser) {
+            authScope = 'user';
+          } else {
+            errorResponse(res, 401, 'Unauthorized');
+            return;
+          }
         } else {
-          errorResponse(res, 401, 'Unauthorized');
-          return;
+          // Single-token mode — LYNOX_HTTP_SECRET grants admin
+          const secretBufCmp = Buffer.from(secret);
+          if (tokenBuf.length !== secretBufCmp.length || !timingSafeEqual(tokenBuf, secretBufCmp)) {
+            errorResponse(res, 401, 'Unauthorized');
+            return;
+          }
+          authScope = 'admin';
         }
+      } else if (this._verifySessionCookie(req, secret)) {
+        // Session cookie auth (same-origin Web UI requests)
+        authScope = adminSecret ? 'user' : 'admin';
       } else {
-        // Single-token mode — LYNOX_HTTP_SECRET grants admin
-        if (tokenBuf.length !== secretBuf.length || !timingSafeEqual(tokenBuf, secretBuf)) {
-          errorResponse(res, 401, 'Unauthorized');
-          return;
-        }
-        authScope = 'admin';
+        errorResponse(res, 401, 'Unauthorized');
+        return;
       }
     }
 
@@ -1511,6 +1603,10 @@ export class LynoxHTTPApi {
       try {
         const result = await bm.restoreBackup(backupPath);
         jsonResponse(res, result.success ? 200 : 500, result);
+        // Auto-restart after successful restore so restored data takes effect
+        if (result.success) {
+          setTimeout(() => { process.exit(0); }, 500);
+        }
       } catch (err: unknown) {
         errorResponse(res, 500, err instanceof Error ? err.message : 'Restore failed');
       }

@@ -37,7 +37,8 @@
 </script>
 
 <div class="p-6 max-w-lg mx-auto">
-	<h1 class="text-xl font-light tracking-tight mb-2">{t('mobile.title')}</h1>
+	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
+	<h1 class="text-xl font-light tracking-tight mb-2 mt-2">{t('mobile.title')}</h1>
 	<p class="text-sm text-text-muted mb-6">{t('mobile.desc')}</p>
 
 	{#if !hasSecret}

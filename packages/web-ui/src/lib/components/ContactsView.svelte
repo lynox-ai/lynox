@@ -115,8 +115,13 @@
 					{/each}
 				</div>
 				{#if selected}
-					<div class="w-80 shrink-0 rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3 self-start">
-						<h2 class="font-medium">{selected.name}</h2>
+					<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+				<div class="fixed inset-0 z-40 bg-bg/80 backdrop-blur-sm md:hidden" onclick={() => selected = null}></div>
+					<div class="fixed inset-x-0 bottom-0 z-50 max-h-[70vh] overflow-y-auto rounded-t-xl border-t border-border bg-bg-subtle p-4 space-y-3 md:relative md:inset-auto md:z-auto md:max-h-none md:rounded-[var(--radius-md)] md:border md:rounded-t-[var(--radius-md)] md:w-80 md:shrink-0 md:self-start">
+						<div class="flex items-center justify-between">
+							<h2 class="font-medium">{selected.name}</h2>
+							<button onclick={() => selected = null} class="md:hidden p-1 rounded text-text-subtle hover:text-text">&times;</button>
+						</div>
 						{#if selected.email}<p class="text-xs text-text-muted">{selected.email}</p>{/if}
 						{#if selected.company}<p class="text-xs text-text-muted">{selected.company}</p>{/if}
 						{#if parseTags(selected.tags).length > 0}
