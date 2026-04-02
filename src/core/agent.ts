@@ -26,6 +26,7 @@ import { isDangerous } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
+import { maskSecretPatterns } from './secret-store.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -49,6 +50,7 @@ export class Agent implements IAgent {
   onStream: StreamHandler | null;
   promptUser?: ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?: ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
+  promptSecret?: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
   currentRunId?: string | undefined;
   readonly spawnDepth: number;
 
@@ -110,6 +112,7 @@ export class Agent implements IAgent {
     this.onStream = config.onStream ?? null;
     this.promptUser = config.promptUser;
     this.promptTabs = config.promptTabs;
+    this.promptSecret = config.promptSecret;
     this.systemPrompt = config.systemPrompt;
     this.mcpServers = config.mcpServers;
     // Haiku: no adaptive thinking (API rejects it), no effort parameter
@@ -707,7 +710,11 @@ export class Agent implements IAgent {
         ? await this.workerPool.execute(tc.name, processedInput)
         : await tool.handler(processedInput, this);
 
-      const masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;
+      let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;
+      // Extra guard: if ask_user response looks like a secret, mask it pattern-based
+      if (tc.name === 'ask_user') {
+        masked = maskSecretPatterns(masked);
+      }
       const scanned = Agent.EXTERNAL_TOOLS.has(tc.name) ? scanToolResult(masked, tc.name) : masked;
 
       // Truncate oversized tool results to prevent context window waste

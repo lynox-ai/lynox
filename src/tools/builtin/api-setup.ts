@@ -178,7 +178,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
       if (profile.guidelines) parts.push(`Guidelines: ${String(profile.guidelines.length)}`);
       if (profile.avoid) parts.push(`Avoid rules: ${String(profile.avoid.length)}`);
       parts.push(`Profile saved to ${filePath} and activated immediately.`);
-      parts.push('Next steps: ask the user for API credentials if needed, then test with a simple http_request.');
+      parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
       return parts.join('\n');
     }
 

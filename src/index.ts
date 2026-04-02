@@ -928,6 +928,60 @@ Docs: https://docs.lynox.dev
       return answers;
     };
 
+    session.promptSecret = async (name: string, prompt: string, _keyType?: string): Promise<boolean> => {
+      spinner.stop();
+      if (activeEscHandler) {
+        stdin.removeListener('data', activeEscHandler);
+      }
+      const saved = detachStdin();
+      stdout.write(`\n  🔐 ${prompt}\n  (stored encrypted, never sent to AI)\n  ${name}: `);
+      // Masked stdin read
+      const value = await new Promise<string>((resolve) => {
+        let buf = '';
+        stdin.setRawMode(true);
+        stdin.resume();
+        const onData = (data: Buffer): void => {
+          const ch = data.toString('utf-8');
+          if (ch === '\r' || ch === '\n') {
+            stdin.removeListener('data', onData);
+            stdin.setRawMode(false);
+            stdout.write('\n');
+            resolve(buf);
+          } else if (ch === '\x03' || ch === '\x1b') {
+            // Ctrl+C or ESC → cancel
+            stdin.removeListener('data', onData);
+            stdin.setRawMode(false);
+            stdout.write('\n');
+            resolve('');
+          } else if (ch === '\x7f' || ch === '\b') {
+            // Backspace
+            if (buf.length > 0) {
+              buf = buf.slice(0, -1);
+              stdout.write('\b \b');
+            }
+          } else {
+            buf += ch;
+            stdout.write('*');
+          }
+        };
+        stdin.on('data', onData);
+      });
+      reattachStdin(saved);
+      if (activeEscHandler) {
+        stdin.on('data', activeEscHandler);
+        stdin.resume();
+      }
+      if (!value) return false;
+      // Store directly in vault
+      const secretStore = session.getSecretStore();
+      if (secretStore?.set) {
+        secretStore.set(name, value);
+        secretStore.recordConsent(name);
+        return true;
+      }
+      return false;
+    };
+
     // CLI-only dialog (no abort logic — for slash commands like /model)
     state.cliPrompt = async (question: string, options?: string[]): Promise<string> => {
       rl.pause();

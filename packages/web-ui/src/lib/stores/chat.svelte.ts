@@ -123,6 +123,8 @@ let sessionId = $state<string | null>(persisted.sessionId);
 let currentRunId = $state<string | null>(null);
 let isStreaming = $state(false);
 let pendingPermission = $state<PermissionPrompt | null>(null);
+let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string } | null>(null);
+let secretPromptGeneration = $state(0);
 let chatError = $state<string | null>(null);
 let chatErrorDetail = $state<string | null>(null);
 let messageQueue = $state<QueuedMessage[]>([]);
@@ -403,6 +405,15 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				options: data['options'] as string[] | undefined
 			};
 			break;
+		case 'secret_prompt':
+			pendingSecretPrompt = {
+				name: String(data['name'] ?? ''),
+				prompt: String(data['prompt'] ?? ''),
+				keyType: data['key_type'] as string | undefined,
+			};
+			// Reset UI state for fresh prompt (handles retry after cancel)
+			secretPromptGeneration++;
+			break;
 		case 'turn_end': {
 			retryStatus = null;
 			const usage = data['usage'] as Record<string, number> | undefined;
@@ -518,6 +529,58 @@ export async function replyPermission(answer: string): Promise<void> {
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ answer })
 	});
+}
+
+export async function submitSecret(name: string, value: string): Promise<boolean> {
+	if (!sessionId || !pendingSecretPrompt) return false;
+	const sid = sessionId;
+	try {
+		// Store secret directly in vault (bypasses chat — value never enters SSE/messages)
+		const vaultRes = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ value }),
+		});
+		if (!vaultRes.ok) {
+			// Vault write failed — don't tell engine it was saved
+			pendingSecretPrompt = null;
+			await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ saved: false }),
+			});
+			return false;
+		}
+		// Notify engine that secret was saved
+		pendingSecretPrompt = null;
+		await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ saved: true }),
+		});
+		return true;
+	} catch {
+		pendingSecretPrompt = null;
+		return false;
+	}
+}
+
+export async function cancelSecret(): Promise<void> {
+	if (!sessionId || !pendingSecretPrompt) return;
+	pendingSecretPrompt = null;
+	await fetch(`${getApiBase()}/sessions/${sessionId}/secret-saved`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ saved: false }),
+	});
+}
+
+export function getPendingSecretPrompt() {
+	return pendingSecretPrompt;
+}
+
+export function getSecretPromptGeneration() {
+	return secretPromptGeneration;
 }
 
 export async function abortRun(): Promise<void> {
@@ -647,6 +710,7 @@ export function newChat() {
 	currentRunId = null;
 	isStreaming = false;
 	pendingPermission = null;
+	pendingSecretPrompt = null;
 	pendingChangeset = null;
 	changesetLoading = false;
 	chatError = null;

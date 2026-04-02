@@ -323,6 +323,20 @@ async function executeRunInner(
     });
   };
 
+  // 3b. Set promptSecret → Telegram can't do secure input, redirect to Web UI
+  session.promptSecret = async (_name: string, _prompt: string, _keyType?: string): Promise<boolean> => {
+    try {
+      await bot.telegram.sendMessage(chatId, '🔐 <b>Secure input required</b>\n\nPlease enter this secret in the Web UI under <b>Settings → API Keys</b>. Secrets cannot be entered via Telegram for security reasons.', {
+        parse_mode: 'HTML',
+      });
+    } catch {
+      try {
+        await bot.telegram.sendMessage(chatId, 'Secure input required. Please enter this secret in the Web UI under Settings > API Keys.');
+      } catch { /* lost */ }
+    }
+    return false;
+  };
+
   // 4. Set stream handler — rich status via edits
   session.onStream = (event: StreamEvent): void => {
     run.lastActivityAt = Date.now();

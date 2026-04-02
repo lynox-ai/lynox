@@ -4,6 +4,62 @@ import type { SecretVault } from './secret-vault.js';
 
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
+/**
+ * Common secret patterns — regex-based detection for accidental secret leaks.
+ * Used by ask_user guard and chat input warning.
+ */
+const SECRET_PATTERNS: RegExp[] = [
+  // Anthropic
+  /\bsk-ant-[A-Za-z0-9_-]{20,}\b/,
+  // OpenAI
+  /\bsk-[A-Za-z0-9]{20,}\b/,
+  // Stripe
+  /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/,
+  // GitHub
+  /\b(ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{10,}\b/,
+  // AWS
+  /\bAKIA[A-Z0-9]{16}\b/,
+  // Google
+  /\bAIza[A-Za-z0-9_-]{35}\b/,
+  // Slack
+  /\bxox[bpras]-[A-Za-z0-9-]{10,}\b/,
+  // Generic Bearer tokens (long base64-ish)
+  /\bBearer\s+[A-Za-z0-9_\-.]{20,}\b/,
+  // Generic long hex/base64 secrets (40+ chars, likely tokens)
+  /\b[A-Za-z0-9_-]{40,}\b/,
+];
+
+/**
+ * Check if text likely contains a secret based on common key patterns.
+ * Returns the first match or null.
+ */
+export function matchesSecretPattern(text: string): string | null {
+  // Skip the generic long-string pattern (last one) for short texts to reduce false positives
+  const patterns = text.length < 100 ? SECRET_PATTERNS.slice(0, -1) : SECRET_PATTERNS;
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+/**
+ * Mask text that matches common secret patterns.
+ * Replaces detected secrets with `***<last4>`.
+ */
+export function maskSecretPatterns(text: string): string {
+  let result = text;
+  // Apply specific patterns (skip generic last pattern to avoid over-masking)
+  for (const pattern of SECRET_PATTERNS.slice(0, -1)) {
+    const globalPattern = new RegExp(pattern.source, 'g');
+    result = result.replace(globalPattern, (match) => {
+      if (match.length <= 4) return '***';
+      return `***${match.slice(-4)}`;
+    });
+  }
+  return result;
+}
+
 interface InternalSecret {
   name: string;
   value: string;

@@ -24,6 +24,8 @@ export interface TelegramSession {
   onStream: ((event: import('../../types/index.js').StreamEvent) => void | Promise<void>) | null;
   get promptUser(): ((question: string, options?: string[]) => Promise<string>) | null;
   set promptUser(fn: ((question: string, options?: string[]) => Promise<string>) | null);
+  get promptSecret(): ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null;
+  set promptSecret(fn: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null);
   readonly usage: { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number };
   getModelTier(): string;
 }

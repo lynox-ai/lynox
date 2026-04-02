@@ -7,6 +7,10 @@
 		getIsStreaming,
 		getQueueLength,
 		getPendingPermission,
+		getPendingSecretPrompt,
+		getSecretPromptGeneration,
+		submitSecret,
+		cancelSecret,
 		getChatError,
 		getChatErrorDetail,
 		getRetryStatus,
@@ -455,6 +459,60 @@
 	let selectedOptions = $state<string[]>([]);
 	let answeredPrompts = $state<{ question: string; answer: string }[]>([]);
 
+	// Secret prompt state
+	let secretValue = $state('');
+	let secretConsented = $state(false);
+	let secretInputEl = $state<HTMLInputElement>();
+
+	const secretGeneration = $derived(getSecretPromptGeneration());
+
+	// Reset secret UI state when a new prompt arrives (e.g. retry after cancel)
+	$effect(() => {
+		void secretGeneration; // track
+		secretValue = '';
+		secretConsented = false;
+	});
+
+	// Auto-focus password input when consent is given
+	$effect(() => {
+		if (secretConsented && secretInputEl) {
+			requestAnimationFrame(() => secretInputEl?.focus());
+		}
+	});
+
+	// Common secret patterns for chat input guard
+	const SECRET_INPUT_PATTERNS = [
+		/\bsk-ant-[A-Za-z0-9_-]{20,}/,
+		/\bsk-[A-Za-z0-9]{20,}/,
+		/\b[sr]k_(live|test)_[A-Za-z0-9]{10,}/,
+		/\b(ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{10,}/,
+		/\bAKIA[A-Z0-9]{16}/,
+		/\bAIza[A-Za-z0-9_-]{35}/,
+		/\bxox[bpras]-[A-Za-z0-9-]{10,}/,
+	];
+
+	function looksLikeSecret(text: string): boolean {
+		return SECRET_INPUT_PATTERNS.some(p => p.test(text));
+	}
+
+	async function handleSecretSave() {
+		if (!pendingSecret || !secretValue.trim()) return;
+		const ok = await submitSecret(pendingSecret.name, secretValue.trim());
+		if (ok) {
+			addToast(t('chat.secret_saved'), 'success', 3000);
+		} else {
+			addToast('Failed to store secret. Check vault configuration.', 'error', 5000);
+		}
+		secretValue = '';
+		secretConsented = false;
+	}
+
+	function handleSecretCancel() {
+		cancelSecret();
+		secretValue = '';
+		secretConsented = false;
+	}
+
 	// Multi-question batch mode: collect all answers before sending
 	interface BatchQuestion { question: string; options: string[]; header?: string; }
 	let batchQuestions = $state<BatchQuestion[]>([]);
@@ -787,6 +845,7 @@
 	const isStreaming = $derived(getIsStreaming());
 	const queueLength = $derived(getQueueLength());
 	const pendingPermission = $derived(getPendingPermission());
+	const pendingSecret = $derived(getPendingSecretPrompt());
 	const chatError = $derived(getChatError());
 	const chatErrorDetail = $derived(getChatErrorDetail());
 	const retryStatus = $derived(getRetryStatus());
@@ -851,6 +910,12 @@
 			inputText = '';
 			if (textareaEl) textareaEl.style.height = 'auto';
 			answerPrompt(task);
+			return;
+		}
+
+		// Chat input guard: warn if text looks like an API key or secret
+		if (looksLikeSecret(task)) {
+			addToast(t('chat.secret_warning'), 'error', 6000);
 			return;
 		}
 
@@ -1349,6 +1414,44 @@
 				{:else}
 					<!-- Open-ended: user types in normal chat input below -->
 					<p class="text-xs text-text-subtle">{t('chat.hint')}</p>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Secure Secret Prompt -->
+	{#if pendingSecret}
+		<div class="border-t border-border bg-bg-subtle px-4 py-3">
+			<div class="max-w-3xl mx-auto space-y-3">
+				<div class="flex items-center gap-2">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+					<span class="text-sm font-medium text-text">{pendingSecret.prompt}</span>
+				</div>
+
+				{#if !secretConsented}
+					<div class="flex items-center gap-2 text-xs text-text-subtle bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
+						<span>{t('chat.secret_consent')}</span>
+					</div>
+					<div class="flex gap-2">
+						<button onclick={() => { secretConsented = true; }} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent hover:bg-accent/25 transition-all">OK</button>
+						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
+					</div>
+				{:else}
+					<div class="flex gap-2">
+						<input
+							type="password"
+							bind:value={secretValue}
+							bind:this={secretInputEl}
+							onkeydown={(e) => { if (e.key === 'Enter') handleSecretSave(); }}
+							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
+							placeholder={pendingSecret.name}
+							autocomplete="off"
+							data-1p-ignore
+						/>
+						<button onclick={handleSecretSave} disabled={!secretValue.trim()} class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed">{t('chat.secret_save')}</button>
+						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
+					</div>
 				{/if}
 			</div>
 		</div>

@@ -28,6 +28,14 @@ interface PendingPrompt {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface PendingSecretPrompt {
+  name: string;
+  prompt: string;
+  keyType: string | undefined;
+  resolve: (saved: boolean) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 type RouteHandler = (
   req: IncomingMessage,
   res: ServerResponse,
@@ -136,6 +144,7 @@ export class LynoxHTTPApi {
   private server: Server | null = null;
   private readonly sessionStore = new SessionStore();
   private readonly pendingPrompts = new Map<string, PendingPrompt>();
+  private readonly pendingSecretPrompts = new Map<string, PendingSecretPrompt>();
   private readonly runningSessions = new Set<string>();
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
@@ -275,6 +284,11 @@ export class LynoxHTTPApi {
       prompt.resolve('n');
     }
     this.pendingPrompts.clear();
+    for (const [, prompt] of this.pendingSecretPrompts) {
+      clearTimeout(prompt.timeout);
+      prompt.resolve(false);
+    }
+    this.pendingSecretPrompts.clear();
     this.server?.close();
     await this.engine?.shutdown();
   }
@@ -579,6 +593,20 @@ export class LynoxHTTPApi {
         });
       };
 
+      // Wire promptSecret — secret value never enters SSE, only the prompt metadata
+      session.promptSecret = (name: string, prompt: string, keyType?: string) => {
+        return new Promise<boolean>((resolve) => {
+          const timeout = setTimeout(() => {
+            this.pendingSecretPrompts.delete(sessionId);
+            resolve(false);
+          }, PROMPT_TIMEOUT_MS);
+
+          this.pendingSecretPrompts.set(sessionId, { name, prompt, keyType, resolve, timeout });
+          const data = JSON.stringify({ name, prompt, key_type: keyType });
+          res.write(`event: secret_prompt\ndata: ${data}\n\n`);
+        });
+      };
+
       // SSE keepalive — prevents proxies/browsers from dropping idle connections
       const keepaliveTimer = setInterval(() => {
         if (!aborted && !res.writableEnded) res.write(': keepalive\n\n');
@@ -633,6 +661,18 @@ export class LynoxHTTPApi {
       clearTimeout(pending.timeout);
       this.pendingPrompts.delete(sessionId);
       pending.resolve(answer);
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/secret-saved', async (_req, res, params, body) => {
+      const sessionId = params['id']!;
+      const pending = this.pendingSecretPrompts.get(sessionId);
+      if (!pending) { errorResponse(res, 404, 'No pending secret prompt'); return; }
+
+      const saved = body && typeof body === 'object' && 'saved' in body ? Boolean((body as Record<string, unknown>)['saved']) : false;
+      clearTimeout(pending.timeout);
+      this.pendingSecretPrompts.delete(sessionId);
+      pending.resolve(saved);
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -883,6 +923,7 @@ export class LynoxHTTPApi {
       if (!value) { errorResponse(res, 400, 'Missing value'); return; }
       try {
         store.set(params['name']!, value);
+        store.recordConsent(params['name']!);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to store secret';
         errorResponse(res, 503, msg);

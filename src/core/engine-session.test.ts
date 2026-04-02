@@ -132,6 +132,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   memoryPromoteTool: { definition: { name: 'memory_promote' }, handler: vi.fn() },
   spawnAgentTool: { definition: { name: 'spawn_agent' }, handler: vi.fn() },
   askUserTool: { definition: { name: 'ask_user' }, handler: vi.fn() },
+  askSecretTool: { definition: { name: 'ask_secret' }, handler: vi.fn() },
   batchFilesTool: { definition: { name: 'batch_files' }, handler: vi.fn() },
   httpRequestTool: { definition: { name: 'http_request' }, handler: vi.fn() },
   runPipelineTool: { definition: { name: 'run_pipeline' }, handler: vi.fn() },
@@ -312,8 +313,8 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool
-      // 18 core + 5 datastore + 3 artifact + 5 google + 4 pipeline = 35
-      expect(mockRegister).toHaveBeenCalledTimes(35);
+      // 19 core + 5 datastore + 3 artifact + 5 google + 4 pipeline = 36
+      expect(mockRegister).toHaveBeenCalledTimes(36);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -378,8 +379,8 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 35 tools total (18 core + 5 datastore + 3 artifact + 5 google + 4 pipeline)
-      expect(mockRegister).toHaveBeenCalledTimes(35);
+      // 36 tools total (19 core + 5 datastore + 3 artifact + 5 google + 4 pipeline)
+      expect(mockRegister).toHaveBeenCalledTimes(36);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

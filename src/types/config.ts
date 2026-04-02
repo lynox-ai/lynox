@@ -24,6 +24,7 @@ export interface AgentConfig {
   workerPool?:      IWorkerPool | undefined;
   promptUser?:      ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?:      ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
+  promptSecret?:    ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
   maxIterations?:      number | undefined;
   continuationPrompt?: string | undefined;
   excludeTools?:       string[] | undefined;
@@ -110,6 +111,7 @@ export interface LynoxConfig {
   memory?:         boolean | undefined;
   promptUser?:     ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?:     ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
+  promptSecret?:   ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
   context?:        LynoxContext | undefined;
 }
 
@@ -196,7 +198,7 @@ export interface LynoxUserConfig {
   mcp_servers?: Array<{ name: string; url: string }> | undefined;
   /** Whitelist of MCP tool names to expose. When set, only listed tools are registered. Default: all tools. */
   mcp_exposed_tools?: string[] | undefined;
-  /** Experience level: controls output style. 'business' (default) = UI-focused, no CLI/env hints. 'developer' = technical details, CLI commands, config snippets. */
+  /** Experience level: controls output style. 'business' (default) = UI-focused, no CLI/env hints. 'developer' (experimental) = technical details, CLI commands, config snippets. */
   experience?: 'business' | 'developer' | undefined;
 }
 

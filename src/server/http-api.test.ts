@@ -56,6 +56,7 @@ vi.mock('../core/engine.js', () => ({
     this.getSecretStore = vi.fn().mockReturnValue({
       listNames: mockSecretListNames,
       set: mockSecretSet,
+      recordConsent: vi.fn(),
       deleteSecret: mockSecretDelete,
       resolve: vi.fn().mockReturnValue(null),
     });

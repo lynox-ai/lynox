@@ -19,6 +19,7 @@ export interface IAgent {
   onStream:        StreamHandler | null;
   promptUser?: ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?: ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
+  promptSecret?: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
   currentRunId?: string | undefined;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;

@@ -90,6 +90,7 @@ export class Session {
   onStream: StreamHandler | null = null;
   private _promptUser: ((question: string, options?: string[]) => Promise<string>) | null = null;
   private _promptTabs: ((questions: TabQuestion[]) => Promise<string[]>) | null = null;
+  private _promptSecret: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null = null;
   private _tenantId: string | null = null;
 
   // Per-session config (copied from engine.config at creation, mutated independently)
@@ -184,6 +185,19 @@ export class Session {
     if (this.agent) {
       this.agent.promptTabs = fn
         ? (qs: TabQuestion[]) => fn(qs)
+        : undefined;
+    }
+  }
+
+  get promptSecret(): ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null {
+    return this._promptSecret;
+  }
+
+  set promptSecret(fn: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null) {
+    this._promptSecret = fn;
+    if (this.agent) {
+      this.agent.promptSecret = fn
+        ? (name: string, prompt: string, keyType?: string) => fn(name, prompt, keyType)
         : undefined;
     }
   }

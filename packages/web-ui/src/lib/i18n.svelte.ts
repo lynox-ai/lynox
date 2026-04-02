@@ -53,7 +53,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.desc.knowledge': { de: 'Was lynox sich merkt', en: 'What lynox remembers' },
 	'nav.desc.graph': { de: 'Personen, Firmen, Beziehungen', en: 'People, companies, relationships' },
 	'nav.desc.insights': { de: 'Leistung, Muster, Threads', en: 'Performance, patterns, threads' },
-	'nav.desc.contacts': { de: 'Deine Kunden und Deals', en: 'Your clients and deals' },
+	'nav.desc.contacts': { de: 'Deine Kunden und Deals (Beta)', en: 'Your clients and deals (beta)' },
 	'nav.desc.artifacts': { de: 'Dashboards, Diagramme, Reports', en: 'Dashboards, diagrams, reports' },
 	'nav.activity': { de: 'Activity', en: 'Activity' },
 	'nav.desc.activity': { de: 'Runs, Kosten, Aufgaben', en: 'Runs, costs, tasks' },
@@ -65,8 +65,8 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Hub tabs
 	'hub.knowledge.wissen': { de: 'Wissen', en: 'Knowledge' },
-	'hub.knowledge.graph': { de: 'Graph', en: 'Graph' },
-	'hub.knowledge.insights': { de: 'Insights', en: 'Insights' },
+	'hub.knowledge.graph': { de: 'Graph (Beta)', en: 'Graph (beta)' },
+	'hub.knowledge.insights': { de: 'Insights (Beta)', en: 'Insights (beta)' },
 	'hub.artifacts.gallery': { de: 'Galerie', en: 'Gallery' },
 	'hub.artifacts.files': { de: 'Dateien', en: 'Files' },
 	'hub.activity.dashboard': { de: 'Dashboard', en: 'Dashboard' },
@@ -80,7 +80,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.activity.scheduled': { de: 'Geplante Jobs', en: 'Scheduled jobs' },
 	'hub.activity.view_all': { de: 'Alle anzeigen', en: 'View all' },
 	'hub.workflow.list': { de: 'Workflows', en: 'Workflows' },
-	'hub.workflow.analytics': { de: 'Analyse', en: 'Analytics' },
+	'hub.workflow.analytics': { de: 'Analyse (Beta)', en: 'Analytics (beta)' },
 
 	// Workflows
 	'workflow.title': { de: 'Workflows', en: 'Workflows' },
@@ -286,6 +286,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
 	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
+	'chat.secret_consent': { de: 'Wird lokal verschlüsselt gespeichert und niemals an die KI gesendet.', en: 'Stored encrypted locally and never sent to AI.' },
+	'chat.secret_save': { de: 'Speichern', en: 'Save' },
+	'chat.secret_cancel': { de: 'Abbrechen', en: 'Cancel' },
+	'chat.secret_saved': { de: 'Sicher gespeichert', en: 'Saved securely' },
+	'chat.secret_warning': { de: 'Das sieht nach einem API-Key oder Passwort aus. Bitte nicht im Chat eingeben.', en: 'This looks like an API key or password. Please don\'t enter it in chat.' },
 	'chat.voice_unsupported': { de: '[Spracheingabe nicht verfügbar]', en: '[Voice input not available]' },
 	'chat.analyze_files': { de: 'Analysiere diese Dateien.', en: 'Analyze these files.' },
 	'chat.mic_unavailable': { de: '[Mikrofon nicht verfügbar]', en: '[Microphone not available]' },
@@ -396,7 +401,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.experience': { de: 'Erfahrungslevel', en: 'Experience Level' },
 	'config.experience_desc': { de: 'Bestimmt den Kommunikationsstil: Business = einfache Anleitungen, Developer = CLI-Befehle & Config-Details', en: 'Controls communication style: Business = simple instructions, Developer = CLI commands & config details' },
 	'config.experience_business': { de: 'Business (Standard)', en: 'Business (default)' },
-	'config.experience_developer': { de: 'Developer', en: 'Developer' },
+	'config.experience_developer': { de: 'Developer (experimentell)', en: 'Developer (experimental)' },
 
 	// Budget
 	'config.budget': { de: 'Budget', en: 'Budget' },
@@ -441,6 +446,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.reveal': { de: 'Anzeigen', en: 'Reveal' },
 	'config.hide': { de: 'Verbergen', en: 'Hide' },
 	'config.copy': { de: 'Kopieren', en: 'Copy' },
+
+	// Legal
+	'legal.terms': { de: 'AGB', en: 'Terms' },
+	'legal.privacy': { de: 'Datenschutz', en: 'Privacy' },
+	'legal.imprint': { de: 'Impressum', en: 'Imprint' },
 
 	// Bug Reporting
 	'config.privacy': { de: 'Datenschutz', en: 'Privacy' },

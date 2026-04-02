@@ -40,6 +40,7 @@ import {
   memoryPromoteTool,
   spawnAgentTool,
   askUserTool,
+  askSecretTool,
   batchFilesTool,
   httpRequestTool,
   runPipelineTool,
@@ -399,6 +400,7 @@ export class Engine {
       .register(memoryPromoteTool)
       .register(spawnAgentTool)
       .register(askUserTool)
+      .register(askSecretTool)
       .register(batchFilesTool)
       .register(httpRequestTool)
       .register(apiSetupTool)
