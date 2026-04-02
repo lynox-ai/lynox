@@ -531,6 +531,7 @@
 		border-bottom: 1px solid var(--color-border);
 		color: var(--color-text-muted);
 		word-break: break-word;
+		max-width: 20rem;
 	}
 	div :global(tr:last-child td) {
 		border-bottom: none;
