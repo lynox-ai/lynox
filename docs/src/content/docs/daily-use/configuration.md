@@ -95,11 +95,11 @@ See [Backups](/features/backup/) for details.
 ```
 
 - `business` — Optimized for business users (default)
-- `developer` — Shows more technical details and options
+- `developer` — Shows more technical details and options (experimental)
 
 ## Environment Variables
 
-Environment variables take precedence over config files:
+Environment variables take precedence over config files. Alternatively, credentials can be stored interactively via lynox's secure `ask_secret` dialog — the agent will prompt you when it needs a key, and the value goes directly to the encrypted vault without ever entering the chat. See [Security](/features/security/#secure-secret-collection) for details.
 
 | Variable | Purpose |
 |----------|---------|

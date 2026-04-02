@@ -93,6 +93,22 @@ PUT    /api/secrets/:name         # Store a secret
 DELETE /api/secrets/:name         # Delete a secret
 ```
 
+### Secret Prompt (SSE)
+
+During a run, the agent may request a secret via the `ask_secret` tool. This triggers a `secret_prompt` SSE event:
+
+```
+event: secret_prompt
+data: {"name":"STRIPE_API_KEY","prompt":"Enter your Stripe API key","key_type":"stripe"}
+```
+
+The client stores the secret directly via `PUT /api/secrets/:name` (the value never enters the SSE stream), then confirms:
+
+```
+POST /api/sessions/:id/secret-saved
+Body: {"saved": true}   # or false if canceled
+```
+
 ### Config
 
 ```

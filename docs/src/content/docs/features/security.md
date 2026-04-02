@@ -36,6 +36,33 @@ The vault key is your master encryption key. Keep it safe:
 
 You can rotate the vault key via the Web UI (Settings → Config → Security) or the API. This re-encrypts all stored secrets with a new key.
 
+## Secure Secret Collection
+
+When lynox needs a credential (API key, token, password), it uses the `ask_secret` tool instead of regular chat. This ensures secrets **never enter the conversation** sent to the AI provider.
+
+### How it works
+
+1. **Agent requests a secret** — calls `ask_secret` with a name and prompt
+2. **Consent step** — the UI shows "Stored encrypted locally and never sent to AI"
+3. **Password input** — you type the secret in a masked field
+4. **Direct vault storage** — the value goes straight to the encrypted vault via REST API, completely bypassing the chat
+5. **Confirmation only** — the agent receives "Secret saved" — never the actual value
+
+### Security guarantees
+
+- The secret value **never enters the conversation history** (the messages sent to Anthropic)
+- The secret value **never appears in SSE events** (the real-time stream to the UI)
+- The secret value **never appears in logs** or observability channels
+- The secret is **encrypted at rest** in the AES-256-GCM vault
+
+### Using secrets in tools
+
+After storing a secret, lynox references it as `secret:KEY_NAME` in tool inputs. The actual value is resolved at execution time in a local variable, used for the API call, and immediately discarded. If the secret accidentally appears in a tool response, it's automatically masked to `***<last4>`.
+
+### Chat input guard
+
+As an extra safety layer, the chat input detects common API key patterns (Anthropic, OpenAI, Stripe, GitHub, AWS, Google, Slack) and blocks the message with a warning if you accidentally try to paste a secret in the chat.
+
 ## Permission Guard
 
 When lynox wants to perform a potentially impactful action (writing files, sending emails, executing commands), it asks for your approval first. The permission system ensures:
