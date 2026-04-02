@@ -63,7 +63,12 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(config)
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) {
+				const detail = await res.text().catch(() => '');
+				error = detail ? `${t('common.save_failed')}: ${detail}` : t('common.save_failed');
+				saving = false;
+				return;
+			}
 			saved = true;
 			setTimeout(() => (saved = false), 2000);
 		} catch {

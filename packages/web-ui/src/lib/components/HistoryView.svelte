@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { formatCost } from '../format.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { unarchiveThread } from '../stores/threads.svelte.js';
@@ -335,7 +336,7 @@
 			{#if stats}
 				<div class="flex gap-4 text-xs text-text-muted">
 					<span>{stats.total_runs ?? 0} {t('history.runs')}</span>
-					<span>${(stats.total_cost_usd ?? 0).toFixed(2)} {t('history.total')}</span>
+					<span>{formatCost(stats.total_cost_usd ?? 0)} {t('history.total')}</span>
 					<span>{t('history.avg_duration')} {((stats.avg_duration_ms ?? 0) / 1000).toFixed(1)}s</span>
 				</div>
 			{/if}
@@ -371,7 +372,7 @@
 								style="height: {Math.max(pct, 1)}%"
 							></div>
 							<div class="absolute bottom-full mb-1 hidden group-hover:block z-10 rounded bg-bg border border-border px-2 py-1 text-xs text-text whitespace-nowrap shadow-lg">
-								{day.day}<br />${day.cost_usd.toFixed(4)} &middot; {day.run_count} runs
+								{day.day}<br />{formatCost(day.cost_usd)} &middot; {day.run_count} runs
 							</div>
 						</div>
 					{/each}
@@ -467,7 +468,7 @@
 								</div>
 								<div class="flex gap-3 mt-0.5 text-xs text-text-muted">
 									<span>{group.runs.length} {group.runs.length === 1 ? 'Run' : 'Runs'}</span>
-									<span>${group.totalCost.toFixed(4)}</span>
+									<span>{formatCost(group.totalCost)}</span>
 									<span>{formatDateTime(group.lastActivity)}</span>
 								</div>
 							</div>
@@ -561,7 +562,7 @@
 								<span class="rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5">{t('history.spawned')}</span>
 							{/if}
 							<span>{run.model_id}</span>
-							<span>${run.cost_usd.toFixed(4)}</span>
+							<span>{formatCost(run.cost_usd)}</span>
 							{#if (run.user_wait_ms ?? 0) > 0}
 								<span title="AI: {((run.duration_ms - (run.user_wait_ms ?? 0)) / 1000).toFixed(1)}s / Total: {(run.duration_ms / 1000).toFixed(1)}s">{((run.duration_ms - (run.user_wait_ms ?? 0)) / 1000).toFixed(1)}s AI</span>
 							{:else}

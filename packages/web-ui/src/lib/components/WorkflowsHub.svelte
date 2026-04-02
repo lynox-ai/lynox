@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { getApiBase } from '../config.svelte.js';
+	import { formatCost, formatDuration } from '../format.js';
 	import { t } from '../i18n.svelte.js';
 	import WorkflowsView from './WorkflowsView.svelte';
 
@@ -64,16 +65,6 @@
 			}
 		} catch { /* silent */ }
 		statsLoading = false;
-	}
-
-	function formatDuration(ms: number): string {
-		if (ms < 1000) return `${Math.round(ms)}ms`;
-		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-		return `${(ms / 60_000).toFixed(1)}m`;
-	}
-
-	function formatCost(usd: number): string {
-		return `$${usd.toFixed(4)}`;
 	}
 
 	// Aggregated summary

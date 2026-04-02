@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { formatCost, formatDuration } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 
@@ -81,16 +82,6 @@
 		const next = new Set(expandedSteps);
 		if (next.has(stepId)) next.delete(stepId); else next.add(stepId);
 		expandedSteps = next;
-	}
-
-	function formatDuration(ms: number): string {
-		if (ms < 1000) return `${ms}ms`;
-		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-		return `${(ms / 60_000).toFixed(1)}m`;
-	}
-
-	function formatCost(usd: number): string {
-		return `$${usd.toFixed(4)}`;
 	}
 
 	function wfTimeAgo(iso: string): string {
