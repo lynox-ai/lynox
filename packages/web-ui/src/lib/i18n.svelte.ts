@@ -374,6 +374,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.thinking': { de: 'Thinking Mode', en: 'Thinking Mode' },
 	'config.thinking_disabled': { de: 'Deaktiviert', en: 'Disabled' },
 	'config.thinking_adaptive': { de: 'Adaptiv (empfohlen)', en: 'Adaptive (recommended)' },
+	'config.anthropic_only_hint': { de: 'Nur mit Anthropic (direkt) verfügbar. Bei Custom/Bedrock/Vertex automatisch deaktiviert.', en: 'Only available with Anthropic (direct). Automatically disabled with Custom/Bedrock/Vertex.' },
 	'config.memory_extraction': { de: 'Memory Extraction', en: 'Memory Extraction' },
 	'config.memory_extraction_desc': { de: 'Agent lernt automatisch aus Gesprächen', en: 'Agent learns automatically from conversations' },
 	'config.experience': { de: 'Erfahrungslevel', en: 'Experience Level' },

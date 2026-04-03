@@ -175,6 +175,9 @@
 		loadCurrentVersion();
 	});
 
+	const isAnthropicDirect = $derived(config.provider === 'anthropic' || !config.provider);
+	const isNonDirect = $derived(config.provider === 'custom' || config.provider === 'bedrock' || config.provider === 'vertex');
+
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';
 	const sectionClass = 'text-xs font-mono uppercase tracking-widest text-text-subtle mt-8 mb-3';
@@ -260,23 +263,30 @@
 				</select>
 			</div>
 
-			<div class={cardClass}>
-				<label for="effort" class="block text-sm font-medium mb-2">{t('config.effort')}</label>
-				<select id="effort" bind:value={config.effort_level} class={inputClass}>
-					<option value="low">{t('config.effort_low')}</option>
-					<option value="medium">{t('config.effort_medium')}</option>
-					<option value="high">{t('config.effort_high')}</option>
-					<option value="max">{t('config.effort_max')}</option>
-				</select>
-			</div>
+			{#if isAnthropicDirect}
+				<div class={cardClass}>
+					<label for="effort" class="block text-sm font-medium mb-2">{t('config.effort')}</label>
+					<select id="effort" bind:value={config.effort_level} class={inputClass}>
+						<option value="low">{t('config.effort_low')}</option>
+						<option value="medium">{t('config.effort_medium')}</option>
+						<option value="high">{t('config.effort_high')}</option>
+						<option value="max">{t('config.effort_max')}</option>
+					</select>
+				</div>
 
-			<div class={cardClass}>
-				<label for="thinking" class="block text-sm font-medium mb-2">{t('config.thinking')}</label>
-				<select id="thinking" bind:value={config.thinking_mode} class={inputClass}>
-					<option value="disabled">{t('config.thinking_disabled')}</option>
-					<option value="adaptive">{t('config.thinking_adaptive')}</option>
-				</select>
-			</div>
+				<div class={cardClass}>
+					<label for="thinking" class="block text-sm font-medium mb-2">{t('config.thinking')}</label>
+					<select id="thinking" bind:value={config.thinking_mode} class={inputClass}>
+						<option value="disabled">{t('config.thinking_disabled')}</option>
+						<option value="adaptive">{t('config.thinking_adaptive')}</option>
+					</select>
+				</div>
+			{:else}
+				<div class="{cardClass} opacity-60">
+					<p class="text-sm font-medium mb-1">{t('config.effort')} / {t('config.thinking')}</p>
+					<p class="text-xs text-text-muted">{isNonDirect ? t('config.anthropic_only_hint') : ''}</p>
+				</div>
+			{/if}
 
 			<div class={cardClass}>
 				<label for="experience" class="block text-sm font-medium mb-1">{t('config.experience')}</label>
@@ -333,7 +343,6 @@
 				<label for="embedding" class="block text-sm font-medium mb-2">{t('config.embedding_provider')}</label>
 				<select id="embedding" bind:value={config.embedding_provider} class={inputClass}>
 					<option value="onnx">{t('config.embedding_onnx')}</option>
-					<option value="voyage">{t('config.embedding_voyage')}</option>
 				</select>
 			</div>
 
