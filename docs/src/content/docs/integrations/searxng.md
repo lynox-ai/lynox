@@ -78,35 +78,16 @@ When running lynox in Docker, use `host.docker.internal` (macOS/Windows) or the 
 
 lynox checks the SearXNG health endpoint on startup. If reachable, the `web_research` tool becomes available. You can verify in the Web UI under Settings → Integrations — the SearXNG card shows "Connected".
 
-## Docker Compose (Both Together)
+## Docker Compose
 
-Run lynox and SearXNG side by side:
+SearXNG is **included and active by default** in the standard `docker-compose.yml`. No extra setup needed — just `docker compose up`.
 
-```yaml
-services:
-  lynox:
-    image: ghcr.io/lynox-ai/lynox:webui
-    ports:
-      - "3000:3000"
-    environment:
-      - ANTHROPIC_API_KEY=sk-ant-...
-      - SEARXNG_URL=http://searxng:8080
-    networks:
-      - lynox
+lynox ships a pre-configured `searxng/settings.yml` with optimized engines:
 
-  searxng:
-    image: searxng/searxng:latest
-    volumes:
-      - searxng-data:/etc/searxng
-    networks:
-      - lynox
-
-networks:
-  lynox:
-
-volumes:
-  searxng-data:
-```
+- **General**: Google, DuckDuckGo, Bing, Wikipedia, Wikidata
+- **News**: Google News, DuckDuckGo News, Bing News
+- **Science**: Google Scholar, Semantic Scholar, arXiv
+- **IT**: GitHub, StackOverflow, npm, PyPI
 
 :::tip
 SearXNG doesn't need to be exposed to the internet — only lynox needs to reach it on the internal Docker network.
@@ -119,19 +100,31 @@ SearXNG doesn't need to be exposed to the internet — only lynox needs to reach
 | Cost | Included | Free tier, then paid | Free |
 | API key required | No | Yes | No |
 | Providers | Anthropic only | All | All |
-| Content extraction | Deep (full page) | Deep (raw_content) | Snippets only |
-| Quality | High (Claude-optimized) | High (AI-optimized) | Medium-High |
+| Content extraction | Deep (full page) | Deep (raw_content) | Auto-enriched (top 3 results) |
+| Quality | High (Claude-optimized) | High (AI-optimized) | High (enriched + multi-engine) |
 | Setup | Zero | Account creation | Docker container |
 | Rate limits | API rate limits | 1,000/month free | Unlimited |
 
-**Content depth:** SearXNG returns search snippets, not full page content. For deep reading, lynox uses the built-in content extractor to fetch and parse the full page when needed.
+**Content enrichment:** lynox automatically fetches full page content for the top 3 search results using its built-in content extractor (Readability-based). This closes the quality gap to Tavily. A 10-second timeout ensures search stays responsive even when pages are slow.
 
-## Customizing SearXNG
+## Search Categories
 
-SearXNG is highly configurable. Common tweaks:
+The `web_research` tool supports topic-based search:
 
-- **Enable/disable search engines** in `settings.yml` (Google, Bing, DuckDuckGo, etc.)
-- **Set language and region** for localized results
-- **Configure rate limiting** to avoid upstream bans
+| Topic | SearXNG Category | Engines |
+|-------|-----------------|---------|
+| `general` | (default) | Google, DuckDuckGo, Bing, Wikipedia |
+| `news` | news | Google News, DuckDuckGo News, Bing News |
+| `science` | science | Google Scholar, Semantic Scholar, arXiv |
+| `it` | it | GitHub, StackOverflow, npm, PyPI |
+| `finance` | (general) | Google, DuckDuckGo, Bing + currency engine |
 
-See the [SearXNG documentation](https://docs.searxng.org/) for details.
+## Customizing
+
+Edit `searxng/settings.yml` in the repo to:
+
+- **Add/remove engines** — see `use_default_settings.engines.keep_only`
+- **Change language** — `search.default_lang` (default: `auto`)
+- **Adjust timeout** — `outgoing.request_timeout` (default: 5s)
+
+See the [SearXNG documentation](https://docs.searxng.org/) for all options.

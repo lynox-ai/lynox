@@ -59,7 +59,4 @@ services:
     security_opt:
       - no-new-privileges
     volumes:
-      - searxng-data:/etc/searxng
-
-volumes:
-  searxng-data:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro

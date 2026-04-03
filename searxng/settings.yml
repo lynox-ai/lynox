@@ -1,0 +1,59 @@
+# SearXNG settings for lynox — optimized for AI agent web research.
+# Mounted into the SearXNG container via docker-compose.
+# Full reference: https://docs.searxng.org/admin/settings/
+
+use_default_settings:
+  engines:
+    keep_only:
+      # General
+      - google
+      - duckduckgo
+      - bing
+      - wikipedia
+      - wikidata
+      - currency
+      # News
+      - google news
+      - duckduckgo news
+      - bing news
+      # Science
+      - google scholar
+      - semantic scholar
+      - arxiv
+      # IT
+      - github
+      - stackoverflow
+      - npm
+      - pypi
+
+general:
+  debug: false
+  instance_name: "lynox-search"
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "auto"
+  formats:
+    - html
+    - json
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "lynox-searxng-change-me"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+
+ui:
+  default_theme: simple
+  query_in_title: false
+
+outgoing:
+  request_timeout: 5.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true

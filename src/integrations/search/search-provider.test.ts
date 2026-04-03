@@ -301,6 +301,45 @@ describe('SearXNGProvider', () => {
     expect(url).not.toContain('number_of_results');
   });
 
+  it('maps science topic to science category', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [] }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('quantum computing', { topic: 'science' });
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).toContain('categories=science');
+  });
+
+  it('maps it topic to it category', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [] }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('typescript generics', { topic: 'it' });
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).toContain('categories=it');
+  });
+
+  it('does not set categories for finance topic (no SearXNG equivalent)', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [] }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('AAPL stock', { topic: 'finance' });
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).not.toContain('categories');
+  });
+
   it('does not set categories param for general topic', async () => {
     mockFetch.mockResolvedValue({
       ok: true,

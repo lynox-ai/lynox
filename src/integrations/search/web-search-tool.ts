@@ -23,12 +23,17 @@ async function enrichResults(results: SearchResult[]): Promise<SearchResult[]> {
   const toEnrich = results.slice(0, ENRICH_TOP_N).filter(r => !r.content);
   if (toEnrich.length === 0) return results;
 
-  const enriched = await Promise.allSettled(
+  // Race enrichment against a 10s timeout to keep search responsive
+  const enrichmentPromise = Promise.allSettled(
     toEnrich.map(async (r) => {
       const extracted = await extractContent(r.url, ENRICH_MAX_CHARS);
       return { url: r.url, content: extracted.content };
     }),
   );
+  const timeout = new Promise<PromiseSettledResult<{ url: string; content: string }>[]>(
+    resolve => setTimeout(() => resolve([]), 10_000),
+  );
+  const enriched = await Promise.race([enrichmentPromise, timeout]);
 
   const contentMap = new Map<string, string>();
   for (const result of enriched) {
@@ -81,7 +86,7 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
           },
           topic: {
             type: 'string',
-            enum: ['general', 'news', 'finance'],
+            enum: ['general', 'news', 'finance', 'science', 'it'],
             description: 'Search topic category. Only used with action "search"',
           },
           time_range: {

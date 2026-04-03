@@ -9,7 +9,7 @@ export interface SearchResult {
 
 export interface SearchOptions {
   maxResults?: number | undefined;
-  topic?: 'general' | 'news' | 'finance' | undefined;
+  topic?: 'general' | 'news' | 'finance' | 'science' | 'it' | undefined;
   timeRange?: 'day' | 'week' | 'month' | 'year' | undefined;
 }
 
@@ -114,7 +114,12 @@ export class SearXNGProvider implements SearchProvider {
     });
     if (opts?.maxResults) params.set('number_of_results', String(maxResults));
     if (opts?.timeRange) params.set('time_range', opts.timeRange);
-    if (opts?.topic === 'news') params.set('categories', 'news');
+    const categoryMap: Record<string, string> = {
+      news: 'news', science: 'science', it: 'it',
+    };
+    if (opts?.topic && categoryMap[opts.topic]) {
+      params.set('categories', categoryMap[opts.topic]!);
+    }
 
     const url = `${this.baseUrl.replace(/\/+$/, '')}/search?${params.toString()}`;
     const response = await fetch(url, {
