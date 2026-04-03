@@ -138,8 +138,7 @@ export interface LynoxUserConfig {
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;
   max_session_cost_usd?: number | undefined;
-  voyage_api_key?: string | undefined;
-  embedding_provider?: 'voyage' | 'onnx' | 'local' | undefined;
+  embedding_provider?: 'onnx' | 'local' | undefined;
   plugins?: Record<string, boolean> | undefined;
   agents_dir?: string | undefined;
   manifests_dir?: string | undefined;

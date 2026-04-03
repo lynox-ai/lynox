@@ -409,7 +409,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.memory_half_life_desc': { de: 'Wie lange Wissen relevant bleibt (Default: 90 Tage)', en: 'How long knowledge stays relevant (default: 90 days)' },
 	'config.embedding_provider': { de: 'Embedding Provider', en: 'Embedding Provider' },
 	'config.embedding_onnx': { de: 'ONNX (lokal, kostenlos)', en: 'ONNX (local, free)' },
-	'config.embedding_voyage': { de: 'Voyage (Cloud, bessere Qualität)', en: 'Voyage (cloud, better quality)' },
 
 	// Limits
 	'config.limits': { de: 'Limits', en: 'Limits' },

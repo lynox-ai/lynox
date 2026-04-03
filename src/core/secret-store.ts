@@ -114,7 +114,6 @@ export class SecretStore implements SecretStoreLike {
       ['ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY'],
       ['GOOGLE_CLIENT_SECRET', 'GOOGLE_CLIENT_SECRET'],
       ['SEARCH_API_KEY', 'TAVILY_API_KEY'],
-      ['VOYAGE_API_KEY', 'VOYAGE_API_KEY'],
     ];
     for (const [secretName, envVar] of wellKnownEnv) {
       const value = process.env[envVar];
@@ -149,7 +148,6 @@ export class SecretStore implements SecretStoreLike {
   private _loadFromConfig(config: LynoxUserConfig): void {
     const wellKnown: Array<[string, string | undefined]> = [
       ['ANTHROPIC_API_KEY', config.api_key],
-      ['VOYAGE_API_KEY', config.voyage_api_key],
     ];
 
     for (const [name, value] of wellKnown) {

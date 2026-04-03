@@ -23,7 +23,6 @@ describe('Config', () => {
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['ANTHROPIC_BASE_URL'];
     delete process.env['LYNOX_WORKSPACE'];
-    delete process.env['VOYAGE_API_KEY'];
     delete process.env['LYNOX_EMBEDDING_PROVIDER'];
     delete process.env['LYNOX_USER'];
     delete process.env['LYNOX_ORG'];

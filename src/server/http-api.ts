@@ -51,7 +51,7 @@ const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
 // Keys stripped from GET /api/config responses (secrets that must not leak)
 // Keys stripped from GET /api/config responses (secrets that must not leak)
 const REDACTED_CONFIG_KEYS = new Set([
-  'api_key', 'voyage_api_key', 'telegram_bot_token',
+  'api_key', 'telegram_bot_token',
   'search_api_key', 'google_client_id', 'google_client_secret',
 ]);
 

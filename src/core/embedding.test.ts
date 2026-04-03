@@ -121,15 +121,9 @@ describe('Embedding', () => {
       expect(provider.name).toBe('onnx');
     });
 
-    it('creates OnnxProvider when voyage has no key', () => {
-      const provider = createEmbeddingProvider('voyage');
-      expect(provider.name).toBe('onnx');
-    });
-
-    it('creates VoyageProvider when key provided', () => {
-      const provider = createEmbeddingProvider('voyage', 'test-key');
-      expect(provider.name).toBe('voyage');
-      expect(provider.dimensions).toBe(1024);
+    it('creates LocalProvider when type is local', () => {
+      const provider = createEmbeddingProvider('local');
+      expect(provider.name).toBe('local');
     });
   });
 });

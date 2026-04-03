@@ -85,21 +85,15 @@ describe('SecretStore', () => {
     it('loads well-known config fields as secrets', () => {
       const config: LynoxUserConfig = {
         api_key: 'sk-ant-config-key123',
-        voyage_api_key: 'pa-voyage-key1234',
       };
       const store = new SecretStore(config);
       expect(store.listNames()).toContain('ANTHROPIC_API_KEY');
-      expect(store.listNames()).toContain('VOYAGE_API_KEY');
     });
 
     it('skips undefined config values', () => {
-      const config: LynoxUserConfig = {
-        api_key: 'sk-ant-valid-key12',
-        // voyage_api_key is undefined
-      };
+      const config: LynoxUserConfig = {};
       const store = new SecretStore(config);
-      expect(store.listNames()).toContain('ANTHROPIC_API_KEY');
-      expect(store.listNames()).not.toContain('VOYAGE_API_KEY');
+      expect(store.listNames()).not.toContain('ANTHROPIC_API_KEY');
     });
   });
 

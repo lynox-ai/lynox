@@ -94,12 +94,9 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['LYNOX_WORKSPACE']) {
     merged.workspace_dir = process.env['LYNOX_WORKSPACE'];
   }
-  if (process.env['VOYAGE_API_KEY']) {
-    merged.voyage_api_key = process.env['VOYAGE_API_KEY'];
-  }
   if (process.env['LYNOX_EMBEDDING_PROVIDER']) {
     const ep = process.env['LYNOX_EMBEDDING_PROVIDER'];
-    if (ep === 'voyage' || ep === 'onnx' || ep === 'local') {
+    if (ep === 'onnx' || ep === 'local') {
       merged.embedding_provider = ep;
     }
   }

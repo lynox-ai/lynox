@@ -5,48 +5,6 @@ export interface EmbeddingProvider {
 }
 
 /**
- * Voyage AI embedding provider.
- * Uses voyage-3-lite (1024 dimensions) via plain fetch().
- */
-export class VoyageProvider implements EmbeddingProvider {
-  readonly name = 'voyage';
-  readonly dimensions = 1024;
-  private readonly apiKey: string;
-  private readonly baseUrl: string;
-
-  constructor(apiKey: string, baseUrl = 'https://api.voyageai.com/v1') {
-    this.apiKey = apiKey;
-    this.baseUrl = baseUrl;
-  }
-
-  async embed(text: string): Promise<number[]> {
-    const response = await fetch(`${this.baseUrl}/embeddings`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: 'voyage-3-lite',
-        input: [text],
-        input_type: 'document',
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Voyage API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json() as {
-      data: Array<{ embedding: number[] }>;
-    };
-    const embedding = data.data[0]?.embedding;
-    if (!embedding) throw new Error('No embedding returned from Voyage API');
-    return embedding;
-  }
-}
-
-/**
  * Deterministic hash-based embedding provider for testing.
  * Not suitable for real semantic search — use OnnxProvider instead.
  */
@@ -161,16 +119,11 @@ export class OnnxProvider implements EmbeddingProvider {
 
 /**
  * Create an embedding provider based on config.
- * Falls back to local if Voyage is unavailable.
  */
 export function createEmbeddingProvider(
-  type: 'voyage' | 'onnx' | 'local' | undefined,
-  voyageApiKey?: string | undefined,
+  type: 'onnx' | 'local' | undefined,
   model?: OnnxModelId | undefined,
 ): EmbeddingProvider {
-  if (type === 'voyage' && voyageApiKey) {
-    return new VoyageProvider(voyageApiKey);
-  }
   if (type === 'local') {
     return new LocalProvider();
   }

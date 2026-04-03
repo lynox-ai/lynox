@@ -293,10 +293,6 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
         userConfig.search_api_key = vaultSearchKey;
       }
 
-      const vaultVoyageKey = vault.get('VOYAGE_API_KEY');
-      if (vaultVoyageKey && !process.env['VOYAGE_API_KEY']) {
-        userConfig.voyage_api_key = vaultVoyageKey;
-      }
 
       // Load MCP secret from vault if not set via env
       if (!process.env['LYNOX_MCP_SECRET']) {
@@ -347,7 +343,6 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     { vaultName: 'ANTHROPIC_API_KEY', configField: 'api_key', envVar: 'ANTHROPIC_API_KEY' },
     { vaultName: 'GOOGLE_CLIENT_SECRET', configField: 'google_client_secret', envVar: 'GOOGLE_CLIENT_SECRET' },
     { vaultName: 'SEARCH_API_KEY', configField: 'search_api_key', envVar: 'TAVILY_API_KEY' },
-    { vaultName: 'VOYAGE_API_KEY', configField: 'voyage_api_key', envVar: 'VOYAGE_API_KEY' },
   ];
 
   const fieldsToRemove: string[] = [];
@@ -521,7 +516,6 @@ export function initEmbeddingProvider(
   try {
     return createEmbeddingProvider(
       userConfig.embedding_provider ?? 'onnx',
-      userConfig.voyage_api_key,
       userConfig.embedding_model as OnnxModelId | undefined,
     );
   } catch {
