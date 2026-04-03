@@ -115,8 +115,7 @@
 					{/each}
 				</div>
 				{#if selected}
-					<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-				<div class="fixed inset-0 z-40 bg-bg/80 backdrop-blur-sm md:hidden" onclick={() => selected = null}></div>
+				<button type="button" class="fixed inset-0 z-40 bg-bg/80 backdrop-blur-sm md:hidden" onclick={() => selected = null} aria-label="Close"></button>
 					<div class="fixed inset-x-0 bottom-0 z-50 max-h-[70vh] overflow-y-auto rounded-t-xl border-t border-border bg-bg-subtle p-4 space-y-3 md:relative md:inset-auto md:z-auto md:max-h-none md:rounded-[var(--radius-md)] md:border md:rounded-t-[var(--radius-md)] md:w-80 md:shrink-0 md:self-start">
 						<div class="flex items-center justify-between">
 							<h2 class="font-medium">{selected.name}</h2>

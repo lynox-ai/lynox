@@ -26,6 +26,8 @@
 	let renamingThreadId = $state<string | null>(null);
 	let renameValue = $state('');
 
+	function focusOnMount(node: HTMLElement) { node.focus(); }
+
 	function startRename(threadId: string, currentTitle: string) {
 		renamingThreadId = threadId;
 		renameValue = currentTitle;
@@ -333,7 +335,7 @@
 														onblur={() => commitRename(thread.id)}
 														onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') commitRename(thread.id); if (e.key === 'Escape') cancelRename(); }}
 														class="flex-1 px-2 py-1.5 text-sm bg-bg border border-accent/40 rounded-[var(--radius-sm)] outline-none text-text"
-														autofocus
+														use:focusOnMount
 													/>
 												{:else}
 													<button

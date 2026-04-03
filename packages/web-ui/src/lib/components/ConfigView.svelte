@@ -94,11 +94,11 @@
 
 	async function loadVaultKey() {
 		try {
-			const res = await fetch(`${getApiBase()}/vault/key`);
+			const res = await fetch(`${getApiBase()}/vault/key?reveal=true`);
 			if (!res.ok) return;
-			const data = (await res.json()) as { configured: boolean; key: string | null };
+			const data = (await res.json()) as { configured: boolean; key?: string };
 			vaultConfigured = data.configured;
-			vaultKey = data.key;
+			vaultKey = data.key ?? null;
 		} catch { /* ignore — endpoint may not exist on older engines */ }
 	}
 

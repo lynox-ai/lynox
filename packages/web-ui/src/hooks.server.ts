@@ -1,5 +1,6 @@
 import type { Handle } from '@sveltejs/kit';
 import { redirect } from '@sveltejs/kit';
+import { sequence } from '@sveltejs/kit/hooks';
 import { env } from '$env/dynamic/private';
 import { verifySessionToken } from '$lib/server/auth.js';
 
@@ -10,7 +11,7 @@ function isPublic(pathname: string): boolean {
 	return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'));
 }
 
-export const handle: Handle = async ({ event, resolve }) => {
+const handleAuth: Handle = async ({ event, resolve }) => {
 	const secret = env.LYNOX_HTTP_SECRET;
 
 	// No secret configured → auth gate disabled (localhost-only mode)
@@ -37,3 +38,14 @@ export const handle: Handle = async ({ event, resolve }) => {
 
 	redirect(303, '/login');
 };
+
+const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
+	const response = await resolve(event);
+	response.headers.set('X-Content-Type-Options', 'nosniff');
+	response.headers.set('X-Frame-Options', 'SAMEORIGIN');
+	response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+	response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+	return response;
+};
+
+export const handle = sequence(handleAuth, handleSecurityHeaders);

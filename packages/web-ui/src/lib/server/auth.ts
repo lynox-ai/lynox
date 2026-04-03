@@ -9,24 +9,28 @@ function deriveKey(secret: string, purpose: string): Buffer {
 
 // ── Session tokens ──────────────────────────────────────────────────
 
-/** Create a signed session token: `<unix_ts>.<hmac_hex>`. */
+/** Create a signed session token: `<nonce>.<unix_ts>.<hmac_hex>`. */
 export function createSessionToken(secret: string): string {
 	const key = deriveKey(secret, 'lynox-session');
+	const nonce = randomBytes(8).toString('hex');
 	const ts = Math.floor(Date.now() / 1000).toString();
-	const hmac = createHmac('sha256', key).update(ts).digest('hex');
-	return `${ts}.${hmac}`;
+	const payload = `${nonce}.${ts}`;
+	const hmac = createHmac('sha256', key).update(payload).digest('hex');
+	return `${payload}.${hmac}`;
 }
 
-/** Verify a session token is correctly signed and not expired. */
+/** Verify a session token is correctly signed and not expired.
+ *  Supports both old format `<ts>.<hmac>` and new format `<nonce>.<ts>.<hmac>`. */
 export function verifySessionToken(token: string, secret: string): boolean {
-	const dot = token.indexOf('.');
-	if (dot === -1) return false;
+	const parts = token.split('.');
+	if (parts.length < 2 || parts.length > 3) return false;
 
-	const ts = token.slice(0, dot);
-	const sig = token.slice(dot + 1);
-	if (!ts || !sig) return false;
+	const sig = parts[parts.length - 1]!;
+	const payload = parts.slice(0, -1).join('.');
+	// Timestamp is last element before sig
+	const tsStr = parts.length === 3 ? parts[1]! : parts[0]!;
 
-	const timestamp = parseInt(ts, 10);
+	const timestamp = parseInt(tsStr, 10);
 	if (Number.isNaN(timestamp)) return false;
 
 	// Expired?
@@ -34,7 +38,7 @@ export function verifySessionToken(token: string, secret: string): boolean {
 
 	// Verify HMAC (constant-time, derived key)
 	const key = deriveKey(secret, 'lynox-session');
-	const expected = createHmac('sha256', key).update(ts).digest('hex');
+	const expected = createHmac('sha256', key).update(payload).digest('hex');
 	try {
 		const sigBuf = Buffer.from(sig, 'hex');
 		const expBuf = Buffer.from(expected, 'hex');

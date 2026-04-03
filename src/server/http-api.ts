@@ -208,20 +208,21 @@ export class LynoxHTTPApi {
     if (!match?.[1]) return false;
 
     const token = decodeURIComponent(match[1]);
-    const dot = token.indexOf('.');
-    if (dot === -1) return false;
+    const parts = token.split('.');
+    if (parts.length < 2 || parts.length > 3) return false;
 
-    const ts = token.slice(0, dot);
-    const sig = token.slice(dot + 1);
-    if (!ts || !sig) return false;
+    const sig = parts[parts.length - 1]!;
+    const payload = parts.slice(0, -1).join('.');
+    // Timestamp: last element before sig (supports old ts.hmac and new nonce.ts.hmac)
+    const tsStr = parts.length === 3 ? parts[1]! : parts[0]!;
 
-    const timestamp = parseInt(ts, 10);
+    const timestamp = parseInt(tsStr, 10);
     if (Number.isNaN(timestamp)) return false;
     if (Math.floor(Date.now() / 1000) - timestamp > 7 * 24 * 60 * 60) return false;
 
     try {
       const key = createHmac('sha256', 'lynox-session').update(secret).digest();
-      const expected = createHmac('sha256', key).update(ts).digest('hex');
+      const expected = createHmac('sha256', key).update(payload).digest('hex');
       const sigBuf = Buffer.from(sig, 'hex');
       const expBuf = Buffer.from(expected, 'hex');
       if (sigBuf.length !== expBuf.length) return false;
@@ -517,6 +518,11 @@ export class LynoxHTTPApi {
     // Parse body for POST/PUT/PATCH
     let body: unknown = null;
     if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+      const ct = (req.headers['content-type'] ?? '').split(';')[0]!.trim();
+      if (ct && ct !== 'application/json') {
+        errorResponse(res, 415, 'Content-Type must be application/json');
+        return;
+      }
       try {
         body = await parseBody(req, MAX_BODY_BYTES);
       } catch {
@@ -645,7 +651,11 @@ export class LynoxHTTPApi {
       let task: string | unknown[];
       if (files.length > 0) {
         const content: unknown[] = [];
+        const MAX_FILE_B64_LEN = 10 * 1024 * 1024; // ~7.5 MB decoded
         for (const file of files) {
+          if (typeof file.data !== 'string' || file.data.length > MAX_FILE_B64_LEN) {
+            errorResponse(res, 413, `File too large: ${typeof file.name === 'string' ? file.name : 'unknown'}`); return;
+          }
           if (file.type.startsWith('image/')) {
             content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
           } else {
@@ -880,7 +890,7 @@ export class LynoxHTTPApi {
       const threadStore = engine.getThreadStore();
       if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
       const url = new URL(req.url ?? '', 'http://localhost');
-      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
       const includeArchived = url.searchParams.get('includeArchived') === 'true';
       const threads = threadStore.listThreads({ limit, includeArchived });
       jsonResponse(res, 200, { threads });
@@ -925,8 +935,8 @@ export class LynoxHTTPApi {
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       const url = new URL(req.url ?? '', 'http://localhost');
-      const fromSeq = parseInt(url.searchParams.get('fromSeq') ?? '0', 10);
-      const limit = parseInt(url.searchParams.get('limit') ?? '10000', 10);
+      const fromSeq = Math.max(parseInt(url.searchParams.get('fromSeq') ?? '0', 10) || 0, 0);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '10000', 10) || 10000, 1), 50000);
       const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
       const messages = records.map(r => ({
         seq: r.seq,
@@ -1068,7 +1078,11 @@ export class LynoxHTTPApi {
         return;
       }
       const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
-      if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')) {
+      // Block cloud metadata endpoints (AWS/GCP/Azure all use 169.254.169.254)
+      // Private IPs intentionally allowed — SearXNG typically runs on Docker network or LAN
+      if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')
+          || hostname === 'metadata.google.internal'
+          || hostname === 'metadata.internal') {
         errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
         return;
       }
@@ -1125,8 +1139,8 @@ export class LynoxHTTPApi {
       if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const q = url.searchParams.get('q');
-      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
-      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
+      const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
       if (q) {
         const runs = history.searchRuns(q, limit, offset);
         jsonResponse(res, 200, { runs });
@@ -1173,7 +1187,7 @@ export class LynoxHTTPApi {
       const history = engine.getRunHistory();
       if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      const days = parseInt(url.searchParams.get('days') ?? '30', 10);
+      const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const data = history.getCostByDay(days);
       jsonResponse(res, 200, data);
     });
@@ -1183,7 +1197,7 @@ export class LynoxHTTPApi {
       const history = engine.getRunHistory();
       if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const runs = history.getRecentPipelineRuns(limit);
       jsonResponse(res, 200, { runs });
     });
@@ -1192,7 +1206,7 @@ export class LynoxHTTPApi {
       const history = engine.getRunHistory();
       if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      const days = parseInt(url.searchParams.get('days') ?? '30', 10);
+      const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const stats = history.getPipelineStepStats(days);
       jsonResponse(res, 200, { stats });
     });
@@ -1201,7 +1215,7 @@ export class LynoxHTTPApi {
       const history = engine.getRunHistory();
       if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      const days = parseInt(url.searchParams.get('days') ?? '30', 10);
+      const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const stats = history.getPipelineCostStats(days);
       jsonResponse(res, 200, { stats });
     });
@@ -1515,8 +1529,8 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const typeFilter = url.searchParams.get('type') ?? '';
       const query = url.searchParams.get('q') ?? '';
-      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
-      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
+      const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
       try {
         if (query) {
           const result = await kg.retrieve(query, [{ type: 'global', id: 'global' }], { topK: limit });
@@ -1552,7 +1566,7 @@ export class LynoxHTTPApi {
       const rh = engine.getRunHistory();
       if (!rh) { jsonResponse(res, 200, { threadInsights: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
-      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const threadInsights = rh.getThreadAggregates(limit);
       jsonResponse(res, 200, { threadInsights });
     });
@@ -1583,7 +1597,7 @@ export class LynoxHTTPApi {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { contacts: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
-      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
       const typeFilter = url.searchParams.get('type') ?? '';
       const filter: Record<string, unknown> = {};
       if (typeFilter) filter['type'] = { $eq: typeFilter };
@@ -1595,7 +1609,7 @@ export class LynoxHTTPApi {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
-      const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
       const stageFilter = url.searchParams.get('stage') ?? '';
       // Show all deals by default (not just open ones)
       const filter: Record<string, unknown> = {};
@@ -1686,8 +1700,8 @@ export class LynoxHTTPApi {
       const ds = engine.getDataStore();
       if (!ds) { errorResponse(res, 503, 'DataStore not available'); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
-      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
-      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
+      const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
       try {
         const result = ds.queryRecords({ collection: params['collection']!, limit, offset });
         jsonResponse(res, 200, result);
@@ -1698,13 +1712,19 @@ export class LynoxHTTPApi {
 
     // ── Vault ─────────────────────────────────────────────────────
 
-    this.staticRoutes.set('GET /api/vault/key', async (_req, res) => {
+    this.staticRoutes.set('GET /api/vault/key', async (req, res) => {
       const key = process.env['LYNOX_VAULT_KEY'];
       if (!key) {
-        jsonResponse(res, 200, { configured: false, key: null });
+        jsonResponse(res, 200, { configured: false });
         return;
       }
-      jsonResponse(res, 200, { configured: true, key });
+      // Only return the actual key when explicitly requested (settings page reveal)
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      if (url.searchParams.get('reveal') === 'true') {
+        jsonResponse(res, 200, { configured: true, key });
+      } else {
+        jsonResponse(res, 200, { configured: true });
+      }
     });
 
     this.staticRoutes.set('POST /api/vault/rotate', async (_req, res, _params, body) => {
@@ -1766,7 +1786,7 @@ export class LynoxHTTPApi {
     /** Resolve a workspace-relative path, rejecting traversal and symlink escape. */
     async function resolveWorkspacePath(filePath: string): Promise<string | null> {
       const { resolve, join } = await import('node:path');
-      const { existsSync, realpathSync } = await import('node:fs');
+      const { realpathSync } = await import('node:fs');
       const { getWorkspaceDir } = await import('../core/workspace.js');
       const { getLynoxDir } = await import('../core/config.js');
       const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
@@ -1774,9 +1794,11 @@ export class LynoxHTTPApi {
       // Logical path must be within workspace
       if (resolved !== base && !resolved.startsWith(base + '/')) return null;
       // Real path (after symlink resolution) must also be within workspace
-      if (existsSync(resolved)) {
+      try {
         const real = realpathSync(resolved);
         if (real !== base && !real.startsWith(base + '/')) return null;
+      } catch {
+        // File doesn't exist yet — logical path check above is sufficient
       }
       return resolved;
     }
