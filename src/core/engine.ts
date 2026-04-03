@@ -506,9 +506,11 @@ export class Engine {
         const healthy = await searxng.healthCheck();
         if (healthy) {
           this.registry.register(createWebSearchTool(searxng));
+        } else {
+          process.stderr.write(`[lynox] SearXNG not reachable at ${searxngUrl} — web_research tool disabled. Check if SearXNG is running.\n`);
         }
-      } catch {
-        // SearXNG init failed — non-critical, continue without it
+      } catch (err) {
+        process.stderr.write(`[lynox] SearXNG init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     } else if (searchKey) {
       try {
