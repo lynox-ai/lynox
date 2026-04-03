@@ -520,6 +520,8 @@ export class Engine {
       } catch {
         // Web search init failed — non-critical, continue without it
       }
+    } else if (!searchKey && !searxngUrl) {
+      process.stderr.write('[lynox] No web search configured. Use docker-compose for built-in SearXNG, or set SEARXNG_URL / TAVILY_API_KEY.\n');
     }
 
     // Google Workspace tools (conditional — requires client ID + secret)
