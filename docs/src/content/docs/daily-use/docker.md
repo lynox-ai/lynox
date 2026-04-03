@@ -15,6 +15,19 @@ Docker is the recommended way to run lynox in production. Two images are availab
 ## Quick Start
 
 ```bash
+cp .env.example .env       # add your API key
+docker compose up -d
+```
+
+Open [localhost:3000](http://localhost:3000) and enter the access token from `docker logs lynox`. Includes SearXNG for free web search out of the box.
+
+The repo includes a `docker-compose.yml` with lynox + SearXNG pre-configured. Edit `.env` to set your API key and optional features (Telegram, Google Workspace, etc.).
+
+## Single Container (advanced)
+
+If you don't need docker-compose (e.g. orchestrated via Kubernetes or Coolify), you can run lynox standalone — but without SearXNG:
+
+```bash
 docker run -d --name lynox -p 3000:3000 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e LYNOX_HTTP_SECRET=your-access-token \
@@ -23,47 +36,9 @@ docker run -d --name lynox -p 3000:3000 \
   ghcr.io/lynox-ai/lynox:webui
 ```
 
-Open [localhost:3000](http://localhost:3000) and enter your access token. The [setup guide](https://lynox.ai/getting-started) generates one for you. If omitted, a token is auto-generated — find it with `docker logs lynox`.
-
-## Docker Compose (recommended)
-
-Create a `docker-compose.yml`:
-
-```yaml
-services:
-  lynox:
-    image: ghcr.io/lynox-ai/lynox:webui
-    restart: unless-stopped
-    read_only: true
-    ports:
-      - "3000:3000"
-    tmpfs:
-      - /tmp:size=512M
-      - /workspace:size=256M,uid=1001,gid=1001
-    security_opt:
-      - no-new-privileges
-    environment:
-      - ANTHROPIC_API_KEY
-      # Optional: LLM provider (default: anthropic)
-      # - LYNOX_LLM_PROVIDER=bedrock
-      # - AWS_REGION=eu-central-1
-      - LYNOX_HTTP_SECRET
-      - LYNOX_VAULT_KEY
-      - TELEGRAM_BOT_TOKEN
-      - TELEGRAM_ALLOWED_CHAT_IDS
-      - TAVILY_API_KEY
-      - GOOGLE_CLIENT_ID
-      - GOOGLE_CLIENT_SECRET
-    volumes:
-      - ${HOME}/.lynox:/home/lynox/.lynox
-```
-
-Then run:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-docker compose up -d
-```
+:::note
+Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to your own instance, or use a `TAVILY_API_KEY` for web search.
+:::
 
 ## Environment Variables
 

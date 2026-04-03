@@ -28,15 +28,11 @@ You need Node.js 22+ and an [Anthropic API key](https://console.anthropic.com/) 
 ### Docker (recommended for always-on)
 
 ```bash
-docker run -d --name lynox -p 3000:3000 \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e LYNOX_HTTP_SECRET=your-access-token \
-  -v ~/.lynox:/home/lynox/.lynox \
-  --restart unless-stopped \
-  ghcr.io/lynox-ai/lynox:webui
+cp .env.example .env       # add your API key
+docker compose up -d        # starts lynox + SearXNG (web search)
 ```
 
-Open [localhost:3000](http://localhost:3000) and enter your access token. The [setup guide](https://lynox.ai/getting-started) generates one for you. If omitted, find it with `docker logs lynox`.
+Open [localhost:3000](http://localhost:3000) and enter the access token from `docker logs lynox`. Includes web search out of the box via SearXNG.
 
 ## Documentation
 
@@ -100,7 +96,7 @@ pnpm run dev
 ### Docker
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env       # add your API key
 docker compose up
 ```
 

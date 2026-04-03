@@ -31,52 +31,33 @@ Anthropic users get `web_search` automatically — `web_research` via SearXNG is
 
 ## Setup
 
-### 1. Start SearXNG
+### Docker Compose (default — no setup needed)
+
+SearXNG is included in the standard `docker-compose.yml`. Just run:
+
+```bash
+docker compose up -d
+```
+
+Web search works immediately. Verify in the Web UI under Settings → Integrations — the SearXNG card shows "Connected".
+
+### Standalone (npx or docker run)
+
+If you're not using docker-compose, start SearXNG separately:
 
 ```bash
 docker run -d --name searxng -p 8888:8080 searxng/searxng:latest
 ```
 
-Verify it's running:
+Then configure lynox:
 
-```bash
-curl http://localhost:8888/healthz
-```
+**Via Web UI:** Settings → Integrations → SearXNG. Enter the URL and test the connection.
 
-### 2. Configure lynox
-
-**Via Web UI:** Go to Settings → Integrations → SearXNG. Enter the URL and test the connection.
-
-**Via environment variable:**
+**Via environment variable or config:**
 
 ```bash
 export SEARXNG_URL=http://localhost:8888
 ```
-
-**Via config file** (`~/.lynox/config.json`):
-
-```json
-{
-  "searxng_url": "http://localhost:8888"
-}
-```
-
-**Via Docker:**
-
-```bash
-docker run -p 3000:3000 \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e SEARXNG_URL=http://host.docker.internal:8888 \
-  ghcr.io/lynox-ai/lynox:webui
-```
-
-:::note
-When running lynox in Docker, use `host.docker.internal` (macOS/Windows) or the Docker bridge IP (Linux) to reach SearXNG on the host.
-:::
-
-### 3. Verify
-
-lynox checks the SearXNG health endpoint on startup. If reachable, the `web_research` tool becomes available. You can verify in the Web UI under Settings → Integrations — the SearXNG card shows "Connected".
 
 ## Docker Compose
 

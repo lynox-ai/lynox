@@ -1,5 +1,6 @@
 # Combined Engine + Web UI image for self-hosted single-user deployment
-# Usage: docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui
+# Recommended: docker compose up (includes SearXNG for web search)
+# Standalone:  docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui
 
 # --- Stage 1: Build Engine ---
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS build-engine

@@ -28,36 +28,19 @@ npx @lynox-ai/core
 
 Starts the setup wizard on first run, then opens the Web UI.
 
-### Option 2: Docker (recommended for always-on)
+### Option 2: Docker Compose (recommended for always-on)
 
 ```bash
-docker run -d --name lynox -p 3000:3000 \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e LYNOX_HTTP_SECRET=your-access-token \
-  -v ~/.lynox:/home/lynox/.lynox \
-  --restart unless-stopped \
-  ghcr.io/lynox-ai/lynox:webui
+cp .env.example .env       # add your API key (Anthropic, Bedrock, Vertex, or local)
+docker compose up -d
 ```
 
-Open [localhost:3000](http://localhost:3000) and enter your access token to log in.
+Open [localhost:3000](http://localhost:3000) and enter the access token from `docker logs lynox`.
 
-:::tip[Alternative providers]
-Using AWS Bedrock or a local model? Replace the API key line with your provider config:
+This starts lynox + SearXNG (free web search) — everything works out of the box. See [LLM Providers](/daily-use/llm-providers/) for Bedrock, Vertex, or local model setup.
 
-```bash
-# AWS Bedrock (EU)
--e LYNOX_LLM_PROVIDER=bedrock -e AWS_REGION=eu-central-1 \
--e AWS_ACCESS_KEY_ID=AKIA... -e AWS_SECRET_ACCESS_KEY=... \
-
-# Local model via LiteLLM
--e LYNOX_LLM_PROVIDER=custom -e ANTHROPIC_BASE_URL=http://host.docker.internal:4000 \
-```
-
-You can also change the provider later in **Settings → Config**. See [LLM Providers](/daily-use/llm-providers/).
-:::
-
-:::tip[Token from setup guide]
-The [setup guide](https://lynox.ai/getting-started) generates a secure token for you and includes it in the command. If you omit `LYNOX_HTTP_SECRET`, one is auto-generated — find it with `docker logs lynox`.
+:::tip[Access token]
+The [setup guide](https://lynox.ai/getting-started) generates a secure token and includes it in your `.env`. If you omit `LYNOX_HTTP_SECRET`, one is auto-generated — find it with `docker logs lynox`.
 :::
 
 ### Option 3: Clone & run
@@ -108,7 +91,7 @@ lynox remembers context across conversations. The more you use it, the more it l
 |------|---------|----------|
 | **Web UI** | `npx @lynox-ai/core` | Primary interface — chat, settings, integrations |
 | **One-shot** | `npx @lynox-ai/core "your task"` | Run a single task from the terminal |
-| **Docker** | `docker run ... ghcr.io/lynox-ai/lynox:webui` | Always-on with Web UI |
+| **Docker** | `docker compose up` | Always-on with Web UI + web search |
 
 ## HTTPS & Remote Access
 
