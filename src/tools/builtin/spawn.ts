@@ -1,5 +1,6 @@
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig } from '../../types/index.js';
-import { MODEL_MAP, DEFAULT_MAX_TOKENS } from '../../types/index.js';
+import { MODEL_MAP, DEFAULT_MAX_TOKENS, getModelId } from '../../types/index.js';
+import { getActiveProvider, isBedrockEuOnly } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
@@ -63,7 +64,7 @@ async function executeThinker(
   // 4-tier resolution: spec fields > role defaults > user config > global default
   const userConfig = loadConfig();
   const modelTier = (spec.model ?? resolved?.model ?? userConfig.default_tier ?? 'sonnet') as ModelTier;
-  const model = MODEL_MAP[modelTier] ?? MODEL_MAP['sonnet'];
+  const model = getModelId(modelTier, getActiveProvider(), isBedrockEuOnly());
   const systemPrompt = spec.system_prompt;
   const thinking = spec.thinking;
   const effort = spec.effort ?? resolved?.effort;
@@ -132,6 +133,10 @@ async function executeThinker(
     costGuard,
     apiKey: userConfig.api_key,
     apiBaseURL: userConfig.api_base_url,
+    provider: userConfig.provider,
+    awsRegion: userConfig.aws_region,
+    gcpRegion: userConfig.gcp_region,
+    gcpProjectId: userConfig.gcp_project_id,
   });
 
   // Track child for abort propagation

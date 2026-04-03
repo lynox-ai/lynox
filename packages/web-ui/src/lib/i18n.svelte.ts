@@ -350,7 +350,19 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Config
 	'config.title': { de: 'Konfiguration', en: 'Configuration' },
-	'config.model': { de: 'Modell', en: 'Model' },
+	'config.provider': { de: 'LLM Provider', en: 'LLM Provider' },
+	'config.provider_desc': { de: 'Wohin werden KI-Anfragen gesendet? Daten bleiben immer lokal — nur die Inferenz nutzt den Provider.', en: 'Where are AI requests sent? Your data stays local — only inference uses the provider.' },
+	'config.provider_anthropic': { de: 'Anthropic (direkt)', en: 'Anthropic (direct)' },
+	'config.provider_bedrock': { de: 'AWS Bedrock (EU-Datenresidenz)', en: 'AWS Bedrock (EU data residency)' },
+	'config.provider_vertex': { de: 'Google Vertex AI (EU)', en: 'Google Vertex AI (EU)' },
+	'config.provider_custom': { de: 'Custom / LiteLLM (eigener Proxy)', en: 'Custom / LiteLLM (own proxy)' },
+	'config.aws_region': { de: 'AWS Region', en: 'AWS Region' },
+	'config.bedrock_eu_only': { de: 'Nur EU-Regionen', en: 'EU regions only' },
+	'config.bedrock_eu_only_desc': { de: 'Garantierte EU-Datenresidenz via Cross-Region Inference (+10% Kosten)', en: 'Guaranteed EU data residency via cross-region inference (+10% cost)' },
+	'config.gcp_region': { de: 'GCP Region', en: 'GCP Region' },
+	'config.gcp_project_id': { de: 'GCP Project ID', en: 'GCP Project ID' },
+	'config.custom_url': { de: 'Proxy URL', en: 'Proxy URL' },
+	'config.custom_url_desc': { de: 'LiteLLM oder anderer Anthropic-kompatibler Proxy', en: 'LiteLLM or other Anthropic-compatible proxy' },
 	'config.model_haiku': { de: 'Haiku (schnell, günstig)', en: 'Haiku (fast, affordable)' },
 	'config.model_sonnet': { de: 'Sonnet (balanciert)', en: 'Sonnet (balanced)' },
 	'config.model_opus': { de: 'Opus (stärkstes Modell)', en: 'Opus (most capable)' },
@@ -358,6 +370,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.effort_low': { de: 'Niedrig', en: 'Low' },
 	'config.effort_medium': { de: 'Mittel', en: 'Medium' },
 	'config.effort_high': { de: 'Hoch', en: 'High' },
+	'config.effort_max': { de: 'Maximum', en: 'Max' },
 	'config.thinking': { de: 'Thinking Mode', en: 'Thinking Mode' },
 	'config.thinking_disabled': { de: 'Deaktiviert', en: 'Disabled' },
 	'config.thinking_adaptive': { de: 'Adaptiv (empfohlen)', en: 'Adaptive (recommended)' },
@@ -370,6 +383,8 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Budget
 	'config.budget': { de: 'Budget', en: 'Budget' },
+	'config.session_limit': { de: 'Session-Limit (USD)', en: 'Session limit (USD)' },
+	'config.session_limit_desc': { de: 'Maximale API-Kosten pro Session. Leer = kein Limit.', en: 'Max API cost per session. Empty = no limit.' },
 	'config.daily_limit': { de: 'Tageslimit (USD)', en: 'Daily limit (USD)' },
 	'config.daily_limit_desc': { de: 'Maximale API-Kosten pro Tag. Leer = kein Limit.', en: 'Max API cost per day. Empty = no limit.' },
 	'config.monthly_limit': { de: 'Monatslimit (USD)', en: 'Monthly limit (USD)' },

@@ -8,7 +8,7 @@ import { saveUserConfig, getLynoxDir, ensureLynoxDir, reloadConfig } from '../co
 import { writeFileAtomicSync } from '../core/atomic-write.js';
 import type { LynoxUserConfig, ModelTier } from '../types/index.js';
 import { BOLD, DIM, GREEN, RED, YELLOW, RESET } from './ansi.js';
-import { confirm, readSecret } from './interactive.js';
+import { confirm, readSecret, select } from './interactive.js';
 import { renderGradientArt } from './ui.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { getErrorMessage } from '../core/utils.js';
@@ -45,17 +45,16 @@ async function checkPrerequisites(): Promise<PrereqResult> {
     );
   }
 
-  // 3. Check network connectivity (Anthropic API reachable)
+  // 3. Check network connectivity (basic — just DNS resolution)
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5_000);
     await fetch('https://api.anthropic.com/', { signal: controller.signal, method: 'HEAD' }).catch(() => {
-      // HEAD may fail, try a simple GET
       return fetch('https://api.anthropic.com/', { signal: controller.signal, method: 'GET' });
     });
     clearTimeout(timeout);
   } catch {
-    warnings.push('Cannot reach api.anthropic.com — API key verification may fail');
+    warnings.push('Cannot reach api.anthropic.com — may affect Anthropic provider setup');
   }
 
   return { ok: errors.length === 0, errors, warnings };
@@ -193,42 +192,99 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       await rl.question('');
     }
 
-    // ── API Key ─────────────────────────────────────────────────
-    stdout.write(`\n  ${BOLD}API Key${RESET}\n`);
-    stdout.write(`${DIM}  console.anthropic.com → API Keys → Create Key${RESET}\n`);
+    // ── LLM Provider ─────────────────────────────────────────────
+    stdout.write(`\n  ${BOLD}LLM Provider${RESET}\n`);
+    stdout.write(`${DIM}  Where should AI requests be sent?${RESET}\n\n`);
+    type ProviderChoice = 'anthropic' | 'bedrock' | 'vertex' | 'custom';
+    const providerChoice = await select<ProviderChoice>([
+      { label: 'Anthropic (direct)', value: 'anthropic', hint: 'recommended' },
+      { label: 'AWS Bedrock (EU)', value: 'bedrock', hint: 'experimental' },
+      { label: 'Google Vertex AI', value: 'vertex', hint: 'experimental' },
+      { label: 'Custom / LiteLLM', value: 'custom', hint: 'experimental — own proxy' },
+    ], { default: 0, rl: stdin.isTTY ? undefined : rl });
+    const provider: ProviderChoice = providerChoice ?? 'anthropic';
+
     let apiKey = '';
-    const MAX_KEY_ATTEMPTS = 5;
-    for (let keyAttempt = 1; keyAttempt <= MAX_KEY_ATTEMPTS; keyAttempt++) {
-      const input = await readSecret(`${BOLD}Key:${RESET}`, stdin.isTTY ? undefined : rl);
-      if (!input.trim()) {
-        stdout.write(`  ${DIM}Cancelled.${RESET}\n`);
-        return null;
-      }
-      if (!input.trim().startsWith('sk-') || input.trim().length < 20) {
-        stdout.write(`  ${YELLOW}⚠${RESET} Should start with "sk-" (20+ chars).\n`);
-        if (keyAttempt >= 3) {
-          stdout.write(`  ${DIM}Get a key at: https://console.anthropic.com/settings/keys${RESET}\n`);
-        }
-        continue;
-      }
-      stdout.write(`  ${DIM}Verifying...${RESET}`);
-      const result = await validateApiKey(input.trim());
-      if (!result.valid) {
-        stdout.write(`\r  ${RED}✗${RESET} ${result.error}.\n`);
-        if (keyAttempt >= 3) {
-          stdout.write(`  ${DIM}Hint: check for trailing spaces or line breaks in the copied key.${RESET}\n`);
-        }
-        if (keyAttempt >= MAX_KEY_ATTEMPTS) {
-          stdout.write(`  ${YELLOW}⚠${RESET} Max attempts reached. Run ${BOLD}lynox --init${RESET} to try again.\n`);
+    let awsRegion: string | undefined;
+    let gcpRegion: string | undefined;
+    let gcpProjectId: string | undefined;
+    let apiBaseUrl: string | undefined;
+
+    if (provider === 'anthropic') {
+      // ── Anthropic API Key ──
+      stdout.write(`\n  ${BOLD}API Key${RESET}\n`);
+      stdout.write(`${DIM}  console.anthropic.com → API Keys → Create Key${RESET}\n`);
+      const MAX_KEY_ATTEMPTS = 5;
+      for (let keyAttempt = 1; keyAttempt <= MAX_KEY_ATTEMPTS; keyAttempt++) {
+        const input = await readSecret(`${BOLD}Key:${RESET}`, stdin.isTTY ? undefined : rl);
+        if (!input.trim()) {
+          stdout.write(`  ${DIM}Cancelled.${RESET}\n`);
           return null;
         }
-        continue;
+        if (!input.trim().startsWith('sk-') || input.trim().length < 20) {
+          stdout.write(`  ${YELLOW}⚠${RESET} Should start with "sk-" (20+ chars).\n`);
+          if (keyAttempt >= 3) {
+            stdout.write(`  ${DIM}Get a key at: https://console.anthropic.com/settings/keys${RESET}\n`);
+          }
+          continue;
+        }
+        stdout.write(`  ${DIM}Verifying...${RESET}`);
+        const result = await validateApiKey(input.trim());
+        if (!result.valid) {
+          stdout.write(`\r  ${RED}✗${RESET} ${result.error}.\n`);
+          if (keyAttempt >= 3) {
+            stdout.write(`  ${DIM}Hint: check for trailing spaces or line breaks in the copied key.${RESET}\n`);
+          }
+          if (keyAttempt >= MAX_KEY_ATTEMPTS) {
+            stdout.write(`  ${YELLOW}⚠${RESET} Max attempts reached. Run ${BOLD}lynox --init${RESET} to try again.\n`);
+            return null;
+          }
+          continue;
+        }
+        stdout.write(result.error
+          ? `\r  ${YELLOW}⚠${RESET} ${result.error}\n`
+          : `\r  ${GREEN}✓${RESET} Verified.           \n`);
+        apiKey = input.trim();
+        break;
       }
-      stdout.write(result.error
-        ? `\r  ${YELLOW}⚠${RESET} ${result.error}\n`
-        : `\r  ${GREEN}✓${RESET} Verified.           \n`);
-      apiKey = input.trim();
-      break;
+    } else if (provider === 'bedrock') {
+      // ── AWS Bedrock ──
+      stdout.write(`\n  ${BOLD}AWS Bedrock${RESET} ${DIM}(experimental)${RESET}\n`);
+      stdout.write(`${DIM}  Requires: AWS credentials (env vars or ~/.aws/credentials)${RESET}\n`);
+      stdout.write(`${DIM}  Install SDK: pnpm add @anthropic-ai/bedrock-sdk${RESET}\n\n`);
+      const regionChoice = await select([
+        { label: 'eu-central-1 (Frankfurt)', value: 'eu-central-1' },
+        { label: 'eu-central-2 (Zurich)', value: 'eu-central-2' },
+        { label: 'eu-west-1 (Ireland)', value: 'eu-west-1' },
+        { label: 'eu-west-3 (Paris)', value: 'eu-west-3' },
+        { label: 'eu-north-1 (Stockholm)', value: 'eu-north-1' },
+        { label: 'eu-south-1 (Milan)', value: 'eu-south-1' },
+        { label: 'us-east-1 (N. Virginia)', value: 'us-east-1' },
+        { label: 'us-west-2 (Oregon)', value: 'us-west-2' },
+      ], { default: 0, rl: stdin.isTTY ? undefined : rl });
+      awsRegion = regionChoice ?? 'eu-central-1';
+      stdout.write(`  ${GREEN}✓${RESET} Region: ${awsRegion}\n`);
+      stdout.write(`  ${DIM}Credentials: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars${RESET}\n`);
+    } else if (provider === 'vertex') {
+      // ── Google Vertex AI ──
+      stdout.write(`\n  ${BOLD}Google Vertex AI${RESET} ${DIM}(experimental)${RESET}\n`);
+      stdout.write(`${DIM}  Requires: gcloud auth application-default login${RESET}\n`);
+      stdout.write(`${DIM}  Install SDK: pnpm add @anthropic-ai/vertex-sdk${RESET}\n\n`);
+      gcpRegion = 'europe-west1';
+      const input = await rl.question(`  ${BOLD}GCP Project ID:${RESET} `);
+      gcpProjectId = input.trim() || undefined;
+      if (gcpProjectId) {
+        stdout.write(`  ${GREEN}✓${RESET} Project: ${gcpProjectId}, Region: ${gcpRegion}\n`);
+      } else {
+        stdout.write(`  ${YELLOW}⚠${RESET} No project ID. Set GCP_PROJECT_ID env var before starting.\n`);
+      }
+    } else {
+      // ── Custom / LiteLLM ──
+      stdout.write(`\n  ${BOLD}Custom Provider${RESET} ${DIM}(experimental)${RESET}\n`);
+      stdout.write(`${DIM}  Point to any Anthropic-compatible proxy (LiteLLM, OpenRouter, etc.)${RESET}\n`);
+      const input = await rl.question(`  ${BOLD}Proxy URL:${RESET} `);
+      apiBaseUrl = input.trim() || 'http://localhost:4000';
+      stdout.write(`  ${GREEN}✓${RESET} URL: ${apiBaseUrl}\n`);
     }
 
     // ── Encryption (always on, no prompt) ────────────────────────
@@ -257,16 +313,26 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
 
     // ── Save ────────────────────────────────────────────────────
     const config: LynoxUserConfig = {
-      api_key: apiKey,
       default_tier: tier,
+      ...(provider !== 'anthropic' ? { provider } : {}),
+      ...(apiKey ? { api_key: apiKey } : {}),
+      ...(awsRegion ? { aws_region: awsRegion } : {}),
+      ...(gcpRegion ? { gcp_region: gcpRegion } : {}),
+      ...(gcpProjectId ? { gcp_project_id: gcpProjectId } : {}),
+      ...(apiBaseUrl ? { api_base_url: apiBaseUrl } : {}),
     };
     saveUserConfig(config);
     reloadConfig();
 
     // ── Summary ─────────────────────────────────────────────────
+    const providerLabel = provider === 'anthropic' ? 'Anthropic'
+      : provider === 'bedrock' ? `Bedrock (${awsRegion})`
+      : provider === 'vertex' ? `Vertex AI (${gcpRegion})`
+      : `Custom (${apiBaseUrl})`;
     stdout.write(`\n  ${GREEN}${BOLD}✓ Setup complete${RESET}\n\n`);
-    stdout.write(`  API Key        ${GREEN}✓${RESET}\n`);
+    stdout.write(`  Provider       ${GREEN}✓${RESET} ${providerLabel}\n`);
     stdout.write(`  Encryption     ${GREEN}✓${RESET}\n`);
+    stdout.write(`${DIM}  Change provider anytime in Settings → Config${RESET}\n`);
     stdout.write(`${DIM}  Add integrations in the Web UI: Settings → Integrations${RESET}\n`);
     stdout.write('\n');
 

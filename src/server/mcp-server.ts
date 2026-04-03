@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, realpathSync } from 'node:fs';
 import { join, resolve, normalize, basename, relative, isAbsolute } from 'node:path';
-import Anthropic from '@anthropic-ai/sdk';
+import { createLLMClient } from '../core/llm-client.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -509,11 +509,7 @@ export class LynoxMCPServer {
       async ({ batch_id }) => {
         if (!this.engine) throw new Error('LynoxMCPServer not initialized');
         const apiConfig = this.engine.getApiConfig();
-        const client = apiConfig.apiKey
-          ? new Anthropic({ apiKey: apiConfig.apiKey, baseURL: apiConfig.apiBaseURL })
-          : apiConfig.apiBaseURL
-            ? new Anthropic({ baseURL: apiConfig.apiBaseURL })
-            : new Anthropic();
+        const client = createLLMClient(apiConfig);
         const batch = await client.messages.batches.retrieve(batch_id);
         const counts = batch.request_counts;
         const text = [

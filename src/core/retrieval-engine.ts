@@ -6,7 +6,8 @@ import type {
   EntityRecord,
   KnowledgeRetrievalResult,
 } from '../types/index.js';
-import { MODEL_MAP, LYNOX_BETAS, NAMESPACE_HALF_LIFE } from '../types/index.js';
+import { MODEL_MAP, LYNOX_BETAS, NAMESPACE_HALF_LIFE, getModelId } from '../types/index.js';
+import { getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
@@ -306,9 +307,9 @@ export class RetrievalEngine {
     if (!this.anthropicClient) return null;
     try {
       const stream = this.anthropicClient.beta.messages.stream({
-        model: MODEL_MAP['haiku'],
+        model: getModelId('haiku', getActiveProvider(), isBedrockEuOnly()),
         max_tokens: 256,
-        betas: [...LYNOX_BETAS],
+        ...(isCustomProvider() ? {} : { betas: [...LYNOX_BETAS] }),
         messages: [{
           role: 'user',
           content: `Write a brief factual answer (1-2 sentences) to this question as if you already know the answer. Do not explain or add caveats.\n\nQuestion: ${query.slice(0, 500)}`,

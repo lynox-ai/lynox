@@ -1,7 +1,8 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
-import { MODEL_MAP } from '../types/index.js';
+import { MODEL_MAP, getModelId } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
+import { getActiveProvider, isBedrockEuOnly } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from './types.js';
 import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
@@ -78,8 +79,10 @@ export function convertAgentTools(tools: AgentTool[]): ToolEntry[] {
  * If step.model is a ModelTier key, map it. Otherwise use as full model ID.
  */
 export function resolveModel(stepModel: string | undefined, defaultTier: ModelTier): string {
-  if (!stepModel) return MODEL_MAP[defaultTier];
-  return stepModel in MODEL_MAP ? MODEL_MAP[stepModel as ModelTier] : stepModel;
+  const provider = getActiveProvider();
+  const eu = isBedrockEuOnly();
+  if (!stepModel) return getModelId(defaultTier, provider, eu);
+  return stepModel in MODEL_MAP ? getModelId(stepModel as ModelTier, provider, eu) : stepModel;
 }
 
 /**
@@ -127,6 +130,10 @@ export async function spawnViaAgent(
     costGuard: { maxBudgetUSD: model.includes('opus') ? 10 : 2, maxIterations: 10 },
     apiKey: config.api_key,
     apiBaseURL: config.api_base_url,
+    provider: config.provider,
+    awsRegion: config.aws_region,
+    gcpRegion: config.gcp_region,
+    gcpProjectId: config.gcp_project_id,
     preApproval,
     autonomy,
     onStream: (event: StreamEvent) => {
@@ -209,6 +216,10 @@ export async function spawnInline(
     effort,
     apiKey: config.api_key,
     apiBaseURL: config.api_base_url,
+    provider: config.provider,
+    awsRegion: config.aws_region,
+    gcpRegion: config.gcp_region,
+    gcpProjectId: config.gcp_project_id,
     preApproval,
     autonomy,
     toolContext: parentToolContext,

@@ -6,11 +6,18 @@
 	const SENTRY_DSN = 'https://21110d12849ca21ae1309b661ab3b603@o4511106815492096.ingest.de.sentry.io/4511106856976464';
 
 	interface Config {
+		provider?: string;
+		aws_region?: string;
+		bedrock_eu_only?: boolean;
+		gcp_region?: string;
+		gcp_project_id?: string;
+		api_base_url?: string;
 		default_tier?: string;
 		effort_level?: string;
 		thinking_mode?: string;
 		experience?: string;
 		memory_extraction?: boolean;
+		max_session_cost_usd?: number | undefined;
 		max_daily_cost_usd?: number | undefined;
 		max_monthly_cost_usd?: number | undefined;
 		backup_schedule?: string | undefined;
@@ -39,6 +46,7 @@
 			const data = (await res.json()) as Config;
 			// Apply defaults for undefined fields (Engine defaults: sonnet, high, adaptive)
 			config = {
+				provider: 'anthropic',
 				default_tier: 'sonnet',
 				effort_level: 'high',
 				thinking_mode: 'adaptive',
@@ -180,7 +188,69 @@
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else}
 		<div class="space-y-4">
+			<!-- LLM Provider -->
+			<div class={cardClass}>
+				<label for="provider" class="block text-sm font-medium mb-1">{t('config.provider')}</label>
+				<p class="text-xs text-text-muted mb-2">{t('config.provider_desc')}</p>
+				<select id="provider" bind:value={config.provider} class={inputClass}>
+					<option value="anthropic">{t('config.provider_anthropic')}</option>
+					<option value="bedrock">{t('config.provider_bedrock')} (experimental)</option>
+					<option value="vertex">{t('config.provider_vertex')} (experimental)</option>
+					<option value="custom">{t('config.provider_custom')} (experimental)</option>
+				</select>
+			</div>
+
+			{#if config.provider === 'bedrock'}
+				<div class={cardClass}>
+					<label for="aws-region" class="block text-sm font-medium mb-2">{t('config.aws_region')}</label>
+					<select id="aws-region" bind:value={config.aws_region} class={inputClass}>
+						<option value="eu-central-1">eu-central-1 (Frankfurt)</option>
+						<option value="eu-central-2">eu-central-2 (Zurich)</option>
+						<option value="eu-west-1">eu-west-1 (Ireland)</option>
+						<option value="eu-west-3">eu-west-3 (Paris)</option>
+						<option value="eu-north-1">eu-north-1 (Stockholm)</option>
+						<option value="eu-south-1">eu-south-1 (Milan)</option>
+						<option value="us-east-1">us-east-1 (N. Virginia)</option>
+						<option value="us-west-2">us-west-2 (Oregon)</option>
+					</select>
+				</div>
+				<div class="{cardClass} flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium">{t('config.bedrock_eu_only')}</p>
+						<p class="text-xs text-text-muted mt-1">{t('config.bedrock_eu_only_desc')}</p>
+					</div>
+					<button onclick={() => config.bedrock_eu_only = !config.bedrock_eu_only} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.bedrock_eu_only ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.bedrock_eu_only ? 'translate-x-4' : ''}"></span></button>
+				</div>
+			{/if}
+
+			{#if config.provider === 'vertex'}
+				<div class={cardClass}>
+					<label for="gcp-region" class="block text-sm font-medium mb-2">{t('config.gcp_region')}</label>
+					<select id="gcp-region" bind:value={config.gcp_region} class={inputClass}>
+						<option value="europe-west1">europe-west1 (Belgium)</option>
+						<option value="us-east5">us-east5 (Columbus)</option>
+						<option value="us-central1">us-central1 (Iowa)</option>
+					</select>
+				</div>
+				<div class={cardClass}>
+					<label for="gcp-project" class="block text-sm font-medium mb-2">{t('config.gcp_project_id')}</label>
+					<input id="gcp-project" type="text" placeholder="my-project-123"
+						bind:value={config.gcp_project_id} class="{inputClass} font-mono" />
+				</div>
+			{/if}
+
+			{#if config.provider === 'custom'}
+				<div class={cardClass}>
+					<label for="custom-url" class="block text-sm font-medium mb-1">{t('config.custom_url')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.custom_url_desc')}</p>
+					<input id="custom-url" type="url" placeholder="http://localhost:4000"
+						bind:value={config.api_base_url} class="{inputClass} font-mono" />
+				</div>
+			{/if}
+
 			<!-- Model & Inference -->
+			<p class={sectionClass}>{t('config.model')}</p>
+
 			<div class={cardClass}>
 				<label for="model" class="block text-sm font-medium mb-2">{t('config.model')}</label>
 				<select id="model" bind:value={config.default_tier} class={inputClass}>
@@ -196,6 +266,7 @@
 					<option value="low">{t('config.effort_low')}</option>
 					<option value="medium">{t('config.effort_medium')}</option>
 					<option value="high">{t('config.effort_high')}</option>
+					<option value="max">{t('config.effort_max')}</option>
 				</select>
 			</div>
 
@@ -226,6 +297,13 @@
 
 			<!-- Budget -->
 			<p class={sectionClass}>{t('config.budget')}</p>
+
+			<div class={cardClass}>
+				<label for="session-limit" class="block text-sm font-medium mb-1">{t('config.session_limit')}</label>
+				<p class="text-xs text-text-muted mb-2">{t('config.session_limit_desc')}</p>
+				<input id="session-limit" type="number" step="0.5" min="0" placeholder="5.00"
+					bind:value={config.max_session_cost_usd} class="{inputClass} font-mono" />
+			</div>
 
 			<div class={cardClass}>
 				<label for="daily-limit" class="block text-sm font-medium mb-1">{t('config.daily_limit')}</label>

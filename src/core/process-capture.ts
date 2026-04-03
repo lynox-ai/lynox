@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import Anthropic from '@anthropic-ai/sdk';
-import { MODEL_MAP, LYNOX_BETAS } from '../types/index.js';
+import { MODEL_MAP, LYNOX_BETAS, getModelId } from '../types/index.js';
+import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
 
@@ -122,11 +122,11 @@ export async function captureProcess(
   const sanitized = actionCalls.map(sanitizeToolCall);
 
   // Call Haiku for step naming + parameter identification
-  const client = new Anthropic({ apiKey: options.apiKey, baseURL: options.apiBaseURL });
+  const client = createLLMClient({ apiKey: options.apiKey, apiBaseURL: options.apiBaseURL });
   const response = await client.beta.messages.create({
-    model: MODEL_MAP.haiku,
+    model: getModelId('haiku', getActiveProvider(), isBedrockEuOnly()),
     max_tokens: 4096,
-    betas: LYNOX_BETAS,
+    ...(isCustomProvider() ? {} : { betas: LYNOX_BETAS }),
     system: EXTRACTION_SYSTEM,
     messages: [
       {

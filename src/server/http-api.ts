@@ -1007,9 +1007,14 @@ export class LynoxHTTPApi {
       const store = engine.getSecretStore();
       if (!store) { errorResponse(res, 503, 'Secret store not initialized'); return; }
       const names = new Set(store.listNames());
+      const userConfig = engine.getUserConfig();
+      const provider = userConfig.provider ?? 'anthropic';
+      // For bedrock/vertex/custom, API key is not needed — provider handles auth
+      const llmConfigured = provider !== 'anthropic' || names.has('ANTHROPIC_API_KEY');
       jsonResponse(res, 200, {
+        provider,
         configured: {
-          api_key: names.has('ANTHROPIC_API_KEY'),
+          api_key: llmConfigured,
           telegram: names.has('TELEGRAM_BOT_TOKEN'),
           search: names.has('TAVILY_API_KEY') || names.has('SEARCH_API_KEY') || names.has('BRAVE_API_KEY'),
           google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
@@ -1071,7 +1076,7 @@ export class LynoxHTTPApi {
       }
       saveUserConfig(parsed.data as Record<string, unknown>);
       reloadConfig();
-      engine.reloadUserConfig();
+      await engine.reloadUserConfig();
       jsonResponse(res, 200, { ok: true });
     });
 

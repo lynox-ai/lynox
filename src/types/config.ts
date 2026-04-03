@@ -2,7 +2,7 @@
 
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
-import type { ModelTier, ThinkingMode, EffortLevel } from './models.js';
+import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider } from './models.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
 import type { TabQuestion } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
@@ -30,6 +30,10 @@ export interface AgentConfig {
   excludeTools?:       string[] | undefined;
   apiKey?:             string | undefined;
   apiBaseURL?:         string | undefined;
+  provider?:           LLMProvider | undefined;
+  awsRegion?:          string | undefined;
+  gcpRegion?:          string | undefined;
+  gcpProjectId?:       string | undefined;
   currentRunId?:       string | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
@@ -120,6 +124,16 @@ export interface LynoxConfig {
 export interface LynoxUserConfig {
   api_key?: string | undefined;
   api_base_url?: string | undefined;
+  /** LLM provider: 'anthropic' (default), 'bedrock' (AWS), 'vertex' (GCP), or 'custom' (LiteLLM/proxy). */
+  provider?: LLMProvider | undefined;
+  /** AWS region for Bedrock provider (e.g. 'eu-central-1'). */
+  aws_region?: string | undefined;
+  /** Use Bedrock EU cross-region inference profile for guaranteed EU data residency (10% surcharge). */
+  bedrock_eu_only?: boolean | undefined;
+  /** GCP region for Vertex provider (e.g. 'europe-west1'). */
+  gcp_region?: string | undefined;
+  /** GCP project ID for Vertex provider. */
+  gcp_project_id?: string | undefined;
   default_tier?: ModelTier | undefined;
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;

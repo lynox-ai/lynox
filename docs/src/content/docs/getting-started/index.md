@@ -8,7 +8,13 @@ sidebar:
 ## Prerequisites
 
 - **Node.js 22+** — [nodejs.org](https://nodejs.org)
-- **Anthropic API Key** — [console.anthropic.com](https://console.anthropic.com/settings/keys)
+- **An LLM provider** — one of:
+  - **Anthropic API Key** (default) — [console.anthropic.com](https://console.anthropic.com/settings/keys)
+  - **AWS Bedrock** — for EU data residency
+  - **Google Vertex AI** — for GCP-native organizations
+  - **Local model via LiteLLM** — for full data control
+
+Most users start with Anthropic. You can switch providers anytime in Settings. See [LLM Providers](/daily-use/llm-providers/) for details.
 
 Anthropic charges per usage — a typical business day costs **$1–5**. You can set spending limits in their console and in lynox.
 
@@ -34,6 +40,21 @@ docker run -d --name lynox -p 3000:3000 \
 ```
 
 Open [localhost:3000](http://localhost:3000) and enter your access token to log in.
+
+:::tip[Alternative providers]
+Using AWS Bedrock or a local model? Replace the API key line with your provider config:
+
+```bash
+# AWS Bedrock (EU)
+-e LYNOX_LLM_PROVIDER=bedrock -e AWS_REGION=eu-central-1 \
+-e AWS_ACCESS_KEY_ID=AKIA... -e AWS_SECRET_ACCESS_KEY=... \
+
+# Local model via LiteLLM
+-e LYNOX_LLM_PROVIDER=custom -e ANTHROPIC_BASE_URL=http://host.docker.internal:4000 \
+```
+
+You can also change the provider later in **Settings → Config**. See [LLM Providers](/daily-use/llm-providers/).
+:::
 
 :::tip[Token from setup guide]
 The [setup guide](https://lynox.ai/getting-started) generates a secure token for you and includes it in the command. If you omit `LYNOX_HTTP_SECRET`, one is auto-generated — find it with `docker logs lynox`.
@@ -146,7 +167,7 @@ docker run -p 8080:3000 ...
 
 **Container won't start** — Check `docker logs lynox`. Most common cause: missing or invalid API key.
 
-**"API key rejected"** — Must start with `sk-ant-` and be active in [console.anthropic.com](https://console.anthropic.com/).
+**"API key rejected"** — For Anthropic: must start with `sk-ant-` and be active in [console.anthropic.com](https://console.anthropic.com/). For Bedrock/Vertex: check your cloud credentials. For Custom: verify your proxy URL is reachable.
 
 **Can't access Web UI** — Check that port 3000 is open. On a VPS, you may need to allow it in your firewall.
 
@@ -158,6 +179,7 @@ docker run -p 8080:3000 ...
 
 - [Web UI Guide](/daily-use/web-ui/) — Learn the interface
 - [Configuration](/daily-use/configuration/) — Customize model, cost limits, and more
+- [LLM Providers](/daily-use/llm-providers/) — Use AWS Bedrock, Vertex AI, or local models
 - [Telegram](/integrations/telegram/) — Mobile access via Telegram bot
 - [Google Workspace](/integrations/google-workspace/) — Connect Gmail, Calendar, Drive
 - [Docker Deployment](/daily-use/docker/) — Production setup with Docker Compose

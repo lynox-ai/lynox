@@ -16,7 +16,8 @@ import type {
   TabQuestion,
   IAgent,
 } from '../types/index.js';
-import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW } from '../types/index.js';
+import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW, getModelId } from '../types/index.js';
+import { getActiveProvider, isBedrockEuOnly } from './llm-client.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -290,7 +291,7 @@ export class Session {
       }
     }
 
-    const model = MODEL_MAP[this._model];
+    const model = getModelId(this._model, getActiveProvider(), isBedrockEuOnly());
     const startTime = Date.now();
     this.runToolCallSeq = 0;
     this._userWaitMs = 0;
@@ -638,7 +639,7 @@ export class Session {
     this._model = tier;
     this._createAgent();
     this.loadMessages(messages);
-    return MODEL_MAP[tier];
+    return getModelId(tier, getActiveProvider(), isBedrockEuOnly());
   }
 
   getModelTier(): ModelTier {
@@ -698,7 +699,7 @@ export class Session {
     toolContext.tools = registry.getEntries();
     toolContext.streamHandler = this.onStream ?? null;
 
-    const model = MODEL_MAP[this._model] ?? MODEL_MAP['sonnet'];
+    const model = getModelId(this._model, getActiveProvider(), isBedrockEuOnly());
     const mcpServers = registry.getMCPServers();
     const entries = registry.getEntries();
     const tools = pluginManager
@@ -784,6 +785,10 @@ export class Session {
       excludeTools: this.agentOverrides.excludeTools,
       apiKey: userConfig.api_key,
       apiBaseURL: userConfig.api_base_url,
+      provider: userConfig.provider,
+      awsRegion: userConfig.aws_region,
+      gcpRegion: userConfig.gcp_region,
+      gcpProjectId: userConfig.gcp_project_id,
       briefing: this._briefingConsumed ? undefined : this.briefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,
@@ -816,7 +821,7 @@ export class Session {
   getUserId(): string | null { return this.engine.getUserId(); }
   getEmbeddingProvider(): EmbeddingProvider | null { return this.engine.getEmbeddingProvider(); }
   getToolContext(): ToolContext { return this.engine.getToolContext(); }
-  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined } { return this.engine.getApiConfig(); }
+  getApiConfig(): ReturnType<import('./engine.js').Engine['getApiConfig']> { return this.engine.getApiConfig(); }
   getBatchIndex(): BatchIndex { return this.engine.getBatchIndex(); }
   getBriefing(): string | undefined { return this.briefing; }
   getAgent(): Agent | null { return this.agent; }
@@ -851,8 +856,8 @@ export class Session {
 
   // ── Engine delegation — config ──
 
-  reloadUserConfig(): void {
-    this.engine.reloadUserConfig();
+  async reloadUserConfig(): Promise<void> {
+    await this.engine.reloadUserConfig();
     const messages = this.saveMessages();
     this._createAgent();
     this.loadMessages(messages);

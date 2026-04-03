@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
+import { createLLMClient, initLLMProvider, getActiveProvider, setBedrockEuOnly } from './llm-client.js';
 import type {
   LynoxConfig,
   LynoxUserConfig,
@@ -183,11 +184,12 @@ export class Engine {
       config.thinking = undefined;
     }
     this.config = config;
-    this.client = this.userConfig.api_key
-      ? new Anthropic({ apiKey: this.userConfig.api_key, baseURL: this.userConfig.api_base_url })
-      : this.userConfig.api_base_url
-        ? new Anthropic({ baseURL: this.userConfig.api_base_url })
-        : new Anthropic();
+    // Always create standard Anthropic client in constructor.
+    // For bedrock/vertex, init() will load the SDK and recreate.
+    this.client = createLLMClient({
+      apiKey: this.userConfig.api_key,
+      apiBaseURL: this.userConfig.api_base_url,
+    });
 
     this._toolContext = createToolContext(this.userConfig);
   }
@@ -196,13 +198,30 @@ export class Engine {
     return this.userConfig;
   }
 
-  /** Reload config from disk, update cached reference, and recreate API client if key changed. */
-  reloadUserConfig(): void {
+  /** Reload config from disk, update cached reference, and recreate API client if credentials/provider changed. */
+  async reloadUserConfig(): Promise<void> {
     const oldKey = this.userConfig.api_key;
     const oldBase = this.userConfig.api_base_url;
+    const oldProvider = this.userConfig.provider;
     this.userConfig = loadConfig();
-    // Recreate API client if credentials changed
-    if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase) {
+    const newProvider = this.userConfig.provider;
+    // Recreate API client if credentials or provider changed
+    if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase || newProvider !== oldProvider) {
+      // Provider switch: load new SDK if needed
+      if (newProvider && newProvider !== oldProvider) {
+        if (newProvider === 'bedrock' || newProvider === 'vertex') {
+          await initLLMProvider(newProvider);
+        } else {
+          // anthropic / custom — just update active provider, no SDK loading
+          await initLLMProvider(newProvider === 'custom' ? 'custom' : 'anthropic');
+        }
+      }
+      if (newProvider === 'bedrock') {
+        const region = this.userConfig.aws_region ?? process.env['AWS_REGION'] ?? '';
+        setBedrockEuOnly(this.userConfig.bedrock_eu_only || region.startsWith('eu-'));
+      } else {
+        setBedrockEuOnly(false);
+      }
       this._recreateClient();
     }
   }
@@ -217,17 +236,38 @@ export class Engine {
     const apiKey = this.secretStore?.resolve('ANTHROPIC_API_KEY')
       ?? process.env['ANTHROPIC_API_KEY']
       ?? this.userConfig.api_key;
-    const baseUrl = this.userConfig.api_base_url;
-    this.client = apiKey
-      ? new Anthropic({ apiKey, baseURL: baseUrl })
-      : baseUrl
-        ? new Anthropic({ baseURL: baseUrl })
-        : new Anthropic();
+    this.client = createLLMClient({
+      provider: this.userConfig.provider,
+      apiKey,
+      apiBaseURL: this.userConfig.api_base_url,
+      awsRegion: this.userConfig.aws_region,
+      gcpRegion: this.userConfig.gcp_region,
+      gcpProjectId: this.userConfig.gcp_project_id,
+    });
   }
 
   async init(): Promise<this> {
     // Activate debug logging early (before any channel publishing)
     initDebugSubscriber();
+
+    // Initialize LLM provider SDK if using bedrock/vertex/custom
+    const provider = this.userConfig.provider;
+    if (provider && provider !== 'anthropic') {
+      if (provider === 'bedrock' || provider === 'vertex') {
+        await initLLMProvider(provider);
+        if (provider === 'bedrock') {
+          // Auto-detect EU from region or explicit config
+          const region = this.userConfig.aws_region ?? process.env['AWS_REGION'] ?? '';
+          const isEu = this.userConfig.bedrock_eu_only || region.startsWith('eu-');
+          setBedrockEuOnly(isEu);
+        }
+        this._recreateClient(); // Recreate with correct SDK now that module is loaded
+      } else if (provider === 'custom') {
+        // Custom provider (LiteLLM etc.) uses standard Anthropic SDK with api_base_url
+        // No SDK loading needed — just set active provider for model ID resolution
+        await initLLMProvider(provider);
+      }
+    }
 
     // Initialize Sentry error reporting (opt-in — requires DSN env var or config field)
     const sentryDsn = process.env['LYNOX_SENTRY_DSN'] ?? this.userConfig.sentry_dsn;
@@ -706,8 +746,15 @@ export class Engine {
   getTaskManager(): import('./task-manager.js').TaskManager | null { return this._taskManager; }
   getDataStore(): DataStore | null { return this._dataStore; }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
-  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined } {
-    return { apiKey: this.userConfig.api_key, apiBaseURL: this.userConfig.api_base_url };
+  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; awsRegion?: string | undefined; gcpRegion?: string | undefined; gcpProjectId?: string | undefined } {
+    return {
+      apiKey: this.userConfig.api_key,
+      apiBaseURL: this.userConfig.api_base_url,
+      provider: this.userConfig.provider,
+      awsRegion: this.userConfig.aws_region,
+      gcpRegion: this.userConfig.gcp_region,
+      gcpProjectId: this.userConfig.gcp_project_id,
+    };
   }
   getBatchIndex(): BatchIndex { return this.batchIndex; }
   getLastBatchParentId(): string | null { return this._lastBatchParentId; }

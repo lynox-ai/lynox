@@ -474,17 +474,19 @@
 		mediaRecorder.stop();
 	}
 
-	// Standalone onboarding: check if API key is configured
+	// Standalone onboarding: check if LLM provider is configured
 	let hasApiKey = $state<boolean | null>(null);
+	let activeProvider = $state<string>('anthropic');
 	let setupKey = $state('');
 	let setupSaving = $state(false);
 	let justCompleted = $state(false);
 
 	async function checkApiKey() {
 		try {
-			const res = await fetch(`${getApiBase()}/secrets`);
-			const data = (await res.json()) as { names: string[] };
-			hasApiKey = data.names.includes('ANTHROPIC_API_KEY');
+			const res = await fetch(`${getApiBase()}/secrets/status`);
+			const data = (await res.json()) as { provider?: string; configured: Record<string, boolean> };
+			activeProvider = data.provider ?? 'anthropic';
+			hasApiKey = data.configured['api_key'] ?? false;
 		} catch {
 			hasApiKey = null; // Engine not reachable
 		}

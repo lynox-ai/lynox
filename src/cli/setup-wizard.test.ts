@@ -42,14 +42,13 @@ function mockReadline(answers: string[]): ReturnType<typeof createInterface> {
   return rl;
 }
 
-// New answer sequence (checklist wizard):
-// 1. API key
-// 2. Integration checklist (comma-separated numbers or empty to skip)
+// New answer sequence (provider + credentials wizard):
+// 1. Provider selection (1=Anthropic, 2=Bedrock, 3=Vertex, 4=Custom)
+// 2. API key (for Anthropic) or region/URL (for others)
 // (Encryption = always on, Accuracy = always sonnet — no prompts)
 
-function basicAnswers(apiKey: string, integrations: string = ''): string[] {
-  return [apiKey, integrations];
-  //       key   checklist selection
+function basicAnswers(apiKey: string): string[] {
+  return ['1', apiKey]; // 1 = Anthropic, then API key
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +99,7 @@ describe('setup-wizard', () => {
   });
 
   it('returns null when API key is empty', async () => {
-    const rl = mockReadline(['']);
+    const rl = mockReadline(['1', '']); // select Anthropic, then empty key
 
     const { runSetupWizard } = await import('./setup-wizard.js');
     const config = await runSetupWizard(rl);
@@ -110,9 +109,9 @@ describe('setup-wizard', () => {
 
   it('rejects key with bad format then accepts valid key', async () => {
     const rl = mockReadline([
+      '1',                                // select Anthropic
       'too-short',                        // rejected: bad format
       'sk-ant-valid-key-12345678',        // accepted
-      '',                                 // checklist: skip all
     ]);
 
     const { runSetupWizard } = await import('./setup-wizard.js');
@@ -128,9 +127,9 @@ describe('setup-wizard', () => {
       .mockResolvedValueOnce({ id: 'msg_ok' });
 
     const rl = mockReadline([
+      '1',                               // select Anthropic
       'sk-ant-bad-key-123456789',        // rejected: auth error
       'sk-ant-good-key-12345678',        // accepted
-      '',                                // checklist: skip all
     ]);
 
     const { runSetupWizard } = await import('./setup-wizard.js');
@@ -151,5 +150,35 @@ describe('setup-wizard', () => {
 
     expect(config).not.toBeNull();
     expect(config!.api_key).toBe('sk-ant-net-error-key-12345');
+  });
+
+  it('saves bedrock config with region', async () => {
+    const rl = mockReadline([
+      '2',  // select Bedrock
+      '1',  // select eu-central-1
+    ]);
+
+    const { runSetupWizard } = await import('./setup-wizard.js');
+    const config = await runSetupWizard(rl);
+
+    expect(config).not.toBeNull();
+    expect(config!.provider).toBe('bedrock');
+    expect(config!.aws_region).toBe('eu-central-1');
+    expect(config!.api_key).toBeUndefined();
+  });
+
+  it('saves custom provider config with URL', async () => {
+    const rl = mockReadline([
+      '4',                        // select Custom
+      'http://localhost:4000',    // proxy URL
+    ]);
+
+    const { runSetupWizard } = await import('./setup-wizard.js');
+    const config = await runSetupWizard(rl);
+
+    expect(config).not.toBeNull();
+    expect(config!.provider).toBe('custom');
+    expect(config!.api_base_url).toBe('http://localhost:4000');
+    expect(config!.api_key).toBeUndefined();
   });
 });

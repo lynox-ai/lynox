@@ -131,7 +131,8 @@ import { homedir } from 'node:os';
 import { Engine } from './core/engine.js';
 import type { Session } from './core/session.js';
 import type { StreamEvent } from './types/index.js';
-import { MODEL_MAP } from './types/index.js';
+import { MODEL_MAP, getModelId } from './types/index.js';
+import { getActiveProvider, isBedrockEuOnly } from './core/llm-client.js';
 import { hasApiKey, setDataDir } from './core/config.js';
 import { runSetupWizard } from './cli/setup-wizard.js';
 
@@ -394,7 +395,7 @@ Docs: https://docs.lynox.dev
   }
 
   const engine = new Engine({});
-  state.currentModelId = MODEL_MAP[engine.config.model ?? 'sonnet'];
+  state.currentModelId = getModelId(engine.config.model ?? 'sonnet', getActiveProvider(), isBedrockEuOnly());
   const initPromise = engine.init();
 
   let session: Session;

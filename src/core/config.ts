@@ -112,6 +112,22 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['LYNOX_CLIENT']) {
     merged.client_id = process.env['LYNOX_CLIENT'];
   }
+  // LLM provider
+  if (process.env['LYNOX_LLM_PROVIDER']) {
+    const p = process.env['LYNOX_LLM_PROVIDER'];
+    if (p === 'anthropic' || p === 'bedrock' || p === 'vertex' || p === 'custom') {
+      merged.provider = p;
+    }
+  }
+  if (process.env['AWS_REGION']) {
+    merged.aws_region = process.env['AWS_REGION'];
+  }
+  if (process.env['GCP_REGION']) {
+    merged.gcp_region = process.env['GCP_REGION'];
+  }
+  if (process.env['GCP_PROJECT_ID']) {
+    merged.gcp_project_id = process.env['GCP_PROJECT_ID'];
+  }
   if (process.env['GOOGLE_CLIENT_ID']) {
     merged.google_client_id = process.env['GOOGLE_CLIENT_ID'];
   }
@@ -159,8 +175,11 @@ export function readUserConfig(): LynoxUserConfig {
 let _vaultApiKeyExists: boolean | null = null;
 
 export function hasApiKey(): boolean {
-  if (process.env['ANTHROPIC_API_KEY']) return true;
+  // Non-Anthropic providers don't need ANTHROPIC_API_KEY
   const config = loadConfig();
+  const provider = config.provider;
+  if (provider === 'bedrock' || provider === 'vertex' || provider === 'custom') return true;
+  if (process.env['ANTHROPIC_API_KEY']) return true;
   if (config.api_key !== undefined && config.api_key !== null && config.api_key !== '') return true;
   // Check vault (cached — avoids repeated SQLite opens)
   if (process.env['LYNOX_VAULT_KEY'] && _vaultApiKeyExists === null) {

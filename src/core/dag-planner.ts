@@ -1,6 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
 import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from '../types/index.js';
-import { MODEL_MAP, LYNOX_BETAS } from '../types/index.js';
+import { MODEL_MAP, LYNOX_BETAS, getModelId } from '../types/index.js';
+import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import { resolveModel } from '../orchestrator/runtime-adapter.js';
 
 export interface DagPlanResult {
@@ -64,13 +64,9 @@ export async function planDAG(
   },
 ): Promise<DagPlanResult | null> {
   try {
-    const client = options?.apiKey
-      ? new Anthropic({ apiKey: options.apiKey, baseURL: options.apiBaseURL })
-      : options?.apiBaseURL
-        ? new Anthropic({ baseURL: options.apiBaseURL })
-        : new Anthropic();
+    const client = createLLMClient({ apiKey: options?.apiKey, apiBaseURL: options?.apiBaseURL });
 
-    const model = options?.model ?? MODEL_MAP['haiku'];
+    const model = options?.model ?? getModelId('haiku', getActiveProvider(), isBedrockEuOnly());
     const maxSteps = options?.maxSteps ?? 15;
 
     let systemText = PLANNING_SYSTEM;
@@ -86,7 +82,7 @@ export async function planDAG(
         {
           model,
           max_tokens: 4096,
-          betas: [...LYNOX_BETAS],
+          ...(isCustomProvider() ? {} : { betas: [...LYNOX_BETAS] }),
           system: systemText,
           tool_choice: { type: 'tool', name: 'propose_dag' },
           tools: [PROPOSE_DAG_TOOL],

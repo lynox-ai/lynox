@@ -18,6 +18,30 @@ Project configs cannot override security-sensitive fields like API keys or vault
 
 ## Key Settings
 
+### LLM Provider
+
+```json
+{
+  "provider": "anthropic",
+  "aws_region": "eu-central-1",
+  "bedrock_eu_only": true,
+  "gcp_region": "europe-west1",
+  "gcp_project_id": "my-project",
+  "api_base_url": "http://localhost:4000"
+}
+```
+
+| Setting | Values | Default |
+|---------|--------|---------|
+| `provider` | `anthropic`, `bedrock`, `vertex`, `custom` | `anthropic` |
+| `aws_region` | Any AWS region (e.g. `eu-central-1`) | — |
+| `bedrock_eu_only` | `true`, `false` | `false` |
+| `gcp_region` | GCP region (e.g. `europe-west1`) | — |
+| `gcp_project_id` | GCP project ID | — |
+| `api_base_url` | Custom proxy URL | — |
+
+Only configure the fields relevant to your provider. See [LLM Providers](/daily-use/llm-providers/) for full setup guides.
+
 ### Model & Intelligence
 
 ```json
@@ -59,7 +83,7 @@ lynox tracks token usage per session, day, and month. When a limit is reached, i
 }
 ```
 
-Supported providers: `tavily`, `brave`. Get a key from [tavily.com](https://tavily.com) or [brave.com/search/api](https://brave.com/search/api).
+Supported providers: `tavily` (default), `brave`. Get a key from [tavily.com](https://tavily.com) or [brave.com/search/api](https://brave.com/search/api).
 
 ### Memory
 
@@ -103,7 +127,12 @@ Environment variables take precedence over config files. Alternatively, credenti
 
 | Variable | Purpose |
 |----------|---------|
-| `ANTHROPIC_API_KEY` | Claude API key |
+| `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider) |
+| `ANTHROPIC_BASE_URL` | Custom API base URL (for LiteLLM/proxy) |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `bedrock`, `vertex`, `custom` |
+| `AWS_REGION` | AWS region for Bedrock provider |
+| `GCP_REGION` | GCP region for Vertex provider |
+| `GCP_PROJECT_ID` | GCP project ID for Vertex provider |
 | `LYNOX_VAULT_KEY` | Encryption key for the secret vault |
 | `LYNOX_DATA_DIR` | Override data directory (default: `~/.lynox`) |
 | `LYNOX_WORKSPACE` | Working directory for file operations |
@@ -111,6 +140,7 @@ Environment variables take precedence over config files. Alternatively, credenti
 | `BRAVE_API_KEY` | Brave web search key |
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
+| `GOOGLE_SERVICE_ACCOUNT_KEY` | Google service account JSON (headless/Docker) |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Comma-separated allowed Telegram chat IDs |
 

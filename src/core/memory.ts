@@ -1,6 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
 import type { IMemory, MemoryNamespace, MemoryScopeRef } from '../types/index.js';
-import { ALL_NAMESPACES, MODEL_MAP, LYNOX_BETAS } from '../types/index.js';
+import { ALL_NAMESPACES, MODEL_MAP, LYNOX_BETAS, getModelId } from '../types/index.js';
+import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import { channels } from './observability.js';
 import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
@@ -103,11 +104,7 @@ export class Memory implements IMemory {
     maskFn?: ((text: string) => string) | undefined,
     flatFileEnabled?: boolean | undefined,
   ) {
-    this.client = apiKey
-      ? new Anthropic({ apiKey, baseURL: apiBaseURL })
-      : apiBaseURL
-        ? new Anthropic({ baseURL: apiBaseURL })
-        : new Anthropic();
+    this.client = createLLMClient({ apiKey, apiBaseURL });
     this.apiKey = apiKey;
     this.apiBaseURL = apiBaseURL;
     this.baseDir = path.join(workingDir ?? getLynoxDir(), DEFAULT_DIR);
@@ -418,9 +415,9 @@ export class Memory implements IMemory {
         : finalAnswer;
 
       const stream = this.client.beta.messages.stream({
-        model: MODEL_MAP['haiku'],
+        model: getModelId('haiku', getActiveProvider(), isBedrockEuOnly()),
         max_tokens: 1024,
-        betas: [...LYNOX_BETAS],
+        ...(isCustomProvider() ? {} : { betas: [...LYNOX_BETAS] }),
         messages: [{
           role: 'user',
           content: EXTRACTION_PROMPT + truncated,
