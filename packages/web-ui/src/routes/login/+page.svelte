@@ -4,6 +4,8 @@
 
 	let { form }: { form: ActionData } = $props();
 	let loading = $state(false);
+
+	const isDE = typeof navigator !== 'undefined' && navigator.language.startsWith('de');
 </script>
 
 <svelte:head>
@@ -14,7 +16,7 @@
 	<div class="w-full max-w-sm">
 		<div class="mb-8 flex flex-col items-center gap-4">
 			<img src="/logo.svg" alt="lynox" class="h-20" />
-			<p class="text-sm text-text-muted">Enter your access token to continue.</p>
+			<p class="text-sm text-text-muted">{isDE ? 'Access Token eingeben um fortzufahren.' : 'Enter your access token to continue.'}</p>
 		</div>
 
 		<form
@@ -55,12 +57,12 @@
 				class="w-full rounded-[var(--radius-md)] bg-accent px-4 py-2.5 text-sm font-medium text-white
 					transition-colors hover:bg-accent-hover disabled:opacity-50"
 			>
-				{loading ? 'Verifying...' : 'Continue'}
+				{loading ? (isDE ? 'Wird geprüft...' : 'Verifying...') : (isDE ? 'Weiter' : 'Continue')}
 			</button>
 		</form>
 
 		<p class="mt-6 text-center text-xs text-text-subtle">
-			Token from setup guide. Lost it? <code class="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-xs">docker logs lynox</code>
+			{isDE ? 'Token verloren?' : 'Lost it?'} <code class="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-xs">docker logs lynox</code>
 		</p>
 	</div>
 </div>

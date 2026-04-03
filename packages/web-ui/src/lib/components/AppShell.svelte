@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { newChat, resumeThread, getSessionId } from '../stores/chat.svelte.js';
-	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved } from '../stores/threads.svelte.js';
+	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 	import StatusBar from './StatusBar.svelte';
@@ -212,15 +212,21 @@
 		goto('/app');
 	});
 
+	// Auto-refresh threads when tab regains focus (cross-device sync)
+	let stopVisibilityRefresh: (() => void) | undefined;
+
 	// Auto-expand section matching current route on mount
 	onMount(() => {
 		void loadThreads();
+		stopVisibilityRefresh = startVisibilityRefresh();
 		const path = $page.url.pathname;
 		const match = nav.find(item => item.exact ? path === item.href : path.startsWith(item.href));
 		if (match && hasChildren(match)) {
 			expandedSection = match.href;
 		}
 	});
+
+	onDestroy(() => stopVisibilityRefresh?.());
 
 	$effect(() => {
 		function handleEscape(e: KeyboardEvent) {

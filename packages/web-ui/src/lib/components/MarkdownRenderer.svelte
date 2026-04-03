@@ -519,7 +519,7 @@
 		text-align: left;
 		font-weight: 600;
 		color: var(--color-text);
-		padding: 0.5rem 0.75rem;
+		padding: 0.625rem 0.875rem;
 		border-bottom: 1px solid var(--color-border);
 		font-size: 0.75rem;
 		text-transform: uppercase;
@@ -527,7 +527,7 @@
 		white-space: nowrap;
 	}
 	div :global(td) {
-		padding: 0.4rem 0.75rem;
+		padding: 0.5rem 0.875rem;
 		border-bottom: 1px solid var(--color-border);
 		color: var(--color-text-muted);
 		word-break: break-word;

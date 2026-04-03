@@ -109,6 +109,16 @@ export async function toggleFavorite(id: string): Promise<void> {
 	}
 }
 
+/** Auto-refresh thread list when tab regains focus (e.g. after using mobile). */
+export function startVisibilityRefresh(): () => void {
+	if (typeof document === 'undefined') return () => {};
+	const handler = () => {
+		if (document.visibilityState === 'visible') void loadThreads();
+	};
+	document.addEventListener('visibilitychange', handler);
+	return () => document.removeEventListener('visibilitychange', handler);
+}
+
 export function getThreads() {
 	return threads.toSorted((a, b) => {
 		if (a.is_favorite !== b.is_favorite) return b.is_favorite - a.is_favorite;
