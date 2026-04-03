@@ -148,6 +148,32 @@ html {
   background: #0a0a1a;
 }
 
+/* ── Tables ── */
+
+.sl-markdown-content table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.sl-markdown-content th,
+.sl-markdown-content td {
+  padding: 0.625rem 0.875rem;
+  border: 1px solid var(--sl-color-hairline-light);
+}
+
+.sl-markdown-content th {
+  font-weight: 600;
+  text-align: left;
+}
+
+:root[data-theme='dark'] .sl-markdown-content th {
+  background: #0c0c20;
+}
+
+:root[data-theme='dark'] .sl-markdown-content tr:nth-child(even) td {
+  background: rgba(10, 10, 26, 0.5);
+}
+
 /* ── Table of contents ── */
 
 :root[data-theme='dark'] starlight-toc a[aria-current='true'] {

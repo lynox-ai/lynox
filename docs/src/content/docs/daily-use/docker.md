@@ -41,7 +41,7 @@ docker run -d --name lynox -p 3000:3000 \
 ```
 
 :::note
-Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to your own instance, or use a `TAVILY_API_KEY` for web search.
+Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to your own SearXNG instance for web search.
 :::
 
 ## Environment Variables
@@ -64,14 +64,13 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `LYNOX_MCP_PORT` | No | MCP port (default: 3042) |
 | `LYNOX_HTTP_PORT` | No | Engine HTTP API port (default: 3100) |
 | `LYNOX_WORKSPACE` | No | Workspace root (default: /workspace) |
-| `LYNOX_EMBEDDING_PROVIDER` | No | `onnx` / `voyage` / `local` |
+| `LYNOX_EMBEDDING_PROVIDER` | No | `onnx` (default) |
 | `TELEGRAM_BOT_TOKEN` | No | Enable Telegram bot |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Recommended | Restrict bot access to specific chats |
 | `GOOGLE_CLIENT_ID` | No | Google Workspace OAuth |
 | `GOOGLE_CLIENT_SECRET` | No | Google Workspace OAuth |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | No | Google service account (headless) |
-| `SEARXNG_URL` | No | Web search via SearXNG (self-hosted, included in docker-compose) |
-| `TAVILY_API_KEY` | No | Web search via Tavily (alternative) |
+| `SEARXNG_URL` | No | Web search via SearXNG (included in docker-compose) |
 | `LYNOX_SENTRY_DSN` | No | Error reporting (opt-in) |
 
 ## Persistent Data
