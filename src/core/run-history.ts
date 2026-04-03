@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { join, dirname } from 'node:path';
+import { renameSync } from 'node:fs';
 import { hkdfSync, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
 import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
@@ -549,10 +550,8 @@ export class RunHistory {
   constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
     const path = dbPath ?? getDefaultDbPath();
     ensureDirSync(dirname(path));
-    this.db = new Database(path);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this._migrate();
+    this.db = null!; // assigned by _openOrRecreate
+    this._openOrRecreate(path);
 
     // Derive history encryption key via HKDF from vault key
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
@@ -560,6 +559,39 @@ export class RunHistory {
       this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
       this._encKey = null;
+    }
+  }
+
+  /**
+   * Open the SQLite database, running an integrity check.
+   * If the database is malformed, rename the corrupt file and create a fresh one.
+   */
+  private _openOrRecreate(path: string): void {
+    let db = new Database(path);
+    try {
+      const result = db.pragma('integrity_check') as { integrity_check: string }[];
+      if (result[0]?.integrity_check !== 'ok') {
+        throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
+      }
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+      this.db = db;
+      this._migrate();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`⚠ History database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
+      try { db.close(); } catch { /* best-effort */ }
+      const corruptPath = `${path}.corrupt-${Date.now()}`;
+      try {
+        renameSync(path, corruptPath);
+        try { renameSync(`${path}-wal`, `${corruptPath}-wal`); } catch { /* may not exist */ }
+        try { renameSync(`${path}-shm`, `${corruptPath}-shm`); } catch { /* may not exist */ }
+      } catch { /* rename failed */ }
+      db = new Database(path);
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+      this.db = db;
+      this._migrate();
     }
   }
 
