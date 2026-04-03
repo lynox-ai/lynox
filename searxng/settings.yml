@@ -42,8 +42,9 @@ search:
 server:
   port: 8080
   bind_address: "0.0.0.0"
-  secret_key: "lynox-searxng-change-me"
-  limiter: false
+  # Internal-only (not exposed to host). Override in production if needed.
+  secret_key: "YpbHlRuAOCqhIAsdj4Vf0LBqeKMwafWjGrlkp/vk2zQ="
+  limiter: false  # Safe: SearXNG is only reachable by lynox on Docker internal network
   public_instance: false
   image_proxy: false
   method: "GET"

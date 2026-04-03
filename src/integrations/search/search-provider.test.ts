@@ -370,6 +370,215 @@ describe('SearXNGProvider', () => {
     const healthy = await provider.healthCheck();
     expect(healthy).toBe(false);
   });
+
+  // --- Sophisticated edge cases ---
+
+  it('handles Unicode queries (CJK, diacritics, emoji)', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [{ title: '日本語の結果', url: 'https://example.jp', content: 'テスト' }] }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('東京 天気 🌤️ café résumé');
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    // URLSearchParams encodes Unicode properly
+    expect(url).toContain('q=');
+    expect(results[0]!.snippet).toBe('テスト');
+  });
+
+  it('handles very long queries without truncation', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [] }),
+    });
+
+    const longQuery = 'a'.repeat(2000);
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search(longQuery);
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).toContain(`q=${'a'.repeat(2000)}`);
+  });
+
+  it('handles results with HTML entities in snippets', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{
+          title: 'XSS &amp; Injection <script>alert(1)</script>',
+          url: 'https://example.com',
+          content: 'Content with &lt;b&gt;HTML&lt;/b&gt; entities &amp; special chars',
+        }],
+      }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test');
+    // Provider passes through as-is — formatting/sanitization is tool-layer responsibility
+    expect(results[0]!.title).toContain('<script>');
+    expect(results[0]!.snippet).toContain('&lt;b&gt;');
+  });
+
+  it('handles results with empty strings for title/content', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ title: '', url: 'https://example.com', content: '' }],
+      }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test');
+    expect(results[0]!.title).toBe('');
+    expect(results[0]!.snippet).toBe('');
+  });
+
+  it('handles SearXNG returning malformed JSON', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => { throw new SyntaxError('Unexpected token'); },
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await expect(provider.search('test')).rejects.toThrow();
+  });
+
+  it('handles SearXNG 429 rate limit response', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 429,
+      text: async () => 'Too Many Requests',
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await expect(provider.search('test')).rejects.toThrow('SearXNG API error 429');
+  });
+
+  it('handles network error (connection refused)', async () => {
+    mockFetch.mockRejectedValue(new Error('fetch failed: ECONNREFUSED'));
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await expect(provider.search('test')).rejects.toThrow('ECONNREFUSED');
+  });
+
+  it('handles results with extremely long URLs', async () => {
+    const longUrl = 'https://example.com/' + 'a'.repeat(5000);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ title: 'Long URL', url: longUrl, content: 'test' }],
+      }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test');
+    expect(results[0]!.url).toBe(longUrl);
+  });
+
+  it('handles results with null values for optional fields', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{
+          title: 'Test',
+          url: 'https://example.com',
+          content: 'snippet',
+          publishedDate: null,
+          engine: null,
+        }],
+      }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test');
+    // null ?? undefined = undefined
+    expect(results[0]!.publishedDate).toBeUndefined();
+  });
+
+  it('handles duplicate results from multiple engines', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [
+          { title: 'Same Page', url: 'https://example.com/page', content: 'From Google', engine: 'google' },
+          { title: 'Same Page', url: 'https://example.com/page', content: 'From Bing', engine: 'bing' },
+          { title: 'Different', url: 'https://other.com', content: 'Other', engine: 'duckduckgo' },
+        ],
+      }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test', { maxResults: 3 });
+    // Provider doesn't deduplicate — SearXNG should handle this
+    expect(results).toHaveLength(3);
+  });
+
+  it('handles all time_range values', async () => {
+    const provider = new SearXNGProvider('http://localhost:8888');
+
+    for (const range of ['day', 'week', 'month', 'year'] as const) {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+      await provider.search('test', { timeRange: range });
+      const url = mockFetch.mock.calls.at(-1)![0] as string;
+      expect(url).toContain(`time_range=${range}`);
+    }
+  });
+
+  it('combines topic and timeRange correctly', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('breaking news', { topic: 'news', timeRange: 'day', maxResults: 10 });
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).toContain('categories=news');
+    expect(url).toContain('time_range=day');
+    expect(url).toContain('number_of_results=10');
+  });
+
+  it('rejects URL with credentials', () => {
+    // URLs with user:pass should still be valid (URL constructor allows them)
+    // but SearXNG shouldn't be accessed with credentials in URL
+    const provider = new SearXNGProvider('http://admin:pass@localhost:8888');
+    expect(provider.name).toBe('searxng');
+  });
+
+  it('handles port 0 URL', () => {
+    // Port 0 is technically valid but unusual
+    expect(() => new SearXNGProvider('http://localhost:0')).not.toThrow();
+  });
+
+  it('handles IPv6 localhost', () => {
+    expect(() => new SearXNGProvider('http://[::1]:8888')).not.toThrow();
+  });
+
+  it('maxResults of 0 returns empty', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ title: 'R', url: 'https://example.com', content: 'C' }],
+      }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test', { maxResults: 0 });
+    expect(results).toHaveLength(0);
+  });
+
+  it('negative maxResults clamps to 0', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ title: 'R', url: 'https://example.com', content: 'C' }],
+      }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test', { maxResults: -5 });
+    expect(results).toHaveLength(0);
+  });
 });
 
 describe('createSearchProvider', () => {

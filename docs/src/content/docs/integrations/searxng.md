@@ -41,7 +41,11 @@ docker compose up -d
 
 Web search works immediately. Verify in the Web UI under Settings → Integrations — the SearXNG card shows "Connected".
 
-### Standalone (npx or docker run)
+### Standalone (for npx or single-container users only)
+
+:::tip
+If you use Docker Compose, SearXNG is already included. No setup needed — skip this section.
+:::
 
 If you're not using docker-compose, start SearXNG separately:
 

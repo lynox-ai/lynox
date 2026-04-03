@@ -97,8 +97,14 @@ lynox remembers context across conversations. The more you use it, the more it l
 
 When running lynox on a server, add HTTPS so the access token isn't transmitted in plaintext:
 
-When using a reverse proxy, set `ORIGIN` so session cookies get the correct `Secure` flag:
+When using a reverse proxy, set `ORIGIN` so session cookies get the correct `Secure` flag.
 
+**Docker Compose** — add to your `.env`:
+```bash
+ORIGIN=https://yourdomain.com
+```
+
+**Single container** — pass as environment variable:
 ```bash
 docker run ... -e ORIGIN=https://yourdomain.com ghcr.io/lynox-ai/lynox:webui
 ```
@@ -154,7 +160,7 @@ docker run -p 8080:3000 ...
 
 **Can't access Web UI** — Check that port 3000 is open. On a VPS, you may need to allow it in your firewall.
 
-**Lost access token** — Set a new one: `docker rm -f lynox` and re-run with a new `-e LYNOX_HTTP_SECRET=...`. Or omit it entirely to auto-generate one visible via `docker logs lynox`.
+**Lost access token** — Set a new one in your `.env` file (`LYNOX_HTTP_SECRET=...`) and re-run `docker compose up -d`. For single-container setups: `docker rm -f lynox` and re-run with `-e LYNOX_HTTP_SECRET=...`. Or omit it entirely to auto-generate one visible via `docker logs lynox`.
 
 **Telegram bot not responding** — Check that no other instance uses the same bot token.
 

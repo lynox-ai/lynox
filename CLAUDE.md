@@ -15,7 +15,7 @@ pnpm run lint        # eslint src/
 pnpm run build       # tsc → dist/
 pnpm run dev         # watch mode with tsx
 pnpm run security    # security scan + vitest security tests
-npx vitest run       # 115 test files / ~2691 tests
+npx vitest run       # 113 test files / ~2834 tests
 npx vitest run tests/online/  # 22 real API tests
 
 # Web UI (@lynox-ai/web-ui)
@@ -33,11 +33,11 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — 72 modules: engine, session, thread-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
+- `src/core/` — 73 modules: engine, session, thread-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, setup wizard, watchdog)
-- `src/tools/` — 30 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
+- `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
-- `src/integrations/` — Telegram, Google Workspace, Web Search
+- `src/integrations/` — Telegram, Google Workspace, Web Search (SearXNG default, Tavily fallback)
 - `src/server/` — MCP server (stdio + HTTP SSE), Engine HTTP API (REST + SSE for PWA)
 - `src/types/` — 12 domain type files, barrel re-export via index.ts
 
@@ -90,7 +90,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Testing
 
-107 offline test files / ~2638 tests. Co-located *.test.ts.
+108 offline test files / ~2812 tests. Co-located *.test.ts.
 2 security test files in tests/security/.
 5 online test files / 22 tests (real Haiku API).
 Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/integrations/ (lines >=65%, functions >=60%, branches >=50%, statements >=65%).
@@ -113,3 +113,9 @@ Single process: Engine HTTP API auto-loads SvelteKit handler as fallback for non
 Entrypoint: entrypoint-webui.sh (env setup, then `exec node dist/index.js --http-api`).
 Web UI handler resolved from `/app/web-ui/handler.js` (adapter-node export).
 `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui`
+
+**Docker Compose** (`docker-compose.yml`): Recommended deployment method.
+Bundles Engine+Web UI with SearXNG sidecar for free, unlimited web search.
+`docker compose up` — serves on :3000, SearXNG on internal :8080.
+Env: ANTHROPIC_API_KEY required, SEARXNG_URL pre-configured to http://searxng:8080.
+SearXNG settings in `searxng/settings.yml` (optimized engine selection, JSON API enabled).

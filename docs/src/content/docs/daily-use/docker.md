@@ -25,7 +25,11 @@ The repo includes a `docker-compose.yml` with lynox + SearXNG pre-configured. Ed
 
 ## Single Container (advanced)
 
-If you don't need docker-compose (e.g. orchestrated via Kubernetes or Coolify), you can run lynox standalone — but without SearXNG:
+:::caution
+The single-container mode does not include SearXNG web search. Use `docker compose` for the full setup.
+:::
+
+If you don't need docker-compose (e.g. orchestrated via Kubernetes or Coolify), you can run lynox standalone:
 
 ```bash
 docker run -d --name lynox -p 3000:3000 \
@@ -96,7 +100,18 @@ The Docker Compose example above includes production-ready hardening:
 
 ## Automatic Updates
 
-Keep lynox updated with [Watchtower](https://containrrr.dev/watchtower/):
+Keep lynox updated with [Watchtower](https://containrrr.dev/watchtower/). Add it to your `docker-compose.yml`:
+
+```yaml
+  watchtower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --cleanup --interval 86400 lynox searxng
+```
+
+Or run it standalone:
 
 ```bash
 docker run -d \

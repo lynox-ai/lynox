@@ -334,6 +334,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     stdout.write(`  Encryption     ${GREEN}✓${RESET}\n`);
     stdout.write(`${DIM}  Change provider anytime in Settings → Config${RESET}\n`);
     stdout.write(`${DIM}  Add integrations in the Web UI: Settings → Integrations${RESET}\n`);
+    stdout.write(`${DIM}  Web search: Set SEARXNG_URL or use docker-compose for built-in SearXNG${RESET}\n`);
     stdout.write('\n');
 
     return config;
