@@ -163,6 +163,8 @@ export class Engine {
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
+  private _promptStore: import('./prompt-store.js').PromptStore | null = null;
+  private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
@@ -233,8 +235,9 @@ export class Engine {
   }
 
   private _recreateClient(): void {
-    const apiKey = this.secretStore?.resolve('ANTHROPIC_API_KEY')
-      ?? process.env['ANTHROPIC_API_KEY']
+    // Priority: explicit env var > vault > config.json
+    const apiKey = process.env['ANTHROPIC_API_KEY']
+      ?? this.secretStore?.resolve('ANTHROPIC_API_KEY')
       ?? this.userConfig.api_key;
     this.client = createLLMClient({
       provider: this.userConfig.provider,
@@ -309,6 +312,23 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] ThreadStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         this._threadStore = null;
+      }
+    }
+
+    // Initialize prompt store (shares DB connection with RunHistory)
+    if (this.runHistory) {
+      try {
+        const { PromptStore } = await import('./prompt-store.js');
+        this._promptStore = new PromptStore(this.runHistory.getDb());
+        // Expire any prompts left pending from a previous engine run
+        this._promptStore.expireAll();
+        // Periodic cleanup every 5 minutes
+        this._promptCleanupTimer = setInterval(() => {
+          this._promptStore?.expireOld();
+        }, 5 * 60_000);
+      } catch (err) {
+        process.stderr.write(`[lynox] PromptStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        this._promptStore = null;
       }
     }
 
@@ -786,6 +806,7 @@ export class Engine {
   getApiStore(): import('./api-store.js').ApiStore | null { return this._apiStore; }
   getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }
   getCRM(): import('./crm.js').CRM | null { return this._crm; }
+  getPromptStore(): import('./prompt-store.js').PromptStore | null { return this._promptStore; }
 
   /** Returns true if CRM tables (contacts/deals) contain actual records. */
   hasCrmData(): boolean {
@@ -869,6 +890,12 @@ export class Engine {
     if (this._workerLoop) {
       this._workerLoop.stop();
       this._workerLoop = null;
+    }
+
+    // Stop prompt cleanup timer
+    if (this._promptCleanupTimer) {
+      clearInterval(this._promptCleanupTimer);
+      this._promptCleanupTimer = null;
     }
 
     // Save file manifest for next session's diff

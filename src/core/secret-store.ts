@@ -91,6 +91,7 @@ export class SecretStore implements SecretStoreLike {
   }
 
   private _loadFromEnv(): void {
+    // 1. LYNOX_SECRET_* prefix — explicit secret injection
     const prefix = 'LYNOX_SECRET_';
     for (const [key, value] of Object.entries(process.env)) {
       if (key.startsWith(prefix) && value) {
@@ -104,6 +105,28 @@ export class SecretStore implements SecretStoreLike {
           ttlMs: 0,
         });
       }
+    }
+
+    // 2. Well-known env vars — explicit runtime env always overrides vault.
+    //    Without this, vault.getAll() in _loadFromVault() would shadow the env var
+    //    and secretStore.resolve() would return a stale vault value.
+    const wellKnownEnv: Array<[string, string]> = [
+      ['ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY'],
+      ['GOOGLE_CLIENT_SECRET', 'GOOGLE_CLIENT_SECRET'],
+      ['SEARCH_API_KEY', 'TAVILY_API_KEY'],
+      ['VOYAGE_API_KEY', 'VOYAGE_API_KEY'],
+    ];
+    for (const [secretName, envVar] of wellKnownEnv) {
+      const value = process.env[envVar];
+      if (!value) continue;
+      if (this.secrets.has(secretName)) continue; // LYNOX_SECRET_* already set
+      this.secrets.set(secretName, {
+        name: secretName,
+        value,
+        scope: 'any',
+        loadedAt: Date.now(),
+        ttlMs: 0,
+      });
     }
   }
 

@@ -33,7 +33,7 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — 73 modules: engine, session, thread-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
+- `src/core/` — 74 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, setup wizard, watchdog)
 - `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
@@ -79,7 +79,8 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 - Types: single source of truth in src/types/index.ts — never duplicate
 - Tools: ToolRegistry + ToolContext dependency injection
-- Security: 6 layers (input-guard, output-guard, permission-guard, data-boundary, secret-store, security-audit)
+- Security: 6 layers (input-guard, output-guard, permission-guard, data-boundary, secret-store, security-audit). Env vars always override vault (priority: env > vault > config).
+- Resumable Prompts: PromptStore (SQLite, shared DB with RunHistory) — ask_user/ask_secret survive SSE disconnects, page refreshes, thread switches. Agent polls SQLite every 2s. 24h expiry.
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
 - Agent Memory: SQLite (AgentMemoryDb, `~/.lynox/agent-memory.db`) — entity graph, thread insights (per-thread aggregated stats), pattern detection, KPI metrics, confidence evolution, memory consolidation, retrieval feedback loop. ONNX embeddings, brute-force cosine search, recursive CTE graph traversal

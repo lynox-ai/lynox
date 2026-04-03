@@ -274,19 +274,29 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       // Migrate secrets from plaintext config to vault
       _migrateConfigSecretsToVault(vault, userConfig);
 
-      // Load secrets from vault — vault takes precedence over env vars and config.
-      // This ensures credentials saved via the Web UI always win.
+      // Load secrets from vault — vault wins over config.json, but explicit env vars
+      // always override vault (so users can fix stale vault entries without Web UI).
       const vaultApiKey = vault.get('ANTHROPIC_API_KEY');
-      if (vaultApiKey) userConfig.api_key = vaultApiKey;
+      if (vaultApiKey && !process.env['ANTHROPIC_API_KEY']) {
+        userConfig.api_key = vaultApiKey;
+      } else if (vaultApiKey && process.env['ANTHROPIC_API_KEY']) {
+        process.stderr.write('[lynox] ANTHROPIC_API_KEY env var overrides vault value\n');
+      }
 
       const vaultGoogleSecret = vault.get('GOOGLE_CLIENT_SECRET');
-      if (vaultGoogleSecret) userConfig.google_client_secret = vaultGoogleSecret;
+      if (vaultGoogleSecret && !process.env['GOOGLE_CLIENT_SECRET']) {
+        userConfig.google_client_secret = vaultGoogleSecret;
+      }
 
       const vaultSearchKey = vault.get('SEARCH_API_KEY') ?? vault.get('TAVILY_API_KEY');
-      if (vaultSearchKey) userConfig.search_api_key = vaultSearchKey;
+      if (vaultSearchKey && !process.env['TAVILY_API_KEY']) {
+        userConfig.search_api_key = vaultSearchKey;
+      }
 
       const vaultVoyageKey = vault.get('VOYAGE_API_KEY');
-      if (vaultVoyageKey) userConfig.voyage_api_key = vaultVoyageKey;
+      if (vaultVoyageKey && !process.env['VOYAGE_API_KEY']) {
+        userConfig.voyage_api_key = vaultVoyageKey;
+      }
 
       // Load MCP secret from vault if not set via env
       if (!process.env['LYNOX_MCP_SECRET']) {

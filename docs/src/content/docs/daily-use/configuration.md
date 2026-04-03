@@ -118,7 +118,15 @@ See [Backups](/features/backup/) for details.
 
 ## Environment Variables
 
-Environment variables take precedence over config files. Alternatively, credentials can be stored interactively via lynox's secure `ask_secret` dialog — the agent will prompt you when it needs a key, and the value goes directly to the encrypted vault without ever entering the chat. See [Security](/features/security/#secure-secret-collection) for details.
+Environment variables always take the highest precedence. The full priority chain for secrets is:
+
+1. **Environment variable** (e.g. `ANTHROPIC_API_KEY`) — always wins, useful for overriding stale vault entries
+2. **Encrypted vault** (`~/.lynox/vault.db`) — persisted via Web UI or `ask_secret`
+3. **Config file** (`~/.lynox/config.json`) — lowest priority
+
+When an env var overrides a vault value, a log message is printed: `[lynox] ANTHROPIC_API_KEY env var overrides vault value`.
+
+Credentials can also be stored interactively via lynox's secure `ask_secret` dialog — the agent will prompt you when it needs a key, and the value goes directly to the encrypted vault without ever entering the chat. See [Security](/features/security/#secure-secret-collection) for details.
 
 | Variable | Purpose |
 |----------|---------|

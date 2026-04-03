@@ -40,6 +40,7 @@ Returns `{"status":"ok"}`. No auth required, useful for Docker health checks.
 POST   /api/sessions              # Create a new session
 DELETE /api/sessions/:id          # Delete a session
 POST   /api/sessions/:id/run     # Run a task (SSE streaming response)
+GET    /api/sessions/:id/pending-prompt  # Check for a resumable prompt
 POST   /api/sessions/:id/reply   # Reply to a pending prompt
 POST   /api/sessions/:id/abort   # Abort a running task
 POST   /api/sessions/:id/compact # Compact context window
@@ -61,7 +62,10 @@ The response is a Server-Sent Events stream with these event types:
 | `thinking` | Extended thinking summary |
 | `tool_call` | Tool invocation (name, input) |
 | `tool_result` | Tool result (output, success) |
+| `prompt` | Agent requests user input (`ask_user`). Includes `promptId` for resumable prompts |
+| `secret_prompt` | Agent requests a secret (`ask_secret`). Includes `promptId` |
 | `turn_end` | Turn completed |
+| `done` | Run completed |
 | `error` | Error occurred |
 
 ### Threads
@@ -93,20 +97,65 @@ PUT    /api/secrets/:name         # Store a secret
 DELETE /api/secrets/:name         # Delete a secret
 ```
 
+### Resumable Prompts
+
+Prompts (`ask_user` and `ask_secret`) are persisted in SQLite and survive SSE disconnects, page refreshes, and thread switches. The agent polls the database for answers instead of holding an in-memory callback.
+
+#### Flow
+
+1. Agent calls `ask_user` or `ask_secret` → prompt written to SQLite with a `promptId`
+2. SSE event sent to client (best-effort — client may not be connected)
+3. Agent polls SQLite every 2s for an answer
+4. If client disconnects, the agent loop stays alive (polling is near-zero CPU)
+5. Client reconnects → `GET /api/sessions/:id/pending-prompt` → sees the prompt
+6. Client replies → `POST /api/sessions/:id/reply` with `promptId` → answer written to SQLite
+7. Agent picks up answer on next poll → resumes execution
+
+Prompts expire after 24 hours. On engine restart, all pending prompts are expired.
+
+#### Checking for pending prompts
+
+```bash
+GET /api/sessions/:id/pending-prompt
+```
+
+Returns `{"pending": false}` or the full prompt data:
+
+```json
+{
+  "pending": true,
+  "promptId": "uuid",
+  "promptType": "ask_user",
+  "question": "Shall I create the task?",
+  "options": ["Yes", "No"],
+  "timeoutMs": 86400000,
+  "createdAt": "2026-04-03T23:30:00Z"
+}
+```
+
+#### Replying to prompts
+
+Include `promptId` for idempotent replies (prevents double-answer race conditions):
+
+```bash
+POST /api/sessions/:id/reply
+Body: {"answer": "Yes", "promptId": "uuid"}
+```
+
 ### Secret Prompt (SSE)
 
 During a run, the agent may request a secret via the `ask_secret` tool. This triggers a `secret_prompt` SSE event:
 
 ```
 event: secret_prompt
-data: {"name":"STRIPE_API_KEY","prompt":"Enter your Stripe API key","key_type":"stripe"}
+data: {"promptId":"uuid","name":"STRIPE_API_KEY","prompt":"Enter your Stripe API key","key_type":"stripe"}
 ```
 
 The client stores the secret directly via `PUT /api/secrets/:name` (the value never enters the SSE stream), then confirms:
 
 ```
 POST /api/sessions/:id/secret-saved
-Body: {"saved": true}   # or false if canceled
+Body: {"saved": true, "promptId": "uuid"}
 ```
 
 ### Config

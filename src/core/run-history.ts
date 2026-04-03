@@ -539,6 +539,26 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (24);
    ALTER TABLE threads ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
    CREATE INDEX IF NOT EXISTS idx_threads_favorite ON threads(is_favorite);`,
+
+  // v25: Resumable pending prompts (ask_user / ask_secret)
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (25);
+
+   CREATE TABLE IF NOT EXISTS pending_prompts (
+     id TEXT PRIMARY KEY,
+     session_id TEXT NOT NULL,
+     prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
+     question TEXT NOT NULL,
+     options_json TEXT,
+     secret_name TEXT,
+     secret_key_type TEXT,
+     answer TEXT,
+     answer_saved INTEGER,
+     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     answered_at TEXT,
+     expires_at TEXT NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS idx_pending_prompts_session ON pending_prompts(session_id, status);`,
 ];
 
 export class RunHistory {

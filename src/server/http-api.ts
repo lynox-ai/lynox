@@ -23,20 +23,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-interface PendingPrompt {
-  question: string;
-  options: string[] | undefined;
-  resolve: (answer: string) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
-interface PendingSecretPrompt {
-  name: string;
-  prompt: string;
-  keyType: string | undefined;
-  resolve: (saved: boolean) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
+// PendingPrompt/PendingSecretPrompt interfaces removed — replaced by PromptStore (SQLite-backed)
 
 type RouteHandler = (
   req: IncomingMessage,
@@ -85,7 +72,7 @@ function requiresAdmin(method: string, pathname: string): boolean {
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
-const PROMPT_TIMEOUT_MS = 10 * 60_000; // 10 minutes — users need time to review plans
+const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
@@ -146,8 +133,7 @@ export class LynoxHTTPApi {
   private server: Server | null = null;
   private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
-  private readonly pendingPrompts = new Map<string, PendingPrompt>();
-  private readonly pendingSecretPrompts = new Map<string, PendingSecretPrompt>();
+  // Pending prompts now stored in PromptStore (SQLite) — no in-memory Maps
   private readonly runningSessions = new Set<string>();
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
@@ -361,16 +347,8 @@ export class LynoxHTTPApi {
 
   async shutdown(): Promise<void> {
     if (this.rateGcTimer) clearInterval(this.rateGcTimer);
-    for (const [, prompt] of this.pendingPrompts) {
-      clearTimeout(prompt.timeout);
-      prompt.resolve('n');
-    }
-    this.pendingPrompts.clear();
-    for (const [, prompt] of this.pendingSecretPrompts) {
-      clearTimeout(prompt.timeout);
-      prompt.resolve(false);
-    }
-    this.pendingSecretPrompts.clear();
+    // Expire all pending prompts in SQLite on shutdown
+    this.engine?.getPromptStore()?.expireAll();
     this.server?.close();
     await this.engine?.shutdown();
   }
@@ -693,32 +671,39 @@ export class LynoxHTTPApi {
         agent.toolContext.streamHandler = session.onStream;
       }
 
-      // Wire promptUser
-      session.promptUser = (question: string, options?: string[]) => {
-        return new Promise<string>((resolve) => {
-          const timeout = setTimeout(() => {
-            this.pendingPrompts.delete(sessionId);
-            resolve('n');
-          }, PROMPT_TIMEOUT_MS);
+      // ── Prompt wiring (SQLite-backed, survives SSE disconnects) ──
+      const promptStore = this.engine?.getPromptStore();
+      // AbortController for the session — used to cancel prompt polling on disconnect
+      const sessionAbortController = new AbortController();
+      let hasActivePendingPrompt = false;
 
-          this.pendingPrompts.set(sessionId, { question, options, resolve, timeout });
-          const data = JSON.stringify({ question, options, timeoutMs: PROMPT_TIMEOUT_MS });
+      // Wire promptUser — writes prompt to SQLite, polls for answer
+      session.promptUser = async (question: string, options?: string[]): Promise<string> => {
+        if (!promptStore) return 'n'; // fallback if store unavailable
+        const promptId = promptStore.insertAskUser(sessionId, question, options);
+        hasActivePendingPrompt = true;
+        // Best-effort SSE notification (client may not be connected)
+        if (!aborted && !res.writableEnded) {
+          const data = JSON.stringify({ promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS });
           res.write(`event: prompt\ndata: ${data}\n\n`);
-        });
+        }
+        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        hasActivePendingPrompt = false;
+        return row?.answer ?? 'n';
       };
 
       // Wire promptSecret — secret value never enters SSE, only the prompt metadata
-      session.promptSecret = (name: string, prompt: string, keyType?: string) => {
-        return new Promise<boolean>((resolve) => {
-          const timeout = setTimeout(() => {
-            this.pendingSecretPrompts.delete(sessionId);
-            resolve(false);
-          }, PROMPT_TIMEOUT_MS);
-
-          this.pendingSecretPrompts.set(sessionId, { name, prompt, keyType, resolve, timeout });
-          const data = JSON.stringify({ name, prompt, key_type: keyType });
+      session.promptSecret = async (name: string, prompt: string, keyType?: string): Promise<boolean> => {
+        if (!promptStore) return false;
+        const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
+        hasActivePendingPrompt = true;
+        if (!aborted && !res.writableEnded) {
+          const data = JSON.stringify({ promptId, name, prompt, key_type: keyType });
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
-        });
+        }
+        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        hasActivePendingPrompt = false;
+        return row?.answer_saved === 1;
       };
 
       // SSE keepalive — prevents proxies/browsers from dropping idle connections
@@ -730,6 +715,7 @@ export class LynoxHTTPApi {
       const streamTimeout = setTimeout(() => {
         aborted = true;
         clearInterval(keepaliveTimer);
+        sessionAbortController.abort();
         session.abort();
         if (!res.writableEnded) res.end();
       }, 30 * 60_000);
@@ -738,7 +724,13 @@ export class LynoxHTTPApi {
         clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         aborted = true;
-        session.abort();
+        // If a prompt is pending, do NOT abort the session —
+        // the agent loop stays alive polling SQLite for an answer.
+        // The user can reconnect and answer the prompt.
+        if (!hasActivePendingPrompt) {
+          sessionAbortController.abort();
+          session.abort();
+        }
       });
 
       // Run
@@ -766,27 +758,68 @@ export class LynoxHTTPApi {
       }
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/reply', async (_req, res, params, body) => {
-      const sessionId = params['id']!;
-      const pending = this.pendingPrompts.get(sessionId);
-      if (!pending) { errorResponse(res, 404, 'No pending prompt'); return; }
+    // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/sessions/:id/pending-prompt', async (_req, res, params) => {
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { jsonResponse(res, 200, { pending: false }); return; }
+      const row = ps.getPending(params['id']!);
+      if (!row) { jsonResponse(res, 200, { pending: false }); return; }
+      // Never leak secret answers back to client
+      jsonResponse(res, 200, {
+        pending: true,
+        promptId: row.id,
+        promptType: row.prompt_type,
+        question: row.question,
+        options: row.options_json ? JSON.parse(row.options_json) as string[] : undefined,
+        secretName: row.secret_name,
+        secretKeyType: row.secret_key_type,
+        timeoutMs: PROMPT_TIMEOUT_MS,
+        createdAt: row.created_at,
+      });
+    }));
 
-      const answer = body && typeof body === 'object' && 'answer' in body ? String((body as Record<string, unknown>)['answer']) : '';
-      clearTimeout(pending.timeout);
-      this.pendingPrompts.delete(sessionId);
-      pending.resolve(answer);
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/reply', async (_req, res, params, body) => {
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { errorResponse(res, 404, 'No pending prompt'); return; }
+
+      const b = body as Record<string, unknown> | null;
+      const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
+      const answer = b && typeof b['answer'] === 'string' ? b['answer'] : '';
+
+      // Try by promptId first (preferred — idempotent), fall back to session lookup
+      let answered = false;
+      if (promptId) {
+        answered = ps.answerUser(promptId, answer);
+      }
+      if (!answered) {
+        const pending = ps.getPending(params['id']!);
+        if (pending && pending.prompt_type === 'ask_user') {
+          answered = ps.answerUser(pending.id, answer);
+        }
+      }
+      if (!answered) { errorResponse(res, 404, 'No pending prompt'); return; }
       jsonResponse(res, 200, { ok: true });
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/secret-saved', async (_req, res, params, body) => {
-      const sessionId = params['id']!;
-      const pending = this.pendingSecretPrompts.get(sessionId);
-      if (!pending) { errorResponse(res, 404, 'No pending secret prompt'); return; }
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { errorResponse(res, 404, 'No pending secret prompt'); return; }
 
-      const saved = body && typeof body === 'object' && 'saved' in body ? Boolean((body as Record<string, unknown>)['saved']) : false;
-      clearTimeout(pending.timeout);
-      this.pendingSecretPrompts.delete(sessionId);
-      pending.resolve(saved);
+      const b = body as Record<string, unknown> | null;
+      const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
+      const saved = b && typeof b['saved'] === 'boolean' ? b['saved'] : false;
+
+      let answered = false;
+      if (promptId) {
+        answered = ps.answerSecret(promptId, saved);
+      }
+      if (!answered) {
+        const pending = ps.getPending(params['id']!);
+        if (pending && pending.prompt_type === 'ask_secret') {
+          answered = ps.answerSecret(pending.id, saved);
+        }
+      }
+      if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }
       jsonResponse(res, 200, { ok: true });
     }));
 

@@ -62,6 +62,8 @@ export interface PermissionPrompt {
 	timeoutMs?: number;
 	/** Timestamp when the prompt was received */
 	receivedAt?: number;
+	/** Persistent prompt ID (for resumable prompts) */
+	promptId?: string;
 }
 
 interface QueuedMessage {
@@ -127,7 +129,7 @@ let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
 let isStreaming = $state(false);
 let pendingPermission = $state<PermissionPrompt | null>(null);
-let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string } | null>(null);
+let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
 let secretPromptGeneration = $state(0);
 let chatError = $state<string | null>(null);
 let chatErrorDetail = $state<string | null>(null);
@@ -164,6 +166,11 @@ if (typeof window !== 'undefined') {
 	});
 	// Flush pending persist on tab close to prevent data loss
 	window.addEventListener('beforeunload', () => persistChatNow());
+
+	// On page load, check for pending prompts from a previous session
+	if (sessionId && !isStreaming) {
+		void checkPendingPrompt();
+	}
 }
 
 async function ensureSession(): Promise<string> {
@@ -437,6 +444,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				options: data['options'] as string[] | undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
+				promptId: data['promptId'] as string | undefined,
 			};
 			break;
 		case 'secret_prompt':
@@ -444,6 +452,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				name: String(data['name'] ?? ''),
 				prompt: String(data['prompt'] ?? ''),
 				keyType: data['key_type'] as string | undefined,
+				promptId: data['promptId'] as string | undefined,
 			};
 			// Reset UI state for fresh prompt (handles retry after cancel)
 			secretPromptGeneration++;
@@ -560,17 +569,19 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 
 export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
+	const promptId = pendingPermission?.promptId;
 	pendingPermission = null;
 	await fetch(`${getApiBase()}/sessions/${sessionId}/reply`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ answer })
+		body: JSON.stringify({ answer, promptId })
 	});
 }
 
 export async function submitSecret(name: string, value: string): Promise<boolean> {
 	if (!sessionId || !pendingSecretPrompt) return false;
 	const sid = sessionId;
+	const promptId = pendingSecretPrompt.promptId;
 	try {
 		// Store secret directly in vault (bypasses chat — value never enters SSE/messages)
 		const vaultRes = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, {
@@ -584,7 +595,7 @@ export async function submitSecret(name: string, value: string): Promise<boolean
 			await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ saved: false }),
+				body: JSON.stringify({ saved: false, promptId }),
 			});
 			return false;
 		}
@@ -593,7 +604,7 @@ export async function submitSecret(name: string, value: string): Promise<boolean
 		await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ saved: true }),
+			body: JSON.stringify({ saved: true, promptId }),
 		});
 		return true;
 	} catch {
@@ -604,11 +615,12 @@ export async function submitSecret(name: string, value: string): Promise<boolean
 
 export async function cancelSecret(): Promise<void> {
 	if (!sessionId || !pendingSecretPrompt) return;
+	const promptId = pendingSecretPrompt.promptId;
 	pendingSecretPrompt = null;
 	await fetch(`${getApiBase()}/sessions/${sessionId}/secret-saved`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ saved: false }),
+		body: JSON.stringify({ saved: false, promptId }),
 	});
 }
 
@@ -618,6 +630,41 @@ export function getPendingSecretPrompt() {
 
 export function getSecretPromptGeneration() {
 	return secretPromptGeneration;
+}
+
+/**
+ * Check the server for a pending prompt that survived a disconnect/refresh.
+ * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it.
+ */
+export async function checkPendingPrompt(): Promise<void> {
+	if (!sessionId) return;
+	try {
+		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/pending-prompt`);
+		if (!res.ok) return;
+		const data = (await res.json()) as Record<string, unknown>;
+		if (!data['pending']) return;
+
+		const promptType = data['promptType'] as string;
+		if (promptType === 'ask_user') {
+			pendingPermission = {
+				question: String(data['question'] ?? ''),
+				options: data['options'] as string[] | undefined,
+				timeoutMs: data['timeoutMs'] as number | undefined,
+				receivedAt: Date.now(),
+				promptId: data['promptId'] as string | undefined,
+			};
+		} else if (promptType === 'ask_secret') {
+			pendingSecretPrompt = {
+				name: String(data['secretName'] ?? ''),
+				prompt: String(data['question'] ?? ''),
+				keyType: data['secretKeyType'] as string | undefined,
+				promptId: data['promptId'] as string | undefined,
+			};
+			secretPromptGeneration++;
+		}
+	} catch {
+		// Non-critical — prompt check failed, user can still interact normally
+	}
 }
 
 export async function abortRun(): Promise<void> {
@@ -822,6 +869,11 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}
 
 		persistChatNow();
+
+		// Check for a pending prompt that survived a disconnect/refresh
+		if (gen === _resumeGeneration) {
+			await checkPendingPrompt();
+		}
 	} catch (err: unknown) {
 		// Silently ignore abort errors from superseded requests
 		if (err instanceof DOMException && err.name === 'AbortError') return;

@@ -31,6 +31,7 @@ The vault key is your master encryption key. Keep it safe:
 - **View and copy** your vault key anytime in **Settings → Config → Security**
 - **Save it to a password manager** — if you lose the vault key, encrypted secrets cannot be recovered (but you can re-enter them)
 - Store your vault key **separately from your backups** — if both are lost, the data is unrecoverable
+- **Environment variables always override vault** — if a vault entry becomes stale, set the env var (e.g. `ANTHROPIC_API_KEY`) to override it without needing the Web UI
 
 ### Key rotation
 

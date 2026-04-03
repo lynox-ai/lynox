@@ -75,6 +75,7 @@ vi.mock('../core/engine.js', () => ({
       complete: mockTaskComplete,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
+    this.getPromptStore = vi.fn().mockReturnValue(null);
     this.reloadUserConfig = vi.fn().mockResolvedValue(undefined);
     this.getUserConfig = vi.fn().mockReturnValue({});
     return this;
