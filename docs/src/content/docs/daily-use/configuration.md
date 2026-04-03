@@ -128,21 +128,58 @@ When an env var overrides a vault value, a log message is printed: `[lynox] ANTH
 
 Credentials can also be stored interactively via lynox's secure `ask_secret` dialog — the agent will prompt you when it needs a key, and the value goes directly to the encrypted vault without ever entering the chat. See [Security](/features/security/#secure-secret-collection) for details.
 
+### LLM Provider
+
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider) |
 | `ANTHROPIC_BASE_URL` | Custom API base URL (for LiteLLM/proxy) |
 | `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `bedrock`, `vertex`, `custom` |
-| `AWS_REGION` | AWS region for Bedrock provider |
-| `GCP_REGION` | GCP region for Vertex provider |
-| `GCP_PROJECT_ID` | GCP project ID for Vertex provider |
+
+### AWS Bedrock
+
+| Variable | Purpose |
+|----------|---------|
+| `AWS_REGION` | AWS region (e.g. `us-east-1`, `eu-west-1`) |
+| `AWS_ACCESS_KEY_ID` | IAM access key (or use IAM role on EC2/ECS) |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
+| `AWS_SESSION_TOKEN` | Temporary session token (for assumed roles / SSO) |
+
+### Google Vertex AI
+
+| Variable | Purpose |
+|----------|---------|
+| `GCP_REGION` | GCP region (e.g. `europe-west1`) |
+| `GCP_PROJECT_ID` | GCP project ID |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON (headless/Docker) |
+
+### Web Search
+
+| Variable | Purpose |
+|----------|---------|
+| `SEARXNG_URL` | SearXNG instance URL (included in docker-compose, recommended) |
+| `TAVILY_API_KEY` | Tavily API key (fallback when SearXNG unavailable, 1K free/month) |
+
+### Security & Storage
+
+| Variable | Purpose |
+|----------|---------|
 | `LYNOX_VAULT_KEY` | Encryption key for the secret vault |
 | `LYNOX_DATA_DIR` | Override data directory (default: `~/.lynox`) |
 | `LYNOX_WORKSPACE` | Working directory for file operations |
-| `SEARXNG_URL` | SearXNG instance URL (included in docker-compose) |
+
+### Google Workspace
+
+| Variable | Purpose |
+|----------|---------|
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
-| `GOOGLE_SERVICE_ACCOUNT_KEY` | Google service account JSON (headless/Docker) |
+| `GOOGLE_SERVICE_ACCOUNT_KEY` | Google service account JSON key (headless/Docker) |
+
+### Telegram
+
+| Variable | Purpose |
+|----------|---------|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Comma-separated allowed Telegram chat IDs |
 
