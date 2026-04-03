@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { EntityType, MemoryNamespace } from '../types/index.js';
-import { MODEL_MAP, LYNOX_BETAS, getModelId } from '../types/index.js';
+import { LYNOX_BETAS, getModelId } from '../types/index.js';
 import { getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 
 export interface ExtractedEntity {

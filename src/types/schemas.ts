@@ -8,12 +8,7 @@ import { z } from 'zod';
 
 const ModelTierSchema = z.enum(['opus', 'sonnet', 'haiku']);
 const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'max']);
-const AutonomyLevelSchema = z.enum(['supervised', 'guided', 'autonomous']);
-const ThinkingModeSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('enabled'), budget_tokens: z.number() }),
-  z.object({ type: z.literal('adaptive') }),
-  z.object({ type: z.literal('disabled') }),
-]);
+// AutonomyLevelSchema and ThinkingModeSchema validated at runtime via type checks, not Zod
 
 // === LynoxUserConfig ===
 

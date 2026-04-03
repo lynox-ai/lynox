@@ -10,8 +10,6 @@ import type {
 import {
   setTaskFollowUps,
   setTaskInquiry,
-  getTaskInquiry,
-  clearTaskInquiry,
 } from './telegram-callbacks.js';
 
 // ---------------------------------------------------------------------------

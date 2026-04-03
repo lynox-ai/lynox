@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
-import { createLLMClient, initLLMProvider, getActiveProvider, setBedrockEuOnly } from './llm-client.js';
+import { createLLMClient, initLLMProvider, setBedrockEuOnly } from './llm-client.js';
 import type {
   LynoxConfig,
   LynoxUserConfig,

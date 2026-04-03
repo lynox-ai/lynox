@@ -13,9 +13,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { LLMProvider } from '../types/index.js';
 
 // Cached dynamic module references — loaded once via initLLMProvider()
-// eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
 type BedrockCtor = new (opts: { awsRegion?: string | undefined; awsAccessKey?: string | undefined; awsSecretKey?: string | undefined; awsSessionToken?: string | undefined }) => Anthropic;
-// eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
 type VertexCtor = new (opts: { region?: string | undefined; projectId?: string | undefined }) => Anthropic;
 
 let _bedrockCtor: BedrockCtor | null = null;

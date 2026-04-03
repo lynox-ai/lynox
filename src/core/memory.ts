@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { IMemory, MemoryNamespace, MemoryScopeRef } from '../types/index.js';
-import { ALL_NAMESPACES, MODEL_MAP, LYNOX_BETAS, getModelId } from '../types/index.js';
+import { ALL_NAMESPACES, LYNOX_BETAS, getModelId } from '../types/index.js';
 import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import { channels } from './observability.js';
 import { classifyScope } from './scope-classifier.js';

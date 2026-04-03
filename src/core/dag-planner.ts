@@ -1,5 +1,5 @@
 import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from '../types/index.js';
-import { MODEL_MAP, LYNOX_BETAS, getModelId } from '../types/index.js';
+import { LYNOX_BETAS, getModelId } from '../types/index.js';
 import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import { resolveModel } from '../orchestrator/runtime-adapter.js';
 

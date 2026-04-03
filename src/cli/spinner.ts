@@ -1,5 +1,5 @@
 import { stderr } from 'node:process';
-import { GRAY, GREEN, DIM, RESET } from './ansi.js';
+import { GRAY, DIM, RESET } from './ansi.js';
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const INTERVAL = 80;

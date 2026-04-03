@@ -6,7 +6,7 @@ import type {
   EntityRecord,
   KnowledgeRetrievalResult,
 } from '../types/index.js';
-import { MODEL_MAP, LYNOX_BETAS, NAMESPACE_HALF_LIFE, getModelId } from '../types/index.js';
+import { LYNOX_BETAS, NAMESPACE_HALF_LIFE, getModelId } from '../types/index.js';
 import { getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';

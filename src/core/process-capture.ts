@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { MODEL_MAP, LYNOX_BETAS, getModelId } from '../types/index.js';
+import { LYNOX_BETAS, getModelId } from '../types/index.js';
 import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
