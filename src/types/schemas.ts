@@ -42,7 +42,11 @@ export const LynoxUserConfigSchema = z.object({
   telegram_bot_token:       z.string().optional(),
   telegram_allowed_chat_ids: z.array(z.number()).optional(),
   search_api_key:       z.string().optional(),
-  search_provider:      z.enum(['tavily', 'brave']).optional(),
+  search_provider:      z.enum(['tavily', 'searxng']).optional(),
+  searxng_url:          z.string().url().refine(
+    url => url.startsWith('http://') || url.startsWith('https://'),
+    { message: 'SearXNG URL must use http:// or https:// scheme' },
+  ).optional().or(z.null()),
   google_client_id:     z.string().optional(),
   google_client_secret: z.string().optional(),
   max_daily_cost_usd:   z.number().optional(),

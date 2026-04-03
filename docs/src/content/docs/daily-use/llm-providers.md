@@ -25,6 +25,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | Extended Thinking | ✅ | ✅ | ✅ | ❌ Auto-disabled |
 | Prompt Caching | ✅ | ✅ | ✅ | ❌ |
 | Web Search (built-in) | ✅ | ❌ | ❌ | ❌ |
+| Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ | ✅ |
 | MCP Server-Side | ✅ | ❌ | ❌ | ❌ |
 | | | | | |
 | **Privacy** | | | | |

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TavilyProvider, BraveProvider, createSearchProvider, detectProviderType } from './search-provider.js';
+import { TavilyProvider, SearXNGProvider, createSearchProvider } from './search-provider.js';
 
 // Mock global fetch
 const mockFetch = vi.fn();
@@ -95,70 +95,241 @@ describe('TavilyProvider', () => {
   });
 });
 
-describe('BraveProvider', () => {
+describe('SearXNGProvider', () => {
   it('sends correct request', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
-      json: async () => ({ web: { results: [] } }),
+      json: async () => ({ results: [] }),
     });
 
-    const provider = new BraveProvider('brave-key');
-    await provider.search('test query', { maxResults: 3, timeRange: 'week' });
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('test query', { maxResults: 3, topic: 'news', timeRange: 'week' });
 
     const url = mockFetch.mock.calls[0]![0] as string;
-    expect(url).toContain('api.search.brave.com');
+    expect(url).toContain('localhost:8888/search?');
     expect(url).toContain('q=test+query');
-    expect(url).toContain('count=3');
-    expect(url).toContain('freshness=pw');
+    expect(url).toContain('format=json');
+    expect(url).toContain('number_of_results=3');
+    expect(url).toContain('categories=news');
+    expect(url).toContain('time_range=week');
+  });
 
-    const headers = mockFetch.mock.calls[0]![1]!.headers as Record<string, string>;
-    expect(headers['X-Subscription-Token']).toBe('brave-key');
+  it('strips trailing slash from base URL', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [] }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888/');
+    await provider.search('test');
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).toMatch(/^http:\/\/localhost:8888\/search\?/);
   });
 
   it('maps results correctly', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({
-        web: {
-          results: [
-            { title: 'Brave Result', url: 'https://brave.com', description: 'A description' },
-          ],
-        },
+        results: [
+          {
+            title: 'SearXNG Result',
+            url: 'https://example.com',
+            content: 'A snippet from SearXNG',
+            publishedDate: '2026-01-15',
+            engine: 'google',
+          },
+        ],
       }),
     });
 
-    const provider = new BraveProvider('brave-key');
+    const provider = new SearXNGProvider('http://localhost:8888');
     const results = await provider.search('test');
 
     expect(results).toHaveLength(1);
     expect(results[0]).toEqual({
-      title: 'Brave Result',
-      url: 'https://brave.com',
-      snippet: 'A description',
-      source: 'brave',
+      title: 'SearXNG Result',
+      url: 'https://example.com',
+      snippet: 'A snippet from SearXNG',
+      publishedDate: '2026-01-15',
+      source: 'searxng',
     });
   });
 
-  it('handles missing web results', async () => {
+  it('clamps results to maxResults', async () => {
+    const manyResults = Array.from({ length: 25 }, (_, i) => ({
+      title: `Result ${i}`,
+      url: `https://example.com/${i}`,
+      content: `Content ${i}`,
+    }));
     mockFetch.mockResolvedValue({
       ok: true,
-      json: async () => ({}),
+      json: async () => ({ results: manyResults }),
     });
 
-    const provider = new BraveProvider('brave-key');
-    const results = await provider.search('test');
-    expect(results).toEqual([]);
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test', { maxResults: 3 });
+
+    expect(results).toHaveLength(3);
   });
 
   it('throws on API error', async () => {
     mockFetch.mockResolvedValue({
       ok: false,
-      status: 429,
-      text: async () => 'Rate limited',
+      status: 500,
+      text: async () => 'Internal Server Error',
     });
 
-    const provider = new BraveProvider('brave-key');
-    await expect(provider.search('test')).rejects.toThrow('Brave Search API error 429');
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await expect(provider.search('test')).rejects.toThrow('SearXNG API error 500');
+  });
+
+  it('healthCheck returns true when reachable', async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const healthy = await provider.healthCheck();
+    expect(healthy).toBe(true);
+  });
+
+  it('healthCheck returns false when unreachable', async () => {
+    mockFetch.mockRejectedValue(new Error('Connection refused'));
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const healthy = await provider.healthCheck();
+    expect(healthy).toBe(false);
+  });
+
+  // --- Security: URL validation ---
+
+  it('rejects file:// scheme', () => {
+    expect(() => new SearXNGProvider('file:///etc/passwd')).toThrow('http:// or https://');
+  });
+
+  it('rejects javascript: scheme', () => {
+    expect(() => new SearXNGProvider('javascript:alert(1)')).toThrow();
+  });
+
+  it('rejects data: scheme', () => {
+    expect(() => new SearXNGProvider('data:text/html,test')).toThrow('http:// or https://');
+  });
+
+  it('rejects ftp: scheme', () => {
+    expect(() => new SearXNGProvider('ftp://evil.com')).toThrow('http:// or https://');
+  });
+
+  it('rejects cloud metadata endpoint 169.254.169.254', () => {
+    expect(() => new SearXNGProvider('http://169.254.169.254')).toThrow('cloud metadata');
+  });
+
+  it('rejects link-local 169.254.x.x', () => {
+    expect(() => new SearXNGProvider('http://169.254.1.1:8080')).toThrow('cloud metadata');
+  });
+
+  it('rejects invalid URL', () => {
+    expect(() => new SearXNGProvider('not-a-url')).toThrow('Invalid SearXNG URL');
+  });
+
+  it('allows http:// localhost (self-hosted)', () => {
+    expect(() => new SearXNGProvider('http://localhost:8888')).not.toThrow();
+  });
+
+  it('allows http:// private IP (self-hosted)', () => {
+    expect(() => new SearXNGProvider('http://192.168.1.100:8888')).not.toThrow();
+  });
+
+  it('allows https:// URL', () => {
+    expect(() => new SearXNGProvider('https://searxng.example.com')).not.toThrow();
+  });
+
+  // --- Edge cases ---
+
+  it('handles empty results array', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [] }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('no results query');
+    expect(results).toEqual([]);
+  });
+
+  it('handles missing optional fields in results', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ title: 'Minimal', url: 'https://example.com', content: 'Just a snippet' }],
+      }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test');
+    expect(results[0]).toEqual({
+      title: 'Minimal',
+      url: 'https://example.com',
+      snippet: 'Just a snippet',
+      publishedDate: undefined,
+      source: 'searxng',
+    });
+  });
+
+  it('defaults to 5 results when maxResults not specified', async () => {
+    const manyResults = Array.from({ length: 10 }, (_, i) => ({
+      title: `R${i}`, url: `https://example.com/${i}`, content: `C${i}`,
+    }));
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: manyResults }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const results = await provider.search('test');
+    expect(results).toHaveLength(5);
+  });
+
+  it('does not set number_of_results param when maxResults is unset', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [] }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('test');
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).not.toContain('number_of_results');
+  });
+
+  it('does not set categories param for general topic', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [] }),
+    });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('test', { topic: 'general' });
+
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).not.toContain('categories');
+  });
+
+  it('handles network timeout gracefully in healthCheck', async () => {
+    mockFetch.mockImplementation(() => new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), 10),
+    ));
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const healthy = await provider.healthCheck();
+    expect(healthy).toBe(false);
+  });
+
+  it('healthCheck returns false on non-ok response', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 503 });
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    const healthy = await provider.healthCheck();
+    expect(healthy).toBe(false);
   });
 });
 
@@ -168,23 +339,8 @@ describe('createSearchProvider', () => {
     expect(provider.name).toBe('tavily');
   });
 
-  it('creates BraveProvider', () => {
-    const provider = createSearchProvider('brave', 'brave-key');
-    expect(provider.name).toBe('brave');
-  });
-});
-
-describe('detectProviderType', () => {
-  it('returns explicit type when provided', () => {
-    expect(detectProviderType('any-key', 'brave')).toBe('brave');
-    expect(detectProviderType('tvly-key', 'brave')).toBe('brave');
-  });
-
-  it('detects tavily from key prefix', () => {
-    expect(detectProviderType('tvly-abc123')).toBe('tavily');
-  });
-
-  it('defaults to brave for unknown key format', () => {
-    expect(detectProviderType('some-random-key')).toBe('brave');
+  it('creates SearXNGProvider', () => {
+    const provider = createSearchProvider('searxng', 'http://localhost:8888');
+    expect(provider.name).toBe('searxng');
   });
 });

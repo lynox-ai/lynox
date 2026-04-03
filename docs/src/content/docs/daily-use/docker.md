@@ -91,8 +91,8 @@ docker compose up -d
 | `GOOGLE_CLIENT_ID` | No | Google Workspace OAuth |
 | `GOOGLE_CLIENT_SECRET` | No | Google Workspace OAuth |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | No | Google service account (headless) |
-| `TAVILY_API_KEY` | No | Web search via Tavily |
-| `BRAVE_API_KEY` | No | Web search via Brave |
+| `SEARXNG_URL` | No | Web search via SearXNG (self-hosted, included in docker-compose) |
+| `TAVILY_API_KEY` | No | Web search via Tavily (alternative) |
 | `LYNOX_SENTRY_DSN` | No | Error reporting (opt-in) |
 
 ## Persistent Data

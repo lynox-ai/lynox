@@ -35,8 +35,11 @@ services:
       - TELEGRAM_BOT_TOKEN
       - TELEGRAM_ALLOWED_CHAT_IDS
 
+      # ── Web Search ────────────────────────────────────
+      - SEARXNG_URL=http://searxng:8080  # Free, unlimited via SearXNG below
+      # - TAVILY_API_KEY                 # Alternative: tavily.com (1K free/month, set search_provider: 'tavily')
+
       # ── Optional features ─────────────────────────────
-      # - TAVILY_API_KEY            # Web search (free: tavily.com, 1K/month)
       # - GOOGLE_CLIENT_ID          # Google Workspace OAuth
       # - GOOGLE_CLIENT_SECRET      # Google Workspace OAuth
       # - LYNOX_SENTRY_DSN          # Error reporting (opt-in, EU region)
@@ -45,3 +48,18 @@ services:
     # Without it, all data and encryption keys are lost on container restart.
     volumes:
       - ${HOME}/.lynox:/home/lynox/.lynox
+
+  # ── SearXNG — free web search ──────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    security_opt:
+      - no-new-privileges
+    volumes:
+      - searxng-data:/etc/searxng
+
+volumes:
+  searxng-data:

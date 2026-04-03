@@ -12,6 +12,37 @@ interface WebSearchInput {
   time_range?: 'day' | 'week' | 'month' | 'year' | undefined;
 }
 
+const ENRICH_TOP_N = 3;
+const ENRICH_MAX_CHARS = 4000;
+
+/**
+ * Enrich search results that lack full content (e.g. SearXNG snippets)
+ * by fetching the top N pages via content extractor.
+ */
+async function enrichResults(results: SearchResult[]): Promise<SearchResult[]> {
+  const toEnrich = results.slice(0, ENRICH_TOP_N).filter(r => !r.content);
+  if (toEnrich.length === 0) return results;
+
+  const enriched = await Promise.allSettled(
+    toEnrich.map(async (r) => {
+      const extracted = await extractContent(r.url, ENRICH_MAX_CHARS);
+      return { url: r.url, content: extracted.content };
+    }),
+  );
+
+  const contentMap = new Map<string, string>();
+  for (const result of enriched) {
+    if (result.status === 'fulfilled') {
+      contentMap.set(result.value.url, result.value.content);
+    }
+  }
+
+  return results.map((r) => {
+    const content = contentMap.get(r.url);
+    return content ? { ...r, content } : r;
+  });
+}
+
 function formatSearchResults(results: SearchResult[]): string {
   if (results.length === 0) return 'No results found.';
   return results.map((r, i) => {
@@ -51,7 +82,7 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
           topic: {
             type: 'string',
             enum: ['general', 'news', 'finance'],
-            description: 'Search topic category (Tavily only). Only used with action "search"',
+            description: 'Search topic category. Only used with action "search"',
           },
           time_range: {
             type: 'string',
@@ -66,11 +97,12 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
       if (input.action === 'search') {
         if (!input.query) return 'Error: "query" is required for action "search".';
         try {
-          const results = await provider.search(input.query, {
+          let results = await provider.search(input.query, {
             maxResults: input.max_results,
             topic: input.topic,
             timeRange: input.time_range,
           });
+          results = await enrichResults(results);
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');

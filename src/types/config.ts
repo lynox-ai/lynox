@@ -158,10 +158,12 @@ export interface LynoxUserConfig {
   telegram_bot_token?: string | undefined;
   /** Restrict Telegram bot to specific chat IDs */
   telegram_allowed_chat_ids?: number[] | undefined;
-  /** API key for web search provider (Tavily or Brave) */
+  /** API key for Tavily web search provider */
   search_api_key?: string | undefined;
-  /** Web search provider: 'tavily' (default) or 'brave' */
-  search_provider?: 'tavily' | 'brave' | undefined;
+  /** Web search provider: 'tavily' or 'searxng' */
+  search_provider?: 'tavily' | 'searxng' | undefined;
+  /** SearXNG instance URL (e.g. http://localhost:8888). Default web search provider when configured. */
+  searxng_url?: string | undefined;
   /** Google OAuth client ID (from GCP Console) */
   google_client_id?: string | undefined;
   /** Google OAuth client secret (from GCP Console) */

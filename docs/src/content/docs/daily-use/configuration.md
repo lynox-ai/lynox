@@ -83,7 +83,7 @@ lynox tracks token usage per session, day, and month. When a limit is reached, i
 }
 ```
 
-Supported providers: `tavily` (default), `brave`. Get a key from [tavily.com](https://tavily.com) or [brave.com/search/api](https://brave.com/search/api).
+Supported providers: `searxng` (self-hosted, free, unlimited — included in docker-compose) or `tavily` (API key, 1,000 free/month). See [SearXNG setup](/integrations/searxng/) or get a Tavily key from [tavily.com](https://tavily.com).
 
 ### Memory
 
@@ -136,8 +136,8 @@ Environment variables take precedence over config files. Alternatively, credenti
 | `LYNOX_VAULT_KEY` | Encryption key for the secret vault |
 | `LYNOX_DATA_DIR` | Override data directory (default: `~/.lynox`) |
 | `LYNOX_WORKSPACE` | Working directory for file operations |
-| `TAVILY_API_KEY` | Tavily web search key |
-| `BRAVE_API_KEY` | Brave web search key |
+| `SEARXNG_URL` | SearXNG instance URL (e.g. `http://localhost:8888`) |
+| `TAVILY_API_KEY` | Tavily web search key (alternative to SearXNG) |
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | Google service account JSON (headless/Docker) |

@@ -71,68 +71,91 @@ export class TavilyProvider implements SearchProvider {
   }
 }
 
-// --- Brave ---
+// --- SearXNG ---
 
-interface BraveWebResult {
+interface SearXNGResult {
   title: string;
   url: string;
-  description: string;
+  content: string;
+  publishedDate?: string | undefined;
+  engine?: string | undefined;
 }
 
-interface BraveResponse {
-  web?: { results: BraveWebResult[] } | undefined;
+interface SearXNGResponse {
+  results: SearXNGResult[];
 }
 
-export class BraveProvider implements SearchProvider {
-  readonly name = 'brave';
-  constructor(private readonly apiKey: string) {}
+/** Validate that a URL uses http/https and is not a cloud metadata endpoint. */
+function validateSearxngUrl(url: string): void {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error('Invalid SearXNG URL'); }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Blocked: SearXNG URL must use http:// or https:// (got ${parsed.protocol})`);
+  }
+  // Block cloud metadata endpoints (link-local)
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')) {
+    throw new Error('Blocked: cloud metadata endpoint');
+  }
+}
+
+export class SearXNGProvider implements SearchProvider {
+  readonly name = 'searxng';
+  constructor(private readonly baseUrl: string) {
+    validateSearxngUrl(baseUrl);
+  }
 
   async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
-    const count = Math.min(opts?.maxResults ?? 5, 20);
-    const params = new URLSearchParams({ q: query, count: String(count) });
-    if (opts?.timeRange) {
-      const freshMap: Record<string, string> = { day: 'pd', week: 'pw', month: 'pm', year: 'py' };
-      const freshness = freshMap[opts.timeRange];
-      if (freshness) params.set('freshness', freshness);
-    }
+    const maxResults = Math.min(opts?.maxResults ?? 5, 20);
+    const params = new URLSearchParams({
+      q: query,
+      format: 'json',
+      pageno: '1',
+    });
+    if (opts?.maxResults) params.set('number_of_results', String(maxResults));
+    if (opts?.timeRange) params.set('time_range', opts.timeRange);
+    if (opts?.topic === 'news') params.set('categories', 'news');
 
-    const response = await fetch(
-      `https://api.search.brave.com/res/v1/web/search?${params.toString()}`,
-      { headers: { 'X-Subscription-Token': this.apiKey, Accept: 'application/json' } },
-    );
+    const url = `${this.baseUrl.replace(/\/+$/, '')}/search?${params.toString()}`;
+    const response = await fetch(url, {
+      headers: { Accept: 'application/json' },
+    });
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new Error(`Brave Search API error ${response.status}: ${text}`);
+      throw new Error(`SearXNG API error ${response.status}: ${text}`);
     }
 
-    const data = await response.json() as BraveResponse;
-    return (data.web?.results ?? []).map((r): SearchResult => ({
+    const data = await response.json() as SearXNGResponse;
+    return data.results.slice(0, maxResults).map((r): SearchResult => ({
       title: r.title,
       url: r.url,
-      snippet: r.description,
-      source: 'brave',
+      snippet: r.content,
+      publishedDate: r.publishedDate ?? undefined,
+      source: 'searxng',
     }));
+  }
+
+  /** Check if the SearXNG instance is reachable. */
+  async healthCheck(): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.baseUrl.replace(/\/+$/, '')}/healthz`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
   }
 }
 
 // --- Factory ---
 
-export type SearchProviderType = 'tavily' | 'brave';
+export type SearchProviderType = 'tavily' | 'searxng';
 
-export function createSearchProvider(type: SearchProviderType, apiKey: string): SearchProvider {
+export function createSearchProvider(type: SearchProviderType, apiKeyOrUrl: string): SearchProvider {
   switch (type) {
-    case 'tavily': return new TavilyProvider(apiKey);
-    case 'brave': return new BraveProvider(apiKey);
+    case 'tavily': return new TavilyProvider(apiKeyOrUrl);
+    case 'searxng': return new SearXNGProvider(apiKeyOrUrl);
   }
-}
-
-export function detectProviderType(
-  apiKey: string,
-  explicit?: SearchProviderType | undefined,
-): SearchProviderType {
-  if (explicit) return explicit;
-  // Tavily keys start with "tvly-"
-  if (apiKey.startsWith('tvly-')) return 'tavily';
-  return 'brave';
 }

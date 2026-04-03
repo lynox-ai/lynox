@@ -282,6 +282,15 @@
 	let searchSaved = $state(false);
 	let searchConfigured = $state(false);
 
+	// --- SearXNG ---
+	let searxngUrl = $state('');
+	let searxngSaving = $state(false);
+	let searxngSaved = $state(false);
+	let searxngConfigured = $state(false);
+	let searxngConfiguredUrl = $state('');
+	let searxngChecking = $state(false);
+	let searxngHealthy = $state<boolean | null>(null);
+
 	let secretsLoading = $state(true);
 
 	async function loadSecretStatuses() {
@@ -289,10 +298,12 @@
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { configured: { telegram: boolean; search: boolean; api_key: boolean } };
+			const data = (await res.json()) as { configured: { telegram: boolean; search: boolean; api_key: boolean; searxng: boolean }; searxng_url: string | null };
 			apiKeyConfigured = data.configured.api_key;
 			telegramConfigured = data.configured.telegram;
 			searchConfigured = data.configured.search;
+			searxngConfigured = data.configured.searxng;
+			searxngConfiguredUrl = data.searxng_url ?? '';
 		} catch { /* ignore */ }
 		secretsLoading = false;
 	}
@@ -314,6 +325,62 @@
 			addToast(t('common.save_failed'), 'error');
 		}
 		searchSaving = false;
+	}
+
+	async function checkSearxng(url: string) {
+		searxngChecking = true;
+		searxngHealthy = null;
+		try {
+			const res = await fetch(`${getApiBase()}/searxng/check`, {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ url })
+			});
+			if (!res.ok) throw new Error();
+			const data = (await res.json()) as { healthy: boolean };
+			searxngHealthy = data.healthy;
+		} catch {
+			searxngHealthy = false;
+		}
+		searxngChecking = false;
+	}
+
+	async function saveSearxng() {
+		const url = searxngUrl.trim().replace(/\/+$/, '');
+		if (!url) return;
+		searxngSaving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/config`, {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ searxng_url: url })
+			});
+			if (!res.ok) throw new Error();
+			searxngUrl = '';
+			searxngSaved = true;
+			searxngHealthy = null;
+			setTimeout(() => (searxngSaved = false), 2000);
+			await loadSecretStatuses();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
+		searxngSaving = false;
+	}
+
+	async function removeSearxng() {
+		searxngSaving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/config`, {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ searxng_url: null })
+			});
+			if (!res.ok) throw new Error();
+			searxngConfigured = false;
+			searxngConfiguredUrl = '';
+			searxngHealthy = null;
+			await loadSecretStatuses();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
+		searxngSaving = false;
 	}
 
 	// Load all statuses on mount
@@ -661,6 +728,91 @@
 					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
 				>
 					{searchSaving ? t('settings.saving') : t('settings.save')}
+				</button>
+			</div>
+		{/if}
+	</div>
+
+	<!-- SearXNG -->
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+		<div class="flex items-center justify-between mb-4">
+			<div>
+				<h2 class="font-medium">{t('integrations.searxng')}</h2>
+				<p class="text-xs text-text-muted mt-1">{t('integrations.searxng_desc')}</p>
+			</div>
+			{#if secretsLoading}
+				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
+			{:else if searxngConfigured}
+				<span class="text-xs text-success">{t('integrations.searxng_configured')}</span>
+			{:else}
+				<span class="text-xs text-text-subtle">{t('integrations.searxng_not_configured')}</span>
+			{/if}
+		</div>
+
+		{#if searxngSaved}
+			<p class="text-sm text-success">{t('integrations.searxng_saved')}</p>
+		{:else if searxngConfigured}
+			<div class="space-y-3">
+				<p class="text-xs text-text-muted font-mono">{searxngConfiguredUrl}</p>
+				<div class="flex gap-2">
+					<button
+						onclick={() => checkSearxng(searxngConfiguredUrl)}
+						disabled={searxngChecking}
+						class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover disabled:opacity-50"
+					>
+						{searxngChecking ? t('integrations.searxng_checking') : t('integrations.searxng_check')}
+					</button>
+					<button
+						onclick={removeSearxng}
+						disabled={searxngSaving}
+						class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-error hover:border-error disabled:opacity-50"
+					>
+						{t('integrations.searxng_remove')}
+					</button>
+				</div>
+				{#if searxngHealthy === true}
+					<p class="text-xs text-success">{t('integrations.searxng_healthy')}</p>
+				{:else if searxngHealthy === false}
+					<p class="text-xs text-error">{t('integrations.searxng_check_failed')}</p>
+				{/if}
+			</div>
+		{:else}
+			<div class="space-y-3">
+				<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
+					<li>{t('integrations.searxng_step1')} <code class="text-text-subtle bg-bg px-1 py-0.5 rounded text-[11px]">docker run -d -p 8888:8080 searxng/searxng</code></li>
+					<li>{t('integrations.searxng_step2')}</li>
+					<li class="text-text-subtle">{t('integrations.searxng_step3')}</li>
+				</ol>
+				<div>
+					<label for="searxng-url" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.searxng_label')}</label>
+					<div class="flex gap-2">
+						<input
+							id="searxng-url"
+							bind:value={searxngUrl}
+							type="url"
+							placeholder="http://localhost:8888"
+							class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
+						/>
+						<button
+							onclick={() => { if (searxngUrl.trim()) checkSearxng(searxngUrl.trim().replace(/\/+$/, '')); }}
+							disabled={!searxngUrl.trim() || searxngChecking}
+							class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover disabled:opacity-50"
+						>
+							{searxngChecking ? t('integrations.searxng_checking') : t('integrations.searxng_check')}
+						</button>
+					</div>
+				</div>
+				{#if searxngHealthy === true}
+					<p class="text-xs text-success">{t('integrations.searxng_healthy')}</p>
+				{:else if searxngHealthy === false}
+					<p class="text-xs text-error">{t('integrations.searxng_check_failed')}</p>
+				{/if}
+				<button
+					onclick={saveSearxng}
+					disabled={!searxngUrl.trim() || searxngSaving}
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+				>
+					{searxngSaving ? t('settings.saving') : t('settings.save')}
 				</button>
 			</div>
 		{/if}

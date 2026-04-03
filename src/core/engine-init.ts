@@ -351,11 +351,6 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     fieldsToRemove.push(m.configField);
   }
 
-  // Also check BRAVE_API_KEY env for search_api_key
-  if (!vault.has('SEARCH_API_KEY') && userConfig.search_api_key && process.env['BRAVE_API_KEY']) {
-    // search_api_key came from BRAVE_API_KEY env — don't migrate
-  }
-
   if (fieldsToRemove.length === 0) return;
 
   // Remove migrated fields from plaintext config file

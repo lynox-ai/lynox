@@ -31,7 +31,7 @@ describe('Config', () => {
     delete process.env['GOOGLE_CLIENT_ID'];
     delete process.env['GOOGLE_CLIENT_SECRET'];
     delete process.env['TAVILY_API_KEY'];
-    delete process.env['BRAVE_API_KEY'];
+    delete process.env['SEARXNG_URL'];
     // Clean up any config files from previous tests
     rmSync(join(fakeHome, '.lynox'), { recursive: true, force: true });
     rmSync(join(fakeProject, '.lynox'), { recursive: true, force: true });

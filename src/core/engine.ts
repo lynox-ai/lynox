@@ -488,17 +488,32 @@ export class Engine {
       this._artifactStore = null;
     }
 
-    // Web search tool (conditional — requires API key)
+    // Web search tool (conditional)
+    // Priority: explicit search_provider > SearXNG URL (if configured) > Tavily API key > none
+    // Rationale: SearXNG requires intentional setup (Docker + URL), so when present it's the default.
+    // Users who prefer Tavily despite having SearXNG can set search_provider: 'tavily'.
     const searchKey = this.secretStore?.resolve('TAVILY_API_KEY')
       ?? this.secretStore?.resolve('SEARCH_API_KEY')
       ?? process.env['TAVILY_API_KEY']
-      ?? process.env['BRAVE_API_KEY']
       ?? this.userConfig.search_api_key;
-    if (searchKey) {
+    const searxngUrl = process.env['SEARXNG_URL'] ?? this.userConfig.searxng_url;
+    const explicitProvider = this.userConfig.search_provider;
+    const useSearxng = explicitProvider === 'searxng' || (searxngUrl && explicitProvider !== 'tavily');
+    if (useSearxng && searxngUrl) {
       try {
-        const { createSearchProvider, detectProviderType, createWebSearchTool } = await import('../integrations/search/index.js');
-        const providerType = detectProviderType(searchKey, this.userConfig.search_provider);
-        const searchProvider = createSearchProvider(providerType, searchKey);
+        const { SearXNGProvider, createWebSearchTool } = await import('../integrations/search/index.js');
+        const searxng = new SearXNGProvider(searxngUrl);
+        const healthy = await searxng.healthCheck();
+        if (healthy) {
+          this.registry.register(createWebSearchTool(searxng));
+        }
+      } catch {
+        // SearXNG init failed — non-critical, continue without it
+      }
+    } else if (searchKey) {
+      try {
+        const { createSearchProvider, createWebSearchTool } = await import('../integrations/search/index.js');
+        const searchProvider = createSearchProvider('tavily', searchKey);
         this.registry.register(createWebSearchTool(searchProvider));
       } catch {
         // Web search init failed — non-critical, continue without it

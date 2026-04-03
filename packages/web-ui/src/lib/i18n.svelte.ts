@@ -557,6 +557,23 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.search_step2': { de: 'API-Key im Dashboard kopieren und unten einfügen', en: 'Copy API key from dashboard and paste below' },
 	'integrations.search_step3': { de: 'Gratis-Tier: 1.000 Suchen/Monat', en: 'Free tier: 1,000 searches/month' },
 
+	// SearXNG
+	'integrations.searxng': { de: 'SearXNG (Self-Hosted)', en: 'SearXNG (Self-Hosted)' },
+	'integrations.searxng_desc': { de: 'Kostenlose, unbegrenzte Websuche via eigener SearXNG-Instanz', en: 'Free, unlimited web search via your own SearXNG instance' },
+	'integrations.searxng_configured': { de: 'Verbunden', en: 'Connected' },
+	'integrations.searxng_not_configured': { de: 'Nicht konfiguriert', en: 'Not configured' },
+	'integrations.searxng_unreachable': { de: 'Nicht erreichbar', en: 'Unreachable' },
+	'integrations.searxng_saved': { de: 'URL gespeichert. Engine wird neu gestartet...', en: 'URL saved. Restarting engine...' },
+	'integrations.searxng_label': { de: 'SearXNG URL', en: 'SearXNG URL' },
+	'integrations.searxng_step1': { de: 'SearXNG via Docker starten:', en: 'Start SearXNG via Docker:' },
+	'integrations.searxng_step2': { de: 'URL unten eintragen und Verbindung testen', en: 'Enter the URL below and test the connection' },
+	'integrations.searxng_step3': { de: 'Wird als Standard genutzt sobald konfiguriert — unbegrenzt und kostenlos', en: 'Used as default once configured — unlimited and free' },
+	'integrations.searxng_check': { de: 'Verbindung testen', en: 'Test connection' },
+	'integrations.searxng_checking': { de: 'Prüfe...', en: 'Checking...' },
+	'integrations.searxng_healthy': { de: 'Erreichbar', en: 'Reachable' },
+	'integrations.searxng_check_failed': { de: 'Nicht erreichbar — URL prüfen', en: 'Unreachable — check URL' },
+	'integrations.searxng_remove': { de: 'Entfernen', en: 'Remove' },
+
 	// Memory
 	'memory.title': { de: 'Knowledge', en: 'Knowledge' },
 	'memory.no_entries': { de: 'Keine Einträge in', en: 'No entries in' },

@@ -137,9 +137,9 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['TAVILY_API_KEY']) {
     merged.search_api_key = process.env['TAVILY_API_KEY'];
     if (!merged.search_provider) merged.search_provider = 'tavily';
-  } else if (process.env['BRAVE_API_KEY']) {
-    merged.search_api_key = process.env['BRAVE_API_KEY'];
-    if (!merged.search_provider) merged.search_provider = 'brave';
+  }
+  if (process.env['SEARXNG_URL']) {
+    merged.searxng_url = process.env['SEARXNG_URL'];
   }
 
   _cachedConfig = merged;

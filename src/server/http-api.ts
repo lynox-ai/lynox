@@ -1011,15 +1011,18 @@ export class LynoxHTTPApi {
       const provider = userConfig.provider ?? 'anthropic';
       // For bedrock/vertex/custom, API key is not needed — provider handles auth
       const llmConfigured = provider !== 'anthropic' || names.has('ANTHROPIC_API_KEY');
+      const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
       jsonResponse(res, 200, {
         provider,
         configured: {
           api_key: llmConfigured,
           telegram: names.has('TELEGRAM_BOT_TOKEN'),
-          search: names.has('TAVILY_API_KEY') || names.has('SEARCH_API_KEY') || names.has('BRAVE_API_KEY'),
+          search: names.has('TAVILY_API_KEY') || names.has('SEARCH_API_KEY') || !!searxngUrl,
+          searxng: !!searxngUrl,
           google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
           sentry: names.has('LYNOX_SENTRY_DSN'),
         },
+        searxng_url: searxngUrl ?? null,
         count: names.size,
       });
     });
@@ -1052,6 +1055,31 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { deleted });
     }));
 
+    // SearXNG health check — validates a SearXNG URL is reachable
+    this.staticRoutes.set('POST /api/searxng/check', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const url = b && typeof b['url'] === 'string' ? b['url'].replace(/\/+$/, '') : '';
+      if (!url) { errorResponse(res, 400, 'Missing url'); return; }
+      // Validate scheme (http/https only) and block cloud metadata endpoints
+      let parsed: URL;
+      try { parsed = new URL(url); } catch { errorResponse(res, 400, 'Invalid URL'); return; }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        errorResponse(res, 400, 'URL must use http:// or https://');
+        return;
+      }
+      const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+      if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')) {
+        errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
+        return;
+      }
+      try {
+        const response = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
+        jsonResponse(res, 200, { healthy: response.ok });
+      } catch {
+        jsonResponse(res, 200, { healthy: false });
+      }
+    });
+
     // ── Config ──
     this.staticRoutes.set('GET /api/config', async (_req, res) => {
       const { readUserConfig } = await import('../core/config.js');
@@ -1067,14 +1095,25 @@ export class LynoxHTTPApi {
     });
 
     this.staticRoutes.set('PUT /api/config', async (_req, res, _params, body) => {
-      const { saveUserConfig, reloadConfig } = await import('../core/config.js');
+      const { readUserConfig, saveUserConfig, reloadConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       const parsed = LynoxUserConfigSchema.safeParse(body);
       if (!parsed.success) {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
-      saveUserConfig(parsed.data as Record<string, unknown>);
+      // Merge with existing config so partial updates don't lose other fields
+      const existing = readUserConfig() as Record<string, unknown>;
+      const update = parsed.data as Record<string, unknown>;
+      const merged = { ...existing };
+      for (const [key, value] of Object.entries(update)) {
+        if (value === null) {
+          delete merged[key]; // explicit null = delete field
+        } else {
+          merged[key] = value;
+        }
+      }
+      saveUserConfig(merged);
       reloadConfig();
       await engine.reloadUserConfig();
       jsonResponse(res, 200, { ok: true });
