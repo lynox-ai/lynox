@@ -20,7 +20,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   'plugins': true,
-  'flat-file-memory': false,
+  'flat-file-memory': true,
 };
 
 // Dynamic registry for Pro/plugin feature flags
