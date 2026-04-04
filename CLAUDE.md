@@ -88,6 +88,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 - API Store: profile-first enforcement, agent-driven setup
 - CRM: agent-driven contacts/deals, entity-primary, DataStore for structured tracking
 - Sentry: opt-in error reporting (LYNOX_SENTRY_DSN), PII scrubbed
+- i18n: write each language natively with same meaning — never translate one from the other. Translated text reads unnaturally.
 
 ## Testing
 
