@@ -412,7 +412,7 @@
 					const cached = richCache.get(raw);
 					if (cached) return { original: match[0], result: cached };
 					// Uncached during streaming → show placeholder instead of raw code
-					const placeholder = `<div class="artifact-placeholder"><span class="artifact-placeholder-dot"></span><span>Artifact wird erstellt...</span></div>`;
+					const placeholder = `<div class="artifact-placeholder"><span class="artifact-placeholder-dot"></span><span>${t('tool.artifact_creating')}</span></div>`;
 					return { original: match[0], result: placeholder };
 				}
 

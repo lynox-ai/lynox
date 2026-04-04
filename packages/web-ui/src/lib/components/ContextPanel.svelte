@@ -6,33 +6,48 @@
 	const ctx = $derived(getContext());
 	const pinned = $derived(isPinned());
 
-	// User-friendly labels + icons
-	const TOOL_META: Record<string, { label: string; icon: string; color: string }> = {
-		write_file:       { label: 'Datei erstellt',    icon: '📄', color: 'text-success' },
-		read_file:        { label: 'Datei gelesen',     icon: '📖', color: 'text-accent-text' },
-		bash:             { label: 'Befehl',            icon: '⚡', color: 'text-warning' },
-		http_request:     { label: 'API-Anfrage',       icon: '🌐', color: 'text-accent-text' },
-		web_research:     { label: 'Web-Recherche',     icon: '🔍', color: 'text-accent-text' },
-		google_gmail:     { label: 'Gmail',             icon: '📧', color: 'text-accent-text' },
-		google_sheets:    { label: 'Sheets',            icon: '📊', color: 'text-success' },
-		google_drive:     { label: 'Drive',             icon: '📁', color: 'text-accent-text' },
-		google_calendar:  { label: 'Kalender',          icon: '📅', color: 'text-accent-text' },
-		google_docs:      { label: 'Docs',              icon: '📝', color: 'text-accent-text' },
-		spawn_agent:      { label: 'Delegiert',         icon: '🤖', color: 'text-warning' },
-		memory_store:     { label: 'Gemerkt',           icon: '🧠', color: 'text-success' },
-		memory_recall:    { label: 'Erinnert',          icon: '💭', color: 'text-accent-text' },
-		memory_update:    { label: 'Wissen aktualisiert', icon: '✏️', color: 'text-warning' },
-		data_store_query: { label: 'Daten abgefragt',   icon: '📊', color: 'text-accent-text' },
-		data_store_insert:{ label: 'Daten gespeichert', icon: '💾', color: 'text-success' },
-		data_store_create:{ label: 'Tabelle erstellt',  icon: '🗂️', color: 'text-success' },
-		run_pipeline:     { label: 'Workflow',          icon: '⚙️', color: 'text-warning' },
-		ask_user:         { label: 'Frage an dich',     icon: '❓', color: 'text-accent-text' },
-		task_create:      { label: 'Aufgabe erstellt',  icon: '✅', color: 'text-success' },
-		plan_task:        { label: 'Plan erstellt',     icon: '📋', color: 'text-accent-text' },
+	// Tool icons + colors (labels via i18n)
+	const TOOL_ICONS: Record<string, { icon: string; color: string }> = {
+		write_file:       { icon: '📄', color: 'text-success' },
+		read_file:        { icon: '📖', color: 'text-accent-text' },
+		bash:             { icon: '⚡', color: 'text-warning' },
+		http_request:     { icon: '🌐', color: 'text-accent-text' },
+		web_research:     { icon: '🔍', color: 'text-accent-text' },
+		google_gmail:     { icon: '📧', color: 'text-accent-text' },
+		google_sheets:    { icon: '📊', color: 'text-success' },
+		google_drive:     { icon: '📁', color: 'text-accent-text' },
+		google_calendar:  { icon: '📅', color: 'text-accent-text' },
+		google_docs:      { icon: '📝', color: 'text-accent-text' },
+		spawn_agent:      { icon: '🤖', color: 'text-warning' },
+		memory_store:     { icon: '🧠', color: 'text-success' },
+		memory_recall:    { icon: '💭', color: 'text-accent-text' },
+		memory_update:    { icon: '✏️', color: 'text-warning' },
+		data_store_query: { icon: '📊', color: 'text-accent-text' },
+		data_store_insert:{ icon: '💾', color: 'text-success' },
+		data_store_create:{ icon: '🗂️', color: 'text-success' },
+		run_pipeline:     { icon: '⚙️', color: 'text-warning' },
+		ask_user:         { icon: '❓', color: 'text-accent-text' },
+		task_create:      { icon: '✅', color: 'text-success' },
+		plan_task:        { icon: '📋', color: 'text-accent-text' },
+	};
+
+	const TOOL_LABELS: Record<string, string> = {
+		write_file: 'tool.file_created', read_file: 'tool.file_read',
+		bash: 'tool.command', http_request: 'tool.api_request',
+		web_research: 'tool.web_search', spawn_agent: 'tool.delegated',
+		memory_store: 'tool.remembered', memory_recall: 'tool.knowledge_recalled',
+		memory_update: 'tool.knowledge_updated', data_store_query: 'tool.data_queried',
+		data_store_insert: 'tool.data_stored', data_store_create: 'tool.table_created',
+		run_pipeline: 'tool.pipeline', ask_user: 'tool.question',
+		task_create: 'tool.task_created', plan_task: 'tool.plan_created',
+		artifact_save: 'tool.artifact_saved', google_calendar: 'tool.calendar',
 	};
 
 	function meta(name: string) {
-		return TOOL_META[name] ?? { label: name, icon: '🔧', color: 'text-text-subtle' };
+		const icons = TOOL_ICONS[name] ?? { icon: '🔧', color: 'text-text-subtle' };
+		const labelKey = TOOL_LABELS[name];
+		const label = labelKey ? t(labelKey) : name;
+		return { label, ...icons };
 	}
 
 	function getInput(key: string): string {

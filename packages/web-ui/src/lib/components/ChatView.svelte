@@ -152,21 +152,21 @@
 		if (HIDDEN_TOOLS.has(tc.name)) return null;
 		const inp = tc.input as Record<string, unknown> | undefined;
 		switch (tc.name) {
-			case 'data_store_query': return { action: 'Daten abgefragt', subject: String(inp?.['collection'] ?? 'Tabelle') };
-			case 'data_store_insert': return { action: 'Daten gespeichert', subject: String(inp?.['collection'] ?? 'Tabelle') };
-			case 'data_store_create': return { action: 'Tabelle erstellt', subject: String(inp?.['collection'] ?? '') };
-			case 'memory_store': return { action: 'Gemerkt', subject: String(inp?.['content'] ?? '').slice(0, 50) };
-			case 'memory_recall': return { action: 'Wissen abgerufen', subject: String(inp?.['query'] ?? '') };
-			case 'memory_update': return { action: 'Wissen aktualisiert', subject: '' };
-			case 'write_file': return { action: 'Datei geschrieben', subject: String(inp?.['path'] ?? '').split('/').pop() ?? '' };
-			case 'read_file': return { action: 'Datei gelesen', subject: String(inp?.['path'] ?? '').split('/').pop() ?? '' };
-			case 'bash': return { action: 'Befehl', subject: String(inp?.['command'] ?? '').slice(0, 60) };
-			case 'http_request': return { action: 'API-Anfrage', subject: `${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}` };
-			case 'web_research': return { action: 'Web-Recherche', subject: String(inp?.['query'] ?? '') };
-			case 'run_pipeline': return { action: 'Pipeline gestartet', subject: String(inp?.['name'] ?? '') };
-			case 'spawn_agent': return { action: 'Delegiert', subject: String(inp?.['task'] ?? '').slice(0, 50) };
-			case 'artifact_save': return { action: 'Artifact gespeichert', subject: String(inp?.['title'] ?? '') };
-			case 'task_create': return { action: 'Aufgabe erstellt', subject: String(inp?.['title'] ?? '') };
+			case 'data_store_query': return { action: t('tool.data_queried'), subject: String(inp?.['collection'] ?? '') };
+			case 'data_store_insert': return { action: t('tool.data_stored'), subject: String(inp?.['collection'] ?? '') };
+			case 'data_store_create': return { action: t('tool.table_created'), subject: String(inp?.['collection'] ?? '') };
+			case 'memory_store': return { action: t('tool.remembered'), subject: String(inp?.['content'] ?? '').slice(0, 50) };
+			case 'memory_recall': return { action: t('tool.knowledge_recalled'), subject: String(inp?.['query'] ?? '') };
+			case 'memory_update': return { action: t('tool.knowledge_updated'), subject: '' };
+			case 'write_file': return { action: t('tool.file_written'), subject: String(inp?.['path'] ?? '').split('/').pop() ?? '' };
+			case 'read_file': return { action: t('tool.file_read'), subject: String(inp?.['path'] ?? '').split('/').pop() ?? '' };
+			case 'bash': return { action: t('tool.command'), subject: String(inp?.['command'] ?? '').slice(0, 60) };
+			case 'http_request': return { action: t('tool.api_request'), subject: `${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}` };
+			case 'web_research': return { action: t('tool.web_search'), subject: String(inp?.['query'] ?? '') };
+			case 'run_pipeline': return { action: t('tool.pipeline'), subject: String(inp?.['name'] ?? '') };
+			case 'spawn_agent': return { action: t('tool.delegated'), subject: String(inp?.['task'] ?? '').slice(0, 50) };
+			case 'artifact_save': return { action: t('tool.artifact_saved'), subject: String(inp?.['title'] ?? '') };
+			case 'task_create': return { action: t('tool.task_created'), subject: String(inp?.['title'] ?? '') };
 			default: return { action: tc.name, subject: '' };
 		}
 	}

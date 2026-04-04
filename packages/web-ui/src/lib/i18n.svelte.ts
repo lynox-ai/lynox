@@ -628,6 +628,28 @@ const translations: Record<string, Record<Locale, string>> = {
 	'common.copied': { de: 'Kopiert', en: 'Copied' },
 	'common.copy': { de: 'Kopieren', en: 'Copy' },
 	'common.cancel': { de: 'Abbrechen', en: 'Cancel' },
+
+	// Tool-call labels (ChatView + ContextPanel)
+	'tool.data_stored': { de: 'Daten gespeichert', en: 'Data stored' },
+	'tool.table_created': { de: 'Tabelle erstellt', en: 'Table created' },
+	'tool.remembered': { de: 'Gemerkt', en: 'Remembered' },
+	'tool.knowledge_recalled': { de: 'Wissen abgerufen', en: 'Knowledge recalled' },
+	'tool.knowledge_updated': { de: 'Wissen aktualisiert', en: 'Knowledge updated' },
+	'tool.file_written': { de: 'Datei geschrieben', en: 'File written' },
+	'tool.file_read': { de: 'Datei gelesen', en: 'File read' },
+	'tool.file_created': { de: 'Datei erstellt', en: 'File created' },
+	'tool.delegated': { de: 'Delegiert', en: 'Delegated' },
+	'tool.artifact_saved': { de: 'Artifact gespeichert', en: 'Artifact saved' },
+	'tool.task_created': { de: 'Aufgabe erstellt', en: 'Task created' },
+	'tool.plan_created': { de: 'Plan erstellt', en: 'Plan created' },
+	'tool.data_queried': { de: 'Daten abgefragt', en: 'Data queried' },
+	'tool.artifact_creating': { de: 'Artifact wird erstellt...', en: 'Creating artifact...' },
+	'tool.command': { de: 'Befehl', en: 'Command' },
+	'tool.api_request': { de: 'API-Anfrage', en: 'API request' },
+	'tool.web_search': { de: 'Web-Recherche', en: 'Web search' },
+	'tool.pipeline': { de: 'Pipeline', en: 'Pipeline' },
+	'tool.question': { de: 'Frage an dich', en: 'Question for you' },
+	'tool.calendar': { de: 'Kalender', en: 'Calendar' },
 };
 
 export function setLocale(locale: Locale): void {
