@@ -90,8 +90,8 @@ Or let lynox set it up during a conversation:
 Once configured, lynox can make authenticated requests:
 
 - *"Check my Stripe balance"*
-- *"Get the latest orders from my Shopify store"*
 - *"Query the weather API for Munich"*
+- *"Get data from [any REST API you've connected]"*
 
 API credentials are stored in the encrypted vault.
 
