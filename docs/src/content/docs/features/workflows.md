@@ -23,12 +23,6 @@ In the Web UI or CLI, switch roles by telling lynox:
 - *"Switch to researcher mode"*
 - *"Act as operator and check the status of..."*
 
-Or use the CLI command:
-
-```
-/roles
-```
-
 The role determines which model is used, what tools are available, and how autonomous lynox operates. The default mode uses Sonnet with full tool access.
 
 ## Background Tasks

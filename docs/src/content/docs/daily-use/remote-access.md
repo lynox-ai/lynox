@@ -2,7 +2,7 @@
 title: Remote Access
 description: Use lynox on your phone — from home or anywhere.
 sidebar:
-  order: 4
+  order: 5
 ---
 
 lynox runs on your server or laptop. This guide shows how to use it on your phone — on the same WiFi or from anywhere.
@@ -11,7 +11,7 @@ lynox runs on your server or laptop. This guide shows how to use it on your phon
 
 If your phone is on the same WiFi as lynox, this takes 10 seconds:
 
-1. Open **Settings → Mobile Zugang** (or tap the phone icon in the status bar)
+1. Open **Settings → Mobile Access** (or tap the phone icon in the status bar)
 2. Scan the QR code with your phone camera
 3. You're logged in — no token to type
 4. **Install as PWA:** iOS: Share → Add to Home Screen. Android: Menu → Install app.
@@ -42,7 +42,7 @@ sudo tailscale up
 
 Your Tailscale IP is shown after `tailscale up` or in the Tailscale app. It looks like `100.x.y.z` and never changes.
 
-Then use the QR code in Settings → Mobile Zugang to log in, or enter your access token manually.
+Then use the QR code in Settings → Mobile Access to log in, or enter your access token manually.
 
 **Why Tailscale:**
 - 2 minute setup

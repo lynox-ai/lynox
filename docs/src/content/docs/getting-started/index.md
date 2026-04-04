@@ -20,11 +20,11 @@ lynox also supports **AWS Bedrock**, **Google Vertex AI**, and **Custom proxies*
 ### Docker Compose (recommended)
 
 ```bash
-# 1. Create project directory
-mkdir lynox && cd lynox
+# 1. Clone the repo (contains docker-compose.yml + SearXNG config)
+git clone https://github.com/lynox-ai/lynox.git && cd lynox
 
 # 2. Create .env with your API key
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+cp .env.example .env    # then edit .env and set ANTHROPIC_API_KEY
 
 # 3. Start lynox + SearXNG (web search)
 docker compose up -d

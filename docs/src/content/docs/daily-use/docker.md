@@ -83,7 +83,7 @@ Mount `~/.lynox` to keep your data across container restarts:
 
 This directory contains:
 - `config.json` — Your configuration
-- `vault.key` — Vault encryption key (keep safe!)
+- `.env` — Vault encryption key (`LYNOX_VAULT_KEY`) — keep safe!
 - `vault.db` — Encrypted secrets
 - `history.db` — Threads, runs, and conversation history
 - `agent-memory.db` — Knowledge graph and embeddings
@@ -176,7 +176,7 @@ docker compose up -d
 All your threads, memory, knowledge graph, config, and vault secrets carry over. The only difference: Docker Compose adds SearXNG for web search (locally, Anthropic's native `web_search` was used instead).
 
 :::tip
-Your vault key (`~/.lynox/vault.key`) must be present on the Docker host. Without it, encrypted secrets can't be decrypted — but you can re-enter them via the Web UI.
+Your vault key (stored as `LYNOX_VAULT_KEY` in `~/.lynox/.env`) must be present on the Docker host. Without it, encrypted secrets can't be decrypted — but you can re-enter them via the Web UI.
 :::
 
 ## Data & Portability

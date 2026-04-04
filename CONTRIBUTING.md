@@ -20,7 +20,7 @@ pnpm run dev          # Watch mode with hot reload
 pnpm run typecheck    # tsc --noEmit — must pass with zero errors
 pnpm run lint         # eslint src/ — must pass with zero errors
 pnpm run build        # tsc → dist/
-npx vitest run        # 115 files / ~2669 tests — all must pass
+npx vitest run        # 113 files / ~2834 tests — all must pass
 pnpm run coverage     # coverage report (CI enforces ≥65% lines, ≥60% functions, ≥50% branches, ≥65% statements)
 ```
 
@@ -67,7 +67,7 @@ Keep PRs focused — one concern per PR.
 
 ## Understanding the Codebase
 
-See [Architecture](https://docs.lynox.ai/developers/architecture/) for the module map, data flow, and design decisions.
+See [Extension Points](https://docs.lynox.ai/developers/extension-points/) and the [HTTP API](https://docs.lynox.ai/developers/http-api/) reference for technical details.
 
 ## Reporting Bugs
 
