@@ -8,8 +8,10 @@ import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGT
 import { FILE_MODE_PRIVATE } from './constants.js';
 import { ensureDirSync } from './atomic-write.js';
 
-const LYNOX_DIR = getLynoxDir();
-const VAULT_DB_PATH = join(LYNOX_DIR, 'vault.db');
+// Lazy — must not evaluate at import time (setDataDir may not have been called yet)
+function getVaultDbPath(): string {
+  return join(getLynoxDir(), 'vault.db');
+}
 
 /**
  * Estimate Shannon entropy of a string in bits per character.
@@ -83,7 +85,7 @@ export class SecretVault {
   private readonly derivedKey: Buffer;
 
   constructor(options?: VaultOptions | undefined) {
-    const dbPath = options?.path ?? VAULT_DB_PATH;
+    const dbPath = options?.path ?? getVaultDbPath();
 
     // Ensure directory exists
     const dir = join(dbPath, '..');

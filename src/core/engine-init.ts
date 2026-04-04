@@ -249,7 +249,7 @@ function _ensureVaultKey(): void {
   try {
     writeFileSync(keyFilePath, key + '\n', { mode: FILE_MODE_PRIVATE });
     process.env['LYNOX_VAULT_KEY'] = key;
-    process.stderr.write('Generated vault key → ~/.lynox/vault.key\n');
+    process.stderr.write(`Generated vault key → ${keyFilePath}\n`);
   } catch {
     process.stderr.write('⚠ Could not write vault key file. Secrets will not be persisted.\n');
   }

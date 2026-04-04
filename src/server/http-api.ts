@@ -325,6 +325,15 @@ export class LynoxHTTPApi {
       );
     }
 
+    this.server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        process.stderr.write(`✗ Port ${port} is already in use.\n`);
+        process.stderr.write(`  Try: LYNOX_HTTP_PORT=${port + 1} lynox\n`);
+        process.exit(1);
+      }
+      throw err;
+    });
+
     this.server.listen(port, host, () => {
       const authStatus = secret ? '(auth enabled)' : '(localhost only)';
       process.stderr.write(`LYNOX HTTP API listening on ${protocol}://${host}:${port} ${authStatus}\n`);
