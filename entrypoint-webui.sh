@@ -37,20 +37,34 @@ if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; 
 fi
 
 # Auto-generate access token if not set
+TOKEN_FILE="$HOME/.lynox/.access-token"
 if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
-  LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
-  export LYNOX_HTTP_SECRET
-  # Persist to file so user can retrieve without docker logs
-  printf '%s' "$LYNOX_HTTP_SECRET" > /tmp/lynox-access-token
-  chmod 600 /tmp/lynox-access-token
-  echo "" >&2
-  echo "========================================" >&2
-  echo "  Access Token (enter in browser):" >&2
-  echo "  ${LYNOX_HTTP_SECRET}" >&2
-  echo "========================================" >&2
-  echo "  Retrieve later: docker exec lynox cat /tmp/lynox-access-token" >&2
-  echo "  Suppress this:  set LYNOX_HTTP_SECRET in your docker run command" >&2
-  echo "" >&2
+  # Reuse persisted token from previous run (survives container restarts)
+  if [ -f "$TOKEN_FILE" ]; then
+    LYNOX_HTTP_SECRET=$(cat "$TOKEN_FILE")
+    export LYNOX_HTTP_SECRET
+    echo "" >&2
+    echo "========================================" >&2
+    echo "  Access Token (from previous run):" >&2
+    echo "  ${LYNOX_HTTP_SECRET}" >&2
+    echo "========================================" >&2
+    echo "" >&2
+  else
+    LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
+    export LYNOX_HTTP_SECRET
+    # Persist to volume so it survives container restarts
+    mkdir -p "$HOME/.lynox"
+    printf '%s' "$LYNOX_HTTP_SECRET" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    echo "" >&2
+    echo "========================================" >&2
+    echo "  Access Token (enter in browser):" >&2
+    echo "  ${LYNOX_HTTP_SECRET}" >&2
+    echo "========================================" >&2
+    echo "  Same token on every restart (stored in volume)." >&2
+    echo "  Override: set LYNOX_HTTP_SECRET in .env or docker run" >&2
+    echo "" >&2
+  fi
 fi
 
 # Auto-generate vault key if not set (persist to volume)
