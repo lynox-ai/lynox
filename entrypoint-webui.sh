@@ -43,11 +43,8 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   if [ -f "$TOKEN_FILE" ]; then
     LYNOX_HTTP_SECRET=$(cat "$TOKEN_FILE")
     export LYNOX_HTTP_SECRET
-    echo "" >&2
-    echo "========================================" >&2
-    echo "  Access Token (from previous run):" >&2
-    echo "  ${LYNOX_HTTP_SECRET}" >&2
-    echo "========================================" >&2
+    echo "  Access token loaded from volume (not shown in logs)." >&2
+    echo "  Retrieve: docker exec lynox cat \$HOME/.lynox/.access-token" >&2
     echo "" >&2
   else
     LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
@@ -61,7 +58,8 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     echo "  Access Token (enter in browser):" >&2
     echo "  ${LYNOX_HTTP_SECRET}" >&2
     echo "========================================" >&2
-    echo "  Same token on every restart (stored in volume)." >&2
+    echo "  Stored in volume — same token on every restart." >&2
+    echo "  Retrieve: docker exec lynox cat \$HOME/.lynox/.access-token" >&2
     echo "  Override: set LYNOX_HTTP_SECRET in .env or docker run" >&2
     echo "" >&2
   fi
