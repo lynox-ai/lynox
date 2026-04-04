@@ -935,7 +935,7 @@ export class RunHistory {
   getCostByDay(days: number): Array<{ day: string; cost_usd: number; run_count: number }> {
     return this.db.prepare(`
       SELECT date(created_at) as day, COALESCE(SUM(cost_usd), 0) as cost_usd, COUNT(*) as run_count
-      FROM runs WHERE created_at >= datetime('now', ?) AND status != 'failed'
+      FROM runs WHERE created_at >= datetime('now', ?) AND status NOT IN ('running', 'failed')
       GROUP BY date(created_at) ORDER BY day DESC
     `).all(`-${days} days`) as Array<{ day: string; cost_usd: number; run_count: number }>;
   }
