@@ -83,9 +83,11 @@ Mount `~/.lynox` to keep your data across container restarts:
 
 This directory contains:
 - `config.json` — Your configuration
-- `agent-memory.db` — Memory and knowledge graph
-- `threads/` — Conversation history
+- `vault.key` — Vault encryption key (keep safe!)
 - `vault.db` — Encrypted secrets
+- `history.db` — Threads, runs, and conversation history
+- `agent-memory.db` — Knowledge graph and embeddings
+- `memory/` — Flat-file memory
 - `backups/` — Automatic backups
 
 ## Security Hardening
@@ -160,6 +162,22 @@ docker run -i --rm \
 ```
 
 See [MCP Integration](/integrations/mcp/) for IDE setup.
+
+## Migrating from Local to Docker
+
+If you've been running lynox locally (via `npx` or `pnpm`), you can move to Docker without losing any data. Everything lives in `~/.lynox/` — just mount it:
+
+```bash
+# Your local data is already in ~/.lynox/
+# Docker Compose mounts it automatically (see docker-compose.yml)
+docker compose up -d
+```
+
+All your threads, memory, knowledge graph, config, and vault secrets carry over. The only difference: Docker Compose adds SearXNG for web search (locally, Anthropic's native `web_search` was used instead).
+
+:::tip
+Your vault key (`~/.lynox/vault.key`) must be present on the Docker host. Without it, encrypted secrets can't be decrypted — but you can re-enter them via the Web UI.
+:::
 
 ## Data & Portability
 
