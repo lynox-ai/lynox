@@ -279,7 +279,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.secret_save': { de: 'Speichern', en: 'Save' },
 	'chat.secret_cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.secret_saved': { de: 'Sicher gespeichert', en: 'Saved securely' },
-	'chat.secret_warning': { de: 'Das sieht nach einem API-Key oder Passwort aus. Bitte nicht im Chat eingeben.', en: 'This looks like an API key or password. Please don\'t enter it in chat.' },
+	'chat.secret_warning': { de: 'Das sieht nach einem API-Key oder Passwort aus. Bitte nicht im Chat eingeben — nutze „Speichere ein Secret" stattdessen.', en: 'This looks like an API key or password. Don\'t paste it in chat — ask me to "store a secret" instead.' },
 	'chat.analyze_files': { de: 'Analysiere diese Dateien.', en: 'Analyze these files.' },
 	'chat.mic_unavailable': { de: '[Mikrofon nicht verfügbar]', en: '[Microphone not available]' },
 	'chat.attach_file': { de: 'Datei anhängen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
@@ -450,7 +450,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.check_now': { de: 'Jetzt prüfen', en: 'Check now' },
 
 	// Keys
-	'keys.title': { de: 'API Keys', en: 'API Keys' },
+	'keys.title': { de: 'Secrets & API Keys', en: 'Secrets & API Keys' },
+	'keys.settings_desc': { de: 'Verschlüsselt gespeicherte Zugangsdaten', en: 'Encrypted credentials and API keys' },
 	'keys.no_keys': { de: 'Keine API Keys gespeichert. Füge unten deinen Anthropic API Key hinzu.', en: 'No API keys stored. Add your Anthropic API key below.' },
 	'keys.add_title': { de: 'Neuen Key hinzufügen', en: 'Add new key' },
 	'keys.name_label': { de: 'Name', en: 'Name' },

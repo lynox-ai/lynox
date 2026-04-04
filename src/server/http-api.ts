@@ -1666,6 +1666,13 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { interactions });
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/crm/contacts/:name/deals', async (_req, res, params) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
+      const deals = crm.getDealsForContact(decodeURIComponent(params['name']!), 50);
+      jsonResponse(res, 200, { deals });
+    }));
+
     // ── Backups ──────────────────────────────────────────────────
 
     this.staticRoutes.set('GET /api/backups', async (_req, res) => {

@@ -12,6 +12,7 @@
 	let loading = $state(true);
 	let selected = $state<Contact | null>(null);
 	let interactions = $state<Interaction[]>([]);
+	let contactDeals = $state<Deal[]>([]);
 	let error = $state('');
 
 	async function loadContacts() {
@@ -38,11 +39,16 @@
 
 	async function selectContact(c: Contact) {
 		selected = c;
+		interactions = [];
+		contactDeals = [];
 		try {
-			const res = await fetch(`${getApiBase()}/crm/contacts/${encodeURIComponent(c.name)}/interactions`);
-			const data = (await res.json()) as { interactions: Interaction[] };
-			interactions = data.interactions;
-		} catch { interactions = []; }
+			const [intRes, dealRes] = await Promise.all([
+				fetch(`${getApiBase()}/crm/contacts/${encodeURIComponent(c.name)}/interactions`),
+				fetch(`${getApiBase()}/crm/contacts/${encodeURIComponent(c.name)}/deals`),
+			]);
+			if (intRes.ok) { const d = (await intRes.json()) as { interactions: Interaction[] }; interactions = d.interactions; }
+			if (dealRes.ok) { const d = (await dealRes.json()) as { deals: Deal[] }; contactDeals = d.deals; }
+		} catch { /* keep empty defaults */ }
 	}
 
 	let hasDeals = $state(false);
@@ -125,6 +131,21 @@
 						{#if selected.company}<p class="text-xs text-text-muted">{selected.company}</p>{/if}
 						{#if parseTags(selected.tags).length > 0}
 							<div class="flex flex-wrap gap-1">{#each parseTags(selected.tags) as tag}<span class="rounded-[var(--radius-sm)] bg-accent/10 text-accent-text px-2 py-0.5 text-xs">{tag}</span>{/each}</div>
+						{/if}
+						{#if contactDeals.length > 0}
+							<p class="text-xs font-mono uppercase tracking-widest text-text-subtle">{t('crm.deals')} ({contactDeals.length})</p>
+							<div class="space-y-2">
+								{#each contactDeals as deal}
+									<div class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">
+										<div class="flex items-center justify-between">
+											<span class="text-xs font-medium">{deal.title}</span>
+											<span class="text-[10px] rounded-[var(--radius-sm)] px-1.5 py-0.5 {stageColors[deal.stage ?? ''] ?? 'bg-bg-muted text-text-muted'}">{deal.stage}</span>
+										</div>
+										{#if deal.value}<p class="text-[10px] text-text-muted mt-0.5">{deal.currency ?? 'CHF'} {deal.value.toLocaleString()}</p>{/if}
+										{#if deal.next_action}<p class="text-[10px] text-text-subtle mt-0.5">{deal.next_action}</p>{/if}
+									</div>
+								{/each}
+							</div>
 						{/if}
 						{#if interactions.length > 0}
 							<p class="text-xs font-mono uppercase tracking-widest text-text-subtle">{t('crm.interactions')} ({interactions.length})</p>

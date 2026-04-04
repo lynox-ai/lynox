@@ -12,6 +12,7 @@
 	const baseItems: SettingsItem[] = [
 		{ href: '/app/settings/mobile', titleKey: 'mobile.title', descKey: 'mobile.settings_desc' },
 		{ href: '/app/settings/config', titleKey: 'settings.config', descKey: 'settings.config_desc' },
+		{ href: '/app/settings/keys', titleKey: 'keys.title', descKey: 'keys.settings_desc' },
 		{ href: '/app/settings/integrations', titleKey: 'settings.integrations', descKey: 'settings.integrations_desc' },
 		{ href: '/app/settings/apis', titleKey: 'apis.title', descKey: 'apis.no_profiles' },
 		{ href: '/app/settings/data', titleKey: 'data.title', descKey: 'data.no_collections' },

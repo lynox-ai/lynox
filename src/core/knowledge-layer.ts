@@ -28,7 +28,7 @@ import type { RunHistory } from './run-history.js';
 import { channels } from './observability.js';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
-const DEDUP_THRESHOLD = 0.90;
+const DEDUP_THRESHOLD = 0.95;
 
 /**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.

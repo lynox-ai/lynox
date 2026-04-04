@@ -236,6 +236,18 @@ export class CRM {
     return result.rows;
   }
 
+  /** Get deals linked to a specific contact. */
+  getDealsForContact(contactName: string, limit = 50): Array<Record<string, unknown>> {
+    this.ensureSchema();
+    const result = this.ds.queryRecords({
+      collection: 'deals',
+      filter: { contact_name: contactName },
+      sort: [{ field: '_updated_at', order: 'desc' }],
+      limit,
+    });
+    return result.rows;
+  }
+
   /** Get all deals (optionally filtered by stage). */
   getAllDeals(filter?: Record<string, unknown>, limit = 50): Array<Record<string, unknown>> {
     this.ensureSchema();

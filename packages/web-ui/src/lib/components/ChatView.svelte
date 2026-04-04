@@ -657,9 +657,11 @@
 		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
 	);
 
-	// Auto-focus textarea when chat is empty (new chat or initial load)
+	// Auto-focus textarea and clear leftover input when chat is empty (new chat or initial load)
 	function focusInput() {
 		if (messages.length === 0 && !isStreaming && textareaEl) {
+			inputText = '';
+			if (textareaEl) textareaEl.style.height = 'auto';
 			void tick().then(() => textareaEl?.focus());
 		}
 	}

@@ -918,12 +918,12 @@ export class RunHistory {
              COALESCE(SUM(tokens_out), 0) as total_tokens_out,
              COALESCE(SUM(cost_usd), 0) as total_cost_usd,
              COALESCE(AVG(duration_ms), 0) as avg_duration_ms
-      FROM runs WHERE status != 'running'
+      FROM runs WHERE status NOT IN ('running', 'failed')
     `).get() as { total_runs: number; total_tokens_in: number; total_tokens_out: number; total_cost_usd: number; avg_duration_ms: number };
 
     const costByModel = this.db.prepare(`
       SELECT model_id, COALESCE(SUM(cost_usd), 0) as cost_usd, COUNT(*) as run_count
-      FROM runs WHERE status != 'running'
+      FROM runs WHERE status NOT IN ('running', 'failed')
       GROUP BY model_id ORDER BY cost_usd DESC
     `).all() as Array<{ model_id: string; cost_usd: number; run_count: number }>;
 
