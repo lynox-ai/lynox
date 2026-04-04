@@ -100,6 +100,15 @@ for dir in "$HOME/.lynox" "$HOME/.cache/huggingface"; do
   fi
 done
 
+# SvelteKit CSRF: set ORIGIN so protocol matches (defaults to https otherwise)
+if [ -z "${ORIGIN:-}" ]; then
+  if [ -n "${LYNOX_TLS_CERT:-}" ]; then
+    export ORIGIN="https://localhost:${LYNOX_HTTP_PORT:-3000}"
+  else
+    export ORIGIN="http://localhost:${LYNOX_HTTP_PORT:-3000}"
+  fi
+fi
+
 # Single process: Engine auto-loads Web UI handler from /app/web-ui/handler.js
 echo "Starting lynox on port ${LYNOX_HTTP_PORT:-3000}..."
 echo "  Phone access: Settings → Mobile Access → scan QR code" >&2
