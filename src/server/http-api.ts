@@ -1136,7 +1136,6 @@ export class LynoxHTTPApi {
           sentry: names.has('LYNOX_SENTRY_DSN'),
         },
         searxng_url: searxngUrl ?? null,
-        count: names.size,
       });
     });
 
