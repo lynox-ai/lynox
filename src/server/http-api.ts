@@ -67,6 +67,7 @@ function requiresAdmin(method: string, pathname: string): boolean {
   if (method === 'GET' && pathname === '/api/secrets') return true;
   if (method === 'PUT' && pathname.startsWith('/api/secrets/')) return true;
   if (method === 'DELETE' && pathname.startsWith('/api/secrets/')) return true;
+  if (method === 'GET' && pathname === '/api/auth/token') return true;
   return false;
 }
 const RATE_WINDOW_MS = 60_000;
@@ -1797,6 +1798,22 @@ export class LynoxHTTPApi {
         jsonResponse(res, 200, { rotated: count, message: 'Update LYNOX_VAULT_KEY and restart' });
       } catch (err: unknown) {
         errorResponse(res, 500, err instanceof Error ? err.message : 'Rotation failed');
+      }
+    });
+
+    // ── Access token (read-only, for Settings UI) ────────────────
+
+    this.staticRoutes.set('GET /api/auth/token', async (req, res) => {
+      const secret = process.env['LYNOX_HTTP_SECRET'];
+      if (!secret) {
+        jsonResponse(res, 200, { configured: false });
+        return;
+      }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      if (url.searchParams.get('reveal') === 'true') {
+        jsonResponse(res, 200, { configured: true, token: secret });
+      } else {
+        jsonResponse(res, 200, { configured: true });
       }
     });
 

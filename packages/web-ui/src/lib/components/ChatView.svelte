@@ -89,21 +89,44 @@
 		!onboardingDismissed && onboardingStep < ONBOARDING_CHIPS.length
 	);
 
-	// Vault key hint — deferred until after first chat
+	// Vault key checkpoint — blocking modal after onboarding or first chat
 	let securityLoadTriggered = false;
+	let showVaultCheckpoint = $state(false);
+	let vaultCheckpointKey = $state<string | null>(null);
+	let vaultCheckpointRevealed = $state(false);
+	let vaultCheckpointCopied = $state(false);
 
 	async function loadSecurityState() {
 		if (typeof localStorage === 'undefined') return;
-		if (localStorage.getItem('lynox-security-dismissed')) return;
+		if (localStorage.getItem('lynox-vault-checkpoint')) return;
 		try {
-			const res = await fetch(`${getApiBase()}/vault/key`);
+			const res = await fetch(`${getApiBase()}/vault/key?reveal=true`);
 			if (!res.ok) return;
-			const data = (await res.json()) as { configured: boolean };
-			if (data.configured) {
-				addToast(t('onboard.security_toast'), 'info', 8000);
-				localStorage.setItem('lynox-security-dismissed', '1');
+			const data = (await res.json()) as { configured: boolean; key?: string };
+			if (data.configured && data.key) {
+				vaultCheckpointKey = data.key;
+				showVaultCheckpoint = true;
 			}
 		} catch { /* ignore — older engine */ }
+	}
+
+	function maskCheckpointKey(key: string): string {
+		if (key.length <= 8) return '••••••••';
+		return key.slice(0, 4) + '••••••••' + key.slice(-4);
+	}
+
+	async function copyCheckpointKey() {
+		if (!vaultCheckpointKey) return;
+		await navigator.clipboard.writeText(vaultCheckpointKey);
+		vaultCheckpointCopied = true;
+		setTimeout(() => (vaultCheckpointCopied = false), 2000);
+	}
+
+	function confirmVaultCheckpoint() {
+		showVaultCheckpoint = false;
+		vaultCheckpointKey = null;
+		localStorage.setItem('lynox-vault-checkpoint', '1');
+		addToast(t('onboard.vault_confirmed'), 'success');
 	}
 
 	$effect(() => {
@@ -1414,6 +1437,34 @@
 		{/if}
 	</div>
 </div>
+
+{#if showVaultCheckpoint && vaultCheckpointKey}
+	<div class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center" role="dialog" aria-modal="true" tabindex="-1"
+		onkeydown={(e) => { if (e.key === 'Escape') e.preventDefault(); }}
+	>
+		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-md mx-4 space-y-4">
+			<div>
+				<h2 class="text-base font-medium text-text">{t('onboard.vault_title')}</h2>
+				<p class="text-xs text-text-muted mt-1">{t('onboard.vault_desc')}</p>
+			</div>
+			<div class="flex items-center gap-2">
+				<code class="flex-1 rounded-[var(--radius-sm)] bg-bg-subtle px-3 py-2 text-sm font-mono select-all break-all">
+					{vaultCheckpointRevealed ? vaultCheckpointKey : maskCheckpointKey(vaultCheckpointKey)}
+				</code>
+				<button onclick={() => (vaultCheckpointRevealed = !vaultCheckpointRevealed)} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0">
+					{vaultCheckpointRevealed ? t('config.hide') : t('config.reveal')}
+				</button>
+				<button onclick={copyCheckpointKey} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {vaultCheckpointCopied ? 'text-success border-success/30' : ''}">
+					{t('config.copy')}
+				</button>
+			</div>
+			<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
+			<button onclick={confirmVaultCheckpoint} class="w-full rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90">
+				{t('onboard.vault_confirm_btn')}
+			</button>
+		</div>
+	</div>
+{/if}
 
 <style>
 	@keyframes fadeUp {

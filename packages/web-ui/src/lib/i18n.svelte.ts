@@ -333,6 +333,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.api_key_format': { de: 'API Key muss mit sk-ant- beginnen', en: 'API key must start with sk-ant-' },
 	'onboard.setting_up': { de: 'Wird eingerichtet...', en: 'Setting up...' },
 	'onboard.security_toast': { de: 'Tipp: Sichere deinen Vault Key unter Settings → Config', en: 'Tip: Save your vault key in Settings → Config' },
+	'onboard.vault_title': { de: 'Sichere deinen Vault Key', en: 'Save your Vault Key' },
+	'onboard.vault_desc': { de: 'Dein Vault Key verschlüsselt alle gespeicherten API Keys und Backups. Ohne diesen Key können verschlüsselte Daten nicht wiederhergestellt werden. Kopiere ihn jetzt in einen Passwort-Manager.', en: 'Your vault key encrypts all stored API keys and backups. Without this key, encrypted data cannot be recovered. Copy it to a password manager now.' },
+	'onboard.vault_confirm_btn': { de: 'Ich habe den Key gesichert', en: 'I\'ve saved the key' },
+	'onboard.vault_confirmed': { de: 'Vault Key gesichert. Du findest ihn jederzeit unter Settings → Config.', en: 'Vault key saved. You can find it anytime in Settings → Config.' },
 
 	// Settings
 	'settings.title': { de: 'Settings', en: 'Settings' },
@@ -425,6 +429,19 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.reveal': { de: 'Anzeigen', en: 'Reveal' },
 	'config.hide': { de: 'Verbergen', en: 'Hide' },
 	'config.copy': { de: 'Kopieren', en: 'Copy' },
+	'config.access_token': { de: 'Access Token', en: 'Access Token' },
+	'config.access_token_desc': { de: 'Wird zum Login in die Web UI verwendet. Gesetzt via LYNOX_HTTP_SECRET.', en: 'Used to log in to the Web UI. Set via LYNOX_HTTP_SECRET.' },
+	'config.access_token_copied': { de: 'Access Token kopiert', en: 'Access token copied' },
+	'config.access_token_not_configured': { de: 'Kein Access Token konfiguriert (LYNOX_HTTP_SECRET). Ohne Token ist die API ungeschützt.', en: 'No access token configured (LYNOX_HTTP_SECRET). Without a token, the API is unprotected.' },
+	'config.vault_rotate': { de: 'Key rotieren', en: 'Rotate Key' },
+	'config.vault_rotate_title': { de: 'Vault Key rotieren', en: 'Rotate Vault Key' },
+	'config.vault_rotate_desc': { de: 'Ein neuer Key wurde generiert. Kopiere ihn in deinen Passwort-Manager, bevor du die Rotation bestätigst.', en: 'A new key has been generated. Copy it to your password manager before confirming the rotation.' },
+	'config.vault_rotate_confirm': { de: 'Ich habe den neuen Key gesichert', en: 'I\'ve saved the new key' },
+	'config.vault_rotating': { de: 'Rotiere...', en: 'Rotating...' },
+	'config.vault_rotated_title': { de: 'Key erfolgreich rotiert', en: 'Key rotated successfully' },
+	'config.vault_rotated_desc': { de: 'Alle Secrets wurden mit dem neuen Key verschlüsselt.', en: 'All secrets have been re-encrypted with the new key.' },
+	'config.vault_rotated_env_warning': { de: 'Wichtig: Aktualisiere LYNOX_VAULT_KEY in deiner Umgebung und starte die Engine neu. Ohne Update werden Secrets beim nächsten Start nicht entschlüsselbar.', en: 'Important: Update LYNOX_VAULT_KEY in your environment and restart the engine. Without the update, secrets will not be decryptable on next start.' },
+	'config.vault_rotated_count': { de: 'Secrets re-encrypted', en: 'secrets re-encrypted' },
 
 	// Legal
 	'legal.terms': { de: 'AGB', en: 'Terms' },

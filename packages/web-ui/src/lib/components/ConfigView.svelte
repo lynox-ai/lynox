@@ -115,6 +115,95 @@
 		setTimeout(() => (vaultCopied = false), 2000);
 	}
 
+	// Vault key rotation
+	let showRotateModal = $state(false);
+	let rotateNewKey = $state<string | null>(null);
+	let rotateRevealed = $state(false);
+	let rotateCopied = $state(false);
+	let rotateConfirmed = $state(false);
+	let rotating = $state(false);
+	let rotateResult = $state<{ rotated: number; message: string } | null>(null);
+
+	function generateVaultKey(): string {
+		const bytes = new Uint8Array(48);
+		crypto.getRandomValues(bytes);
+		let binary = '';
+		for (const b of bytes) binary += String.fromCharCode(b);
+		return btoa(binary);
+	}
+
+	function startRotation() {
+		rotateNewKey = generateVaultKey();
+		rotateRevealed = false;
+		rotateCopied = false;
+		rotateConfirmed = false;
+		rotating = false;
+		rotateResult = null;
+		showRotateModal = true;
+	}
+
+	async function copyRotateKey() {
+		if (!rotateNewKey) return;
+		await navigator.clipboard.writeText(rotateNewKey);
+		rotateCopied = true;
+		setTimeout(() => (rotateCopied = false), 2000);
+	}
+
+	async function executeRotation() {
+		if (!rotateNewKey) return;
+		rotating = true;
+		try {
+			const res = await fetch(`${getApiBase()}/vault/rotate`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ newKey: rotateNewKey }),
+			});
+			if (!res.ok) {
+				const text = await res.text().catch(() => '');
+				addToast(text || t('common.save_failed'), 'error');
+				rotating = false;
+				return;
+			}
+			const data = (await res.json()) as { rotated: number; message: string };
+			rotateResult = data;
+			vaultKey = rotateNewKey;
+			vaultRevealed = false;
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
+		rotating = false;
+	}
+
+	function closeRotateModal() {
+		showRotateModal = false;
+		rotateNewKey = null;
+		rotateResult = null;
+	}
+
+	// Access token
+	let accessToken = $state<string | null>(null);
+	let accessTokenConfigured = $state(false);
+	let accessTokenRevealed = $state(false);
+	let accessTokenCopied = $state(false);
+
+	async function loadAccessToken() {
+		try {
+			const res = await fetch(`${getApiBase()}/auth/token?reveal=true`);
+			if (!res.ok) return;
+			const data = (await res.json()) as { configured: boolean; token?: string };
+			accessTokenConfigured = data.configured;
+			accessToken = data.token ?? null;
+		} catch { /* ignore — endpoint may not exist on older engines */ }
+	}
+
+	async function copyAccessToken() {
+		if (!accessToken) return;
+		await navigator.clipboard.writeText(accessToken);
+		accessTokenCopied = true;
+		addToast(t('config.access_token_copied'), 'success');
+		setTimeout(() => (accessTokenCopied = false), 2000);
+	}
+
 	let sentryEnabled = $state(false);
 
 	async function loadSentryStatus() {
@@ -171,6 +260,7 @@
 	$effect(() => {
 		loadConfig();
 		loadVaultKey();
+		loadAccessToken();
 		loadSentryStatus();
 		loadCurrentVersion();
 	});
@@ -382,8 +472,33 @@
 						</button>
 					</div>
 					<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
+					<div class="mt-3 pt-3 border-t border-border/50">
+						<button onclick={startRotation} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">
+							{t('config.vault_rotate')}
+						</button>
+					</div>
 				{:else}
 					<p class="text-xs text-text-muted">{t('config.vault_key_not_configured')}</p>
+				{/if}
+			</div>
+
+			<div class={cardClass}>
+				<p class="text-sm font-medium mb-1">{t('config.access_token')}</p>
+				<p class="text-xs text-text-muted mb-3">{t('config.access_token_desc')}</p>
+				{#if accessTokenConfigured && accessToken}
+					<div class="flex items-center gap-2">
+						<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
+							{accessTokenRevealed ? accessToken : maskKey(accessToken)}
+						</code>
+						<button onclick={() => (accessTokenRevealed = !accessTokenRevealed)} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0">
+							{accessTokenRevealed ? t('config.hide') : t('config.reveal')}
+						</button>
+						<button onclick={copyAccessToken} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {accessTokenCopied ? 'text-success border-success/30' : ''}">
+							{t('config.copy')}
+						</button>
+					</div>
+				{:else}
+					<p class="text-xs text-text-muted">{t('config.access_token_not_configured')}</p>
 				{/if}
 			</div>
 
@@ -455,3 +570,51 @@
 		</div>
 	{/if}
 </div>
+
+{#if showRotateModal}
+	<div class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center" role="dialog" aria-modal="true" tabindex="-1"
+		onclick={(e) => { if (e.target === e.currentTarget && rotateResult) closeRotateModal(); }}
+		onkeydown={(e) => { if (e.key === 'Escape' && rotateResult) closeRotateModal(); }}
+	>
+		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-md mx-4 space-y-4">
+			{#if rotateResult}
+				<div>
+					<h2 class="text-base font-medium text-success">{t('config.vault_rotated_title')}</h2>
+					<p class="text-xs text-text-muted mt-1">{t('config.vault_rotated_desc')}</p>
+				</div>
+				<div class="rounded-[var(--radius-sm)] bg-warning/10 border border-warning/20 px-3 py-2 text-xs text-warning">
+					{t('config.vault_rotated_env_warning')}
+				</div>
+				<p class="text-xs text-text-muted font-mono">{rotateResult.rotated} {t('config.vault_rotated_count')}</p>
+				<button onclick={closeRotateModal} class="w-full rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90">OK</button>
+			{:else}
+				<div>
+					<h2 class="text-base font-medium text-text">{t('config.vault_rotate_title')}</h2>
+					<p class="text-xs text-text-muted mt-1">{t('config.vault_rotate_desc')}</p>
+				</div>
+				<div class="flex items-center gap-2">
+					<code class="flex-1 rounded-[var(--radius-sm)] bg-bg-subtle px-3 py-2 text-sm font-mono select-all break-all">
+						{rotateRevealed ? rotateNewKey : maskKey(rotateNewKey ?? '')}
+					</code>
+					<button onclick={() => (rotateRevealed = !rotateRevealed)} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0">
+						{rotateRevealed ? t('config.hide') : t('config.reveal')}
+					</button>
+					<button onclick={copyRotateKey} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {rotateCopied ? 'text-success border-success/30' : ''}">
+						{t('config.copy')}
+					</button>
+				</div>
+				<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
+				<label class="flex items-center gap-2 text-xs text-text-muted cursor-pointer">
+					<input type="checkbox" bind:checked={rotateConfirmed} class="rounded border-border" />
+					{t('config.vault_rotate_confirm')}
+				</label>
+				<div class="flex gap-3 justify-end">
+					<button onclick={closeRotateModal} class="text-xs text-text-muted hover:text-text px-3 py-1.5">{t('common.cancel')}</button>
+					<button onclick={executeRotation} disabled={!rotateConfirmed || rotating} class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-50">
+						{rotating ? t('config.vault_rotating') : t('config.vault_rotate')}
+					</button>
+				</div>
+			{/if}
+		</div>
+	</div>
+{/if}
