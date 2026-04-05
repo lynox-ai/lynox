@@ -87,9 +87,8 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     echo "" >&2
     echo "  Warning: ANTHROPIC_API_KEY not set" >&2
     echo "  AI responses disabled — browse mode only" >&2
-    echo "  Set: docker run -e ANTHROPIC_API_KEY=sk-ant-... ..." >&2
+    echo "  Set via Web UI Settings or: docker run -e ANTHROPIC_API_KEY=sk-ant-... ..." >&2
     echo "" >&2
-    export ANTHROPIC_API_KEY="not-configured"
   fi
 fi
 

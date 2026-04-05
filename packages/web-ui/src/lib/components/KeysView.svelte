@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { clearError } from '../stores/chat.svelte.js';
 
 	let names = $state<string[]>([]);
 	let newName = $state('ANTHROPIC_API_KEY');
@@ -8,6 +9,11 @@
 	let loading = $state(true);
 	let saving = $state(false);
 	let error = $state('');
+
+	// Inline edit state
+	let editingName = $state<string | null>(null);
+	let editValue = $state('');
+	let editSaving = $state(false);
 
 	async function loadSecrets() {
 		loading = true;
@@ -35,6 +41,7 @@
 			});
 			if (!res.ok) throw new Error();
 			newValue = '';
+			clearError();
 			await loadSecrets();
 		} catch {
 			error = t('common.save_failed');
@@ -42,10 +49,46 @@
 		saving = false;
 	}
 
+	function startEdit(name: string) {
+		editingName = name;
+		editValue = '';
+	}
+
+	function cancelEdit() {
+		editingName = null;
+		editValue = '';
+	}
+
+	async function commitEdit(name: string) {
+		if (!editValue.trim()) return;
+		editSaving = true;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: editValue })
+			});
+			if (!res.ok) throw new Error();
+			clearError();
+			editingName = null;
+			editValue = '';
+		} catch {
+			error = t('common.save_failed');
+		}
+		editSaving = false;
+	}
+
+	function onEditKeydown(e: KeyboardEvent, name: string) {
+		if (e.key === 'Enter' && editValue.trim()) commitEdit(name);
+		if (e.key === 'Escape') cancelEdit();
+	}
+
 	async function deleteSecret(name: string) {
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
 			if (!res.ok) throw new Error();
+			if (editingName === name) cancelEdit();
 			await loadSecrets();
 		} catch {
 			error = t('common.save_failed');
@@ -70,14 +113,51 @@
 	{:else if names.length > 0}
 		<div class="space-y-2 mb-6">
 			{#each names as name}
-				<div class="flex items-center justify-between rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
-					<span class="font-mono text-sm">{name}</span>
-					<button
-						onclick={() => deleteSecret(name)}
-						class="text-xs text-danger hover:underline"
-					>
-						{t('settings.delete')}
-					</button>
+				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
+					<div class="flex items-center justify-between">
+						<span class="font-mono text-sm">{name}</span>
+						<div class="flex items-center gap-2">
+							{#if editingName !== name}
+								<button
+									onclick={() => startEdit(name)}
+									class="text-xs text-accent-text hover:underline"
+								>
+									{t('keys.edit')}
+								</button>
+							{/if}
+							<button
+								onclick={() => deleteSecret(name)}
+								class="text-xs text-danger hover:underline"
+							>
+								{t('settings.delete')}
+							</button>
+						</div>
+					</div>
+					{#if editingName === name}
+						<div class="flex items-center gap-2 mt-2">
+							<input
+								type="password"
+								bind:value={editValue}
+								onkeydown={(e) => onEditKeydown(e, name)}
+								placeholder={t('keys.new_value')}
+								autocomplete="off"
+								class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-1.5 font-mono text-sm focus:border-accent focus:outline-none"
+							/>
+							<button
+								onclick={() => commitEdit(name)}
+								disabled={editSaving || !editValue.trim()}
+								class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+							>
+								{editSaving ? t('settings.saving') : t('settings.save')}
+							</button>
+							<button
+								onclick={cancelEdit}
+								class="text-xs text-text-subtle hover:text-text"
+							>
+								{t('common.cancel')}
+							</button>
+						</div>
+					{/if}
 				</div>
 			{/each}
 		</div>

@@ -237,10 +237,19 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	'common.ok': { de: 'OK', en: 'OK' },
 
-	// Setup Banner
+	// Setup Banner & Wizard
 	'banner.api_key_missing': { de: 'Kein API-Schlüssel konfiguriert — KI-Antworten sind deaktiviert.', en: 'No API key configured — AI responses are disabled.' },
 	'banner.api_key_action': { de: 'API Key einrichten', en: 'Configure API Key' },
 	'banner.dismiss': { de: 'Ausblenden', en: 'Dismiss' },
+	'setup.title': { de: 'Willkommen bei lynox', en: 'Welcome to lynox' },
+	'setup.subtitle': { de: 'Um die KI-Funktionen zu nutzen, gib deinen Anthropic API-Schlüssel ein.', en: 'Enter your Anthropic API key to start using the AI features.' },
+	'setup.label': { de: 'Anthropic API Key', en: 'Anthropic API Key' },
+	'setup.hint': { de: 'Du findest deinen Key unter ', en: 'Get your key at ' },
+	'setup.save': { de: 'Speichern & Starten', en: 'Save & Start' },
+	'setup.skip': { de: 'Später einrichten', en: 'Set up later' },
+	'setup.success': { de: 'API Key gespeichert — los geht\'s!', en: 'API key saved — let\'s go!' },
+	'setup.save_error': { de: 'Speichern fehlgeschlagen. Bitte erneut versuchen.', en: 'Failed to save. Please try again.' },
+	'common.saving': { de: 'Speichern...', en: 'Saving...' },
 
 	// Chat errors
 	'chat.error_start': { de: 'Etwas ist schiefgelaufen. Versuche es nochmal oder prüfe die [Einstellungen](/app/settings).', en: 'Something went wrong. Try again or check your [settings](/app/settings).' },
@@ -473,6 +482,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'keys.add_title': { de: 'Neuen Key hinzufügen', en: 'Add new key' },
 	'keys.name_label': { de: 'Name', en: 'Name' },
 	'keys.value_label': { de: 'Wert', en: 'Value' },
+	'keys.edit': { de: 'Ändern', en: 'Edit' },
+	'keys.new_value': { de: 'Neuer Wert...', en: 'New value...' },
 
 	// Tasks
 	'tasks.title': { de: 'Aufgaben', en: 'Tasks' },

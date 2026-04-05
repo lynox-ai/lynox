@@ -11,6 +11,8 @@ import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import { readFileSync, accessSync } from 'node:fs';
+import { statfs } from 'node:fs/promises';
+import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
@@ -47,6 +49,12 @@ interface ProviderStatus {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
+const PKG_VERSION: string = (() => {
+  try {
+    const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../package.json'), 'utf-8');
+    return (JSON.parse(raw) as { version: string }).version;
+  } catch { return 'unknown'; }
+})();
 
 // Keys stripped from GET /api/config responses (secrets that must not leak)
 // Keys stripped from GET /api/config responses (secrets that must not leak)
@@ -141,9 +149,59 @@ export class LynoxHTTPApi {
   private readonly dynamicRoutes: DynamicRoute[] = [];
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
+  private healthCache: { data: Record<string, unknown>; expiresAt: number } | null = null;
 
   /** Whether the Web UI handler is loaded (determines default port and bind behavior). */
   hasWebUi(): boolean { return this.webUiHandler !== null; }
+
+  /** Collect system + process metrics for the health endpoint. Cached 10s. */
+  private async _collectHealthMetrics(): Promise<Record<string, unknown>> {
+    const now = Date.now();
+    if (this.healthCache && this.healthCache.expiresAt > now) return this.healthCache.data;
+
+    const mem = process.memoryUsage();
+    const cpu = process.cpuUsage();
+    const load = loadavg();
+
+    let diskTotalGb: number | undefined;
+    let diskUsedGb: number | undefined;
+    try {
+      const stats = await statfs('/');
+      const totalBytes = stats.blocks * stats.bsize;
+      const freeBytes = stats.bavail * stats.bsize;
+      diskTotalGb = Math.round((totalBytes / (1024 ** 3)) * 10) / 10;
+      diskUsedGb = Math.round(((totalBytes - freeBytes) / (1024 ** 3)) * 10) / 10;
+    } catch { /* disk metrics unavailable (e.g. read-only root without statfs) */ }
+
+    const threadStore = this.engine?.getThreadStore();
+    const threadCount = threadStore ? threadStore.listThreads({ limit: 200 }).length : 0;
+
+    const data: Record<string, unknown> = {
+      status: 'ok',
+      version: PKG_VERSION,
+      uptime_s: Math.floor(process.uptime()),
+      process: {
+        memory_used_mb: Math.round(mem.heapUsed / (1024 * 1024)),
+        memory_rss_mb: Math.round(mem.rss / (1024 * 1024)),
+        cpu_user_ms: Math.round(cpu.user / 1000),
+        cpu_system_ms: Math.round(cpu.system / 1000),
+      },
+      system: {
+        memory_total_mb: Math.round(totalmem() / (1024 * 1024)),
+        memory_free_mb: Math.round(freemem() / (1024 * 1024)),
+        load_avg_1m: Math.round(load[0]! * 100) / 100,
+        load_avg_5m: Math.round(load[1]! * 100) / 100,
+        ...(diskTotalGb !== undefined ? { disk_total_gb: diskTotalGb, disk_used_gb: diskUsedGb } : {}),
+      },
+      engine: {
+        active_sessions: this.runningSessions.size,
+        total_threads: threadCount,
+      },
+    };
+
+    this.healthCache = { data, expiresAt: now + 10_000 };
+    return data;
+  }
 
   async init(): Promise<void> {
     const config = loadConfig();
@@ -378,9 +436,11 @@ export class LynoxHTTPApi {
       ? '/api/' + url.pathname.slice('/api/v1/'.length)
       : url.pathname;
 
-    // Health check (unauthenticated — used by both container probes and Web UI status bar)
+    // Health check (unauthenticated — used by container probes, Web UI status bar, and managed hosting monitor).
+    // Returns system + process metrics (no user data, no thread content, no secrets — counters only).
     if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
-      jsonResponse(res, 200, { status: 'ok' });
+      const health = await this._collectHealthMetrics();
+      jsonResponse(res, 200, health);
       return;
     }
 
