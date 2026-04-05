@@ -108,11 +108,13 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/int
 **Engine-only** (`Dockerfile`): 4-stage build on debian:trixie-slim (~523 MB). Non-root lynox:1001.
 Entrypoint: entrypoint.sh (vault key auto-load, --version/--help without API key).
 Healthcheck: `GET /health` → `{"status":"ok"}` on MCP port.
+Enhanced health: `GET /api/health` → system metrics (CPU, memory, disk, uptime, version, active sessions) for monitoring.
 Hardened: no bash, no apt, no perl, no SUID, read-only root.
 
 **Engine + Web UI** (`Dockerfile.web-ui`): Combined image for self-hosted single-user deployment.
 Single process: Engine HTTP API auto-loads SvelteKit handler as fallback for non-API routes.
 Entrypoint: entrypoint-webui.sh (env setup, then `exec node dist/index.js --http-api`).
+ANTHROPIC_API_KEY is optional — without it, engine starts in browse mode and SetupBanner prompts the user to enter a key via the UI (stored in vault). Never set a placeholder value as env vars override vault.
 Web UI handler resolved from `/app/web-ui/handler.js` (adapter-node export).
 `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui`
 
