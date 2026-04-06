@@ -3,7 +3,6 @@
   Conditions: managed mode, WebAuthn available, no passkey registered, not dismissed.
 -->
 <script lang="ts">
-	import { startRegistration } from '@simplewebauthn/browser';
 	import { t } from '$lib/i18n.svelte.js';
 
 	let visible = $state(false);
@@ -61,6 +60,7 @@
 			const options = await startRes.json();
 
 			// 2. Prompt authenticator
+			const { startRegistration } = await import('@simplewebauthn/browser');
 			const regResponse = await startRegistration({ optionsJSON: options });
 
 			// 3. Verify with control plane

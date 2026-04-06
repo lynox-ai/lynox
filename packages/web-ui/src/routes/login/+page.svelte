@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { startAuthentication } from '@simplewebauthn/browser';
 	import type { ActionData, PageData } from './$types.js';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
@@ -65,6 +64,7 @@
 			}
 
 			// 2. Prompt the user's authenticator (Face ID / Touch ID / Security Key)
+			const { startAuthentication } = await import('@simplewebauthn/browser');
 			const authResponse = await startAuthentication({ optionsJSON: options });
 
 			// 3. Verify with control plane
