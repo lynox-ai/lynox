@@ -1224,6 +1224,10 @@ export class LynoxHTTPApi {
           redacted[`${key}_configured`] = true;
         }
       }
+      // Expose managed tier so the Web UI can adapt its settings UI ('starter' = BYOK, 'eu' = Managed Bedrock)
+      if (process.env['LYNOX_MANAGED_MODE']) {
+        redacted['managed'] = process.env['LYNOX_MANAGED_MODE'];
+      }
       jsonResponse(res, 200, redacted);
     });
 

@@ -28,6 +28,7 @@
 		max_http_requests_per_hour?: number | undefined;
 		search_provider?: string;
 		update_check?: boolean;
+		managed?: string; // 'starter' (BYOK) | 'eu' (Managed Bedrock) | undefined (self-hosted)
 		[key: string]: unknown;
 	}
 
@@ -66,10 +67,11 @@
 		saving = true;
 		error = '';
 		try {
+			const { managed: _m, ...payload } = config;
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(config)
+				body: JSON.stringify(payload)
 			});
 			if (!res.ok) {
 				const detail = await res.text().catch(() => '');
@@ -265,8 +267,12 @@
 		loadCurrentVersion();
 	});
 
+	const managed = $derived(!!config.managed);
+	const isManagedEu = $derived(config.managed === 'eu');
 	const isAnthropicDirect = $derived(config.provider === 'anthropic' || !config.provider);
 	const isNonDirect = $derived(config.provider === 'custom' || config.provider === 'bedrock');
+	// In managed mode, effort/thinking are always available (infrastructure guarantees it)
+	const showEffortThinking = $derived(isAnthropicDirect || managed);
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';
@@ -281,56 +287,63 @@
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else}
 		<div class="space-y-4">
-			<!-- LLM Provider -->
-			<div class={cardClass}>
-				<label for="provider" class="block text-sm font-medium mb-1">{t('config.provider')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.provider_desc')}</p>
-				<select id="provider" bind:value={config.provider} class={inputClass}>
-					<option value="anthropic">{t('config.provider_anthropic')}</option>
-					<option value="bedrock">{t('config.provider_bedrock')}</option>
-					<option value="custom">{t('config.provider_custom')}</option>
-				</select>
-				<p class="text-xs text-text-muted mt-2">
-					{#if config.provider === 'bedrock'}
-						{t('config.credentials_hint_bedrock')}
-					{:else if config.provider === 'custom'}
-						{t('config.credentials_hint_custom')}
-					{:else}
-						{t('config.credentials_hint_anthropic')}
-					{/if}
-					<a href="/app/settings/keys" class="text-accent-text hover:underline ml-1">{t('keys.title')}</a>
-				</p>
-			</div>
-
-			{#if config.provider === 'bedrock'}
+			<!-- LLM Provider (hidden in managed mode) -->
+			{#if !managed}
 				<div class={cardClass}>
-					<label for="aws-region" class="block text-sm font-medium mb-2">{t('config.aws_region')}</label>
-					<select id="aws-region" bind:value={config.aws_region} class={inputClass}>
-						<option value="eu-central-1">eu-central-1 (Frankfurt)</option>
-						<option value="eu-central-2">eu-central-2 (Zurich)</option>
-						<option value="eu-west-1">eu-west-1 (Ireland)</option>
-						<option value="eu-west-3">eu-west-3 (Paris)</option>
-						<option value="eu-north-1">eu-north-1 (Stockholm)</option>
-						<option value="eu-south-1">eu-south-1 (Milan)</option>
-						<option value="us-east-1">us-east-1 (N. Virginia)</option>
-						<option value="us-west-2">us-west-2 (Oregon)</option>
+					<label for="provider" class="block text-sm font-medium mb-1">{t('config.provider')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.provider_desc')}</p>
+					<select id="provider" bind:value={config.provider} class={inputClass}>
+						<option value="anthropic">{t('config.provider_anthropic')}</option>
+						<option value="bedrock">{t('config.provider_bedrock')}</option>
+						<option value="custom">{t('config.provider_custom')}</option>
 					</select>
+					<p class="text-xs text-text-muted mt-2">
+						{#if config.provider === 'bedrock'}
+							{t('config.credentials_hint_bedrock')}
+						{:else if config.provider === 'custom'}
+							{t('config.credentials_hint_custom')}
+						{:else}
+							{t('config.credentials_hint_anthropic')}
+						{/if}
+						<a href="/app/settings/keys" class="text-accent-text hover:underline ml-1">{t('keys.title')}</a>
+					</p>
 				</div>
-				<div class="{cardClass} flex items-center justify-between">
-					<div>
-						<p class="text-sm font-medium">{t('config.bedrock_eu_only')}</p>
-						<p class="text-xs text-text-muted mt-1">{t('config.bedrock_eu_only_desc')}</p>
-					</div>
-					<button onclick={() => config.bedrock_eu_only = !config.bedrock_eu_only} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.bedrock_eu_only ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.bedrock_eu_only ? 'translate-x-4' : ''}"></span></button>
-				</div>
-			{/if}
 
-			{#if config.provider === 'custom'}
-				<div class={cardClass}>
-					<label for="custom-url" class="block text-sm font-medium mb-1">{t('config.custom_url')}</label>
-					<p class="text-xs text-text-muted mb-2">{t('config.custom_url_desc')}</p>
-					<input id="custom-url" type="url" placeholder="http://localhost:4000"
-						bind:value={config.api_base_url} class="{inputClass} font-mono" />
+				{#if config.provider === 'bedrock'}
+					<div class={cardClass}>
+						<label for="aws-region" class="block text-sm font-medium mb-2">{t('config.aws_region')}</label>
+						<select id="aws-region" bind:value={config.aws_region} class={inputClass}>
+							<option value="eu-central-1">eu-central-1 (Frankfurt)</option>
+							<option value="eu-central-2">eu-central-2 (Zurich)</option>
+							<option value="eu-west-1">eu-west-1 (Ireland)</option>
+							<option value="eu-west-3">eu-west-3 (Paris)</option>
+							<option value="eu-north-1">eu-north-1 (Stockholm)</option>
+							<option value="eu-south-1">eu-south-1 (Milan)</option>
+							<option value="us-east-1">us-east-1 (N. Virginia)</option>
+							<option value="us-west-2">us-west-2 (Oregon)</option>
+						</select>
+					</div>
+					<div class="{cardClass} flex items-center justify-between">
+						<div>
+							<p class="text-sm font-medium">{t('config.bedrock_eu_only')}</p>
+							<p class="text-xs text-text-muted mt-1">{t('config.bedrock_eu_only_desc')}</p>
+						</div>
+						<button onclick={() => config.bedrock_eu_only = !config.bedrock_eu_only} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.bedrock_eu_only ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.bedrock_eu_only ? 'translate-x-4' : ''}"></span></button>
+					</div>
+				{/if}
+
+				{#if config.provider === 'custom'}
+					<div class={cardClass}>
+						<label for="custom-url" class="block text-sm font-medium mb-1">{t('config.custom_url')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.custom_url_desc')}</p>
+						<input id="custom-url" type="url" placeholder="http://localhost:4000"
+							bind:value={config.api_base_url} class="{inputClass} font-mono" />
+					</div>
+				{/if}
+			{:else}
+				<div class="{cardClass} opacity-60">
+					<p class="text-sm font-medium">{t('config.provider')}</p>
+					<p class="text-xs text-text-muted mt-1">{t('config.managed_provider_info')}</p>
 				</div>
 			{/if}
 
@@ -338,7 +351,8 @@
 			<p class={sectionClass}>{t('config.model')}</p>
 
 			<div class={cardClass}>
-				<label for="model" class="block text-sm font-medium mb-2">{t('config.model')}</label>
+				<label for="model" class="block text-sm font-medium mb-1">{t('config.model')}</label>
+				<p class="text-xs text-text-muted mb-2">{t('config.model_desc')}</p>
 				<select id="model" bind:value={config.default_tier} class={inputClass}>
 					<option value="haiku">{t('config.model_haiku')}</option>
 					<option value="sonnet">{t('config.model_sonnet')}</option>
@@ -346,9 +360,10 @@
 				</select>
 			</div>
 
-			{#if isAnthropicDirect}
+			{#if showEffortThinking}
 				<div class={cardClass}>
-					<label for="effort" class="block text-sm font-medium mb-2">{t('config.effort')}</label>
+					<label for="effort" class="block text-sm font-medium mb-1">{t('config.effort')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.effort_desc')}</p>
 					<select id="effort" bind:value={config.effort_level} class={inputClass}>
 						<option value="low">{t('config.effort_low')}</option>
 						<option value="medium">{t('config.effort_medium')}</option>
@@ -358,7 +373,8 @@
 				</div>
 
 				<div class={cardClass}>
-					<label for="thinking" class="block text-sm font-medium mb-2">{t('config.thinking')}</label>
+					<label for="thinking" class="block text-sm font-medium mb-1">{t('config.thinking')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.thinking_desc')}</p>
 					<select id="thinking" bind:value={config.thinking_mode} class={inputClass}>
 						<option value="disabled">{t('config.thinking_disabled')}</option>
 						<option value="adaptive">{t('config.thinking_adaptive')}</option>
@@ -388,29 +404,33 @@
 				<button onclick={() => config.memory_extraction = !config.memory_extraction} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.memory_extraction ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.memory_extraction ? 'translate-x-4' : ''}"></span></button>
 			</div>
 
-			<!-- Budget -->
-			<p class={sectionClass}>{t('config.budget')}</p>
+			<!-- Budget (hidden for Managed EU — LLM costs included in subscription) -->
+			{#if !isManagedEu}
+				<p class={sectionClass}>{t('config.budget')}</p>
 
-			<div class={cardClass}>
-				<label for="session-limit" class="block text-sm font-medium mb-1">{t('config.session_limit')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.session_limit_desc')}</p>
-				<input id="session-limit" type="number" step="0.5" min="0" placeholder="5.00"
-					bind:value={config.max_session_cost_usd} class="{inputClass} font-mono" />
-			</div>
+				<div class={cardClass}>
+					<label for="monthly-limit" class="block text-sm font-medium mb-1">{t('config.monthly_limit')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.monthly_limit_desc')}</p>
+					<input id="monthly-limit" type="number" step="1" min="0" placeholder="—"
+						bind:value={config.max_monthly_cost_usd} class="{inputClass} font-mono" />
+				</div>
 
-			<div class={cardClass}>
-				<label for="daily-limit" class="block text-sm font-medium mb-1">{t('config.daily_limit')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.daily_limit_desc')}</p>
-				<input id="daily-limit" type="number" step="0.5" min="0" placeholder="—"
-					bind:value={config.max_daily_cost_usd} class="{inputClass} font-mono" />
-			</div>
+				{#if !managed}
+					<div class={cardClass}>
+						<label for="daily-limit" class="block text-sm font-medium mb-1">{t('config.daily_limit')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.daily_limit_desc')}</p>
+						<input id="daily-limit" type="number" step="0.5" min="0" placeholder="—"
+							bind:value={config.max_daily_cost_usd} class="{inputClass} font-mono" />
+					</div>
 
-			<div class={cardClass}>
-				<label for="monthly-limit" class="block text-sm font-medium mb-1">{t('config.monthly_limit')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.monthly_limit_desc')}</p>
-				<input id="monthly-limit" type="number" step="1" min="0" placeholder="—"
-					bind:value={config.max_monthly_cost_usd} class="{inputClass} font-mono" />
-			</div>
+					<div class={cardClass}>
+						<label for="session-limit" class="block text-sm font-medium mb-1">{t('config.session_limit')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.session_limit_desc')}</p>
+						<input id="session-limit" type="number" step="0.5" min="0" placeholder="5.00"
+							bind:value={config.max_session_cost_usd} class="{inputClass} font-mono" />
+					</div>
+				{/if}
+			{/if}
 
 			<!-- Knowledge -->
 			<p class={sectionClass}>{t('config.knowledge')}</p>
@@ -422,78 +442,88 @@
 					bind:value={config.memory_half_life_days} class="{inputClass} font-mono" />
 			</div>
 
-			<div class={cardClass}>
-				<label for="embedding" class="block text-sm font-medium mb-2">{t('config.embedding_provider')}</label>
-				<select id="embedding" bind:value={config.embedding_provider} class={inputClass}>
-					<option value="onnx">{t('config.embedding_onnx')}</option>
-				</select>
-			</div>
+			{#if !managed}
+				<div class={cardClass}>
+					<label for="embedding" class="block text-sm font-medium mb-2">{t('config.embedding_provider')}</label>
+					<select id="embedding" bind:value={config.embedding_provider} class={inputClass}>
+						<option value="onnx">{t('config.embedding_onnx')}</option>
+					</select>
+				</div>
 
-			<!-- Limits -->
-			<p class={sectionClass}>{t('config.limits')}</p>
+				<!-- Limits -->
+				<p class={sectionClass}>{t('config.limits')}</p>
 
-			<div class={cardClass}>
-				<label for="http-rate" class="block text-sm font-medium mb-1">{t('config.http_rate_limit')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.http_rate_limit_desc')}</p>
-				<input id="http-rate" type="number" min="1" placeholder="—"
-					bind:value={config.max_http_requests_per_hour} class="{inputClass} font-mono" />
-			</div>
+				<div class={cardClass}>
+					<label for="http-rate" class="block text-sm font-medium mb-1">{t('config.http_rate_limit')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.http_rate_limit_desc')}</p>
+					<input id="http-rate" type="number" min="1" placeholder="—"
+						bind:value={config.max_http_requests_per_hour} class="{inputClass} font-mono" />
+				</div>
+			{/if}
 
 
-			<!-- Security -->
-			<p class={sectionClass}>{t('config.security')}</p>
+			<!-- Security (hidden in managed — vault + token are system-controlled) -->
+			{#if !managed}
+				<p class={sectionClass}>{t('config.security')}</p>
 
-			<div class={cardClass}>
-				<p class="text-sm font-medium mb-1">{t('config.vault_key')}</p>
-				<p class="text-xs text-text-muted mb-3">{t('config.vault_key_desc')}</p>
-				{#if vaultConfigured && vaultKey}
-					<div class="flex items-center gap-2 mb-2">
-						<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
-							{vaultRevealed ? vaultKey : maskKey(vaultKey)}
-						</code>
-						<button
-							onclick={() => (vaultRevealed = !vaultRevealed)}
-							class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0"
-						>
-							{vaultRevealed ? t('config.hide') : t('config.reveal')}
-						</button>
-						<button
-							onclick={copyVaultKey}
-							class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {vaultCopied ? 'text-success border-success/30' : ''}"
-						>
-							{t('config.copy')}
-						</button>
-					</div>
-					<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
-					<div class="mt-3 pt-3 border-t border-border/50">
-						<button onclick={startRotation} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">
-							{t('config.vault_rotate')}
-						</button>
-					</div>
-				{:else}
-					<p class="text-xs text-text-muted">{t('config.vault_key_not_configured')}</p>
-				{/if}
-			</div>
+				<div class={cardClass}>
+					<p class="text-sm font-medium mb-1">{t('config.vault_key')}</p>
+					<p class="text-xs text-text-muted mb-3">{t('config.vault_key_desc')}</p>
+					{#if vaultConfigured && vaultKey}
+						<div class="flex items-center gap-2 mb-2">
+							<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
+								{vaultRevealed ? vaultKey : maskKey(vaultKey)}
+							</code>
+							<button
+								onclick={() => (vaultRevealed = !vaultRevealed)}
+								class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0"
+							>
+								{vaultRevealed ? t('config.hide') : t('config.reveal')}
+							</button>
+							<button
+								onclick={copyVaultKey}
+								class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {vaultCopied ? 'text-success border-success/30' : ''}"
+							>
+								{t('config.copy')}
+							</button>
+						</div>
+						<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
+						<div class="mt-3 pt-3 border-t border-border/50">
+							<button onclick={startRotation} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">
+								{t('config.vault_rotate')}
+							</button>
+						</div>
+					{:else}
+						<p class="text-xs text-text-muted">{t('config.vault_key_not_configured')}</p>
+					{/if}
+				</div>
 
-			<div class={cardClass}>
-				<p class="text-sm font-medium mb-1">{t('config.access_token')}</p>
-				<p class="text-xs text-text-muted mb-3">{t('config.access_token_desc')}</p>
-				{#if accessTokenConfigured && accessToken}
-					<div class="flex items-center gap-2">
-						<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
-							{accessTokenRevealed ? accessToken : maskKey(accessToken)}
-						</code>
-						<button onclick={() => (accessTokenRevealed = !accessTokenRevealed)} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0">
-							{accessTokenRevealed ? t('config.hide') : t('config.reveal')}
-						</button>
-						<button onclick={copyAccessToken} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {accessTokenCopied ? 'text-success border-success/30' : ''}">
-							{t('config.copy')}
-						</button>
-					</div>
-				{:else}
-					<p class="text-xs text-text-muted">{t('config.access_token_not_configured')}</p>
-				{/if}
-			</div>
+				<div class={cardClass}>
+					<p class="text-sm font-medium mb-1">{t('config.access_token')}</p>
+					<p class="text-xs text-text-muted mb-3">{t('config.access_token_desc')}</p>
+					{#if accessTokenConfigured && accessToken}
+						<div class="flex items-center gap-2">
+							<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
+								{accessTokenRevealed ? accessToken : maskKey(accessToken)}
+							</code>
+							<button onclick={() => (accessTokenRevealed = !accessTokenRevealed)} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0">
+								{accessTokenRevealed ? t('config.hide') : t('config.reveal')}
+							</button>
+							<button onclick={copyAccessToken} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {accessTokenCopied ? 'text-success border-success/30' : ''}">
+								{t('config.copy')}
+							</button>
+						</div>
+					{:else}
+						<p class="text-xs text-text-muted">{t('config.access_token_not_configured')}</p>
+					{/if}
+				</div>
+			{:else}
+				<p class={sectionClass}>{t('config.security')}</p>
+				<div class="{cardClass} opacity-60">
+					<p class="text-sm font-medium">{t('config.security')}</p>
+					<p class="text-xs text-text-muted mt-1">{t('config.managed_security_info')}</p>
+				</div>
+			{/if}
 
 			<!-- Privacy -->
 			<p class={sectionClass}>{t('config.privacy')}</p>
@@ -506,42 +536,53 @@
 				<button onclick={toggleSentry} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {sentryEnabled ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {sentryEnabled ? 'translate-x-4' : ''}"></span></button>
 			</div>
 
-			<!-- Updates -->
-			<p class={sectionClass}>{t('config.updates')}</p>
+			<!-- Updates (hidden in managed — auto-updated) -->
+			{#if !managed}
+				<p class={sectionClass}>{t('config.updates')}</p>
 
-			<div class="{cardClass} flex items-center justify-between">
-				<div>
-					<p class="text-sm font-medium">{t('config.update_check')}</p>
-					<p class="text-xs text-text-muted mt-1">{t('config.update_check_desc')}</p>
-				</div>
-				<button onclick={() => config.update_check = !config.update_check} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.update_check ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.update_check ? 'translate-x-4' : ''}"></span></button>
-			</div>
-
-			<div class={cardClass}>
-				<div class="flex items-center justify-between">
-					<div class="space-y-1">
-						{#if currentVersion}
-							<p class="text-xs text-text-muted">{t('config.version_current')}: <span class="font-mono text-text">{currentVersion}</span></p>
-						{/if}
-						{#if latestVersion}
-							<p class="text-xs text-text-muted">{t('config.version_latest')}: <span class="font-mono {isUpToDate ? 'text-success' : 'text-warning'}">{latestVersion}</span>
-								{#if isUpToDate}
-									<span class="text-success ml-1">{t('config.version_up_to_date')}</span>
-								{:else}
-									<span class="text-warning ml-1">{t('config.version_update_available')}</span>
-								{/if}
-							</p>
-						{/if}
+				<div class="{cardClass} flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium">{t('config.update_check')}</p>
+						<p class="text-xs text-text-muted mt-1">{t('config.update_check_desc')}</p>
 					</div>
-					<button
-						onclick={checkForUpdates}
-						disabled={versionChecking}
-						class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50"
-					>
-						{versionChecking ? t('config.version_checking') : t('config.check_now')}
-					</button>
+					<button onclick={() => config.update_check = !config.update_check} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.update_check ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.update_check ? 'translate-x-4' : ''}"></span></button>
 				</div>
-			</div>
+
+				<div class={cardClass}>
+					<div class="flex items-center justify-between">
+						<div class="space-y-1">
+							{#if currentVersion}
+								<p class="text-xs text-text-muted">{t('config.version_current')}: <span class="font-mono text-text">{currentVersion}</span></p>
+							{/if}
+							{#if latestVersion}
+								<p class="text-xs text-text-muted">{t('config.version_latest')}: <span class="font-mono {isUpToDate ? 'text-success' : 'text-warning'}">{latestVersion}</span>
+									{#if isUpToDate}
+										<span class="text-success ml-1">{t('config.version_up_to_date')}</span>
+									{:else}
+										<span class="text-warning ml-1">{t('config.version_update_available')}</span>
+									{/if}
+								</p>
+							{/if}
+						</div>
+						<button
+							onclick={checkForUpdates}
+							disabled={versionChecking}
+							class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50"
+						>
+							{versionChecking ? t('config.version_checking') : t('config.check_now')}
+						</button>
+					</div>
+				</div>
+			{:else}
+				<p class={sectionClass}>{t('config.updates')}</p>
+				<div class="{cardClass} opacity-60">
+					<p class="text-sm font-medium">{t('config.updates')}</p>
+					<p class="text-xs text-text-muted mt-1">{t('config.managed_updates_info')}</p>
+					{#if currentVersion}
+						<p class="text-xs text-text-muted mt-2">{t('config.version_current')}: <span class="font-mono text-text">{currentVersion}</span></p>
+					{/if}
+				</div>
+			{/if}
 
 			<!-- Error + Save -->
 			{#if error}

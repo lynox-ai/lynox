@@ -253,6 +253,19 @@
 		tgStopPolling();
 	}
 
+	// --- Managed mode detection ---
+	let managedTier = $state<string | undefined>(undefined);
+	const managed = $derived(!!managedTier);
+
+	async function loadManagedStatus() {
+		try {
+			const res = await fetch(`${getApiBase()}/config`);
+			if (!res.ok) return;
+			const data = (await res.json()) as Record<string, unknown>;
+			if (typeof data['managed'] === 'string') managedTier = data['managed'];
+		} catch { /* ignore */ }
+	}
+
 	// --- Anthropic API Key ---
 	let apiKey = $state('');
 	let apiKeySaving = $state(false);
@@ -387,6 +400,7 @@
 	import { onDestroy } from 'svelte';
 
 	$effect(() => {
+		loadManagedStatus();
 		loadGoogleStatus();
 		loadSecretStatuses();
 	});
@@ -401,48 +415,50 @@
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('integrations.title')}</h1>
 
-	<!-- Anthropic API Key -->
-	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
-		<div class="flex items-center justify-between mb-4">
-			<div>
-				<h2 class="font-medium">{t('integrations.anthropic')}</h2>
-				<p class="text-xs text-text-muted mt-1">{t('integrations.anthropic_desc')}</p>
+	<!-- Anthropic API Key (hidden in managed — credentials are system-controlled) -->
+	{#if !managed}
+		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+			<div class="flex items-center justify-between mb-4">
+				<div>
+					<h2 class="font-medium">{t('integrations.anthropic')}</h2>
+					<p class="text-xs text-text-muted mt-1">{t('integrations.anthropic_desc')}</p>
+				</div>
+				{#if secretsLoading}
+					<span class="text-xs text-text-subtle">{t('common.loading')}</span>
+				{:else if apiKeyConfigured}
+					<span class="text-xs text-success">{t('integrations.api_key_active')}</span>
+				{:else}
+					<span class="text-xs text-text-subtle">{t('integrations.not_configured')}</span>
+				{/if}
 			</div>
-			{#if secretsLoading}
-				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
-			{:else if apiKeyConfigured}
-				<span class="text-xs text-success">{t('integrations.api_key_active')}</span>
-			{:else}
-				<span class="text-xs text-text-subtle">{t('integrations.not_configured')}</span>
-			{/if}
-		</div>
 
-		<div class="space-y-3">
-			{#if !apiKeyConfigured}
-				<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
-					<li>{t('integrations.anthropic_step1')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">console.anthropic.com</a></li>
-					<li>{t('integrations.anthropic_step2')}</li>
-				</ol>
-			{/if}
-			<div>
-				<label for="api-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.api_key_label')}</label>
-				<input
-					id="api-key"
-					bind:value={apiKey}
-					type="password"
-					placeholder="sk-ant-..."
-					class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
-				/>
+			<div class="space-y-3">
+				{#if !apiKeyConfigured}
+					<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
+						<li>{t('integrations.anthropic_step1')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">console.anthropic.com</a></li>
+						<li>{t('integrations.anthropic_step2')}</li>
+					</ol>
+				{/if}
+				<div>
+					<label for="api-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.api_key_label')}</label>
+					<input
+						id="api-key"
+						bind:value={apiKey}
+						type="password"
+						placeholder="sk-ant-..."
+						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
+					/>
+				</div>
+				<button
+					onclick={saveApiKey}
+					disabled={!apiKey.trim() || apiKeySaving}
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+				>
+					{apiKeySaving ? t('settings.saving') : apiKeyConfigured ? t('integrations.api_key_update') : t('settings.save')}
+				</button>
 			</div>
-			<button
-				onclick={saveApiKey}
-				disabled={!apiKey.trim() || apiKeySaving}
-				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
-			>
-				{apiKeySaving ? t('settings.saving') : apiKeyConfigured ? t('integrations.api_key_update') : t('settings.save')}
-			</button>
 		</div>
-	</div>
+	{/if}
 
 	<!-- Google Workspace -->
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
@@ -685,7 +701,8 @@
 		{/if}
 	</div>
 
-	<!-- Web Search -->
+	<!-- Web Search (hidden in managed — SearXNG pre-configured) -->
+	{#if !managed}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">
 			<div>
@@ -732,8 +749,10 @@
 			</div>
 		{/if}
 	</div>
+	{/if}
 
-	<!-- SearXNG -->
+	<!-- SearXNG (hidden in managed — pre-configured as sidecar) -->
+	{#if !managed}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">
 			<div>
@@ -817,4 +836,5 @@
 			</div>
 		{/if}
 	</div>
+	{/if}
 </div>
