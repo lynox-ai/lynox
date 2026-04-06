@@ -111,5 +111,6 @@ Regardless of how you expose lynox:
 - **Rate limiting** prevents brute-force attacks (5 attempts per 15 minutes)
 - **Session cookies** are `httpOnly`, `secure` (HTTPS), `sameSite: strict`
 - **QR login codes** are one-time use, 256-bit random, expire in 5 minutes
+- **Onboarding tokens** (managed hosting only) are one-time use, separate from `LYNOX_HTTP_SECRET`, consumed after first login
 
 Never expose lynox without `LYNOX_HTTP_SECRET` set. The setup wizard and Docker entrypoint auto-generate one if not provided.
