@@ -303,6 +303,19 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 		});
 	}
 
+	// Provider error (502/503) — retry once after 2s (Bedrock cold start)
+	if ((res.status === 502 || res.status === 503) && !retried) {
+		retryStatus = { attempt: 1, maxAttempts: 1 };
+		await new Promise(r => setTimeout(r, 2000));
+		retryStatus = null;
+		retried = true;
+		res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload)
+		});
+	}
+
 	if (!res.ok || !res.body) {
 		isStreaming = false;
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
@@ -340,10 +353,51 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 			}
 		}
 	} catch {
-		chatError = t('chat.error_connection');
-		chatErrorDetail = null;
-		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
-		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+		// SSE connection error — retry once if not already retried
+		if (!retried) {
+			retried = true;
+			try {
+				await new Promise(r => setTimeout(r, 2000));
+				const retryRes = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(payload)
+				});
+				if (retryRes.ok && retryRes.body) {
+					const retryReader = retryRes.body.getReader();
+					const retryDecoder = new TextDecoder();
+					let retryBuffer = '';
+					while (true) {
+						const { done, value } = await retryReader.read();
+						if (done) break;
+						retryBuffer += retryDecoder.decode(value, { stream: true });
+						const retryLines = retryBuffer.split('\n');
+						retryBuffer = retryLines.pop() ?? '';
+						let retryEventType = '';
+						for (const line of retryLines) {
+							if (line.startsWith('event: ')) retryEventType = line.slice(7);
+							else if (line.startsWith('data: ') && retryEventType) {
+								try { handleSSEEvent(retryEventType, JSON.parse(line.slice(6)) as Record<string, unknown>, assistantIdx, userMsgIdx); } catch { /* skip */ }
+								retryEventType = '';
+							}
+						}
+					}
+					try { retryReader.cancel(); } catch { /* already closed */ }
+				} else {
+					throw new Error('Retry failed');
+				}
+			} catch {
+				chatError = t('chat.error_connection');
+				chatErrorDetail = null;
+				if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+				if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+			}
+		} else {
+			chatError = t('chat.error_connection');
+			chatErrorDetail = null;
+			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+			if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+		}
 	} finally {
 		try { reader.cancel(); } catch { /* already closed */ }
 	}

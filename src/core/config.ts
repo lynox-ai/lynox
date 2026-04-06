@@ -109,6 +109,10 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['LYNOX_CLIENT']) {
     merged.client_id = process.env['LYNOX_CLIENT'];
   }
+  // Default language
+  if (process.env['LYNOX_LANGUAGE']) {
+    merged.language = process.env['LYNOX_LANGUAGE'];
+  }
   // LLM provider
   if (process.env['LYNOX_LLM_PROVIDER']) {
     const p = process.env['LYNOX_LLM_PROVIDER'];

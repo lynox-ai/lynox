@@ -205,7 +205,7 @@ export class LynoxHTTPApi {
 
   async init(): Promise<void> {
     const config = loadConfig();
-    this.engine = new Engine({ model: config.default_tier });
+    this.engine = new Engine({ model: config.default_tier, language: config.language });
     await this.engine.init();
     this.engine.startWorkerLoop();
     this._registerRoutes();

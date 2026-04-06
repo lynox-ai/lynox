@@ -117,6 +117,8 @@ export interface LynoxConfig {
   promptTabs?:     ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
   promptSecret?:   ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
   context?:        LynoxContext | undefined;
+  /** Default response language (e.g. 'de', 'en'). */
+  language?:       string | undefined;
 }
 
 // === User Config ===
@@ -145,6 +147,8 @@ export interface LynoxUserConfig {
   workspace_dir?: string | undefined;
   user_id?: string | undefined;
   display_name?: string | undefined;
+  /** Default response language (e.g. 'de', 'en'). Overridden by user's language in conversation. */
+  language?: string | undefined;
   organization_id?: string | undefined;
   client_id?: string | undefined;
   /** Enable changeset review mode: backup files before write, review post-run. Default: true for interactive CLI. */

@@ -299,7 +299,10 @@ export class Session {
     this._retrievedMemoryIds = [];
 
     // Compute prompt hash from the system prompt the agent uses
-    const basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
+    let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
+    if (this.engine.config.language) {
+      basePrompt += `\n\n**Default language**: Respond in ${this.engine.config.language === 'de' ? 'German' : this.engine.config.language}. Switch only if the user writes in a different language.`;
+    }
     const effectivePrompt = this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
       : basePrompt;
