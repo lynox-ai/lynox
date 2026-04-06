@@ -11,6 +11,24 @@ lynox is designed for self-hosting. Your data stays on your machine, your API ke
 
 lynox never proxies your API calls. Your credentials talk directly to your chosen provider — Claude (Anthropic), Claude (AWS Bedrock), or a custom proxy. All providers serve the same Claude models. There's no middleman, no data collection, no usage tracking. The installer lets you choose your provider and enter credentials on first run. All credentials are stored encrypted in the local vault.
 
+## Authentication
+
+lynox supports two authentication modes depending on your deployment:
+
+### Self-Hosted (Token)
+
+Set `LYNOX_HTTP_SECRET` to enable authentication. The Web UI shows a token login form. Sessions last 30 days. QR-code login is available for mobile devices.
+
+### Managed Hosting (Email OTP + Passkeys)
+
+Managed instances use email-based one-time codes instead of permanent tokens:
+
+1. **Email OTP** — Enter your email, receive a 6-digit code, sign in. No token to save or lose.
+2. **Passkeys** — After your first login, set up Face ID, Touch ID, or a security key for instant login. OTP remains as fallback.
+3. **Login notifications** — Every login triggers an email with device and IP information.
+
+Sessions last 30 days. Passkey credentials use WebAuthn (FIDO2) with the `lynox.cloud` relying party.
+
 ## Encrypted Vault
 
 All sensitive data (API keys, OAuth tokens, credentials) is stored in an AES-256-GCM encrypted vault.
