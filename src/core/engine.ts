@@ -695,13 +695,11 @@ export class Engine {
     }
 
     // Register managed hosting usage hook (env-gated — only on EU instances)
+    // Fatal: if LYNOX_MANAGED_MODE is set but hook fails, engine must not start
+    // (otherwise EU customer uses Bedrock for free without usage tracking)
     if (process.env['LYNOX_MANAGED_MODE']) {
-      try {
-        const { createManagedHook } = await import('./managed-hook.js');
-        this.registerHooks(createManagedHook());
-      } catch (err) {
-        process.stderr.write(`[lynox] Managed hook init failed: ${err instanceof Error ? err.message : String(err)}\n`);
-      }
+      const { createManagedHook } = await import('./managed-hook.js');
+      this.registerHooks(createManagedHook());
     }
 
     // Fire orchestrator lifecycle hooks (for Pro extensions)
