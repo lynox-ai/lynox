@@ -7,6 +7,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.chat': { de: 'Chat', en: 'Chat' },
 	'nav.knowledge': { de: 'Wissen', en: 'Knowledge' },
 	'nav.settings': { de: 'Einstellungen', en: 'Settings' },
+	'nav.logout': { de: 'Abmelden', en: 'Log out' },
 	'nav.new_chat': { de: 'Neuer Chat', en: 'New Chat' },
 	'nav.artifacts': { de: 'Artefakte', en: 'Artifacts' },
 

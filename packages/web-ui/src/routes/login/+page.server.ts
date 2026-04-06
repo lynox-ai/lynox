@@ -60,7 +60,9 @@ function setSessionCookie(cookies: Parameters<PageServerLoad>[0]['cookies'], sec
 
 // ── Load function ──────────────────────────────────────────────────
 
-export const load: PageServerLoad = async ({ cookies, url, getClientAddress }) => {
+export const load: PageServerLoad = async ({ cookies, url, getClientAddress, setHeaders }) => {
+	// Prevent caching — login state is dynamic (managed mode, passkey status)
+	setHeaders({ 'Cache-Control': 'no-store' });
 	const secret = getSecret();
 	if (!secret) redirect(303, '/app');
 
