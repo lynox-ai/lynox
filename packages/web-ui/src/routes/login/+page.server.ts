@@ -102,13 +102,34 @@ export const load: PageServerLoad = async ({ cookies, url, getClientAddress }) =
 	// Return managed mode info for the login form
 	const managed = getManagedConfig();
 	if (managed) {
+		// Check if customer has registered passkeys
+		let hasPasskeys = false;
+		try {
+			const secret = getSecret();
+			if (secret) {
+				const res = await fetch(`${managed.controlPlaneUrl}/internal/auth/webauthn/status`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'x-instance-secret': secret,
+					},
+					body: JSON.stringify({ instanceId: managed.instanceId, email: managed.customerEmail }),
+				});
+				if (res.ok) {
+					const data = await res.json() as { hasPasskeys?: boolean };
+					hasPasskeys = data.hasPasskeys === true;
+				}
+			}
+		} catch { /* control plane unreachable — fallback to OTP */ }
+
 		return {
 			isManaged: true,
 			customerEmail: managed.customerEmail ?? undefined,
+			hasPasskeys,
 		};
 	}
 
-	return { isManaged: false };
+	return { isManaged: false, hasPasskeys: false };
 };
 
 // ── Actions ────────────────────────────────────────────────────────
@@ -242,5 +263,33 @@ export const actions: Actions = {
 			if (isRedirect(err)) throw err;
 			return fail(502, { error: 'Could not reach the control plane. Please try again.' });
 		}
+	},
+
+	/** Managed: complete passkey authentication, create local session. */
+	passkeyAuth: async ({ request, cookies, url, getClientAddress }) => {
+		const secret = getSecret();
+		if (!secret) redirect(303, '/app');
+
+		const managed = getManagedConfig();
+		if (!managed) return fail(400, { error: 'Not a managed instance.' });
+
+		const ip = getClientAddress();
+		const limit = isRateLimited(ip);
+		if (limit.limited) {
+			return fail(429, { error: `Too many attempts. Try again in ${limit.retryAfter}s.` });
+		}
+
+		const data = await request.formData();
+		const valid = data.get('valid');
+
+		if (valid !== 'true') {
+			recordFailedLogin(ip);
+			return fail(401, { error: 'Passkey verification failed.' });
+		}
+
+		// Passkey verified client-side via /api/passkey → control plane
+		clearRateLimit(ip);
+		setSessionCookie(cookies, secret, url.protocol === 'https:');
+		redirect(303, '/app');
 	},
 };

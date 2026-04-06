@@ -26,6 +26,7 @@
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
+    "@simplewebauthn/browser": "^13.3.0",
     "dompurify": "^3.3.3",
     "html2canvas": "^1.4.1",
     "marked": "^17.0.5",

@@ -693,6 +693,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tool.pipeline': { de: 'Pipeline', en: 'Pipeline' },
 	'tool.question': { de: 'Frage an dich', en: 'Question for you' },
 	'tool.calendar': { de: 'Kalender', en: 'Calendar' },
+
+	// Passkey prompt
+	'passkeySetupTitle': { de: 'Schneller anmelden mit Passkey', en: 'Faster login with Passkey' },
+	'passkeySetupDescription': { de: 'Nutze Face ID oder Fingerabdruck statt E-Mail-Code.', en: 'Use Face ID or fingerprint instead of email code.' },
+	'passkeySetupCta': { de: 'Jetzt einrichten', en: 'Set up now' },
+	'passkeySetupDismiss': { de: 'Später', en: 'Maybe later' },
+	'passkeySetupRegistering': { de: 'Einrichten...', en: 'Setting up...' },
+	'passkeySetupSuccess': { de: 'Passkey eingerichtet! Beim nächsten Login kannst du ihn nutzen.', en: 'Passkey set up! You can use it next time you log in.' },
 };
 
 export function setLocale(locale: Locale): void {
