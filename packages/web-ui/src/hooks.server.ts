@@ -5,7 +5,7 @@ import { env } from '$env/dynamic/private';
 import { verifySessionToken } from '$lib/server/auth.js';
 
 /** Paths that never require authentication. */
-const PUBLIC_PATHS = ['/login', '/logout', '/health'];
+const PUBLIC_PATHS = ['/login', '/logout', '/health', '/auth/passkey'];
 
 function isPublic(pathname: string): boolean {
 	return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'));
@@ -28,8 +28,8 @@ const handleAuth: Handle = async ({ event, resolve }) => {
 		return resolve(event);
 	}
 
-	// Unauthenticated — API routes get 401, pages get redirect
-	if (pathname.startsWith('/api/')) {
+	// Unauthenticated — API/auth routes get 401, pages get redirect
+	if (pathname.startsWith('/api/') || pathname.startsWith('/auth/')) {
 		return new Response(JSON.stringify({ error: 'Unauthorized' }), {
 			status: 401,
 			headers: { 'Content-Type': 'application/json' },
