@@ -4,7 +4,7 @@
 	import { clearError } from '../stores/chat.svelte.js';
 	import { onMount } from 'svelte';
 
-	type Provider = 'anthropic' | 'bedrock' | 'vertex' | 'custom';
+	type Provider = 'anthropic' | 'bedrock' | 'custom';
 
 	let apiKeyMissing = $state(false);
 	let dismissed = $state(false);
@@ -19,7 +19,6 @@
 	let anthropicKey = $state('');
 	let bedrockAccessKey = $state('');
 	let bedrockSecretKey = $state('');
-	let vertexSaJson = $state('');
 	let customUrl = $state('');
 	let customKey = $state('');
 
@@ -71,7 +70,6 @@
 	const canSave = $derived(
 		selectedProvider === 'anthropic' ? !!anthropicKey.trim() :
 		selectedProvider === 'bedrock' ? (!!bedrockAccessKey.trim() && !!bedrockSecretKey.trim()) :
-		selectedProvider === 'vertex' ? !!vertexSaJson.trim() :
 		selectedProvider === 'custom' ? !!customUrl.trim() :
 		false
 	);
@@ -106,8 +104,6 @@
 			} else if (selectedProvider === 'bedrock') {
 				await saveSecret('AWS_ACCESS_KEY_ID', bedrockAccessKey.trim());
 				await saveSecret('AWS_SECRET_ACCESS_KEY', bedrockSecretKey.trim());
-			} else if (selectedProvider === 'vertex') {
-				await saveSecret('GCP_SERVICE_ACCOUNT_JSON', vertexSaJson.trim());
 			} else if (selectedProvider === 'custom' && customKey.trim()) {
 				await saveSecret('ANTHROPIC_API_KEY', customKey.trim());
 			}
@@ -140,13 +136,11 @@
 	const providers: { id: Provider; label: string; desc: string }[] = [
 		{ id: 'anthropic', label: 'Claude (Anthropic)', desc: 'setup.provider_anthropic_desc' },
 		{ id: 'bedrock', label: 'Claude (AWS Bedrock)', desc: 'setup.provider_bedrock_desc' },
-		{ id: 'vertex', label: 'Claude (Vertex AI)', desc: 'setup.provider_vertex_desc' },
 		{ id: 'custom', label: 'Custom Proxy', desc: 'setup.provider_custom_desc' },
 	];
 
 	const subtitleKey = $derived(
 		selectedProvider === 'bedrock' ? 'setup.subtitle_bedrock' :
-		selectedProvider === 'vertex' ? 'setup.subtitle_vertex' :
 		selectedProvider === 'custom' ? 'setup.subtitle_custom' :
 		'setup.subtitle'
 	);
@@ -260,23 +254,6 @@
 							<p class="text-xs text-text-subtle">
 								{t('setup.hint_bedrock')}
 								<a href="https://console.aws.amazon.com/iam/" target="_blank" rel="noopener" class="text-accent-text hover:underline">AWS IAM Console</a>
-							</p>
-
-						{:else if selectedProvider === 'vertex'}
-							<div class="space-y-2">
-								<label for="setup-vertex-sa" class="text-sm font-medium text-text">{t('setup.label_vertex_sa')}</label>
-								<textarea
-									id="setup-vertex-sa"
-									bind:value={vertexSaJson}
-									placeholder={'{"type":"service_account",...}'}
-									rows="4"
-									autocomplete="off"
-									class="{inputClass} resize-none"
-								></textarea>
-							</div>
-							<p class="text-xs text-text-subtle">
-								{t('setup.hint_vertex')}
-								<a href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank" rel="noopener" class="text-accent-text hover:underline">GCP Console</a>
 							</p>
 
 						{:else if selectedProvider === 'custom'}

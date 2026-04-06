@@ -266,7 +266,7 @@
 	});
 
 	const isAnthropicDirect = $derived(config.provider === 'anthropic' || !config.provider);
-	const isNonDirect = $derived(config.provider === 'custom' || config.provider === 'bedrock' || config.provider === 'vertex');
+	const isNonDirect = $derived(config.provider === 'custom' || config.provider === 'bedrock');
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';
@@ -288,14 +288,11 @@
 				<select id="provider" bind:value={config.provider} class={inputClass}>
 					<option value="anthropic">{t('config.provider_anthropic')}</option>
 					<option value="bedrock">{t('config.provider_bedrock')}</option>
-					<option value="vertex">{t('config.provider_vertex')}</option>
 					<option value="custom">{t('config.provider_custom')}</option>
 				</select>
 				<p class="text-xs text-text-muted mt-2">
 					{#if config.provider === 'bedrock'}
 						{t('config.credentials_hint_bedrock')}
-					{:else if config.provider === 'vertex'}
-						{t('config.credentials_hint_vertex')}
 					{:else if config.provider === 'custom'}
 						{t('config.credentials_hint_custom')}
 					{:else}
@@ -325,22 +322,6 @@
 						<p class="text-xs text-text-muted mt-1">{t('config.bedrock_eu_only_desc')}</p>
 					</div>
 					<button onclick={() => config.bedrock_eu_only = !config.bedrock_eu_only} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.bedrock_eu_only ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.bedrock_eu_only ? 'translate-x-4' : ''}"></span></button>
-				</div>
-			{/if}
-
-			{#if config.provider === 'vertex'}
-				<div class={cardClass}>
-					<label for="gcp-region" class="block text-sm font-medium mb-2">{t('config.gcp_region')}</label>
-					<select id="gcp-region" bind:value={config.gcp_region} class={inputClass}>
-						<option value="europe-west1">europe-west1 (Belgium)</option>
-						<option value="us-east5">us-east5 (Columbus)</option>
-						<option value="us-central1">us-central1 (Iowa)</option>
-					</select>
-				</div>
-				<div class={cardClass}>
-					<label for="gcp-project" class="block text-sm font-medium mb-2">{t('config.gcp_project_id')}</label>
-					<input id="gcp-project" type="text" placeholder="my-project-123"
-						bind:value={config.gcp_project_id} class="{inputClass} font-mono" />
 				</div>
 			{/if}
 

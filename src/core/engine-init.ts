@@ -313,7 +313,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       if (!process.env['LYNOX_VAULT_KEY']) {
         const vaultDbPath = join(getLynoxDir(), 'vault.db');
         if (existsSync(vaultDbPath)) {
-          process.stderr.write('⚠ Encrypted vault found but LYNOX_VAULT_KEY is not set. Run: lynox init\n');
+          process.stderr.write('⚠ Encrypted vault found but LYNOX_VAULT_KEY is not set. Set the LYNOX_VAULT_KEY env var or configure in Settings → Config → Security.\n');
         }
       }
     }

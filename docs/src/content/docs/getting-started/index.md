@@ -10,10 +10,9 @@ sidebar:
 - **A Claude API account** — all providers serve the same Claude models:
   - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended, direct API
   - [Claude (AWS Bedrock)](https://console.aws.amazon.com) — EU data residency
-  - [Claude (Vertex AI)](https://console.cloud.google.com) — experimental
   - Custom Proxy (LiteLLM, OpenRouter) — experimental
 
-The setup wizard walks you through provider selection and credential entry on first run. Most users start with Anthropic — you can switch anytime in Settings. A typical business day costs **$1–5**.
+The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in Settings. A typical business day costs **$1–5**.
 
 ## Install
 
@@ -38,13 +37,13 @@ This starts everything: Web UI, AI engine, and SearXNG for free unlimited web se
 If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated. Find it with `docker logs lynox`.
 :::
 
-### npx (quick try)
+### npx (one command)
 
 ```bash
 npx @lynox-ai/core
 ```
 
-Starts the setup wizard on first run, then opens the Web UI.
+Interactive Docker installer — creates `docker-compose.yml`, `.env`, and SearXNG config, then starts everything.
 
 ## First Run
 
@@ -82,6 +81,6 @@ Without `-v ~/.lynox:/home/lynox/.lynox`, your vault key and all data are lost o
 - [Web UI Guide](/daily-use/web-ui/) — Learn the interface
 - [Configuration](/daily-use/configuration/) — Model, cost limits, and more
 - [Docker Deployment](/daily-use/docker/) — Production setup
-- [LLM Providers](/daily-use/llm-providers/) — Bedrock, Vertex AI, or local models
+- [LLM Providers](/daily-use/llm-providers/) — Bedrock or local models
 - [Google Workspace](/integrations/google-workspace/) — Connect Gmail, Calendar, Drive
 - [Telegram](/integrations/telegram/) — Mobile access via Telegram bot

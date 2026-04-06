@@ -195,19 +195,16 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     // ── LLM Provider ─────────────────────────────────────────────
     stdout.write(`\n  ${BOLD}LLM Provider${RESET}\n`);
     stdout.write(`${DIM}  Where should AI requests be sent?${RESET}\n\n`);
-    type ProviderChoice = 'anthropic' | 'bedrock' | 'vertex' | 'custom';
+    type ProviderChoice = 'anthropic' | 'bedrock' | 'custom';
     const providerChoice = await select<ProviderChoice>([
       { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended' },
       { label: 'Claude (AWS Bedrock)', value: 'bedrock', hint: 'EU data residency' },
-      { label: 'Claude (Vertex AI)', value: 'vertex', hint: 'experimental' },
       { label: 'Custom Proxy', value: 'custom', hint: 'experimental' },
     ], { default: 0, rl: stdin.isTTY ? undefined : rl });
     const provider: ProviderChoice = providerChoice ?? 'anthropic';
 
     let apiKey = '';
     let awsRegion: string | undefined;
-    let gcpRegion: string | undefined;
-    let gcpProjectId: string | undefined;
     let apiBaseUrl: string | undefined;
 
     if (provider === 'anthropic') {
@@ -236,7 +233,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
             stdout.write(`  ${DIM}Hint: check for trailing spaces or line breaks in the copied key.${RESET}\n`);
           }
           if (keyAttempt >= MAX_KEY_ATTEMPTS) {
-            stdout.write(`  ${YELLOW}⚠${RESET} Max attempts reached. Run ${BOLD}lynox --init${RESET} to try again.\n`);
+            stdout.write(`  ${YELLOW}⚠${RESET} Max attempts reached. Try again or set the API key in Settings → Keys.\n`);
             return null;
           }
           continue;
@@ -265,19 +262,6 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       awsRegion = regionChoice ?? 'eu-central-1';
       stdout.write(`  ${GREEN}✓${RESET} Region: ${awsRegion}\n`);
       stdout.write(`  ${DIM}Credentials: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars${RESET}\n`);
-    } else if (provider === 'vertex') {
-      // ── Google Vertex AI ──
-      stdout.write(`\n  ${BOLD}Claude (Vertex AI)${RESET} ${DIM}(experimental)${RESET}\n`);
-      stdout.write(`${DIM}  Requires: gcloud auth application-default login${RESET}\n`);
-      stdout.write(`${DIM}  Install SDK: pnpm add @anthropic-ai/vertex-sdk${RESET}\n\n`);
-      gcpRegion = 'europe-west1';
-      const input = await rl.question(`  ${BOLD}GCP Project ID:${RESET} `);
-      gcpProjectId = input.trim() || undefined;
-      if (gcpProjectId) {
-        stdout.write(`  ${GREEN}✓${RESET} Project: ${gcpProjectId}, Region: ${gcpRegion}\n`);
-      } else {
-        stdout.write(`  ${YELLOW}⚠${RESET} No project ID. Set GCP_PROJECT_ID env var before starting.\n`);
-      }
     } else {
       // ── Custom / LiteLLM ──
       stdout.write(`\n  ${BOLD}Custom Proxy${RESET} ${DIM}(experimental)${RESET}\n`);
@@ -317,8 +301,6 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       ...(provider !== 'anthropic' ? { provider } : {}),
       ...(apiKey ? { api_key: apiKey } : {}),
       ...(awsRegion ? { aws_region: awsRegion } : {}),
-      ...(gcpRegion ? { gcp_region: gcpRegion } : {}),
-      ...(gcpProjectId ? { gcp_project_id: gcpProjectId } : {}),
       ...(apiBaseUrl ? { api_base_url: apiBaseUrl } : {}),
     };
     saveUserConfig(config);
@@ -327,7 +309,6 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     // ── Summary ─────────────────────────────────────────────────
     const providerLabel = provider === 'anthropic' ? 'Claude (Anthropic)'
       : provider === 'bedrock' ? `Claude (AWS Bedrock, ${awsRegion})`
-      : provider === 'vertex' ? `Claude (Vertex AI, ${gcpRegion})`
       : `Custom Proxy (${apiBaseUrl})`;
     stdout.write(`\n  ${GREEN}${BOLD}✓ Setup complete${RESET}\n\n`);
     stdout.write(`  Provider       ${GREEN}✓${RESET} ${providerLabel}\n`);

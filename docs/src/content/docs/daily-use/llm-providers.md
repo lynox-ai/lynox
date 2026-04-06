@@ -6,41 +6,43 @@ sidebar:
 ---
 
 :::note[Multi-Provider BYOK]
-lynox supports multiple LLM providers out of the box. The **setup wizard** lets you choose your provider and enter credentials — stored encrypted in your local vault. You can switch providers anytime in **Settings → Config**.
+lynox supports multiple LLM providers out of the box. The **installer** lets you choose your provider and enter credentials — stored encrypted in your local vault. You can switch providers anytime in **Settings → Config**.
+
+*Vertex AI support has been removed from the UI. If you need it, set `"provider": "vertex"` manually in config.json — the SDK integration still works.*
 :::
 
 lynox stores all your data locally. Only the AI inference (the LLM request) leaves your machine. You choose where it goes.
 
 ## At a Glance
 
-| | **Claude (Anthropic)** | **Claude (AWS Bedrock)** | **Claude (Vertex AI)** | **Custom Proxy** |
-|---|---|---|---|---|
-| **Status** | Stable | Stable | Experimental | Experimental |
-| **Setup** | API key | AWS account + IAM | GCP project + auth | Proxy URL |
-| **AI quality** | Claude | Claude (same models) | Claude (same models) | Model-dependent |
-| | | | | |
-| **Features** | | | | |
-| Chat + Streaming | ✅ | ✅ | ✅ | ✅ |
-| Tool Calling | ✅ | ✅ | ✅ | ✅ via LiteLLM |
-| Extended Thinking | ✅ | ✅ | ✅ | ❌ Auto-disabled |
-| Prompt Caching | ✅ | ✅ | ✅ | ❌ |
-| Web Search (built-in) | ✅ | ❌ | ❌ | ❌ |
-| Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ | ✅ |
-| MCP Server-Side | ✅ | ❌ | ❌ | ❌ |
-| | | | | |
-| **Privacy** | | | | |
-| Data residency | US | 🇪🇺 EU (6 regions) | 🇪🇺 EU (Belgium) | 🏠 Your server |
-| DPA available | ✅ Auto | ✅ AWS | ✅ GCP | N/A |
-| Training on data | ❌ Never | ❌ Never | ❌ Never | ❌ Never |
-| CLOUD Act exposure | ⚠️ Yes | ⚠️ AWS US parent | ⚠️ Google US parent | ❌ None |
-| GDPR compliant | ✅ With DPA | ✅ | ✅ | ✅ |
-| Art. 321 StGB (CH) | ⚠️ Counsel | ⚠️ Better | ⚠️ Better | ✅ Safe |
-| | | | | |
-| **Cost** | | | | |
-| API pricing | $3/$15 per MTok | Same | Same | Free (your hardware) |
-| EU surcharge | — | +10% (EU CRIS) | — | — |
-| Infrastructure | — | — | — | GPU server ~€150/mo |
-| Typical monthly | €30–150 | €33–165 | €30–150 | €150 fixed |
+| | **Claude (Anthropic)** | **Claude (AWS Bedrock)** | **Custom Proxy** |
+|---|---|---|---|
+| **Status** | Stable | Stable | Experimental |
+| **Setup** | API key | AWS account + IAM | Proxy URL |
+| **AI quality** | Claude | Claude (same models) | Model-dependent |
+| | | | |
+| **Features** | | | |
+| Chat + Streaming | ✅ | ✅ | ✅ |
+| Tool Calling | ✅ | ✅ | ✅ via LiteLLM |
+| Extended Thinking | ✅ | ✅ | ❌ Auto-disabled |
+| Prompt Caching | ✅ | ✅ | ❌ |
+| Web Search (built-in) | ✅ | ❌ | ❌ |
+| Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ |
+| MCP Server-Side | ✅ | ❌ | ❌ |
+| | | | |
+| **Privacy** | | | |
+| Data residency | US | 🇪🇺 EU (6 regions) | 🏠 Your server |
+| DPA available | ✅ Auto | ✅ AWS | N/A |
+| Training on data | ❌ Never | ❌ Never | ❌ Never |
+| CLOUD Act exposure | ⚠️ Yes | ⚠️ AWS US parent | ❌ None |
+| GDPR compliant | ✅ With DPA | ✅ | ✅ |
+| Art. 321 StGB (CH) | ⚠️ Counsel | ⚠️ Better | ✅ Safe |
+| | | | |
+| **Cost** | | | |
+| API pricing | $3/$15 per MTok | Same | Free (your hardware) |
+| EU surcharge | — | +10% (EU CRIS) | — |
+| Infrastructure | — | — | GPU server ~€150/mo |
+| Typical monthly | €30–150 | €33–165 | €150 fixed |
 
 ## Claude (Anthropic) — Default
 
@@ -83,7 +85,7 @@ Same Claude models, hosted in AWS EU regions. Your data never leaves the EU.
 
 **Credentials (choose one):**
 
-**Web UI (recommended):** The setup wizard prompts for your AWS Access Key ID and Secret Access Key on first run. Stored encrypted in the local vault. You can also add them later in **Settings → Keys**.
+**Web UI (recommended):** Enter your AWS Access Key ID and Secret Access Key in the setup banner on first run. Stored encrypted in the local vault. You can also add them later in **Settings → Keys**.
 
 **Environment variables:**
 ```bash
@@ -103,38 +105,6 @@ When `aws_region` starts with `eu-`, lynox auto-selects EU model IDs — you don
 
 **EU regions with Claude:**
 `eu-central-1` (Frankfurt), `eu-west-1` (Ireland), `eu-west-3` (Paris), `eu-north-1` (Stockholm), `eu-central-2` (Zurich), `eu-south-1` (Milan)
-
-## Claude (Vertex AI) — Experimental
-
-Same Claude models, hosted on Google Cloud. EU region available.
-
-```json
-{
-  "provider": "vertex",
-  "gcp_region": "europe-west1",
-  "gcp_project_id": "my-project-123"
-}
-```
-
-**Setup:**
-1. Create a [GCP project](https://console.cloud.google.com)
-2. Enable **Vertex AI API** → activate Claude models in the Model Garden
-3. Create a service account with `roles/aiplatform.user` and download the JSON key
-4. Install the SDK: `pnpm add @anthropic-ai/vertex-sdk` (pre-installed in Docker images)
-
-**Credentials (choose one):**
-
-**Web UI:** The setup wizard prompts for your Service Account JSON on first run. Stored encrypted in the local vault (as `GCP_SERVICE_ACCOUNT_JSON`).
-
-**Environment variables:**
-```bash
-LYNOX_LLM_PROVIDER=vertex
-GCP_REGION=europe-west1
-GCP_PROJECT_ID=my-project-123
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
-```
-
-**EU region:** `europe-west1` (Belgium) — the only confirmed EU endpoint for Claude on Vertex.
 
 ## Custom Proxy — Experimental
 
@@ -196,7 +166,6 @@ For maximum data control, run lynox on the same cloud as your LLM provider — a
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
 | **AWS all-in-one** | Bedrock `eu-central-1` | ECS/Fargate `eu-central-1` | Everything in Frankfurt |
-| **GCP all-in-one** | Vertex `europe-west1` | Cloud Run `europe-west1` | Everything in Belgium |
 | **Fully local** | Ollama on your server | Docker on your server | Nothing leaves your network |
 
 lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/daily-use/docker/) for container configuration.

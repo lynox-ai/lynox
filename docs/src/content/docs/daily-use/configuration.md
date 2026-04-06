@@ -33,11 +33,9 @@ Project configs cannot override security-sensitive fields like API keys or vault
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `provider` | `anthropic`, `bedrock`, `vertex`, `custom` | `anthropic` |
+| `provider` | `anthropic`, `bedrock`, `custom` | `anthropic` |
 | `aws_region` | Any AWS region (e.g. `eu-central-1`) | — |
 | `bedrock_eu_only` | `true`, `false` | `false` |
-| `gcp_region` | GCP region (e.g. `europe-west1`) | — |
-| `gcp_project_id` | GCP project ID | — |
 | `api_base_url` | Custom proxy URL | — |
 
 Only configure the fields relevant to your provider. See [LLM Providers](/daily-use/llm-providers/) for full setup guides.
@@ -134,7 +132,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider) |
 | `ANTHROPIC_BASE_URL` | Custom API base URL (for LiteLLM/proxy) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `bedrock`, `vertex`, `custom` |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `bedrock`, `custom` |
 
 ### AWS Bedrock
 
@@ -144,14 +142,6 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `AWS_ACCESS_KEY_ID` | IAM access key (or use IAM role on EC2/ECS) |
 | `AWS_SECRET_ACCESS_KEY` | IAM secret key |
 | `AWS_SESSION_TOKEN` | Temporary session token (for assumed roles / SSO) |
-
-### Google Vertex AI
-
-| Variable | Purpose |
-|----------|---------|
-| `GCP_REGION` | GCP region (e.g. `europe-west1`) |
-| `GCP_PROJECT_ID` | GCP project ID |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON (headless/Docker) |
 
 ### Web Search
 

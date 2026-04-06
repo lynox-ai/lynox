@@ -34,7 +34,7 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
 - `src/core/` — 74 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, etc.
-- `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, setup wizard, watchdog)
+- `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, Docker installer, setup wizard, watchdog)
 - `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Telegram, Google Workspace, Web Search (SearXNG default, Tavily fallback)

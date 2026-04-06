@@ -1235,6 +1235,15 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
+      // Managed mode: block provider/credential changes (breaks billing + isolation)
+      if (process.env['LYNOX_MANAGED_MODE']) {
+        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'aws_region', 'bedrock_eu_only', 'gcp_region', 'gcp_project_id'];
+        const attempted = LOCKED_FIELDS.filter(f => f in (parsed.data as Record<string, unknown>));
+        if (attempted.length > 0) {
+          errorResponse(res, 403, `Managed instance: cannot change ${attempted.join(', ')}`);
+          return;
+        }
+      }
       // Merge with existing config so partial updates don't lose other fields
       const existing = readUserConfig() as Record<string, unknown>;
       const update = parsed.data as Record<string, unknown>;
@@ -1847,6 +1856,11 @@ export class LynoxHTTPApi {
       // Only return the actual key when explicitly requested (settings page reveal)
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
+        // Managed mode: never expose vault key to users
+        if (process.env['LYNOX_MANAGED_MODE']) {
+          errorResponse(res, 403, 'Managed instance: vault key is system-controlled');
+          return;
+        }
         jsonResponse(res, 200, { configured: true, key });
       } else {
         jsonResponse(res, 200, { configured: true });
@@ -1854,6 +1868,10 @@ export class LynoxHTTPApi {
     });
 
     this.staticRoutes.set('POST /api/vault/rotate', async (_req, res, _params, body) => {
+      if (process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 403, 'Managed instance: vault rotation is system-controlled');
+        return;
+      }
       const b = body as Record<string, unknown> | null;
       const newKey = typeof b?.['newKey'] === 'string' ? b['newKey'] : '';
       if (!newKey || newKey.length < 16) {
@@ -1887,6 +1905,10 @@ export class LynoxHTTPApi {
       }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
+        if (process.env['LYNOX_MANAGED_MODE']) {
+          errorResponse(res, 403, 'Managed instance: access token is system-controlled');
+          return;
+        }
         jsonResponse(res, 200, { configured: true, token: secret });
       } else {
         jsonResponse(res, 200, { configured: true });

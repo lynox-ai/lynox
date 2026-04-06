@@ -113,4 +113,4 @@ Regardless of how you expose lynox:
 - **QR login codes** are one-time use, 256-bit random, expire in 5 minutes
 - **Onboarding tokens** (managed hosting only) are one-time use, separate from `LYNOX_HTTP_SECRET`, consumed after first login
 
-Never expose lynox without `LYNOX_HTTP_SECRET` set. The setup wizard and Docker entrypoint auto-generate one if not provided.
+Never expose lynox without `LYNOX_HTTP_SECRET` set. The installer and Docker entrypoint auto-generate one if not provided.

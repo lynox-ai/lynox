@@ -9,13 +9,13 @@ The CLI is lynox's automation-oriented interface. All interactive features are i
 
 ## Entry Modes
 
-### Web UI (default)
+### Docker Installer (default)
 
 ```bash
 npx @lynox-ai/core
 ```
 
-Starts the Engine HTTP API and opens the Web UI. This is what most users should use.
+Interactive Docker setup — creates docker-compose.yml, .env, SearXNG config, starts containers, and opens the browser.
 
 ### One-Shot
 
@@ -47,7 +47,7 @@ Combines piped input with a task prompt.
 | `--output <file>` | Save output to file |
 | `--project <dir>` | Set project directory |
 | `--data-dir <dir>` | Override data directory (default: `~/.lynox`) |
-| `--init` | Re-run the setup wizard |
+| `--init` | Re-run the Docker installer |
 | `--version` | Show version (no API key required) |
 | `--help` | Show help (no API key required) |
 

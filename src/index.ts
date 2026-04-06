@@ -134,8 +134,6 @@ import type { StreamEvent } from './types/index.js';
 import { getModelId } from './types/index.js';
 import { getActiveProvider, isBedrockEuOnly } from './core/llm-client.js';
 import { hasApiKey, setDataDir } from './core/config.js';
-import { runSetupWizard } from './cli/setup-wizard.js';
-
 import { renderError, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from './cli/ui.js';
 import { Watchdog } from './cli/watchdog.js';
 import { createRequire } from 'node:module';
@@ -235,10 +233,10 @@ async function runCLI(): Promise<void> {
     stdout.write(`lynox ${pkg.version}
 
 Usage:
-  lynox                         Start Engine + open Web UI (setup wizard on first run)
+  lynox                         Install lynox via Docker (interactive)
   lynox "<task>"                Run a single task and exit
   cat file | lynox "<task>"     Process piped input with a task
-  lynox init                    Run the setup wizard
+  lynox init                    Run Docker installer
   lynox --http-api              Start Engine HTTP API server (headless)
   lynox --mcp-server            Start as MCP server (stdio)
   lynox --mcp-server --transport sse   Start as MCP server (HTTP/SSE)
@@ -248,7 +246,7 @@ Usage:
 Options:
   --help, -h                    Show this help
   --version, -v                 Show version
-  --init                        Run setup wizard
+  --init                        Run Docker installer
   --project <dir>               Set project directory
   --manifest <file>             Run a workflow manifest
   --task "<title>"              Create a background task and exit
@@ -318,21 +316,11 @@ Docs: https://docs.lynox.dev
     return;
   }
 
-  // === Setup wizard (explicit --init / "init" subcommand, or auto when no API key) ===
+  // === Docker installer (--init / "init" subcommand) ===
   if (args.includes('--init') || args[0] === 'init') {
-    const wizardResult = await runSetupWizard();
-    if (!wizardResult) {
-      stderr.write('No API key configured. Run "lynox init" to set up.\n');
-      process.exit(1);
-    }
-    // Continue to default mode (HTTP API + Web UI)
-  } else if (!hasApiKey() && stdin.isTTY) {
-    const wizardResult = await runSetupWizard();
-    if (!wizardResult) {
-      stderr.write('No API key configured. Run "lynox init" to set up.\n');
-      process.exit(1);
-    }
-    // Continue to default mode (HTTP API + Web UI)
+    const { runDockerInstaller } = await import('./cli/docker-installer.js');
+    await runDockerInstaller();
+    return;
   }
 
   // === MCP Server mode ===
@@ -606,55 +594,10 @@ Docs: https://docs.lynox.dev
     return;
   }
 
-  // === Default: Engine HTTP API (+ Web UI if available) ===
+  // === Default: Docker installer (bare npx) ===
   if (stdin.isTTY) {
-    if (!hasApiKey()) {
-      stderr.write('No API key configured. Run "lynox init" to set up.\n');
-      process.exit(1);
-    }
-    const { LynoxHTTPApi } = await import('./server/http-api.js');
-    const api = new LynoxHTTPApi();
-    await api.init();
-
-    // Default port: 3000 when Web UI is embedded, 3100 for API-only
-    const defaultPort = api.hasWebUi() ? 3000 : 3100;
-    const rawPort = parseInt(process.env['LYNOX_HTTP_PORT'] ?? String(defaultPort), 10);
-    const port = Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : defaultPort;
-    await api.start(port);
-
-    const url = `http://localhost:${port}`;
-
-    stderr.write(`\n  ${BOLD}lynox${RESET} ${DIM}v${pkg.version}${RESET}\n`);
-    if (api.hasWebUi()) {
-      stderr.write(`  ${DIM}Web UI + API:${RESET}  ${url}\n`);
-    } else {
-      stderr.write(`  ${DIM}Engine API:${RESET}    ${url}\n`);
-      stderr.write(`  ${DIM}(Web UI not found — run \`cd packages/web-ui && pnpm run build\` first)${RESET}\n`);
-    }
-    stderr.write(`  ${DIM}Press Ctrl+C to stop.${RESET}\n\n`);
-
-    // Open browser (best-effort, no shell injection via execFile)
-    if (api.hasWebUi()) {
-      try {
-        const { execFile } = await import('node:child_process');
-        const cmd = process.platform === 'darwin' ? 'open'
-          : process.platform === 'win32' ? 'start'
-          : 'xdg-open';
-        execFile(cmd, [url], () => { /* ignore errors */ });
-      } catch { /* best-effort */ }
-    }
-
-    // Graceful shutdown
-    let shuttingDown = false;
-    const graceful = async (signal: string) => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      stderr.write(`\n[lynox] ${signal} received — shutting down…\n`);
-      try { await api.shutdown(); } catch { /* best-effort */ }
-      process.exit(0);
-    };
-    process.on('SIGINT', () => void graceful('SIGINT'));
-    process.on('SIGTERM', () => void graceful('SIGTERM'));
+    const { runDockerInstaller } = await import('./cli/docker-installer.js');
+    await runDockerInstaller();
     return;
   }
 

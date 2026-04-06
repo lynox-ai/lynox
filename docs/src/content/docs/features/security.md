@@ -9,7 +9,7 @@ lynox is designed for self-hosting. Your data stays on your machine, your API ke
 
 ## Bring Your Own Key (BYOK)
 
-lynox never proxies your API calls. Your credentials talk directly to your chosen provider — Claude (Anthropic), Claude (AWS Bedrock), Claude (Vertex AI), or a custom proxy. All providers serve the same Claude models. There's no middleman, no data collection, no usage tracking. The setup wizard lets you choose your provider and enter credentials on first run. All credentials are stored encrypted in the local vault.
+lynox never proxies your API calls. Your credentials talk directly to your chosen provider — Claude (Anthropic), Claude (AWS Bedrock), or a custom proxy. All providers serve the same Claude models. There's no middleman, no data collection, no usage tracking. The installer lets you choose your provider and enter credentials on first run. All credentials are stored encrypted in the local vault.
 
 ## Encrypted Vault
 
@@ -17,7 +17,7 @@ All sensitive data (API keys, OAuth tokens, credentials) is stored in an AES-256
 
 ### How it works
 
-1. **Setup** — The setup wizard generates a random vault key and saves it to `~/.lynox/.env`
+1. **Setup** — The installer generates a random vault key (Docker auto-generates it on first start)
 2. **Storage** — Secrets are encrypted before being written to `~/.lynox/vault.db`
 3. **Access** — The vault key is loaded from `LYNOX_VAULT_KEY` environment variable at startup
 
@@ -26,7 +26,7 @@ All sensitive data (API keys, OAuth tokens, credentials) is stored in an AES-256
 The vault key is your master encryption key. Keep it safe:
 
 - It's generated during setup and stored in `~/.lynox/.env`
-- The setup wizard can add it to your shell profile for auto-loading
+- Docker auto-generates and persists it to the volume
 - For Docker, pass it as `LYNOX_VAULT_KEY` environment variable
 - **View and copy** your vault key anytime in **Settings → Config → Security**
 - **Save it to a password manager** — if you lose the vault key, encrypted secrets cannot be recovered (but you can re-enter them)
