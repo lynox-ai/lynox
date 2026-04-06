@@ -4,11 +4,14 @@ import { sequence } from '@sveltejs/kit/hooks';
 import { env } from '$env/dynamic/private';
 import { verifySessionToken } from '$lib/server/auth.js';
 
-/** Paths that never require authentication. */
-const PUBLIC_PATHS = ['/login', '/logout', '/health', '/auth/passkey'];
+/** Exact paths that never require authentication. */
+const PUBLIC_EXACT = new Set(['/login', '/logout', '/health']);
+/** Prefixes that never require authentication (with trailing slash enforced). */
+const PUBLIC_PREFIXES = ['/auth/passkey'];
 
 function isPublic(pathname: string): boolean {
-	return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'));
+	if (PUBLIC_EXACT.has(pathname)) return true;
+	return PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'));
 }
 
 const handleAuth: Handle = async ({ event, resolve }) => {

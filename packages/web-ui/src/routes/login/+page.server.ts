@@ -268,6 +268,7 @@ export const actions: Actions = {
 	},
 
 	/** Managed: complete passkey authentication, create local session. */
+	/** Managed: complete passkey authentication with signed proof from control plane. */
 	passkeyAuth: async ({ request, cookies, url, getClientAddress }) => {
 		const secret = getSecret();
 		if (!secret) redirect(303, '/app');
@@ -282,14 +283,39 @@ export const actions: Actions = {
 		}
 
 		const data = await request.formData();
-		const valid = data.get('valid');
+		const proof = (data.get('proof') as string ?? '').trim();
 
-		if (valid !== 'true') {
+		if (!proof) {
 			recordFailedLogin(ip);
 			return fail(401, { error: 'Passkey verification failed.' });
 		}
 
-		// Passkey verified client-side via /api/passkey → control plane
+		// Verify the signed proof server-side via control plane
+		try {
+			const res = await fetch(`${managed.controlPlaneUrl}/internal/auth/webauthn/verify-proof`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'x-instance-secret': secret,
+				},
+				body: JSON.stringify({ instanceId: managed.instanceId, proof }),
+			});
+
+			if (!res.ok) {
+				recordFailedLogin(ip);
+				return fail(401, { error: 'Passkey verification failed.' });
+			}
+
+			const result = await res.json() as { valid?: boolean };
+			if (!result.valid) {
+				recordFailedLogin(ip);
+				return fail(401, { error: 'Passkey verification failed.' });
+			}
+		} catch (err: unknown) {
+			if (isRedirect(err)) throw err;
+			return fail(502, { error: 'Could not verify passkey. Please try again.' });
+		}
+
 		clearRateLimit(ip);
 		setSessionCookie(cookies, secret, url.protocol === 'https:');
 		redirect(303, '/app');

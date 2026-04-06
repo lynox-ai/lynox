@@ -74,16 +74,16 @@
 				body: JSON.stringify({ action: 'authenticate/complete', response: authResponse }),
 			});
 
-			const verifyData = await verifyRes.json() as { valid?: boolean; error?: string };
+			const verifyData = await verifyRes.json() as { valid?: boolean; proof?: string; error?: string };
 
-			if (!verifyRes.ok || !verifyData.valid) {
+			if (!verifyRes.ok || !verifyData.valid || !verifyData.proof) {
 				localError = verifyData.error ?? 'Passkey verification failed.';
 				return;
 			}
 
-			// 4. Create session via form action
+			// 4. Create session via form action (with signed proof from control plane)
 			const formData = new FormData();
-			formData.set('valid', 'true');
+			formData.set('proof', verifyData.proof);
 			const sessionRes = await fetch('?/passkeyAuth', {
 				method: 'POST',
 				body: formData,
