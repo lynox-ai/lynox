@@ -694,6 +694,16 @@ export class Engine {
       void this.pluginManager.fireSessionStart();
     }
 
+    // Register managed hosting usage hook (env-gated — only on EU instances)
+    if (process.env['LYNOX_MANAGED_MODE']) {
+      try {
+        const { createManagedHook } = await import('./managed-hook.js');
+        this.registerHooks(createManagedHook());
+      } catch (err) {
+        process.stderr.write(`[lynox] Managed hook init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+
     // Fire orchestrator lifecycle hooks (for Pro extensions)
     for (const hook of this._hooks) {
       if (hook.onInit) {
