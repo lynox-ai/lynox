@@ -301,7 +301,8 @@ export class Session {
     // Compute prompt hash from the system prompt the agent uses
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
     if (this.engine.config.language) {
-      basePrompt += `\n\n**Default language**: Respond in ${this.engine.config.language === 'de' ? 'German' : this.engine.config.language}. Switch only if the user writes in a different language.`;
+      const langName = { de: 'German', en: 'English', fr: 'French', it: 'Italian', es: 'Spanish', nl: 'Dutch', pt: 'Portuguese', sv: 'Swedish' }[this.engine.config.language] ?? this.engine.config.language;
+      basePrompt += `\n\n**Language override**: Respond in ${langName}. The user has explicitly set this preference.`;
     }
     const effectivePrompt = this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
