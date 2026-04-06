@@ -209,7 +209,7 @@ export const actions: Actions = {
 
 		const data = await request.formData();
 		const email = (data.get('email') as string ?? '').trim().toLowerCase();
-		const code = (data.get('code') as string ?? '').trim();
+		const code = (data.get('code') as string ?? '').replace(/[\s\-]/g, '').trim();
 
 		if (!email || !code) {
 			return fail(400, { error: 'Email and code are required.' });
