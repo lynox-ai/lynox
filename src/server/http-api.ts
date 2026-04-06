@@ -1122,8 +1122,25 @@ export class LynoxHTTPApi {
       const names = new Set(store.listNames());
       const userConfig = engine.getUserConfig();
       const provider = userConfig.provider ?? 'anthropic';
-      // For bedrock/vertex/custom, API key is not needed — provider handles auth
-      const llmConfigured = provider !== 'anthropic' || names.has('ANTHROPIC_API_KEY');
+      // Provider-aware LLM configured check (BYOK)
+      let llmConfigured: boolean;
+      if (provider === 'bedrock') {
+        // Bedrock needs AWS credentials — from vault or env
+        llmConfigured = (names.has('AWS_ACCESS_KEY_ID') && names.has('AWS_SECRET_ACCESS_KEY'))
+          || (!!process.env['AWS_ACCESS_KEY_ID'] && !!process.env['AWS_SECRET_ACCESS_KEY']);
+      } else if (provider === 'vertex') {
+        // Vertex needs GCP service account — from vault or ADC
+        llmConfigured = names.has('GCP_SERVICE_ACCOUNT_JSON')
+          || !!process.env['GOOGLE_APPLICATION_CREDENTIALS'];
+      } else if (provider === 'custom') {
+        // Custom needs api_base_url configured
+        llmConfigured = !!(userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL']);
+      } else {
+        // Anthropic direct — needs API key
+        llmConfigured = names.has('ANTHROPIC_API_KEY')
+          || !!process.env['ANTHROPIC_API_KEY']
+          || !!(userConfig as Record<string, unknown>)['api_key'];
+      }
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
       jsonResponse(res, 200, {
         provider,

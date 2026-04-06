@@ -59,6 +59,8 @@ export interface LLMClientOptions {
   apiKey?: string | undefined;
   apiBaseURL?: string | undefined;
   awsRegion?: string | undefined;
+  awsAccessKey?: string | undefined;
+  awsSecretKey?: string | undefined;
   gcpRegion?: string | undefined;
   gcpProjectId?: string | undefined;
 }
@@ -74,7 +76,11 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
     if (!_bedrockCtor) {
       throw new Error('Bedrock provider not initialized. Call initLLMProvider("bedrock") first.');
     }
-    return new _bedrockCtor({ awsRegion: opts.awsRegion });
+    return new _bedrockCtor({
+      awsRegion: opts.awsRegion,
+      awsAccessKey: opts.awsAccessKey,
+      awsSecretKey: opts.awsSecretKey,
+    });
   }
 
   if (provider === 'vertex') {

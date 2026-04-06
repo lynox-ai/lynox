@@ -239,11 +239,20 @@ export class Engine {
     const apiKey = process.env['ANTHROPIC_API_KEY']
       ?? this.secretStore?.resolve('ANTHROPIC_API_KEY')
       ?? this.userConfig.api_key;
+    // BYOK: resolve AWS credentials from env > vault
+    const awsAccessKey = process.env['AWS_ACCESS_KEY_ID']
+      ?? this.secretStore?.resolve('AWS_ACCESS_KEY_ID')
+      ?? undefined;
+    const awsSecretKey = process.env['AWS_SECRET_ACCESS_KEY']
+      ?? this.secretStore?.resolve('AWS_SECRET_ACCESS_KEY')
+      ?? undefined;
     this.client = createLLMClient({
       provider: this.userConfig.provider,
       apiKey,
       apiBaseURL: this.userConfig.api_base_url,
       awsRegion: this.userConfig.aws_region,
+      awsAccessKey,
+      awsSecretKey,
       gcpRegion: this.userConfig.gcp_region,
       gcpProjectId: this.userConfig.gcp_project_id,
     });

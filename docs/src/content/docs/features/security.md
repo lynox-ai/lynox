@@ -9,7 +9,7 @@ lynox is designed for self-hosting. Your data stays on your machine, your API ke
 
 ## Bring Your Own Key (BYOK)
 
-lynox never proxies your API calls. Your Anthropic API key is used directly — there's no middleman, no data collection, no usage tracking.
+lynox never proxies your API calls. Your credentials talk directly to your chosen provider — Anthropic, AWS Bedrock, Google Vertex AI, or a custom proxy. There's no middleman, no data collection, no usage tracking. The setup wizard lets you choose your provider and enter credentials on first run. All credentials are stored encrypted in the local vault.
 
 ## Encrypted Vault
 

@@ -5,8 +5,8 @@ sidebar:
   order: 3
 ---
 
-:::note[Experimental]
-Alternative LLM providers (Bedrock, Vertex, Custom) are experimental. The default Anthropic provider is stable and recommended. If you encounter issues with alternative providers, please [report them](https://github.com/lynox-ai/lynox/issues).
+:::note[Multi-Provider BYOK]
+lynox supports multiple LLM providers out of the box. The **setup wizard** lets you choose your provider and enter credentials — stored encrypted in your local vault. You can switch providers anytime in **Settings → Config**.
 :::
 
 lynox stores all your data locally. Only the AI inference (the LLM request) leaves your machine. You choose where it goes.
@@ -15,7 +15,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 
 | | **Anthropic** | **AWS Bedrock** | **Google Vertex** | **Custom / Local** |
 |---|---|---|---|---|
-| **Status** | Stable | Experimental | Experimental | Experimental |
+| **Status** | Stable | Stable | Experimental | Stable |
 | **Setup** | API key | AWS account + IAM | GCP project + auth | Proxy URL |
 | **AI quality** | Claude (best) | Claude (same) | Claude (same) | Model-dependent |
 | | | | | |
@@ -79,15 +79,21 @@ Claude hosted in AWS EU regions. Your data never leaves the EU.
 1. Create an [AWS account](https://console.aws.amazon.com)
 2. Open **Amazon Bedrock** → **Model access** → enable Anthropic Claude models
 3. Create IAM credentials with `AmazonBedrockFullAccess` policy
-4. Install the SDK: `pnpm add @anthropic-ai/bedrock-sdk`
+4. Install the SDK: `pnpm add @anthropic-ai/bedrock-sdk` (pre-installed in Docker images)
 
-**Environment:**
+**Credentials (choose one):**
+
+**Web UI (recommended):** The setup wizard prompts for your AWS Access Key ID and Secret Access Key on first run. Stored encrypted in the local vault. You can also add them later in **Settings → Keys**.
+
+**Environment variables:**
 ```bash
 LYNOX_LLM_PROVIDER=bedrock
 AWS_REGION=eu-central-1
 AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
 ```
+
+Environment variables always override vault-stored credentials.
 
 **EU Data Residency:**
 
@@ -113,14 +119,19 @@ Claude hosted on Google Cloud. EU region available.
 **Setup:**
 1. Create a [GCP project](https://console.cloud.google.com)
 2. Enable **Vertex AI API** → activate Claude models in the Model Garden
-3. Authenticate: `gcloud auth application-default login`
-4. Install the SDK: `pnpm add @anthropic-ai/vertex-sdk`
+3. Create a service account with `roles/aiplatform.user` and download the JSON key
+4. Install the SDK: `pnpm add @anthropic-ai/vertex-sdk` (pre-installed in Docker images)
 
-**Environment:**
+**Credentials (choose one):**
+
+**Web UI:** The setup wizard prompts for your Service Account JSON on first run. Stored encrypted in the local vault (as `GCP_SERVICE_ACCOUNT_JSON`).
+
+**Environment variables:**
 ```bash
 LYNOX_LLM_PROVIDER=vertex
 GCP_REGION=europe-west1
 GCP_PROJECT_ID=my-project-123
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
 **EU region:** `europe-west1` (Belgium) — the only confirmed EU endpoint for Claude on Vertex.

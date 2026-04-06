@@ -7,13 +7,13 @@ sidebar:
 
 ## Prerequisites
 
-- **An Anthropic API Key** — [console.anthropic.com](https://console.anthropic.com/settings/keys)
+- **An LLM provider account** — one of:
+  - [Anthropic API Key](https://console.anthropic.com/settings/keys) (simplest)
+  - [AWS account with Bedrock](https://console.aws.amazon.com) (EU data residency)
+  - [GCP project with Vertex AI](https://console.cloud.google.com) (experimental)
+  - Custom proxy (LiteLLM, OpenRouter)
 
-Anthropic charges per usage — a typical business day costs **$1–5**. You can set spending limits in their console and in lynox.
-
-:::tip[Other LLM providers]
-lynox also supports **AWS Bedrock**, **Google Vertex AI**, and **Custom proxies** (e.g. LiteLLM). See [LLM Providers](/daily-use/llm-providers/) for details. Most users start with Anthropic — you can switch anytime.
-:::
+The setup wizard walks you through provider selection and credential entry on first run. Most users start with Anthropic — you can switch anytime in Settings. A typical business day costs **$1–5**.
 
 ## Install
 

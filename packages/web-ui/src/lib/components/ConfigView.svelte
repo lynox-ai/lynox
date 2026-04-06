@@ -287,10 +287,22 @@
 				<p class="text-xs text-text-muted mb-2">{t('config.provider_desc')}</p>
 				<select id="provider" bind:value={config.provider} class={inputClass}>
 					<option value="anthropic">{t('config.provider_anthropic')}</option>
-					<option value="bedrock">{t('config.provider_bedrock')} (experimental)</option>
+					<option value="bedrock">{t('config.provider_bedrock')}</option>
 					<option value="vertex">{t('config.provider_vertex')} (experimental)</option>
-					<option value="custom">{t('config.provider_custom')} (experimental)</option>
+					<option value="custom">{t('config.provider_custom')}</option>
 				</select>
+				<p class="text-xs text-text-muted mt-2">
+					{#if config.provider === 'bedrock'}
+						{t('config.credentials_hint_bedrock')}
+					{:else if config.provider === 'vertex'}
+						{t('config.credentials_hint_vertex')}
+					{:else if config.provider === 'custom'}
+						{t('config.credentials_hint_custom')}
+					{:else}
+						{t('config.credentials_hint_anthropic')}
+					{/if}
+					<a href="/app/settings/keys" class="text-accent-text hover:underline ml-1">{t('keys.title')}</a>
+				</p>
 			</div>
 
 			{#if config.provider === 'bedrock'}
