@@ -21,7 +21,7 @@
 		if (!window.PublicKeyCredential) return;
 
 		try {
-			const res = await fetch('/api/passkey', {
+			const res = await fetch('/auth/passkey', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ action: 'status' }),
@@ -46,7 +46,7 @@
 
 		try {
 			// 1. Get registration options
-			const startRes = await fetch('/api/passkey', {
+			const startRes = await fetch('/auth/passkey', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ action: 'register/start' }),
@@ -71,7 +71,7 @@
 				: /Windows/.test(ua) ? 'Windows'
 				: 'Device';
 
-			const verifyRes = await fetch('/api/passkey', {
+			const verifyRes = await fetch('/auth/passkey', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ action: 'register/complete', response: regResponse, deviceName }),

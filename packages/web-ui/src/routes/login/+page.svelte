@@ -41,7 +41,7 @@
 
 		try {
 			// 1. Get authentication options from control plane
-			const startRes = await fetch('/api/passkey', {
+			const startRes = await fetch('/auth/passkey', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ action: 'authenticate/start' }),
@@ -68,7 +68,7 @@
 			const authResponse = await startAuthentication({ optionsJSON: options });
 
 			// 3. Verify with control plane
-			const verifyRes = await fetch('/api/passkey', {
+			const verifyRes = await fetch('/auth/passkey', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ action: 'authenticate/complete', response: authResponse }),
