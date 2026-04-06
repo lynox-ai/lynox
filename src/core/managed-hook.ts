@@ -1,11 +1,11 @@
 /**
- * Managed hosting usage hook — reports token consumption to the control plane.
+ * Managed hosting usage hook — reports AI cost (USD cents) to the control plane.
  *
  * Only active when LYNOX_MANAGED_MODE is set (EU instances provisioned by
  * the managed hosting control plane). BYOK instances never load this.
  *
  * - onBeforeRun: blocks if cached `allowed` flag is false (hard cap)
- * - onAfterRun: queues usage and periodically flushes to control plane
+ * - onAfterRun: queues cost report and periodically flushes to control plane
  * - Periodic re-sync: refreshes `allowed` flag every 5 min when denied
  */
 
@@ -14,12 +14,12 @@ import type { LynoxHooks, RunContext } from './engine.js';
 interface UsageReport {
   run_id: string;
   model: string;
-  total_tokens: number;
+  cost_cents: number;
 }
 
 interface FlushResponse {
   accepted: number;
-  balance_tokens: number;
+  balance_cents: number;
   allowed: boolean;
 }
 
@@ -30,14 +30,10 @@ const RESYNC_INTERVAL_MS = 5 * 60_000; // Re-check credit status every 5 min whe
 const FLUSH_TIMEOUT_MS = 15_000;
 const SYNC_TIMEOUT_MS = 5_000;
 
-/** Blended cost estimate: ~$9/1M tokens (average across input+output, all model tiers). */
-const DEFAULT_USD_PER_TOKEN = 0.000009;
-
 export function createManagedHook(): LynoxHooks {
   const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] ?? '';
   const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '';
   const secret = process.env['LYNOX_HTTP_SECRET'] ?? '';
-  const usdPerToken = Number(process.env['LYNOX_MANAGED_USD_PER_TOKEN'] ?? '') || DEFAULT_USD_PER_TOKEN;
 
   if (!controlPlaneUrl || !instanceId || !secret) {
     throw new Error(
@@ -112,7 +108,7 @@ export function createManagedHook(): LynoxHooks {
       await syncStatus();
       process.stderr.write(`[lynox] Managed hook initialized: allowed=${allowed}, instance=${instanceId}\n`);
       flushTimer = setInterval(() => { void flush(); }, FLUSH_INTERVAL_MS);
-      // Periodic re-sync when denied — picks up credit top-ups
+      // Periodic re-sync when denied — picks up credit pack purchases
       resyncTimer = setInterval(() => {
         if (!allowed) void syncStatus();
       }, RESYNC_INTERVAL_MS);
@@ -121,7 +117,7 @@ export function createManagedHook(): LynoxHooks {
     onBeforeRun(_runId: string, _context: RunContext) {
       if (!allowed) {
         throw new Error(
-          'Token allowance exhausted. Purchase additional credits or wait for your next billing cycle.\n' +
+          'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
           'Manage your account at https://lynox.ai/managed/account',
         );
       }
@@ -130,12 +126,12 @@ export function createManagedHook(): LynoxHooks {
     onAfterRun(runId: string, costUsd: number, context: RunContext) {
       if (costUsd <= 0) return; // Skip zero-cost or erroneous runs
 
-      const estimatedTokens = Math.max(1, Math.round(costUsd / usdPerToken));
+      const costCents = Math.max(1, Math.round(costUsd * 100));
 
       pending.push({
         run_id: runId,
         model: context.modelTier,
-        total_tokens: estimatedTokens,
+        cost_cents: costCents,
       });
 
       // Drop oldest if over capacity
