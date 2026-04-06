@@ -593,10 +593,17 @@ export class Agent implements IAgent {
 
   private static readonly MAX_PARALLEL_TOOL_CALLS = 10;
 
-  /** Tools whose results may contain external/untrusted content — scanned for injection. */
-  private static readonly EXTERNAL_TOOLS = new Set([
-    'bash', 'http_request', 'web_research',
-    'google_gmail', 'google_sheets', 'google_drive', 'google_calendar', 'google_docs',
+  /** Tools whose results are guaranteed internal — NOT scanned for injection.
+   *  Everything else (MCP tools, bash, http, google, etc.) IS scanned. */
+  private static readonly INTERNAL_TOOLS = new Set([
+    'read_file', 'write_file', 'list_files', 'batch_files',
+    'memory_store', 'memory_recall', 'memory_update', 'memory_delete', 'memory_list', 'memory_promote',
+    'ask_user', 'ask_secret', 'spawn_agent',
+    'artifact_save', 'artifact_list', 'artifact_delete',
+    'task_create', 'task_update', 'task_list',
+    'api_setup', 'data_store',
+    'pipeline_run', 'pipeline_list',
+    'watch_url',
   ]);
 
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {
@@ -742,7 +749,7 @@ export class Agent implements IAgent {
       if (tc.name === 'ask_user') {
         masked = maskSecretPatterns(masked);
       }
-      const scanned = Agent.EXTERNAL_TOOLS.has(tc.name) ? scanToolResult(masked, tc.name) : masked;
+      const scanned = Agent.INTERNAL_TOOLS.has(tc.name) ? masked : scanToolResult(masked, tc.name);
 
       // Truncate oversized tool results to prevent context window waste
       const toolResultLimit = this.toolContext.userConfig?.max_tool_result_chars ?? Agent.DEFAULT_MAX_TOOL_RESULT_CHARS;
