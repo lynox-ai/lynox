@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
-const SESSION_MAX_AGE_S = 7 * 24 * 60 * 60; // 7 days
+export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60; // 30 days
 
 /** Derive a purpose-specific key so the raw secret is never used directly. */
 function deriveKey(secret: string, purpose: string): Buffer {
