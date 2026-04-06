@@ -13,11 +13,11 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 
 ## At a Glance
 
-| | **Anthropic** | **AWS Bedrock** | **Google Vertex** | **Custom / Local** |
+| | **Claude (Anthropic)** | **Claude (AWS Bedrock)** | **Claude (Vertex AI)** | **Custom Proxy** |
 |---|---|---|---|---|
-| **Status** | Stable | Stable | Experimental | Stable |
+| **Status** | Stable | Stable | Experimental | Experimental |
 | **Setup** | API key | AWS account + IAM | GCP project + auth | Proxy URL |
-| **AI quality** | Claude (best) | Claude (same) | Claude (same) | Model-dependent |
+| **AI quality** | Claude | Claude (same models) | Claude (same models) | Model-dependent |
 | | | | | |
 | **Features** | | | | |
 | Chat + Streaming | ✅ | ✅ | ✅ | ✅ |
@@ -42,9 +42,9 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | Infrastructure | — | — | — | GPU server ~€150/mo |
 | Typical monthly | €30–150 | €33–165 | €30–150 | €150 fixed |
 
-## Anthropic (Default)
+## Claude (Anthropic) — Default
 
-Direct connection to the Anthropic API. Simplest setup.
+Direct connection to the Anthropic API. Simplest setup, recommended for most users.
 
 ```json
 {
@@ -63,9 +63,9 @@ Direct connection to the Anthropic API. Simplest setup.
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-## AWS Bedrock
+## Claude (AWS Bedrock)
 
-Claude hosted in AWS EU regions. Your data never leaves the EU.
+Same Claude models, hosted in AWS EU regions. Your data never leaves the EU.
 
 ```json
 {
@@ -104,9 +104,9 @@ When `aws_region` starts with `eu-`, lynox auto-selects EU model IDs — you don
 **EU regions with Claude:**
 `eu-central-1` (Frankfurt), `eu-west-1` (Ireland), `eu-west-3` (Paris), `eu-north-1` (Stockholm), `eu-central-2` (Zurich), `eu-south-1` (Milan)
 
-## Google Vertex AI
+## Claude (Vertex AI) — Experimental
 
-Claude hosted on Google Cloud. EU region available.
+Same Claude models, hosted on Google Cloud. EU region available.
 
 ```json
 {
@@ -136,9 +136,9 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 
 **EU region:** `europe-west1` (Belgium) — the only confirmed EU endpoint for Claude on Vertex.
 
-## Custom / LiteLLM
+## Custom Proxy — Experimental
 
-Route requests through your own proxy to any model — including local ones via Ollama.
+Route requests through your own Anthropic-compatible proxy (e.g. LiteLLM).
 
 ```json
 {

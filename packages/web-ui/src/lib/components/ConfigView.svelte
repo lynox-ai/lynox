@@ -288,7 +288,7 @@
 				<select id="provider" bind:value={config.provider} class={inputClass}>
 					<option value="anthropic">{t('config.provider_anthropic')}</option>
 					<option value="bedrock">{t('config.provider_bedrock')}</option>
-					<option value="vertex">{t('config.provider_vertex')} (experimental)</option>
+					<option value="vertex">{t('config.provider_vertex')}</option>
 					<option value="custom">{t('config.provider_custom')}</option>
 				</select>
 				<p class="text-xs text-text-muted mt-2">

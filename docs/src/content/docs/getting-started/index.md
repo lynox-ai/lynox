@@ -7,11 +7,11 @@ sidebar:
 
 ## Prerequisites
 
-- **An LLM provider account** — one of:
-  - [Anthropic API Key](https://console.anthropic.com/settings/keys) (simplest)
-  - [AWS account with Bedrock](https://console.aws.amazon.com) (EU data residency)
-  - [GCP project with Vertex AI](https://console.cloud.google.com) (experimental)
-  - Custom proxy (LiteLLM, OpenRouter)
+- **A Claude API account** — all providers serve the same Claude models:
+  - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended, direct API
+  - [Claude (AWS Bedrock)](https://console.aws.amazon.com) — EU data residency
+  - [Claude (Vertex AI)](https://console.cloud.google.com) — experimental
+  - Custom Proxy (LiteLLM, OpenRouter) — experimental
 
 The setup wizard walks you through provider selection and credential entry on first run. Most users start with Anthropic — you can switch anytime in Settings. A typical business day costs **$1–5**.
 

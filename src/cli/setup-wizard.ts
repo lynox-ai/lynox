@@ -197,10 +197,10 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     stdout.write(`${DIM}  Where should AI requests be sent?${RESET}\n\n`);
     type ProviderChoice = 'anthropic' | 'bedrock' | 'vertex' | 'custom';
     const providerChoice = await select<ProviderChoice>([
-      { label: 'Anthropic (direct)', value: 'anthropic', hint: 'recommended' },
-      { label: 'AWS Bedrock (EU)', value: 'bedrock', hint: 'experimental' },
-      { label: 'Google Vertex AI', value: 'vertex', hint: 'experimental' },
-      { label: 'Custom / LiteLLM', value: 'custom', hint: 'experimental — own proxy' },
+      { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended' },
+      { label: 'Claude (AWS Bedrock)', value: 'bedrock', hint: 'EU data residency' },
+      { label: 'Claude (Vertex AI)', value: 'vertex', hint: 'experimental' },
+      { label: 'Custom Proxy', value: 'custom', hint: 'experimental' },
     ], { default: 0, rl: stdin.isTTY ? undefined : rl });
     const provider: ProviderChoice = providerChoice ?? 'anthropic';
 
@@ -249,7 +249,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       }
     } else if (provider === 'bedrock') {
       // ── AWS Bedrock ──
-      stdout.write(`\n  ${BOLD}AWS Bedrock${RESET} ${DIM}(experimental)${RESET}\n`);
+      stdout.write(`\n  ${BOLD}Claude (AWS Bedrock)${RESET}\n`);
       stdout.write(`${DIM}  Requires: AWS credentials (env vars or ~/.aws/credentials)${RESET}\n`);
       stdout.write(`${DIM}  Install SDK: pnpm add @anthropic-ai/bedrock-sdk${RESET}\n\n`);
       const regionChoice = await select([
@@ -267,7 +267,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       stdout.write(`  ${DIM}Credentials: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars${RESET}\n`);
     } else if (provider === 'vertex') {
       // ── Google Vertex AI ──
-      stdout.write(`\n  ${BOLD}Google Vertex AI${RESET} ${DIM}(experimental)${RESET}\n`);
+      stdout.write(`\n  ${BOLD}Claude (Vertex AI)${RESET} ${DIM}(experimental)${RESET}\n`);
       stdout.write(`${DIM}  Requires: gcloud auth application-default login${RESET}\n`);
       stdout.write(`${DIM}  Install SDK: pnpm add @anthropic-ai/vertex-sdk${RESET}\n\n`);
       gcpRegion = 'europe-west1';
@@ -280,7 +280,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       }
     } else {
       // ── Custom / LiteLLM ──
-      stdout.write(`\n  ${BOLD}Custom Provider${RESET} ${DIM}(experimental)${RESET}\n`);
+      stdout.write(`\n  ${BOLD}Custom Proxy${RESET} ${DIM}(experimental)${RESET}\n`);
       stdout.write(`${DIM}  Point to any Anthropic-compatible proxy (LiteLLM, OpenRouter, etc.)${RESET}\n`);
       const input = await rl.question(`  ${BOLD}Proxy URL:${RESET} `);
       apiBaseUrl = input.trim() || 'http://localhost:4000';
@@ -325,10 +325,10 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     reloadConfig();
 
     // ── Summary ─────────────────────────────────────────────────
-    const providerLabel = provider === 'anthropic' ? 'Anthropic'
-      : provider === 'bedrock' ? `Bedrock (${awsRegion})`
-      : provider === 'vertex' ? `Vertex AI (${gcpRegion})`
-      : `Custom (${apiBaseUrl})`;
+    const providerLabel = provider === 'anthropic' ? 'Claude (Anthropic)'
+      : provider === 'bedrock' ? `Claude (AWS Bedrock, ${awsRegion})`
+      : provider === 'vertex' ? `Claude (Vertex AI, ${gcpRegion})`
+      : `Custom Proxy (${apiBaseUrl})`;
     stdout.write(`\n  ${GREEN}${BOLD}✓ Setup complete${RESET}\n\n`);
     stdout.write(`  Provider       ${GREEN}✓${RESET} ${providerLabel}\n`);
     stdout.write(`  Encryption     ${GREEN}✓${RESET}\n`);

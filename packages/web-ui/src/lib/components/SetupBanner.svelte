@@ -138,9 +138,9 @@
 	}
 
 	const providers: { id: Provider; label: string; desc: string }[] = [
-		{ id: 'anthropic', label: 'Anthropic', desc: 'setup.provider_anthropic_desc' },
-		{ id: 'bedrock', label: 'AWS Bedrock', desc: 'setup.provider_bedrock_desc' },
-		{ id: 'vertex', label: 'Vertex AI', desc: 'setup.provider_vertex_desc' },
+		{ id: 'anthropic', label: 'Claude (Anthropic)', desc: 'setup.provider_anthropic_desc' },
+		{ id: 'bedrock', label: 'Claude (AWS Bedrock)', desc: 'setup.provider_bedrock_desc' },
+		{ id: 'vertex', label: 'Claude (Vertex AI)', desc: 'setup.provider_vertex_desc' },
 		{ id: 'custom', label: 'Custom Proxy', desc: 'setup.provider_custom_desc' },
 	];
 
