@@ -14,9 +14,7 @@ If your phone is on the same WiFi as lynox, this takes 10 seconds:
 1. Open **Settings → Mobile Access** (or tap the phone icon in the status bar)
 2. Scan the QR code with your phone camera
 3. You're logged in — no token to type
-4. **Install as PWA:** iOS: Share → Add to Home Screen. Android: Menu → Install app.
-
-The QR code contains a one-time login link (valid 5 minutes, single use). Your session lasts 7 days.
+The QR code contains a one-time login link (valid 5 minutes, single use). Your session lasts 30 days.
 
 ## From anywhere
 
@@ -42,7 +40,7 @@ sudo tailscale up
 
 Your Tailscale IP is shown after `tailscale up` or in the Tailscale app. It looks like `100.x.y.z` and never changes.
 
-Then use the QR code in Settings → Mobile Access to log in, or enter your access token manually.
+Then use the QR code in Settings → Mobile Access to log in.
 
 **Why Tailscale:**
 - 2 minute setup

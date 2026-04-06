@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-The Web UI is where you interact with lynox day-to-day. It runs at [localhost:3000](http://localhost:3000) and works as a PWA — install it on your device for a native app feel.
+The Web UI is where you interact with lynox day-to-day. It runs at [localhost:3000](http://localhost:3000).
 
 **Phone access:** Open Settings → Mobile Access, scan the QR code with your phone — you're logged in instantly. For access outside your WiFi, see [Remote Access](/daily-use/remote-access/).
 
@@ -86,7 +86,7 @@ Access via the gear icon or navigate to `/app/settings/`.
 
 | Section | What it does |
 |---------|-------------|
-| **Mobile Access** | QR code to connect your phone — scan once, auto-login, install as PWA |
+| **Mobile Access** | QR code to connect your phone — scan once, auto-login |
 | **Config** | Model selection, cost limits, greeting, memory settings |
 | **Keys** | Manage your encrypted vault — API keys and secrets. Secrets can also be added via the secure `ask_secret` dialog in chat |
 | **Integrations** | Connect Telegram, Google Workspace |

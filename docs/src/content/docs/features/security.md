@@ -24,10 +24,14 @@ Set `LYNOX_HTTP_SECRET` to enable authentication. The Web UI shows a token login
 Managed instances use email-based one-time codes instead of permanent tokens:
 
 1. **Email OTP** — Enter your email, receive a 6-digit code, sign in. No token to save or lose.
-2. **Passkeys** — After your first login, set up Face ID, Touch ID, or a security key for instant login. OTP remains as fallback.
-3. **Login notifications** — Every login triggers an email with device and IP information.
+2. **Passkeys** — After your first login, a prompt offers to set up Face ID, Touch ID, or a security key. Next time you log in, just confirm with your biometric — no email code needed.
+3. **Login notifications** — Every login triggers an email with timestamp, device, and IP address. If you didn't log in, contact support immediately.
 
-Sessions last 30 days. Passkey credentials use WebAuthn (FIDO2) with the `lynox.cloud` relying party.
+Sessions last 30 days. Passkey credentials use WebAuthn (FIDO2) with the `lynox.cloud` relying party. You can always fall back to email OTP if your passkey device isn't available.
+
+### Logout
+
+Click **Abmelden / Log out** in the sidebar (below Settings) to end your session. This clears the session cookie and redirects to the login page.
 
 ## Encrypted Vault
 
