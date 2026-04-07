@@ -187,7 +187,7 @@ export class Engine {
     }
     this.config = config;
     // Always create standard Anthropic client in constructor.
-    // For bedrock/vertex, init() will load the SDK and recreate.
+    // For bedrock, init() will load the SDK and recreate.
     this.client = createLLMClient({
       apiKey: this.userConfig.api_key,
       apiBaseURL: this.userConfig.api_base_url,
@@ -211,7 +211,7 @@ export class Engine {
     if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase || newProvider !== oldProvider) {
       // Provider switch: load new SDK if needed
       if (newProvider && newProvider !== oldProvider) {
-        if (newProvider === 'bedrock' || newProvider === 'vertex') {
+        if (newProvider === 'bedrock') {
           await initLLMProvider(newProvider);
         } else {
           // anthropic / custom — just update active provider, no SDK loading
@@ -257,8 +257,6 @@ export class Engine {
       awsAccessKey,
       awsSecretKey,
       awsSessionToken,
-      gcpRegion: this.userConfig.gcp_region,
-      gcpProjectId: this.userConfig.gcp_project_id,
     });
   }
 
@@ -266,17 +264,15 @@ export class Engine {
     // Activate debug logging early (before any channel publishing)
     initDebugSubscriber();
 
-    // Initialize LLM provider SDK if using bedrock/vertex/custom
+    // Initialize LLM provider SDK if using bedrock/custom
     const provider = this.userConfig.provider;
     if (provider && provider !== 'anthropic') {
-      if (provider === 'bedrock' || provider === 'vertex') {
+      if (provider === 'bedrock') {
         await initLLMProvider(provider);
-        if (provider === 'bedrock') {
-          // Auto-detect EU from region or explicit config
-          const region = this.userConfig.aws_region ?? process.env['AWS_REGION'] ?? '';
-          const isEu = this.userConfig.bedrock_eu_only || region.startsWith('eu-');
-          setBedrockEuOnly(isEu);
-        }
+        // Auto-detect EU from region or explicit config
+        const region = this.userConfig.aws_region ?? process.env['AWS_REGION'] ?? '';
+        const isEu = this.userConfig.bedrock_eu_only || region.startsWith('eu-');
+        setBedrockEuOnly(isEu);
         this._recreateClient(); // Recreate with correct SDK now that module is loaded
       } else if (provider === 'custom') {
         // Custom provider (LiteLLM etc.) uses standard Anthropic SDK with api_base_url
@@ -806,14 +802,12 @@ export class Engine {
   getTaskManager(): import('./task-manager.js').TaskManager | null { return this._taskManager; }
   getDataStore(): DataStore | null { return this._dataStore; }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
-  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; awsRegion?: string | undefined; gcpRegion?: string | undefined; gcpProjectId?: string | undefined } {
+  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; awsRegion?: string | undefined } {
     return {
       apiKey: this.userConfig.api_key,
       apiBaseURL: this.userConfig.api_base_url,
       provider: this.userConfig.provider,
       awsRegion: this.userConfig.aws_region,
-      gcpRegion: this.userConfig.gcp_region,
-      gcpProjectId: this.userConfig.gcp_project_id,
     };
   }
   getBatchIndex(): BatchIndex { return this.batchIndex; }

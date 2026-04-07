@@ -4,26 +4,24 @@
  * Supports three providers:
  *   - anthropic (default): direct Anthropic API
  *   - bedrock: AWS Bedrock (requires @anthropic-ai/bedrock-sdk)
- *   - vertex: Google Vertex AI (requires @anthropic-ai/vertex-sdk)
+ *   - custom: LiteLLM or other Anthropic-compatible proxy
  *
- * For bedrock/vertex, call `initLLMProvider()` once at startup (async)
+ * For bedrock, call `initLLMProvider()` once at startup (async)
  * before calling `createLLMClient()` (sync).
  */
 import Anthropic from '@anthropic-ai/sdk';
 import type { LLMProvider } from '../types/index.js';
 
-// Cached dynamic module references — loaded once via initLLMProvider()
+// Cached dynamic module reference — loaded once via initLLMProvider()
 type BedrockCtor = new (opts: { awsRegion?: string | undefined; awsAccessKey?: string | undefined; awsSecretKey?: string | undefined; awsSessionToken?: string | undefined }) => Anthropic;
-type VertexCtor = new (opts: { region?: string | undefined; projectId?: string | undefined }) => Anthropic;
 
 let _bedrockCtor: BedrockCtor | null = null;
-let _vertexCtor: VertexCtor | null = null;
 let _activeProvider: LLMProvider = 'anthropic';
 let _bedrockEuOnly = false;
 
 /**
  * Load the provider SDK module. Must be called before `createLLMClient()`
- * when using bedrock or vertex. Safe to call multiple times.
+ * when using bedrock. Safe to call multiple times.
  */
 export async function initLLMProvider(provider: LLMProvider): Promise<void> {
   _activeProvider = provider;
@@ -40,18 +38,6 @@ export async function initLLMProvider(provider: LLMProvider): Promise<void> {
       );
     }
   }
-  if (provider === 'vertex' && !_vertexCtor) {
-    try {
-      const mod = await import('@anthropic-ai/vertex-sdk');
-      _vertexCtor = (mod.default ?? mod.AnthropicVertex) as VertexCtor;
-    } catch {
-      throw new Error(
-        'Vertex provider requires @anthropic-ai/vertex-sdk. Install it with:\n' +
-        '  pnpm add @anthropic-ai/vertex-sdk\n' +
-        'Then configure GCP credentials (gcloud auth application-default login).',
-      );
-    }
-  }
 }
 
 export interface LLMClientOptions {
@@ -62,13 +48,11 @@ export interface LLMClientOptions {
   awsAccessKey?: string | undefined;
   awsSecretKey?: string | undefined;
   awsSessionToken?: string | undefined;
-  gcpRegion?: string | undefined;
-  gcpProjectId?: string | undefined;
 }
 
 /**
  * Create an Anthropic-compatible client for the configured provider.
- * Returns the base Anthropic type — bedrock/vertex SDKs extend it.
+ * Returns the base Anthropic type — bedrock SDK extends it.
  */
 export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
   const provider = opts.provider ?? _activeProvider;
@@ -83,13 +67,6 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
       awsSecretKey: opts.awsSecretKey,
       awsSessionToken: opts.awsSessionToken,
     });
-  }
-
-  if (provider === 'vertex') {
-    if (!_vertexCtor) {
-      throw new Error('Vertex provider not initialized. Call initLLMProvider("vertex") first.');
-    }
-    return new _vertexCtor({ region: opts.gcpRegion, projectId: opts.gcpProjectId });
   }
 
   // Standard Anthropic API

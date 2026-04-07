@@ -2,7 +2,7 @@
 
 export type ModelTier = 'opus' | 'sonnet' | 'haiku';
 
-export type LLMProvider = 'anthropic' | 'bedrock' | 'vertex' | 'custom';
+export type LLMProvider = 'anthropic' | 'bedrock' | 'custom';
 
 export const MODEL_MAP: Record<ModelTier, string> = {
   'opus':   'claude-opus-4-6',
@@ -24,16 +24,9 @@ export const BEDROCK_EU_MODEL_MAP: Record<ModelTier, string> = {
   'haiku':  'eu.anthropic.claude-haiku-4-5-20251001-v1:0',
 };
 
-export const VERTEX_MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'claude-opus-4-6',
-  'sonnet': 'claude-sonnet-4-6',
-  'haiku':  'claude-haiku-4-5@20251001',
-};
-
 const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom'>, Record<ModelTier, string>> = {
   anthropic: MODEL_MAP,
   bedrock: BEDROCK_MODEL_MAP,
-  vertex: VERTEX_MODEL_MAP,
 };
 
 /**
@@ -53,7 +46,6 @@ export function getModelId(tier: ModelTier, provider: LLMProvider = 'anthropic',
  * Normalize a provider-specific model ID to its base Anthropic model ID.
  * E.g. 'eu.anthropic.claude-sonnet-4-6' → 'claude-sonnet-4-6'
  *      'us.anthropic.claude-opus-4-6-v1' → 'claude-opus-4-6'
- *      'claude-haiku-4-5@20251001' → 'claude-haiku-4-5-20251001' (Vertex)
  * Returns the input unchanged if already a base model ID or tier alias.
  */
 export function normalizeModelId(model: string): string {
@@ -61,8 +53,6 @@ export function normalizeModelId(model: string): string {
   let normalized = model.replace(/^(?:eu|us)\.anthropic\./, '');
   // Strip Bedrock version suffix: '-v1', '-v1:0'
   normalized = normalized.replace(/-v\d+(?::\d+)?$/, '');
-  // Vertex uses @ instead of - for date suffix: 'claude-haiku-4-5@20251001'
-  normalized = normalized.replace(/@(\d{8})/, '-$1');
   return normalized;
 }
 
@@ -99,17 +89,17 @@ const _MAX_CONTINUATIONS: Record<string, number> = {
   'haiku':   5,
 };
 
-/** Look up context window size. Normalizes Bedrock/Vertex model IDs automatically. */
+/** Look up context window size. Normalizes Bedrock model IDs automatically. */
 export function getContextWindow(model: string): number {
   return _CONTEXT_WINDOW[model] ?? _CONTEXT_WINDOW[normalizeModelId(model)] ?? 200_000;
 }
 
-/** Look up default max output tokens. Normalizes Bedrock/Vertex model IDs automatically. */
+/** Look up default max output tokens. Normalizes Bedrock model IDs automatically. */
 export function getDefaultMaxTokens(model: string): number {
   return _DEFAULT_MAX_TOKENS[model] ?? _DEFAULT_MAX_TOKENS[normalizeModelId(model)] ?? 16_000;
 }
 
-/** Look up max continuation attempts. Normalizes Bedrock/Vertex model IDs automatically. */
+/** Look up max continuation attempts. Normalizes Bedrock model IDs automatically. */
 export function getMaxContinuations(model: string): number {
   return _MAX_CONTINUATIONS[model] ?? _MAX_CONTINUATIONS[normalizeModelId(model)] ?? 10;
 }

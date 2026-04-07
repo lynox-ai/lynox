@@ -46,18 +46,16 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 
 ## Environment Variables
 
-`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For alternative providers (Bedrock, Vertex, Custom), see [LLM Providers](/daily-use/llm-providers/). Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
+`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For alternative providers (Bedrock, Custom), see [LLM Providers](/daily-use/llm-providers/). Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `ANTHROPIC_API_KEY` | Recommended | Anthropic API key (browse mode without it) |
 | `ANTHROPIC_BASE_URL` | No | Custom API endpoint (for LiteLLM/proxies) |
-| `LYNOX_LLM_PROVIDER` | No | `anthropic` (default), `bedrock`, `vertex`, `custom` |
+| `LYNOX_LLM_PROVIDER` | No | `anthropic` (default), `bedrock`, `custom` |
 | `AWS_REGION` | Bedrock only | AWS region (e.g. `eu-central-1`) |
 | `AWS_ACCESS_KEY_ID` | Bedrock only | AWS IAM access key |
 | `AWS_SECRET_ACCESS_KEY` | Bedrock only | AWS IAM secret key |
-| `GCP_REGION` | Vertex only | GCP region (e.g. `europe-west1`) |
-| `GCP_PROJECT_ID` | Vertex only | GCP project ID |
 | `LYNOX_VAULT_KEY` | Recommended | Encryption key for secrets at rest |
 | `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
 | `LYNOX_MCP_SECRET` | Production | MCP HTTP bearer token |

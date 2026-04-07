@@ -43,7 +43,7 @@ function mockReadline(answers: string[]): ReturnType<typeof createInterface> {
 }
 
 // New answer sequence (provider + credentials wizard):
-// 1. Provider selection (1=Anthropic, 2=Bedrock, 3=Vertex, 4=Custom)
+// 1. Provider selection (1=Anthropic, 2=Bedrock, 3=Custom)
 // 2. API key (for Anthropic) or region/URL (for others)
 // (Encryption = always on, Accuracy = always sonnet — no prompts)
 
@@ -169,7 +169,7 @@ describe('setup-wizard', () => {
 
   it('saves custom provider config with URL', async () => {
     const rl = mockReadline([
-      '4',                        // select Custom
+      '3',                        // select Custom
       'http://localhost:4000',    // proxy URL
     ]);
 

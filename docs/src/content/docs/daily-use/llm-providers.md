@@ -7,8 +7,6 @@ sidebar:
 
 :::note[Multi-Provider BYOK]
 lynox supports multiple LLM providers out of the box. The **installer** lets you choose your provider and enter credentials — stored encrypted in your local vault. You can switch providers anytime in **Settings → Config**.
-
-*Vertex AI support has been removed from the UI. If you need it, set `"provider": "vertex"` manually in config.json — the SDK integration still works.*
 :::
 
 lynox stores all your data locally. Only the AI inference (the LLM request) leaves your machine. You choose where it goes.
@@ -171,7 +169,7 @@ For maximum data control, run lynox on the same cloud as your LLM provider — a
 lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/daily-use/docker/) for container configuration.
 
 :::caution
-Cloud deployment guides for AWS ECS and GCP Cloud Run are planned but not yet available. The Docker image works on any container platform — use your standard deployment process.
+A cloud deployment guide for AWS ECS is planned but not yet available. The Docker image works on any container platform — use your standard deployment process.
 :::
 
 ## Changing Providers

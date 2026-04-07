@@ -791,8 +791,6 @@ export class Session {
       apiBaseURL: userConfig.api_base_url,
       provider: userConfig.provider,
       awsRegion: userConfig.aws_region,
-      gcpRegion: userConfig.gcp_region,
-      gcpProjectId: userConfig.gcp_project_id,
       briefing: this._briefingConsumed ? undefined : this.briefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,

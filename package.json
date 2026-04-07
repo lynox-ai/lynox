@@ -92,14 +92,10 @@
     }
   },
   "peerDependencies": {
-    "@anthropic-ai/bedrock-sdk": ">=0.15.0",
-    "@anthropic-ai/vertex-sdk": ">=0.10.0"
+    "@anthropic-ai/bedrock-sdk": ">=0.15.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/bedrock-sdk": {
-      "optional": true
-    },
-    "@anthropic-ai/vertex-sdk": {
       "optional": true
     }
   },

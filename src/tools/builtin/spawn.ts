@@ -135,8 +135,6 @@ async function executeThinker(
     apiBaseURL: userConfig.api_base_url,
     provider: userConfig.provider,
     awsRegion: userConfig.aws_region,
-    gcpRegion: userConfig.gcp_region,
-    gcpProjectId: userConfig.gcp_project_id,
   });
 
   // Track child for abort propagation

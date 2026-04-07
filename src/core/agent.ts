@@ -57,7 +57,7 @@ export class Agent implements IAgent {
   readonly spawnDepth: number;
 
   private readonly client: Anthropic;
-  /** True for bedrock/vertex/custom — strips top-level cache_control + eager_input_streaming + web_search + MCP */
+  /** True for bedrock/custom — strips top-level cache_control + eager_input_streaming + web_search + MCP */
   private readonly isNonDirectAnthropic: boolean;
   /** True only for custom (non-Claude) — additionally strips betas, block-level cache_control, thinking, effort */
   private readonly isCustomProxy: boolean;
@@ -114,7 +114,7 @@ export class Agent implements IAgent {
     this.systemPrompt = config.systemPrompt;
     // Provider capability detection:
     //   anthropic:       all features
-    //   bedrock/vertex:  Claude features (thinking, effort, betas, block cache_control) but no top-level cache_control, web_search, MCP, eager_input_streaming
+    //   bedrock:         Claude features (thinking, effort, betas, block cache_control) but no top-level cache_control, web_search, MCP, eager_input_streaming
     //   custom:          basic only (chat, streaming, tool calling)
     const activeProvider = config.provider ?? getActiveProvider();
     this.isNonDirectAnthropic = activeProvider !== 'anthropic';
@@ -155,8 +155,6 @@ export class Agent implements IAgent {
       apiKey: config.apiKey,
       apiBaseURL: config.apiBaseURL,
       awsRegion: config.awsRegion,
-      gcpRegion: config.gcpRegion,
-      gcpProjectId: config.gcpProjectId,
     });
   }
 
@@ -443,7 +441,7 @@ export class Agent implements IAgent {
     const systemBlocks = this._buildSystemPrompt();
     const thinkingEnabled = this.thinking.type !== 'disabled';
     const thinkingConfig: BetaThinkingConfigParam = this.thinking as BetaThinkingConfigParam;
-    // web_search is an Anthropic-direct-only server-side tool — not supported on Bedrock, Vertex, or custom.
+    // web_search is an Anthropic-direct-only server-side tool — not supported on Bedrock or custom.
     // Disabled when web_research (SearXNG/Tavily) is registered to avoid redundant search tools.
     const hasWebResearch = this.tools.some(t => t.definition.name === 'web_research');
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch
@@ -455,7 +453,7 @@ export class Agent implements IAgent {
         .map(t => t.definition),
       ...builtinTools,
     ];
-    // Strip eager_input_streaming for non-direct-Anthropic providers (Bedrock/Vertex/Custom don't support it)
+    // Strip eager_input_streaming for non-direct-Anthropic providers (Bedrock/Custom don't support it)
     const toolsDef = !this.isNonDirectAnthropic
       ? rawTools
       : rawTools.map(t => {
@@ -504,11 +502,11 @@ export class Agent implements IAgent {
           max_tokens: this.maxTokens,
           ...(thinkingEnabled ? { thinking: thinkingConfig } : {}),
           ...(this.effort ? { output_config: { effort: this.effort } } : {}),
-          // Top-level cache_control: Anthropic-direct only (Bedrock/Vertex reject it)
+          // Top-level cache_control: Anthropic-direct only (Bedrock rejects it)
           ...(this.isNonDirectAnthropic ? {} : { cache_control: { type: 'ephemeral' as const } }),
           system: systemBlocks,
           messages: this.messages,
-          // Betas: supported on Anthropic + Bedrock + Vertex, not on custom proxies
+          // Betas: supported on Anthropic + Bedrock, not on custom proxies
           ...(this.isCustomProxy ? {} : { betas: [...LYNOX_BETAS] }),
           tools: toolsDef,
           ...(this.mcpServers ? { mcp_servers: this.mcpServers } : {}),
@@ -549,7 +547,7 @@ export class Agent implements IAgent {
 
   private _buildSystemPrompt(): Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> {
     const blocks: Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> = [];
-    // Block-level cache_control: supported on Anthropic + Bedrock + Vertex, not on custom proxies
+    // Block-level cache_control: supported on Anthropic + Bedrock, not on custom proxies
     const cc = this.isCustomProxy ? undefined : { type: 'ephemeral' as const };
 
     const staticPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;

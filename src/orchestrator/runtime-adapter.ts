@@ -132,8 +132,6 @@ export async function spawnViaAgent(
     apiBaseURL: config.api_base_url,
     provider: config.provider,
     awsRegion: config.aws_region,
-    gcpRegion: config.gcp_region,
-    gcpProjectId: config.gcp_project_id,
     preApproval,
     autonomy,
     onStream: (event: StreamEvent) => {
@@ -218,8 +216,6 @@ export async function spawnInline(
     apiBaseURL: config.api_base_url,
     provider: config.provider,
     awsRegion: config.aws_region,
-    gcpRegion: config.gcp_region,
-    gcpProjectId: config.gcp_project_id,
     preApproval,
     autonomy,
     toolContext: parentToolContext,

@@ -16,13 +16,3 @@ declare module '@anthropic-ai/bedrock-sdk' {
   export default AnthropicBedrock;
 }
 
-declare module '@anthropic-ai/vertex-sdk' {
-  import type Anthropic from '@anthropic-ai/sdk';
-  export class AnthropicVertex extends Anthropic {
-    constructor(opts?: {
-      region?: string | undefined;
-      projectId?: string | undefined;
-    });
-  }
-  export default AnthropicVertex;
-}

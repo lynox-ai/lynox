@@ -1164,10 +1164,6 @@ export class LynoxHTTPApi {
         // Bedrock needs AWS credentials — from vault or env
         llmConfigured = (names.has('AWS_ACCESS_KEY_ID') && names.has('AWS_SECRET_ACCESS_KEY'))
           || (!!process.env['AWS_ACCESS_KEY_ID'] && !!process.env['AWS_SECRET_ACCESS_KEY']);
-      } else if (provider === 'vertex') {
-        // Vertex needs GCP service account — from vault or ADC
-        llmConfigured = names.has('GCP_SERVICE_ACCOUNT_JSON')
-          || !!process.env['GOOGLE_APPLICATION_CREDENTIALS'];
       } else if (provider === 'custom') {
         // Custom needs api_base_url configured
         llmConfigured = !!(userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL']);
@@ -1277,7 +1273,7 @@ export class LynoxHTTPApi {
       }
       // Managed mode: block provider/credential changes (breaks billing + isolation)
       if (process.env['LYNOX_MANAGED_MODE']) {
-        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'aws_region', 'bedrock_eu_only', 'gcp_region', 'gcp_project_id'];
+        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'aws_region', 'bedrock_eu_only'];
         const attempted = LOCKED_FIELDS.filter(f => f in (parsed.data as Record<string, unknown>));
         if (attempted.length > 0) {
           errorResponse(res, 403, `Managed instance: cannot change ${attempted.join(', ')}`);
