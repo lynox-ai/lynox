@@ -99,6 +99,19 @@
 	async function loadSecurityState() {
 		if (typeof localStorage === 'undefined') return;
 		if (localStorage.getItem('lynox-vault-checkpoint')) return;
+
+		// Skip blocking modal for managed instances — vault is server-managed
+		try {
+			const cfgRes = await fetch(`${getApiBase()}/config`);
+			if (cfgRes.ok) {
+				const cfg = (await cfgRes.json()) as Record<string, unknown>;
+				if (cfg['managed']) {
+					localStorage.setItem('lynox-vault-checkpoint', '1');
+					return;
+				}
+			}
+		} catch { /* non-critical */ }
+
 		try {
 			const res = await fetch(`${getApiBase()}/vault/key?reveal=true`);
 			if (!res.ok) return;
@@ -1475,8 +1488,8 @@
 </div>
 
 {#if showVaultCheckpoint && vaultCheckpointKey}
-	<div class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center" role="dialog" aria-modal="true" tabindex="-1"
-		onkeydown={(e) => { if (e.key === 'Escape') e.preventDefault(); }}
+	<div class="fixed inset-0 z-[9998] bg-black/40 flex items-center justify-center" role="dialog" aria-modal="true" tabindex="-1"
+		onkeydown={(e) => { if (e.key === 'Escape') confirmVaultCheckpoint(); }}
 	>
 		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-md mx-4 space-y-4">
 			<div>
@@ -1494,10 +1507,15 @@
 					{t('config.copy')}
 				</button>
 			</div>
-			<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
-			<button onclick={confirmVaultCheckpoint} class="w-full rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90">
-				{t('onboard.vault_confirm_btn')}
-			</button>
+			<p class="text-xs text-text-muted">{t('config.vault_key_hint')}</p>
+			<div class="flex gap-2">
+				<button onclick={confirmVaultCheckpoint} class="flex-1 rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90">
+					{t('onboard.vault_confirm_btn')}
+				</button>
+				<button onclick={confirmVaultCheckpoint} class="rounded-[var(--radius-sm)] border border-border px-4 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all">
+					{t('onboard.vault_skip_btn')}
+				</button>
+			</div>
 		</div>
 	</div>
 {/if}

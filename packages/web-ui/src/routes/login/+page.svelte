@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { onDestroy } from 'svelte';
 	import type { ActionData, PageData } from './$types.js';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
@@ -10,6 +11,25 @@
 	let localError = $state<string | null>(null);
 	let _emailOverride = $state<string | null>(null);
 	let submittedEmail = $derived(_emailOverride ?? data.customerEmail ?? '');
+
+	// OTP countdown timer (10 min = 600s)
+	let otpCountdown = $state(0);
+	let otpTimer: ReturnType<typeof setInterval> | null = null;
+
+	function startOtpCountdown() {
+		otpCountdown = 600;
+		if (otpTimer) clearInterval(otpTimer);
+		otpTimer = setInterval(() => {
+			otpCountdown--;
+			if (otpCountdown <= 0 && otpTimer) {
+				clearInterval(otpTimer);
+				otpTimer = null;
+			}
+		}, 1000);
+	}
+
+	const otpMinutes = $derived(Math.floor(otpCountdown / 60));
+	const otpSeconds = $derived(otpCountdown % 60);
 
 	// Passkey state
 	let passkeyLoading = $state(false);
@@ -24,6 +44,7 @@
 			}
 			localError = null;
 			otpStep = 'code';
+			startOtpCountdown();
 		} else if (form && 'error' in form && typeof form.error === 'string') {
 			localError = form.error;
 		}
@@ -108,6 +129,8 @@
 	}
 
 	const isDE = typeof navigator !== 'undefined' && navigator.language.startsWith('de');
+
+	onDestroy(() => { if (otpTimer) clearInterval(otpTimer); });
 </script>
 
 <svelte:head>
@@ -252,6 +275,16 @@
 								? `Wir haben einen Code an ${submittedEmail} gesendet.`
 								: `We sent a code to ${submittedEmail}.`}
 						</p>
+
+						{#if otpCountdown > 0}
+							<p class="text-xs text-text-subtle text-center tabular-nums">
+								{isDE ? 'Code gültig für' : 'Code valid for'} {otpMinutes}:{String(otpSeconds).padStart(2, '0')}
+							</p>
+						{:else if otpCountdown === 0 && otpStep === 'code'}
+							<p class="text-xs text-warning text-center">
+								{isDE ? 'Code abgelaufen — fordere einen neuen an.' : 'Code expired — request a new one.'}
+							</p>
+						{/if}
 
 						<input type="hidden" name="email" value={submittedEmail} />
 
