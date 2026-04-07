@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
+import { getActiveProvider } from '../core/llm-client.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import type { StreamEvent } from '../types/index.js';
@@ -45,6 +46,7 @@ interface DynamicRoute {
 interface ProviderStatus {
   indicator: 'none' | 'minor' | 'major' | 'critical' | 'unknown';
   description: string;
+  provider?: string;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -652,11 +654,34 @@ export class LynoxHTTPApi {
       return this.providerStatusCache.data;
     }
 
-    const fallback: ProviderStatus = { indicator: 'unknown', description: 'Status unavailable' };
+    const provider = getActiveProvider();
+
+    // Custom providers have no public status page — rely solely on run history
+    if (provider === 'custom') {
+      const data = this.getRunBasedStatus(now, 'Custom');
+      this.providerStatusCache = { data, expiresAt: now + 60_000 };
+      return data;
+    }
+
+    // Bedrock uses AWS health dashboard
+    const statusUrl = provider === 'bedrock'
+      ? 'https://health.aws.amazon.com/health/status'
+      : 'https://status.anthropic.com/api/v2/status.json';
+    const providerLabel = provider === 'bedrock' ? 'AWS Bedrock' : 'Anthropic';
+
+    // AWS health dashboard doesn't offer a simple JSON API like Anthropic's statuspage,
+    // so for bedrock we fall back to run-history-based status
+    if (provider === 'bedrock') {
+      const data = this.getRunBasedStatus(now, providerLabel);
+      this.providerStatusCache = { data, expiresAt: now + 60_000 };
+      return data;
+    }
+
+    const fallback: ProviderStatus = { indicator: 'unknown', description: 'Status unavailable', provider: providerLabel };
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch('https://status.anthropic.com/api/v2/status.json', {
+      const res = await fetch(statusUrl, {
         signal: controller.signal,
       });
       clearTimeout(timeout);
@@ -691,13 +716,34 @@ export class LynoxHTTPApi {
         }
       }
 
-      const data: ProviderStatus = { indicator: resolvedIndicator, description };
+      const data: ProviderStatus = { indicator: resolvedIndicator, description, provider: providerLabel };
       this.providerStatusCache = { data, expiresAt: now + 60_000 };
       return data;
     } catch {
       this.providerStatusCache = { data: fallback, expiresAt: now + 30_000 };
       return fallback;
     }
+  }
+
+  /** Derive provider status from recent run history (for providers without a public status page). */
+  private getRunBasedStatus(now: number, providerLabel: string): ProviderStatus {
+    const history = this.engine?.getRunHistory();
+    if (!history) return { indicator: 'unknown', description: 'No run history', provider: providerLabel };
+
+    const recent = history.getRecentRuns(1);
+    const lastRun = recent[0];
+    if (!lastRun) return { indicator: 'unknown', description: 'No recent runs', provider: providerLabel };
+
+    const lastRunTime = new Date(lastRun.created_at).getTime();
+    const fiveMinAgo = now - 5 * 60_000;
+
+    if (lastRunTime > fiveMinAgo && lastRun.status === 'completed') {
+      return { indicator: 'none', description: 'All Systems Operational', provider: providerLabel };
+    }
+    if (lastRunTime > fiveMinAgo && lastRun.status === 'failed') {
+      return { indicator: 'major', description: 'Last run failed', provider: providerLabel };
+    }
+    return { indicator: 'unknown', description: 'No recent activity', provider: providerLabel };
   }
 
   // ── Route registration ───────────────────────────────────────────────────

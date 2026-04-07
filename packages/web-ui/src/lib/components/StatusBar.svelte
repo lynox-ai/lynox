@@ -7,6 +7,7 @@
 
 	let engineOk = $state<boolean | null>(null);
 	let apiStatus = $state<'none' | 'minor' | 'major' | 'critical' | 'unknown' | null>(null);
+	let providerName = $state('Anthropic API');
 	let activeTasks = $state(0);
 	let todayCost = $state(0);
 	let todayRuns = $state(0);
@@ -52,10 +53,11 @@
 			engineOk = healthRes?.ok ?? false;
 
 			if (providerRes?.ok) {
-				const data = (await providerRes.json()) as { indicator: string };
+				const data = (await providerRes.json()) as { indicator: string; provider?: string };
 				const ind = data.indicator;
 				apiStatus = ind === 'none' || ind === 'minor' || ind === 'major' || ind === 'critical'
 					? ind : 'unknown';
+				if (data.provider) providerName = data.provider;
 			} else {
 				apiStatus = 'unknown';
 			}
@@ -153,7 +155,7 @@
 	<span class="text-border">|</span>
 
 	<!-- API Status -->
-	<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="Anthropic API">
+	<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" title={providerName}>
 		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatusClass()}"></span>
 		{apiStatusLabel()}
 	</span>
@@ -229,10 +231,10 @@
 				<span class="font-medium text-text">Engine: {engineOk === true ? t('status.connected') : t('status.disconnected')}</span>
 			</div>
 
-			<!-- Anthropic API Status -->
+			<!-- Provider API Status -->
 			<div class="flex items-center gap-2">
 				<span class="inline-block h-2 w-2 rounded-full {apiStatusClass()}"></span>
-				<span class="font-medium text-text">Anthropic API: {apiStatusLabel()}</span>
+				<span class="font-medium text-text">{providerName}: {apiStatusLabel()}</span>
 			</div>
 
 			<!-- API Keys -->
