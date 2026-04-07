@@ -181,7 +181,7 @@ const COMPOSE_TEMPLATE = `# lynox Docker Compose
 
 services:
   lynox:
-    image: ghcr.io/lynox-ai/lynox:webui
+    image: ghcr.io/lynox-ai/lynox:latest
     restart: unless-stopped
     read_only: true
     ports:

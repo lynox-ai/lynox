@@ -9,7 +9,7 @@
 
 services:
   lynox:
-    image: ghcr.io/lynox-ai/lynox:webui
+    image: ghcr.io/lynox-ai/lynox:latest
     restart: unless-stopped
     read_only: true
     ports:
@@ -50,7 +50,7 @@ services:
       # ── Optional features ─────────────────────────────
       # - GOOGLE_CLIENT_ID          # Google Workspace OAuth
       # - GOOGLE_CLIENT_SECRET      # Google Workspace OAuth
-      # - LYNOX_SENTRY_DSN          # Error reporting (opt-in, EU region)
+      # - LYNOX_BUGSINK_DSN         # Error reporting (opt-in, Bugsink)
 
     # ⚠ CRITICAL: This volume persists your data AND vault key.
     # Without it, all data and encryption keys are lost on container restart.

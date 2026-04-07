@@ -219,7 +219,7 @@ Example (full E2E with two containers):
     -e LYNOX_VAULT_KEY=target-vault-key-$(openssl rand -hex 24) \\
     -e LYNOX_HTTP_SECRET=target-http-secret-$(openssl rand -hex 16) \\
     -e LYNOX_MIGRATION_TOKEN=<generate-and-note-this> \\
-    lynox:webui
+    lynox:latest
 
   # Run the migration:
   npx tsx scripts/test-migration-e2e.ts migrate \\

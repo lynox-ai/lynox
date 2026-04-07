@@ -33,7 +33,7 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — 77 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, sentry, backup, api-store, crm, migration-crypto, migration-export, migration-import, etc.
+- `src/core/` — 77 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, Docker installer, setup wizard, watchdog)
 - `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
@@ -90,7 +90,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 - Migration: Zero-knowledge self-hosted→managed transfer. X25519 ECDH + AES-256-GCM chunk encryption + HMAC-signed handshake. Engine-to-engine (browser orchestrates via SSE). Migration token auth, DB name whitelist, 64 chunk / 500 MB limits.
 - API Store: profile-first enforcement, agent-driven setup
 - CRM: agent-driven contacts/deals, entity-primary, DataStore for structured tracking
-- Sentry: opt-in error reporting (LYNOX_SENTRY_DSN), PII scrubbed
+- Bugsink: error reporting, PII scrubbed. Managed: always active (Art. 6(1)(f) legitimate interest, self-hosted EU). Self-hosted: opt-in via LYNOX_BUGSINK_DSN.
 - i18n: write each language natively with same meaning — never translate one from the other. Translated text reads unnaturally.
 
 ## Testing
@@ -113,7 +113,7 @@ Single process: Engine HTTP API auto-loads SvelteKit handler as fallback for non
 Entrypoint: entrypoint-webui.sh (env setup, then `exec node dist/index.js --http-api`).
 LLM credentials are optional at startup — without them, engine starts in browse mode and SetupBanner shows a provider-aware wizard (Anthropic / Bedrock / Custom) to enter credentials via the UI (stored in vault). Never set placeholder env vars as env vars override vault.
 Web UI handler resolved from `/app/web-ui/handler.js` (adapter-node export).
-`docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:webui`
+`docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:latest`
 
 **Docker Compose** (`docker-compose.yml`): Recommended deployment method.
 Bundles Engine+Web UI with SearXNG sidecar for free, unlimited web search.
