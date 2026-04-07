@@ -1,5 +1,8 @@
 <script lang="ts">
-	import KeysView from '$lib/components/KeysView.svelte';
-</script>
+	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 
-<KeysView />
+	onMount(() => {
+		goto('/app/settings/config?tab=provider', { replaceState: true });
+	});
+</script>

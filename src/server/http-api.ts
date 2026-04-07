@@ -1251,7 +1251,7 @@ export class LynoxHTTPApi {
           search: names.has('TAVILY_API_KEY') || names.has('SEARCH_API_KEY') || !!searxngUrl,
           searxng: !!searxngUrl,
           google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
-          sentry: names.has('LYNOX_SENTRY_DSN'),
+          bugsink: names.has('LYNOX_BUGSINK_DSN'),
         },
         count: names.size,
         searxng_url: searxngUrl ?? null,
@@ -1341,12 +1341,13 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
-      // Managed mode: block provider/credential changes (breaks billing + isolation)
-      if (process.env['LYNOX_MANAGED_MODE']) {
+      // Managed EU mode: block provider/credential changes (lynox provides Bedrock)
+      // Starter (BYOK) mode: provider changes are allowed (customer brings own key)
+      if (process.env['LYNOX_MANAGED_MODE'] === 'eu') {
         const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'aws_region', 'bedrock_eu_only'];
         const attempted = LOCKED_FIELDS.filter(f => f in (parsed.data as Record<string, unknown>));
         if (attempted.length > 0) {
-          errorResponse(res, 403, `Managed instance: cannot change ${attempted.join(', ')}`);
+          errorResponse(res, 403, `Managed EU instance: cannot change ${attempted.join(', ')}`);
           return;
         }
       }

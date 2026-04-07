@@ -224,7 +224,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.telegram': { de: 'Telegram', en: 'Telegram' },
 	'status.search': { de: 'Web-Suche', en: 'Web Search' },
 	'status.google': { de: 'Google', en: 'Google' },
-	'status.sentry': { de: 'Sentry', en: 'Sentry' },
+	'status.bugsink': { de: 'Bugsink', en: 'Bugsink' },
 	'status.usage_today': { de: 'Nutzung heute', en: 'Usage Today' },
 	'status.cost': { de: 'Kosten', en: 'Cost' },
 	'status.usage_total': { de: 'Gesamt', en: 'Total' },
@@ -367,7 +367,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Settings
 	'settings.title': { de: 'Settings', en: 'Settings' },
 	'settings.config': { de: 'Konfiguration', en: 'Configuration' },
-	'settings.config_desc': { de: 'Modell, Effort, Thinking Mode', en: 'Model, effort, thinking mode' },
+	'settings.config_desc': { de: 'KI-Modell, Provider, Budget', en: 'AI model, provider, budget' },
+	'settings.section_main': { de: 'Haupteinstellungen', en: 'Main Settings' },
+	'settings.section_data': { de: 'Daten & Sicherung', en: 'Data & Backup' },
+	'settings.section_access': { de: 'Zugang', en: 'Access' },
 	'settings.keys': { de: 'API Keys', en: 'API Keys' },
 	'settings.integrations': { de: 'Integrationen', en: 'Integrations' },
 	'settings.integrations_desc': { de: 'Google Workspace (Gmail, Drive, Calendar)', en: 'Google Workspace (Gmail, Drive, Calendar)' },
@@ -380,6 +383,11 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Config
 	'config.title': { de: 'Konfiguration', en: 'Configuration' },
+	'config.tab_ai': { de: 'KI', en: 'AI' },
+	'config.tab_provider': { de: 'Provider', en: 'Provider' },
+	'config.tab_budget': { de: 'Budget', en: 'Budget' },
+	'config.tab_system': { de: 'System', en: 'System' },
+	'config.managed_eu_provider_info': { de: 'Claude wird von lynox bereitgestellt — Bedrock Frankfurt, EU-Datenresidenz.', en: 'Claude is provided by lynox — Bedrock Frankfurt, EU data residency.' },
 	'config.provider': { de: 'LLM Provider', en: 'LLM Provider' },
 	'config.provider_desc': { de: 'Wohin werden KI-Anfragen gesendet? Daten bleiben immer lokal — nur die Inferenz nutzt den Provider.', en: 'Where are AI requests sent? Your data stays local — only inference uses the provider.' },
 	'config.provider_anthropic': { de: 'Claude (Anthropic)', en: 'Claude (Anthropic)' },
@@ -486,10 +494,10 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Bug Reporting
 	'config.privacy': { de: 'Datenschutz', en: 'Privacy' },
-	'config.sentry': { de: 'Anonyme Fehlerberichte', en: 'Anonymous error reports' },
-	'config.sentry_desc': { de: 'Hilft Bugs schneller zu fixen. Gesendet: Fehlertyp, Stack Trace, Version. Nie gesendet: Nachrichten, Dateien, Wissen.', en: 'Helps fix bugs faster. Sent: error type, stack trace, version. Never sent: messages, files, knowledge.' },
-	'config.sentry_enabled': { de: 'Aktiviert', en: 'Enabled' },
-	'config.sentry_disabled': { de: 'Deaktiviert', en: 'Disabled' },
+	'config.bugsink': { de: 'Anonyme Fehlerberichte', en: 'Anonymous error reports' },
+	'config.bugsink_desc': { de: 'Hilft Bugs schneller zu fixen. Gesendet: Fehlertyp, Stack Trace, Version. Nie gesendet: Nachrichten, Dateien, Wissen.', en: 'Helps fix bugs faster. Sent: error type, stack trace, version. Never sent: messages, files, knowledge.' },
+	'config.bugsink_enabled': { de: 'Aktiviert', en: 'Enabled' },
+	'config.bugsink_disabled': { de: 'Deaktiviert', en: 'Disabled' },
 
 	// Updates
 	'config.updates': { de: 'Updates', en: 'Updates' },

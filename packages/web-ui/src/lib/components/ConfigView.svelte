@@ -2,8 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-
-	const SENTRY_DSN = 'https://21110d12849ca21ae1309b661ab3b603@o4511106815492096.ingest.de.sentry.io/4511106856976464';
+	import { clearError } from '../stores/chat.svelte.js';
 
 	interface Config {
 		provider?: string;
@@ -32,6 +31,7 @@
 		[key: string]: unknown;
 	}
 
+	// ── Config state ───────────────────────────────────────────────────────────
 	let config = $state<Config>({});
 	let loading = $state(true);
 	let saving = $state(false);
@@ -45,7 +45,6 @@
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as Config;
-			// Apply defaults for undefined fields (Engine defaults: sonnet, high, adaptive)
 			config = {
 				provider: 'anthropic',
 				default_tier: 'sonnet',
@@ -87,8 +86,95 @@
 		saving = false;
 	}
 
-	// Sentry opt-in
-	// Vault key
+	// ── Secrets / Keys (inline in Provider tab) ────────────────────────────────
+	let secretNames = $state<string[]>([]);
+	let newKeyName = $state('ANTHROPIC_API_KEY');
+	let newKeyValue = $state('');
+	let keysSaving = $state(false);
+	let editingSecret = $state<string | null>(null);
+	let editSecretValue = $state('');
+	let editSecretSaving = $state(false);
+
+	const providerKeyDefaults: Record<string, string> = {
+		anthropic: 'ANTHROPIC_API_KEY',
+		bedrock: 'AWS_ACCESS_KEY_ID',
+		custom: 'ANTHROPIC_API_KEY',
+	};
+
+	async function loadSecrets() {
+		try {
+			const res = await fetch(`${getApiBase()}/secrets`);
+			if (!res.ok) return;
+			const data = (await res.json()) as { names: string[] };
+			secretNames = data.names;
+		} catch { /* ignore */ }
+	}
+
+	async function saveSecret() {
+		if (!newKeyValue.trim()) return;
+		keysSaving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(newKeyName)}`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: newKeyValue })
+			});
+			if (!res.ok) throw new Error();
+			newKeyValue = '';
+			clearError();
+			await loadSecrets();
+		} catch {
+			error = t('common.save_failed');
+		}
+		keysSaving = false;
+	}
+
+	function startEditSecret(name: string) {
+		editingSecret = name;
+		editSecretValue = '';
+	}
+
+	function cancelEditSecret() {
+		editingSecret = null;
+		editSecretValue = '';
+	}
+
+	async function commitEditSecret(name: string) {
+		if (!editSecretValue.trim()) return;
+		editSecretSaving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ value: editSecretValue })
+			});
+			if (!res.ok) throw new Error();
+			clearError();
+			editingSecret = null;
+			editSecretValue = '';
+		} catch {
+			error = t('common.save_failed');
+		}
+		editSecretSaving = false;
+	}
+
+	function onEditKeydown(e: KeyboardEvent, name: string) {
+		if (e.key === 'Enter' && editSecretValue.trim()) commitEditSecret(name);
+		if (e.key === 'Escape') cancelEditSecret();
+	}
+
+	async function deleteSecret(name: string) {
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
+			if (!res.ok) throw new Error();
+			if (editingSecret === name) cancelEditSecret();
+			await loadSecrets();
+		} catch {
+			error = t('common.save_failed');
+		}
+	}
+
+	// ── Vault key ──────────────────────────────────────────────────────────────
 	let vaultKey = $state<string | null>(null);
 	let vaultConfigured = $state(false);
 	let vaultRevealed = $state(false);
@@ -101,7 +187,7 @@
 			const data = (await res.json()) as { configured: boolean; key?: string };
 			vaultConfigured = data.configured;
 			vaultKey = data.key ?? null;
-		} catch { /* ignore — endpoint may not exist on older engines */ }
+		} catch { /* ignore */ }
 	}
 
 	function maskKey(key: string): string {
@@ -182,7 +268,7 @@
 		rotateResult = null;
 	}
 
-	// Access token
+	// ── Access token ───────────────────────────────────────────────────────────
 	let accessToken = $state<string | null>(null);
 	let accessTokenConfigured = $state(false);
 	let accessTokenRevealed = $state(false);
@@ -195,7 +281,7 @@
 			const data = (await res.json()) as { configured: boolean; token?: string };
 			accessTokenConfigured = data.configured;
 			accessToken = data.token ?? null;
-		} catch { /* ignore — endpoint may not exist on older engines */ }
+		} catch { /* ignore */ }
 	}
 
 	async function copyAccessToken() {
@@ -206,33 +292,28 @@
 		setTimeout(() => (accessTokenCopied = false), 2000);
 	}
 
-	let sentryEnabled = $state(false);
+	// ── Bugsink ────────────────────────────────────────────────────────────────
+	let bugsinkEnabled = $state(false);
 
-	async function loadSentryStatus() {
+	async function loadBugsinkStatus() {
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
-			const data = (await res.json()) as { configured: { sentry: boolean } };
-			sentryEnabled = data.configured.sentry;
+			const data = (await res.json()) as { configured: { bugsink: boolean } };
+			bugsinkEnabled = data.configured.bugsink;
 		} catch { /* ignore */ }
 	}
 
-	async function toggleSentry() {
-		if (sentryEnabled) {
-			await fetch(`${getApiBase()}/secrets/LYNOX_SENTRY_DSN`, { method: 'DELETE' });
-			sentryEnabled = false;
-			addToast(t('config.sentry_disabled'), 'info');
+	async function toggleBugsink() {
+		if (bugsinkEnabled) {
+			await fetch(`${getApiBase()}/secrets/LYNOX_BUGSINK_DSN`, { method: 'DELETE' });
+			bugsinkEnabled = false;
+			addToast(t('config.bugsink_disabled'), 'info');
 		} else {
-			await fetch(`${getApiBase()}/secrets/LYNOX_SENTRY_DSN`, {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ value: SENTRY_DSN })
-			});
-			sentryEnabled = true;
-			addToast(t('config.sentry_enabled'), 'success');
+			addToast(t('config.bugsink_disabled'), 'info');
 		}
 	}
 
-	// Version check
+	// ── Version check ──────────────────────────────────────────────────────────
 	let currentVersion = $state('');
 	let latestVersion = $state<string | null>(null);
 	let versionChecking = $state(false);
@@ -259,24 +340,64 @@
 
 	const isUpToDate = $derived(latestVersion && currentVersion && latestVersion === currentVersion);
 
-	$effect(() => {
-		loadConfig();
-		loadVaultKey();
-		loadAccessToken();
-		loadSentryStatus();
-		loadCurrentVersion();
-	});
+	// ── Tab state ──────────────────────────────────────────────────────────────
+	type Tab = 'ai' | 'provider' | 'budget' | 'system';
 
+	function getInitialTab(): Tab {
+		if (typeof window === 'undefined') return 'ai';
+		const params = new URLSearchParams(window.location.search);
+		const tab = params.get('tab');
+		if (tab === 'provider' || tab === 'budget' || tab === 'system') return tab;
+		return 'ai';
+	}
+
+	let activeTab = $state<Tab>(getInitialTab());
+
+	function setTab(tab: Tab) {
+		activeTab = tab;
+		const url = new URL(window.location.href);
+		if (tab === 'ai') url.searchParams.delete('tab');
+		else url.searchParams.set('tab', tab);
+		history.replaceState({}, '', url.toString());
+	}
+
+	// ── Derived state ──────────────────────────────────────────────────────────
 	const managed = $derived(!!config.managed);
 	const isManagedEu = $derived(config.managed === 'eu');
 	const isAnthropicDirect = $derived(config.provider === 'anthropic' || !config.provider);
 	const isNonDirect = $derived(config.provider === 'custom' || config.provider === 'bedrock');
-	// In managed mode, effort/thinking are always available (infrastructure guarantees it)
 	const showEffortThinking = $derived(isAnthropicDirect || managed);
+
+	// Update default key name when provider changes
+	$effect(() => {
+		const defaultKey = providerKeyDefaults[config.provider ?? 'anthropic'] ?? 'ANTHROPIC_API_KEY';
+		if (newKeyName === 'ANTHROPIC_API_KEY' || newKeyName === 'AWS_ACCESS_KEY_ID') {
+			newKeyName = defaultKey;
+		}
+	});
+
+	const tabs = $derived(
+		[
+			{ id: 'ai' as Tab, label: t('config.tab_ai') },
+			{ id: 'provider' as Tab, label: t('config.tab_provider') },
+			...(!isManagedEu ? [{ id: 'budget' as Tab, label: t('config.tab_budget') }] : []),
+			{ id: 'system' as Tab, label: t('config.tab_system') },
+		]
+	);
+
+	// ── Init ───────────────────────────────────────────────────────────────────
+	$effect(() => {
+		loadConfig();
+		loadVaultKey();
+		loadAccessToken();
+		loadBugsinkStatus();
+		loadCurrentVersion();
+		loadSecrets();
+	});
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';
-	const sectionClass = 'text-xs font-mono uppercase tracking-widest text-text-subtle mt-8 mb-3';
+	const sectionClass = 'text-xs font-mono uppercase tracking-widest text-text-subtle mt-6 mb-3';
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
@@ -286,128 +407,197 @@
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else}
-		<div class="space-y-4">
-			<!-- LLM Provider (hidden in managed mode) -->
-			{#if !managed}
+		<!-- Tab Bar -->
+		<div class="flex gap-1 border-b border-border mb-6">
+			{#each tabs as tab}
+				<button
+					onclick={() => setTab(tab.id)}
+					class="px-4 py-2 text-sm transition-colors relative {activeTab === tab.id ? 'text-text font-medium' : 'text-text-muted hover:text-text'}"
+				>
+					{tab.label}
+					{#if activeTab === tab.id}
+						<span class="absolute bottom-0 left-0 right-0 h-0.5 bg-accent rounded-full"></span>
+					{/if}
+				</button>
+			{/each}
+		</div>
+
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		<!-- TAB: AI                                                           -->
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		{#if activeTab === 'ai'}
+			<div class="space-y-4">
 				<div class={cardClass}>
-					<label for="provider" class="block text-sm font-medium mb-1">{t('config.provider')}</label>
-					<p class="text-xs text-text-muted mb-2">{t('config.provider_desc')}</p>
-					<select id="provider" bind:value={config.provider} class={inputClass}>
-						<option value="anthropic">{t('config.provider_anthropic')}</option>
-						<option value="bedrock">{t('config.provider_bedrock')}</option>
-						<option value="custom">{t('config.provider_custom')}</option>
+					<label for="model" class="block text-sm font-medium mb-1">{t('config.model')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.model_desc')}</p>
+					<select id="model" bind:value={config.default_tier} class={inputClass}>
+						<option value="haiku">{t('config.model_haiku')}</option>
+						<option value="sonnet">{t('config.model_sonnet')}</option>
+						<option value="opus">{t('config.model_opus')}</option>
 					</select>
-					<p class="text-xs text-text-muted mt-2">
-						{#if config.provider === 'bedrock'}
-							{t('config.credentials_hint_bedrock')}
-						{:else if config.provider === 'custom'}
-							{t('config.credentials_hint_custom')}
-						{:else}
-							{t('config.credentials_hint_anthropic')}
-						{/if}
-						<a href="/app/settings/keys" class="text-accent-text hover:underline ml-1">{t('keys.title')}</a>
-					</p>
 				</div>
 
-				{#if config.provider === 'bedrock'}
+				{#if showEffortThinking}
 					<div class={cardClass}>
-						<label for="aws-region" class="block text-sm font-medium mb-2">{t('config.aws_region')}</label>
-						<select id="aws-region" bind:value={config.aws_region} class={inputClass}>
-							<option value="eu-central-1">eu-central-1 (Frankfurt)</option>
-							<option value="eu-central-2">eu-central-2 (Zurich)</option>
-							<option value="eu-west-1">eu-west-1 (Ireland)</option>
-							<option value="eu-west-3">eu-west-3 (Paris)</option>
-							<option value="eu-north-1">eu-north-1 (Stockholm)</option>
-							<option value="eu-south-1">eu-south-1 (Milan)</option>
-							<option value="us-east-1">us-east-1 (N. Virginia)</option>
-							<option value="us-west-2">us-west-2 (Oregon)</option>
+						<label for="effort" class="block text-sm font-medium mb-1">{t('config.effort')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.effort_desc')}</p>
+						<select id="effort" bind:value={config.effort_level} class={inputClass}>
+							<option value="low">{t('config.effort_low')}</option>
+							<option value="medium">{t('config.effort_medium')}</option>
+							<option value="high">{t('config.effort_high')}</option>
+							<option value="max">{t('config.effort_max')}</option>
 						</select>
 					</div>
-					<div class="{cardClass} flex items-center justify-between">
-						<div>
-							<p class="text-sm font-medium">{t('config.bedrock_eu_only')}</p>
-							<p class="text-xs text-text-muted mt-1">{t('config.bedrock_eu_only_desc')}</p>
-						</div>
-						<button onclick={() => config.bedrock_eu_only = !config.bedrock_eu_only} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.bedrock_eu_only ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.bedrock_eu_only ? 'translate-x-4' : ''}"></span></button>
-					</div>
-				{/if}
 
-				{#if config.provider === 'custom'}
 					<div class={cardClass}>
-						<label for="custom-url" class="block text-sm font-medium mb-1">{t('config.custom_url')}</label>
-						<p class="text-xs text-text-muted mb-2">{t('config.custom_url_desc')}</p>
-						<input id="custom-url" type="url" placeholder="http://localhost:4000"
-							bind:value={config.api_base_url} class="{inputClass} font-mono" />
+						<label for="thinking" class="block text-sm font-medium mb-1">{t('config.thinking')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.thinking_desc')}</p>
+						<select id="thinking" bind:value={config.thinking_mode} class={inputClass}>
+							<option value="disabled">{t('config.thinking_disabled')}</option>
+							<option value="adaptive">{t('config.thinking_adaptive')}</option>
+						</select>
+					</div>
+				{:else}
+					<div class="{cardClass} opacity-60">
+						<p class="text-sm font-medium mb-1">{t('config.effort')} / {t('config.thinking')}</p>
+						<p class="text-xs text-text-muted">{isNonDirect ? t('config.anthropic_only_hint') : ''}</p>
 					</div>
 				{/if}
-			{:else}
-				<div class="{cardClass} opacity-60">
-					<p class="text-sm font-medium">{t('config.provider')}</p>
-					<p class="text-xs text-text-muted mt-1">{t('config.managed_provider_info')}</p>
-				</div>
-			{/if}
 
-			<!-- Model & Inference -->
-			<p class={sectionClass}>{t('config.model')}</p>
-
-			<div class={cardClass}>
-				<label for="model" class="block text-sm font-medium mb-1">{t('config.model')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.model_desc')}</p>
-				<select id="model" bind:value={config.default_tier} class={inputClass}>
-					<option value="haiku">{t('config.model_haiku')}</option>
-					<option value="sonnet">{t('config.model_sonnet')}</option>
-					<option value="opus">{t('config.model_opus')}</option>
-				</select>
-			</div>
-
-			{#if showEffortThinking}
 				<div class={cardClass}>
-					<label for="effort" class="block text-sm font-medium mb-1">{t('config.effort')}</label>
-					<p class="text-xs text-text-muted mb-2">{t('config.effort_desc')}</p>
-					<select id="effort" bind:value={config.effort_level} class={inputClass}>
-						<option value="low">{t('config.effort_low')}</option>
-						<option value="medium">{t('config.effort_medium')}</option>
-						<option value="high">{t('config.effort_high')}</option>
-						<option value="max">{t('config.effort_max')}</option>
+					<label for="experience" class="block text-sm font-medium mb-1">{t('config.experience')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.experience_desc')}</p>
+					<select id="experience" bind:value={config.experience} class={inputClass}>
+						<option value="business">{t('config.experience_business')}</option>
+						<option value="developer">{t('config.experience_developer')}</option>
 					</select>
 				</div>
 
-				<div class={cardClass}>
-					<label for="thinking" class="block text-sm font-medium mb-1">{t('config.thinking')}</label>
-					<p class="text-xs text-text-muted mb-2">{t('config.thinking_desc')}</p>
-					<select id="thinking" bind:value={config.thinking_mode} class={inputClass}>
-						<option value="disabled">{t('config.thinking_disabled')}</option>
-						<option value="adaptive">{t('config.thinking_adaptive')}</option>
-					</select>
+				<div class="{cardClass} flex items-center justify-between">
+					<div>
+						<p class="text-sm font-medium">{t('config.memory_extraction')}</p>
+						<p class="text-xs text-text-muted mt-1">{t('config.memory_extraction_desc')}</p>
+					</div>
+					<button onclick={() => config.memory_extraction = !config.memory_extraction} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.memory_extraction ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.memory_extraction ? 'translate-x-4' : ''}"></span></button>
 				</div>
-			{:else}
-				<div class="{cardClass} opacity-60">
-					<p class="text-sm font-medium mb-1">{t('config.effort')} / {t('config.thinking')}</p>
-					<p class="text-xs text-text-muted">{isNonDirect ? t('config.anthropic_only_hint') : ''}</p>
-				</div>
-			{/if}
-
-			<div class={cardClass}>
-				<label for="experience" class="block text-sm font-medium mb-1">{t('config.experience')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.experience_desc')}</p>
-				<select id="experience" bind:value={config.experience} class={inputClass}>
-					<option value="business">{t('config.experience_business')}</option>
-					<option value="developer">{t('config.experience_developer')}</option>
-				</select>
 			</div>
 
-			<div class="{cardClass} flex items-center justify-between">
-				<div>
-					<p class="text-sm font-medium">{t('config.memory_extraction')}</p>
-					<p class="text-xs text-text-muted mt-1">{t('config.memory_extraction_desc')}</p>
-				</div>
-				<button onclick={() => config.memory_extraction = !config.memory_extraction} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.memory_extraction ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.memory_extraction ? 'translate-x-4' : ''}"></span></button>
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		<!-- TAB: Provider                                                     -->
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		{:else if activeTab === 'provider'}
+			<div class="space-y-4">
+				{#if isManagedEu}
+					<div class={cardClass}>
+						<p class="text-sm font-medium">{t('config.provider')}</p>
+						<p class="text-xs text-text-muted mt-1">{t('config.managed_eu_provider_info')}</p>
+					</div>
+				{:else}
+					<div class={cardClass}>
+						<label for="provider" class="block text-sm font-medium mb-1">{t('config.provider')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.provider_desc')}</p>
+						<select id="provider" bind:value={config.provider} class={inputClass}>
+							<option value="anthropic">{t('config.provider_anthropic')}</option>
+							<option value="bedrock">{t('config.provider_bedrock')}</option>
+							<option value="custom">{t('config.provider_custom')}</option>
+						</select>
+					</div>
+
+					{#if config.provider === 'bedrock'}
+						<div class={cardClass}>
+							<label for="aws-region" class="block text-sm font-medium mb-2">{t('config.aws_region')}</label>
+							<select id="aws-region" bind:value={config.aws_region} class={inputClass}>
+								<option value="eu-central-1">eu-central-1 (Frankfurt)</option>
+								<option value="eu-central-2">eu-central-2 (Zurich)</option>
+								<option value="eu-west-1">eu-west-1 (Ireland)</option>
+								<option value="eu-west-3">eu-west-3 (Paris)</option>
+								<option value="eu-north-1">eu-north-1 (Stockholm)</option>
+								<option value="eu-south-1">eu-south-1 (Milan)</option>
+								<option value="us-east-1">us-east-1 (N. Virginia)</option>
+								<option value="us-west-2">us-west-2 (Oregon)</option>
+							</select>
+						</div>
+						<div class="{cardClass} flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium">{t('config.bedrock_eu_only')}</p>
+								<p class="text-xs text-text-muted mt-1">{t('config.bedrock_eu_only_desc')}</p>
+							</div>
+							<button onclick={() => config.bedrock_eu_only = !config.bedrock_eu_only} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.bedrock_eu_only ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.bedrock_eu_only ? 'translate-x-4' : ''}"></span></button>
+						</div>
+					{/if}
+
+					{#if config.provider === 'custom'}
+						<div class={cardClass}>
+							<label for="custom-url" class="block text-sm font-medium mb-1">{t('config.custom_url')}</label>
+							<p class="text-xs text-text-muted mb-2">{t('config.custom_url_desc')}</p>
+							<input id="custom-url" type="url" placeholder="http://localhost:4000"
+								bind:value={config.api_base_url} class="{inputClass} font-mono" />
+						</div>
+					{/if}
+
+					<!-- Inline Key Management -->
+					<p class={sectionClass}>{t('keys.title')}</p>
+
+					{#if secretNames.length > 0}
+						<div class="space-y-2">
+							{#each secretNames as name}
+								<div class="{cardClass} !p-3">
+									<div class="flex items-center justify-between">
+										<span class="font-mono text-sm">{name}</span>
+										<div class="flex items-center gap-2">
+											{#if editingSecret !== name}
+												<button onclick={() => startEditSecret(name)} class="text-xs text-accent-text hover:underline">{t('keys.edit')}</button>
+											{/if}
+											<button onclick={() => deleteSecret(name)} class="text-xs text-danger hover:underline">{t('settings.delete')}</button>
+										</div>
+									</div>
+									{#if editingSecret === name}
+										<div class="flex items-center gap-2 mt-2">
+											<input
+												type="password"
+												bind:value={editSecretValue}
+												onkeydown={(e) => onEditKeydown(e, name)}
+												placeholder={t('keys.new_value')}
+												autocomplete="off"
+												class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-1.5 font-mono text-sm focus:border-accent focus:outline-none"
+											/>
+											<button onclick={() => commitEditSecret(name)} disabled={editSecretSaving || !editSecretValue.trim()} class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50">
+												{editSecretSaving ? t('settings.saving') : t('settings.save')}
+											</button>
+											<button onclick={cancelEditSecret} class="text-xs text-text-subtle hover:text-text">{t('common.cancel')}</button>
+										</div>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					{:else}
+						<p class="text-text-subtle text-sm">{t('keys.no_keys')}</p>
+					{/if}
+
+					<div class="{cardClass} space-y-3">
+						<h3 class="text-sm font-medium">{t('keys.add_title')}</h3>
+						<div>
+							<label for="key-name" class="block text-xs text-text-muted">{t('keys.name_label')}</label>
+							<input id="key-name" bind:value={newKeyName} class="mt-1 {inputClass} font-mono" />
+						</div>
+						<div>
+							<label for="key-value" class="block text-xs text-text-muted">{t('keys.value_label')}</label>
+							<input id="key-value" bind:value={newKeyValue} type="password" placeholder="sk-ant-..."
+								class="mt-1 {inputClass} font-mono" />
+						</div>
+						<button onclick={saveSecret} disabled={keysSaving || !newKeyValue.trim()}
+							class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-50">
+							{keysSaving ? t('settings.saving') : t('settings.save')}
+						</button>
+					</div>
+				{/if}
 			</div>
 
-			<!-- Budget (hidden for Managed EU — LLM costs included in subscription) -->
-			{#if !isManagedEu}
-				<p class={sectionClass}>{t('config.budget')}</p>
-
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		<!-- TAB: Budget                                                       -->
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		{:else if activeTab === 'budget'}
+			<div class="space-y-4">
 				<div class={cardClass}>
 					<label for="monthly-limit" class="block text-sm font-medium mb-1">{t('config.monthly_limit')}</label>
 					<p class="text-xs text-text-muted mb-2">{t('config.monthly_limit_desc')}</p>
@@ -430,123 +620,118 @@
 							bind:value={config.max_session_cost_usd} class="{inputClass} font-mono" />
 					</div>
 				{/if}
-			{/if}
-
-			<!-- Knowledge -->
-			<p class={sectionClass}>{t('config.knowledge')}</p>
-
-			<div class={cardClass}>
-				<label for="half-life" class="block text-sm font-medium mb-1">{t('config.memory_half_life')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.memory_half_life_desc')}</p>
-				<input id="half-life" type="number" min="1" placeholder="90"
-					bind:value={config.memory_half_life_days} class="{inputClass} font-mono" />
 			</div>
 
-			{#if !managed}
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		<!-- TAB: System                                                       -->
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		{:else if activeTab === 'system'}
+			<div class="space-y-4">
+				<!-- Knowledge -->
 				<div class={cardClass}>
-					<label for="embedding" class="block text-sm font-medium mb-2">{t('config.embedding_provider')}</label>
-					<select id="embedding" bind:value={config.embedding_provider} class={inputClass}>
-						<option value="onnx">{t('config.embedding_onnx')}</option>
-					</select>
+					<label for="half-life" class="block text-sm font-medium mb-1">{t('config.memory_half_life')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.memory_half_life_desc')}</p>
+					<input id="half-life" type="number" min="1" placeholder="90"
+						bind:value={config.memory_half_life_days} class="{inputClass} font-mono" />
 				</div>
 
-				<!-- Limits -->
-				<p class={sectionClass}>{t('config.limits')}</p>
+				{#if !managed}
+					<div class={cardClass}>
+						<label for="embedding" class="block text-sm font-medium mb-2">{t('config.embedding_provider')}</label>
+						<select id="embedding" bind:value={config.embedding_provider} class={inputClass}>
+							<option value="onnx">{t('config.embedding_onnx')}</option>
+						</select>
+					</div>
 
-				<div class={cardClass}>
-					<label for="http-rate" class="block text-sm font-medium mb-1">{t('config.http_rate_limit')}</label>
-					<p class="text-xs text-text-muted mb-2">{t('config.http_rate_limit_desc')}</p>
-					<input id="http-rate" type="number" min="1" placeholder="—"
-						bind:value={config.max_http_requests_per_hour} class="{inputClass} font-mono" />
-				</div>
-			{/if}
+					<!-- Limits -->
+					<p class={sectionClass}>{t('config.limits')}</p>
 
+					<div class={cardClass}>
+						<label for="http-rate" class="block text-sm font-medium mb-1">{t('config.http_rate_limit')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.http_rate_limit_desc')}</p>
+						<input id="http-rate" type="number" min="1" placeholder="—"
+							bind:value={config.max_http_requests_per_hour} class="{inputClass} font-mono" />
+					</div>
 
-			<!-- Security (hidden in managed — vault + token are system-controlled) -->
-			{#if !managed}
-				<p class={sectionClass}>{t('config.security')}</p>
+					<!-- Security -->
+					<p class={sectionClass}>{t('config.security')}</p>
 
-				<div class={cardClass}>
-					<p class="text-sm font-medium mb-1">{t('config.vault_key')}</p>
-					<p class="text-xs text-text-muted mb-3">{t('config.vault_key_desc')}</p>
-					{#if vaultConfigured && vaultKey}
-						<div class="flex items-center gap-2 mb-2">
-							<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
-								{vaultRevealed ? vaultKey : maskKey(vaultKey)}
-							</code>
-							<button
-								onclick={() => (vaultRevealed = !vaultRevealed)}
-								class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0"
-							>
-								{vaultRevealed ? t('config.hide') : t('config.reveal')}
-							</button>
-							<button
-								onclick={copyVaultKey}
-								class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {vaultCopied ? 'text-success border-success/30' : ''}"
-							>
-								{t('config.copy')}
-							</button>
+					<div class={cardClass}>
+						<p class="text-sm font-medium mb-1">{t('config.vault_key')}</p>
+						<p class="text-xs text-text-muted mb-3">{t('config.vault_key_desc')}</p>
+						{#if vaultConfigured && vaultKey}
+							<div class="flex items-center gap-2 mb-2">
+								<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
+									{vaultRevealed ? vaultKey : maskKey(vaultKey)}
+								</code>
+								<button onclick={() => (vaultRevealed = !vaultRevealed)} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0">
+									{vaultRevealed ? t('config.hide') : t('config.reveal')}
+								</button>
+								<button onclick={copyVaultKey} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {vaultCopied ? 'text-success border-success/30' : ''}">
+									{t('config.copy')}
+								</button>
+							</div>
+							<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
+							<div class="mt-3 pt-3 border-t border-border/50">
+								<button onclick={startRotation} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">
+									{t('config.vault_rotate')}
+								</button>
+							</div>
+						{:else}
+							<p class="text-xs text-text-muted">{t('config.vault_key_not_configured')}</p>
+						{/if}
+					</div>
+
+					<div class={cardClass}>
+						<p class="text-sm font-medium mb-1">{t('config.access_token')}</p>
+						<p class="text-xs text-text-muted mb-3">{t('config.access_token_desc')}</p>
+						{#if accessTokenConfigured && accessToken}
+							<div class="flex items-center gap-2">
+								<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
+									{accessTokenRevealed ? accessToken : maskKey(accessToken)}
+								</code>
+								<button onclick={() => (accessTokenRevealed = !accessTokenRevealed)} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0">
+									{accessTokenRevealed ? t('config.hide') : t('config.reveal')}
+								</button>
+								<button onclick={copyAccessToken} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {accessTokenCopied ? 'text-success border-success/30' : ''}">
+									{t('config.copy')}
+								</button>
+							</div>
+						{:else}
+							<p class="text-xs text-text-muted">{t('config.access_token_not_configured')}</p>
+						{/if}
+					</div>
+
+					<!-- Privacy -->
+					<p class={sectionClass}>{t('config.privacy')}</p>
+
+					<div class="{cardClass} flex items-center justify-between">
+						<div>
+							<p class="text-sm font-medium">{t('config.bugsink')}</p>
+							<p class="text-xs text-text-muted mt-1">{t('config.bugsink_desc')}</p>
 						</div>
-						<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
-						<div class="mt-3 pt-3 border-t border-border/50">
-							<button onclick={startRotation} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all">
-								{t('config.vault_rotate')}
-							</button>
-						</div>
-					{:else}
-						<p class="text-xs text-text-muted">{t('config.vault_key_not_configured')}</p>
-					{/if}
-				</div>
+						<button onclick={toggleBugsink} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {bugsinkEnabled ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {bugsinkEnabled ? 'translate-x-4' : ''}"></span></button>
+					</div>
+				{:else}
+					<p class={sectionClass}>{t('config.security')}</p>
+					<div class={cardClass}>
+						<p class="text-sm font-medium">{t('config.security')}</p>
+						<p class="text-xs text-text-muted mt-1">{t('config.managed_security_info')}</p>
+					</div>
+				{/if}
 
-				<div class={cardClass}>
-					<p class="text-sm font-medium mb-1">{t('config.access_token')}</p>
-					<p class="text-xs text-text-muted mb-3">{t('config.access_token_desc')}</p>
-					{#if accessTokenConfigured && accessToken}
-						<div class="flex items-center gap-2">
-							<code class="flex-1 rounded-[var(--radius-sm)] bg-bg px-3 py-2 text-sm font-mono select-all break-all">
-								{accessTokenRevealed ? accessToken : maskKey(accessToken)}
-							</code>
-							<button onclick={() => (accessTokenRevealed = !accessTokenRevealed)} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0">
-								{accessTokenRevealed ? t('config.hide') : t('config.reveal')}
-							</button>
-							<button onclick={copyAccessToken} class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all shrink-0 {accessTokenCopied ? 'text-success border-success/30' : ''}">
-								{t('config.copy')}
-							</button>
-						</div>
-					{:else}
-						<p class="text-xs text-text-muted">{t('config.access_token_not_configured')}</p>
-					{/if}
-				</div>
-			{:else}
-				<p class={sectionClass}>{t('config.security')}</p>
-				<div class="{cardClass} opacity-60">
-					<p class="text-sm font-medium">{t('config.security')}</p>
-					<p class="text-xs text-text-muted mt-1">{t('config.managed_security_info')}</p>
-				</div>
-			{/if}
-
-			<!-- Privacy -->
-			<p class={sectionClass}>{t('config.privacy')}</p>
-
-			<div class="{cardClass} flex items-center justify-between">
-				<div>
-					<p class="text-sm font-medium">{t('config.sentry')}</p>
-					<p class="text-xs text-text-muted mt-1">{t('config.sentry_desc')}</p>
-				</div>
-				<button onclick={toggleSentry} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {sentryEnabled ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {sentryEnabled ? 'translate-x-4' : ''}"></span></button>
-			</div>
-
-			<!-- Updates (hidden in managed — auto-updated) -->
-			{#if !managed}
+				<!-- Updates -->
 				<p class={sectionClass}>{t('config.updates')}</p>
 
-				<div class="{cardClass} flex items-center justify-between">
-					<div>
-						<p class="text-sm font-medium">{t('config.update_check')}</p>
-						<p class="text-xs text-text-muted mt-1">{t('config.update_check_desc')}</p>
+				{#if !managed}
+					<div class="{cardClass} flex items-center justify-between">
+						<div>
+							<p class="text-sm font-medium">{t('config.update_check')}</p>
+							<p class="text-xs text-text-muted mt-1">{t('config.update_check_desc')}</p>
+						</div>
+						<button onclick={() => config.update_check = !config.update_check} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.update_check ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.update_check ? 'translate-x-4' : ''}"></span></button>
 					</div>
-					<button onclick={() => config.update_check = !config.update_check} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {config.update_check ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.update_check ? 'translate-x-4' : ''}"></span></button>
-				</div>
+				{/if}
 
 				<div class={cardClass}>
 					<div class="flex items-center justify-between">
@@ -564,43 +749,39 @@
 								</p>
 							{/if}
 						</div>
-						<button
-							onclick={checkForUpdates}
-							disabled={versionChecking}
-							class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50"
-						>
-							{versionChecking ? t('config.version_checking') : t('config.check_now')}
-						</button>
+						{#if !managed}
+							<button
+								onclick={checkForUpdates}
+								disabled={versionChecking}
+								class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all disabled:opacity-50"
+							>
+								{versionChecking ? t('config.version_checking') : t('config.check_now')}
+							</button>
+						{/if}
 					</div>
-				</div>
-			{:else}
-				<p class={sectionClass}>{t('config.updates')}</p>
-				<div class="{cardClass} opacity-60">
-					<p class="text-sm font-medium">{t('config.updates')}</p>
-					<p class="text-xs text-text-muted mt-1">{t('config.managed_updates_info')}</p>
-					{#if currentVersion}
-						<p class="text-xs text-text-muted mt-2">{t('config.version_current')}: <span class="font-mono text-text">{currentVersion}</span></p>
+					{#if managed}
+						<p class="text-xs text-text-muted mt-2">{t('config.managed_updates_info')}</p>
 					{/if}
 				</div>
-			{/if}
-
-			<!-- Error + Save -->
-			{#if error}
-				<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error}</div>
-			{/if}
-
-			<div class="flex items-center gap-3 pt-2">
-				<button
-					onclick={saveConfig}
-					disabled={saving}
-					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-50"
-				>
-					{saving ? t('settings.saving') : t('settings.save')}
-				</button>
-				{#if saved}
-					<span class="text-sm text-success">{t('settings.saved')}</span>
-				{/if}
 			</div>
+		{/if}
+
+		<!-- Error + Save (always visible) -->
+		{#if error}
+			<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mt-4">{error}</div>
+		{/if}
+
+		<div class="flex items-center gap-3 pt-4">
+			<button
+				onclick={saveConfig}
+				disabled={saving}
+				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-50"
+			>
+				{saving ? t('settings.saving') : t('settings.save')}
+			</button>
+			{#if saved}
+				<span class="text-sm text-success">{t('settings.saved')}</span>
+			{/if}
 		</div>
 	{/if}
 </div>
