@@ -52,6 +52,7 @@ export function configureBudgetAndRateLimits(
 ): void {
   configurePersistentBudget({
     costProvider: runHistory,
+    sessionCapUSD: userConfig.max_session_cost_usd,
     dailyCapUSD: userConfig.max_daily_cost_usd,
     monthlyCapUSD: userConfig.max_monthly_cost_usd,
   });

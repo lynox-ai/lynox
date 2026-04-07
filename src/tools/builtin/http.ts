@@ -260,8 +260,10 @@ export function resetHttpRequestCount(): void {
 import type { ToolCallCountProvider } from '../../core/tool-context.js';
 
 let _rateLimitProvider: ToolCallCountProvider | null = null;
-let _hourlyLimit = Infinity;
-let _dailyLimit = Infinity;
+const DEFAULT_HOURLY_LIMIT = 200;
+const DEFAULT_DAILY_LIMIT = 2000;
+let _hourlyLimit = DEFAULT_HOURLY_LIMIT;
+let _dailyLimit = DEFAULT_DAILY_LIMIT;
 
 /** Configure cross-session HTTP rate limits. Called once at orchestrator init. */
 export function configureHttpRateLimits(opts: {
@@ -270,15 +272,15 @@ export function configureHttpRateLimits(opts: {
   dailyLimit?: number | undefined;
 }): void {
   _rateLimitProvider = opts.provider;
-  _hourlyLimit = opts.hourlyLimit ?? Infinity;
-  _dailyLimit = opts.dailyLimit ?? Infinity;
+  _hourlyLimit = opts.hourlyLimit ?? DEFAULT_HOURLY_LIMIT;
+  _dailyLimit = opts.dailyLimit ?? DEFAULT_DAILY_LIMIT;
 }
 
 /** Reset rate limit config (for testing). */
 export function resetHttpRateLimits(): void {
   _rateLimitProvider = null;
-  _hourlyLimit = Infinity;
-  _dailyLimit = Infinity;
+  _hourlyLimit = DEFAULT_HOURLY_LIMIT;
+  _dailyLimit = DEFAULT_DAILY_LIMIT;
 }
 
 // === Egress control: detect data exfiltration attempts ===

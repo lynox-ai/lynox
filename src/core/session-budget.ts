@@ -8,8 +8,9 @@
 
 import type { PersistentBudgetCheck } from '../types/index.js';
 
-const MAX_SESSION_COST_USD = 50;
+const DEFAULT_SESSION_COST_USD = 50;
 
+let _maxSessionCostUSD = DEFAULT_SESSION_COST_USD;
 let sessionCostUSD = 0;
 
 /**
@@ -18,9 +19,9 @@ let sessionCostUSD = 0;
  * race conditions when parallel spawns both pass the check before either records.
  */
 export function checkSessionBudget(estimatedCostUSD: number): void {
-  if (sessionCostUSD + estimatedCostUSD > MAX_SESSION_COST_USD) {
+  if (sessionCostUSD + estimatedCostUSD > _maxSessionCostUSD) {
     throw new Error(
-      `Session cost ceiling ($${MAX_SESSION_COST_USD}) would be exceeded. ` +
+      `Session cost ceiling ($${String(_maxSessionCostUSD)}) would be exceeded. ` +
       `Current: $${sessionCostUSD.toFixed(2)}, estimated: $${estimatedCostUSD.toFixed(2)}.`,
     );
   }
@@ -64,10 +65,12 @@ let _monthlyCapUSD = DEFAULT_MONTHLY_CAP_USD;
 /** Configure persistent budget caps. Called once at orchestrator init. */
 export function configurePersistentBudget(opts: {
   costProvider: CostQueryProvider;
+  sessionCapUSD?: number | undefined;
   dailyCapUSD?: number | undefined;
   monthlyCapUSD?: number | undefined;
 }): void {
   _costProvider = opts.costProvider;
+  _maxSessionCostUSD = opts.sessionCapUSD ?? DEFAULT_SESSION_COST_USD;
   _dailyCapUSD = opts.dailyCapUSD ?? DEFAULT_DAILY_CAP_USD;
   _monthlyCapUSD = opts.monthlyCapUSD ?? DEFAULT_MONTHLY_CAP_USD;
 }
@@ -109,6 +112,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
 /** Reset persistent budget config (for testing). */
 export function resetPersistentBudget(): void {
   _costProvider = null;
+  _maxSessionCostUSD = DEFAULT_SESSION_COST_USD;
   _dailyCapUSD = DEFAULT_DAILY_CAP_USD;
   _monthlyCapUSD = DEFAULT_MONTHLY_CAP_USD;
 }
