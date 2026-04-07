@@ -169,19 +169,19 @@ describe('Agent Security Audit', () => {
       expect(workerContent).toContain('private URLs are not allowed');
     });
 
-    it('EXTERNAL_TOOLS covers all external tool handlers', () => {
+    it('INTERNAL_TOOLS must NOT include external tool handlers (inverted allowlist)', () => {
       const agentContent = readFileSync(join(SRC, 'core/agent.ts'), 'utf-8');
-      // Extract the EXTERNAL_TOOLS set members
-      const setMatch = agentContent.match(/EXTERNAL_TOOLS\s*=\s*new\s+Set\(\[([^\]]+)\]\)/);
-      expect(setMatch, 'EXTERNAL_TOOLS set must exist in agent.ts').toBeTruthy();
+      // Extract the INTERNAL_TOOLS set members (tools NOT scanned for injection)
+      const setMatch = agentContent.match(/INTERNAL_TOOLS\s*=\s*new\s+Set\(\[([^\]]+)\]\)/);
+      expect(setMatch, 'INTERNAL_TOOLS set must exist in agent.ts').toBeTruthy();
       const toolList = setMatch![1]!;
-      // All tools that make external requests must be in EXTERNAL_TOOLS for scanToolResult
-      const requiredTools = [
+      // Tools that make external requests must NOT be in INTERNAL_TOOLS (so they get scanned)
+      const externalTools = [
         'bash', 'http_request', 'web_research',
         'google_gmail', 'google_sheets', 'google_drive', 'google_calendar', 'google_docs',
       ];
-      for (const tool of requiredTools) {
-        expect(toolList, `EXTERNAL_TOOLS must include '${tool}'`).toContain(tool);
+      for (const tool of externalTools) {
+        expect(toolList, `INTERNAL_TOOLS must NOT include '${tool}' (external tool needs scanning)`).not.toContain(`'${tool}'`);
       }
     });
   });

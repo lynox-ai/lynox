@@ -79,12 +79,13 @@ export function escapeXml(text: string): string {
  */
 function neutralizeBoundaryTags(text: string): string {
   return text
-    // Literal closing tag
-    .replace(/<\/untrusted_data>/gi, '&lt;/untrusted_data&gt;')
-    // HTML entity encoded variants: &lt;/untrusted_data&gt;
+    // Pre-encoded variants first (before literal replacement creates entity-encoded output)
+    // HTML entity encoded: &lt;/untrusted_data&gt;
     .replace(/&lt;\s*\/\s*untrusted_data\s*&gt;/gi, '[blocked:boundary_escape]')
-    // Numeric entity encoded variants: &#60;/untrusted_data&#62; or &#x3c;/untrusted_data&#x3e;
-    .replace(/(&#0*60;|&#x0*3c;)\s*\/\s*untrusted_data\s*(&#0*62;|&#x0*3e;)/gi, '[blocked:boundary_escape]');
+    // Numeric entity encoded: &#60;/untrusted_data&#62; or &#x3c;/untrusted_data&#x3e;
+    .replace(/(&#0*60;|&#x0*3c;)\s*\/\s*untrusted_data\s*(&#0*62;|&#x0*3e;)/gi, '[blocked:boundary_escape]')
+    // Literal closing tag last — produces entity-escaped output that won't be re-matched
+    .replace(/<\/untrusted_data>/gi, '&lt;/untrusted_data&gt;');
 }
 
 export function wrapUntrustedData(content: string, source: string): string {

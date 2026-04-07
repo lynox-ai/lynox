@@ -58,7 +58,6 @@ const PKG_VERSION: string = (() => {
 })();
 
 // Keys stripped from GET /api/config responses (secrets that must not leak)
-// Keys stripped from GET /api/config responses (secrets that must not leak)
 const REDACTED_CONFIG_KEYS = new Set([
   'api_key', 'telegram_bot_token',
   'search_api_key', 'google_client_id', 'google_client_secret',
@@ -1184,6 +1183,7 @@ export class LynoxHTTPApi {
           google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
           sentry: names.has('LYNOX_SENTRY_DSN'),
         },
+        count: names.size,
         searxng_url: searxngUrl ?? null,
       });
     });
