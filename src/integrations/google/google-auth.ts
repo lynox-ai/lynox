@@ -258,8 +258,17 @@ export class GoogleAuth {
     expires_at: number;
     scopes: string[];
   }): Promise<void> {
-    if (!data.access_token || !data.refresh_token || !data.expires_at || !Array.isArray(data.scopes)) {
-      throw new Error('Invalid token data: missing required fields');
+    if (typeof data.access_token !== 'string' || data.access_token.length < 10) {
+      throw new Error('Invalid token data: access_token must be a string of at least 10 characters');
+    }
+    if (typeof data.refresh_token !== 'string' || data.refresh_token.length < 10) {
+      throw new Error('Invalid token data: refresh_token must be a string of at least 10 characters');
+    }
+    if (typeof data.expires_at !== 'number' || !Number.isFinite(data.expires_at) || data.expires_at < Date.now() - 86_400_000) {
+      throw new Error('Invalid token data: expires_at must be a valid future timestamp');
+    }
+    if (!Array.isArray(data.scopes) || data.scopes.length === 0 || !data.scopes.every((s) => typeof s === 'string' && s.length > 0)) {
+      throw new Error('Invalid token data: scopes must be a non-empty array of strings');
     }
     this.tokenData = {
       access_token: data.access_token,

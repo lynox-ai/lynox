@@ -1763,7 +1763,7 @@ export class LynoxHTTPApi {
     });
 
     // Claim Google tokens from managed control plane OAuth broker
-    this.staticRoutes.set('POST /api/google/claim-managed', async (_req, res) => {
+    this.staticRoutes.set('POST /api/google/claim-managed', async (_req, res, _params, body) => {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
 
@@ -1776,6 +1776,13 @@ export class LynoxHTTPApi {
         return;
       }
 
+      const parsed = body as Record<string, unknown> | undefined;
+      const claimNonce = typeof parsed?.['claim_nonce'] === 'string' ? parsed['claim_nonce'] : '';
+      if (!claimNonce) {
+        errorResponse(res, 400, 'Missing claim_nonce');
+        return;
+      }
+
       try {
         const claimRes = await fetch(`${controlPlaneUrl}/internal/oauth/google/claim`, {
           method: 'POST',
@@ -1783,7 +1790,7 @@ export class LynoxHTTPApi {
             'Content-Type': 'application/json',
             'x-instance-secret': httpSecret,
           },
-          body: JSON.stringify({ instance_id: instanceId }),
+          body: JSON.stringify({ instance_id: instanceId, claim_nonce: claimNonce }),
         });
 
         if (!claimRes.ok) {

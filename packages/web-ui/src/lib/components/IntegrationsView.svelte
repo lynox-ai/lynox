@@ -287,10 +287,14 @@
 		}
 	}
 
-	async function claimManagedGoogleTokens() {
+	async function claimManagedGoogleTokens(claimNonce: string) {
 		managedGoogleClaiming = true;
 		try {
-			const res = await fetch(`${getApiBase()}/google/claim-managed`, { method: 'POST' });
+			const res = await fetch(`${getApiBase()}/google/claim-managed`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ claim_nonce: claimNonce }),
+			});
 			if (res.ok) {
 				addToast(t('integrations.google_connected_managed'), 'success');
 				await loadGoogleStatus();
@@ -437,21 +441,25 @@
 	// Load all statuses on mount
 	import { onDestroy } from 'svelte';
 
+	let oauthClaimHandled = false;
+
 	$effect(() => {
 		loadManagedStatus();
 		loadGoogleStatus();
 		loadSecretStatuses();
 
 		// Auto-claim Google tokens after OAuth redirect (managed flow)
-		if (typeof window !== 'undefined') {
+		if (!oauthClaimHandled && typeof window !== 'undefined') {
 			const params = new URLSearchParams(window.location.search);
-			if (params.get('google_oauth') === 'success') {
+			const claimNonce = params.get('google_oauth');
+			if (claimNonce && claimNonce !== 'success') {
+				oauthClaimHandled = true;
 				// Clean URL param without reload
 				const url = new URL(window.location.href);
 				url.searchParams.delete('google_oauth');
 				window.history.replaceState({}, '', url.toString());
-				// Claim tokens from control plane
-				claimManagedGoogleTokens();
+				// Claim tokens using nonce
+				claimManagedGoogleTokens(claimNonce);
 			}
 		}
 	});
