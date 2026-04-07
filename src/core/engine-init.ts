@@ -50,16 +50,26 @@ export function configureBudgetAndRateLimits(
   runHistory: RunHistory,
   userConfig: LynoxUserConfig,
 ): void {
+  // Env vars override config (managed hosting sets tier-specific limits via env)
+  const envFloat = (key: string): number | undefined => {
+    const v = parseFloat(process.env[key] ?? '');
+    return Number.isFinite(v) && v > 0 ? v : undefined;
+  };
+  const envInt = (key: string): number | undefined => {
+    const v = parseInt(process.env[key] ?? '', 10);
+    return Number.isFinite(v) && v > 0 ? v : undefined;
+  };
+
   configurePersistentBudget({
     costProvider: runHistory,
-    sessionCapUSD: userConfig.max_session_cost_usd,
-    dailyCapUSD: userConfig.max_daily_cost_usd,
-    monthlyCapUSD: userConfig.max_monthly_cost_usd,
+    sessionCapUSD: envFloat('LYNOX_MAX_SESSION_COST_USD') ?? userConfig.max_session_cost_usd,
+    dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
+    monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
   });
   configureHttpRateLimits({
     provider: runHistory,
-    hourlyLimit: userConfig.max_http_requests_per_hour,
-    dailyLimit: userConfig.max_http_requests_per_day,
+    hourlyLimit: envInt('LYNOX_MAX_HTTP_REQUESTS_PER_HOUR') ?? userConfig.max_http_requests_per_hour,
+    dailyLimit: envInt('LYNOX_MAX_HTTP_REQUESTS_PER_DAY') ?? userConfig.max_http_requests_per_day,
   });
   configureEnforceHttps(userConfig.enforce_https === true);
 }
