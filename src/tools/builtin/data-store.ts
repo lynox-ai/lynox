@@ -18,7 +18,7 @@ interface CreateInput {
 export const dataStoreCreateTool: ToolEntry<CreateInput> = {
   definition: {
     name: 'data_store_create',
-    description: 'Set up a data table to track metrics, KPIs, or business data. Define columns and types. Data persists across sessions.',
+    description: 'Set up a table for structured, quantitative data — metrics, KPIs, records with typed columns. Data persists across sessions. NOT for qualitative knowledge or preferences (use memory_store).',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,

@@ -19,7 +19,7 @@ interface ArtifactDeleteInput {
 export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
   definition: {
     name: 'artifact_save',
-    description: 'Save or update a persistent artifact (dashboard, diagram, report, chart). Artifacts are shown in the user\'s Artifacts gallery. Use `id` to update an existing artifact.',
+    description: 'Save or update a persistent artifact (dashboard, diagram, report, chart). Displays the artifact inline in the chat AND persists it to the Artifacts gallery. You do NOT need to include the HTML as a code block in your text — this tool handles display automatically. Use `id` to update an existing artifact.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,

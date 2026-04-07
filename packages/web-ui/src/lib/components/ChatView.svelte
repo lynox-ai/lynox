@@ -203,6 +203,14 @@
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
 		const result: GroupedBlock[] = [];
+
+		// Check if agent already included an artifact inline in text
+		const hasInlineArtifact = blocks.some(b =>
+			b.type === 'text' && b.text &&
+			(b.text.includes('```artifact') ||
+			 (b.text.includes('```html') && (b.text.includes('<!DOCTYPE') || b.text.includes('<html'))))
+		);
+
 		for (const block of blocks) {
 			if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
@@ -210,6 +218,19 @@
 				const tc = toolCalls[block.index];
 				if (!tc) continue;
 				if (HIDDEN_TOOLS.has(tc.name)) continue;
+
+				// Special: artifact_save → render inline if not already in text
+				if (tc.name === 'artifact_save') {
+					if (!hasInlineArtifact) {
+						const inp = tc.input as Record<string, unknown> | undefined;
+						const content = String(inp?.['content'] ?? '');
+						if (content) {
+							const title = String(inp?.['title'] ?? 'Artifact');
+							result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
+						}
+					}
+					continue;
+				}
 
 				// Special: plan_task → collapsible plan
 				if (tc.name === 'plan_task') {

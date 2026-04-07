@@ -48,7 +48,7 @@ function formatTaskLine(t: { id: string; title: string; priority: string; status
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   definition: {
     name: 'task_create',
-    description: 'Create a task with title, priority, due date, assignee, and scope.',
+    description: 'Create a task for a concrete deliverable with a deadline or assignee. Not for general notes (use memory_store with status namespace). Only create tasks when the user requests it or a clear action item emerges.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,

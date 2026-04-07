@@ -44,7 +44,7 @@ function resolveScope(scopeStr: string | undefined, agent: IAgent): MemoryScopeR
 export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
   definition: {
     name: 'memory_store',
-    description: 'Save information for future sessions — business facts, techniques, current state, or lessons learned.',
+    description: 'Save qualitative knowledge for future sessions — business context, preferences, techniques, or lessons learned. NOT for structured/quantitative data (use data_store_insert) or deliverables with deadlines (use task_create).',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,

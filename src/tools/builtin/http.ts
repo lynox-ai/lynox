@@ -340,7 +340,7 @@ interface HttpRequestInput {
 export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   definition: {
     name: 'http_request',
-    description: 'Make an HTTP request and return the response.',
+    description: 'Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead.',
     input_schema: {
       type: 'object' as const,
       properties: {

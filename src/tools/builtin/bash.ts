@@ -78,7 +78,7 @@ export function buildSafeEnv(): NodeJS.ProcessEnv {
 export const bashTool: ToolEntry<BashInput> = {
   definition: {
     name: 'bash',
-    description: 'Execute a bash command and return its output.',
+    description: 'Execute a shell command for system operations, package management, git, or process control. NEVER use for file reads/writes (use read_file/write_file) or web searches (use web_research).',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
