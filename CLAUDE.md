@@ -81,6 +81,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 - Types: single source of truth in src/types/index.ts — never duplicate
 - Tools: ToolRegistry + ToolContext dependency injection
 - Security: 6 layers (input-guard, output-guard, permission-guard, data-boundary, secret-store, security-audit). Env vars always override vault (priority: env > vault > config).
+- Cost & rate limits: Session $50, daily $100, monthly $500 (all configurable via config.json). HTTP tool: 200 req/hr, 2000 req/day default. Per-session: 100 HTTP requests, 500 max agent iterations. Spawn depth: 5 levels, $5 default budget per spawn.
 - Resumable Prompts: PromptStore (SQLite, shared DB with RunHistory) — ask_user/ask_secret survive SSE disconnects, page refreshes, thread switches. Agent polls SQLite every 2s. 24h expiry.
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
