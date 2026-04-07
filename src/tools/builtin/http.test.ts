@@ -387,11 +387,11 @@ describe('httpRequestTool', () => {
       expect(result).toContain('HTTP 200');
     });
 
-    it('allows when no limits configured', async () => {
+    it('allows when no explicit limits configured and counts are within defaults', async () => {
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
-      configureHttpRateLimits({ provider: mockProvider({ 1: 1000 }) });
+      configureHttpRateLimits({ provider: mockProvider({ 1: 100 }) });
       const result = await handler({ url: 'http://example.com' }, {} as never);
       expect(result).toContain('HTTP 200');
     });
