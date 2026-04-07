@@ -51,7 +51,7 @@ async function proxyToControlPlane(
 
 export const POST: RequestHandler = async ({ request, cookies, url }) => {
 	const managed = getManagedConfig();
-	if (!managed) return json({ error: 'Not a managed instance' }, { status: 400 });
+	if (!managed) return json({ supported: false });
 
 	const body = await request.json() as { action?: string; [key: string]: unknown };
 	const action = body.action;

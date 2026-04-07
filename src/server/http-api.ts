@@ -106,6 +106,12 @@ function errorResponse(res: ServerResponse, status: number, message: string): vo
   jsonResponse(res, status, { error: message });
 }
 
+/** Type-guard that sends 503 if the service is null/undefined. Caller must `return` after a false result. */
+function requireService<T>(res: ServerResponse, service: T | null | undefined, name: string): service is NonNullable<T> {
+  if (service == null) errorResponse(res, 503, `${name} not available`);
+  return service != null;
+}
+
 async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -1021,7 +1027,7 @@ export class LynoxHTTPApi {
     // ── Threads ──
     this.staticRoutes.set('GET /api/threads', async (req, res) => {
       const threadStore = engine.getThreadStore();
-      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      if (!requireService(res, threadStore, 'Thread store')) return;
       const url = new URL(req.url ?? '', 'http://localhost');
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
       const includeArchived = url.searchParams.get('includeArchived') === 'true';
@@ -1031,7 +1037,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
-      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       jsonResponse(res, 200, { thread });
@@ -1039,7 +1045,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/threads/:id', async (_req, res, params, body) => {
       const threadStore = engine.getThreadStore();
-      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       const b = body as Record<string, unknown> | null;
@@ -1053,7 +1059,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
-      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       // Also clean up in-memory session
@@ -1064,7 +1070,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/threads/:id/messages', async (req, res, params) => {
       const threadStore = engine.getThreadStore();
-      if (!threadStore) { errorResponse(res, 503, 'Thread store not initialized'); return; }
+      if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       const url = new URL(req.url ?? '', 'http://localhost');
@@ -1086,7 +1092,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/memory/:ns', async (_req, res, params) => {
       const memory = engine.getMemory();
-      if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
+      if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const content = await memory.load(ns);
@@ -1095,7 +1101,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
-      if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
+      if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const content = body && typeof body === 'object' && 'content' in body ? String((body as Record<string, unknown>)['content']) : '';
@@ -1105,7 +1111,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
       const memory = engine.getMemory();
-      if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
+      if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
@@ -1115,7 +1121,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/memory/:ns', async (req, res, params) => {
       const memory = engine.getMemory();
-      if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
+      if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -1126,7 +1132,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
-      if (!memory) { errorResponse(res, 503, 'Memory not initialized'); return; }
+      if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const b = body as Record<string, unknown> | null;
@@ -1140,7 +1146,7 @@ export class LynoxHTTPApi {
     // Full name list — admin-scoped (enforced by requiresAdmin)
     this.staticRoutes.set('GET /api/secrets', async (_req, res) => {
       const store = engine.getSecretStore();
-      if (!store) { errorResponse(res, 503, 'Secret store not initialized'); return; }
+      if (!requireService(res, store, 'Secret store')) return;
       const names = store.listNames();
       jsonResponse(res, 200, { names });
     });
@@ -1148,7 +1154,7 @@ export class LynoxHTTPApi {
     // Category-level booleans — available to all authenticated users
     this.staticRoutes.set('GET /api/secrets/status', async (_req, res) => {
       const store = engine.getSecretStore();
-      if (!store) { errorResponse(res, 503, 'Secret store not initialized'); return; }
+      if (!requireService(res, store, 'Secret store')) return;
       const names = new Set(store.listNames());
       const userConfig = engine.getUserConfig();
       const provider = userConfig.provider ?? 'anthropic';
@@ -1188,7 +1194,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/secrets/:name', async (_req, res, params, body) => {
       const store = engine.getSecretStore();
-      if (!store) { errorResponse(res, 503, 'Secret store not initialized'); return; }
+      if (!requireService(res, store, 'Secret store')) return;
       const b = body as Record<string, unknown> | null;
       const value = b && typeof b['value'] === 'string' ? b['value'] : '';
       if (!value) { errorResponse(res, 400, 'Missing value'); return; }
@@ -1209,7 +1215,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/secrets/:name', async (_req, res, params) => {
       const store = engine.getSecretStore();
-      if (!store) { errorResponse(res, 503, 'Secret store not initialized'); return; }
+      if (!requireService(res, store, 'Secret store')) return;
       const deleted = store.deleteSecret(params['name']!);
       jsonResponse(res, 200, { deleted });
     }));
@@ -1298,7 +1304,7 @@ export class LynoxHTTPApi {
     // ── History ──
     this.staticRoutes.set('GET /api/history/runs', async (req, res) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const q = url.searchParams.get('q');
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
@@ -1325,7 +1331,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/history/runs/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const run = history.getRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Run not found'); return; }
       jsonResponse(res, 200, run);
@@ -1333,21 +1339,21 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/history/runs/:id/tool-calls', async (_req, res, params) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const toolCalls = history.getRunToolCalls(params['id']!);
       jsonResponse(res, 200, { toolCalls });
     }));
 
     this.staticRoutes.set('GET /api/history/stats', async (_req, res) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const stats = history.getStats();
       jsonResponse(res, 200, stats);
     });
 
     this.staticRoutes.set('GET /api/history/cost/daily', async (req, res) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const data = history.getCostByDay(days);
@@ -1357,7 +1363,7 @@ export class LynoxHTTPApi {
     // ── Pipelines ──
     this.staticRoutes.set('GET /api/pipelines', async (req, res) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const runs = history.getRecentPipelineRuns(limit);
@@ -1366,7 +1372,7 @@ export class LynoxHTTPApi {
 
     this.staticRoutes.set('GET /api/pipelines/stats/steps', async (req, res) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const stats = history.getPipelineStepStats(days);
@@ -1375,7 +1381,7 @@ export class LynoxHTTPApi {
 
     this.staticRoutes.set('GET /api/pipelines/stats/cost', async (req, res) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const stats = history.getPipelineCostStats(days);
@@ -1384,7 +1390,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/pipelines/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const run = history.getPipelineRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Pipeline run not found'); return; }
       jsonResponse(res, 200, run);
@@ -1392,7 +1398,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/pipelines/:id/steps', async (_req, res, params) => {
       const history = engine.getRunHistory();
-      if (!history) { errorResponse(res, 503, 'History not initialized'); return; }
+      if (!requireService(res, history, 'History')) return;
       const steps = history.getPipelineStepResults(params['id']!);
       jsonResponse(res, 200, { steps });
     }));
@@ -1400,7 +1406,7 @@ export class LynoxHTTPApi {
     // ── Tasks ──
     this.staticRoutes.set('GET /api/tasks', async (req, res) => {
       const taskManager = engine.getTaskManager();
-      if (!taskManager) { errorResponse(res, 503, 'Task manager not initialized'); return; }
+      if (!requireService(res, taskManager, 'Task manager')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const status = url.searchParams.get('status') as 'open' | 'in_progress' | 'completed' | undefined;
       const tasks = taskManager.list(status ? { status } : undefined);
@@ -1409,7 +1415,7 @@ export class LynoxHTTPApi {
 
     this.staticRoutes.set('POST /api/tasks', async (_req, res, _params, body) => {
       const taskManager = engine.getTaskManager();
-      if (!taskManager) { errorResponse(res, 503, 'Task manager not initialized'); return; }
+      if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid task'); return; }
       const b = body as Record<string, unknown>;
       const title = typeof b['title'] === 'string' ? b['title'] : undefined;
@@ -1422,7 +1428,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/tasks/:id', async (_req, res, params, body) => {
       const taskManager = engine.getTaskManager();
-      if (!taskManager) { errorResponse(res, 503, 'Task manager not initialized'); return; }
+      if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
       const task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1]);
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
@@ -1431,7 +1437,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/tasks/:id', async (_req, res, params) => {
       const runHistory = engine.getRunHistory();
-      if (!runHistory) { errorResponse(res, 503, 'Not initialized'); return; }
+      if (!requireService(res, runHistory, 'History')) return;
       const deleted = runHistory.deleteTask(params['id']!);
       if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, { deleted: true });
@@ -1439,7 +1445,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/tasks/:id/complete', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
-      if (!taskManager) { errorResponse(res, 503, 'Task manager not initialized'); return; }
+      if (!requireService(res, taskManager, 'Task manager')) return;
       const task = taskManager.complete(params['id']!);
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, task);
@@ -1448,13 +1454,13 @@ export class LynoxHTTPApi {
     // ── Artifacts ──
     this.staticRoutes.set('GET /api/artifacts', async (_req, res) => {
       const store = engine.getArtifactStore();
-      if (!store) { errorResponse(res, 503, 'Artifact store not initialized'); return; }
+      if (!requireService(res, store, 'Artifact store')) return;
       jsonResponse(res, 200, { artifacts: store.list() });
     });
 
     this.staticRoutes.set('POST /api/artifacts', async (_req, res, _params, body) => {
       const store = engine.getArtifactStore();
-      if (!store) { errorResponse(res, 503, 'Artifact store not initialized'); return; }
+      if (!requireService(res, store, 'Artifact store')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid artifact'); return; }
       const b = body as Record<string, unknown>;
       if (typeof b['title'] !== 'string' || typeof b['content'] !== 'string') {
@@ -1481,7 +1487,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/artifacts/:id', async (_req, res, params) => {
       const store = engine.getArtifactStore();
-      if (!store) { errorResponse(res, 503, 'Artifact store not initialized'); return; }
+      if (!requireService(res, store, 'Artifact store')) return;
       const artifact = store.get(params['id']!);
       if (!artifact) { errorResponse(res, 404, 'Artifact not found'); return; }
       jsonResponse(res, 200, artifact);
@@ -1489,7 +1495,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/artifacts/:id', async (_req, res, params) => {
       const store = engine.getArtifactStore();
-      if (!store) { errorResponse(res, 503, 'Artifact store not initialized'); return; }
+      if (!requireService(res, store, 'Artifact store')) return;
       const deleted = store.delete(params['id']!);
       if (!deleted) { errorResponse(res, 404, 'Artifact not found'); return; }
       jsonResponse(res, 200, { deleted: true });
@@ -1648,7 +1654,7 @@ export class LynoxHTTPApi {
 
     this.staticRoutes.set('POST /api/google/auth', async (_req, res) => {
       const google = engine.getGoogleAuth();
-      if (!google) { errorResponse(res, 503, 'Google auth not configured'); return; }
+      if (!requireService(res, google, 'Google auth')) return;
       try {
         const flow = await google.startDeviceFlow();
         jsonResponse(res, 200, {
@@ -1665,7 +1671,7 @@ export class LynoxHTTPApi {
 
     this.staticRoutes.set('POST /api/google/revoke', async (_req, res) => {
       const google = engine.getGoogleAuth();
-      if (!google) { errorResponse(res, 503, 'Google auth not configured'); return; }
+      if (!requireService(res, google, 'Google auth')) return;
       await google.revoke();
       jsonResponse(res, 200, { ok: true });
     });
@@ -1711,7 +1717,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities/:id', async (_req, res, params) => {
       const kg = engine.getKnowledgeLayer();
-      if (!kg) { errorResponse(res, 503, 'Knowledge graph not available'); return; }
+      if (!requireService(res, kg, 'Knowledge graph')) return;
       try {
         const entity = await kg.getEntity(params['id']!);
         if (!entity) { errorResponse(res, 404, 'Entity not found'); return; }
@@ -1813,7 +1819,7 @@ export class LynoxHTTPApi {
 
     this.staticRoutes.set('POST /api/backups', async (_req, res) => {
       const bm = engine.getBackupManager();
-      if (!bm) { errorResponse(res, 503, 'Backup manager not available'); return; }
+      if (!requireService(res, bm, 'Backup manager')) return;
       try {
         const result = await bm.createBackup();
         jsonResponse(res, 200, result);
@@ -1824,7 +1830,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/backups/:id/restore', async (_req, res, params) => {
       const bm = engine.getBackupManager();
-      if (!bm) { errorResponse(res, 503, 'Backup manager not available'); return; }
+      if (!requireService(res, bm, 'Backup manager')) return;
       const backupPath = bm.getBackupPath(params['id']!);
       if (!backupPath) { errorResponse(res, 404, 'Backup not found'); return; }
       try {
@@ -1850,7 +1856,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/api-profiles/:id', async (_req, res, params) => {
       const store = engine.getApiStore();
-      if (!store) { errorResponse(res, 503, 'API store not available'); return; }
+      if (!requireService(res, store, 'API store')) return;
       const profile = store.get(params['id']!);
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
       jsonResponse(res, 200, { profile });
@@ -1867,7 +1873,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/datastore/:collection', async (req, res, params) => {
       const ds = engine.getDataStore();
-      if (!ds) { errorResponse(res, 503, 'DataStore not available'); return; }
+      if (!requireService(res, ds, 'DataStore')) return;
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);

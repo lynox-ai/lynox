@@ -268,7 +268,6 @@
 								maxlength={20}
 								autocomplete="one-time-code"
 								required
-								autofocus
 								placeholder="000000"
 								class="w-full rounded-[var(--radius-md)] border border-border bg-bg-subtle px-3 py-2.5 text-center
 									font-mono text-lg tracking-[0.3em] text-text placeholder:text-text-subtle
