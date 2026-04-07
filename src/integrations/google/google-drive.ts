@@ -144,10 +144,10 @@ export function createDriveTool(auth: GoogleAuth): ToolEntry<DriveInput> {
       try {
         // Check scopes
         if (WRITE_SCOPE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DRIVE_FILE)) {
-          return `Error: This action requires drive.file scope. Run /google auth to grant access.`;
+          return `Error: This action requires drive.file scope. Grant access in Settings → Integrations → Google.`;
         }
         if (FULL_SCOPE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DRIVE)) {
-          return `Error: This action requires full Drive scope. Run /google auth to grant access.`;
+          return `Error: This action requires full Drive scope. Grant access in Settings → Integrations → Google.`;
         }
 
         // Confirmation — fail-safe: block if no prompt available

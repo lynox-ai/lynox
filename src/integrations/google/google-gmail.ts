@@ -244,7 +244,7 @@ export function createGmailTool(auth: GoogleAuth): ToolEntry<GmailInput> {
             ? SCOPES.GMAIL_SEND
             : SCOPES.GMAIL_MODIFY;
           if (!auth.hasScope(writeScope)) {
-            return `Error: This action requires additional permissions (${writeScope}). Run /google auth to grant write access.`;
+            return `Error: This action requires additional permissions (${writeScope}). Grant write access in Settings → Integrations → Google.`;
           }
         }
 

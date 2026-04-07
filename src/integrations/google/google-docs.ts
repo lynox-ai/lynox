@@ -93,7 +93,7 @@ export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
       try {
         // Check write scope
         if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DOCS)) {
-          return `Error: This action requires document write permissions. Run /google auth to grant access.`;
+          return `Error: This action requires document write permissions. Grant access in Settings → Integrations → Google.`;
         }
 
         // Confirmation — fail-safe: block if no prompt available

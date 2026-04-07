@@ -196,7 +196,7 @@ export function createCalendarTool(auth: GoogleAuth): ToolEntry<CalendarInput> {
       try {
         // Check write scope
         if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.CALENDAR_EVENTS)) {
-          return `Error: This action requires calendar write permissions. Run /google auth to grant access.`;
+          return `Error: This action requires calendar write permissions. Grant access in Settings → Integrations → Google.`;
         }
 
         // Confirmation — fail-safe: block if no prompt available
