@@ -142,12 +142,37 @@ If you opt in to error reporting (via `LYNOX_SENTRY_DSN`), all reports are scrub
 
 ## Docker Hardening
 
-The Docker images include additional security measures:
+The Docker image and Compose file include production-grade hardening out of the box:
 
-- Non-root user (`lynox`, UID 1001)
-- Read-only root filesystem
-- `no-new-privileges` security option
-- No shell, package manager, or unnecessary binaries in the image
-- tmpfs for temporary storage
+| Measure | Description |
+|---------|-------------|
+| Non-root user | Runs as `lynox` (UID 1001), never root |
+| Read-only filesystem | `read_only: true` — no writes to the image |
+| Capabilities dropped | `cap_drop: ALL` — no Linux capabilities |
+| Privilege escalation blocked | `no-new-privileges` security option |
+| No shell or package manager | bash, apt, dpkg, perl removed from image |
+| SUID bits stripped | No setuid binaries in the image |
+| tmpfs for temp storage | `/tmp` and `/workspace` are memory-backed |
+| Process limits | `pids_limit: 512` prevents fork bombs |
+| Log rotation | `max-size: 20m, max-file: 3` prevents disk filling |
+| Network isolation | Internal Docker network between services |
+| Health checks | Built-in Docker `HEALTHCHECK` on `/health` |
 
 See [Docker Deployment](/daily-use/docker/) for the full hardened setup.
+
+## Self-Hosted: Your Responsibility
+
+lynox ships hardened containers, but running a production system requires additional measures that depend on your infrastructure:
+
+| Area | What you need to do |
+|------|---------------------|
+| **TLS / HTTPS** | Set up a reverse proxy (Caddy, nginx, Traefik) or a Cloudflare Tunnel for encrypted connections |
+| **Firewall** | Restrict inbound traffic to ports you need (typically 443). Block SSH from the public internet |
+| **Backups** | Back up `~/.lynox/` regularly — it contains your vault key, knowledge graph, and all conversation history |
+| **Host hardening** | Keep your OS updated, enable automatic security updates (`unattended-upgrades`) |
+| **Access control** | Set a strong `LYNOX_HTTP_SECRET`. Don't expose port 3000 without authentication |
+| **Vault key** | Save your `LYNOX_VAULT_KEY` separately. If you lose it and the volume is destroyed, encrypted data is unrecoverable |
+
+:::tip[Managed hosting handles all of this]
+The [Starter](https://lynox.ai/pricing) and [Managed EU](https://lynox.ai/pricing) tiers include TLS, firewall, health monitoring, automatic updates, and encrypted backups — so you can focus on using lynox instead of running it.
+:::

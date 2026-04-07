@@ -5,6 +5,50 @@ import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 
+// ---------------------------------------------------------------------------
+// Follow-up parsing (mirrors core telegram-formatter logic)
+// ---------------------------------------------------------------------------
+
+const FOLLOW_UP_RE = /<follow_ups>\s*([\s\S]*?)\s*<\/follow_ups>/;
+const MAX_FOLLOW_UPS = 4;
+const MAX_LABEL_LENGTH = 40;
+
+function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[]; cleanText: string } {
+	const match = FOLLOW_UP_RE.exec(text);
+	if (!match) return { suggestions: [], cleanText: text };
+
+	const cleanText = text.replace(FOLLOW_UP_RE, '').trimEnd();
+	let suggestions: FollowUpSuggestion[] = [];
+
+	try {
+		const parsed: unknown = JSON.parse(match[1]!);
+		if (!Array.isArray(parsed)) return { suggestions: [], cleanText };
+
+		for (const item of parsed) {
+			if (typeof item !== 'object' || item === null) continue;
+			const obj = item as Record<string, unknown>;
+			if (typeof obj['label'] !== 'string' || typeof obj['task'] !== 'string') continue;
+			if (!obj['label'].trim() || !obj['task'].trim()) continue;
+			suggestions.push({
+				label: obj['label'].trim().slice(0, MAX_LABEL_LENGTH),
+				task: obj['task'].trim(),
+			});
+		}
+	} catch {
+		return { suggestions: [], cleanText };
+	}
+
+	// Deduplicate by label
+	const seen = new Set<string>();
+	suggestions = suggestions.filter(s => {
+		if (seen.has(s.label)) return false;
+		seen.add(s.label);
+		return true;
+	});
+
+	return { suggestions: suggestions.slice(0, MAX_FOLLOW_UPS), cleanText };
+}
+
 export interface UsageInfo {
 	tokensIn: number;
 	tokensOut: number;
@@ -16,6 +60,11 @@ export interface UsageInfo {
 export type ContentBlock =
 	| { type: 'text'; text: string }
 	| { type: 'tool_call'; index: number };
+
+export interface FollowUpSuggestion {
+	label: string;
+	task: string;
+}
 
 export interface ChatMessage {
 	role: 'user' | 'assistant';
@@ -29,6 +78,8 @@ export interface ChatMessage {
 	queued?: boolean;
 	/** Message failed to send (API error, connection lost, etc.) */
 	failed?: boolean;
+	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
+	followUps?: FollowUpSuggestion[];
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
 }
@@ -405,6 +456,25 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 	isStreaming = false;
 	pendingPermission = null;
 	retryStatus = null;
+
+	// Parse follow-up suggestions from assistant response
+	const lastMsg = messages[assistantIdx];
+	if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content) {
+		const parsed = parseFollowUps(lastMsg.content);
+		if (parsed.suggestions.length > 0) {
+			lastMsg.followUps = parsed.suggestions;
+			lastMsg.content = parsed.cleanText;
+			// Also strip from last text block
+			if (lastMsg.blocks?.length) {
+				const lastBlock = lastMsg.blocks[lastMsg.blocks.length - 1];
+				if (lastBlock && lastBlock.type === 'text') {
+					const blockParsed = parseFollowUps(lastBlock.text);
+					lastBlock.text = blockParsed.cleanText;
+				}
+			}
+		}
+	}
+
 	persistChat();
 
 	// Refresh thread list so sidebar reflects updated ordering

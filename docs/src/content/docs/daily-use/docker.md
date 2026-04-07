@@ -92,12 +92,18 @@ This directory contains:
 
 ## Security Hardening
 
-The Docker Compose example above includes production-ready hardening:
+The Docker Compose file includes production-ready hardening:
 
 - **`read_only: true`** — Read-only root filesystem
+- **`cap_drop: ALL`** — All Linux capabilities dropped
 - **`no-new-privileges`** — Prevents privilege escalation
+- **`pids_limit: 512`** — Prevents fork bombs
 - **`tmpfs`** — Temporary storage in memory, not on disk
 - **Non-root user** — Runs as `lynox` (UID 1001), not root
+- **Log rotation** — `max-size: 20m` prevents disk filling
+- **Network isolation** — Internal Docker network between services
+
+The Docker image goes further: no shell (`bash` removed), no package manager (`apt` removed), no SUID binaries. See [Security](/features/security/) for what you need to handle yourself (TLS, firewall, backups).
 
 ## Automatic Updates
 

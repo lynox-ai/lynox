@@ -19,6 +19,7 @@ import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { SessionStore } from '../core/session-store.js';
+import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import type { StreamEvent } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -205,7 +206,11 @@ export class LynoxHTTPApi {
 
   async init(): Promise<void> {
     const config = loadConfig();
-    this.engine = new Engine({ model: config.default_tier, language: config.language });
+    this.engine = new Engine({
+      model: config.default_tier,
+      language: config.language,
+      context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' },
+    });
     await this.engine.init();
     this.engine.startWorkerLoop();
     this._registerRoutes();
@@ -657,6 +662,7 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
         model: typeof opts['model'] === 'string' ? opts['model'] as 'opus' | 'sonnet' | 'haiku' : undefined,
         effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
+        systemPromptSuffix: WEB_UI_SYSTEM_PROMPT_SUFFIX,
       });
       const tier = session.getModelTier();
       const threadStore = engine.getThreadStore();

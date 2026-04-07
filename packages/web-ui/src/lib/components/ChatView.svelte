@@ -1062,6 +1062,21 @@
 				</div>
 			{/if}
 
+			<!-- Follow-up suggestion chips -->
+			{#if !isStreaming && messages.length > 0}
+				{@const lastAssistant = messages[messages.length - 1]}
+				{#if lastAssistant?.role === 'assistant' && lastAssistant.followUps?.length}
+					<div class="flex flex-wrap gap-2 mt-1">
+						{#each lastAssistant.followUps as fu}
+							<button
+								onclick={() => sendMessage(fu.task)}
+								class="rounded-full border border-accent/30 bg-accent/5 px-3 py-1.5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all"
+							>{fu.label}</button>
+						{/each}
+					</div>
+				{/if}
+			{/if}
+
 			{#if isOffline}
 				<div role="status" class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-2.5 text-sm text-warning flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 5.636a9 9 0 010 12.728M5.636 5.636a9 9 0 000 12.728M12 12h.01M8.464 8.464a5 5 0 000 7.072M15.536 8.464a5 5 0 010 7.072" /><line x1="4" y1="4" x2="20" y2="20" stroke="currentColor" stroke-width="2" /></svg>
