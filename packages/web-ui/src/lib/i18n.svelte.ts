@@ -564,6 +564,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.waiting_auth': { de: 'Warte auf Autorisierung...', en: 'Waiting for authorization...' },
 	'integrations.connect_google': { de: 'Mit Google verbinden', en: 'Connect with Google' },
 	'integrations.connecting': { de: 'Verbinden...', en: 'Connecting...' },
+	'integrations.google_managed_desc': { de: 'Verbinde dein Google-Konto mit einem Klick — wir kümmern uns um den Rest.', en: 'Connect your Google account with one click — we handle the rest.' },
+	'integrations.google_connected_managed': { de: 'Google Workspace verbunden!', en: 'Google Workspace connected!' },
 	'integrations.google_code_copied': { de: 'Code kopiert — im geöffneten Tab einfügen', en: 'Code copied — paste in the opened tab' },
 	'integrations.credentials_saved': { de: 'Credentials gespeichert. Engine wird neu gestartet...', en: 'Credentials saved. Restarting engine...' },
 	'integrations.save_credentials': { de: 'Credentials speichern', en: 'Save credentials' },

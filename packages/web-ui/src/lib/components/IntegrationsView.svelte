@@ -256,6 +256,8 @@
 	// --- Managed mode detection ---
 	let managedTier = $state<string | undefined>(undefined);
 	const managed = $derived(!!managedTier);
+	let managedGoogleOAuthAvailable = $state(false);
+	let managedGoogleClaiming = $state(false);
 
 	async function loadManagedStatus() {
 		try {
@@ -263,7 +265,43 @@
 			if (!res.ok) return;
 			const data = (await res.json()) as Record<string, unknown>;
 			if (typeof data['managed'] === 'string') managedTier = data['managed'];
+
+			// Check if managed Google OAuth is available (engine knows the control plane)
+			if (managedTier) {
+				try {
+					const oauthRes = await fetch(`${getApiBase()}/google/oauth-url`);
+					managedGoogleOAuthAvailable = oauthRes.ok;
+				} catch { /* not available */ }
+			}
 		} catch { /* ignore */ }
+	}
+
+	async function startManagedGoogleOAuth() {
+		try {
+			const res = await fetch(`${getApiBase()}/google/oauth-url`);
+			if (!res.ok) throw new Error();
+			const data = (await res.json()) as { url: string };
+			if (data.url) window.location.href = data.url;
+		} catch {
+			addToast(t('common.error'), 'error');
+		}
+	}
+
+	async function claimManagedGoogleTokens() {
+		managedGoogleClaiming = true;
+		try {
+			const res = await fetch(`${getApiBase()}/google/claim-managed`, { method: 'POST' });
+			if (res.ok) {
+				addToast(t('integrations.google_connected_managed'), 'success');
+				await loadGoogleStatus();
+			} else {
+				const data = (await res.json().catch(() => ({}))) as { error?: string };
+				addToast(data.error ?? t('common.error'), 'error');
+			}
+		} catch {
+			addToast(t('common.error'), 'error');
+		}
+		managedGoogleClaiming = false;
 	}
 
 	// --- Anthropic API Key ---
@@ -403,6 +441,19 @@
 		loadManagedStatus();
 		loadGoogleStatus();
 		loadSecretStatuses();
+
+		// Auto-claim Google tokens after OAuth redirect (managed flow)
+		if (typeof window !== 'undefined') {
+			const params = new URLSearchParams(window.location.search);
+			if (params.get('google_oauth') === 'success') {
+				// Clean URL param without reload
+				const url = new URL(window.location.href);
+				url.searchParams.delete('google_oauth');
+				window.history.replaceState({}, '', url.toString());
+				// Claim tokens from control plane
+				claimManagedGoogleTokens();
+			}
+		}
 	});
 
 	onDestroy(() => {
@@ -480,8 +531,24 @@
 
 		{#if googleLoading}
 			<!-- loading -->
+		{:else if managedGoogleClaiming}
+			<div class="flex items-center gap-2 text-sm text-text-muted">
+				<span class="inline-block h-4 w-4 border-2 border-accent border-t-transparent rounded-full animate-spin"></span>
+				{t('integrations.connecting')}
+			</div>
+		{:else if !googleStatus?.available && managed && managedGoogleOAuthAvailable}
+			<!-- Managed: simplified one-click flow -->
+			<div class="space-y-3">
+				<p class="text-sm text-text-muted">{t('integrations.google_managed_desc')}</p>
+				<button
+					onclick={startManagedGoogleOAuth}
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90"
+				>
+					{t('integrations.connect_google')}
+				</button>
+			</div>
 		{:else if !googleStatus?.available}
-			<!-- Credentials not set — show input -->
+			<!-- Self-hosted: manual credential setup -->
 			<div class="space-y-3">
 				{#if googleCredSaved}
 					<p class="text-sm text-success">{t('integrations.credentials_saved')}</p>

@@ -249,6 +249,28 @@ export class GoogleAuth {
   }
 
   /**
+   * Set tokens directly from an external OAuth broker (e.g. managed control plane).
+   * Validates token structure and saves to vault.
+   */
+  async setTokens(data: {
+    access_token: string;
+    refresh_token: string;
+    expires_at: number;
+    scopes: string[];
+  }): Promise<void> {
+    if (!data.access_token || !data.refresh_token || !data.expires_at || !Array.isArray(data.scopes)) {
+      throw new Error('Invalid token data: missing required fields');
+    }
+    this.tokenData = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: data.expires_at,
+      scopes: data.scopes,
+    };
+    saveTokenData(this.tokenData, this.vault);
+  }
+
+  /**
    * Get a valid access token, refreshing if needed.
    * For service accounts, generates a new JWT token.
    */

@@ -1748,6 +1748,65 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok });
     });
 
+    // Get Google OAuth start URL (managed instances — redirects via control plane)
+    this.staticRoutes.set('GET /api/google/oauth-url', async (_req, res) => {
+      const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+      const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+
+      if (!controlPlaneUrl || !instanceId) {
+        errorResponse(res, 400, 'Not a managed instance');
+        return;
+      }
+
+      const url = `${controlPlaneUrl}/oauth/google/start?instance_id=${encodeURIComponent(instanceId)}`;
+      jsonResponse(res, 200, { url });
+    });
+
+    // Claim Google tokens from managed control plane OAuth broker
+    this.staticRoutes.set('POST /api/google/claim-managed', async (_req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!requireService(res, google, 'Google auth')) return;
+
+      const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+      const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'];
+
+      if (!controlPlaneUrl || !instanceId || !httpSecret) {
+        errorResponse(res, 400, 'Not a managed instance or missing control plane config');
+        return;
+      }
+
+      try {
+        const claimRes = await fetch(`${controlPlaneUrl}/internal/oauth/google/claim`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-instance-secret': httpSecret,
+          },
+          body: JSON.stringify({ instance_id: instanceId }),
+        });
+
+        if (!claimRes.ok) {
+          const data = (await claimRes.json().catch(() => ({}))) as Record<string, unknown>;
+          errorResponse(res, claimRes.status, (data['error'] as string) ?? 'Failed to claim tokens');
+          return;
+        }
+
+        const tokens = (await claimRes.json()) as {
+          access_token: string;
+          refresh_token: string;
+          expires_at: number;
+          scopes: string[];
+        };
+
+        await google.setTokens(tokens);
+        jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errorResponse(res, 500, msg);
+      }
+    });
+
     // ── Knowledge Graph ──────────────────────────────────────────
 
     this.staticRoutes.set('GET /api/kg/stats', async (_req, res) => {
