@@ -479,6 +479,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Legal
 	'legal.terms': { de: 'AGB', en: 'Terms' },
 	'legal.privacy': { de: 'Datenschutz', en: 'Privacy' },
+	'legal.dpa': { de: 'AVV', en: 'DPA' },
 	'legal.imprint': { de: 'Impressum', en: 'Imprint' },
 
 	// Bug Reporting

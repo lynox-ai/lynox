@@ -206,6 +206,8 @@
 		<span class="text-border">·</span>
 		<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/datenschutz/' : 'privacy'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.privacy')}</a>
 		<span class="text-border">·</span>
+		<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/avv/' : 'dpa'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.dpa')}</a>
+		<span class="text-border">·</span>
 		<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/impressum/' : 'imprint'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.imprint')}</a>
 	</div>
 </div>
@@ -319,6 +321,8 @@
 				<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/agb/' : 'terms'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.terms')}</a>
 				<span class="text-border">·</span>
 				<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/datenschutz/' : 'privacy'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.privacy')}</a>
+				<span class="text-border">·</span>
+				<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/avv/' : 'dpa'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.dpa')}</a>
 				<span class="text-border">·</span>
 				<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/impressum/' : 'imprint'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.imprint')}</a>
 			</div>
