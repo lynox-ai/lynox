@@ -165,12 +165,12 @@
 		</div>
 	{:else if content}
 		{@const entries = content.split('\n').filter(line => line.trim())}
-		<div class="space-y-2">
+		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle divide-y divide-border">
 			{#each entries as entry, i}
 				{@const dateMatch = entry.match(/^\[(\d{4}-\d{2}-\d{2})\]\s*/)}
 				{@const date = dateMatch?.[1] ?? ''}
 				{@const text = dateMatch ? entry.slice(dateMatch[0].length) : entry}
-				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 group relative">
+				<div class="px-4 py-3 group relative">
 					{#if editingIdx === i}
 						<!-- Inline edit mode -->
 						<textarea

@@ -25,6 +25,7 @@
 	let dragNode: HTMLElement | null = null;
 	let renamingThreadId = $state<string | null>(null);
 	let renameValue = $state('');
+	let langDropdownOpen = $state(false);
 
 	function focusOnMount(node: HTMLElement) { node.focus(); }
 
@@ -419,14 +420,6 @@
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
 					{t('nav.settings')}
 				</a>
-				<a
-					href="/logout"
-					class="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm transition-all
-					text-text-muted hover:text-text hover:bg-bg-muted mt-1"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" /></svg>
-					{t('nav.logout')}
-				</a>
 			</div>
 		</nav>
 
@@ -436,7 +429,7 @@
 			<header class="flex items-center justify-between h-12 px-4 border-b border-border bg-bg shrink-0">
 				<!-- Left: hamburger (mobile) + logo -->
 				<div class="flex items-center gap-3">
-					<button onclick={() => (sidebarOpen = true)} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label="Open menu">
+					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label="Open menu">
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
 							<path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" />
 						</svg>
@@ -451,18 +444,53 @@
 					<kbd class="text-[10px] font-mono bg-bg-muted px-1 py-0.5 rounded">⌘K</kbd>
 				</button>
 
-				<!-- Right: locale toggle + user -->
-				<div class="flex items-center gap-3">
-					<button
-						onclick={() => setLocale(getLocale() === 'de' ? 'en' : 'de')}
-						class="text-xs font-mono text-text-subtle hover:text-text transition-colors"
-						aria-label="Switch language"
-					>
-						{getLocale() === 'de' ? 'EN' : 'DE'}
-					</button>
+				<!-- Right: locale dropdown + sign out -->
+				<div class="flex items-center gap-1">
+					<!-- Language dropdown -->
+					<div class="relative">
+						<button
+							onclick={() => (langDropdownOpen = !langDropdownOpen)}
+							class="flex items-center gap-1 text-xs font-mono text-text-subtle hover:text-text transition-colors min-h-[2.5rem] min-w-[2.5rem] justify-center px-2 py-2 rounded hover:bg-bg-muted"
+							aria-label="Switch language"
+							aria-expanded={langDropdownOpen}
+						>
+							{getLocale().toUpperCase()}
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" /></svg>
+						</button>
+						{#if langDropdownOpen}
+							<!-- backdrop to close -->
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<div class="fixed inset-0 z-50" onclick={() => (langDropdownOpen = false)} onkeydown={() => {}}></div>
+							<div class="absolute right-0 top-full mt-1 z-50 min-w-[8rem] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg py-1">
+								<button
+									onclick={() => { setLocale('de'); langDropdownOpen = false; }}
+									class="flex items-center gap-2 w-full px-3 py-2.5 text-xs text-left transition-colors {getLocale() === 'de' ? 'text-accent-text bg-accent/10' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+								>
+									<span class="font-mono w-5">DE</span>
+									<span>Deutsch</span>
+								</button>
+								<button
+									onclick={() => { setLocale('en'); langDropdownOpen = false; }}
+									class="flex items-center gap-2 w-full px-3 py-2.5 text-xs text-left transition-colors {getLocale() === 'en' ? 'text-accent-text bg-accent/10' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+								>
+									<span class="font-mono w-5">EN</span>
+									<span>English</span>
+								</button>
+							</div>
+						{/if}
+					</div>
 					{#if userSlot}
 						{@render userSlot()}
 					{/if}
+					<!-- Sign out -->
+					<a
+						href="/logout"
+						class="flex items-center justify-center text-text-subtle hover:text-text transition-colors min-h-[2.5rem] min-w-[2.5rem] p-2 rounded hover:bg-bg-muted"
+						aria-label={t('nav.logout')}
+						title={t('nav.logout')}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" /></svg>
+					</a>
 				</div>
 			</header>
 
