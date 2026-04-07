@@ -77,6 +77,9 @@ function requiresAdmin(method: string, pathname: string): boolean {
   if (method === 'PUT' && pathname.startsWith('/api/secrets/')) return true;
   if (method === 'DELETE' && pathname.startsWith('/api/secrets/')) return true;
   if (method === 'GET' && pathname === '/api/auth/token') return true;
+  // GDPR endpoints require admin scope
+  if (method === 'GET' && pathname === '/api/export') return true;
+  if (method === 'DELETE' && pathname === '/api/data') return true;
   // Migration endpoints require admin scope (except preview which is read-only)
   if (pathname.startsWith('/api/migration') && pathname !== '/api/migration/preview') return true;
   return false;
@@ -107,8 +110,8 @@ function errorResponse(res: ServerResponse, status: number, message: string): vo
 
 /** Type-guard that sends 503 if the service is null/undefined. Caller must `return` after a false result. */
 function requireService<T>(res: ServerResponse, service: T | null | undefined, name: string): service is NonNullable<T> {
-  if (service == null) errorResponse(res, 503, `${name} not available`);
-  return service != null;
+  if (service === null || service === undefined) errorResponse(res, 503, `${name} not available`);
+  return service !== null && service !== undefined;
 }
 
 async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
@@ -1880,6 +1883,200 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, err instanceof Error ? err.message : 'Query failed');
       }
     }));
+
+    // ── GDPR Data Export & Erasure ─────────────────────────────────
+
+    // GET /api/export — GDPR Art. 15 (Right of Access) + Art. 20 (Data Portability)
+    this.staticRoutes.set('GET /api/export', async (_req, res) => {
+      const exportData: Record<string, unknown> = {
+        exported_at: new Date().toISOString(),
+        version: PKG_VERSION,
+      };
+
+      // Threads + messages
+      const threadStore = engine.getThreadStore();
+      if (threadStore) {
+        const threads = threadStore.listThreads({ limit: 200, includeArchived: true });
+        const threadsWithMessages = threads.map(t => ({
+          ...t,
+          messages: threadStore.getMessages(t.id, { limit: 50000 }).map(m => ({
+            seq: m.seq,
+            role: m.role,
+            content: JSON.parse(m.content_json) as unknown,
+            created_at: m.created_at,
+          })),
+        }));
+        exportData['threads'] = threadsWithMessages;
+      } else {
+        exportData['threads'] = [];
+      }
+
+      // Flat-file memory (all namespaces)
+      const memory = engine.getMemory();
+      if (memory) {
+        const memoryData: Record<string, string | null> = {};
+        for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
+          memoryData[ns] = await memory.load(ns);
+        }
+        exportData['memory'] = memoryData;
+      } else {
+        exportData['memory'] = {};
+      }
+
+      // Knowledge graph (entities + relations)
+      const kg = engine.getKnowledgeLayer();
+      if (kg) {
+        try {
+          const entities = await kg.listEntities({ limit: 200 });
+          const stats = await kg.stats();
+          // Collect all relations by iterating entity relations
+          const relationSet = new Map<string, unknown>();
+          for (const entity of entities) {
+            const relations = await kg.getEntityRelations(entity.id);
+            for (const rel of relations) {
+              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}`;
+              if (!relationSet.has(key)) {
+                relationSet.set(key, rel);
+              }
+            }
+          }
+          exportData['knowledge_graph'] = {
+            entities,
+            relationships: [...relationSet.values()],
+            stats,
+          };
+        } catch {
+          exportData['knowledge_graph'] = { entities: [], relationships: [] };
+        }
+      } else {
+        exportData['knowledge_graph'] = { entities: [], relationships: [] };
+      }
+
+      // CRM contacts + deals
+      const crm = engine.getCRM();
+      if (crm) {
+        exportData['contacts'] = crm.listContacts(undefined, 500);
+        exportData['deals'] = crm.getAllDeals(undefined, 500);
+      } else {
+        exportData['contacts'] = [];
+        exportData['deals'] = [];
+      }
+
+      // DataStore collections + records
+      const ds = engine.getDataStore();
+      if (ds) {
+        const collections = ds.listCollections();
+        const datastoreExport: Record<string, unknown[]> = {};
+        for (const col of collections) {
+          try {
+            const result = ds.queryRecords({ collection: col.name, limit: 500 });
+            datastoreExport[col.name] = result.rows;
+          } catch {
+            datastoreExport[col.name] = [];
+          }
+        }
+        exportData['datastore'] = datastoreExport;
+      } else {
+        exportData['datastore'] = {};
+      }
+
+      // Secret names (never values — GDPR export must not leak secrets)
+      const secretStore = engine.getSecretStore();
+      if (secretStore) {
+        exportData['secrets'] = secretStore.listNames();
+      } else {
+        exportData['secrets'] = [];
+      }
+
+      // Config (redacted)
+      try {
+        const { readUserConfig } = await import('../core/config.js');
+        const config = readUserConfig();
+        const redacted: Record<string, unknown> = { ...config };
+        for (const key of REDACTED_CONFIG_KEYS) {
+          if (key in redacted && redacted[key]) {
+            delete redacted[key];
+            redacted[`${key}_configured`] = true;
+          }
+        }
+        exportData['config'] = redacted;
+      } catch {
+        exportData['config'] = {};
+      }
+
+      jsonResponse(res, 200, exportData);
+    });
+
+    // DELETE /api/data — GDPR Art. 17 (Right to Erasure)
+    this.staticRoutes.set('DELETE /api/data', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const confirm = b && typeof b['confirm'] === 'string' ? b['confirm'] : '';
+      if (confirm !== 'DELETE_ALL_DATA') {
+        errorResponse(res, 400, 'Confirmation required: send { "confirm": "DELETE_ALL_DATA" }');
+        return;
+      }
+
+      // Delete all threads + messages
+      const threadStore = engine.getThreadStore();
+      if (threadStore) {
+        const threads = threadStore.listThreads({ limit: 200, includeArchived: true });
+        for (const t of threads) {
+          threadStore.deleteThread(t.id);
+        }
+      }
+
+      // Delete all flat-file memory
+      const memory = engine.getMemory();
+      if (memory) {
+        for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
+          await memory.save(ns, '');
+        }
+      }
+
+      // Delete all knowledge graph entities (cascades to relations, mentions, cooccurrences)
+      const kg = engine.getKnowledgeLayer();
+      if (kg) {
+        try {
+          const db = kg.getDb();
+          let entities = db.listEntities({ limit: 200 });
+          while (entities.length > 0) {
+            for (const entity of entities) {
+              db.deleteEntity(entity.id);
+            }
+            entities = db.listEntities({ limit: 200 });
+          }
+          // Also deactivate all memories
+          db.deactivateMemoriesByPattern('%');
+        } catch { /* best effort */ }
+      }
+
+      // Delete all DataStore collections (includes CRM tables)
+      const ds = engine.getDataStore();
+      if (ds) {
+        const collections = ds.listCollections();
+        for (const col of collections) {
+          ds.dropCollection(col.name);
+        }
+      }
+
+      // Delete all secrets from vault
+      const secretStore = engine.getSecretStore();
+      if (secretStore) {
+        const names = secretStore.listNames();
+        for (const name of names) {
+          secretStore.deleteSecret(name);
+        }
+      }
+
+      // Reset config to defaults
+      try {
+        const { saveUserConfig } = await import('../core/config.js');
+        saveUserConfig({});
+        await engine.reloadUserConfig();
+      } catch { /* best effort */ }
+
+      jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });
+    });
 
     // ── Vault ─────────────────────────────────────────────────────
 
