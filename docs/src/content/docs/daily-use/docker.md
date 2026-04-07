@@ -72,6 +72,12 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | No | Google service account (headless) |
 | `SEARXNG_URL` | No | Web search via SearXNG (included in docker-compose) |
 | `LYNOX_SENTRY_DSN` | No | Error reporting (opt-in) |
+| `LYNOX_LANGUAGE` | No | Force response language (e.g. `de`, `en`) |
+| `LYNOX_TRUST_PROXY` | No | Trust X-Forwarded-For headers (set behind reverse proxy) |
+| `LYNOX_ALLOWED_ORIGINS` | No | CORS allowed origins (comma-separated) |
+| `LYNOX_ALLOWED_IPS` | No | Restrict access to specific IPs (comma-separated) |
+| `LYNOX_TLS_CERT` | No | Path to TLS certificate (enables HTTPS) |
+| `LYNOX_TLS_KEY` | No | Path to TLS private key |
 
 ## Persistent Data
 
@@ -137,8 +143,8 @@ Checks for new images once per day. Your data is on a volume, so updates are saf
 The container exposes a health endpoint:
 
 ```bash
-curl http://localhost:3000/api/engine/health
-# {"status":"ok"}
+curl http://localhost:3000/api/health
+# {"status":"ok","version":"1.0.0","uptime_s":...}
 ```
 
 ## Engine-Only Mode

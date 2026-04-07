@@ -263,7 +263,7 @@ Environment:
   TELEGRAM_BOT_TOKEN            Auto-start Telegram bot mode
   TAVILY_API_KEY                Enable web search tool
 
-Docs: https://docs.lynox.dev
+Docs: https://docs.lynox.ai
 `);
     return;
   }
