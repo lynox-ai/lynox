@@ -246,6 +246,9 @@ export class Engine {
     const awsSecretKey = process.env['AWS_SECRET_ACCESS_KEY']
       ?? this.secretStore?.resolve('AWS_SECRET_ACCESS_KEY')
       ?? undefined;
+    const awsSessionToken = process.env['AWS_SESSION_TOKEN']
+      ?? this.secretStore?.resolve('AWS_SESSION_TOKEN')
+      ?? undefined;
     this.client = createLLMClient({
       provider: this.userConfig.provider,
       apiKey,
@@ -253,6 +256,7 @@ export class Engine {
       awsRegion: this.userConfig.aws_region,
       awsAccessKey,
       awsSecretKey,
+      awsSessionToken,
       gcpRegion: this.userConfig.gcp_region,
       gcpProjectId: this.userConfig.gcp_project_id,
     });

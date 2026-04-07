@@ -61,6 +61,7 @@ export interface LLMClientOptions {
   awsRegion?: string | undefined;
   awsAccessKey?: string | undefined;
   awsSecretKey?: string | undefined;
+  awsSessionToken?: string | undefined;
   gcpRegion?: string | undefined;
   gcpProjectId?: string | undefined;
 }
@@ -80,6 +81,7 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
       awsRegion: opts.awsRegion,
       awsAccessKey: opts.awsAccessKey,
       awsSecretKey: opts.awsSecretKey,
+      awsSessionToken: opts.awsSessionToken,
     });
   }
 

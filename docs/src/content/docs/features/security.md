@@ -174,5 +174,5 @@ lynox ships hardened containers, but running a production system requires additi
 | **Vault key** | Save your `LYNOX_VAULT_KEY` separately. If you lose it and the volume is destroyed, encrypted data is unrecoverable |
 
 :::tip[Managed hosting handles all of this]
-The [Starter](https://lynox.ai/pricing) and [Managed EU](https://lynox.ai/pricing) tiers include TLS, firewall, health monitoring, automatic updates, and encrypted backups — so you can focus on using lynox instead of running it.
+Managed hosting includes TLS, firewall, health monitoring, automatic updates, and encrypted backups — so you can focus on using lynox instead of running it. See [lynox.ai](https://lynox.ai) for plans.
 :::

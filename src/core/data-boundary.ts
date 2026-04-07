@@ -62,10 +62,15 @@ export function detectInjectionAttempt(content: string): InjectionResult {
  * Optionally scans for injection attempts and adds stronger warnings.
  */
 /**
- * Escape XML special characters to prevent tag injection.
+ * Escape XML special characters to prevent tag/attribute injection.
  */
 export function escapeXml(text: string): string {
-  return text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 /**

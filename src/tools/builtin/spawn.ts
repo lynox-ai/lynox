@@ -1,5 +1,5 @@
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig } from '../../types/index.js';
-import { MODEL_MAP, DEFAULT_MAX_TOKENS, getModelId } from '../../types/index.js';
+import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
 import { getActiveProvider, isBedrockEuOnly } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
 import { loadConfig } from '../../core/config.js';
@@ -37,7 +37,7 @@ export function abortSpawnedAgents(): void {
  */
 function estimateSpawnCost(model: string, maxIterations: number): number {
   const pricing = getPricing(model);
-  const maxOutput = DEFAULT_MAX_TOKENS[model] ?? 16_000;
+  const maxOutput = getDefaultMaxTokens(model);
   const avgInput = 4000; // conservative per-turn input estimate
   return maxIterations * (
     (avgInput / 1_000_000) * pricing.input +

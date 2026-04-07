@@ -8,7 +8,7 @@
 import { stderr } from 'node:process';
 
 import type { StreamEvent } from '../types/index.js';
-import { CONTEXT_WINDOW } from '../types/index.js';
+import { getContextWindow } from '../types/index.js';
 import { renderToolCall, renderToolResult, renderSpawn, renderError, renderThinking, BOLD, DIM, BLUE, GREEN, RED, RESET } from './ui.js';
 import { state, spinner, md, footer, toolsUsed } from './cli-state.js';
 
@@ -153,7 +153,7 @@ export function streamHandler(event: StreamEvent, stdout: NodeJS.WriteStream): v
           + (event.usage.cache_read_input_tokens ?? 0);
         const outTok = event.usage.output_tokens;
         const tokens = `${inTok.toLocaleString()} in / ${outTok.toLocaleString()} out`;
-        const maxCtx = CONTEXT_WINDOW[state.currentModelId] ?? 200_000;
+        const maxCtx = getContextWindow(state.currentModelId);
         const pctRaw = Math.min(100, (inTok / maxCtx) * 100);
         const pct = Math.round(pctRaw * 10) / 10;
         const filled = Math.round(pct / 10);

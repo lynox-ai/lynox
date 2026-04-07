@@ -16,7 +16,19 @@ The installer walks you through provider selection and credential entry. Most us
 
 ## Install
 
-### Docker Compose (recommended)
+### npx installer (recommended)
+
+```bash
+npx @lynox-ai/core
+```
+
+The interactive installer checks prerequisites, asks for your AI provider and API key, generates `docker-compose.yml`, `.env`, and SearXNG config, then starts everything automatically. Your browser opens at [localhost:3000](http://localhost:3000) once the health check passes.
+
+**Requires:** Node.js 22+, Docker + Docker Compose.
+
+### Manual Docker Compose
+
+If you prefer to set things up yourself:
 
 ```bash
 # 1. Clone the repo (contains docker-compose.yml + SearXNG config)
@@ -31,19 +43,9 @@ docker compose up -d
 
 Open [localhost:3000](http://localhost:3000) and enter the access token from `docker logs lynox`.
 
-This starts everything: Web UI, AI engine, and SearXNG for free unlimited web search.
-
 :::tip[Access token]
 If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated. Find it with `docker logs lynox`.
 :::
-
-### npx (one command)
-
-```bash
-npx @lynox-ai/core
-```
-
-Interactive Docker installer — creates `docker-compose.yml`, `.env`, and SearXNG config, then starts everything.
 
 ## First Run
 

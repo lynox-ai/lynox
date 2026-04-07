@@ -17,7 +17,7 @@ import type {
   SecretStoreLike,
   ChangesetManagerLike,
 } from '../types/index.js';
-import { LYNOX_BETAS, CHARS_PER_TOKEN, CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, MAX_CONTINUATIONS } from '../types/index.js';
+import { LYNOX_BETAS, CHARS_PER_TOKEN, getContextWindow, getDefaultMaxTokens, getMaxContinuations } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -126,8 +126,8 @@ export class Agent implements IAgent {
       ? { type: 'disabled' }
       : requestedThinking;
     this.effort = (isHaiku || this.isCustomProxy) ? undefined : (config.effort ?? 'high');
-    this.maxTokens = config.maxTokens ?? (DEFAULT_MAX_TOKENS[this.model] ?? 16_000);
-    this.maxContinuations = MAX_CONTINUATIONS[this.model] ?? 10;
+    this.maxTokens = config.maxTokens ?? getDefaultMaxTokens(this.model);
+    this.maxContinuations = getMaxContinuations(this.model);
     this.workerPool = config.workerPool ?? null;
     const rawMax = config.maxIterations ?? 20;
     if (rawMax < 0) throw new Error(`maxIterations must be >= 0 (got ${rawMax}); use 0 for unlimited`);
@@ -376,7 +376,7 @@ export class Agent implements IAgent {
 
     const msgTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
     const totalTokens = msgTokens + overheadTokens;
-    const maxCtx = CONTEXT_WINDOW[this.model] ?? 200_000;
+    const maxCtx = getContextWindow(this.model);
     // Budget for messages = total context minus overhead, with 15% safety margin
     if (totalTokens < maxCtx * 0.85) return;
 
@@ -479,7 +479,7 @@ export class Agent implements IAgent {
     if (this.onStream) {
       const messageTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
       const totalTokens = messageTokens + overheadTokens;
-      const maxCtx = CONTEXT_WINDOW[this.model] ?? 200_000;
+      const maxCtx = getContextWindow(this.model);
       const usagePercent = Math.round(totalTokens / maxCtx * 100);
       if (usagePercent > 70) {
         void this.onStream({
@@ -822,10 +822,21 @@ function isRetryable(err: unknown): boolean {
     if (body?.type === 'overloaded_error' || body?.type === 'rate_limit_error' || body?.type === 'api_error') {
       return true;
     }
+    // AWS Bedrock transient errors (surfaced via Bedrock SDK as APIError)
+    const msg = err.message ?? '';
+    if (msg.includes('ThrottlingException') || msg.includes('TooManyRequestsException')
+      || msg.includes('ServiceUnavailableException') || msg.includes('ModelTimeoutException')
+      || msg.includes('RequestTimeout') || msg.includes('InternalServerException')) {
+      return true;
+    }
   }
   // Network / connection errors
-  if (err instanceof Error && (err.message.includes('ECONNRESET') || err.message.includes('ETIMEDOUT') || err.message.includes('fetch failed'))) {
-    return true;
+  if (err instanceof Error) {
+    const msg = err.message;
+    if (msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed')
+      || msg.includes('ECONNREFUSED') || msg.includes('socket hang up')) {
+      return true;
+    }
   }
   return false;
 }

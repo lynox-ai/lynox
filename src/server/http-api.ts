@@ -72,11 +72,14 @@ function requiresAdmin(method: string, pathname: string): boolean {
   if (method === 'PUT' && pathname === '/api/config') return true;
   if (method === 'GET' && pathname === '/api/vault/key') return true;
   if (method === 'POST' && pathname === '/api/vault/rotate') return true;
-  if (method === 'DELETE' && pathname.startsWith('/api/files')) return true;
+  // All file operations require admin scope (read, download, delete)
+  if (pathname.startsWith('/api/files')) return true;
   if (method === 'GET' && pathname === '/api/secrets') return true;
   if (method === 'PUT' && pathname.startsWith('/api/secrets/')) return true;
   if (method === 'DELETE' && pathname.startsWith('/api/secrets/')) return true;
   if (method === 'GET' && pathname === '/api/auth/token') return true;
+  // Migration endpoints require admin scope (except preview which is read-only)
+  if (pathname.startsWith('/api/migration') && pathname !== '/api/migration/preview') return true;
   return false;
 }
 const RATE_WINDOW_MS = 60_000;
@@ -490,11 +493,31 @@ export class LynoxHTTPApi {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     }
 
-    // Auth — Bearer token OR session cookie (same-origin Web UI).
+    // Auth — Bearer token, session cookie, or migration token (same-origin Web UI).
     // Two-tier: LYNOX_HTTP_SECRET = user scope, LYNOX_HTTP_ADMIN_SECRET = admin scope.
     // When only LYNOX_HTTP_SECRET is set, it implicitly grants admin (backwards compat).
+    // Migration endpoints accept X-Migration-Token as alternative auth (admin scope).
     let authScope: AuthScope = 'admin'; // default for no-secret (localhost) mode
     if (secret) {
+      // Migration token auth — grants admin scope for /api/migration/* endpoints only
+      const migrationToken = req.headers['x-migration-token'];
+      const isMigrationEndpoint = pathname.startsWith('/api/migration/') && pathname !== '/api/migration/preview';
+      if (isMigrationEndpoint && typeof migrationToken === 'string' && migrationToken.length === 64) {
+        const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+        if (storedToken) {
+          const { verifyMigrationToken } = await import('../core/migration-crypto.js');
+          if (verifyMigrationToken(migrationToken, storedToken)) {
+            authScope = 'admin';
+          } else {
+            errorResponse(res, 403, 'Invalid migration token');
+            return;
+          }
+        } else {
+          errorResponse(res, 403, 'No migration token configured');
+          return;
+        }
+      } else {
+
       const auth = req.headers['authorization'] ?? '';
       const bearerToken = auth.startsWith('Bearer ') ? auth.slice(7) : '';
       const adminSecret = process.env['LYNOX_HTTP_ADMIN_SECRET'];
@@ -532,6 +555,7 @@ export class LynoxHTTPApi {
         errorResponse(res, 401, 'Unauthorized');
         return;
       }
+      } // end migration-token else
     }
 
     // Admin scope check for destructive endpoints
@@ -2036,5 +2060,326 @@ export class LynoxHTTPApi {
         errorResponse(res, 404, 'File not found');
       }
     });
+
+    // ── Migration (zero-knowledge self-hosted → managed) ─────────────
+
+    this.staticRoutes.set('GET /api/migration/preview', async (_req, res) => {
+      try {
+        const { MigrationExporter } = await import('../core/migration-export.js');
+        const exporter = new MigrationExporter();
+        const preview = exporter.preview();
+        jsonResponse(res, 200, preview);
+      } catch (err: unknown) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Preview failed');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/export', async (req, res, _params, body) => {
+      // Orchestrated migration: engine handles ECDH + export + transfer to target.
+      // Browser is just the orchestrator — progress reported via SSE.
+      const b = body as Record<string, unknown> | null;
+      const targetUrl = typeof b?.['targetUrl'] === 'string' ? b['targetUrl'] : '';
+      const migrationToken = typeof b?.['migrationToken'] === 'string' ? b['migrationToken'] : '';
+
+      if (!targetUrl || !migrationToken) {
+        errorResponse(res, 400, 'Missing targetUrl or migrationToken');
+        return;
+      }
+
+      // Validate targetUrl is HTTPS (or localhost for testing)
+      try {
+        const parsed = new URL(targetUrl);
+        const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || /^192\.168\./.test(parsed.hostname);
+        if (parsed.protocol !== 'https:' && !isLocal) {
+          errorResponse(res, 400, 'targetUrl must use HTTPS');
+          return;
+        }
+      } catch {
+        errorResponse(res, 400, 'Invalid targetUrl');
+        return;
+      }
+
+      // SSE response for progress
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+
+      const sendEvent = (event: string, data: unknown) => {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+
+      try {
+        const crypto = await import('../core/migration-crypto.js');
+        const { MigrationExporter } = await import('../core/migration-export.js');
+
+        // 1. Preview
+        sendEvent('progress', { phase: 'preview', message: 'Collecting data inventory...' });
+        const exporter = new MigrationExporter();
+        const preview = exporter.preview();
+        sendEvent('preview', preview);
+
+        // 2. ECDH Handshake with target
+        sendEvent('progress', { phase: 'handshake', message: 'Establishing secure connection...' });
+
+        const hsRes = await fetch(`${targetUrl}/api/migration/handshake`, {
+          headers: { 'X-Migration-Token': migrationToken, 'Accept': 'application/json' },
+        });
+        if (!hsRes.ok) {
+          const errText = await hsRes.text();
+          throw new Error(`Handshake failed: ${errText}`);
+        }
+        const handshake = await hsRes.json() as { serverPubKey: string; signature: string; challengeNonce: string };
+
+        // Client key agreement
+        const clientKp = crypto.generateEphemeralKeypair();
+        const serverPub = crypto.deserializePublicKey(handshake.serverPubKey);
+        const nonce = Buffer.from(handshake.challengeNonce, 'hex');
+        const transferKey = crypto.deriveTransferKey(clientKp.privateKey, serverPub, nonce);
+
+        const migrationHeaders = {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Migration-Token': migrationToken,
+        };
+
+        const completeRes = await fetch(`${targetUrl}/api/migration/handshake`, {
+          method: 'POST',
+          headers: migrationHeaders,
+          body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
+        });
+        if (!completeRes.ok) throw new Error('Handshake completion failed');
+
+        sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
+
+        // 3. Export + Encrypt
+        sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
+        const { manifest, chunks } = exporter.export(transferKey, (p) => {
+          sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
+        });
+
+        // Zeroize transfer key — no longer needed after encryption
+        crypto.zeroize(transferKey);
+
+        // 4. Send manifest
+        sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });
+        const mRes = await fetch(`${targetUrl}/api/migration/manifest`, {
+          method: 'POST',
+          headers: migrationHeaders,
+          body: JSON.stringify(manifest),
+        });
+        if (!mRes.ok) throw new Error(`Manifest rejected: ${await mRes.text()}`);
+
+        // 5. Send chunks
+        for (let i = 0; i < chunks.length; i++) {
+          sendEvent('progress', {
+            phase: 'transferring',
+            message: `Sending chunk ${String(i + 1)}/${String(chunks.length)}...`,
+            current: i + 1,
+            total: chunks.length,
+          });
+
+          const cRes = await fetch(`${targetUrl}/api/migration/chunk`, {
+            method: 'POST',
+            headers: migrationHeaders,
+            body: JSON.stringify(chunks[i]),
+          });
+          if (!cRes.ok) throw new Error(`Chunk ${String(i)} rejected: ${await cRes.text()}`);
+        }
+
+        // 6. Restore
+        sendEvent('progress', { phase: 'restoring', message: 'Restoring data on target...' });
+        const rRes = await fetch(`${targetUrl}/api/migration/restore`, {
+          method: 'POST',
+          headers: migrationHeaders,
+        });
+        if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
+
+        const result = await rRes.json() as { success: boolean; verification: unknown };
+        sendEvent('done', { success: true, verification: result.verification });
+      } catch (err: unknown) {
+        sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
+      } finally {
+        res.end();
+      }
+    });
+
+    this.staticRoutes.set('GET /api/migration/handshake', async (req, res) => {
+      // Only available on managed instances receiving a migration
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      const token = req.headers['x-migration-token'];
+      if (!token || typeof token !== 'string') {
+        errorResponse(res, 401, 'Missing X-Migration-Token header');
+        return;
+      }
+
+      try {
+        const importer = await this._getOrCreateMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 503, 'Migration not available — missing vault key or HTTP secret');
+          return;
+        }
+
+        // Validate migration token
+        const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+        if (!storedToken) {
+          errorResponse(res, 403, 'No migration token configured for this instance');
+          return;
+        }
+
+        const { verifyMigrationToken } = await import('../core/migration-crypto.js');
+        if (!verifyMigrationToken(token, storedToken)) {
+          errorResponse(res, 403, 'Invalid migration token');
+          return;
+        }
+
+        const payload = importer.startHandshake();
+        jsonResponse(res, 200, payload);
+      } catch (err: unknown) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Handshake failed');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/handshake', async (_req, res, _params, body) => {
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      const b = body as Record<string, unknown> | null;
+      const clientPubKey = typeof b?.['clientPubKey'] === 'string' ? b['clientPubKey'] : '';
+      if (!clientPubKey) {
+        errorResponse(res, 400, 'Missing clientPubKey');
+        return;
+      }
+
+      try {
+        const importer = this._getMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 400, 'No active migration session — start handshake first');
+          return;
+        }
+
+        importer.completeHandshake(clientPubKey);
+        jsonResponse(res, 200, { ready: true });
+      } catch (err: unknown) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Handshake completion failed');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/manifest', async (_req, res, _params, body) => {
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      try {
+        const importer = this._getMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 400, 'No active migration session');
+          return;
+        }
+
+        const manifest = body as import('../core/migration-crypto.js').MigrationManifest;
+        importer.setManifest(manifest);
+        jsonResponse(res, 200, { accepted: true, totalChunks: manifest.totalChunks });
+      } catch (err: unknown) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Manifest rejected');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/chunk', async (_req, res, _params, body) => {
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      try {
+        const importer = this._getMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 400, 'No active migration session');
+          return;
+        }
+
+        const chunk = body as import('../core/migration-crypto.js').EncryptedChunk;
+        const result = importer.receiveChunk(chunk);
+        const complete = importer.isComplete();
+
+        jsonResponse(res, 200, { ...result, complete });
+      } catch (err: unknown) {
+        // On any chunk error, cleanup the session to prevent partial state
+        this._migrationImporter?.cleanup();
+        this._migrationImporter = null;
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Chunk rejected');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/restore', async (_req, res) => {
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      try {
+        const importer = this._getMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 400, 'No active migration session');
+          return;
+        }
+
+        const verification = importer.restore();
+
+        // Cleanup crypto material
+        importer.cleanup();
+        this._migrationImporter = null;
+
+        // Invalidate the migration token (one-time use)
+        delete process.env['LYNOX_MIGRATION_TOKEN'];
+
+        jsonResponse(res, 200, { success: true, verification });
+
+        // Auto-restart so engine loads the imported data
+        setTimeout(() => { process.exit(0); }, 1000);
+      } catch (err: unknown) {
+        this._migrationImporter?.cleanup();
+        this._migrationImporter = null;
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Restore failed');
+      }
+    });
+
+    this.staticRoutes.set('DELETE /api/migration', async (_req, res) => {
+      // Cancel an in-progress migration (cleanup keys + memory)
+      if (this._migrationImporter) {
+        this._migrationImporter.cleanup();
+        this._migrationImporter = null;
+      }
+      jsonResponse(res, 200, { cancelled: true });
+    });
+  }
+
+  // ── Migration helpers ──────────────────────────────────────────────────────
+
+  private _migrationImporter: import('../core/migration-import.js').MigrationImporter | null = null;
+
+  private async _getOrCreateMigrationImporter(): Promise<import('../core/migration-import.js').MigrationImporter | null> {
+    if (this._migrationImporter?.isActive) return this._migrationImporter;
+
+    const vaultKey = process.env['LYNOX_VAULT_KEY'];
+    const httpSecret = process.env['LYNOX_HTTP_SECRET'];
+    if (!vaultKey || !httpSecret) return null;
+
+    const { MigrationImporter } = await import('../core/migration-import.js');
+    this._migrationImporter = new MigrationImporter({ vaultKey, httpSecret });
+    return this._migrationImporter;
+  }
+
+  private _getMigrationImporter(): import('../core/migration-import.js').MigrationImporter | null {
+    if (!this._migrationImporter?.isActive) return null;
+    return this._migrationImporter;
   }
 }

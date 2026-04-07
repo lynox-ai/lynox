@@ -28,6 +28,7 @@
 		{ href: '/app/settings/apis', titleKey: 'apis.title', descKey: 'apis.no_profiles' },
 		{ href: '/app/settings/data', titleKey: 'data.title', descKey: 'data.no_collections' },
 		{ href: '/app/settings/backups', titleKey: 'backups.title', descKey: 'backups.desc' },
+		{ href: '/app/migration', titleKey: 'migration.title', descKey: 'migration.subtitle', selfHostOnly: true },
 	];
 
 	const items = $derived([...baseItems, ...extraItems].filter(i => !i.selfHostOnly || !managed));

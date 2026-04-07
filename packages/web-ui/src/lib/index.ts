@@ -28,6 +28,7 @@ export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelt
 export { default as ChangesetReview } from './components/ChangesetReview.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';
 export { default as MobileAccess } from './components/MobileAccess.svelte';
+export { default as MigrationWizard } from './components/MigrationWizard.svelte';
 
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';

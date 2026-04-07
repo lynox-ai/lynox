@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
+import { normalizeModelId } from '../types/models.js';
 
 export interface ModelPricing {
   input: number;
@@ -32,7 +33,10 @@ export function getPricing(model: string): ModelPricing {
   if (overridePricing === null) {
     overridePricing = loadPricingOverride() ?? {};
   }
-  return overridePricing[model] ?? DEFAULT_PRICING[model] ?? DEFAULT_PRICING['claude-opus-4-6']!;
+  const base = normalizeModelId(model);
+  return overridePricing[model] ?? overridePricing[base]
+    ?? DEFAULT_PRICING[model] ?? DEFAULT_PRICING[base]
+    ?? DEFAULT_PRICING['claude-opus-4-6']!;
 }
 
 export function calculateCost(model: string, usage: {

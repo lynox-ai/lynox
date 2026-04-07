@@ -37,11 +37,19 @@ export interface WriteCheckResult {
  * Scan file content for malicious patterns before writing.
  */
 export function checkWriteContent(content: string, filePath: string): WriteCheckResult {
-  // Check first 20K and last 20K chars for performance
+  // Scan head, middle samples, and tail to prevent evasion via mid-file payload placement.
+  // Total scan budget: ~60K chars for large files, full content for small files.
   const SCAN_SIZE = 20_000;
-  const head = content.slice(0, SCAN_SIZE);
-  const tail = content.length > SCAN_SIZE * 2 ? content.slice(-SCAN_SIZE) : '';
-  const text = tail ? head + tail : head;
+  let text: string;
+  if (content.length <= SCAN_SIZE * 3) {
+    text = content; // Small file — scan everything
+  } else {
+    const head = content.slice(0, SCAN_SIZE);
+    const midStart = Math.floor(content.length / 2) - SCAN_SIZE / 2;
+    const mid = content.slice(midStart, midStart + SCAN_SIZE);
+    const tail = content.slice(-SCAN_SIZE);
+    text = head + mid + tail;
+  }
   for (const { pattern, label } of MALICIOUS_WRITE_PATTERNS) {
     if (pattern.test(text)) {
       if (channels.securityBlocked.hasSubscribers) {
