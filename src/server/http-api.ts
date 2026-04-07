@@ -668,11 +668,30 @@ export class LynoxHTTPApi {
 
       const body = (await res.json()) as { status?: { indicator?: string; description?: string } };
       const indicator = body.status?.indicator;
-      const data: ProviderStatus = {
-        indicator: indicator === 'none' || indicator === 'minor' || indicator === 'major' || indicator === 'critical'
-          ? indicator : 'unknown',
-        description: body.status?.description ?? 'Unknown',
-      };
+      let resolvedIndicator: 'none' | 'minor' | 'major' | 'critical' | 'unknown' =
+        indicator === 'none' || indicator === 'minor' || indicator === 'major' || indicator === 'critical'
+          ? indicator : 'unknown';
+      let description = body.status?.description ?? 'Unknown';
+
+      // If the status page reports major/critical but our own recent runs succeeded,
+      // downgrade to minor — the API is reachable from this engine despite the outage.
+      if (resolvedIndicator === 'major' || resolvedIndicator === 'critical') {
+        const history = this.engine?.getRunHistory();
+        if (history) {
+          const recent = history.getRecentRuns(1);
+          const lastRun = recent[0];
+          if (lastRun) {
+            const lastRunTime = new Date(lastRun.created_at).getTime();
+            const fiveMinAgo = now - 5 * 60_000;
+            if (lastRunTime > fiveMinAgo && lastRun.status === 'completed') {
+              resolvedIndicator = 'minor';
+              description = `${description} (API responding locally)`;
+            }
+          }
+        }
+      }
+
+      const data: ProviderStatus = { indicator: resolvedIndicator, description };
       this.providerStatusCache = { data, expiresAt: now + 60_000 };
       return data;
     } catch {
@@ -893,6 +912,7 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
       const answer = b && typeof b['answer'] === 'string' ? b['answer'] : '';
+      if (!answer && !promptId) { errorResponse(res, 400, 'Missing answer'); return; }
 
       // Try by promptId first (preferred — idempotent), fall back to session lookup
       let answered = false;
@@ -1117,6 +1137,7 @@ export class LynoxHTTPApi {
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
+      if (!text) { errorResponse(res, 400, 'Missing text'); return; }
       await memory.append(ns, text);
       jsonResponse(res, 200, { ok: true });
     }));

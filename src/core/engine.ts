@@ -54,6 +54,7 @@ import {
   dataStoreQueryTool,
   dataStoreListTool,
   dataStoreDeleteTool,
+  dataStoreDropTool,
   captureProcessTool,
   promoteProcessTool,
   stepCompleteTool,
@@ -740,7 +741,8 @@ export class Engine {
       .register(dataStoreInsertTool)
       .register(dataStoreQueryTool)
       .register(dataStoreListTool)
-      .register(dataStoreDeleteTool);
+      .register(dataStoreDeleteTool)
+      .register(dataStoreDropTool);
   }
 
   addTool<T>(entry: ToolEntry<T>): void {

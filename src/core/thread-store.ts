@@ -62,8 +62,8 @@ export class ThreadStore {
     const limit = Math.min(opts?.limit ?? 50, 200);
     const includeArchived = opts?.includeArchived ?? false;
     const sql = includeArchived
-      ? 'SELECT * FROM threads ORDER BY is_favorite DESC, updated_at DESC LIMIT ?'
-      : 'SELECT * FROM threads WHERE is_archived = 0 ORDER BY is_favorite DESC, updated_at DESC LIMIT ?';
+      ? 'SELECT * FROM threads WHERE message_count > 0 ORDER BY is_favorite DESC, updated_at DESC LIMIT ?'
+      : 'SELECT * FROM threads WHERE is_archived = 0 AND message_count > 0 ORDER BY is_favorite DESC, updated_at DESC LIMIT ?';
     return this.db.prepare(sql).all(limit) as ThreadRecord[];
   }
 

@@ -9,7 +9,7 @@ export { httpRequestTool, setNetworkPolicy, clearNetworkPolicy } from './http.js
 export { runPipelineTool } from './pipeline.js';
 export { taskCreateTool, taskUpdateTool, taskListTool } from './task.js';
 export { planTaskTool } from './plan-task.js';
-export { dataStoreCreateTool, dataStoreInsertTool, dataStoreQueryTool, dataStoreListTool, dataStoreDeleteTool } from './data-store.js';
+export { dataStoreCreateTool, dataStoreInsertTool, dataStoreQueryTool, dataStoreListTool, dataStoreDeleteTool, dataStoreDropTool } from './data-store.js';
 export { captureProcessTool, promoteProcessTool } from './process.js';
 export { stepCompleteTool } from './step-complete.js';
 export { apiSetupTool } from './api-setup.js';

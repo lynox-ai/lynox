@@ -383,3 +383,42 @@ export const dataStoreDeleteTool: ToolEntry<DeleteInput> = {
     }
   },
 };
+
+// === data_store_drop ===
+
+interface DropInput {
+  collection: string;
+}
+
+export const dataStoreDropTool: ToolEntry<DropInput> = {
+  definition: {
+    name: 'data_store_drop',
+    description: 'Permanently remove an entire data table including all records and its schema. Use with caution — this cannot be undone.',
+    eager_input_streaming: true,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        collection: { type: 'string', description: 'Table name to drop' },
+      },
+      required: ['collection'],
+    },
+  },
+  handler: async (input: DropInput, agent): Promise<string> => {
+    const storeRef = agent.toolContext.dataStore;
+    if (!storeRef) return 'DataStore not available.';
+
+    try {
+      const dropped = storeRef.dropCollection(input.collection);
+      if (dropped) {
+        channels.dataStoreInsert.publish({
+          event: 'collection_dropped',
+          collection: input.collection,
+        });
+        return `Dropped collection "${input.collection}" and all its records.`;
+      }
+      return `Collection "${input.collection}" not found.`;
+    } catch (err) {
+      return `Error dropping collection: ${getErrorMessage(err)}`;
+    }
+  },
+};

@@ -153,6 +153,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   dataStoreQueryTool: { definition: { name: 'data_store_query' }, handler: vi.fn() },
   dataStoreListTool: { definition: { name: 'data_store_list' }, handler: vi.fn() },
   dataStoreDeleteTool: { definition: { name: 'data_store_delete' }, handler: vi.fn() },
+  dataStoreDropTool: { definition: { name: 'data_store_drop' }, handler: vi.fn() },
   artifactSaveTool: { definition: { name: 'artifact_save' }, handler: vi.fn() },
   artifactListTool: { definition: { name: 'artifact_list' }, handler: vi.fn() },
   artifactDeleteTool: { definition: { name: 'artifact_delete' }, handler: vi.fn() },
@@ -313,7 +314,7 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool
-      expect(mockRegister).toHaveBeenCalledTimes(31);
+      expect(mockRegister).toHaveBeenCalledTimes(32);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -378,7 +379,7 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      expect(mockRegister).toHaveBeenCalledTimes(31);
+      expect(mockRegister).toHaveBeenCalledTimes(32);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

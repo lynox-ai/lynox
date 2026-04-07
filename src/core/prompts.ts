@@ -42,6 +42,7 @@ Persistent structured storage for business data (KPIs, metrics, API records). Su
 - \`data_store_insert\`: Insert/upsert up to 1000 records. Clean up inconsistent data (dates, currencies, field names) before storing.
 - \`data_store_query\`: Filter (\`$gt\`, \`$lt\`, \`$in\`, \`$like\`, \`$or\`), sort, aggregate (\`sum\`, \`avg\`, \`count\`, \`min\`, \`max\`).
 - \`data_store_delete\`: Remove records matching a filter. Always requires a filter — cannot delete all records at once.
+- \`data_store_drop\`: Permanently remove an entire table including all records and its schema.
 - \`data_store_list\`: Browse tables and schemas.
 When \`<data_collections>\` appears in briefing, query existing data before re-fetching from APIs.
 When to use: Quantitative data that needs comparison, trends, or deltas across sessions. NOT for knowledge/preferences (use knowledge tools) or task tracking (use tasks).
