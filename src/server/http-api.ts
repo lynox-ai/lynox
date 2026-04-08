@@ -1613,9 +1613,9 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { deleted: true });
     }));
 
-    // ── Transcription ──
+    // ── Transcription (streaming via SSE) ──
     this.staticRoutes.set('POST /api/transcribe', async (_req, res, _params, body) => {
-      const { HAS_WHISPER, transcribeAudio } = await import('../core/transcribe.js');
+      const { HAS_WHISPER, transcribeAudioStream } = await import('../core/transcribe.js');
       if (!HAS_WHISPER) {
         errorResponse(res, 503, 'Whisper not available (install whisper.cpp + ffmpeg)');
         return;
@@ -1626,9 +1626,29 @@ export class LynoxHTTPApi {
       const language = b && typeof b['language'] === 'string' ? b['language'] : undefined;
       if (!audioData) { errorResponse(res, 400, 'Missing audio (base64)'); return; }
       const buffer = Buffer.from(audioData, 'base64');
-      const text = await transcribeAudio(buffer, filename, language);
-      if (!text) { errorResponse(res, 422, 'Transcription failed'); return; }
-      jsonResponse(res, 200, { text });
+
+      // SSE streaming — send segments as whisper processes them
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+
+      const text = await transcribeAudioStream(buffer, filename, (segment) => {
+        if (!segment) {
+          // Empty segment = ffmpeg done, whisper starting
+          res.write(`data: ${JSON.stringify({ status: 'transcribing' })}\n\n`);
+        } else {
+          res.write(`data: ${JSON.stringify({ segment })}\n\n`);
+        }
+      }, language);
+
+      if (text) {
+        res.write(`data: ${JSON.stringify({ done: true, text })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ error: 'Transcription failed' })}\n\n`);
+      }
+      res.end();
     });
 
     // ── Telegram Setup (chat ID auto-detection via Telegram Bot API) ──
