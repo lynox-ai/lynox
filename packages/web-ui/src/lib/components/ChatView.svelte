@@ -1652,15 +1652,16 @@
 		margin-top: -36px;
 		margin-left: -36px;
 		border-radius: 50%;
-		border: 1px solid rgba(155, 138, 255, 0.2);
+		border: 2px solid rgba(155, 138, 255, 0.4);
 		z-index: 0;
-		animation: sonarPulse 4s ease-out infinite;
+		animation: sonarPulse 5s ease-out infinite;
 	}
-	:global(.pulse-ring-2) { animation-delay: 1.33s; }
-	:global(.pulse-ring-3) { animation-delay: 2.66s; }
-	@keyframes sonarPulse {
-		0% { transform: scale(0.8); opacity: 0.5; }
-		100% { transform: scale(2.8); opacity: 0; }
+	:global(.pulse-ring-2) { animation-delay: 1.67s; }
+	:global(.pulse-ring-3) { animation-delay: 3.33s; }
+	@keyframes -global-sonarPulse {
+		0% { transform: scale(0.8); opacity: 0.6; }
+		50% { opacity: 0.3; }
+		100% { transform: scale(2.5); opacity: 0; }
 	}
 	.welcome-fade :global(.welcome-greeting) {
 		animation: fadeUp 0.8s ease-out 0.3s both;
