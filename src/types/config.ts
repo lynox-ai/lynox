@@ -195,8 +195,8 @@ export interface LynoxUserConfig {
   google_oauth_scopes?: string[] | undefined;
   /** Block plain HTTP requests (except localhost). Default: false */
   enforce_https?: boolean | undefined;
-  /** Sentry DSN for opt-in error reporting. No data sent unless configured. */
-  sentry_dsn?: string | undefined;
+  /** Bugsink DSN for opt-in error reporting. No data sent unless configured. */
+  bugsink_dsn?: string | undefined;
   /** Directory for backup storage. Default: ~/.lynox/backups */
   backup_dir?: string | undefined;
   /** Cron schedule for automatic backups. Default: '0 3 * * *' (daily 3 AM). */

@@ -95,14 +95,16 @@ The main exports include:
 const registry = new ToolRegistry();
 
 registry.register({
-  name: 'my_tool',
-  description: 'Does something useful',
-  input_schema: {
-    type: 'object',
-    properties: {
-      query: { type: 'string', description: 'The input query' }
-    },
-    required: ['query']
+  definition: {
+    name: 'my_tool',
+    description: 'Does something useful',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The input query' }
+      },
+      required: ['query']
+    }
   },
   handler: async (input, context) => {
     // Your tool logic here

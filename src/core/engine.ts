@@ -282,17 +282,17 @@ export class Engine {
       }
     }
 
-    // Initialize Sentry error reporting (opt-in — requires DSN env var or config field)
-    const sentryDsn = process.env['LYNOX_SENTRY_DSN'] ?? this.userConfig.sentry_dsn;
-    if (sentryDsn) {
+    // Initialize Bugsink error reporting (opt-in — requires DSN env var or config field)
+    const errorDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
+    if (errorDsn) {
       try {
-        const { initSentry, installGlobalHandlers } = await import('./sentry.js');
-        const sentryActive = await initSentry(sentryDsn);
-        if (sentryActive) {
+        const { initErrorReporting, installGlobalHandlers } = await import('./error-reporting.js');
+        const errorReportingActive = await initErrorReporting(errorDsn);
+        if (errorReportingActive) {
           installGlobalHandlers();
           // Subscribe to tool:end channel for automatic breadcrumbs
           const { channels: obsChannels } = await import('./observability.js');
-          const { addToolBreadcrumb } = await import('./sentry.js');
+          const { addToolBreadcrumb } = await import('./error-reporting.js');
           obsChannels.toolEnd.subscribe((msg: unknown) => {
             const data = msg as { name?: string; success?: boolean; duration?: number } | undefined;
             if (data?.name) {
@@ -301,7 +301,7 @@ export class Engine {
           });
         }
       } catch {
-        // Sentry init failed — non-critical, continue without it
+        // Bugsink init failed — non-critical, continue without it
       }
     }
 
@@ -943,10 +943,10 @@ export class Engine {
       try { await this.knowledgeLayer.close(); } catch { /* ignore */ }
       this.knowledgeLayer = null;
     }
-    // Flush Sentry events before shutdown
+    // Flush Bugsink events before shutdown
     try {
-      const { shutdownSentry } = await import('./sentry.js');
-      await shutdownSentry();
+      const { shutdownErrorReporting } = await import('./error-reporting.js');
+      await shutdownErrorReporting();
     } catch {
       // best-effort
     }

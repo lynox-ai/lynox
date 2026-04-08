@@ -44,7 +44,7 @@ docker compose up -d
 Open [localhost:3000](http://localhost:3000) and enter the access token from `docker logs lynox`.
 
 :::tip[Access token]
-If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated. Find it with `docker logs lynox`.
+If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated. On first start, find it with `docker logs lynox`. On subsequent starts, use `docker exec lynox cat /home/lynox/.lynox/.access-token`.
 :::
 
 ## First Run
@@ -82,7 +82,7 @@ Without `-v ~/.lynox:/home/lynox/.lynox`, your vault key and all data are lost o
 
 - [Web UI Guide](/daily-use/web-ui/) — Learn the interface
 - [Configuration](/daily-use/configuration/) — Model, cost limits, and more
-- [Docker Deployment](/daily-use/docker/) — Production setup
-- [LLM Providers](/daily-use/llm-providers/) — Bedrock or local models
+- [Docker Deployment](/setup/docker/) — Production setup
+- [LLM Providers](/setup/llm-providers/) — Bedrock or local models
 - [Google Workspace](/integrations/google-workspace/) — Connect Gmail, Calendar, Drive
 - [Telegram](/integrations/telegram/) — Mobile access via Telegram bot

@@ -1,17 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  initSentry,
-  shutdownSentry,
+  initErrorReporting,
+  shutdownErrorReporting,
   addToolBreadcrumb,
   addLLMBreadcrumb,
   captureLynoxError,
   captureError,
   captureUserFeedback,
-  isSentryEnabled,
+  isErrorReportingEnabled,
   _resetForTesting,
-} from './sentry.js';
+} from './error-reporting.js';
 
-// Mock @sentry/node
+// Mock @sentry/node (Bugsink is Sentry SDK compatible)
 const mockInit = vi.fn();
 const mockAddBreadcrumb = vi.fn();
 const mockCaptureException = vi.fn();
@@ -39,33 +39,33 @@ vi.mock('@sentry/node', () => ({
   close: mockClose,
 }));
 
-describe('sentry', () => {
+describe('error-reporting (Bugsink)', () => {
   beforeEach(() => {
     _resetForTesting();
     vi.clearAllMocks();
-    delete process.env['LYNOX_SENTRY_DSN'];
+    delete process.env['LYNOX_BUGSINK_DSN'];
   });
 
   afterEach(() => {
-    delete process.env['LYNOX_SENTRY_DSN'];
+    delete process.env['LYNOX_BUGSINK_DSN'];
   });
 
-  describe('initSentry', () => {
+  describe('initErrorReporting', () => {
     it('returns false when no DSN is provided', async () => {
-      const result = await initSentry();
+      const result = await initErrorReporting();
       expect(result).toBe(false);
-      expect(isSentryEnabled()).toBe(false);
+      expect(isErrorReportingEnabled()).toBe(false);
       expect(mockInit).not.toHaveBeenCalled();
     });
 
     it('returns true when DSN is provided as argument', async () => {
-      const result = await initSentry('https://key@sentry.io/123');
+      const result = await initErrorReporting('https://key@bugsink.example.com/123');
       expect(result).toBe(true);
-      expect(isSentryEnabled()).toBe(true);
+      expect(isErrorReportingEnabled()).toBe(true);
       expect(mockInit).toHaveBeenCalledOnce();
       expect(mockInit).toHaveBeenCalledWith(
         expect.objectContaining({
-          dsn: 'https://key@sentry.io/123',
+          dsn: 'https://key@bugsink.example.com/123',
           sampleRate: 1.0,
           tracesSampleRate: 0,
           attachStacktrace: true,
@@ -75,22 +75,22 @@ describe('sentry', () => {
     });
 
     it('reads DSN from env var', async () => {
-      process.env['LYNOX_SENTRY_DSN'] = 'https://env@sentry.io/456';
-      const result = await initSentry();
+      process.env['LYNOX_BUGSINK_DSN'] = 'https://env@bugsink.example.com/456';
+      const result = await initErrorReporting();
       expect(result).toBe(true);
       expect(mockInit).toHaveBeenCalledWith(
-        expect.objectContaining({ dsn: 'https://env@sentry.io/456' }),
+        expect.objectContaining({ dsn: 'https://env@bugsink.example.com/456' }),
       );
     });
 
     it('only initializes once', async () => {
-      await initSentry('https://key@sentry.io/123');
-      await initSentry('https://key@sentry.io/456');
+      await initErrorReporting('https://key@bugsink.example.com/123');
+      await initErrorReporting('https://key@bugsink.example.com/456');
       expect(mockInit).toHaveBeenCalledOnce();
     });
 
     it('sets release with lynox@ prefix', async () => {
-      await initSentry('https://key@sentry.io/123');
+      await initErrorReporting('https://key@bugsink.example.com/123');
       expect(mockInit).toHaveBeenCalledWith(
         expect.objectContaining({
           release: expect.stringMatching(/^lynox@/),
@@ -99,7 +99,7 @@ describe('sentry', () => {
     });
 
     it('configures beforeBreadcrumb to strip PII', async () => {
-      await initSentry('https://key@sentry.io/123');
+      await initErrorReporting('https://key@bugsink.example.com/123');
       const config = mockInit.mock.calls[0]![0] as { beforeBreadcrumb: (b: Record<string, unknown>) => unknown };
       const breadcrumb = {
         data: { prompt: 'secret', response: 'also secret', content: 'pii', tool: 'bash' },
@@ -112,7 +112,7 @@ describe('sentry', () => {
     });
 
     it('configures beforeSend to strip request data', async () => {
-      await initSentry('https://key@sentry.io/123');
+      await initErrorReporting('https://key@bugsink.example.com/123');
       const config = mockInit.mock.calls[0]![0] as { beforeSend: (e: Record<string, unknown>) => unknown };
       const event = { request: { data: 'user prompt', url: '/api' } };
       const result = config.beforeSend(event) as { request: Record<string, unknown> };
@@ -135,7 +135,7 @@ describe('sentry', () => {
 
   describe('breadcrumbs (enabled)', () => {
     beforeEach(async () => {
-      await initSentry('https://key@sentry.io/123');
+      await initErrorReporting('https://key@bugsink.example.com/123');
     });
 
     it('addToolBreadcrumb records tool execution', () => {
@@ -176,14 +176,14 @@ describe('sentry', () => {
     });
 
     it('captureError captures when enabled', async () => {
-      await initSentry('https://key@sentry.io/123');
+      await initErrorReporting('https://key@bugsink.example.com/123');
       const err = new Error('test');
       captureError(err);
       expect(mockCaptureException).toHaveBeenCalledWith(err);
     });
 
     it('captureLynoxError sets tags and safe extras', async () => {
-      await initSentry('https://key@sentry.io/123');
+      await initErrorReporting('https://key@bugsink.example.com/123');
       const { ExecutionError } = await import('./errors.js');
       const err = new ExecutionError('Tool failed', {
         toolName: 'bash',
@@ -211,7 +211,7 @@ describe('sentry', () => {
     });
 
     it('captures feedback when enabled', async () => {
-      await initSentry('https://key@sentry.io/123');
+      await initErrorReporting('https://key@bugsink.example.com/123');
       const result = await captureUserFeedback({ name: 'Rafael', comments: 'Wrong result' });
       expect(result).toBe('event-123');
       expect(mockCaptureMessage).toHaveBeenCalledWith('User bug report', 'info');
@@ -225,26 +225,26 @@ describe('sentry', () => {
 
   describe('shutdown', () => {
     it('is safe when not initialized', async () => {
-      await expect(shutdownSentry()).resolves.toBeUndefined();
+      await expect(shutdownErrorReporting()).resolves.toBeUndefined();
       expect(mockFlush).not.toHaveBeenCalled();
     });
 
     it('flushes and closes when enabled', async () => {
-      await initSentry('https://key@sentry.io/123');
-      await shutdownSentry();
+      await initErrorReporting('https://key@bugsink.example.com/123');
+      await shutdownErrorReporting();
       expect(mockFlush).toHaveBeenCalledWith(5000);
       expect(mockClose).toHaveBeenCalled();
     });
   });
 
-  describe('isSentryEnabled', () => {
+  describe('isErrorReportingEnabled', () => {
     it('false by default', () => {
-      expect(isSentryEnabled()).toBe(false);
+      expect(isErrorReportingEnabled()).toBe(false);
     });
 
     it('true after init with DSN', async () => {
-      await initSentry('https://key@sentry.io/123');
-      expect(isSentryEnabled()).toBe(true);
+      await initErrorReporting('https://key@bugsink.example.com/123');
+      expect(isErrorReportingEnabled()).toBe(true);
     });
   });
 });

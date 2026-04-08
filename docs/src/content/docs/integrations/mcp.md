@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-lynox implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — an open standard for connecting AI tools. This lets you use lynox's memory, knowledge, and capabilities directly from your IDE or AI assistant.
+lynox implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — an open standard for connecting AI tools. Supports stdio and Streamable HTTP transports. This lets you use lynox's memory, knowledge, and capabilities directly from your IDE or AI assistant.
 
 ## What This Enables
 
@@ -41,7 +41,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   "mcpServers": {
     "lynox": {
       "command": "npx",
-      "args": ["@lynox-ai/core", "--mcp"]
+      "args": ["@lynox-ai/core", "--mcp-server"]
     }
   }
 }
@@ -58,7 +58,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
         "run", "-i", "--rm",
         "-e", "ANTHROPIC_API_KEY=sk-ant-...",
         "-v", "~/.lynox:/home/lynox/.lynox",
-        "ghcr.io/lynox-ai/lynox:latest", "--mcp"
+        "ghcr.io/lynox-ai/lynox:latest", "--mcp-server"
       ]
     }
   }
@@ -74,7 +74,7 @@ Add to your Cursor MCP settings:
   "mcpServers": {
     "lynox": {
       "command": "npx",
-      "args": ["@lynox-ai/core", "--mcp"]
+      "args": ["@lynox-ai/core", "--mcp-server"]
     }
   }
 }

@@ -7,7 +7,7 @@ sidebar:
 
 The Web UI is where you interact with lynox day-to-day. It runs at [localhost:3000](http://localhost:3000).
 
-**Phone access:** Open Settings → Mobile Access, scan the QR code with your phone — you're logged in instantly. For access outside your WiFi, see [Remote Access](/daily-use/remote-access/).
+**Phone access:** Open Settings → Mobile Access, scan the QR code with your phone — you're logged in instantly. For access outside your WiFi, see [Remote Access](/setup/remote-access/).
 
 ## Chat
 

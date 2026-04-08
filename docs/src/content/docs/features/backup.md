@@ -11,6 +11,9 @@ lynox can back up your data automatically — encrypted and optionally uploaded 
 
 - **Memory database** — All memory, knowledge graph, patterns, and insights
 - **Thread history** — Your conversation threads
+- **Vault** — Encrypted secrets and credentials
+- **DataStore** — CRM contacts, deals, and custom collections
+- **Sessions** — Active session state
 - **Configuration** — Settings and preferences
 
 Backups are stored as encrypted SQLite snapshots.

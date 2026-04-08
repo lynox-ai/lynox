@@ -58,6 +58,7 @@ Restart lynox for the changes to take effect. The bot will send a welcome messag
 | `/help` | Show available commands |
 | `/cost` | Token usage (redirects to Web UI) |
 | `/google` | Google auth setup (redirects to Web UI) |
+| `/bug` | Report a bug (sends diagnostic info via Bugsink) |
 
 ## Supported Inputs
 

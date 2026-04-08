@@ -51,7 +51,7 @@ POST   /api/sessions/:id/compact # Compact context window
 ```bash
 curl -N -X POST http://localhost:3000/api/sessions/{id}/run \
   -H "Content-Type: application/json" \
-  -d '{"message": "What is the weather in Munich?"}'
+  -d '{"task": "What is the weather in Munich?"}'
 ```
 
 The response is a Server-Sent Events stream with these event types:
@@ -65,6 +65,7 @@ The response is a Server-Sent Events stream with these event types:
 | `prompt` | Agent requests user input (`ask_user`). Includes `promptId` for resumable prompts |
 | `secret_prompt` | Agent requests a secret (`ask_secret`). Includes `promptId` |
 | `turn_end` | Turn completed |
+| `changeset_ready` | File changes pending review (accept/rollback) |
 | `done` | Run completed |
 | `error` | Error occurred |
 
@@ -206,9 +207,10 @@ DELETE /api/artifacts/:id         # Delete artifact
 
 ```
 GET /api/crm/contacts             # List contacts
+GET /api/crm/contacts/:name/interactions  # Contact history
+GET /api/crm/contacts/:name/deals # Contact deals
 GET /api/crm/deals                # List deals
 GET /api/crm/stats                # CRM statistics
-GET /api/crm/contacts/:name/interactions  # Contact history
 ```
 
 ### Integrations
@@ -240,16 +242,43 @@ GET    /api/files/read            # Read file preview (max 1 MB)
 DELETE /api/files                 # Delete file
 ```
 
+### Pipelines
+
+```
+GET  /api/pipelines               # List pipeline runs
+GET  /api/pipelines/:id           # Pipeline details
+GET  /api/pipelines/:id/steps     # Pipeline step results
+GET  /api/pipelines/stats/steps   # Step statistics
+GET  /api/pipelines/stats/cost    # Pipeline cost stats
+```
+
+### DataStore
+
+```
+GET  /api/datastore/collections   # DataStore collections
+GET  /api/datastore/:collection   # Collection records
+```
+
+### Vault
+
+```
+GET  /api/vault/key               # Retrieve vault key
+POST /api/vault/rotate            # Rotate vault key
+```
+
 ### Other
 
 ```
 POST /api/transcribe              # Transcribe audio (base64)
-GET  /api/pipelines               # List pipeline runs
-GET  /api/pipelines/:id           # Pipeline details
 GET  /api/thread-insights         # Thread analytics
 GET  /api/patterns                # Detected patterns
 GET  /api/metrics                 # Metrics data
 GET  /api/api-profiles            # API Store profiles
-GET  /api/datastore/collections   # DataStore collections
-POST /api/vault/rotate            # Rotate vault key
+GET  /api/api-profiles/:id        # Individual API profile
+GET  /api/export                  # GDPR data export (Art. 15 + Art. 20)
+GET  /api/auth/token              # Generate auth token
+POST /api/google/reload           # Reload Google integration
+POST /api/searxng/check           # SearXNG health validation
+POST /api/sessions/:id/changeset/review  # Accept/rollback file changes
+GET  /api/sessions/:id/changeset  # Pending file changes
 ```

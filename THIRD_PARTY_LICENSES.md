@@ -17,7 +17,7 @@ The following dependencies are licensed under the MIT License.
 
 - **@anthropic-ai/sdk** - Copyright Anthropic
 - **@modelcontextprotocol/sdk** - Copyright Anthropic
-- **@sentry/node** - Copyright Sentry
+- **@sentry/node** - Copyright Sentry (used for Bugsink error reporting)
 - **better-sqlite3** - Copyright Joshua Wise
 - **telegraf** - Copyright Vitaly Domnikov
 - **zod** - Copyright Colin McDonnell

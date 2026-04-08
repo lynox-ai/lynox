@@ -138,7 +138,10 @@ lynox treats all external content as untrusted. When tools fetch data from the w
 
 ## Error Reporting
 
-If you opt in to error reporting (via `LYNOX_SENTRY_DSN`), all reports are scrubbed of PII before transmission. This is entirely optional and disabled by default.
+All error reports are scrubbed of PII before transmission.
+
+- **Managed instances**: Error reporting is always active (Art. 6(1)(f) legitimate interest). Reports are sent to lynox's self-hosted Bugsink on EU infrastructure — no third-party transfer.
+- **Self-hosted instances**: Error reporting is opt-in via `LYNOX_BUGSINK_DSN`. It is disabled by default — you choose whether and where to send reports.
 
 ## Docker Hardening
 
@@ -158,7 +161,7 @@ The Docker image and Compose file include production-grade hardening out of the 
 | Network isolation | Internal Docker network between services |
 | Health checks | Built-in Docker `HEALTHCHECK` on `/health` |
 
-See [Docker Deployment](/daily-use/docker/) for the full hardened setup.
+See [Docker Deployment](/setup/docker/) for the full hardened setup.
 
 ## Self-Hosted: Your Responsibility
 

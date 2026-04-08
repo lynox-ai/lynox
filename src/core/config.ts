@@ -72,7 +72,7 @@ export function loadConfig(): LynoxUserConfig {
     'pipeline_context_limit', 'pipeline_step_result_limit',
     'memory_extraction_limit', 'http_response_limit',
     'enforce_https',
-    'sentry_dsn',
+    'bugsink_dsn',
     'backup_dir', 'backup_schedule', 'backup_retention_days', 'backup_encrypt',
     'experience',
   ]);

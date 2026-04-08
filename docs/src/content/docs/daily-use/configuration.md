@@ -25,8 +25,6 @@ Project configs cannot override security-sensitive fields like API keys or vault
   "provider": "anthropic",
   "aws_region": "eu-central-1",
   "bedrock_eu_only": true,
-  "gcp_region": "europe-west1",
-  "gcp_project_id": "my-project",
   "api_base_url": "http://localhost:4000"
 }
 ```
@@ -38,7 +36,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 | `bedrock_eu_only` | `true`, `false` | `false` |
 | `api_base_url` | Custom proxy URL | — |
 
-Only configure the fields relevant to your provider. See [LLM Providers](/daily-use/llm-providers/) for full setup guides.
+Only configure the fields relevant to your provider. See [LLM Providers](/setup/llm-providers/) for full setup guides.
 
 ### Model & Intelligence
 
@@ -148,7 +146,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | Variable | Purpose |
 |----------|---------|
 | `SEARXNG_URL` | SearXNG instance URL (included in docker-compose, recommended) |
-| `TAVILY_API_KEY` | Tavily API key (fallback when SearXNG unavailable, 1K free/month) |
+| `TAVILY_API_KEY` | Tavily API key (alternative to SearXNG, 1K free/month) |
 
 ### Security & Storage
 
@@ -164,7 +162,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
-| `GOOGLE_SERVICE_ACCOUNT_KEY` | Google service account JSON key (headless/Docker) |
+| `GOOGLE_SERVICE_ACCOUNT_KEY` | Path to Google service account JSON key file (headless/Docker) |
 
 ### Telegram
 

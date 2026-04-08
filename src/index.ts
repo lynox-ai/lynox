@@ -97,12 +97,12 @@ export type { ContactData, DealData, InteractionData, ContactRecord } from './co
 export { ApiStore } from './core/api-store.js';
 export type { ApiProfile, ApiEndpoint, ApiAuth, ApiRateLimit } from './core/api-store.js';
 
-// === Sentry (opt-in error reporting) ===
+// === Bugsink (error reporting) ===
 export {
-  initSentry, shutdownSentry, captureLynoxError, captureError,
-  captureUserFeedback, isSentryEnabled,
+  initErrorReporting, shutdownErrorReporting, captureLynoxError, captureError,
+  captureUserFeedback, isErrorReportingEnabled,
   addToolBreadcrumb, addLLMBreadcrumb,
-} from './core/sentry.js';
+} from './core/error-reporting.js';
 
 // === ToolContext ===
 export { createToolContext } from './core/tool-context.js';

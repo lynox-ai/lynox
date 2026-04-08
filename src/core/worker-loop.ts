@@ -168,8 +168,8 @@ export class WorkerLoop {
         }
       });
     } catch (err: unknown) {
-      // Sentry capture for background task failures
-      void import('./sentry.js').then(({ captureError }) => {
+      // Bugsink capture for background task failures
+      void import('./error-reporting.js').then(({ captureError }) => {
         import('@sentry/node').then((Sentry) => {
           Sentry.withScope((scope) => {
             scope.setTag('task.id', task.id);
@@ -178,7 +178,7 @@ export class WorkerLoop {
             captureError(err);
           });
         }).catch(() => {
-          // Sentry not installed — use basic capture
+          // @sentry/node not installed — use basic capture
           captureError(err);
         });
       }).catch(() => {});

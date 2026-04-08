@@ -129,7 +129,7 @@ Architecture, tools, integrations, security, and deployment details are in [`doc
 
 - [GitHub Discussions](https://github.com/lynox-ai/lynox/discussions) — Questions, ideas, show & tell
 - [GitHub Issues](https://github.com/lynox-ai/lynox/issues) — Bug reports, feature requests
-- [Contributing](CONTRIBUTING.md) — Development setup and guidelines
+- [Contributing](CONTRIBUTING.md) — Bug reports, feature requests (no external PRs at this time)
 - [Security](SECURITY.md) — Responsible disclosure
 
 ## Disclaimer

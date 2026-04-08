@@ -42,8 +42,9 @@ export default defineConfig({
       sidebar: [
         { label: 'Getting Started', autogenerate: { directory: 'getting-started' } },
         { label: 'Daily Use', autogenerate: { directory: 'daily-use' } },
-        { label: 'Integrations', autogenerate: { directory: 'integrations' } },
         { label: 'Features', autogenerate: { directory: 'features' } },
+        { label: 'Setup & Deployment', autogenerate: { directory: 'setup' } },
+        { label: 'Integrations', autogenerate: { directory: 'integrations' } },
         { label: 'For Developers', autogenerate: { directory: 'developers' } },
       ],
     }),

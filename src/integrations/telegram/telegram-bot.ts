@@ -162,8 +162,8 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
 
     void (async () => {
       try {
-        const { captureUserFeedback, isSentryEnabled } = await import('../../core/sentry.js');
-        if (!isSentryEnabled()) {
+        const { captureUserFeedback, isErrorReportingEnabled } = await import('../../core/error-reporting.js');
+        if (!isErrorReportingEnabled()) {
           void ctx.reply(t('cmd.bug_disabled', lang));
           return;
         }

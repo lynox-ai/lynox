@@ -2,7 +2,7 @@
 title: LLM Providers
 description: Choose where AI requests are processed — direct, cloud-hosted, or fully local.
 sidebar:
-  order: 3
+  order: 1
 ---
 
 :::note[Multi-Provider BYOK]
@@ -37,7 +37,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | Art. 321 StGB (CH) | ⚠️ Counsel | ⚠️ Better | ✅ Safe |
 | | | | |
 | **Cost** | | | |
-| API pricing | $3/$15 per MTok | Same | Free (your hardware) |
+| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | Same | Free (your hardware) |
 | EU surcharge | — | +10% (EU CRIS) | — |
 | Infrastructure | — | — | GPU server ~€150/mo |
 | Typical monthly | €30–150 | €33–165 | €150 fixed |
@@ -166,7 +166,7 @@ For maximum data control, run lynox on the same cloud as your LLM provider — a
 | **AWS all-in-one** | Bedrock `eu-central-1` | ECS/Fargate `eu-central-1` | Everything in Frankfurt |
 | **Fully local** | Ollama on your server | Docker on your server | Nothing leaves your network |
 
-lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/daily-use/docker/) for container configuration.
+lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/setup/docker/) for container configuration.
 
 :::caution
 A cloud deployment guide for AWS ECS is planned but not yet available. The Docker image works on any container platform — use your standard deployment process.

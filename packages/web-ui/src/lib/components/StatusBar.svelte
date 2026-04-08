@@ -247,7 +247,7 @@
 							['telegram', t('status.telegram')],
 							['search', t('status.search')],
 							['google', t('status.google')],
-							['sentry', t('status.sentry')],
+							['bugsink', t('status.bugsink')],
 						] as [key, label]}
 							<div class="flex items-center gap-1.5 text-xs">
 								{#if secrets.configured[key]}

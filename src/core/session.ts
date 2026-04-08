@@ -465,12 +465,12 @@ export class Session {
 
       return result;
     } catch (err: unknown) {
-      // Sentry capture — structured error with tags
-      void import('./sentry.js').then(({ captureLynoxError, captureError: captureSentryError }) => {
+      // Bugsink capture — structured error with tags
+      void import('./error-reporting.js').then(({ captureLynoxError, captureError: captureReportedError }) => {
         if (err instanceof LynoxError) {
           captureLynoxError(err);
         } else {
-          captureSentryError(err);
+          captureReportedError(err);
         }
       }).catch(() => {});
 
@@ -725,7 +725,7 @@ export class Session {
         this.usage.output_tokens += event.usage.output_tokens;
         this.usage.cache_creation_input_tokens += event.usage.cache_creation_input_tokens ?? 0;
         this.usage.cache_read_input_tokens += event.usage.cache_read_input_tokens ?? 0;
-        void import('./sentry.js').then(({ addLLMBreadcrumb }) => {
+        void import('./error-reporting.js').then(({ addLLMBreadcrumb }) => {
           addLLMBreadcrumb(model, event.usage.input_tokens, event.usage.output_tokens);
         }).catch(() => {});
       }

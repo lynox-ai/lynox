@@ -1,7 +1,9 @@
 /**
- * Sentry integration — opt-in error reporting.
- * Activated by LYNOX_SENTRY_DSN env var or config.sentry_dsn.
+ * Bugsink integration — opt-in error reporting.
+ * Activated by LYNOX_BUGSINK_DSN env var or config.bugsink_dsn.
  * No DSN is hardcoded — if absent, all functions are safe no-ops.
+ *
+ * Uses @sentry/node SDK (Bugsink is Sentry SDK compatible).
  */
 
 import type { LynoxError } from './errors.js';
@@ -20,14 +22,14 @@ const SAFE_CONTEXT_KEYS = new Set([
 ]);
 
 /**
- * Initialize Sentry. Safe to call multiple times — only first call has effect.
- * Returns true if Sentry was activated.
+ * Initialize Bugsink error reporting. Safe to call multiple times — only first call has effect.
+ * Returns true if error reporting was activated.
  */
-export async function initSentry(dsn?: string | undefined): Promise<boolean> {
+export async function initErrorReporting(dsn?: string | undefined): Promise<boolean> {
   if (_initialized) return _enabled;
   _initialized = true;
 
-  const resolvedDsn = dsn ?? process.env['LYNOX_SENTRY_DSN'];
+  const resolvedDsn = dsn ?? process.env['LYNOX_BUGSINK_DSN'];
   if (!resolvedDsn) return false;
 
   try {
@@ -174,7 +176,7 @@ export function installGlobalHandlers(): void {
 
 // ── Shutdown ──
 
-export async function shutdownSentry(): Promise<void> {
+export async function shutdownErrorReporting(): Promise<void> {
   if (!_enabled || !_sentry) return;
   try {
     await _sentry.flush(5000);
@@ -184,8 +186,8 @@ export async function shutdownSentry(): Promise<void> {
   }
 }
 
-/** Whether Sentry is currently active. */
-export function isSentryEnabled(): boolean {
+/** Whether Bugsink error reporting is currently active. */
+export function isErrorReportingEnabled(): boolean {
   return _enabled;
 }
 
