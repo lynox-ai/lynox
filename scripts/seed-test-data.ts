@@ -31,8 +31,10 @@ const EMBEDDING_DIM = 384;
 const NOW = new Date();
 const DAY_MS = 86_400_000;
 const CONTEXT_ID = 'seed-ctx-novatech';
-const SCOPE_TYPE = 'context';
-const SCOPE_ID = CONTEXT_ID;
+// Memory scope: use 'global' so data is visible without a specific contextId.
+// Engines without LYNOX_CONTEXT_ID read from global scope.
+const SCOPE_TYPE = 'global';
+const SCOPE_ID = 'global';
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -1340,8 +1342,13 @@ function seedDataStore(ds: DataStore): void {
 
 function seedMemoryFiles(): void {
   console.log('\n📝 Seeding memory files...');
+  // Write to both global and http-api scopes so data is visible regardless of contextId.
+  // Engine HTTP API uses contextId='http-api', standalone CLI uses global scope.
+  const scopes = ['global', 'http-api'];
+  for (const scope of scopes) {
+    mkdirSync(join(LYNOX_DIR, 'memory', scope), { recursive: true });
+  }
   const memDir = join(LYNOX_DIR, 'memory', 'global');
-  mkdirSync(memDir, { recursive: true });
 
   const files: Record<string, string> = {
     'knowledge.txt': `NovaTech GmbH was founded in 2023 by Marcus Weber in Berlin. Focus: B2B SaaS for enterprise operations.
@@ -1393,7 +1400,9 @@ Documentation with code examples gets 5x more page views than prose-only docs.`,
   };
 
   for (const [filename, content] of Object.entries(files)) {
-    writeFileSync(join(memDir, filename), content, 'utf-8');
+    for (const scope of scopes) {
+      writeFileSync(join(LYNOX_DIR, 'memory', scope, filename), content, 'utf-8');
+    }
   }
   console.log(`  ✓ ${Object.keys(files).length} memory files created (knowledge, methods, status, learnings)`);
 }
