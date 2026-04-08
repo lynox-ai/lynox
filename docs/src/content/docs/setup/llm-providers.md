@@ -157,6 +157,48 @@ lynox detects the provider and gracefully disables unsupported features — no e
 | **Llama 3.3 70B** | 48 GB | Good | Strong reasoning |
 | **Qwen 2.5 14B** | 12 GB | Decent | Minimum for tool calling |
 
+### EU Cloud Providers via LiteLLM
+
+Use LiteLLM to route requests to EU-hosted LLM providers. Your data stays in Europe — no CLOUD Act exposure, no transatlantic transfers.
+
+**1. Start LiteLLM with your EU provider:**
+
+**Mistral (France)** — French company, own models, native tool calling. No US parent company.
+```bash
+MISTRAL_API_KEY=your-key litellm --model mistral/mistral-large-latest --port 4000
+```
+Models: `mistral-large-latest` (flagship), `mistral-medium-latest`, `mistral-small-latest` (budget).
+
+**Scaleway (France)** — 18+ open-source models hosted in Paris. Very affordable.
+```bash
+OPENAI_API_KEY=your-scw-key litellm --model openai/llama-3.3-70b-versatile \
+  --api_base https://api.scaleway.ai/v1 --port 4000
+```
+Models: Llama 3.3 70B, Qwen 3, DeepSeek R1, Mistral variants.
+
+**Nebius (Finland)** — 60+ models, Finland/Netherlands infrastructure, 99.9% SLA.
+```bash
+OPENAI_API_KEY=your-nebius-key litellm --model openai/Qwen3-235B-A22B-Instruct-2507 \
+  --api_base https://api.studio.nebius.com/v1 --port 4000
+```
+Models: Qwen 3, DeepSeek V3/R1, Llama 3.3, GLM-4.5.
+
+**2. Configure lynox:**
+```json
+{
+  "provider": "custom",
+  "api_base_url": "http://localhost:4000"
+}
+```
+
+:::tip[EU Data Sovereignty]
+Mistral, Scaleway, and Nebius are EU-based companies (or EU-hosted infrastructure). Unlike AWS Bedrock, they are not subject to the US CLOUD Act. For regulated industries (healthcare, legal, finance), this can be a decisive compliance advantage.
+:::
+
+:::caution
+EU cloud providers host open-source models (Mistral, Llama, Qwen, DeepSeek). These are capable but not on the same level as Claude for complex reasoning and tool calling. Test with your specific use case before committing.
+:::
+
 ## Hosting lynox + LLM Together
 
 For maximum data control, run lynox on the same cloud as your LLM provider — all data stays in one region.
