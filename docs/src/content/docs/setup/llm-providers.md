@@ -201,18 +201,15 @@ EU cloud providers host open-source models (Mistral, Llama, Qwen, DeepSeek). The
 
 ## Hosting lynox + LLM Together
 
-For maximum data control, run lynox on the same cloud as your LLM provider — all data stays in one region.
+For maximum data control, run lynox on a server close to your LLM provider — all data stays in one region.
 
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
-| **AWS all-in-one** | Bedrock `eu-central-1` | ECS/Fargate `eu-central-1` | Everything in Frankfurt |
+| **Hetzner + Bedrock** | Bedrock `eu-central-1` | Hetzner VPS (Falkenstein/Helsinki) | Everything in EU |
+| **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no CLOUD Act |
 | **Fully local** | Ollama on your server | Docker on your server | Nothing leaves your network |
 
 lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/setup/docker/) for container configuration.
-
-:::caution
-A cloud deployment guide for AWS ECS is planned but not yet available. The Docker image works on any container platform — use your standard deployment process.
-:::
 
 ## Changing Providers
 
