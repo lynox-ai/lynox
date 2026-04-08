@@ -513,9 +513,82 @@
 		waveformBars = new Array(24).fill(3);
 	}
 
+	// Web Speech API (instant, browser-side) — preferred over server-side Whisper
+	/* eslint-disable @typescript-eslint/no-explicit-any */
+	const _w = typeof window !== 'undefined' ? window as any : null;
+	const hasSpeechRecognition = !!(_w?.SpeechRecognition || _w?.webkitSpeechRecognition);
+	let speechRecognition: any = null;
+	/* eslint-enable @typescript-eslint/no-explicit-any */
+	let speechTranscript = '';
+
 	async function startRecording() {
 		if (recording) return;
 		recordingDiscarded = false;
+
+		// Try Web Speech API first (instant transcription, no server round-trip)
+		if (hasSpeechRecognition) {
+			try {
+				const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+				activeStream = stream;
+
+				const audioCtx = new AudioContext();
+				activeAudioCtx = audioCtx;
+				const source = audioCtx.createMediaStreamSource(stream);
+				const analyser = audioCtx.createAnalyser();
+				analyser.fftSize = 128;
+				source.connect(analyser);
+				audioAnalyser = analyser;
+
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				const SpeechRecog = (_w.SpeechRecognition || _w.webkitSpeechRecognition) as any;
+				const recognition = new SpeechRecog();
+				recognition.lang = getLocale() === 'de' ? 'de-DE' : 'en-US';
+				recognition.interimResults = false;
+				recognition.continuous = true;
+				speechTranscript = '';
+
+				recognition.onresult = (event: { resultIndex: number; results: { isFinal: boolean; 0: { transcript: string } }[] }) => {
+					for (let i = event.resultIndex; i < event.results.length; i++) {
+						const result = event.results[i];
+						if (result?.isFinal && result[0]) {
+							speechTranscript += (speechTranscript ? ' ' : '') + result[0].transcript;
+						}
+					}
+				};
+
+				recognition.onerror = (event: { error: string }) => {
+					if (event.error !== 'aborted' && event.error !== 'no-speech') {
+						addToast(t('chat.mic_unavailable'), 'error');
+					}
+					cleanupRecording();
+				};
+
+				recognition.onend = async () => {
+					const discarded = recordingDiscarded;
+					cleanupRecording();
+					speechRecognition = null;
+					if (discarded || !speechTranscript.trim()) return;
+					await sendMessage(`🎤 ${speechTranscript.trim()}`);
+				};
+
+				recognition.start();
+				speechRecognition = recognition;
+				recording = true;
+				recordingSeconds = 0;
+				recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
+				waveformRaf = requestAnimationFrame(updateWaveform);
+				return;
+			} catch (err) {
+				// Fall through to server-side Whisper
+				cleanupRecording();
+				if (err instanceof DOMException && err.name === 'NotAllowedError') {
+					addToast(t('chat.mic_denied'), 'error');
+					return;
+				}
+			}
+		}
+
+		// Fallback: server-side Whisper (for browsers without Web Speech API)
 		try {
 			if (!navigator.mediaDevices?.getUserMedia) {
 				addToast(t('chat.mic_requires_https'), 'error');
@@ -592,12 +665,16 @@
 	}
 
 	function stopRecording() {
-		if (!recording || !mediaRecorder) return;
+		if (!recording) return;
+		if (speechRecognition) { speechRecognition.stop(); return; }
+		if (!mediaRecorder) return;
 		mediaRecorder.stop();
 	}
 
 	function discardRecording() {
-		if (!recording || !mediaRecorder) return;
+		if (!recording) return;
+		if (speechRecognition) { recordingDiscarded = true; speechRecognition.abort(); speechRecognition = null; cleanupRecording(); return; }
+		if (!mediaRecorder) return;
 		recordingDiscarded = true;
 		mediaRecorder.stop();
 	}
