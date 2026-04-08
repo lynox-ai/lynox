@@ -290,8 +290,11 @@ export class Session {
     }
 
     // Auto-downgrade to haiku for simple tasks (cost optimization)
+    // Allow downgrade with adaptive thinking (Haiku auto-disables thinking in agent.ts)
+    // Only block when thinking is explicitly enabled with a budget
     const savedModel = this._model;
-    if (!isMultimodal && this._model !== 'haiku' && !this._thinking) {
+    const thinkingBlocksDowngrade = this._thinking?.type === 'enabled';
+    if (!isMultimodal && this._model !== 'haiku' && !thinkingBlocksDowngrade) {
       if (this._isSimpleTask(taskText)) {
         this._model = 'haiku';
         this._recreateAgent();
@@ -543,29 +546,50 @@ export class Session {
     return [...this._runToolNames];
   }
 
-  /** Heuristic: detect simple tasks that can use haiku instead of sonnet/opus. */
+  /** Heuristic: detect simple tasks that can use haiku instead of sonnet/opus.
+   *  Principle: when in doubt, keep Sonnet. A slightly higher cost is better
+   *  than a bad answer from Haiku on a task that needs reasoning. */
   private _isSimpleTask(task: string): boolean {
-    const lower = task.toLowerCase();
+    const lower = task.toLowerCase().trim();
     const len = task.length;
 
-    // Anything long or with technical keywords → keep current model
-    const complexPatterns = [
+    // --- Blockers: anything that needs reasoning stays on current model ---
+    const reasoningBlockers = [
       /\b(implement|build|create|design|refactor|fix|debug|deploy|migrate)\b/i,
       /\b(schreib|entwickl|bau|erstell|analysier|optimier)\b/i,
       /\b(code|function|class|component|api|database|test|schema|query)\b/i,
       /\b(file|datei|config|server|docker|pipeline|workflow)\b/i,
+      // Reasoning & opinion indicators — must not go to Haiku
+      /\b(warum|weshalb|wieso|why|erkl[äa]r|explain|begründ|reason)\b/i,
+      /\b(denkst|meinst|findest|glaubst|würdest|sollte|think|opinion|suggest)\b/i,
+      /\b(einsch[äa]tz|bewert|vergleich|assess|evaluat|compar|review)\b/i,
+      /\b(strategie|plan|konzept|approach|strategy|architektur|entscheid)\b/i,
+      /\b(aber|however|allerdings|berücksichtig|consider|beacht)\b/i,
     ];
-    if (complexPatterns.some(p => p.test(lower))) return false;
+    if (reasoningBlockers.some(p => p.test(lower))) return false;
     if (len > 200) return false;
 
-    // Short, simple queries → haiku
-    const simplePatterns = [
-      /^(was |wer |wo |wann |wie viel|how |what |who |where |when )/i,
+    // --- Follow-up acknowledgments (pure acks, no continuation) ---
+    const hasHistory = this.agent && this.agent.getMessages().length > 0;
+    if (hasHistory) {
+      // Only pure acks — no comma/aber/und continuation
+      const pureAck = /^(danke|thanks|thx|ok|okay|alles klar|passt|perfekt|super|gut|nice|cool|great|yes|ja|nein|no|verstanden|got it|makes sense|klar|genau)[.!]?\s*$/i;
+      if (pureAck.test(lower) && len < 40) return true;
+    }
+
+    // --- Short factual lookups → haiku ---
+    const factualPatterns = [
+      /^(was ist|was sind|wer ist|wo ist|wann |wie viel|how many|what is|who is|where is|when )/i,
       /^(zeig |list |show |check |status |prüf)/i,
       /^(erinner|recall|remember|merke)/i,
     ];
-    if (simplePatterns.some(p => p.test(lower)) && len < 120) return true;
-    if (len < 40) return true;
+    if (factualPatterns.some(p => p.test(lower)) && len < 80) return true;
+
+    // --- Greetings → haiku ---
+    if (/^(hallo|hello|hi |hey |moin|grüß)/i.test(lower) && len < 60) return true;
+
+    // --- Very short AND no reasoning words (already checked above) → haiku ---
+    if (len < 25) return true;
 
     return false;
   }
@@ -747,6 +771,8 @@ export class Session {
 
     const streamHandler: StreamHandler = async (event: StreamEvent) => {
       if (event.type === 'turn_end') {
+        // Inject actual model so the client can compute correct costs
+        (event as { model?: string }).model = model;
         this.usage.input_tokens += event.usage.input_tokens;
         this.usage.output_tokens += event.usage.output_tokens;
         this.usage.cache_creation_input_tokens += event.usage.cache_creation_input_tokens ?? 0;

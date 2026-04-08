@@ -56,10 +56,10 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     echo "" >&2
     echo "========================================" >&2
     echo "  Access Token (enter in browser):" >&2
-    echo "  ${LYNOX_HTTP_SECRET}" >&2
+    echo "  ${LYNOX_HTTP_SECRET:0:8}..." >&2
     echo "========================================" >&2
     echo "  Stored in volume — same token on every restart." >&2
-    echo "  Retrieve: docker exec lynox cat \$HOME/.lynox/.access-token" >&2
+    echo "  Full token: docker exec lynox cat \$HOME/.lynox/.access-token" >&2
     echo "  Override: set LYNOX_HTTP_SECRET in .env or docker run" >&2
     echo "" >&2
   fi

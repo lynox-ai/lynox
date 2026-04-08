@@ -5,6 +5,8 @@
 		replyPermission,
 		getMessages,
 		getIsStreaming,
+		getStreamingActivity,
+		getStreamingToolName,
 		getQueueLength,
 		getPendingPermission,
 		getPendingSecretPrompt,
@@ -739,6 +741,31 @@
 
 	const messages = $derived(getMessages());
 	const isStreaming = $derived(getIsStreaming());
+	const streamActivity = $derived(getStreamingActivity());
+	const streamToolName = $derived(getStreamingToolName());
+	const streamingLabel = $derived.by(() => {
+		if (!isStreaming) return '';
+		if (streamActivity === 'writing') return t('chat.activity.writing');
+		if (streamActivity === 'thinking') return t('chat.activity.thinking');
+		if (streamActivity === 'tool' && streamToolName) {
+			// Try specific tool label, fall back to generic "Arbeitet..."
+			const toolLabels: Record<string, string> = {
+				memory_recall: t('chat.activity.tool.memory_recall'),
+				memory_store: t('chat.activity.tool.memory_store'),
+				http_request: t('chat.activity.tool.http_request'),
+				web_search: t('chat.activity.tool.web_search'),
+				artifact_save: t('chat.activity.tool.artifact_save'),
+				ask_user: t('chat.activity.tool.ask_user'),
+				bash: t('chat.activity.tool.bash'),
+				task_list: t('chat.activity.tool.task_list'),
+				send_email: t('chat.activity.tool.send_email'),
+				read_email: t('chat.activity.tool.read_email'),
+				calendar: t('chat.activity.tool.calendar'),
+			};
+			return toolLabels[streamToolName] ?? t('chat.activity.tool.default');
+		}
+		return t('chat.thinking');
+	});
 	const queueLength = $derived(getQueueLength());
 	const pendingPermission = $derived(getPendingPermission());
 	const pendingSecret = $derived(getPendingSecretPrompt());
@@ -1158,7 +1185,7 @@
 			{#if isStreaming && !pendingPermission}
 				<div class="flex items-center gap-2 text-xs text-text-subtle">
 					<span class="inline-block h-2 w-2 animate-pulse rounded-full bg-accent"></span>
-					{t('chat.thinking')}
+					{streamingLabel}
 				</div>
 			{/if}
 

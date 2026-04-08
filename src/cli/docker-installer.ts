@@ -189,8 +189,16 @@ services:
     tmpfs:
       - /tmp:size=512M
       - /workspace:size=256M,uid=1001,gid=1001
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
     env_file: .env
     environment:
       - SEARXNG_URL=http://searxng:8080
@@ -203,6 +211,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64M
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges
     volumes:
@@ -352,6 +362,10 @@ export async function runDockerInstaller(): Promise<void> {
     const token = tokenInput || randomBytes(32).toString('hex');
     envVars['LYNOX_HTTP_SECRET'] = token;
 
+    // ── Vault key (encryption at rest) ────────────────
+    const vaultKey = randomBytes(48).toString('base64');
+    envVars['LYNOX_VAULT_KEY'] = vaultKey;
+
     // Done with interactive input
     rl.close();
 
@@ -385,10 +399,16 @@ export async function runDockerInstaller(): Promise<void> {
     // ── Done ───────────────────────────────────────────
     const url = 'http://localhost:3000';
     stdout.write(`\n  ${GREEN}${BOLD}✨ lynox is running at ${url}${RESET}\n`);
-    stdout.write(`     ${BOLD}Access token:${RESET} ${token}\n\n`);
+    stdout.write(`     ${BOLD}Access token:${RESET} ${token}\n`);
+    stdout.write(`     ${BOLD}Vault key:${RESET}    ${vaultKey}\n\n`);
+    stdout.write(`  ${YELLOW}⚠${RESET}  Save both values in a password manager — the vault key\n`);
+    stdout.write(`     encrypts your data. Without it, secrets cannot be recovered.\n\n`);
     stdout.write(`  ${DIM}Stop:    cd ${installDir} && docker compose down${RESET}\n`);
     stdout.write(`  ${DIM}Logs:    cd ${installDir} && docker compose logs -f${RESET}\n`);
     stdout.write(`  ${DIM}Update:  docker compose pull && docker compose up -d${RESET}\n\n`);
+    stdout.write(`  ${YELLOW}Security:${RESET} lynox runs over HTTP by default.\n`);
+    stdout.write(`  ${DIM}For remote access, use a reverse proxy (Caddy, nginx) with TLS.${RESET}\n`);
+    stdout.write(`  ${DIM}Docs: https://docs.lynox.ai/getting-started/reverse-proxy${RESET}\n\n`);
 
     // Open browser (best-effort)
     if (healthy) {

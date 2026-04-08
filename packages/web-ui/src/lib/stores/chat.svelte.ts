@@ -179,6 +179,8 @@ const persisted = loadPersistedChat();
 let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
 let isStreaming = $state(false);
+let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
+let streamingToolName = $state<string | null>(null);
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
 let secretPromptGeneration = $state(0);
@@ -386,6 +388,8 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 
 	if (!res.ok || !res.body) {
 		isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
 		chatError = mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
@@ -471,6 +475,8 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	}
 
 	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
 	pendingPermission = null;
 	retryStatus = null;
 
@@ -529,6 +535,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			}
 			msg.content += text;
 			msg._toolSinceText = false;
+			streamingActivity = 'writing';
+			streamingToolName = null;
 			// Interleaved blocks: append to current text block or start new one
 			msg.blocks = msg.blocks ?? [];
 			const lastBlock = msg.blocks[msg.blocks.length - 1];
@@ -541,6 +549,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		}
 		case 'thinking':
 			msg.thinking = (msg.thinking ?? '') + String(data['thinking'] ?? '');
+			streamingActivity = 'thinking';
+			streamingToolName = null;
 			break;
 		case 'tool_call': {
 			const toolName = String(data['name'] ?? '');
@@ -557,6 +567,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				msg.blocks.push({ type: 'tool_call', index: tcIndex });
 			}
 			msg._toolSinceText = true;
+			streamingActivity = 'tool';
+			streamingToolName = toolName;
 			if (toolName !== 'ask_user' && toolName !== 'ask_secret') {
 				setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			}
@@ -602,6 +614,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		case 'turn_end': {
 			retryStatus = null;
+			// Use actual model from this turn (may differ from session default due to Haiku downgrade)
+			const turnModel = typeof data['model'] === 'string' ? data['model'] : sessionModel;
+			if (turnModel && turnModel !== sessionModel) sessionModel = turnModel;
 			const usage = data['usage'] as Record<string, number> | undefined;
 			if (usage) {
 				const baseTok = usage['input_tokens'] ?? 0;
@@ -609,7 +624,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				const cacheWrite = usage['cache_creation_input_tokens'] ?? 0;
 				const inTok = baseTok + cacheWrite + cacheRead;
 				const outTok = usage['output_tokens'] ?? 0;
-				const costUsd = estimateCost(sessionModel, {
+				const costUsd = estimateCost(turnModel, {
 					input_tokens: baseTok,
 					output_tokens: outTok,
 					cache_creation_input_tokens: cacheWrite,
@@ -818,6 +833,8 @@ export async function abortRun(): Promise<void> {
 	if (!sessionId) return;
 	await fetch(`${getApiBase()}/sessions/${sessionId}/abort`, { method: 'POST' });
 	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
 }
 
 async function fetchChangeset(): Promise<void> {
@@ -865,6 +882,12 @@ export function getMessages() {
 }
 export function getIsStreaming() {
 	return isStreaming;
+}
+export function getStreamingActivity() {
+	return streamingActivity;
+}
+export function getStreamingToolName() {
+	return streamingToolName;
 }
 export function getQueueLength() {
 	return messageQueue.length;
@@ -962,6 +985,8 @@ export function newChat() {
 	messages = [];
 	sessionId = null;
 	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
 	pendingPermission = null;
 	pendingSecretPrompt = null;
 	pendingChangeset = null;
@@ -995,6 +1020,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 	sessionId = threadId;
 	chatError = null;
 	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
 	pendingPermission = null;
 	pendingChangeset = null;
 	changesetLoading = false;
