@@ -880,6 +880,24 @@ export function cancelQueue(): void {
 export function getMessages() {
 	return messages;
 }
+/** Add a temporary placeholder message (e.g. voice transcription bubble). Returns its index. */
+export function pushPlaceholder(content: string): number {
+	const idx = messages.length;
+	messages.push({ role: 'user', content });
+	return idx;
+}
+/** Update placeholder content at given index (for live transcription). */
+export function updatePlaceholder(idx: number, content: string): void {
+	if (idx >= 0 && idx < messages.length) {
+		messages[idx] = { ...messages[idx]!, role: 'user', content };
+	}
+}
+/** Remove placeholder at given index. */
+export function removePlaceholder(idx: number): void {
+	if (idx >= 0 && idx < messages.length) {
+		messages.splice(idx, 1);
+	}
+}
 export function getIsStreaming() {
 	return isStreaming;
 }

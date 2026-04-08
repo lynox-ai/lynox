@@ -4,6 +4,9 @@
 		abortRun,
 		replyPermission,
 		getMessages,
+		pushPlaceholder,
+		updatePlaceholder,
+		removePlaceholder,
 		getIsStreaming,
 		getStreamingActivity,
 		getStreamingToolName,
@@ -549,9 +552,7 @@
 				if (discarded) return;
 
 				// Show placeholder bubble immediately with live transcription
-				const placeholderIdx = messages.length;
-				messages.push({ role: 'user', content: `🎤 ${t('chat.voice_processing')}` });
-				if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+				const placeholderIdx = pushPlaceholder(`🎤 ${t('chat.voice_processing')}`);
 
 				const blob = new Blob(chunks, { type: actualMime });
 				const reader = new FileReader();
@@ -565,7 +566,7 @@
 						});
 
 						if (!res.ok || !res.body) {
-							messages.splice(placeholderIdx, 1);
+							removePlaceholder(placeholderIdx);
 							if (res.status === 503) addToast(t('chat.whisper_unavailable'), 'error');
 							else addToast(t('chat.transcribe_failed'), 'error');
 							return;
@@ -588,15 +589,14 @@
 								if (!line.startsWith('data: ')) continue;
 								const data = JSON.parse(line.slice(6)) as { status?: string; segment?: string; done?: boolean; text?: string; error?: string };
 								if (data.status === 'transcribing') {
-									messages[placeholderIdx] = { role: 'user', content: `🎤 ${t('chat.transcribing')}` };
+									updatePlaceholder(placeholderIdx, `🎤 ${t('chat.transcribing')}`);
 								} else if (data.segment) {
 									segments.push(data.segment);
-									messages[placeholderIdx] = { role: 'user', content: `🎤 ${segments.join(' ')}` };
-									if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+									updatePlaceholder(placeholderIdx, `🎤 ${segments.join(' ')}`);
 								} else if (data.done && data.text) {
 									finalText = data.text;
 								} else if (data.error) {
-									messages.splice(placeholderIdx, 1);
+									removePlaceholder(placeholderIdx);
 									addToast(t('chat.transcribe_failed'), 'error');
 									return;
 								}
@@ -604,12 +604,12 @@
 						}
 
 						// Replace placeholder with final text and send to AI
-						messages.splice(placeholderIdx, 1);
+						removePlaceholder(placeholderIdx);
 						if (finalText.trim()) {
 							await sendMessage(`🎤 ${finalText.trim()}`);
 						}
 					} catch {
-						if (placeholderIdx < messages.length) messages.splice(placeholderIdx, 1);
+						removePlaceholder(placeholderIdx);
 						addToast(t('chat.transcribe_failed'), 'error');
 					}
 				};
