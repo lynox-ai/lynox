@@ -54,7 +54,7 @@
 	// Step 1: URL is collected in the UI, injected as {url} — no ask_user round-trip needed
 	const ONBOARDING_CONTEXT = [
 		`[ONBOARDING 1/3] The user's website is: {url} — scan it now. Use web_research and http_request to analyze it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Save ALL findings with memory_store. Present a structured summary. Be fast and direct — no clarifying questions. Respond in {locale}.`,
-		`[ONBOARDING 2/3] You already analyzed the user's website earlier in this conversation. Now use ask_user to ask 3-5 targeted questions about what the website doesn't reveal. Use the ask_user tool with the "questions" parameter to present all questions at once (each as a separate question with free-text input). Topics: revenue model & pricing, team size & capacity, biggest current challenge, 12-month growth goal, key metrics tracked. Save their answers to memory_store when they respond. Respond in {locale}.`,
+		`[ONBOARDING 2/3] You already analyzed the user's website earlier in this conversation. Now use ask_user to ask 3-5 targeted questions about what the website doesn't reveal. Use the ask_user tool with the "questions" parameter to present all questions at once (each as a separate question with free-text input). Topics: revenue model & pricing, team size & capacity, biggest current challenge, 12-month growth goal, key metrics tracked. Save their answers to memory_store when they respond. IMPORTANT: If the user skips or dismisses questions (answers contain "__dismissed__"), accept that gracefully — save whatever answers you received and move on. Do NOT re-ask dismissed questions. Respond in {locale}.`,
 		`[ONBOARDING 3/3] You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Create an artifact (markdown comparison table) with: name, positioning, target audience, key differentiators, pricing (if public). Save competitive insights with memory_store. End with 2-3 concrete next steps the user could take. Respond in {locale}.`,
 	];
 
@@ -1368,8 +1368,14 @@
 						</button>
 					{/if}
 				{/each}
-				<!-- Cancel batch -->
-				<button onclick={() => answerPrompt('__dismissed__')}
+				<!-- Cancel batch: submit answered questions, dismiss the rest -->
+				<button onclick={() => {
+					for (let i = 0; i < batchAnswers.length; i++) {
+						if (!batchAnswers[i]) batchAnswers[i] = '__dismissed__';
+					}
+					batchAnswers = [...batchAnswers];
+					submitBatch();
+				}}
 					class="w-full text-center rounded-[var(--radius-sm)] px-3 py-1.5 text-xs text-text-subtle hover:text-text hover:bg-bg-muted transition-all mt-1"
 				>{t('chat.dismiss')}</button>
 			</div>

@@ -714,11 +714,15 @@ export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
 	pendingPermission = null;
-	await fetch(`${getApiBase()}/sessions/${sessionId}/reply`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ answer, promptId })
-	});
+	try {
+		await fetch(`${getApiBase()}/sessions/${sessionId}/reply`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ answer, promptId })
+		});
+	} catch {
+		// Prompt may have expired or been cancelled — ignore silently
+	}
 }
 
 export async function submitSecret(name: string, value: string): Promise<boolean> {
