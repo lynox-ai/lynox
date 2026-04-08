@@ -1256,11 +1256,18 @@
 					<h3 class="text-sm font-semibold text-text mb-1">{t('onboard.whats_next_title')}</h3>
 					<p class="text-xs text-text-muted mb-3">{t('onboard.whats_next_subtitle')}</p>
 					<div class="space-y-2">
-						<a href="/app/settings" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<span class="text-sm">💬</span>
+						<a href="/app/settings/integrations" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
+							<span class="text-sm">📧</span>
 							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_telegram')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_telegram_desc')}</p>
+								<span class="text-sm font-medium text-text">{t('onboard.whats_next_google')}</span>
+								<p class="text-xs text-text-muted">{t('onboard.whats_next_google_desc')}</p>
+							</div>
+						</a>
+						<a href="/app/settings/mobile" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
+							<span class="text-sm">📱</span>
+							<div>
+								<span class="text-sm font-medium text-text">{t('onboard.whats_next_mobile')}</span>
+								<p class="text-xs text-text-muted">{t('onboard.whats_next_mobile_desc')}</p>
 							</div>
 						</a>
 						<a href="/app/knowledge" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">

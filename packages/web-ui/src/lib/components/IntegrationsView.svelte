@@ -266,13 +266,9 @@
 			const data = (await res.json()) as Record<string, unknown>;
 			if (typeof data['managed'] === 'string') managedTier = data['managed'];
 
-			// Check if managed Google OAuth is available (engine knows the control plane)
-			if (managedTier) {
-				try {
-					const oauthRes = await fetch(`${getApiBase()}/google/oauth-url`);
-					managedGoogleOAuthAvailable = oauthRes.ok;
-				} catch { /* not available */ }
-			}
+			// Managed Google OAuth broker not yet available — always show self-hosted flow
+			// TODO: Re-enable when control plane /oauth/google/start is implemented
+			managedGoogleOAuthAvailable = false;
 		} catch { /* ignore */ }
 	}
 
@@ -281,9 +277,22 @@
 			const res = await fetch(`${getApiBase()}/google/oauth-url`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { url: string };
-			if (data.url) window.location.href = data.url;
+			if (data.url) {
+				// Validate the control plane URL is reachable before redirecting
+				try {
+					const check = await fetch(data.url, { method: 'HEAD', mode: 'no-cors' }).catch(() => null);
+					// no-cors HEAD always succeeds — redirect and let the user see the result
+					window.location.href = data.url;
+				} catch {
+					// Control plane unreachable — fall back to self-hosted instructions
+					managedGoogleOAuthAvailable = false;
+					addToast(t('integrations.google_oauth_unavailable'), 'error');
+				}
+			}
 		} catch {
-			addToast(t('common.error'), 'error');
+			// Engine doesn't have control plane config — show self-hosted flow
+			managedGoogleOAuthAvailable = false;
+			addToast(t('integrations.google_oauth_unavailable'), 'error');
 		}
 	}
 
