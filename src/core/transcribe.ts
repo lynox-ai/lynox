@@ -4,7 +4,7 @@
  */
 
 import { execFile as nodeExecFile, spawn } from 'node:child_process';
-import { writeFileSync, unlinkSync, existsSync } from 'node:fs';
+import { writeFileSync, unlinkSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getErrorMessage } from './utils.js';
@@ -17,11 +17,35 @@ const WHISPER_MODEL_PATHS = [
   '/usr/share/whisper/ggml-base.bin',
   join(process.env['HOME'] ?? '', '.local/share/whisper/ggml-base.bin'),
 ];
+const WHISPER_TINY_MODEL_PATHS = [
+  '/usr/share/whisper/ggml-tiny.bin',
+  join(process.env['HOME'] ?? '', '.local/share/whisper/ggml-tiny.bin'),
+];
 
 const WHISPER_CLI = WHISPER_PATHS.find(p => existsSync(p));
-const WHISPER_MODEL = WHISPER_MODEL_PATHS.find(p => existsSync(p));
+const WHISPER_MODEL_BASE = WHISPER_MODEL_PATHS.find(p => existsSync(p));
+const WHISPER_MODEL_TINY = WHISPER_TINY_MODEL_PATHS.find(p => existsSync(p));
+const WHISPER_MODEL = WHISPER_MODEL_BASE;
 
 export const HAS_WHISPER = !!WHISPER_CLI && !!WHISPER_MODEL;
+
+/** Short audio threshold — use tiny model for clips under this duration (seconds). */
+const SHORT_AUDIO_THRESHOLD = 10;
+
+/** Get WAV duration from file size (16kHz mono 16-bit PCM = 32000 bytes/sec). */
+function wavDurationSec(wavPath: string): number {
+  try {
+    const stat = statSync(wavPath);
+    return Math.max(0, (stat.size - 44) / 32000); // 44-byte WAV header
+  } catch { return 999; } // fallback to base model
+}
+
+/** Pick model based on audio duration — tiny for short, base for long. */
+function pickModel(wavPath: string): string {
+  if (!WHISPER_MODEL_TINY) return WHISPER_MODEL_BASE!;
+  const duration = wavDurationSec(wavPath);
+  return duration <= SHORT_AUDIO_THRESHOLD ? WHISPER_MODEL_TINY : WHISPER_MODEL_BASE!;
+}
 
 function runCommand(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -47,8 +71,9 @@ export async function transcribeAudio(buffer: Buffer, filename: string, language
     await runCommand('ffmpeg', [
       '-i', inputPath, '-ar', '16000', '-ac', '1', '-f', 'wav', '-y', wavPath,
     ]);
+    const model = pickModel(wavPath);
     const { stdout } = await runCommand(WHISPER_CLI!, [
-      '-m', WHISPER_MODEL!, '-f', wavPath, '--language', language ?? 'auto', '--no-timestamps',
+      '-m', model, '-f', wavPath, '--language', language ?? 'auto', '--no-timestamps',
     ]);
     const text = stdout.trim();
     cleanup();
@@ -94,9 +119,10 @@ export async function transcribeAudioStream(
 
     const fullText = await new Promise<string>((resolve, reject) => {
       const segments: string[] = [];
+      const model = pickModel(wavPath);
       // spawn with explicit arg array — no shell, no injection risk
       const proc = spawn(WHISPER_CLI!, [
-        '-m', WHISPER_MODEL!, '-f', wavPath, '--language', safeLang,
+        '-m', model, '-f', wavPath, '--language', safeLang,
       ], { timeout: 60_000, shell: false });
 
       let stderr = '';
