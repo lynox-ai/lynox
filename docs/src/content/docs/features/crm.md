@@ -39,6 +39,8 @@ Open the **Contacts** view in the Web UI to see your full contact database. Clic
 
 ## Deals
 
+![Deals pipeline](../../../assets/screenshots/deals.jpg)
+
 Track business opportunities and their progress:
 
 - Deal name, value, and stage
