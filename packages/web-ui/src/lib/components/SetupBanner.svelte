@@ -10,6 +10,8 @@
 	let dismissed = $state(false);
 	let showWizard = $state(false);
 	let currentProvider = $state<Provider>('anthropic');
+	let managedMode = $state<string | null>(null);
+	let loaded = $state(false);
 
 	// Wizard steps: 'provider' → 'credentials'
 	let step = $state<'provider' | 'credentials'>('provider');
@@ -30,17 +32,32 @@
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (res.ok) {
-				const data = (await res.json()) as { provider: string; configured: Record<string, boolean> };
+				const data = (await res.json()) as { provider: string; managed?: string | null; configured: Record<string, boolean> };
 				currentProvider = (data.provider ?? 'anthropic') as Provider;
 				selectedProvider = currentProvider;
+				managedMode = data.managed ?? null;
+
+				// EU instances have pre-configured keys — never show wizard
+				if (managedMode === 'eu') {
+					apiKeyMissing = false;
+					loaded = true;
+					return;
+				}
+
 				apiKeyMissing = !data.configured['api_key'];
 				if (apiKeyMissing) {
 					const wasDismissed = localStorage.getItem('lynox-setup-dismissed');
 					showWizard = !wasDismissed;
 					dismissed = !!wasDismissed;
+					// Managed BYOK: skip provider selection, go straight to Anthropic key
+					if (managedMode) {
+						selectedProvider = 'anthropic';
+						step = 'credentials';
+					}
 				}
 			}
 		} catch { /* silent — StatusBar handles engine-down state */ }
+		loaded = true;
 	});
 
 	function dismiss() {
@@ -112,7 +129,8 @@
 			apiKeyMissing = false;
 			clearError();
 			localStorage.removeItem('lynox-setup-dismissed');
-			setTimeout(() => { showWizard = false; }, 1500);
+			// Reload after short delay so the engine picks up the new credentials
+			setTimeout(() => { window.location.reload(); }, 1500);
 		} catch {
 			saveError = t('setup.save_error');
 		}
@@ -149,7 +167,7 @@
 </script>
 
 <!-- Setup Wizard Modal -->
-{#if showWizard && apiKeyMissing}
+{#if loaded && showWizard && apiKeyMissing}
 	<div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -163,9 +181,11 @@
 			<div class="p-6 space-y-5">
 				<!-- Header -->
 				<div>
-					<h2 class="text-lg font-semibold text-text">{t('setup.title')}</h2>
-					{#if step === 'provider'}
+					<h2 class="text-lg font-semibold text-text">{managedMode ? t('setup.title_byok') : t('setup.title')}</h2>
+					{#if step === 'provider' && !managedMode}
 						<p class="text-sm text-text-secondary mt-1">{t('setup.provider_select')}</p>
+					{:else if managedMode}
+						<p class="text-sm text-text-secondary mt-1">{t('setup.subtitle_byok')}</p>
 					{:else}
 						<p class="text-sm text-text-secondary mt-1">{t(subtitleKey)}</p>
 					{/if}
@@ -182,8 +202,8 @@
 						<p class="text-sm text-success font-medium">{t('setup.success')}</p>
 					</div>
 
-				<!-- Step 1: Provider selection -->
-				{:else if step === 'provider'}
+				<!-- Step 1: Provider selection (self-hosted only) -->
+				{:else if step === 'provider' && !managedMode}
 					<div class="space-y-2">
 						{#each providers as p}
 							<button
@@ -289,12 +309,21 @@
 
 					<!-- Actions -->
 					<div class="flex items-center justify-between pt-1">
-						<button
-							onclick={goBack}
-							class="text-sm text-text-subtle hover:text-text transition-colors"
-						>
-							{t('setup.back')}
-						</button>
+						{#if !managedMode}
+							<button
+								onclick={goBack}
+								class="text-sm text-text-subtle hover:text-text transition-colors"
+							>
+								{t('setup.back')}
+							</button>
+						{:else}
+							<button
+								onclick={dismiss}
+								class="text-sm text-text-subtle hover:text-text transition-colors"
+							>
+								{t('onboard.vault_skip_btn')}
+							</button>
+						{/if}
 						<button
 							onclick={saveCredentials}
 							disabled={saving || !canSave}
@@ -310,7 +339,7 @@
 {/if}
 
 <!-- Banner (after wizard dismissed or on revisit) -->
-{#if apiKeyMissing && !showWizard && !dismissed}
+{#if loaded && apiKeyMissing && !showWizard && !dismissed}
 	<div role="alert" class="flex items-center justify-between gap-3 border-b border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning shrink-0">
 		<div class="flex items-center gap-2 min-w-0">
 			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor">

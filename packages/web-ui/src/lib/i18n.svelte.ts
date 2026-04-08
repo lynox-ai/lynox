@@ -366,6 +366,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.vault_confirm_btn': { de: 'Kopiert, weiter', en: 'Copied, continue' },
 	'onboard.vault_skip_btn': { de: 'Später', en: 'Later' },
 	'onboard.vault_confirmed': { de: 'Vault Key gesichert. Du findest ihn jederzeit unter Settings → Config.', en: 'Vault key noted. You can find it anytime in Settings → Config.' },
+	'onboard.continue_step': { de: 'Weiter: Schritt {n}/3', en: 'Continue: Step {n}/3' },
+	'onboard.whats_next_title': { de: 'Bereit!', en: 'Ready to go!' },
+	'onboard.whats_next_subtitle': { de: 'lynox kennt jetzt dein Business. Was möchtest du als Nächstes?', en: 'lynox knows your business now. What would you like to do next?' },
+	'onboard.whats_next_telegram': { de: 'Telegram verbinden', en: 'Connect Telegram' },
+	'onboard.whats_next_telegram_desc': { de: 'Mobiler Zugang — Aufgaben von unterwegs', en: 'Mobile access — tasks on the go' },
+	'onboard.whats_next_knowledge': { de: 'Wissen ansehen', en: 'Explore Knowledge' },
+	'onboard.whats_next_knowledge_desc': { de: 'Was lynox über dich gelernt hat', en: 'What lynox learned about you' },
+	'onboard.whats_next_chat': { de: 'Einfach loschatten', en: 'Just start chatting' },
+	'setup.title_byok': { de: 'Dein API Key', en: 'Your API Key' },
+	'setup.subtitle_byok': { de: 'Gib deinen Anthropic API Key ein, um loszulegen.', en: 'Enter your Anthropic API key to get started.' },
 
 	// Settings
 	'settings.title': { de: 'Settings', en: 'Settings' },

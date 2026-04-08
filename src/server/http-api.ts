@@ -1270,6 +1270,7 @@ export class LynoxHTTPApi {
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
       jsonResponse(res, 200, {
         provider,
+        managed: process.env['LYNOX_MANAGED_MODE'] ?? null,
         configured: {
           api_key: llmConfigured,
           telegram: names.has('TELEGRAM_BOT_TOKEN'),
