@@ -52,8 +52,8 @@
 
 	// Agent context prefixes — tell the agent exactly what to do per step
 	const ONBOARDING_CONTEXT = [
-		`[ONBOARDING 1/3] The user wants you to analyze their website. Ask for the URL first, then immediately use web_research and http_request to scan it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Save ALL findings with memory_store. Present a structured summary. Be fast and direct — no clarifying questions beyond the URL. Respond in {locale}.`,
-		`[ONBOARDING 2/3] You already analyzed the user's website earlier in this conversation. Now ask 3-5 targeted questions about what the website doesn't reveal: revenue model, team size, current challenges, growth goals, key metrics they track. Ask all questions in ONE message as a numbered list — do NOT use the ask_user tool. Save their answers to memory when they respond. Respond in {locale}.`,
+		`[ONBOARDING 1/3] The user wants you to analyze their website. Ask for the URL using ask_user (one single question: "What is your website URL?"), then immediately use web_research and http_request to scan it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Save ALL findings with memory_store. Present a structured summary. Be fast and direct — no other clarifying questions. Respond in {locale}.`,
+		`[ONBOARDING 2/3] You already analyzed the user's website earlier in this conversation. Now use ask_user to ask 3-5 targeted questions about what the website doesn't reveal. Use the ask_user tool with the "questions" parameter to present all questions at once (each as a separate question with free-text input). Topics: revenue model & pricing, team size & capacity, biggest current challenge, 12-month growth goal, key metrics tracked. Save their answers to memory_store when they respond. Respond in {locale}.`,
 		`[ONBOARDING 3/3] You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Create an artifact (markdown comparison table) with: name, positioning, target audience, key differentiators, pricing (if public). Save competitive insights with memory_store. End with 2-3 concrete next steps the user could take. Respond in {locale}.`,
 	];
 
@@ -164,11 +164,19 @@
 		}
 	});
 
-	// Advance onboarding step when streaming ends (not on click)
+	// Advance onboarding step when streaming ends successfully (not on click, not on error)
 	$effect(() => {
 		if (pendingOnboardingAdvance && !isStreaming && messages.length > 0) {
-			pendingOnboardingAdvance = false;
-			advanceOnboarding();
+			const hasError = !!getChatError();
+			const lastMsg = messages[messages.length - 1];
+			const lastFailed = lastMsg?.role === 'user' && lastMsg.failed;
+			if (hasError || lastFailed) {
+				// Error occurred — don't advance, let user retry
+				pendingOnboardingAdvance = false;
+			} else {
+				pendingOnboardingAdvance = false;
+				advanceOnboarding();
+			}
 		}
 	});
 
@@ -913,8 +921,11 @@
 							{#if true}
 								{@const greeting = getGreeting(getLocale())}
 								<div class="text-center mb-8">
-									<div class="icon-entrance mb-4">
-										<img src="/icon.svg" alt="" class="icon-float mx-auto w-14 h-14" />
+									<div class="icon-entrance mb-4 sonar-wrap">
+										<div class="pulse-ring pulse-ring-1"></div>
+										<div class="pulse-ring pulse-ring-2"></div>
+										<div class="pulse-ring pulse-ring-3"></div>
+										<img src="/icon.svg" alt="" class="icon-float relative z-[2] w-14 h-14" />
 									</div>
 									<h1 class="text-2xl md:text-3xl font-light tracking-tight text-text welcome-greeting">
 										{greeting.text}{#if displayName}, {displayName}{/if}{greeting.punct}
@@ -1622,6 +1633,34 @@
 	}
 	.welcome-fade :global(.icon-float) {
 		animation: iconFloat 4s ease-in-out infinite, iconGlow 4s ease-in-out infinite;
+	}
+	:global(.sonar-wrap) {
+		position: relative;
+		width: 96px;
+		height: 96px;
+		margin: 0 auto;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	:global(.pulse-ring) {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		width: 72px;
+		height: 72px;
+		margin-top: -36px;
+		margin-left: -36px;
+		border-radius: 50%;
+		border: 1px solid rgba(155, 138, 255, 0.2);
+		z-index: 0;
+		animation: sonarPulse 4s ease-out infinite;
+	}
+	:global(.pulse-ring-2) { animation-delay: 1.33s; }
+	:global(.pulse-ring-3) { animation-delay: 2.66s; }
+	@keyframes sonarPulse {
+		0% { transform: scale(0.8); opacity: 0.5; }
+		100% { transform: scale(2.8); opacity: 0; }
 	}
 	.welcome-fade :global(.welcome-greeting) {
 		animation: fadeUp 0.8s ease-out 0.3s both;
