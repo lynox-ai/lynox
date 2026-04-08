@@ -105,24 +105,27 @@ export const load: PageServerLoad = async ({ cookies, url, getClientAddress, set
 	const managed = getManagedConfig();
 	if (managed) {
 		// Check if customer has registered passkeys
+		// Skip passkey check on first-ever login (onboarding not consumed yet)
 		let hasPasskeys = false;
-		try {
-			const secret = getSecret();
-			if (secret) {
-				const res = await fetch(`${managed.controlPlaneUrl}/internal/auth/webauthn/status`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-						'x-instance-secret': secret,
-					},
-					body: JSON.stringify({ instanceId: managed.instanceId, email: managed.customerEmail }),
-				});
-				if (res.ok) {
-					const data = await res.json() as { hasPasskeys?: boolean };
-					hasPasskeys = data.hasPasskeys === true;
+		if (isOnboardingConsumed()) {
+			try {
+				const secret = getSecret();
+				if (secret) {
+					const res = await fetch(`${managed.controlPlaneUrl}/internal/auth/webauthn/status`, {
+						method: 'POST',
+						headers: {
+							'Content-Type': 'application/json',
+							'x-instance-secret': secret,
+						},
+						body: JSON.stringify({ instanceId: managed.instanceId, email: managed.customerEmail }),
+					});
+					if (res.ok) {
+						const data = await res.json() as { hasPasskeys?: boolean };
+						hasPasskeys = data.hasPasskeys === true;
+					}
 				}
-			}
-		} catch { /* control plane unreachable — fallback to OTP */ }
+			} catch { /* control plane unreachable — fallback to OTP */ }
+		}
 
 		return {
 			isManaged: true,
