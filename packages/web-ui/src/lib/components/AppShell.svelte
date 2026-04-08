@@ -370,10 +370,10 @@
 													>{thread.is_favorite ? '\u2605' : '\u2606'}</button>
 													<button
 														onclick={(e: MouseEvent) => { e.stopPropagation(); void archiveThread(thread.id, getSessionId()); }}
-														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"
+														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-text-muted hover:bg-text-muted/10 text-xs transition-colors"
 														aria-label={t('threads.archive')}
 														title={t('threads.archive')}
-													>&times;</button>
+													><svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg></button>
 													<button
 														onclick={(e: MouseEvent) => { e.stopPropagation(); void confirmDelete(thread.id); }}
 														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"

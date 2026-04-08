@@ -517,6 +517,10 @@
 		if (recording) return;
 		recordingDiscarded = false;
 		try {
+			if (!navigator.mediaDevices?.getUserMedia) {
+				addToast(t('chat.mic_requires_https'), 'error');
+				return;
+			}
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 			activeStream = stream;
 
@@ -528,7 +532,14 @@
 			source.connect(analyser);
 			audioAnalyser = analyser;
 
-			const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+			const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
+				: MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4'
+				: '';
+			const recorder = mimeType
+				? new MediaRecorder(stream, { mimeType })
+				: new MediaRecorder(stream);
+			const actualMime = recorder.mimeType || 'audio/webm';
+			const ext = actualMime.includes('mp4') ? 'mp4' : actualMime.includes('aac') ? 'aac' : 'webm';
 			const chunks: Blob[] = [];
 
 			recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
@@ -537,7 +548,7 @@
 				cleanupRecording();
 				if (discarded) return;
 
-				const blob = new Blob(chunks, { type: 'audio/webm' });
+				const blob = new Blob(chunks, { type: actualMime });
 				const reader = new FileReader();
 				reader.onload = async () => {
 					const base64 = (reader.result as string).split(',')[1] ?? '';
@@ -546,13 +557,17 @@
 						const res = await fetch(`${getApiBase()}/transcribe`, {
 							method: 'POST',
 							headers: { 'Content-Type': 'application/json' },
-							body: JSON.stringify({ audio: base64, filename: 'voice.webm', language: getLocale() })
+							body: JSON.stringify({ audio: base64, filename: `voice.${ext}`, language: getLocale() })
 						});
 						if (res.ok) {
 							const data = (await res.json()) as { text: string };
 							if (data.text.trim()) {
 								await sendMessage(`🎤 ${data.text.trim()}`);
 							}
+						} else if (res.status === 503) {
+							addToast(t('chat.whisper_unavailable'), 'error');
+						} else {
+							addToast(t('chat.transcribe_failed'), 'error');
 						}
 					} finally {
 						transcribing = false;
@@ -567,8 +582,12 @@
 			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
 			mediaRecorder = recorder;
 			waveformRaf = requestAnimationFrame(updateWaveform);
-		} catch {
-			addToast(t('chat.mic_unavailable'), 'error');
+		} catch (err) {
+			if (err instanceof DOMException && err.name === 'NotAllowedError') {
+				addToast(t('chat.mic_denied'), 'error');
+			} else {
+				addToast(t('chat.mic_unavailable'), 'error');
+			}
 		}
 	}
 
@@ -1620,14 +1639,15 @@
 				{:else}
 					<!-- Touch: hold to record, release to send. Mouse: click to toggle. -->
 					<button
+						onclick={() => {
+							if (recordingStartedByTouch) return;
+							if (recording) { stopRecording(); } else { void startRecording(); }
+						}}
 						onpointerdown={(e) => {
-							if (e.pointerType === 'touch') {
-								e.preventDefault();
-								recordingStartedByTouch = true;
-								startRecording();
-							} else {
-								if (recording) { stopRecording(); } else { startRecording(); }
-							}
+							if (e.pointerType !== 'touch') return;
+							e.preventDefault();
+							recordingStartedByTouch = true;
+							void startRecording();
 						}}
 						onpointerup={() => {
 							if (recordingStartedByTouch) {

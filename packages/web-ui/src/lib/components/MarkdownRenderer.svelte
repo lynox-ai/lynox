@@ -477,17 +477,29 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div onclick={handleContainerClick} class="prose prose-invert prose-sm max-w-none
+<div onclick={handleContainerClick} class="prose prose-invert max-w-none
 	prose-pre:bg-bg-muted prose-pre:border prose-pre:border-border prose-pre:rounded-[var(--radius-md)] prose-pre:overflow-x-auto
 	prose-code:text-accent-text prose-code:text-xs prose-code:font-mono
 	prose-a:text-accent-text prose-a:no-underline hover:prose-a:opacity-80
-	prose-headings:text-text prose-headings:font-light prose-headings:tracking-tight
+	prose-headings:text-text prose-headings:font-medium prose-headings:tracking-tight
 	prose-p:leading-relaxed prose-li:leading-relaxed
-	prose-strong:text-text">
+	prose-strong:text-text prose-strong:font-semibold">
 	{@html highlightedHtml || baseHtml}
 </div>
 
 <style>
+	/* Base prose overrides for readability */
+	div :global(p) {
+		font-size: 0.9375rem;
+		line-height: 1.75;
+		margin-bottom: 1rem;
+	}
+
+	div :global(strong) {
+		color: var(--color-text);
+		letter-spacing: 0.01em;
+	}
+
 	/* Override Shiki's inline styles to match our theme */
 	:global(.shiki) {
 		background-color: transparent !important;
@@ -540,6 +552,18 @@
 		background-color: var(--color-bg-subtle);
 	}
 
+	/* Headings — visual section separation */
+	div :global(h1),
+	div :global(h2),
+	div :global(h3),
+	div :global(h4) {
+		margin-top: 1.75rem;
+		margin-bottom: 0.75rem;
+	}
+	div :global(:first-child:is(h1, h2, h3, h4)) {
+		margin-top: 0;
+	}
+
 	/* Blockquotes */
 	div :global(blockquote) {
 		border-left: 3px solid var(--color-accent);
@@ -557,12 +581,20 @@
 	div :global(ul) {
 		list-style-type: disc;
 		padding-left: 1.5rem;
+		margin: 0.75rem 0;
 	}
 	div :global(ol) {
 		list-style-type: decimal;
 		padding-left: 1.5rem;
+		margin: 0.75rem 0;
 	}
 	div :global(li) {
+		margin: 0.375rem 0;
+		font-size: 0.9375rem;
+		line-height: 1.7;
+	}
+	div :global(li > ul),
+	div :global(li > ol) {
 		margin: 0.25rem 0;
 	}
 

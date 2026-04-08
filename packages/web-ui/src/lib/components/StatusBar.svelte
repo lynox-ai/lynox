@@ -13,7 +13,7 @@
 	let todayRuns = $state(0);
 	let panelOpen = $state(false);
 
-	interface SecretsStatus { configured: Record<string, boolean>; count: number }
+	interface SecretsStatus { configured: Record<string, boolean>; count: number; managed?: string | null }
 	interface KgStats {
 		memoryCount: number;
 		entityCount: number;
@@ -24,6 +24,8 @@
 
 	let secrets = $state<SecretsStatus | null>(null);
 	let kgStats = $state<KgStats | null>(null);
+
+	const isManaged = $derived(!!secrets?.managed);
 
 	const hasAuthError = $derived(getAuthError());
 	function apiStatusClass(): string {
@@ -243,11 +245,11 @@
 					<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.api_keys')}</p>
 					<div class="grid grid-cols-2 gap-1.5">
 						{#each [
-							['api_key', t('status.api_key')],
+							['api_key', isManaged ? t('status.api_key_managed') : t('status.api_key')],
 							['telegram', t('status.telegram')],
 							['search', t('status.search')],
 							['google', t('status.google')],
-							['bugsink', t('status.bugsink')],
+							...(!isManaged ? [['bugsink', t('status.bugsink')]] : []),
 						] as [key, label]}
 							<div class="flex items-center gap-1.5 text-xs">
 								{#if secrets.configured[key]}
