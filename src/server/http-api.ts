@@ -734,7 +734,14 @@ export class LynoxHTTPApi {
 
     const recent = history.getRecentRuns(1);
     const lastRun = recent[0];
-    if (!lastRun) return { indicator: 'unknown', description: 'No recent runs', provider: providerLabel };
+    if (!lastRun) {
+      // No runs yet — if the engine has an API key, assume operational (fresh instance)
+      // Use dynamic check — import at module level would cause circular dependency
+      const hasKey = !!(process.env['ANTHROPIC_API_KEY'] ?? process.env['AWS_ACCESS_KEY_ID'] ?? process.env['LYNOX_MANAGED_MODE']);
+      return hasKey
+        ? { indicator: 'none', description: 'Ready', provider: providerLabel }
+        : { indicator: 'unknown', description: 'No API key configured', provider: providerLabel };
+    }
 
     const lastRunTime = new Date(lastRun.created_at).getTime();
     const fiveMinAgo = now - 5 * 60_000;
