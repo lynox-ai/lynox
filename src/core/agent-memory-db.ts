@@ -240,6 +240,11 @@ const MIGRATIONS: string[] = [
    DROP TABLE IF EXISTS episodes;
    DROP TABLE IF EXISTS episodes_deprecated;
    DROP TABLE IF EXISTS thread_insights;`,
+
+  // v3: Per-thread source tracking (for private-mode purge)
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (3);
+   ALTER TABLE memories ADD COLUMN source_thread_id TEXT;
+   CREATE INDEX IF NOT EXISTS idx_memories_thread ON memories(source_thread_id);`,
 ];
 
 // ── Database Class ──────────────────────────────────────────────
@@ -402,6 +407,63 @@ export class AgentMemoryDb {
     this.db.prepare('DELETE FROM entities WHERE id = ?').run(entityId);
   }
 
+  /**
+   * Purge all knowledge extracted from a specific thread.
+   * Uses subqueries instead of IN-list placeholders to avoid SQLite's 999-param limit.
+   * Deletes memories, orphaned entities (reference-counted), and their relations.
+   * Returns count of deleted memories.
+   */
+  purgeByThread(threadId: string): number {
+    return this.transaction(() => {
+      const countRow = this.db.prepare(
+        'SELECT COUNT(*) as cnt FROM memories WHERE source_thread_id = ?',
+      ).get(threadId) as { cnt: number };
+
+      if (countRow.cnt === 0) return 0;
+
+      // Subquery used everywhere — avoids placeholder overflow for large threads
+      const memSub = 'SELECT id FROM memories WHERE source_thread_id = ?';
+
+      // 1. Find orphan entities: only mentioned by this thread's memories
+      const orphanEntities = this.db.prepare(`
+        SELECT DISTINCT m.entity_id FROM mentions m
+        WHERE m.memory_id IN (${memSub})
+        AND NOT EXISTS (
+          SELECT 1 FROM mentions m2
+          WHERE m2.entity_id = m.entity_id
+          AND m2.memory_id NOT IN (${memSub})
+        )
+      `).all(threadId, threadId) as Array<{ entity_id: string }>;
+
+      // 2. Delete mentions for these memories
+      this.db.prepare(`DELETE FROM mentions WHERE memory_id IN (${memSub})`).run(threadId);
+
+      // 3. Delete relations sourced from these memories
+      this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub})`).run(threadId);
+
+      // 4. Clean supersedes: clear superseded_by pointers, then delete records
+      this.db.prepare(`UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (${memSub})`).run(threadId);
+      this.db.prepare(`DELETE FROM supersedes WHERE new_memory_id IN (${memSub}) OR old_memory_id IN (${memSub})`).run(threadId, threadId);
+
+      // 5. Delete orphan entities (and their cooccurrences/relations)
+      if (orphanEntities.length > 0) {
+        const deleteCooc = this.db.prepare('DELETE FROM cooccurrences WHERE entity_a_id = ? OR entity_b_id = ?');
+        const deleteRel = this.db.prepare('DELETE FROM relations WHERE from_entity_id = ? OR to_entity_id = ?');
+        const deleteEnt = this.db.prepare('DELETE FROM entities WHERE id = ?');
+        for (const oe of orphanEntities) {
+          deleteCooc.run(oe.entity_id, oe.entity_id);
+          deleteRel.run(oe.entity_id, oe.entity_id);
+          deleteEnt.run(oe.entity_id);
+        }
+      }
+
+      // 6. Delete the memories themselves
+      this.db.prepare('DELETE FROM memories WHERE source_thread_id = ?').run(threadId);
+
+      return countRow.cnt;
+    });
+  }
+
   // ── Memory Operations ─────────────────────────────────────────
 
   createMemory(props: {
@@ -411,6 +473,7 @@ export class AgentMemoryDb {
     scopeType: string;
     scopeId: string;
     sourceRunId?: string | undefined;
+    sourceThreadId?: string | undefined;
     provider?: string | undefined;
     embedding: number[];
   }): string {
@@ -420,12 +483,13 @@ export class AgentMemoryDb {
 
     this.db.prepare(`
       INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_run_id,
-        provider, embedding, confidence, is_active, retrieval_count, confirmation_count,
-        created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.75, 1, 0, 0, ?, ?)
+        source_thread_id, provider, embedding, confidence, is_active, retrieval_count,
+        confirmation_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0.75, 1, 0, 0, ?, ?)
     `).run(
       id, props.text, props.namespace, props.scopeType, props.scopeId,
-      props.sourceRunId ?? null, props.provider ?? 'onnx', embBlob, now, now,
+      props.sourceRunId ?? null, props.sourceThreadId ?? null,
+      props.provider ?? 'onnx', embBlob, now, now,
     );
 
     return id;

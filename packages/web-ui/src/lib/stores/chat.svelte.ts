@@ -191,6 +191,7 @@ let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let changesetLoading = $state(false);
+let skipExtraction = $state(false);
 let retryStatus = $state<{ attempt: number; maxAttempts: number } | null>(null);
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
@@ -881,6 +882,25 @@ export function clearError() {
 export function getPendingChangeset() {
 	return pendingChangeset;
 }
+export function getSkipExtraction() {
+	return skipExtraction;
+}
+export async function toggleSkipExtraction(): Promise<void> {
+	const sid = sessionId;
+	if (!sid) return;
+	const newValue = !skipExtraction;
+	skipExtraction = newValue;
+	const res = await fetch(`${getApiBase()}/threads/${sid}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ skip_extraction: newValue }),
+	});
+	if (!res.ok) {
+		skipExtraction = !newValue;
+	}
+	// Refresh thread list so sidebar indicator updates
+	void loadThreads();
+}
 export function getChangesetLoading() {
 	return changesetLoading;
 }
@@ -924,6 +944,7 @@ export function newChat() {
 	pendingSecretPrompt = null;
 	pendingChangeset = null;
 	changesetLoading = false;
+	skipExtraction = false;
 	chatError = null;
 	messageQueue = [];
 	sessionModel = null;
@@ -955,6 +976,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	pendingPermission = null;
 	pendingChangeset = null;
 	changesetLoading = false;
+	skipExtraction = false;
 	messageQueue = [];
 	contextBudget = null;
 	clearContext();
@@ -977,6 +999,16 @@ export async function resumeThread(threadId: string): Promise<void> {
 		sessionId = data.sessionId;
 		if (data.model) sessionModel = data.model;
 		if (data.contextWindow) contextWindow = data.contextWindow;
+
+		// Load thread metadata (extraction flag)
+		const threadRes = await fetch(`${getApiBase()}/threads/${threadId}`, {
+			signal: controller.signal,
+		});
+		if (gen !== _resumeGeneration) return;
+		if (threadRes.ok) {
+			const threadData = (await threadRes.json()) as { thread: { skip_extraction: number } };
+			skipExtraction = !!threadData.thread.skip_extraction;
+		}
 
 		// Load messages for display
 		const msgRes = await fetch(`${getApiBase()}/threads/${threadId}/messages`, {

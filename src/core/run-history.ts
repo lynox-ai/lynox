@@ -559,6 +559,10 @@ const MIGRATIONS: string[] = [
      expires_at TEXT NOT NULL
    );
    CREATE INDEX IF NOT EXISTS idx_pending_prompts_session ON pending_prompts(session_id, status);`,
+
+  // v26: Per-thread knowledge extraction toggle
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (26);
+   ALTER TABLE threads ADD COLUMN skip_extraction INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export class RunHistory {

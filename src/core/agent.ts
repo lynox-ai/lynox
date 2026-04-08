@@ -54,6 +54,7 @@ export class Agent implements IAgent {
   promptTabs?: ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
   promptSecret?: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
   currentRunId?: string | undefined;
+  currentThreadId?: string | undefined;
   readonly spawnDepth: number;
 
   private readonly client: Anthropic;
@@ -285,7 +286,7 @@ export class Agent implements IAgent {
           const text = extractText(response.content);
           if (this.memory && !this.skipMemoryExtraction) {
             const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-            this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount));
+            this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId));
           }
           return text;
         }
@@ -295,7 +296,7 @@ export class Agent implements IAgent {
         const text = extractText(response.content);
         if (this.memory && !this.skipMemoryExtraction) {
           const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount));
+          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId));
         }
         return text;
       }
@@ -313,7 +314,7 @@ export class Agent implements IAgent {
         const text = extractText(response.content);
         if (this.memory && !this.skipMemoryExtraction) {
           const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount));
+          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId));
         }
         return text;
       }

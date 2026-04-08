@@ -78,12 +78,12 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
 
     if (scopeRef) {
       await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id });
+      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId });
       return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
     }
 
     await agent.memory.append(input.namespace, input.content);
-    channels.memoryStore.publish({ namespace: input.namespace, content: input.content });
+    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId });
     return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
   },
 };
@@ -415,6 +415,7 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       content: matchedLine,
       scopeType: toRef.type,
       scopeId: toRef.id,
+      sourceThreadId: agent.currentThreadId,
     });
 
     // Remove from source scope + sync graph

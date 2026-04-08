@@ -93,6 +93,7 @@ export class Session {
   private _promptTabs: ((questions: TabQuestion[]) => Promise<string[]>) | null = null;
   private _promptSecret: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null = null;
   private _tenantId: string | null = null;
+  private _skipMemoryExtractionOverride: boolean | null = null;
 
   // Per-session config (copied from engine.config at creation, mutated independently)
   private _model: ModelTier;
@@ -329,8 +330,9 @@ export class Session {
       }
     }
 
-    // Thread run ID to agent so spawn tool can read it
+    // Thread run ID and session ID to agent so spawn tool and memory extraction can use them
     this.agent.currentRunId = this.currentRunId ?? undefined;
+    this.agent.currentThreadId = this.sessionId;
 
     const usageBefore = { ...this.usage };
 
@@ -673,6 +675,7 @@ export class Session {
   }
 
   setSkipMemoryExtraction(skip: boolean): void {
+    this._skipMemoryExtractionOverride = skip;
     if (this.agent) this.agent.skipMemoryExtraction = skip;
   }
 
@@ -803,6 +806,10 @@ export class Session {
     // Respect memory_extraction config (default: true)
     if (userConfig.memory_extraction === false) {
       this.agent.skipMemoryExtraction = true;
+    }
+    // Per-thread override takes precedence over global config
+    if (this._skipMemoryExtractionOverride !== null) {
+      this.agent.skipMemoryExtraction = this._skipMemoryExtractionOverride;
     }
   }
 

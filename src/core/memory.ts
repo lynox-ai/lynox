@@ -382,7 +382,7 @@ export class Memory implements IMemory {
     return true;
   }
 
-  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined): Promise<void> {
+  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined): Promise<void> {
     try {
       if (!finalAnswer || finalAnswer.length < 50) return;
 
@@ -483,6 +483,7 @@ export class Memory implements IMemory {
               content: text,
               scopeType: classification.scope.type,
               scopeId: classification.scope.id,
+              sourceThreadId,
             });
           }),
         );
@@ -490,7 +491,7 @@ export class Memory implements IMemory {
         await Promise.all(
           entries.map(async ([ns, text]) => {
             await this.append(ns as MemoryNamespace, text);
-            channels.memoryStore.publish({ namespace: ns, content: text });
+            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId });
           }),
         );
       }

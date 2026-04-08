@@ -47,7 +47,7 @@ export interface IMemory {
   render():                                                     string;
   hasContent():                                                 boolean;
   loadAll():                                                    Promise<void>;
-  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined): Promise<void>;
+  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined): Promise<void>;
   // Scope-aware methods (Phase 1)
   appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;

@@ -98,6 +98,11 @@ export class SessionStore {
           session.loadMessages(toLoad);
         }
 
+        // Apply per-thread extraction toggle
+        if (thread.skip_extraction) {
+          session.setSkipMemoryExtraction(true);
+        }
+
         // Fire-and-forget summary generation if needed
         if (messages.length > VERBATIM_THRESHOLD && !thread.summary) {
           void generateThreadSummary(engine, sessionId, messages);

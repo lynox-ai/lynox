@@ -21,6 +21,7 @@ export interface IAgent {
   promptTabs?: ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
   promptSecret?: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
   currentRunId?: string | undefined;
+  currentThreadId?: string | undefined;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;
   readonly userId?: string | undefined;

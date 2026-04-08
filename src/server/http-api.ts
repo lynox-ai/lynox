@@ -1117,11 +1117,34 @@ export class LynoxHTTPApi {
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       const b = body as Record<string, unknown> | null;
+      const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
       threadStore.updateThread(params['id']!, {
         title: typeof b?.['title'] === 'string' ? b['title'] : undefined,
         is_archived: typeof b?.['is_archived'] === 'boolean' ? b['is_archived'] : undefined,
         is_favorite: typeof b?.['is_favorite'] === 'boolean' ? b['is_favorite'] : undefined,
+        skip_extraction: skipExtraction,
       });
+      // Propagate extraction toggle to in-memory session (if active)
+      if (skipExtraction !== undefined) {
+        const session = this.sessionStore.get(params['id']!);
+        if (session) {
+          session.setSkipMemoryExtraction(skipExtraction);
+        }
+        // Private mode: purge extracted knowledge from this thread
+        if (skipExtraction) {
+          const knowledgeLayer = engine.getKnowledgeLayer();
+          if (knowledgeLayer) {
+            try {
+              const purged = knowledgeLayer.purgeThread(params['id']!);
+              if (purged > 0) {
+                process.stderr.write(`[lynox:private] Purged ${purged} memories from thread ${params['id']!.slice(0, 8)}\n`);
+              }
+            } catch (err: unknown) {
+              process.stderr.write(`[lynox:private] Purge failed for thread ${params['id']!.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}\n`);
+            }
+          }
+        }
+      }
       jsonResponse(res, 200, { ok: true });
     }));
 

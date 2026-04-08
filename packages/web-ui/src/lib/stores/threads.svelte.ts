@@ -10,6 +10,7 @@ export interface Thread {
 	total_cost_usd: number;
 	is_archived: number;
 	is_favorite: number;
+	skip_extraction: number;
 	created_at: string;
 	updated_at: string;
 }
@@ -106,6 +107,25 @@ export async function toggleFavorite(id: string): Promise<void> {
 		// Rollback
 		thread.is_favorite = newValue ? 0 : 1;
 		addToast(t('threads.error_favorite'), 'error');
+	}
+}
+
+export async function toggleExtraction(id: string): Promise<void> {
+	const thread = threads.find((t) => t.id === id);
+	if (!thread) return;
+	const oldValue = thread.skip_extraction;
+	const newValue = oldValue ? false : true;
+	// Optimistic update
+	thread.skip_extraction = newValue ? 1 : 0;
+	const res = await fetch(`${getApiBase()}/threads/${id}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ skip_extraction: newValue }),
+	});
+	if (!res.ok) {
+		// Rollback to previous state
+		thread.skip_extraction = oldValue;
+		addToast(t('threads.error_extraction'), 'error');
 	}
 }
 

@@ -94,6 +94,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     scope: MemoryScopeRef,
     options?: {
       sourceRunId?: string | undefined;
+      sourceThreadId?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;
     },
@@ -135,7 +136,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const memoryId = this.db.transaction(() => {
       const id = this.db.createMemory({
         text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
-        sourceRunId: options?.sourceRunId, provider: this.embeddingProvider.name, embedding,
+        sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
+        provider: this.embeddingProvider.name, embedding,
       });
       for (const c of contradictions) {
         if (c.resolution === 'superseded') {
@@ -221,6 +223,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryId, entities: resolvedEntities, relations: resolvedRelations,
       contradictions, stored: true, deduplicated: false,
     };
+  }
+
+  /**
+   * Purge all knowledge extracted from a specific thread.
+   * Deletes memories and orphaned entities (reference-counted).
+   */
+  purgeThread(threadId: string): number {
+    return this.db.purgeByThread(threadId);
   }
 
   // === Retrieve ===

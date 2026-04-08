@@ -66,6 +66,8 @@ export {
 	getChangesetLoading,
 	getRetryStatus,
 	getIsOffline,
+	getSkipExtraction,
+	toggleSkipExtraction,
 } from './stores/chat.svelte.js';
 
 export type {

@@ -204,7 +204,7 @@ describe('Agent', () => {
       });
       const result = await agent.send('Question');
       expect(result).toBe('The answer is 42');
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0);
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined);
     });
 
     it('max_tokens with continuationPrompt: continues the loop', async () => {
