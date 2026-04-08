@@ -64,8 +64,8 @@ export class Agent implements IAgent {
   private readonly isCustomProxy: boolean;
   private readonly systemPrompt: string | undefined;
   private readonly mcpServers: MCPServer[] | undefined;
-  private readonly thinking: ThinkingMode;
-  private readonly effort: EffortLevel | undefined;
+  private thinking: ThinkingMode;
+  private effort: EffortLevel | undefined;
   private readonly maxTokens: number;
   private readonly workerPool: IWorkerPool | null;
   private readonly maxIterations: number;
@@ -102,6 +102,12 @@ export class Agent implements IAgent {
   private _settledMemory = new WeakSet<Promise<void>>();
   private static readonly MAX_PENDING_MEMORY = 10;
   skipMemoryExtraction = false;
+
+  /** Override effort for the next run without recreating the agent. */
+  setEffort(level: EffortLevel | undefined): void { this.effort = level; }
+
+  /** Override thinking mode for the next run without recreating the agent. */
+  setThinking(mode: ThinkingMode): void { this.thinking = mode; }
 
   constructor(config: AgentConfig) {
     this.name = config.name;

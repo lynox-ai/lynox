@@ -241,7 +241,13 @@ export interface FileAttachment {
 	data: string; // base64
 }
 
-export async function sendMessage(task: string, displayText?: string | FileAttachment[], files?: FileAttachment[]): Promise<void> {
+/** Per-run overrides passed to the engine API. */
+export interface RunOptions {
+	effort?: 'low' | 'medium' | 'high' | 'max';
+	thinking?: 'disabled';
+}
+
+export async function sendMessage(task: string, displayText?: string | FileAttachment[], files?: FileAttachment[], runOptions?: RunOptions): Promise<void> {
 	// Overload: sendMessage(task, files?) — backwards compatible
 	if (Array.isArray(displayText)) {
 		files = displayText;
@@ -267,7 +273,7 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		return;
 	}
 
-	await _executeRun(task, files, displayText);
+	await _executeRun(task, files, displayText, runOptions);
 }
 
 /** Map HTTP status + error detail to a user-friendly i18n message. */
@@ -295,7 +301,7 @@ function mapApiError(status: number, detail: string): string {
 	return t('chat.error_start');
 }
 
-async function _executeRun(task: string, files?: FileAttachment[], displayText?: string): Promise<void> {
+async function _executeRun(task: string, files?: FileAttachment[], displayText?: string, runOptions?: RunOptions): Promise<void> {
 	chatError = null;
 	retryStatus = null;
 
@@ -331,6 +337,8 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	if (files && files.length > 0) {
 		payload['files'] = files;
 	}
+	if (runOptions?.effort) payload['effort'] = runOptions.effort;
+	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
 
 	let res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
 		method: 'POST',

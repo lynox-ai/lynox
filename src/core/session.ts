@@ -48,6 +48,12 @@ import type { DataStore } from './data-store.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 
+/** Per-run overrides — applied via agent setters, never mutate session state. */
+export interface RunOptions {
+  effort?: EffortLevel | undefined;
+  thinking?: ThinkingMode | undefined;
+}
+
 export interface SessionOptions {
   sessionId?: string | undefined;
   model?: ModelTier | undefined;
@@ -114,7 +120,7 @@ export class Session {
     this.sessionId = opts?.sessionId ?? randomUUID();
     // Copy config from engine — session mutates its own copy, not the shared config
     this._model = opts?.model ?? engine.config.model ?? 'sonnet';
-    this._effort = opts?.effort ?? engine.config.effort ?? 'high';
+    this._effort = opts?.effort ?? engine.config.effort ?? 'medium';
     this._thinking = opts?.thinking ?? engine.config.thinking;
     this._maxTokens = engine.config.maxTokens;
     this._systemPrompt = engine.config.systemPrompt;
@@ -215,7 +221,7 @@ export class Session {
 
   // ── Core execution ──
 
-  async run(task: string | unknown[]): Promise<string> {
+  async run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
     if (!this.agent) throw new Error('Session not initialized — agent missing');
 
     // Extract text for subsystems that need string (input guard, KG retrieval, run history).
@@ -284,12 +290,19 @@ export class Session {
     }
 
     // Auto-downgrade to haiku for simple tasks (cost optimization)
+    const savedModel = this._model;
     if (!isMultimodal && this._model !== 'haiku' && !this._thinking) {
-      const isSimple = this._isSimpleTask(taskText);
-      if (isSimple) {
+      if (this._isSimpleTask(taskText)) {
         this._model = 'haiku';
         this._recreateAgent();
       }
+    }
+
+    // Apply per-run overrides via agent setters (never mutate session state)
+    const hasRunOverrides = runOptions?.effort !== undefined || runOptions?.thinking !== undefined;
+    if (hasRunOverrides && this.agent) {
+      if (runOptions?.effort !== undefined) this.agent.setEffort(runOptions.effort);
+      if (runOptions?.thinking !== undefined) this.agent.setThinking(runOptions.thinking);
     }
 
     const model = getModelId(this._model, getActiveProvider(), isBedrockEuOnly());
@@ -507,6 +520,16 @@ export class Session {
       this.currentRunId = null;
       if (this.agent) {
         this.agent.currentRunId = undefined;
+        // Restore per-run overrides to session defaults
+        if (hasRunOverrides) {
+          this.agent.setEffort(this._effort);
+          this.agent.setThinking(this._thinking ?? { type: 'adaptive' });
+        }
+      }
+      // Restore model if auto-downgraded to haiku for this run
+      if (this._model !== savedModel) {
+        this._model = savedModel;
+        this._recreateAgent();
       }
     }
   }
@@ -525,7 +548,7 @@ export class Session {
     const lower = task.toLowerCase();
     const len = task.length;
 
-    // Complex tasks → always keep current model
+    // Anything long or with technical keywords → keep current model
     const complexPatterns = [
       /\b(implement|build|create|design|refactor|fix|debug|deploy|migrate)\b/i,
       /\b(schreib|entwickl|bau|erstell|analysier|optimier)\b/i,

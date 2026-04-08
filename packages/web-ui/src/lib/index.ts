@@ -79,6 +79,7 @@ export type {
 	FileAttachment,
 	ContextBudget,
 	ChangesetFileInfo,
+	RunOptions,
 } from './stores/chat.svelte.js';
 
 // Thread store

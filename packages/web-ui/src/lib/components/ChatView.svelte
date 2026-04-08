@@ -51,8 +51,9 @@
 	] as const;
 
 	// Agent context prefixes — tell the agent exactly what to do per step
+	// Step 1: URL is collected in the UI, injected as {url} — no ask_user round-trip needed
 	const ONBOARDING_CONTEXT = [
-		`[ONBOARDING 1/3] The user wants you to analyze their website. Ask for the URL using ask_user (one single question: "What is your website URL?"), then immediately use web_research and http_request to scan it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Save ALL findings with memory_store. Present a structured summary. Be fast and direct — no other clarifying questions. Respond in {locale}.`,
+		`[ONBOARDING 1/3] The user's website is: {url} — scan it now. Use web_research and http_request to analyze it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Save ALL findings with memory_store. Present a structured summary. Be fast and direct — no clarifying questions. Respond in {locale}.`,
 		`[ONBOARDING 2/3] You already analyzed the user's website earlier in this conversation. Now use ask_user to ask 3-5 targeted questions about what the website doesn't reveal. Use the ask_user tool with the "questions" parameter to present all questions at once (each as a separate question with free-text input). Topics: revenue model & pricing, team size & capacity, biggest current challenge, 12-month growth goal, key metrics tracked. Save their answers to memory_store when they respond. Respond in {locale}.`,
 		`[ONBOARDING 3/3] You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Create an artifact (markdown comparison table) with: name, positioning, target audience, key differentiators, pricing (if public). Save competitive insights with memory_store. End with 2-3 concrete next steps the user could take. Respond in {locale}.`,
 	];
@@ -61,6 +62,8 @@
 	let onboardingDismissed = $state(false);
 	let pendingOnboardingAdvance = $state(false);
 	let onboardingJustCompleted = $state(false);
+	let showUrlInput = $state(false); // Step 1: collect URL in UI before LLM call
+	let onboardingUrl = $state('');
 
 	function loadOnboardingState() {
 		if (typeof localStorage === 'undefined') return;
@@ -88,13 +91,29 @@
 
 	function handleChipClick(idx: number) {
 		if (idx !== onboardingStep) return;
+		// Step 1: show URL input instead of sending immediately
+		if (idx === 0) { showUrlInput = true; return; }
+		sendOnboardingStep(idx);
+	}
+
+	function sendOnboardingStep(idx: number, url?: string) {
 		const chip = ONBOARDING_CHIPS[idx];
 		if (!chip) return;
 		const locale = getLocale() === 'de' ? 'German' : 'English';
-		const context = ONBOARDING_CONTEXT[idx]?.replace('{locale}', locale) ?? '';
+		let context = ONBOARDING_CONTEXT[idx]?.replace('{locale}', locale) ?? '';
+		if (url) context = context.replace('{url}', url);
 		const prompt = t(`onboard.${chip.key}` as 'onboard.chip_1');
 		pendingOnboardingAdvance = true;
-		sendMessage(context ? `${context}\n\n${prompt}` : prompt, prompt);
+		// Onboarding instructions are explicit — use low effort, no thinking
+		sendMessage(context ? `${context}\n\n${prompt}` : prompt, prompt, undefined, { effort: 'low', thinking: 'disabled' });
+	}
+
+	function submitOnboardingUrl() {
+		const url = onboardingUrl.trim();
+		if (!url) return;
+		showUrlInput = false;
+		onboardingUrl = '';
+		sendOnboardingStep(0, url);
 	}
 
 	const showOnboarding = $derived(
@@ -952,23 +971,53 @@
 												</div>
 											</div>
 										{:else if idx === onboardingStep}
-											<!-- Current: clickable -->
-											<button
-												onclick={() => handleChipClick(idx)}
-												class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
-											>
-												<div class="flex items-center gap-3">
-													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 1}</span>
-													<div class="flex-1 min-w-0">
-														<div class="flex items-center gap-2">
-															<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
-															<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 1}/3</span>
+											<!-- Current step -->
+											{#if idx === 0 && showUrlInput}
+												<!-- Step 1: inline URL input (skips LLM ask_user round-trip) -->
+												<div class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 p-4 space-y-3">
+													<div class="flex items-center gap-3">
+														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">1</span>
+														<div class="flex-1 min-w-0">
+															<span class="text-sm font-medium text-text">{t('onboard.chip_1')}</span>
+															<span class="ml-2 text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} 1/3</span>
 														</div>
-														<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
 													</div>
-													<svg class="shrink-0 text-accent-text" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+													<div class="flex gap-2">
+														<input
+															type="url"
+															bind:value={onboardingUrl}
+															placeholder={t('onboard.url_placeholder')}
+															onkeydown={(e) => e.key === 'Enter' && submitOnboardingUrl()}
+															class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[16px] md:text-sm outline-none focus:border-accent/60"
+														/>
+														<button
+															onclick={submitOnboardingUrl}
+															disabled={!onboardingUrl.trim()}
+															class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+														>
+															{t('onboard.url_go')}
+														</button>
+													</div>
 												</div>
-											</button>
+											{:else}
+												<!-- Clickable chip -->
+												<button
+													onclick={() => handleChipClick(idx)}
+													class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
+												>
+													<div class="flex items-center gap-3">
+														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 1}</span>
+														<div class="flex-1 min-w-0">
+															<div class="flex items-center gap-2">
+																<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
+																<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 1}/3</span>
+															</div>
+															<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
+														</div>
+														<svg class="shrink-0 text-accent-text" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+													</div>
+												</button>
+											{/if}
 										{:else}
 											<!-- Future: faded -->
 											<div class="w-full rounded-[var(--radius-md)] border border-border/50 bg-bg-subtle opacity-40 p-4">

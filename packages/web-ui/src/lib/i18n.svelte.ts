@@ -374,6 +374,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.whats_next_knowledge': { de: 'Wissen ansehen', en: 'Explore Knowledge' },
 	'onboard.whats_next_knowledge_desc': { de: 'Was lynox über dich gelernt hat', en: 'What lynox learned about you' },
 	'onboard.whats_next_chat': { de: 'Einfach loschatten', en: 'Just start chatting' },
+	'onboard.url_placeholder': { de: 'https://deine-website.de', en: 'https://your-website.com' },
+	'onboard.url_go': { de: 'Analysieren', en: 'Analyze' },
 	'setup.title_byok': { de: 'Dein API Key', en: 'Your API Key' },
 	'setup.subtitle_byok': { de: 'Gib deinen Anthropic API Key ein, um loszulegen.', en: 'Enter your Anthropic API key to get started.' },
 

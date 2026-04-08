@@ -799,6 +799,18 @@ export class LynoxHTTPApi {
       const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
 
+      // Optional per-run overrides (e.g. onboarding uses low effort)
+      const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'max']);
+      const runEffort = typeof b?.['effort'] === 'string' && VALID_EFFORTS.has(b['effort'])
+        ? b['effort'] as import('../types/index.js').EffortLevel
+        : undefined;
+      const runThinking = b?.['thinking'] === 'disabled'
+        ? { type: 'disabled' as const }
+        : undefined;
+      const runOptions = runEffort || runThinking
+        ? { ...(runEffort ? { effort: runEffort } : {}), ...(runThinking ? { thinking: runThinking } : {}) }
+        : undefined;
+
       // Build multimodal content if files are attached
       const files = Array.isArray(b?.['files']) ? b['files'] as { name: string; type: string; data: string }[] : [];
       let task: string | unknown[];
@@ -911,7 +923,7 @@ export class LynoxHTTPApi {
       // Run
       this.runningSessions.add(sessionId);
       try {
-        const result = await session.run(task);
+        const result = await session.run(task, runOptions);
         if (!aborted) {
           // Notify client if changeset has pending file changes for review
           const csm = session.getChangesetManager();

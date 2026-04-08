@@ -59,6 +59,10 @@ vi.mock('./agent.js', () => ({
     this.memory = null;
     // @ts-expect-error mock constructor
     this.tools = [];
+    // @ts-expect-error mock constructor
+    this.setEffort = vi.fn();
+    // @ts-expect-error mock constructor
+    this.setThinking = vi.fn();
   }),
 }));
 
