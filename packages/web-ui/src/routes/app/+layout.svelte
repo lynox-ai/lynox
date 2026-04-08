@@ -6,6 +6,10 @@
 	let { children }: { children: Snippet } = $props();
 </script>
 
+<svelte:head>
+	<title>lynox</title>
+</svelte:head>
+
 <AppShell>
 	{@render children()}
 </AppShell>

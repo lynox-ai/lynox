@@ -491,7 +491,7 @@ export class LynoxHTTPApi {
     if (method === 'OPTIONS') {
       res.writeHead(204, {
         ...(corsOrigin ? { 'Access-Control-Allow-Origin': corsOrigin } : {}),
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Max-Age': '86400',
       });
@@ -618,16 +618,18 @@ export class LynoxHTTPApi {
       }
     }
 
-    // Route dispatch
+    // Route dispatch — also try GET handler for HEAD requests (RFC 9110 §9.3.2)
     const routeKey = `${method} ${pathname}`;
-    const staticHandler = this.staticRoutes.get(routeKey);
+    const staticHandler = this.staticRoutes.get(routeKey)
+      ?? (method === 'HEAD' ? this.staticRoutes.get(`GET ${pathname}`) : undefined);
     if (staticHandler) {
       await staticHandler(req, res, {}, body);
       return;
     }
 
+    const dispatchMethod = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
     for (const route of this.dynamicRoutes) {
-      if (route.method !== method) continue;
+      if (!dispatchMethod.includes(route.method)) continue;
       const match = route.pattern.exec(pathname);
       if (match) {
         const params: Record<string, string> = {};

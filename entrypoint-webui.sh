@@ -99,9 +99,14 @@ for dir in "$HOME/.lynox" "$HOME/.cache/huggingface"; do
   fi
 done
 
-# SvelteKit CSRF: set ORIGIN so protocol matches (defaults to https otherwise)
+# SvelteKit CSRF: ORIGIN must match the browser's Origin header on form POSTs.
+# Behind a reverse proxy / tunnel, the browser sends the public URL as Origin,
+# but the server sees localhost — causing a CSRF mismatch (403).
 if [ -z "${ORIGIN:-}" ]; then
-  if [ -n "${LYNOX_TLS_CERT:-}" ]; then
+  if [ -n "${LYNOX_ALLOWED_ORIGINS:-}" ]; then
+    # Use the first allowed origin (comma-separated list) as the CSRF origin
+    export ORIGIN="${LYNOX_ALLOWED_ORIGINS%%,*}"
+  elif [ -n "${LYNOX_TLS_CERT:-}" ]; then
     export ORIGIN="https://localhost:${LYNOX_HTTP_PORT:-3000}"
   else
     export ORIGIN="http://localhost:${LYNOX_HTTP_PORT:-3000}"

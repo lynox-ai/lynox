@@ -52,11 +52,11 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 		'Content-Security-Policy',
 		[
 			"default-src 'self'",
-			"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com",
+			"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com https://static.cloudflareinsights.com",
 			"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com",
 			"img-src 'self' data: blob:",
 			"font-src 'self' https://fonts.gstatic.com",
-			"connect-src 'self'",
+			"connect-src 'self' https://cloudflareinsights.com",
 			"frame-src blob: data:",
 			"frame-ancestors 'self'",
 			"base-uri 'self'",

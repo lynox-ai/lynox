@@ -204,7 +204,21 @@ describe('LynoxHTTPApi', () => {
       const res = await fetch(`${baseUrl}/api/secrets`, { method: 'OPTIONS' });
       expect(res.status).toBe(204);
       // With LYNOX_HTTP_SECRET set and no LYNOX_ALLOWED_ORIGINS, CORS is restricted (no wildcard)
-      expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      expect(res.headers.get('access-control-allow-methods')).toBe('GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
+    });
+  });
+
+  describe('HEAD', () => {
+    it('HEAD falls back to GET handler', async () => {
+      const res = await fetch(`${baseUrl}/api/config`, {
+        method: 'HEAD',
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('application/json');
+      // HEAD response must have no body
+      const body = await res.text();
+      expect(body).toBe('');
     });
   });
 
