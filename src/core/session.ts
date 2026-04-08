@@ -881,8 +881,11 @@ export class Session {
 
 /** Generate a short thread title from the first user message. */
 function generateThreadTitle(taskText: string): string {
+  // Strip system context prefixes (e.g. onboarding prompts)
+  let title = taskText.replace(/^\[ONBOARDING \d+\/\d+\][\s\S]*?\n\n/i, '');
+
   // Strip markdown, trim, and take first meaningful line
-  let title = taskText
+  title = title
     .replace(/^#+\s*/gm, '')
     .replace(/\[.*?\]\(.*?\)/g, '')
     .replace(/[*_`~]/g, '')

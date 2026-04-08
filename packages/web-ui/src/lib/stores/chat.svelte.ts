@@ -241,7 +241,13 @@ export interface FileAttachment {
 	data: string; // base64
 }
 
-export async function sendMessage(task: string, files?: FileAttachment[]): Promise<void> {
+export async function sendMessage(task: string, displayText?: string | FileAttachment[], files?: FileAttachment[]): Promise<void> {
+	// Overload: sendMessage(task, files?) — backwards compatible
+	if (Array.isArray(displayText)) {
+		files = displayText;
+		displayText = undefined;
+	}
+
 	// Block if changeset review is pending — user must review before next run
 	if (pendingChangeset) {
 		addToast(t('changeset.review_pending'), 'info', 4000);
@@ -254,13 +260,14 @@ export async function sendMessage(task: string, files?: FileAttachment[]): Promi
 
 	// Queue if a run is in progress
 	if (isStreaming) {
+		const display = displayText ?? task;
 		const fileNames = files?.map((f) => f.name).join(', ');
-		messages.push({ role: 'user', content: fileNames ? `${task}\n📎 ${fileNames}` : task, queued: true });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true });
 		messageQueue.push({ task, files });
 		return;
 	}
 
-	await _executeRun(task, files);
+	await _executeRun(task, files, displayText);
 }
 
 /** Map HTTP status + error detail to a user-friendly i18n message. */
@@ -288,7 +295,7 @@ function mapApiError(status: number, detail: string): string {
 	return t('chat.error_start');
 }
 
-async function _executeRun(task: string, files?: FileAttachment[]): Promise<void> {
+async function _executeRun(task: string, files?: FileAttachment[], displayText?: string): Promise<void> {
 	chatError = null;
 	retryStatus = null;
 
@@ -303,14 +310,15 @@ async function _executeRun(task: string, files?: FileAttachment[]): Promise<void
 
 	// Find and un-queue if this message was already added as queued
 	let userMsgIdx: number;
-	const queuedIdx = messages.findIndex((m) => m.role === 'user' && m.queued && m.content.startsWith(task.slice(0, 50)));
+	const display = displayText ?? task;
+	const queuedIdx = messages.findIndex((m) => m.role === 'user' && m.queued && m.content.startsWith(display.slice(0, 50)));
 	if (queuedIdx !== -1) {
 		messages[queuedIdx]!.queued = false;
 		messages[queuedIdx]!.failed = false;
 		userMsgIdx = queuedIdx;
 	} else {
 		const fileNames = files?.map((f) => f.name).join(', ');
-		messages.push({ role: 'user', content: fileNames ? `${task}\n📎 ${fileNames}` : task });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display });
 		userMsgIdx = messages.length - 1;
 	}
 
@@ -541,7 +549,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				msg.blocks.push({ type: 'tool_call', index: tcIndex });
 			}
 			msg._toolSinceText = true;
-			setContext({ type: 'tool', toolName, toolInput, title: toolName });
+			if (toolName !== 'ask_user' && toolName !== 'ask_secret') {
+				setContext({ type: 'tool', toolName, toolInput, title: toolName });
+			}
 			break;
 		}
 		case 'tool_result': {

@@ -43,15 +43,24 @@
 	// Welcome screen state
 	let displayName = $state('');
 
-	// Onboarding chips (sequential steps)
+	// Onboarding chips (sequential steps — all 3 in one thread)
 	const ONBOARDING_CHIPS = [
 		{ key: 'chip_1', descKey: 'chip_1_desc' },
 		{ key: 'chip_2', descKey: 'chip_2_desc' },
 		{ key: 'chip_3', descKey: 'chip_3_desc' },
 	] as const;
 
+	// Agent context prefixes — tell the agent exactly what to do per step
+	const ONBOARDING_CONTEXT = [
+		`[ONBOARDING 1/3] The user wants you to analyze their website. Ask for the URL first, then immediately use web_research and http_request to scan it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Save ALL findings with memory_store. Present a structured summary. Be fast and direct — no clarifying questions beyond the URL. Respond in {locale}.`,
+		`[ONBOARDING 2/3] You already analyzed the user's website earlier in this conversation. Now ask 3-5 targeted questions about what the website doesn't reveal: revenue model, team size, current challenges, growth goals, key metrics they track. Ask all questions in ONE message as a numbered list — do NOT use the ask_user tool. Save their answers to memory when they respond. Respond in {locale}.`,
+		`[ONBOARDING 3/3] You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Create an artifact (markdown comparison table) with: name, positioning, target audience, key differentiators, pricing (if public). Save competitive insights with memory_store. End with 2-3 concrete next steps the user could take. Respond in {locale}.`,
+	];
+
 	let onboardingStep = $state(0); // 0-based: which step is current
 	let onboardingDismissed = $state(false);
+	let pendingOnboardingAdvance = $state(false);
+	let onboardingJustCompleted = $state(false);
 
 	function loadOnboardingState() {
 		if (typeof localStorage === 'undefined') return;
@@ -64,6 +73,7 @@
 		const next = onboardingStep + 1;
 		if (next >= ONBOARDING_CHIPS.length) {
 			onboardingDismissed = true;
+			onboardingJustCompleted = true;
 			localStorage.setItem('lynox-onboarding-step', 'done');
 		} else {
 			onboardingStep = next;
@@ -77,17 +87,21 @@
 	}
 
 	function handleChipClick(idx: number) {
-		if (idx !== onboardingStep) return; // only current step is clickable
+		if (idx !== onboardingStep) return;
 		const chip = ONBOARDING_CHIPS[idx];
 		if (!chip) return;
+		const locale = getLocale() === 'de' ? 'German' : 'English';
+		const context = ONBOARDING_CONTEXT[idx]?.replace('{locale}', locale) ?? '';
 		const prompt = t(`onboard.${chip.key}` as 'onboard.chip_1');
-		advanceOnboarding();
-		sendMessage(prompt);
+		pendingOnboardingAdvance = true;
+		sendMessage(context ? `${context}\n\n${prompt}` : prompt, prompt);
 	}
 
 	const showOnboarding = $derived(
 		!onboardingDismissed && onboardingStep < ONBOARDING_CHIPS.length
 	);
+
+	// showInlineChip is computed in the template (depends on messages/isStreaming declared later)
 
 	// Vault key checkpoint — blocking modal after onboarding or first chat
 	let securityLoadTriggered = false;
@@ -142,10 +156,19 @@
 		addToast(t('onboard.vault_confirmed'), 'success');
 	}
 
+	// Defer vault checkpoint until onboarding is complete or skipped
 	$effect(() => {
-		if (messages.length > 0 && !securityLoadTriggered) {
+		if (messages.length > 0 && !securityLoadTriggered && (onboardingDismissed || !showOnboarding)) {
 			securityLoadTriggered = true;
 			void loadSecurityState();
+		}
+	});
+
+	// Advance onboarding step when streaming ends (not on click)
+	$effect(() => {
+		if (pendingOnboardingAdvance && !isStreaming && messages.length > 0) {
+			pendingOnboardingAdvance = false;
+			advanceOnboarding();
 		}
 	});
 
@@ -899,53 +922,54 @@
 								</div>
 							{/if}
 
-							<!-- Onboarding chips (sequential) -->
+							<!-- Onboarding: all steps with done/current/future states -->
 							{#if showOnboarding}
 								<div class="mt-6 space-y-2.5">
 									<p class="text-center text-sm text-text-muted mb-4">{t('onboard.ready_hint')}</p>
 									{#each ONBOARDING_CHIPS as chip, idx}
-										{@const isDone = idx < onboardingStep}
-										{@const isCurrent = idx === onboardingStep}
-										{@const isFuture = idx > onboardingStep}
-										<button
-											onclick={() => handleChipClick(idx)}
-											disabled={!isCurrent}
-											class="w-full rounded-[var(--radius-md)] border p-4 text-left transition-all {
-												isDone ? 'border-accent/30 bg-accent/5 opacity-60' :
-												isCurrent ? 'border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 cursor-pointer' :
-												'border-border/50 bg-bg-subtle opacity-40'
-											}"
-										>
-											<div class="flex items-center gap-3">
-												<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm {
-													isDone ? 'bg-accent/20 text-accent-text' :
-													isCurrent ? 'bg-accent/20 text-accent-text' :
-													'bg-bg-muted text-text-subtle'
-												}">
-													{#if isDone}
+										{#if idx < onboardingStep}
+											<!-- Done -->
+											<div class="w-full rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 opacity-60 p-4">
+												<div class="flex items-center gap-3">
+													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">
 														<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-													{:else}
-														{idx + 1}
-													{/if}
-												</span>
-												<div class="flex-1 min-w-0">
-													<div class="flex items-center gap-2">
-														<span class="text-sm font-medium {isDone ? 'text-text-muted line-through' : isCurrent ? 'text-text' : 'text-text-subtle'}">
-															{t(`onboard.${chip.key}` as 'onboard.chip_1')}
-														</span>
-														{#if isDone}
-															<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step_done')}</span>
-														{:else if isCurrent}
-															<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 1}/{ONBOARDING_CHIPS.length}</span>
-														{/if}
+													</span>
+													<div class="flex-1 min-w-0">
+														<span class="text-sm font-medium text-text-muted line-through">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
+														<span class="ml-2 text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step_done')}</span>
 													</div>
-													<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
 												</div>
-												{#if isCurrent}
-													<svg class="shrink-0 text-accent-text" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
-												{/if}
 											</div>
-										</button>
+										{:else if idx === onboardingStep}
+											<!-- Current: clickable -->
+											<button
+												onclick={() => handleChipClick(idx)}
+												class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
+											>
+												<div class="flex items-center gap-3">
+													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 1}</span>
+													<div class="flex-1 min-w-0">
+														<div class="flex items-center gap-2">
+															<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
+															<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 1}/3</span>
+														</div>
+														<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
+													</div>
+													<svg class="shrink-0 text-accent-text" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+												</div>
+											</button>
+										{:else}
+											<!-- Future: faded -->
+											<div class="w-full rounded-[var(--radius-md)] border border-border/50 bg-bg-subtle opacity-40 p-4">
+												<div class="flex items-center gap-3">
+													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-bg-muted text-text-subtle">{idx + 1}</span>
+													<div class="flex-1 min-w-0">
+														<span class="text-sm font-medium text-text-subtle">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
+														<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
+													</div>
+												</div>
+											</div>
+										{/if}
 									{/each}
 									<button onclick={skipOnboarding} class="w-full text-center text-xs text-text-subtle hover:text-text-muted transition-colors mt-3 py-1">
 										{t('onboard.skip_onboarding')}
@@ -1109,6 +1133,61 @@
 						{/each}
 					</div>
 				{/if}
+			{/if}
+
+			<!-- Inline onboarding chip for steps 2+3 (same thread) -->
+			{#if showOnboarding && onboardingStep > 0 && messages.length > 0 && !isStreaming}
+				{@const chip = ONBOARDING_CHIPS[onboardingStep]}
+				{#if chip}
+					<div class="mt-4 mb-2">
+						<button
+							onclick={() => handleChipClick(onboardingStep)}
+							class="w-full max-w-lg rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
+						>
+							<div class="flex items-center gap-3">
+								<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{onboardingStep + 1}</span>
+								<div class="flex-1 min-w-0">
+									<div class="flex items-center gap-2">
+										<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
+										<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {onboardingStep + 1}/3</span>
+									</div>
+									<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
+								</div>
+								<svg class="shrink-0 text-accent-text" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+							</div>
+						</button>
+						<button onclick={skipOnboarding} class="text-center text-xs text-text-subtle hover:text-text-muted transition-colors mt-2 py-1">
+							{t('onboard.skip_onboarding')}
+						</button>
+					</div>
+				{/if}
+			{/if}
+
+			<!-- Post-onboarding "What's Next" -->
+			{#if onboardingJustCompleted && !isStreaming && messages.length > 0}
+				<div class="mt-4 mb-2 w-full max-w-lg rounded-[var(--radius-md)] border border-accent/20 bg-accent/5 p-5">
+					<h3 class="text-sm font-semibold text-text mb-1">{t('onboard.whats_next_title')}</h3>
+					<p class="text-xs text-text-muted mb-3">{t('onboard.whats_next_subtitle')}</p>
+					<div class="space-y-2">
+						<a href="/app/settings" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
+							<span class="text-sm">💬</span>
+							<div>
+								<span class="text-sm font-medium text-text">{t('onboard.whats_next_telegram')}</span>
+								<p class="text-xs text-text-muted">{t('onboard.whats_next_telegram_desc')}</p>
+							</div>
+						</a>
+						<a href="/app/knowledge" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
+							<span class="text-sm">🧠</span>
+							<div>
+								<span class="text-sm font-medium text-text">{t('onboard.whats_next_knowledge')}</span>
+								<p class="text-xs text-text-muted">{t('onboard.whats_next_knowledge_desc')}</p>
+							</div>
+						</a>
+						<button onclick={() => { onboardingJustCompleted = false; }} class="w-full text-center text-xs text-text-subtle hover:text-text-muted transition-colors mt-2 py-1">
+							{t('onboard.whats_next_chat')}
+						</button>
+					</div>
+				</div>
 			{/if}
 
 			{#if isOffline}
