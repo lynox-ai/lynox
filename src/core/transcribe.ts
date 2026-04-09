@@ -40,16 +40,14 @@ function wavDurationSec(wavPath: string): number {
   } catch { return 999; } // fallback to base model
 }
 
-/** Pick model based on audio duration — tiny for short, base for long. */
-function pickModel(wavPath: string): string {
-  if (!WHISPER_MODEL_TINY) return WHISPER_MODEL_BASE!;
-  const duration = wavDurationSec(wavPath);
-  return duration <= SHORT_AUDIO_THRESHOLD ? WHISPER_MODEL_TINY : WHISPER_MODEL_BASE!;
+/** Pick model — tiny for voice chat (fast enough on shared CPUs), base as fallback. */
+function pickModel(_wavPath: string): string {
+  return WHISPER_MODEL_TINY ?? WHISPER_MODEL_BASE!;
 }
 
 function runCommand(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    nodeExecFile(cmd, args, { timeout: 60_000 }, (err, stdout, stderr) => {
+    nodeExecFile(cmd, args, { timeout: 120_000 }, (err, stdout, stderr) => {
       if (err) reject(err);
       else resolve({ stdout, stderr });
     });
@@ -127,7 +125,7 @@ export async function transcribeAudioStream(
       // spawn with explicit arg array — no shell, no injection risk
       const proc = spawn(WHISPER_CLI!, [
         '-m', model, '-f', wavPath, '--language', safeLang,
-      ], { timeout: 60_000, shell: false });
+      ], { timeout: 120_000, shell: false });
 
       let stderr = '';
       proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
