@@ -746,13 +746,18 @@ export class LynoxHTTPApi {
     const lastRunTime = new Date(lastRun.created_at).getTime();
     const fiveMinAgo = now - 5 * 60_000;
 
-    if (lastRunTime > fiveMinAgo && lastRun.status === 'completed') {
-      return { indicator: 'none', description: 'All Systems Operational', provider: providerLabel };
+    if (lastRun.status === 'completed') {
+      // Recent success = green, older success = neutral "OK" (not unknown)
+      return lastRunTime > fiveMinAgo
+        ? { indicator: 'none', description: 'All Systems Operational', provider: providerLabel }
+        : { indicator: 'none', description: 'API OK', provider: providerLabel };
     }
-    if (lastRunTime > fiveMinAgo && lastRun.status === 'failed') {
-      return { indicator: 'major', description: 'Last run failed', provider: providerLabel };
+    if (lastRun.status === 'failed') {
+      return lastRunTime > fiveMinAgo
+        ? { indicator: 'major', description: 'Last run failed', provider: providerLabel }
+        : { indicator: 'minor', description: 'Last run failed (not recent)', provider: providerLabel };
     }
-    return { indicator: 'unknown', description: 'No recent activity', provider: providerLabel };
+    return { indicator: 'none', description: 'Ready', provider: providerLabel };
   }
 
   // ── Route registration ───────────────────────────────────────────────────

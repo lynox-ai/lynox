@@ -533,7 +533,15 @@ export class Engine {
       try {
         const { SearXNGProvider, createWebSearchTool } = await import('../integrations/search/index.js');
         const searxng = new SearXNGProvider(searxngUrl);
-        const healthy = await searxng.healthCheck();
+        let healthy = await searxng.healthCheck();
+        if (!healthy) {
+          // SearXNG may still be starting (Docker Compose race) — retry with backoff
+          for (const delay of [3000, 5000, 10000]) {
+            await new Promise(r => setTimeout(r, delay));
+            healthy = await searxng.healthCheck();
+            if (healthy) break;
+          }
+        }
         if (healthy) {
           this.registry.register(createWebSearchTool(searxng));
         } else {
