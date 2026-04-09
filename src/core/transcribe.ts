@@ -40,9 +40,11 @@ function wavDurationSec(wavPath: string): number {
   } catch { return 999; } // fallback to base model
 }
 
-/** Pick model — tiny for voice chat (fast enough on shared CPUs), base as fallback. */
-function pickModel(_wavPath: string): string {
-  return WHISPER_MODEL_TINY ?? WHISPER_MODEL_BASE!;
+/** Pick model — tiny for short clips (≤10s), base for longer (better accuracy). */
+function pickModel(wavPath: string): string {
+  if (!WHISPER_MODEL_TINY) return WHISPER_MODEL_BASE!;
+  const duration = wavDurationSec(wavPath);
+  return duration <= SHORT_AUDIO_THRESHOLD ? WHISPER_MODEL_TINY : WHISPER_MODEL_BASE!;
 }
 
 function runCommand(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
