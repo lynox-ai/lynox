@@ -110,3 +110,15 @@ export type { Artifact, ArtifactMeta, ArtifactType } from './stores/artifacts.sv
 // Context Panel
 export { setContext, clearContext, getContext, closePanel } from './stores/context-panel.svelte.js';
 export type { ContextType, ContextInfo } from './stores/context-panel.svelte.js';
+
+// Push Notifications
+export {
+  initNotifications,
+  enablePushNotifications,
+  disablePushNotifications,
+  testPushNotification,
+  getNotificationPermission,
+  isSubscribed,
+  isLoading,
+  isSupported,
+} from './stores/notifications.svelte.js';

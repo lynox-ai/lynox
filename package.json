@@ -76,6 +76,7 @@
     "better-sqlite3": "^12.6.2",
     "linkedom": "^0.18.12",
     "telegraf": "^4.16.3",
+    "web-push": "^3.6.7",
     "zod": "^4.3.6"
   },
   "pnpm": {
@@ -105,6 +106,7 @@
     "@evilmartians/lefthook": "^2.1.4",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.3.5",
+    "@types/web-push": "^3.6.4",
     "@typescript-eslint/eslint-plugin": "^8.57.2",
     "@typescript-eslint/parser": "^8.57.2",
     "@vitest/coverage-v8": "^4.1.1",

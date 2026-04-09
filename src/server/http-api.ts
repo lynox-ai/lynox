@@ -163,6 +163,7 @@ export class LynoxHTTPApi {
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
   private healthCache: { data: Record<string, unknown>; expiresAt: number } | null = null;
+  private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
 
   /** Whether the Web UI handler is loaded (determines default port and bind behavior). */
   hasWebUi(): boolean { return this.webUiHandler !== null; }
@@ -226,8 +227,24 @@ export class LynoxHTTPApi {
     await this.engine.init();
     this.engine.startWorkerLoop();
     this._registerRoutes();
+    this._initPushChannel();
     await this._tryLoadWebUiHandler();
     await this._tryStartTelegram(config);
+  }
+
+  private _initPushChannel(): void {
+    try {
+      // Dynamic import to avoid hard dependency — web-push is optional
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { WebPushNotificationChannel } = require('../integrations/push/web-push-channel.js') as typeof import('../integrations/push/web-push-channel.js');
+      const { getLynoxDir } = require('../core/config.js') as typeof import('../core/config.js');
+      const dataDir = getLynoxDir();
+      this.pushChannel = new WebPushNotificationChannel(dataDir);
+      this.engine!.getNotificationRouter().register(this.pushChannel);
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[http-api] push notifications unavailable: ${detail}\n`);
+    }
   }
 
   // ── Web UI handler (optional) ─────────────────────────────────────────
@@ -1775,6 +1792,82 @@ export class LynoxHTTPApi {
     this.staticRoutes.set('DELETE /api/telegram/setup', async (_req, res) => {
       tgSetup = null;
       jsonResponse(res, 200, { ok: true });
+    });
+
+    // ── Push Notifications ──
+
+    this.staticRoutes.set('GET /api/push/vapid-key', async (_req, res) => {
+      if (!this.pushChannel) {
+        errorResponse(res, 503, 'Push notifications not available');
+        return;
+      }
+      jsonResponse(res, 200, { publicKey: this.pushChannel.getPublicKey() });
+    });
+
+    this.staticRoutes.set('POST /api/push/subscribe', async (_req, res, _params, body) => {
+      if (!this.pushChannel) {
+        errorResponse(res, 503, 'Push notifications not available');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const sub = b?.['subscription'] as Record<string, unknown> | undefined;
+      const endpoint = typeof sub?.['endpoint'] === 'string' ? sub['endpoint'] : '';
+      const keys = sub?.['keys'] as Record<string, unknown> | undefined;
+      const p256dh = typeof keys?.['p256dh'] === 'string' ? keys['p256dh'] : '';
+      const auth = typeof keys?.['auth'] === 'string' ? keys['auth'] : '';
+
+      if (!endpoint || !p256dh || !auth) {
+        errorResponse(res, 400, 'Missing subscription fields: endpoint, keys.p256dh, keys.auth');
+        return;
+      }
+
+      // Basic endpoint validation — must be HTTPS URL
+      try {
+        const url = new URL(endpoint);
+        if (url.protocol !== 'https:') {
+          errorResponse(res, 400, 'Subscription endpoint must use HTTPS');
+          return;
+        }
+      } catch {
+        errorResponse(res, 400, 'Invalid subscription endpoint URL');
+        return;
+      }
+
+      this.pushChannel.subscribe(endpoint, p256dh, auth);
+      jsonResponse(res, 201, { ok: true });
+    });
+
+    this.staticRoutes.set('POST /api/push/unsubscribe', async (_req, res, _params, body) => {
+      if (!this.pushChannel) {
+        errorResponse(res, 503, 'Push notifications not available');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const endpoint = typeof b?.['endpoint'] === 'string' ? b['endpoint'] : '';
+      if (!endpoint) {
+        errorResponse(res, 400, 'Missing endpoint');
+        return;
+      }
+      this.pushChannel.unsubscribe(endpoint);
+      jsonResponse(res, 200, { ok: true });
+    });
+
+    this.staticRoutes.set('POST /api/push/test', async (_req, res) => {
+      if (!this.pushChannel) {
+        errorResponse(res, 503, 'Push notifications not available');
+        return;
+      }
+      const count = this.pushChannel.subscriptionCount();
+      if (count === 0) {
+        errorResponse(res, 404, 'No push subscriptions registered');
+        return;
+      }
+      await this.pushChannel.send({
+        title: 'lynox',
+        body: 'Push notifications are working.',
+        priority: 'normal',
+      });
+      jsonResponse(res, 200, { ok: true, subscriptions: count });
     });
 
     // ── Google Auth ──
