@@ -115,11 +115,15 @@ export async function transcribeAudioStream(
       '-i', inputPath, '-ar', '16000', '-ac', '1', '-f', 'wav', '-y', wavPath,
     ]);
 
+    const model = pickModel(wavPath);
+    const duration = wavDurationSec(wavPath);
+    const modelName = model.includes('tiny') ? 'tiny' : 'base';
+    process.stderr.write(`[whisper] ${modelName} model, ${duration.toFixed(1)}s audio\n`);
     onSegment(''); // signal: ffmpeg done, whisper starting
 
+    const t0 = Date.now();
     const fullText = await new Promise<string>((resolve, reject) => {
       const segments: string[] = [];
-      const model = pickModel(wavPath);
       // spawn with explicit arg array — no shell, no injection risk
       const proc = spawn(WHISPER_CLI!, [
         '-m', model, '-f', wavPath, '--language', safeLang,
@@ -144,6 +148,7 @@ export async function transcribeAudioStream(
       });
 
       proc.on('close', (code) => {
+        process.stderr.write(`[whisper] done in ${Date.now() - t0}ms (${segments.length} segments)\n`);
         if (code !== 0) reject(new Error(`whisper exited ${code}: ${stderr}`));
         else resolve(segments.join(' '));
       });
