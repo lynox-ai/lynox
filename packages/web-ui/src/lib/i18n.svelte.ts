@@ -630,6 +630,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_wrong_client_type': { de: 'Falscher Client-Typ. Prüfe die Einrichtungsanleitung für den richtigen Anwendungstyp.', en: 'Wrong client type. Check the setup guide for the correct application type.' },
 	'integrations.google_invalid_credentials': { de: 'Ungültige Client-ID. Bitte prüfe, ob die Client-ID korrekt aus der Google Cloud Console kopiert wurde.', en: 'Invalid Client ID. Please verify you copied the Client ID correctly from the Google Cloud Console.' },
 	'integrations.change_credentials': { de: 'Credentials ändern', en: 'Change credentials' },
+	'integrations.access_level': { de: 'Zugriffsebene', en: 'Access level' },
+	'integrations.scope_readonly': { de: 'Nur lesen', en: 'Read only' },
+	'integrations.scope_full': { de: 'Voller Zugriff', en: 'Full access' },
+	'integrations.scope_full_desc': { de: 'Mails senden, Termine erstellen, Sheets bearbeiten, Dateien hochladen.', en: 'Send emails, create events, edit sheets, upload files.' },
+	'integrations.reconnect_google': { de: 'Erneut verbinden', en: 'Reconnect' },
+	'integrations.scope_change_hint': { de: 'Erneute Google-Autorisierung nötig, um die Berechtigungen zu ändern.', en: 'Re-authorization with Google required to change permissions.' },
 
 	// Push Notifications
 	'integrations.push_notifications': { de: 'Push-Benachrichtigungen', en: 'Push Notifications' },

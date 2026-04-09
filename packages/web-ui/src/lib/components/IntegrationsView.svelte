@@ -38,6 +38,18 @@
 	let googleClientSecret = $state('');
 	let googleCredSaving = $state(false);
 	let googleCredSaved = $state(false);
+	let scopeMode = $state<'readonly' | 'full'>('readonly');
+
+	// Detect current scope mode from granted scopes
+	const WRITE_SCOPE_PREFIX = ['.send', '.modify', '/spreadsheets', '/drive', '/calendar.events', '/documents'];
+	function detectScopeMode(scopes: string[]): 'readonly' | 'full' {
+		return scopes.some(s => WRITE_SCOPE_PREFIX.some(w => s.includes(w) && !s.includes('.readonly'))) ? 'full' : 'readonly';
+	}
+	const scopeMismatch = $derived(
+		googleStatus?.authenticated && googleStatus.scopes
+			? detectScopeMode(googleStatus.scopes) !== scopeMode
+			: false,
+	);
 
 	async function loadGoogleStatus() {
 		googleLoading = true;
@@ -45,6 +57,9 @@
 			const res = await fetch(`${getApiBase()}/google/status`);
 			if (!res.ok) throw new Error();
 			googleStatus = (await res.json()) as GoogleStatus;
+			if (googleStatus?.scopes?.length) {
+				scopeMode = detectScopeMode(googleStatus.scopes);
+			}
 		} catch {
 			googleStatus = null;
 		}
@@ -96,7 +111,7 @@
 			const res = await fetch(`${getApiBase()}/google/auth`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({}),
+				body: JSON.stringify({ scopeMode }),
 			});
 			if (res.ok) {
 				const data = (await res.json()) as { authUrl?: string; verificationUrl?: string; userCode?: string };
@@ -652,6 +667,33 @@
 		{:else if googleStatus.authenticated}
 			<!-- Connected -->
 			<div class="space-y-3">
+				<!-- Scope mode toggle -->
+				<div>
+					<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.access_level')}</p>
+					<div class="inline-flex rounded-[var(--radius-md)] border border-border overflow-hidden">
+						<button
+							onclick={() => { scopeMode = 'readonly'; }}
+							class="px-3 py-1.5 text-xs transition-colors {scopeMode === 'readonly' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+						>{t('integrations.scope_readonly')}</button>
+						<button
+							onclick={() => { scopeMode = 'full'; }}
+							class="px-3 py-1.5 text-xs transition-colors {scopeMode === 'full' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+						>{t('integrations.scope_full')}</button>
+					</div>
+					{#if scopeMode === 'full'}
+						<p class="text-xs text-text-subtle mt-1">{t('integrations.scope_full_desc')}</p>
+					{/if}
+				</div>
+				{#if scopeMismatch}
+					<button
+						onclick={startGoogleAuth}
+						disabled={connecting}
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+					>
+						{connecting ? t('integrations.connecting') : t('integrations.reconnect_google')}
+					</button>
+					<p class="text-xs text-warning">{t('integrations.scope_change_hint')}</p>
+				{/if}
 				{#if googleStatus.scopes && googleStatus.scopes.length > 0}
 					<div>
 						<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-1">{t('integrations.permissions')}</p>
@@ -687,6 +729,22 @@
 		{:else}
 			<!-- Credentials set, not connected -->
 			<div class="space-y-2">
+				<div class="mb-1">
+					<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.access_level')}</p>
+					<div class="inline-flex rounded-[var(--radius-md)] border border-border overflow-hidden">
+						<button
+							onclick={() => { scopeMode = 'readonly'; }}
+							class="px-3 py-1.5 text-xs transition-colors {scopeMode === 'readonly' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+						>{t('integrations.scope_readonly')}</button>
+						<button
+							onclick={() => { scopeMode = 'full'; }}
+							class="px-3 py-1.5 text-xs transition-colors {scopeMode === 'full' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+						>{t('integrations.scope_full')}</button>
+					</div>
+					{#if scopeMode === 'full'}
+						<p class="text-xs text-text-subtle mt-1">{t('integrations.scope_full_desc')}</p>
+					{/if}
+				</div>
 				<button
 					onclick={startGoogleAuth}
 					disabled={connecting}

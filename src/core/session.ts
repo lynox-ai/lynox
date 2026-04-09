@@ -29,6 +29,7 @@ import { isWorkspaceActive } from './workspace.js';
 import { checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,
+  GOOGLE_PROMPT_SUFFIX,
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
   CRM_PROMPT_SUFFIX,
@@ -102,6 +103,7 @@ export class Session {
   private _skipMemoryExtractionOverride: boolean | null = null;
 
   // Per-session config (copied from engine.config at creation, mutated independently)
+  private _registryVersion = 0;
   private _model: ModelTier;
   private _effort: EffortLevel;
   private _thinking: ThinkingMode | undefined;
@@ -223,6 +225,11 @@ export class Session {
 
   async run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
     if (!this.agent) throw new Error('Session not initialized — agent missing');
+
+    // Hot-reload tools when registry changed (e.g. Google connected mid-session)
+    if (this.engine.getRegistry().version !== this._registryVersion) {
+      this._recreateAgent();
+    }
 
     // Extract text for subsystems that need string (input guard, KG retrieval, run history).
     // Multimodal content (e.g. Telegram vision) is an array of content blocks.
@@ -746,6 +753,7 @@ export class Session {
     const engine = this.engine;
     const userConfig = engine.getUserConfig();
     const registry = engine.getRegistry();
+    this._registryVersion = registry.version;
     const pluginManager = engine.getPluginManager();
     const toolContext = engine.getToolContext();
 
@@ -791,6 +799,10 @@ export class Session {
     };
 
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
+    // Append Google Workspace docs only when Google tools are registered
+    if (engine.getGoogleAuth()) {
+      basePrompt += GOOGLE_PROMPT_SUFFIX;
+    }
     // Append pipeline docs only when pipeline tools are registered
     if (engine.getPipelinesEnabled()) {
       basePrompt += PIPELINE_PROMPT_SUFFIX;

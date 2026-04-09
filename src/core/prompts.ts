@@ -95,6 +95,11 @@ Do NOT create contacts for:
 - Task completed → consider advancing deal stage`;
 
 
+/** Appended when Google Workspace tools are registered */
+export const GOOGLE_PROMPT_SUFFIX = `
+
+**Google Workspace**: \`google_gmail\` (search/read/send/reply), \`google_sheets\` (read/write/append), \`google_drive\` (search/read/upload), \`google_calendar\` (list/create/update), \`google_docs\` (read/create/append). Send/modify require confirmation.`;
+
 /** Appended when experience === 'developer' — unlocks technical output style */
 export const DEVELOPER_PROMPT_SUFFIX = `
 
@@ -175,8 +180,6 @@ Never over-deliver on a simple question. A "danke" does not need a 3-paragraph r
 **Tasks**: \`task_create\` (scope, priority, due_date, assignee). \`assignee: "lynox"\` = background. \`schedule: "<cron>"\` = recurring. \`watch_url\` = monitor. \`pipeline_id\` = run workflow.
 
 **External**: \`http_request\` (SSRF-protected, \`secret:KEY_NAME\` for auth). \`api_setup\` to create API profiles. **Never ask for credentials in chat** — use \`ask_secret\` to securely collect them. \`web_research\` for public info — **ALWAYS use \`web_research\` for web searches, NEVER use \`bash\` with curl/wget**.
-
-**Google Workspace**: \`google_gmail\` (search/read/send/reply), \`google_sheets\` (read/write/append), \`google_drive\` (search/read/upload), \`google_calendar\` (list/create/update), \`google_docs\` (read/create/append). Send/modify require confirmation.
 
 **Secrets**: \`secret:KEY_NAME\` refs only. Never log, print, store, or embed secrets.
 

@@ -1912,15 +1912,21 @@ export class LynoxHTTPApi {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
 
+      // Scope mode: "full" includes write scopes, default is read-only
+      const b = body as Record<string, unknown> | null;
+      const { READ_ONLY_SCOPES, WRITE_SCOPES } = await import('../integrations/google/google-auth.js');
+      const scopes = b?.['scopeMode'] === 'full'
+        ? [...READ_ONLY_SCOPES, ...WRITE_SCOPES]
+        : [...READ_ONLY_SCOPES];
+
       // Web-hosted instances: use redirect flow (ORIGIN env is set on managed instances)
       const origin = process.env['ORIGIN'];
-      const b = body as Record<string, unknown> | null;
       const preferRedirect = b?.['mode'] === 'redirect' || !!origin;
 
       if (preferRedirect && origin) {
         try {
           const redirectUri = `${origin}/api/google/callback`;
-          const { authUrl, state } = google.startRedirectAuth(redirectUri);
+          const { authUrl, state } = google.startRedirectAuth(redirectUri, scopes);
           // Store state for CSRF validation
           this._googleOAuthState = state;
           this._googleRedirectUri = redirectUri;
@@ -1935,7 +1941,7 @@ export class LynoxHTTPApi {
 
       // Fallback: device flow (self-hosted / headless)
       try {
-        const flow = await google.startDeviceFlow();
+        const flow = await google.startDeviceFlow(scopes);
         jsonResponse(res, 200, {
           verificationUrl: flow.verificationUrl,
           userCode: flow.userCode,

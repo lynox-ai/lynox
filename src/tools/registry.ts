@@ -3,9 +3,14 @@ import type { ToolEntry, MCPServer, ToolScopeConfig } from '../types/index.js';
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolEntry>();
   private readonly servers: MCPServer[] = [];
+  private _version = 0;
+
+  /** Incremented on every tool change — sessions compare this to detect stale tools. */
+  get version(): number { return this._version; }
 
   register<T>(entry: ToolEntry<T>): this {
     this.tools.set(entry.definition.name, entry as ToolEntry);
+    this._version++;
     return this;
   }
 
