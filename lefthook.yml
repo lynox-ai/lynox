@@ -1,0 +1,22 @@
+pre-push:
+  commands:
+    gitleaks:
+      run: gitleaks protect --staged --verbose
+      skip:
+        - merge
+        - rebase
+    pattern-scan:
+      run: >-
+        git diff --cached --name-only -z |
+        xargs -0 grep -rlE
+        '(sk-ant-|AKIA[A-Z0-9]{16}|ghp_[a-zA-Z0-9]{36}|xoxb-|xapp-|-----BEGIN (RSA |EC )?PRIVATE KEY-----)'
+        -- || true
+      fail_text: "Potential secrets detected in staged files"
+    security-scan:
+      run: sh scripts/security-scan.sh
+
+pre-commit:
+  commands:
+    typecheck:
+      run: npm run typecheck
+      stage_fixed: true

@@ -1,0 +1,2981 @@
+/**
+ * Engine HTTP API Server
+ *
+ * Exposes the Engine singleton over REST + SSE for the PWA Gateway.
+ * Each process serves exactly one user (process-per-user model).
+ *
+ */
+
+import { createServer } from 'node:http';
+import { createServer as createTlsServer } from 'node:https';
+import type { IncomingMessage, ServerResponse, Server } from 'node:http';
+import { readFileSync, accessSync } from 'node:fs';
+import { statfs } from 'node:fs/promises';
+import { freemem, totalmem, loadavg } from 'node:os';
+import { resolve, dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
+import { Engine } from '../core/engine.js';
+import { loadConfig } from '../core/config.js';
+import { getActiveProvider } from '../core/llm-client.js';
+import { SessionStore } from '../core/session-store.js';
+import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
+import type { StreamEvent } from '../types/index.js';
+import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
+import { LynoxUserConfigSchema } from '../types/schemas.js';
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+// PendingPrompt/PendingSecretPrompt interfaces removed — replaced by PromptStore (SQLite-backed)
+
+type RouteHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  body: unknown,
+) => Promise<void>;
+
+interface DynamicRoute {
+  method: string;
+  pattern: RegExp;
+  paramNames: string[];
+  handler: RouteHandler;
+}
+
+interface ProviderStatus {
+  indicator: 'none' | 'minor' | 'major' | 'critical' | 'unknown';
+  description: string;
+  provider?: string;
+}
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
+const PKG_VERSION: string = (() => {
+  try {
+    const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../package.json'), 'utf-8');
+    return (JSON.parse(raw) as { version: string }).version;
+  } catch { return 'unknown'; }
+})();
+
+// Keys stripped from GET /api/config responses (secrets that must not leak)
+const REDACTED_CONFIG_KEYS = new Set([
+  'api_key', 'telegram_bot_token',
+  'search_api_key', 'google_client_id', 'google_client_secret',
+]);
+
+// Two-tier auth: when LYNOX_HTTP_ADMIN_SECRET is set, these routes require admin scope.
+// When only LYNOX_HTTP_SECRET is set (single-token mode), it grants admin implicitly.
+type AuthScope = 'admin' | 'user';
+
+function requiresAdmin(method: string, pathname: string): boolean {
+  if (method === 'PUT' && pathname === '/api/config') return true;
+  if (method === 'GET' && pathname === '/api/vault/key') return true;
+  if (method === 'POST' && pathname === '/api/vault/rotate') return true;
+  // All file operations require admin scope (read, download, delete)
+  if (pathname.startsWith('/api/files')) return true;
+  if (method === 'GET' && pathname === '/api/secrets') return true;
+  if (method === 'PUT' && pathname.startsWith('/api/secrets/')) return true;
+  if (method === 'DELETE' && pathname.startsWith('/api/secrets/')) return true;
+  if (method === 'GET' && pathname === '/api/auth/token') return true;
+  // GDPR endpoints require admin scope
+  if (method === 'GET' && pathname === '/api/export') return true;
+  if (method === 'DELETE' && pathname === '/api/data') return true;
+  // Migration endpoints require admin scope (except preview which is read-only)
+  if (pathname.startsWith('/api/migration') && pathname !== '/api/migration/preview') return true;
+  return false;
+}
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX = 120;
+const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
+const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
+const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
+const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
+const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
+const TLS_KEY = process.env['LYNOX_TLS_KEY'] ?? '';
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
+  const json = JSON.stringify(body);
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(json),
+  });
+  res.end(json);
+}
+
+function errorResponse(res: ServerResponse, status: number, message: string): void {
+  jsonResponse(res, status, { error: message });
+}
+
+/** Type-guard that sends 503 if the service is null/undefined. Caller must `return` after a false result. */
+function requireService<T>(res: ServerResponse, service: T | null | undefined, name: string): service is NonNullable<T> {
+  if (service === null || service === undefined) errorResponse(res, 503, `${name} not available`);
+  return service !== null && service !== undefined;
+}
+
+async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    req.on('data', (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        req.destroy();
+        reject(new Error('Body too large'));
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        const raw = Buffer.concat(chunks).toString('utf-8');
+        resolve(raw ? JSON.parse(raw) as unknown : null);
+      } catch {
+        reject(new Error('Invalid JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function parseDynamicRoute(method: string, path: string, handler: RouteHandler): DynamicRoute {
+  const paramNames: string[] = [];
+  const pattern = path.replace(/:([^/]+)/g, (_match, name: string) => {
+    paramNames.push(name);
+    return '([^/]+)';
+  });
+  return { method, pattern: new RegExp(`^${pattern}$`), paramNames, handler };
+}
+
+// ── Server Class ─────────────────────────────────────────────────────────────
+
+export class LynoxHTTPApi {
+  private engine: Engine | null = null;
+  private server: Server | null = null;
+  private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
+  private readonly sessionStore = new SessionStore();
+  // Pending prompts now stored in PromptStore (SQLite) — no in-memory Maps
+  private readonly runningSessions = new Set<string>();
+  private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
+  private readonly staticRoutes = new Map<string, RouteHandler>();
+  private readonly dynamicRoutes: DynamicRoute[] = [];
+  private rateGcTimer: ReturnType<typeof setInterval> | null = null;
+  private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
+  private healthCache: { data: Record<string, unknown>; expiresAt: number } | null = null;
+  private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
+  private _googleOAuthState: string | undefined;
+  private _googleRedirectUri: string | undefined;
+
+  /** Whether the Web UI handler is loaded (determines default port and bind behavior). */
+  hasWebUi(): boolean { return this.webUiHandler !== null; }
+
+  /** Collect system + process metrics for the health endpoint. Cached 10s. */
+  private async _collectHealthMetrics(): Promise<Record<string, unknown>> {
+    const now = Date.now();
+    if (this.healthCache && this.healthCache.expiresAt > now) return this.healthCache.data;
+
+    const mem = process.memoryUsage();
+    const cpu = process.cpuUsage();
+    const load = loadavg();
+
+    let diskTotalGb: number | undefined;
+    let diskUsedGb: number | undefined;
+    try {
+      const stats = await statfs('/');
+      const totalBytes = stats.blocks * stats.bsize;
+      const freeBytes = stats.bavail * stats.bsize;
+      diskTotalGb = Math.round((totalBytes / (1024 ** 3)) * 10) / 10;
+      diskUsedGb = Math.round(((totalBytes - freeBytes) / (1024 ** 3)) * 10) / 10;
+    } catch { /* disk metrics unavailable (e.g. read-only root without statfs) */ }
+
+    const threadStore = this.engine?.getThreadStore();
+    const threadCount = threadStore ? threadStore.listThreads({ limit: 200 }).length : 0;
+
+    const data: Record<string, unknown> = {
+      status: 'ok',
+      version: PKG_VERSION,
+      uptime_s: Math.floor(process.uptime()),
+      process: {
+        memory_used_mb: Math.round(mem.heapUsed / (1024 * 1024)),
+        memory_rss_mb: Math.round(mem.rss / (1024 * 1024)),
+        cpu_user_ms: Math.round(cpu.user / 1000),
+        cpu_system_ms: Math.round(cpu.system / 1000),
+      },
+      system: {
+        memory_total_mb: Math.round(totalmem() / (1024 * 1024)),
+        memory_free_mb: Math.round(freemem() / (1024 * 1024)),
+        load_avg_1m: Math.round(load[0]! * 100) / 100,
+        load_avg_5m: Math.round(load[1]! * 100) / 100,
+        ...(diskTotalGb !== undefined ? { disk_total_gb: diskTotalGb, disk_used_gb: diskUsedGb } : {}),
+      },
+      engine: {
+        active_sessions: this.runningSessions.size,
+        total_threads: threadCount,
+      },
+    };
+
+    this.healthCache = { data, expiresAt: now + 10_000 };
+    return data;
+  }
+
+  async init(): Promise<void> {
+    const config = loadConfig();
+    this.engine = new Engine({
+      model: config.default_tier,
+      language: config.language,
+      context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' },
+    });
+    await this.engine.init();
+    this.engine.startWorkerLoop();
+    this._registerRoutes();
+    await this._initPushChannel();
+    await this._tryLoadWebUiHandler();
+    await this._tryStartTelegram(config);
+  }
+
+  private async _initPushChannel(): Promise<void> {
+    try {
+      const { WebPushNotificationChannel } = await import('../integrations/push/web-push-channel.js');
+      const { getLynoxDir } = await import('../core/config.js');
+      const dataDir = getLynoxDir();
+      this.pushChannel = new WebPushNotificationChannel(dataDir);
+      this.engine!.getNotificationRouter().register(this.pushChannel);
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[http-api] push notifications unavailable: ${detail}\n`);
+    }
+  }
+
+  // ── Web UI handler (optional) ─────────────────────────────────────────
+
+  private async _tryLoadWebUiHandler(): Promise<void> {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const candidates: string[] = [];
+
+    // 1. Explicit path via env var (Docker / custom deploy)
+    if (process.env['LYNOX_WEBUI_HANDLER']) {
+      candidates.push(process.env['LYNOX_WEBUI_HANDLER']);
+    }
+    // 2. Docker layout: /app/dist/server/ → /app/web-ui/handler.js
+    candidates.push(join(thisDir, '../../web-ui/handler.js'));
+    // 3. Monorepo dev (after build): src/server/ → packages/web-ui/build/handler.js
+    candidates.push(join(thisDir, '../../packages/web-ui/build/handler.js'));
+
+    for (const candidate of candidates) {
+      try {
+        const abs = resolve(candidate);
+        accessSync(abs); // fast existence check before dynamic import
+        const mod = await import(pathToFileURL(abs).href) as { handler?: unknown };
+        if (typeof mod.handler === 'function') {
+          this.webUiHandler = mod.handler as (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+          process.stderr.write(`Web UI loaded from ${abs}\n`);
+          return;
+        }
+      } catch { /* try next */ }
+    }
+    // No handler found — engine-only mode (not an error)
+  }
+
+  // ── Session cookie verification (shared auth with Web UI) ─────────────
+
+  private _verifySessionCookie(req: IncomingMessage, secret: string): boolean {
+    const cookieHeader = req.headers['cookie'];
+    if (!cookieHeader) return false;
+
+    const match = /(?:^|;\s*)lynox_session=([^;]+)/.exec(cookieHeader);
+    if (!match?.[1]) return false;
+
+    const token = decodeURIComponent(match[1]);
+    const parts = token.split('.');
+    if (parts.length < 2 || parts.length > 3) return false;
+
+    const sig = parts[parts.length - 1]!;
+    const payload = parts.slice(0, -1).join('.');
+    // Timestamp: last element before sig (supports old ts.hmac and new nonce.ts.hmac)
+    const tsStr = parts.length === 3 ? parts[1]! : parts[0]!;
+
+    const timestamp = parseInt(tsStr, 10);
+    if (Number.isNaN(timestamp)) return false;
+    if (Math.floor(Date.now() / 1000) - timestamp > 7 * 24 * 60 * 60) return false;
+
+    try {
+      const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+      const expected = createHmac('sha256', key).update(payload).digest('hex');
+      const sigBuf = Buffer.from(sig, 'hex');
+      const expBuf = Buffer.from(expected, 'hex');
+      if (sigBuf.length !== expBuf.length) return false;
+      return timingSafeEqual(sigBuf, expBuf);
+    } catch {
+      return false;
+    }
+  }
+
+  private async _tryStartTelegram(config: ReturnType<typeof loadConfig>): Promise<void> {
+    const store = this.engine?.getSecretStore();
+    const token = store?.resolve('TELEGRAM_BOT_TOKEN')
+      ?? process.env['TELEGRAM_BOT_TOKEN']
+      ?? config.telegram_bot_token;
+    if (!token || !this.engine) return;
+
+    const allowedRaw = store?.resolve('TELEGRAM_ALLOWED_CHAT_IDS')
+      ?? process.env['TELEGRAM_ALLOWED_CHAT_IDS']
+      ?? '';
+    const allowedChatIds = allowedRaw
+      ? String(allowedRaw).split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
+      : config.telegram_allowed_chat_ids;
+
+    try {
+      const { startTelegramBot } = await import('../integrations/telegram/telegram-bot.js');
+      await startTelegramBot({ token, allowedChatIds, engine: this.engine });
+      process.stderr.write(`Telegram bot started (${allowedChatIds?.length ?? 0} allowed chat IDs)\n`);
+    } catch (err: unknown) {
+      process.stderr.write(`Telegram bot failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  }
+
+  async start(port: number): Promise<void> {
+    const secret = process.env['LYNOX_HTTP_SECRET'];
+
+    const trustProxy = process.env['LYNOX_TRUST_PROXY'] === 'true';
+
+    const handler = async (req: IncomingMessage, res: ServerResponse) => {
+      const start = Date.now();
+
+      // Security headers safe for all responses (API + Web UI)
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+      if (useTls) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+
+      // Method filtering
+      const method = req.method ?? 'GET';
+      if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'].includes(method)) {
+        errorResponse(res, 405, `Method ${method} not allowed`);
+        return;
+      }
+
+      // Resolve client IP (proxy-aware)
+      let clientIp = req.socket.remoteAddress ?? 'unknown';
+      if (trustProxy) {
+        const forwarded = req.headers['x-forwarded-for'];
+        if (typeof forwarded === 'string') {
+          clientIp = forwarded.split(',')[0]?.trim() ?? clientIp;
+        }
+      }
+      clientIp = clientIp.replace(/^::ffff:/, '');
+
+      // IP allowlist check
+      if (ALLOWED_IPS.length > 0) {
+        if (!ALLOWED_IPS.includes(clientIp)) {
+          errorResponse(res, 403, 'IP not allowed');
+          return;
+        }
+      }
+
+      try {
+        await this._handleRequest(req, res, secret, clientIp);
+      } catch (err: unknown) {
+        if (!res.headersSent) {
+          errorResponse(res, 500, 'Internal server error');
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`HTTP API error: ${msg}\n`);
+      }
+      const url = req.url ?? '/';
+      const status = res.statusCode;
+      const ms = Date.now() - start;
+      process.stderr.write(`${method} ${url} ${status} ${ms}ms\n`);
+    };
+
+    // TLS support: use HTTPS if cert + key provided
+    const useTls = TLS_CERT && TLS_KEY;
+    if (useTls) {
+      try {
+        const cert = readFileSync(TLS_CERT);
+        const key = readFileSync(TLS_KEY);
+        this.server = createTlsServer({ cert, key }, handler) as unknown as Server;
+      } catch (err: unknown) {
+        process.stderr.write(`TLS setup failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`Falling back to plain HTTP.\n`);
+        this.server = createServer(handler);
+      }
+    } else {
+      this.server = createServer(handler);
+    }
+
+    // When Web UI is embedded, always bind to 0.0.0.0 (Web UI has session-cookie auth).
+    // API-only mode: bind to 0.0.0.0 only with auth, else localhost only.
+    const host = this.webUiHandler ? '0.0.0.0' : (secret ? '0.0.0.0' : '127.0.0.1');
+    const protocol = useTls ? 'https' : 'http';
+
+    // Refuse to expose Bearer tokens in plaintext (API-only mode without TLS).
+    // When Web UI is embedded, auth uses session cookies — allow plain HTTP behind reverse proxy.
+    if (secret && !useTls && !this.webUiHandler && process.env['LYNOX_ALLOW_PLAIN_HTTP'] !== 'true') {
+      throw new Error(
+        'Refusing to bind HTTP API on 0.0.0.0 without TLS — Bearer tokens would be sent in plaintext.\n'
+        + 'Fix: set LYNOX_TLS_CERT + LYNOX_TLS_KEY, use a TLS reverse proxy, '
+        + 'or set LYNOX_ALLOW_PLAIN_HTTP=true to override.',
+      );
+    }
+
+    this.server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        process.stderr.write(`✗ Port ${port} is already in use.\n`);
+        process.stderr.write(`  Try: LYNOX_HTTP_PORT=${port + 1} lynox\n`);
+        process.exit(1);
+      }
+      throw err;
+    });
+
+    this.server.listen(port, host, () => {
+      const authStatus = secret ? '(auth enabled)' : '(localhost only)';
+      process.stderr.write(`LYNOX HTTP API listening on ${protocol}://${host}:${port} ${authStatus}\n`);
+      if (ALLOWED_IPS.length > 0) {
+        process.stderr.write(`  IP allowlist: ${ALLOWED_IPS.join(', ')}\n`);
+      }
+      if (secret && !useTls) {
+        process.stderr.write(`⚠ Warning: HTTP API exposed without TLS (LYNOX_ALLOW_PLAIN_HTTP=true). Use a reverse proxy.\n`);
+      }
+    });
+
+    // Rate limit GC
+    this.rateGcTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [ip, entry] of this.rateCounts) {
+        if (entry.resetAt < now) this.rateCounts.delete(ip);
+      }
+    }, 5 * 60_000);
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.rateGcTimer) clearInterval(this.rateGcTimer);
+    // Expire all pending prompts in SQLite on shutdown
+    this.engine?.getPromptStore()?.expireAll();
+    this.server?.close();
+    await this.engine?.shutdown();
+  }
+
+  // ── Request handling ─────────────────────────────────────────────────────
+
+  private async _handleRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    secret: string | undefined,
+    clientIp: string = 'unknown',
+  ): Promise<void> {
+    const method = req.method ?? 'GET';
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    // Accept both /api/v1/... and /api/... (normalize v1 prefix away for route matching)
+    const pathname = url.pathname.startsWith('/api/v1/')
+      ? '/api/' + url.pathname.slice('/api/v1/'.length)
+      : url.pathname;
+
+    // Health check (unauthenticated — used by container probes, Web UI status bar, and managed hosting monitor).
+    // Returns system + process metrics (no user data, no thread content, no secrets — counters only).
+    if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
+      const health = await this._collectHealthMetrics();
+      jsonResponse(res, 200, health);
+      return;
+    }
+
+    // ── Non-API routes → Web UI handler (if available) ──────────────────
+    // SvelteKit handles its own auth (session cookies), body parsing, and CSP.
+    if (!pathname.startsWith('/api/') && this.webUiHandler) {
+      await this.webUiHandler(req, res);
+      return;
+    }
+
+    // ── API routes: security headers, auth, rate limiting, dispatch ──────
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+
+    // Provider status — cached Anthropic statuspage check (unauthenticated, public data)
+    if (method === 'GET' && (pathname === '/api/provider/status')) {
+      const status = await this.getProviderStatus();
+      jsonResponse(res, 200, status);
+      return;
+    }
+
+    // Google OAuth callback — unauthenticated (browser redirect from Google).
+    // Session cookie is unavailable here because sameSite:strict blocks cross-site
+    // navigations. CSRF protection is via the `state` parameter instead.
+    if (method === 'GET' && pathname === '/api/google/callback') {
+      const handler = this.staticRoutes.get('GET /api/google/callback');
+      if (handler) { await handler(req, res, {}, null); return; }
+    }
+
+    // CORS — restrict to allowed origins (or allow all for localhost-only mode)
+    const requestOrigin = req.headers['origin'] ?? '';
+    // Localhost origins accepted in no-auth mode; with auth require explicit LYNOX_ALLOWED_ORIGINS
+    const isLocalhostOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(requestOrigin);
+    const corsOrigin = ALLOWED_ORIGINS.length > 0
+      ? (ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
+      : (secret ? '' : (isLocalhostOrigin ? requestOrigin : ''));
+
+    if (method === 'OPTIONS') {
+      res.writeHead(204, {
+        ...(corsOrigin ? { 'Access-Control-Allow-Origin': corsOrigin } : {}),
+        'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Max-Age': '86400',
+      });
+      res.end();
+      return;
+    }
+
+    if (corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
+
+    // Auth — Bearer token, session cookie, or migration token (same-origin Web UI).
+    // Two-tier: LYNOX_HTTP_SECRET = user scope, LYNOX_HTTP_ADMIN_SECRET = admin scope.
+    // When only LYNOX_HTTP_SECRET is set, it implicitly grants admin (backwards compat).
+    // Migration endpoints accept X-Migration-Token as alternative auth (admin scope).
+    let authScope: AuthScope = 'admin'; // default for no-secret (localhost) mode
+    if (secret) {
+      // Migration token auth — grants admin scope for /api/migration/* endpoints only
+      const migrationToken = req.headers['x-migration-token'];
+      const isMigrationEndpoint = pathname.startsWith('/api/migration/') && pathname !== '/api/migration/preview';
+      if (isMigrationEndpoint && typeof migrationToken === 'string' && migrationToken.length === 64) {
+        const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+        if (storedToken) {
+          const { verifyMigrationToken } = await import('../core/migration-crypto.js');
+          if (verifyMigrationToken(migrationToken, storedToken)) {
+            authScope = 'admin';
+          } else {
+            errorResponse(res, 403, 'Invalid migration token');
+            return;
+          }
+        } else {
+          errorResponse(res, 403, 'No migration token configured');
+          return;
+        }
+      } else {
+
+      const auth = req.headers['authorization'] ?? '';
+      const bearerToken = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+      const adminSecret = process.env['LYNOX_HTTP_ADMIN_SECRET'];
+
+      if (bearerToken) {
+        // Bearer token auth (external clients, MCP, Telegram)
+        const tokenBuf = Buffer.from(bearerToken);
+        const secretBuf = Buffer.from(secret);
+
+        if (adminSecret) {
+          const adminBuf = Buffer.from(adminSecret);
+          const isAdmin = adminBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, adminBuf);
+          const isUser = secretBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, secretBuf);
+          if (isAdmin) {
+            authScope = 'admin';
+          } else if (isUser) {
+            authScope = 'user';
+          } else {
+            errorResponse(res, 401, 'Unauthorized');
+            return;
+          }
+        } else {
+          // Single-token mode — LYNOX_HTTP_SECRET grants admin
+          const secretBufCmp = Buffer.from(secret);
+          if (tokenBuf.length !== secretBufCmp.length || !timingSafeEqual(tokenBuf, secretBufCmp)) {
+            errorResponse(res, 401, 'Unauthorized');
+            return;
+          }
+          authScope = 'admin';
+        }
+      } else if (this._verifySessionCookie(req, secret)) {
+        // Session cookie auth (same-origin Web UI requests)
+        authScope = adminSecret ? 'user' : 'admin';
+      } else {
+        errorResponse(res, 401, 'Unauthorized');
+        return;
+      }
+      } // end migration-token else
+    }
+
+    // Admin scope check for destructive endpoints
+    if (requiresAdmin(method, pathname) && authScope !== 'admin') {
+      errorResponse(res, 403, 'Admin scope required');
+      return;
+    }
+
+    // Content-Length check (guard against NaN/negative from malformed headers)
+    const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
+    if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > MAX_BODY_BYTES) {
+      errorResponse(res, 413, 'Request body too large');
+      return;
+    }
+
+    // Rate limiting (always applied — uses socket IP for loopback detection to prevent spoofing)
+    {
+      const socketIp = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
+      const isLoopback = socketIp === '127.0.0.1' || socketIp === '::1';
+      const limit = isLoopback ? RATE_MAX_LOOPBACK : RATE_MAX;
+      const ip = clientIp;
+      const now = Date.now();
+      let rateEntry = this.rateCounts.get(ip);
+      if (!rateEntry || rateEntry.resetAt < now) {
+        rateEntry = { count: 0, resetAt: now + RATE_WINDOW_MS };
+        this.rateCounts.set(ip, rateEntry);
+      }
+      rateEntry.count++;
+      if (rateEntry.count > limit) {
+        const retryAfter = Math.ceil((rateEntry.resetAt - now) / 1000);
+        res.setHeader('Retry-After', String(retryAfter));
+        errorResponse(res, 429, 'Too many requests');
+        return;
+      }
+    }
+
+    // Parse body for POST/PUT/PATCH
+    let body: unknown = null;
+    if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+      const ct = (req.headers['content-type'] ?? '').split(';')[0]!.trim();
+      if (ct && ct !== 'application/json') {
+        errorResponse(res, 415, 'Content-Type must be application/json');
+        return;
+      }
+      try {
+        body = await parseBody(req, MAX_BODY_BYTES);
+      } catch {
+        errorResponse(res, 400, 'Invalid request body');
+        return;
+      }
+    }
+
+    // Route dispatch — also try GET handler for HEAD requests (RFC 9110 §9.3.2)
+    const routeKey = `${method} ${pathname}`;
+    const staticHandler = this.staticRoutes.get(routeKey)
+      ?? (method === 'HEAD' ? this.staticRoutes.get(`GET ${pathname}`) : undefined);
+    if (staticHandler) {
+      await staticHandler(req, res, {}, body);
+      return;
+    }
+
+    const dispatchMethod = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
+    for (const route of this.dynamicRoutes) {
+      if (!dispatchMethod.includes(route.method)) continue;
+      const match = route.pattern.exec(pathname);
+      if (match) {
+        const params: Record<string, string> = {};
+        for (let i = 0; i < route.paramNames.length; i++) {
+          const name = route.paramNames[i];
+          const value = match[i + 1];
+          if (name !== undefined && value !== undefined) {
+            params[name] = value;
+          }
+        }
+        await route.handler(req, res, params, body);
+        return;
+      }
+    }
+
+    errorResponse(res, 404, 'Not found');
+  }
+
+  // ── Provider status (cached) ──────────────────────────────────────────────
+
+  private async getProviderStatus(): Promise<ProviderStatus> {
+    const now = Date.now();
+    if (this.providerStatusCache && now < this.providerStatusCache.expiresAt) {
+      return this.providerStatusCache.data;
+    }
+
+    const provider = getActiveProvider();
+
+    // Custom providers have no public status page — rely solely on run history
+    if (provider === 'custom') {
+      const data = this.getRunBasedStatus(now, 'Custom');
+      this.providerStatusCache = { data, expiresAt: now + 60_000 };
+      return data;
+    }
+
+    // Bedrock uses AWS health dashboard
+    const statusUrl = provider === 'bedrock'
+      ? 'https://health.aws.amazon.com/health/status'
+      : 'https://status.anthropic.com/api/v2/status.json';
+    const providerLabel = provider === 'bedrock' ? 'AWS Bedrock' : 'Anthropic';
+
+    // AWS health dashboard doesn't offer a simple JSON API like Anthropic's statuspage,
+    // so for bedrock we fall back to run-history-based status
+    if (provider === 'bedrock') {
+      const data = this.getRunBasedStatus(now, providerLabel);
+      this.providerStatusCache = { data, expiresAt: now + 60_000 };
+      return data;
+    }
+
+    const fallback: ProviderStatus = { indicator: 'unknown', description: 'Status unavailable', provider: providerLabel };
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(statusUrl, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        this.providerStatusCache = { data: fallback, expiresAt: now + 30_000 };
+        return fallback;
+      }
+
+      const body = (await res.json()) as { status?: { indicator?: string; description?: string } };
+      const indicator = body.status?.indicator;
+      let resolvedIndicator: 'none' | 'minor' | 'major' | 'critical' | 'unknown' =
+        indicator === 'none' || indicator === 'minor' || indicator === 'major' || indicator === 'critical'
+          ? indicator : 'unknown';
+      let description = body.status?.description ?? 'Unknown';
+
+      // If the status page reports major/critical but our own recent runs succeeded,
+      // downgrade to minor — the API is reachable from this engine despite the outage.
+      if (resolvedIndicator === 'major' || resolvedIndicator === 'critical') {
+        const history = this.engine?.getRunHistory();
+        if (history) {
+          const recent = history.getRecentRuns(1);
+          const lastRun = recent[0];
+          if (lastRun) {
+            const lastRunTime = new Date(lastRun.created_at).getTime();
+            const fiveMinAgo = now - 5 * 60_000;
+            if (lastRunTime > fiveMinAgo && lastRun.status === 'completed') {
+              resolvedIndicator = 'minor';
+              description = `${description} (API responding locally)`;
+            }
+          }
+        }
+      }
+
+      const data: ProviderStatus = { indicator: resolvedIndicator, description, provider: providerLabel };
+      this.providerStatusCache = { data, expiresAt: now + 60_000 };
+      return data;
+    } catch {
+      this.providerStatusCache = { data: fallback, expiresAt: now + 30_000 };
+      return fallback;
+    }
+  }
+
+  /** Derive provider status from recent run history (for providers without a public status page). */
+  private getRunBasedStatus(now: number, providerLabel: string): ProviderStatus {
+    const history = this.engine?.getRunHistory();
+    if (!history) return { indicator: 'unknown', description: 'No run history', provider: providerLabel };
+
+    const recent = history.getRecentRuns(1);
+    const lastRun = recent[0];
+    if (!lastRun) {
+      // No runs yet — if the engine has an API key, assume operational (fresh instance)
+      // Use dynamic check — import at module level would cause circular dependency
+      const hasKey = !!(process.env['ANTHROPIC_API_KEY'] ?? process.env['AWS_ACCESS_KEY_ID'] ?? process.env['LYNOX_MANAGED_MODE']);
+      return hasKey
+        ? { indicator: 'none', description: 'Ready', provider: providerLabel }
+        : { indicator: 'unknown', description: 'No API key configured', provider: providerLabel };
+    }
+
+    const lastRunTime = new Date(lastRun.created_at).getTime();
+    const fiveMinAgo = now - 5 * 60_000;
+
+    if (lastRun.status === 'completed') {
+      // Recent success = green, older success = neutral "OK" (not unknown)
+      return lastRunTime > fiveMinAgo
+        ? { indicator: 'none', description: 'All Systems Operational', provider: providerLabel }
+        : { indicator: 'none', description: 'API OK', provider: providerLabel };
+    }
+    if (lastRun.status === 'failed') {
+      return lastRunTime > fiveMinAgo
+        ? { indicator: 'major', description: 'Last run failed', provider: providerLabel }
+        : { indicator: 'minor', description: 'Last run failed (not recent)', provider: providerLabel };
+    }
+    return { indicator: 'none', description: 'Ready', provider: providerLabel };
+  }
+
+  // ── Route registration ───────────────────────────────────────────────────
+
+  private _registerRoutes(): void {
+    const engine = this.engine!;
+
+    // ── Sessions ──
+    this.staticRoutes.set('POST /api/sessions', async (_req, res, _params, body) => {
+      const opts = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+      const threadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
+      const sessionId = threadId ?? randomUUID();
+      const session = this.sessionStore.getOrCreate(sessionId, engine, {
+        model: typeof opts['model'] === 'string' ? opts['model'] as 'opus' | 'sonnet' | 'haiku' : undefined,
+        effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
+        systemPromptSuffix: WEB_UI_SYSTEM_PROMPT_SUFFIX,
+      });
+      const tier = session.getModelTier();
+      const threadStore = engine.getThreadStore();
+      const thread = threadStore?.getThread(sessionId);
+      jsonResponse(res, 201, {
+        sessionId,
+        model: tier,
+        contextWindow: CONTEXT_WINDOW[MODEL_MAP[tier]] ?? 200_000,
+        threadId: sessionId,
+        resumed: !!threadId && !!thread,
+      });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/sessions/:id', async (_req, res, params) => {
+      const session = this.sessionStore.get(params['id']!);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      session.abort();
+      this.sessionStore.reset(params['id']!);
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    // ── Runs (SSE) ──
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/run', async (req, res, params, body) => {
+      const sessionId = params['id']!;
+      const session = this.sessionStore.get(sessionId);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+
+      // Guard: reject concurrent runs on the same session
+      if (this.runningSessions.has(sessionId)) {
+        errorResponse(res, 409, 'A run is already in progress for this session');
+        return;
+      }
+
+      const b = body as Record<string, unknown> | null;
+      const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
+      if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
+
+      // Optional per-run overrides (e.g. onboarding uses low effort)
+      const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'max']);
+      const runEffort = typeof b?.['effort'] === 'string' && VALID_EFFORTS.has(b['effort'])
+        ? b['effort'] as import('../types/index.js').EffortLevel
+        : undefined;
+      const runThinking = b?.['thinking'] === 'disabled'
+        ? { type: 'disabled' as const }
+        : undefined;
+      const runOptions = runEffort || runThinking
+        ? { ...(runEffort ? { effort: runEffort } : {}), ...(runThinking ? { thinking: runThinking } : {}) }
+        : undefined;
+
+      // Build multimodal content if files are attached
+      const files = Array.isArray(b?.['files']) ? b['files'] as { name: string; type: string; data: string }[] : [];
+      let task: string | unknown[];
+      if (files.length > 0) {
+        const content: unknown[] = [];
+        const MAX_FILE_B64_LEN = 10 * 1024 * 1024; // ~7.5 MB decoded
+        for (const file of files) {
+          if (typeof file.data !== 'string' || file.data.length > MAX_FILE_B64_LEN) {
+            errorResponse(res, 413, `File too large: ${typeof file.name === 'string' ? file.name : 'unknown'}`); return;
+          }
+          if (file.type.startsWith('image/')) {
+            content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
+          } else {
+            // Non-image files: decode and include as text
+            const text = Buffer.from(file.data, 'base64').toString('utf-8');
+            content.push({ type: 'text', text: `[File: ${file.name}]\n${text}` });
+          }
+        }
+        content.push({ type: 'text', text: taskText });
+        task = content;
+      } else {
+        task = taskText;
+      }
+
+      // SSE headers
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      let aborted = false;
+
+      // Wire streaming
+      session.onStream = async (event: StreamEvent) => {
+        if (aborted) return;
+        const data = JSON.stringify(event);
+        res.write(`event: ${event.type}\ndata: ${data}\n\n`);
+      };
+
+      // Sync streamHandler to toolContext so plan-tracker events reach the SSE stream
+      const agent = session.getAgent();
+      if (agent?.toolContext) {
+        agent.toolContext.streamHandler = session.onStream;
+      }
+
+      // ── Prompt wiring (SQLite-backed, survives SSE disconnects) ──
+      const promptStore = this.engine?.getPromptStore();
+      // AbortController for the session — used to cancel prompt polling on disconnect
+      const sessionAbortController = new AbortController();
+      let hasActivePendingPrompt = false;
+
+      // Wire promptUser — writes prompt to SQLite, polls for answer
+      session.promptUser = async (question: string, options?: string[]): Promise<string> => {
+        if (!promptStore) return 'n'; // fallback if store unavailable
+        const promptId = promptStore.insertAskUser(sessionId, question, options);
+        hasActivePendingPrompt = true;
+        // Best-effort SSE notification (client may not be connected)
+        if (!aborted && !res.writableEnded) {
+          const data = JSON.stringify({ promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS });
+          res.write(`event: prompt\ndata: ${data}\n\n`);
+        }
+        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        hasActivePendingPrompt = false;
+        return row?.answer ?? 'n';
+      };
+
+      // Wire promptSecret — secret value never enters SSE, only the prompt metadata
+      session.promptSecret = async (name: string, prompt: string, keyType?: string): Promise<boolean> => {
+        if (!promptStore) return false;
+        const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
+        hasActivePendingPrompt = true;
+        if (!aborted && !res.writableEnded) {
+          const data = JSON.stringify({ promptId, name, prompt, key_type: keyType });
+          res.write(`event: secret_prompt\ndata: ${data}\n\n`);
+        }
+        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        hasActivePendingPrompt = false;
+        return row?.answer_saved === 1;
+      };
+
+      // SSE keepalive — prevents proxies/browsers from dropping idle connections
+      const keepaliveTimer = setInterval(() => {
+        if (!aborted && !res.writableEnded) res.write(': keepalive\n\n');
+      }, 15_000);
+
+      // Abort on client disconnect or timeout (30 min max)
+      const streamTimeout = setTimeout(() => {
+        aborted = true;
+        clearInterval(keepaliveTimer);
+        sessionAbortController.abort();
+        session.abort();
+        if (!res.writableEnded) res.end();
+      }, 30 * 60_000);
+
+      req.on('close', () => {
+        clearTimeout(streamTimeout);
+        clearInterval(keepaliveTimer);
+        aborted = true;
+        // If a prompt is pending, do NOT abort the session —
+        // the agent loop stays alive polling SQLite for an answer.
+        // The user can reconnect and answer the prompt.
+        if (!hasActivePendingPrompt) {
+          sessionAbortController.abort();
+          session.abort();
+        }
+      });
+
+      // Run
+      this.runningSessions.add(sessionId);
+      try {
+        const result = await session.run(task, runOptions);
+        if (!aborted) {
+          // Notify client if changeset has pending file changes for review
+          const csm = session.getChangesetManager();
+          if (csm?.hasChanges()) {
+            res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size })}\n\n`);
+          }
+          res.write(`event: done\ndata: ${JSON.stringify({ result })}\n\n`);
+          res.end();
+        }
+      } catch (err: unknown) {
+        if (!aborted) {
+          const msg = err instanceof Error ? err.message : String(err);
+          res.write(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`);
+          res.end();
+        }
+      } finally {
+        clearInterval(keepaliveTimer);
+        this.runningSessions.delete(sessionId);
+      }
+    }));
+
+    // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/sessions/:id/pending-prompt', async (_req, res, params) => {
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { jsonResponse(res, 200, { pending: false }); return; }
+      const row = ps.getPending(params['id']!);
+      if (!row) { jsonResponse(res, 200, { pending: false }); return; }
+      // Never leak secret answers back to client
+      jsonResponse(res, 200, {
+        pending: true,
+        promptId: row.id,
+        promptType: row.prompt_type,
+        question: row.question,
+        options: row.options_json ? JSON.parse(row.options_json) as string[] : undefined,
+        secretName: row.secret_name,
+        secretKeyType: row.secret_key_type,
+        timeoutMs: PROMPT_TIMEOUT_MS,
+        createdAt: row.created_at,
+      });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/reply', async (_req, res, params, body) => {
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { errorResponse(res, 404, 'No pending prompt'); return; }
+
+      const b = body as Record<string, unknown> | null;
+      const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
+      const answer = b && typeof b['answer'] === 'string' ? b['answer'] : '';
+      if (!answer && !promptId) { errorResponse(res, 400, 'Missing answer'); return; }
+
+      // Try by promptId first (preferred — idempotent), fall back to session lookup
+      let answered = false;
+      if (promptId) {
+        answered = ps.answerUser(promptId, answer);
+      }
+      if (!answered) {
+        const pending = ps.getPending(params['id']!);
+        if (pending && pending.prompt_type === 'ask_user') {
+          answered = ps.answerUser(pending.id, answer);
+        }
+      }
+      if (!answered) { errorResponse(res, 404, 'No pending prompt'); return; }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/secret-saved', async (_req, res, params, body) => {
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { errorResponse(res, 404, 'No pending secret prompt'); return; }
+
+      const b = body as Record<string, unknown> | null;
+      const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
+      const saved = b && typeof b['saved'] === 'boolean' ? b['saved'] : false;
+
+      let answered = false;
+      if (promptId) {
+        answered = ps.answerSecret(promptId, saved);
+      }
+      if (!answered) {
+        const pending = ps.getPending(params['id']!);
+        if (pending && pending.prompt_type === 'ask_secret') {
+          answered = ps.answerSecret(pending.id, saved);
+        }
+      }
+      if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/abort', async (_req, res, params) => {
+      const session = this.sessionStore.get(params['id']!);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      session.abort();
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    // ── Changeset review ──
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/sessions/:id/changeset', async (_req, res, params) => {
+      const session = this.sessionStore.get(params['id']!);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      const csm = session.getChangesetManager();
+      if (!csm || !csm.hasChanges()) {
+        jsonResponse(res, 200, { hasChanges: false, files: [] });
+        return;
+      }
+      const changes = csm.getChanges();
+      const files = changes.map(c => {
+        const lines = c.diff.split('\n');
+        let added = 0;
+        let removed = 0;
+        for (const line of lines) {
+          if (line.startsWith('+') && !line.startsWith('+++')) added++;
+          else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+        }
+        return { file: c.file, status: c.status, diff: c.diff, added, removed };
+      });
+      jsonResponse(res, 200, { hasChanges: true, files });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
+      const session = this.sessionStore.get(params['id']!);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      const csm = session.getChangesetManager();
+      if (!csm || !csm.hasChanges()) {
+        errorResponse(res, 400, 'No changeset to review');
+        return;
+      }
+
+      const b = body as Record<string, unknown> | null;
+      const action = typeof b?.['action'] === 'string' ? b['action'] : '';
+      if (!['accept', 'rollback', 'partial'].includes(action)) {
+        errorResponse(res, 400, 'Invalid action — must be accept, rollback, or partial');
+        return;
+      }
+
+      const changes = csm.getChanges();
+      let accepted = 0;
+      let rolledBack = 0;
+
+      if (action === 'accept') {
+        accepted = changes.length;
+        csm.acceptAll();
+      } else if (action === 'rollback') {
+        rolledBack = changes.length;
+        csm.rollbackAll();
+      } else {
+        // Partial: validate rolledBackFiles against changeset entries
+        const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
+        const validRelPaths = new Set(changes.map(c => c.file));
+        const toRollback: string[] = [];
+
+        for (const f of clientFiles) {
+          if (typeof f !== 'string' || !validRelPaths.has(f)) continue;
+          // Resolve relative path back to absolute via cwd
+          const abs = resolve(process.cwd(), f);
+          toRollback.push(abs);
+        }
+
+        if (toRollback.length > 0) {
+          csm.rollbackFiles(toRollback);
+        }
+        rolledBack = toRollback.length;
+        accepted = changes.length - rolledBack;
+      }
+
+      csm.cleanup();
+      jsonResponse(res, 200, { ok: true, accepted, rolledBack });
+    }));
+
+    // ── Compact (context management) ──
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/compact', async (_req, res, params, body) => {
+      const sessionId = params['id']!;
+      const session = this.sessionStore.get(sessionId);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      if (this.runningSessions.has(sessionId)) {
+        errorResponse(res, 409, 'Cannot compact while a run is in progress');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const focus = typeof b?.['focus'] === 'string' ? b['focus'] : undefined;
+      const result = await session.compact(focus);
+      jsonResponse(res, 200, { ok: result.success, summary: result.summary });
+    }));
+
+    // ── Threads ──
+    this.staticRoutes.set('GET /api/threads', async (req, res) => {
+      const threadStore = engine.getThreadStore();
+      if (!requireService(res, threadStore, 'Thread store')) return;
+      const url = new URL(req.url ?? '', 'http://localhost');
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
+      const includeArchived = url.searchParams.get('includeArchived') === 'true';
+      const threads = threadStore.listThreads({ limit, includeArchived });
+      jsonResponse(res, 200, { threads });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/threads/:id', async (_req, res, params) => {
+      const threadStore = engine.getThreadStore();
+      if (!requireService(res, threadStore, 'Thread store')) return;
+      const thread = threadStore.getThread(params['id']!);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      jsonResponse(res, 200, { thread });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/threads/:id', async (_req, res, params, body) => {
+      const threadStore = engine.getThreadStore();
+      if (!requireService(res, threadStore, 'Thread store')) return;
+      const thread = threadStore.getThread(params['id']!);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      const b = body as Record<string, unknown> | null;
+      const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
+      threadStore.updateThread(params['id']!, {
+        title: typeof b?.['title'] === 'string' ? b['title'] : undefined,
+        is_archived: typeof b?.['is_archived'] === 'boolean' ? b['is_archived'] : undefined,
+        is_favorite: typeof b?.['is_favorite'] === 'boolean' ? b['is_favorite'] : undefined,
+        skip_extraction: skipExtraction,
+      });
+      // Propagate extraction toggle to in-memory session (if active)
+      if (skipExtraction !== undefined) {
+        const session = this.sessionStore.get(params['id']!);
+        if (session) {
+          session.setSkipMemoryExtraction(skipExtraction);
+        }
+        // Private mode: purge extracted knowledge from this thread
+        if (skipExtraction) {
+          const knowledgeLayer = engine.getKnowledgeLayer();
+          if (knowledgeLayer) {
+            try {
+              const purged = knowledgeLayer.purgeThread(params['id']!);
+              if (purged > 0) {
+                process.stderr.write(`[lynox:private] Purged ${purged} memories from thread ${params['id']!.slice(0, 8)}\n`);
+              }
+            } catch (err: unknown) {
+              process.stderr.write(`[lynox:private] Purge failed for thread ${params['id']!.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}\n`);
+            }
+          }
+        }
+      }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/threads/:id', async (_req, res, params) => {
+      const threadStore = engine.getThreadStore();
+      if (!requireService(res, threadStore, 'Thread store')) return;
+      const thread = threadStore.getThread(params['id']!);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      // Also clean up in-memory session
+      this.sessionStore.reset(params['id']!);
+      threadStore.deleteThread(params['id']!);
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/threads/:id/messages', async (req, res, params) => {
+      const threadStore = engine.getThreadStore();
+      if (!requireService(res, threadStore, 'Thread store')) return;
+      const thread = threadStore.getThread(params['id']!);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      const url = new URL(req.url ?? '', 'http://localhost');
+      const fromSeq = Math.max(parseInt(url.searchParams.get('fromSeq') ?? '0', 10) || 0, 0);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '10000', 10) || 10000, 1), 50000);
+      const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
+      const messages = records.map(r => ({
+        seq: r.seq,
+        role: r.role,
+        content: JSON.parse(r.content_json) as unknown,
+        created_at: r.created_at,
+      }));
+      jsonResponse(res, 200, { messages });
+    }));
+
+    // ── Memory ──
+    const VALID_MEMORY_NS = new Set(['knowledge', 'methods', 'status', 'learnings']);
+    type MemoryNs = 'knowledge' | 'methods' | 'status' | 'learnings';
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/memory/:ns', async (_req, res, params) => {
+      const memory = engine.getMemory();
+      if (!requireService(res, memory, 'Memory')) return;
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
+      const content = await memory.load(ns);
+      jsonResponse(res, 200, { content });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/memory/:ns', async (_req, res, params, body) => {
+      const memory = engine.getMemory();
+      if (!requireService(res, memory, 'Memory')) return;
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
+      const content = body && typeof body === 'object' && 'content' in body ? String((body as Record<string, unknown>)['content']) : '';
+      await memory.save(ns, content);
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
+      const memory = engine.getMemory();
+      if (!requireService(res, memory, 'Memory')) return;
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
+      const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
+      if (!text) { errorResponse(res, 400, 'Missing text'); return; }
+      await memory.append(ns, text);
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/memory/:ns', async (req, res, params) => {
+      const memory = engine.getMemory();
+      if (!requireService(res, memory, 'Memory')) return;
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const pattern = url.searchParams.get('pattern') ?? '';
+      const deleted = await memory.delete(ns, pattern);
+      jsonResponse(res, 200, { deleted });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
+      const memory = engine.getMemory();
+      if (!requireService(res, memory, 'Memory')) return;
+      if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
+      const ns = params['ns'] as MemoryNs;
+      const b = body as Record<string, unknown> | null;
+      const oldText = b && typeof b['old'] === 'string' ? b['old'] : '';
+      const newText = b && typeof b['new'] === 'string' ? b['new'] : '';
+      const updated = await memory.update(ns, oldText, newText);
+      jsonResponse(res, 200, { updated });
+    }));
+
+    // ── Secrets ──
+    // Full name list — admin-scoped (enforced by requiresAdmin)
+    this.staticRoutes.set('GET /api/secrets', async (_req, res) => {
+      const store = engine.getSecretStore();
+      if (!requireService(res, store, 'Secret store')) return;
+      const names = store.listNames();
+      jsonResponse(res, 200, { names });
+    });
+
+    // Category-level booleans — available to all authenticated users
+    this.staticRoutes.set('GET /api/secrets/status', async (_req, res) => {
+      const store = engine.getSecretStore();
+      if (!requireService(res, store, 'Secret store')) return;
+      const names = new Set(store.listNames());
+      const userConfig = engine.getUserConfig();
+      const provider = userConfig.provider ?? 'anthropic';
+      // Provider-aware LLM configured check (BYOK)
+      let llmConfigured: boolean;
+      if (provider === 'bedrock') {
+        // Bedrock needs AWS credentials — from vault or env
+        llmConfigured = (names.has('AWS_ACCESS_KEY_ID') && names.has('AWS_SECRET_ACCESS_KEY'))
+          || (!!process.env['AWS_ACCESS_KEY_ID'] && !!process.env['AWS_SECRET_ACCESS_KEY']);
+      } else if (provider === 'custom') {
+        // Custom needs api_base_url configured
+        llmConfigured = !!(userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL']);
+      } else {
+        // Anthropic direct — needs API key
+        llmConfigured = names.has('ANTHROPIC_API_KEY')
+          || !!process.env['ANTHROPIC_API_KEY']
+          || !!(userConfig as Record<string, unknown>)['api_key'];
+      }
+      const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
+      jsonResponse(res, 200, {
+        provider,
+        managed: process.env['LYNOX_MANAGED_MODE'] ?? null,
+        configured: {
+          api_key: llmConfigured,
+          telegram: names.has('TELEGRAM_BOT_TOKEN'),
+          search: names.has('TAVILY_API_KEY') || names.has('SEARCH_API_KEY') || !!searxngUrl,
+          searxng: !!searxngUrl,
+          google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
+          bugsink: names.has('LYNOX_BUGSINK_DSN'),
+        },
+        count: names.size,
+        searxng_url: searxngUrl ?? null,
+      });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/secrets/:name', async (_req, res, params, body) => {
+      const store = engine.getSecretStore();
+      if (!requireService(res, store, 'Secret store')) return;
+      const b = body as Record<string, unknown> | null;
+      const value = b && typeof b['value'] === 'string' ? b['value'] : '';
+      if (!value) { errorResponse(res, 400, 'Missing value'); return; }
+      try {
+        store.set(params['name']!, value);
+        store.recordConsent(params['name']!);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to store secret';
+        errorResponse(res, 503, msg);
+        return;
+      }
+      // Hot-reload API key so new sessions use it immediately
+      if (params['name'] === 'ANTHROPIC_API_KEY') {
+        engine.setApiKey(value);
+      }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/secrets/:name', async (_req, res, params) => {
+      const store = engine.getSecretStore();
+      if (!requireService(res, store, 'Secret store')) return;
+      const deleted = store.deleteSecret(params['name']!);
+      jsonResponse(res, 200, { deleted });
+    }));
+
+    // SearXNG health check — validates a SearXNG URL is reachable
+    this.staticRoutes.set('POST /api/searxng/check', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const url = b && typeof b['url'] === 'string' ? b['url'].replace(/\/+$/, '') : '';
+      if (!url) { errorResponse(res, 400, 'Missing url'); return; }
+      // Validate scheme (http/https only) and block cloud metadata endpoints
+      let parsed: URL;
+      try { parsed = new URL(url); } catch { errorResponse(res, 400, 'Invalid URL'); return; }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        errorResponse(res, 400, 'URL must use http:// or https://');
+        return;
+      }
+      const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+      // Block cloud metadata endpoints (AWS/GCP/Azure all use 169.254.169.254)
+      // Private IPs intentionally allowed — SearXNG typically runs on Docker network or LAN
+      if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')
+          || hostname === 'metadata.google.internal'
+          || hostname === 'metadata.internal') {
+        errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
+        return;
+      }
+      try {
+        const response = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
+        jsonResponse(res, 200, { healthy: response.ok });
+      } catch {
+        jsonResponse(res, 200, { healthy: false });
+      }
+    });
+
+    // ── Config ──
+    this.staticRoutes.set('GET /api/config', async (_req, res) => {
+      const { readUserConfig } = await import('../core/config.js');
+      const config = readUserConfig();
+      const redacted: Record<string, unknown> = { ...config };
+      for (const key of REDACTED_CONFIG_KEYS) {
+        if (key in redacted && redacted[key]) {
+          delete redacted[key];
+          redacted[`${key}_configured`] = true;
+        }
+      }
+      // Expose managed tier so the Web UI can adapt its settings UI ('starter' = BYOK, 'eu' = Managed Bedrock)
+      if (process.env['LYNOX_MANAGED_MODE']) {
+        redacted['managed'] = process.env['LYNOX_MANAGED_MODE'];
+      }
+      jsonResponse(res, 200, redacted);
+    });
+
+    this.staticRoutes.set('PUT /api/config', async (_req, res, _params, body) => {
+      const { readUserConfig, saveUserConfig, reloadConfig } = await import('../core/config.js');
+      if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
+      const parsed = LynoxUserConfigSchema.safeParse(body);
+      if (!parsed.success) {
+        errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
+        return;
+      }
+      // Managed EU mode: block provider/credential changes (lynox provides Bedrock)
+      // Starter (BYOK) mode: provider changes are allowed (customer brings own key)
+      if (process.env['LYNOX_MANAGED_MODE'] === 'eu') {
+        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'aws_region', 'bedrock_eu_only'];
+        const attempted = LOCKED_FIELDS.filter(f => f in (parsed.data as Record<string, unknown>));
+        if (attempted.length > 0) {
+          errorResponse(res, 403, `Managed EU instance: cannot change ${attempted.join(', ')}`);
+          return;
+        }
+      }
+      // Merge with existing config so partial updates don't lose other fields
+      const existing = readUserConfig() as Record<string, unknown>;
+      const update = parsed.data as Record<string, unknown>;
+      const merged = { ...existing };
+      for (const [key, value] of Object.entries(update)) {
+        if (value === null) {
+          delete merged[key]; // explicit null = delete field
+        } else {
+          merged[key] = value;
+        }
+      }
+      saveUserConfig(merged);
+      reloadConfig();
+      await engine.reloadUserConfig();
+      jsonResponse(res, 200, { ok: true });
+    });
+
+    // ── History ──
+    this.staticRoutes.set('GET /api/history/runs', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const q = url.searchParams.get('q');
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
+      const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
+      if (q) {
+        const runs = history.searchRuns(q, limit, offset);
+        jsonResponse(res, 200, { runs });
+      } else {
+        const filters: { status?: string; model?: string; dateFrom?: string; dateTo?: string; sessionId?: string } = {};
+        const status = url.searchParams.get('status');
+        const model = url.searchParams.get('model');
+        const dateFrom = url.searchParams.get('dateFrom');
+        const dateTo = url.searchParams.get('dateTo');
+        const sessionId = url.searchParams.get('sessionId') ?? url.searchParams.get('thread_id');
+        if (status) filters.status = status;
+        if (model) filters.model = model;
+        if (dateFrom) filters.dateFrom = dateFrom;
+        if (dateTo) filters.dateTo = dateTo;
+        if (sessionId) filters.sessionId = sessionId;
+        const runs = history.getRecentRuns(limit, offset, Object.keys(filters).length > 0 ? filters : undefined);
+        jsonResponse(res, 200, { runs });
+      }
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/history/runs/:id', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const run = history.getRun(params['id']!);
+      if (!run) { errorResponse(res, 404, 'Run not found'); return; }
+      jsonResponse(res, 200, run);
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/history/runs/:id/tool-calls', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const toolCalls = history.getRunToolCalls(params['id']!);
+      jsonResponse(res, 200, { toolCalls });
+    }));
+
+    this.staticRoutes.set('GET /api/history/stats', async (_req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const stats = history.getStats();
+      jsonResponse(res, 200, stats);
+    });
+
+    this.staticRoutes.set('GET /api/history/cost/daily', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
+      const data = history.getCostByDay(days);
+      jsonResponse(res, 200, data);
+    });
+
+    // ── Pipelines ──
+    this.staticRoutes.set('GET /api/pipelines', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
+      const runs = history.getRecentPipelineRuns(limit);
+      jsonResponse(res, 200, { runs });
+    });
+
+    this.staticRoutes.set('GET /api/pipelines/stats/steps', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
+      const stats = history.getPipelineStepStats(days);
+      jsonResponse(res, 200, { stats });
+    });
+
+    this.staticRoutes.set('GET /api/pipelines/stats/cost', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
+      const stats = history.getPipelineCostStats(days);
+      jsonResponse(res, 200, { stats });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/pipelines/:id', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const run = history.getPipelineRun(params['id']!);
+      if (!run) { errorResponse(res, 404, 'Pipeline run not found'); return; }
+      jsonResponse(res, 200, run);
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/pipelines/:id/steps', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const steps = history.getPipelineStepResults(params['id']!);
+      jsonResponse(res, 200, { steps });
+    }));
+
+    // ── Tasks ──
+    this.staticRoutes.set('GET /api/tasks', async (req, res) => {
+      const taskManager = engine.getTaskManager();
+      if (!requireService(res, taskManager, 'Task manager')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const status = url.searchParams.get('status') as 'open' | 'in_progress' | 'completed' | undefined;
+      const tasks = taskManager.list(status ? { status } : undefined);
+      jsonResponse(res, 200, { tasks });
+    });
+
+    this.staticRoutes.set('POST /api/tasks', async (_req, res, _params, body) => {
+      const taskManager = engine.getTaskManager();
+      if (!requireService(res, taskManager, 'Task manager')) return;
+      if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid task'); return; }
+      const b = body as Record<string, unknown>;
+      const title = typeof b['title'] === 'string' ? b['title'] : undefined;
+      const description = typeof b['description'] === 'string' ? b['description'] : undefined;
+      const assignee = typeof b['assignee'] === 'string' ? b['assignee'] : undefined;
+      if (!title) { errorResponse(res, 400, 'Missing required field: title'); return; }
+      const task = taskManager.create({ title, description: description ?? title, assignee });
+      jsonResponse(res, 201, task);
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/tasks/:id', async (_req, res, params, body) => {
+      const taskManager = engine.getTaskManager();
+      if (!requireService(res, taskManager, 'Task manager')) return;
+      if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
+      const task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1]);
+      if (!task) { errorResponse(res, 404, 'Task not found'); return; }
+      jsonResponse(res, 200, task);
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/tasks/:id', async (_req, res, params) => {
+      const runHistory = engine.getRunHistory();
+      if (!requireService(res, runHistory, 'History')) return;
+      const deleted = runHistory.deleteTask(params['id']!);
+      if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }
+      jsonResponse(res, 200, { deleted: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/tasks/:id/complete', async (_req, res, params) => {
+      const taskManager = engine.getTaskManager();
+      if (!requireService(res, taskManager, 'Task manager')) return;
+      const task = taskManager.complete(params['id']!);
+      if (!task) { errorResponse(res, 404, 'Task not found'); return; }
+      jsonResponse(res, 200, task);
+    }));
+
+    // ── Artifacts ──
+    this.staticRoutes.set('GET /api/artifacts', async (_req, res) => {
+      const store = engine.getArtifactStore();
+      if (!requireService(res, store, 'Artifact store')) return;
+      jsonResponse(res, 200, { artifacts: store.list() });
+    });
+
+    this.staticRoutes.set('POST /api/artifacts', async (_req, res, _params, body) => {
+      const store = engine.getArtifactStore();
+      if (!requireService(res, store, 'Artifact store')) return;
+      if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid artifact'); return; }
+      const b = body as Record<string, unknown>;
+      if (typeof b['title'] !== 'string' || typeof b['content'] !== 'string') {
+        errorResponse(res, 400, 'title and content are required'); return;
+      }
+      const VALID_TYPES = ['html', 'mermaid', 'svg'] as const;
+      const rawType = typeof b['type'] === 'string' ? b['type'] : undefined;
+      if (rawType && !VALID_TYPES.includes(rawType as typeof VALID_TYPES[number])) {
+        errorResponse(res, 400, `Invalid type. Must be one of: ${VALID_TYPES.join(', ')}`); return;
+      }
+      const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024; // 5 MB
+      if (b['content'].length > MAX_ARTIFACT_BYTES) {
+        errorResponse(res, 413, 'Artifact content too large (max 5 MB)'); return;
+      }
+      const artifact = store.save({
+        title: b['title'],
+        content: b['content'],
+        ...(rawType ? { type: rawType as 'html' | 'mermaid' | 'svg' } : {}),
+        ...(typeof b['description'] === 'string' ? { description: b['description'] } : {}),
+        ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
+      });
+      jsonResponse(res, 201, artifact);
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/artifacts/:id', async (_req, res, params) => {
+      const store = engine.getArtifactStore();
+      if (!requireService(res, store, 'Artifact store')) return;
+      const artifact = store.get(params['id']!);
+      if (!artifact) { errorResponse(res, 404, 'Artifact not found'); return; }
+      jsonResponse(res, 200, artifact);
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/artifacts/:id', async (_req, res, params) => {
+      const store = engine.getArtifactStore();
+      if (!requireService(res, store, 'Artifact store')) return;
+      const deleted = store.delete(params['id']!);
+      if (!deleted) { errorResponse(res, 404, 'Artifact not found'); return; }
+      jsonResponse(res, 200, { deleted: true });
+    }));
+
+    // ── Transcription (streaming via SSE) ──
+    this.staticRoutes.set('POST /api/transcribe', async (_req, res, _params, body) => {
+      const { HAS_WHISPER, transcribeAudioStream } = await import('../core/transcribe.js');
+      if (!HAS_WHISPER) {
+        errorResponse(res, 503, 'Whisper not available (install whisper.cpp + ffmpeg)');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const audioData = b && typeof b['audio'] === 'string' ? b['audio'] : '';
+      const filename = b && typeof b['filename'] === 'string' ? b['filename'] : 'audio.webm';
+      const language = b && typeof b['language'] === 'string' ? b['language'] : undefined;
+      if (!audioData) { errorResponse(res, 400, 'Missing audio (base64)'); return; }
+      const buffer = Buffer.from(audioData, 'base64');
+
+      // SSE streaming — send segments as whisper processes them
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+
+      const text = await transcribeAudioStream(buffer, filename, (segment) => {
+        if (!segment) {
+          // Empty segment = ffmpeg done, whisper starting
+          res.write(`data: ${JSON.stringify({ status: 'transcribing' })}\n\n`);
+        } else {
+          res.write(`data: ${JSON.stringify({ segment })}\n\n`);
+        }
+      }, language);
+
+      if (text) {
+        res.write(`data: ${JSON.stringify({ done: true, text })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ error: 'Transcription failed' })}\n\n`);
+      }
+      res.end();
+    });
+
+    // ── Telegram Setup (chat ID auto-detection via Telegram Bot API) ──
+
+    // In-memory state for the setup wizard — only one setup at a time
+    let tgSetup: {
+      token: string;
+      botName: string;
+      botUsername: string;
+      updateOffset: number;
+      chatId: number | null;
+      firstName: string | null;
+      startedAt: number;
+    } | null = null;
+
+    const TG_SETUP_TIMEOUT_MS = 120_000; // 2 min
+
+    this.staticRoutes.set('POST /api/telegram/setup', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const token = b && typeof b['token'] === 'string' ? b['token'].trim() : '';
+      if (!token) { errorResponse(res, 400, 'token required'); return; }
+
+      // Validate token via getMe
+      let botName = '';
+      let botUsername = '';
+      try {
+        const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!meRes.ok) throw new Error('Invalid bot token');
+        const me = (await meRes.json()) as { ok: boolean; result: { first_name: string; username: string } };
+        if (!me.ok) throw new Error('Invalid bot token');
+        botName = me.result.first_name;
+        botUsername = me.result.username;
+      } catch {
+        errorResponse(res, 400, 'Invalid bot token');
+        return;
+      }
+
+      // Flush old updates — get last update_id so we only receive NEW messages
+      let updateOffset = 0;
+      try {
+        const flushRes = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&limit=1`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (flushRes.ok) {
+          const flushData = (await flushRes.json()) as { result: Array<{ update_id: number }> };
+          if (flushData.result.length > 0) {
+            updateOffset = flushData.result[flushData.result.length - 1]!.update_id + 1;
+          }
+        }
+      } catch { /* ignore flush errors */ }
+
+      tgSetup = { token, botName, botUsername, updateOffset, chatId: null, firstName: null, startedAt: Date.now() };
+      jsonResponse(res, 200, { botName, botUsername });
+    });
+
+    this.staticRoutes.set('GET /api/telegram/setup', async (_req, res) => {
+      if (!tgSetup) { jsonResponse(res, 200, { status: 'idle' }); return; }
+
+      // Timeout check
+      if (Date.now() - tgSetup.startedAt > TG_SETUP_TIMEOUT_MS) {
+        tgSetup = null;
+        jsonResponse(res, 200, { status: 'timeout' });
+        return;
+      }
+
+      // Already detected — return result and clear sensitive token from memory
+      if (tgSetup.chatId !== null) {
+        const { chatId, firstName } = tgSetup;
+        tgSetup = null;
+        jsonResponse(res, 200, { status: 'detected', chatId, firstName });
+        return;
+      }
+
+      // Poll for new messages (short poll, 2s server-side timeout)
+      try {
+        const url = `https://api.telegram.org/bot${tgSetup.token}/getUpdates`
+          + `?offset=${tgSetup.updateOffset}&timeout=2&allowed_updates=${encodeURIComponent('["message"]')}`;
+        const pollRes = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+        if (!pollRes.ok) throw new Error('poll failed');
+
+        const pollData = (await pollRes.json()) as {
+          result: Array<{
+            update_id: number;
+            message?: { chat: { id: number }; from?: { first_name?: string } };
+          }>;
+        };
+
+        for (const update of pollData.result) {
+          // Advance offset regardless
+          tgSetup.updateOffset = update.update_id + 1;
+
+          if (update.message) {
+            tgSetup.chatId = update.message.chat.id;
+            tgSetup.firstName = update.message.from?.first_name ?? '';
+
+            // Send confirmation to the user in Telegram
+            try {
+              await fetch(`https://api.telegram.org/bot${tgSetup.token}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: tgSetup.chatId,
+                  text: '✓ Verbunden! Setup wird im Browser fortgesetzt.',
+                }),
+                signal: AbortSignal.timeout(5_000),
+              });
+            } catch { /* best effort */ }
+
+            jsonResponse(res, 200, { status: 'detected', chatId: tgSetup.chatId, firstName: tgSetup.firstName });
+            return;
+          }
+        }
+      } catch { /* poll error — return waiting */ }
+
+      jsonResponse(res, 200, { status: 'waiting' });
+    });
+
+    this.staticRoutes.set('DELETE /api/telegram/setup', async (_req, res) => {
+      tgSetup = null;
+      jsonResponse(res, 200, { ok: true });
+    });
+
+    // ── Push Notifications ──
+
+    this.staticRoutes.set('GET /api/push/vapid-key', async (_req, res) => {
+      if (!this.pushChannel) {
+        errorResponse(res, 503, 'Push notifications not available');
+        return;
+      }
+      jsonResponse(res, 200, { publicKey: this.pushChannel.getPublicKey() });
+    });
+
+    this.staticRoutes.set('POST /api/push/subscribe', async (_req, res, _params, body) => {
+      if (!this.pushChannel) {
+        errorResponse(res, 503, 'Push notifications not available');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const sub = b?.['subscription'] as Record<string, unknown> | undefined;
+      const endpoint = typeof sub?.['endpoint'] === 'string' ? sub['endpoint'] : '';
+      const keys = sub?.['keys'] as Record<string, unknown> | undefined;
+      const p256dh = typeof keys?.['p256dh'] === 'string' ? keys['p256dh'] : '';
+      const auth = typeof keys?.['auth'] === 'string' ? keys['auth'] : '';
+
+      if (!endpoint || !p256dh || !auth) {
+        errorResponse(res, 400, 'Missing subscription fields: endpoint, keys.p256dh, keys.auth');
+        return;
+      }
+
+      // Endpoint validation — must be HTTPS, must be a known push service
+      try {
+        const url = new URL(endpoint);
+        if (url.protocol !== 'https:') {
+          errorResponse(res, 400, 'Subscription endpoint must use HTTPS');
+          return;
+        }
+        // Allow only known Web Push service domains (Google FCM, Mozilla, Apple, Microsoft)
+        const host = url.hostname;
+        const allowedPushDomains = [
+          'fcm.googleapis.com',
+          'updates.push.services.mozilla.com',
+          'push.services.mozilla.com',
+          'web.push.apple.com',
+          'wns2-par02p.notify.windows.com',
+          'wns.windows.com',
+        ];
+        const isAllowed = allowedPushDomains.some((d) => host === d || host.endsWith(`.${d}`));
+        if (!isAllowed) {
+          errorResponse(res, 400, 'Subscription endpoint must be a valid push service');
+          return;
+        }
+      } catch {
+        errorResponse(res, 400, 'Invalid subscription endpoint URL');
+        return;
+      }
+
+      this.pushChannel.subscribe(endpoint, p256dh, auth);
+      jsonResponse(res, 201, { ok: true });
+    });
+
+    this.staticRoutes.set('POST /api/push/unsubscribe', async (_req, res, _params, body) => {
+      if (!this.pushChannel) {
+        errorResponse(res, 503, 'Push notifications not available');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const endpoint = typeof b?.['endpoint'] === 'string' ? b['endpoint'] : '';
+      if (!endpoint) {
+        errorResponse(res, 400, 'Missing endpoint');
+        return;
+      }
+      this.pushChannel.unsubscribe(endpoint);
+      jsonResponse(res, 200, { ok: true });
+    });
+
+    this.staticRoutes.set('POST /api/push/test', async (_req, res) => {
+      if (!this.pushChannel) {
+        errorResponse(res, 503, 'Push notifications not available');
+        return;
+      }
+      const count = this.pushChannel.subscriptionCount();
+      if (count === 0) {
+        errorResponse(res, 404, 'No push subscriptions registered');
+        return;
+      }
+      const result = await this.pushChannel.sendDetailed({
+        title: 'lynox',
+        body: 'Push notifications are working.',
+        priority: 'normal',
+      });
+      if (result.sent === 0) {
+        errorResponse(res, 502, `Delivery failed — ${result.cleaned} subscription(s) expired, ${result.failed} failed`);
+        return;
+      }
+      jsonResponse(res, 200, { ok: true, sent: result.sent, failed: result.failed, cleaned: result.cleaned });
+    });
+
+    // ── Google Auth ──
+    this.staticRoutes.set('GET /api/google/status', async (_req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!google) { jsonResponse(res, 200, { available: false }); return; }
+      jsonResponse(res, 200, {
+        available: true,
+        authenticated: google.isAuthenticated(),
+        ...google.getAccountInfo(),
+      });
+    });
+
+    this.staticRoutes.set('POST /api/google/auth', async (_req, res, _params, body) => {
+      const google = engine.getGoogleAuth();
+      if (!requireService(res, google, 'Google auth')) return;
+
+      // Scope mode: "full" includes write scopes, default is read-only
+      const b = body as Record<string, unknown> | null;
+      const { READ_ONLY_SCOPES, WRITE_SCOPES } = await import('../integrations/google/google-auth.js');
+      const scopes = b?.['scopeMode'] === 'full'
+        ? [...READ_ONLY_SCOPES, ...WRITE_SCOPES]
+        : [...READ_ONLY_SCOPES];
+
+      // Web-hosted instances: use redirect flow (ORIGIN env is set on managed instances)
+      const origin = process.env['ORIGIN'];
+      const preferRedirect = b?.['mode'] === 'redirect' || !!origin;
+
+      if (preferRedirect && origin) {
+        try {
+          const redirectUri = `${origin}/api/google/callback`;
+          const { authUrl, state } = google.startRedirectAuth(redirectUri, scopes);
+          // Store state for CSRF validation
+          this._googleOAuthState = state;
+          this._googleRedirectUri = redirectUri;
+          jsonResponse(res, 200, { authUrl });
+          return;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errorResponse(res, 500, msg);
+          return;
+        }
+      }
+
+      // Fallback: device flow (self-hosted / headless)
+      try {
+        const flow = await google.startDeviceFlow(scopes);
+        jsonResponse(res, 200, {
+          verificationUrl: flow.verificationUrl,
+          userCode: flow.userCode,
+        });
+        // Wait for auth in background — user opens URL and enters code
+        flow.waitForAuth().catch(() => {});
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errorResponse(res, 500, msg);
+      }
+    });
+
+    // Google OAuth callback — handles redirect from Google after user consent
+    this.staticRoutes.set('GET /api/google/callback', async (req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!google) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<html><body><h1>Error</h1><p>Google auth not configured.</p></body></html>');
+        return;
+      }
+
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const error = url.searchParams.get('error');
+
+      if (error) {
+        const safe = error.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end(`<html><body><h1>Error</h1><p>${safe}</p><p>You can close this tab.</p></body></html>`);
+        return;
+      }
+
+      if (!code || !state || state !== this._googleOAuthState) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<html><body><h1>Error</h1><p>Invalid callback — missing code or state mismatch.</p></body></html>');
+        return;
+      }
+
+      try {
+        await google.exchangeRedirectCode(code, this._googleRedirectUri ?? '');
+        this._googleOAuthState = undefined;
+        this._googleRedirectUri = undefined;
+        // Navigate back via JS — a 302 would continue the cross-site redirect chain
+        // (Google → callback → settings), so the sameSite:strict session cookie still
+        // wouldn't be sent. A JS navigation starts a fresh same-site context.
+        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/integrations`;
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>window.location.replace(${JSON.stringify(target)})</script></body></html>`);
+      } catch (err: unknown) {
+        const msg = (err instanceof Error ? err.message : String(err))
+          .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
+        res.writeHead(500, { 'Content-Type': 'text/html' });
+        res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
+      }
+    });
+
+    this.staticRoutes.set('POST /api/google/revoke', async (_req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!requireService(res, google, 'Google auth')) return;
+      await google.revoke();
+      jsonResponse(res, 200, { ok: true });
+    });
+
+    // Reload Google integration after credentials change
+    this.staticRoutes.set('POST /api/google/reload', async (_req, res) => {
+      const ok = await engine.reloadGoogle();
+      jsonResponse(res, 200, { ok });
+    });
+
+    // Get Google OAuth start URL (managed instances — redirects via control plane)
+    this.staticRoutes.set('GET /api/google/oauth-url', async (_req, res) => {
+      const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+      const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+
+      if (!controlPlaneUrl || !instanceId) {
+        errorResponse(res, 400, 'Not a managed instance');
+        return;
+      }
+
+      const url = `${controlPlaneUrl}/oauth/google/start?instance_id=${encodeURIComponent(instanceId)}`;
+      jsonResponse(res, 200, { url });
+    });
+
+    // Claim Google tokens from managed control plane OAuth broker
+    this.staticRoutes.set('POST /api/google/claim-managed', async (_req, res, _params, body) => {
+      const google = engine.getGoogleAuth();
+      if (!requireService(res, google, 'Google auth')) return;
+
+      const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+      const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'];
+
+      if (!controlPlaneUrl || !instanceId || !httpSecret) {
+        errorResponse(res, 400, 'Not a managed instance or missing control plane config');
+        return;
+      }
+
+      const parsed = body as Record<string, unknown> | undefined;
+      const claimNonce = typeof parsed?.['claim_nonce'] === 'string' ? parsed['claim_nonce'] : '';
+      if (!claimNonce) {
+        errorResponse(res, 400, 'Missing claim_nonce');
+        return;
+      }
+
+      try {
+        const claimRes = await fetch(`${controlPlaneUrl}/internal/oauth/google/claim`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-instance-secret': httpSecret,
+          },
+          body: JSON.stringify({ instance_id: instanceId, claim_nonce: claimNonce }),
+        });
+
+        if (!claimRes.ok) {
+          const data = (await claimRes.json().catch(() => ({}))) as Record<string, unknown>;
+          errorResponse(res, claimRes.status, (data['error'] as string) ?? 'Failed to claim tokens');
+          return;
+        }
+
+        const tokens = (await claimRes.json()) as {
+          access_token: string;
+          refresh_token: string;
+          expires_at: number;
+          scopes: string[];
+        };
+
+        await google.setTokens(tokens);
+        jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errorResponse(res, 500, msg);
+      }
+    });
+
+    // ── Knowledge Graph ──────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/kg/stats', async (_req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { entityCount: 0, relationCount: 0, memoryCount: 0, communityCount: 0 }); return; }
+      const stats = await kg.stats();
+      jsonResponse(res, 200, stats);
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { entities: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const typeFilter = url.searchParams.get('type') ?? '';
+      const query = url.searchParams.get('q') ?? '';
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
+      const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
+      try {
+        if (query) {
+          const result = await kg.retrieve(query, [{ type: 'global', id: 'global' }], { topK: limit });
+          const entities = result.entities ?? [];
+          jsonResponse(res, 200, { entities });
+        } else {
+          const listOpts: { type?: string; limit?: number; offset?: number } = { limit, offset };
+          if (typeFilter) listOpts.type = typeFilter;
+          const result = await kg.listEntities(listOpts);
+          jsonResponse(res, 200, { entities: result });
+        }
+      } catch {
+        jsonResponse(res, 200, { entities: [] });
+      }
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities/:id', async (_req, res, params) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!requireService(res, kg, 'Knowledge graph')) return;
+      try {
+        const entity = await kg.getEntity(params['id']!);
+        if (!entity) { errorResponse(res, 404, 'Entity not found'); return; }
+        const relations = await kg.getEntityRelations(entity.id);
+        jsonResponse(res, 200, { entity, relations });
+      } catch {
+        errorResponse(res, 404, 'Entity not found');
+      }
+    }));
+
+    // ── Thread Insights + Metrics ──────────────────────────────────
+
+    this.staticRoutes.set('GET /api/thread-insights', async (req, res) => {
+      const rh = engine.getRunHistory();
+      if (!rh) { jsonResponse(res, 200, { threadInsights: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
+      const threadInsights = rh.getThreadAggregates(limit);
+      jsonResponse(res, 200, { threadInsights });
+    });
+
+    this.staticRoutes.set('GET /api/patterns', async (_req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { patterns: [] }); return; }
+      const patterns = kg.getPatterns();
+      jsonResponse(res, 200, { patterns });
+    });
+
+    this.staticRoutes.set('GET /api/metrics', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { metrics: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const metricName = url.searchParams.get('name') ?? undefined;
+      const window = url.searchParams.get('window') ?? undefined;
+      const metrics = kg.getMetrics(
+        metricName,
+        window as import('../types/index.js').MetricWindow | undefined,
+      );
+      jsonResponse(res, 200, { metrics });
+    });
+
+    // ── CRM ──────────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/crm/contacts', async (req, res) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { contacts: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
+      const typeFilter = url.searchParams.get('type') ?? '';
+      const filter: Record<string, unknown> = {};
+      if (typeFilter) filter['type'] = { $eq: typeFilter };
+      const contacts = crm.listContacts(Object.keys(filter).length > 0 ? filter : undefined, limit);
+      jsonResponse(res, 200, { contacts });
+    });
+
+    this.staticRoutes.set('GET /api/crm/deals', async (req, res) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
+      const stageFilter = url.searchParams.get('stage') ?? '';
+      // Show all deals by default (not just open ones)
+      const filter: Record<string, unknown> = {};
+      if (stageFilter) filter['stage'] = { $eq: stageFilter };
+      const result = crm.getAllDeals(filter, limit);
+      jsonResponse(res, 200, { deals: result });
+    });
+
+    this.staticRoutes.set('GET /api/crm/stats', async (_req, res) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { contacts: 0, pipeline: [] }); return; }
+      const stats = crm.getContactStats();
+      const pipeline = crm.getPipelineSummary();
+      jsonResponse(res, 200, { contacts: stats, pipeline });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/crm/contacts/:name/interactions', async (_req, res, params) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { interactions: [] }); return; }
+      const interactions = crm.getInteractions(decodeURIComponent(params['name']!), 50);
+      jsonResponse(res, 200, { interactions });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/crm/contacts/:name/deals', async (_req, res, params) => {
+      const crm = engine.getCRM();
+      if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
+      const deals = crm.getDealsForContact(decodeURIComponent(params['name']!), 50);
+      jsonResponse(res, 200, { deals });
+    }));
+
+    // ── Backups ──────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/backups', async (_req, res) => {
+      const bm = engine.getBackupManager();
+      if (!bm) { jsonResponse(res, 200, { backups: [] }); return; }
+      const backups = bm.listBackups();
+      jsonResponse(res, 200, { backups });
+    });
+
+    this.staticRoutes.set('POST /api/backups', async (_req, res) => {
+      const bm = engine.getBackupManager();
+      if (!requireService(res, bm, 'Backup manager')) return;
+      try {
+        const result = await bm.createBackup();
+        jsonResponse(res, 200, result);
+      } catch (err: unknown) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Backup failed');
+      }
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/backups/:id/restore', async (_req, res, params) => {
+      const bm = engine.getBackupManager();
+      if (!requireService(res, bm, 'Backup manager')) return;
+      const backupPath = bm.getBackupPath(params['id']!);
+      if (!backupPath) { errorResponse(res, 404, 'Backup not found'); return; }
+      try {
+        const result = await bm.restoreBackup(backupPath);
+        jsonResponse(res, result.success ? 200 : 500, result);
+        // Auto-restart after successful restore so restored data takes effect
+        if (result.success) {
+          setTimeout(() => { process.exit(0); }, 500);
+        }
+      } catch (err: unknown) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Restore failed');
+      }
+    }));
+
+    // ── API Store ────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/api-profiles', async (_req, res) => {
+      const store = engine.getApiStore();
+      if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
+      const profiles = store.getAll();
+      jsonResponse(res, 200, { profiles });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/api-profiles/:id', async (_req, res, params) => {
+      const store = engine.getApiStore();
+      if (!requireService(res, store, 'API store')) return;
+      const profile = store.get(params['id']!);
+      if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
+      jsonResponse(res, 200, { profile });
+    }));
+
+    // ── DataStore ────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/datastore/collections', async (_req, res) => {
+      const ds = engine.getDataStore();
+      if (!ds) { jsonResponse(res, 200, { collections: [] }); return; }
+      const collections = ds.listCollections();
+      jsonResponse(res, 200, { collections });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/datastore/:collection', async (req, res, params) => {
+      const ds = engine.getDataStore();
+      if (!requireService(res, ds, 'DataStore')) return;
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
+      const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
+      try {
+        const result = ds.queryRecords({ collection: params['collection']!, limit, offset });
+        jsonResponse(res, 200, result);
+      } catch (err: unknown) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Query failed');
+      }
+    }));
+
+    // ── GDPR Data Export & Erasure ─────────────────────────────────
+
+    // GET /api/export — GDPR Art. 15 (Right of Access) + Art. 20 (Data Portability)
+    this.staticRoutes.set('GET /api/export', async (_req, res) => {
+      const exportData: Record<string, unknown> = {
+        exported_at: new Date().toISOString(),
+        version: PKG_VERSION,
+      };
+
+      // Threads + messages
+      const threadStore = engine.getThreadStore();
+      if (threadStore) {
+        const threads = threadStore.listThreads({ limit: 200, includeArchived: true });
+        const threadsWithMessages = threads.map(t => ({
+          ...t,
+          messages: threadStore.getMessages(t.id, { limit: 50000 }).map(m => ({
+            seq: m.seq,
+            role: m.role,
+            content: JSON.parse(m.content_json) as unknown,
+            created_at: m.created_at,
+          })),
+        }));
+        exportData['threads'] = threadsWithMessages;
+      } else {
+        exportData['threads'] = [];
+      }
+
+      // Flat-file memory (all namespaces)
+      const memory = engine.getMemory();
+      if (memory) {
+        const memoryData: Record<string, string | null> = {};
+        for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
+          memoryData[ns] = await memory.load(ns);
+        }
+        exportData['memory'] = memoryData;
+      } else {
+        exportData['memory'] = {};
+      }
+
+      // Knowledge graph (entities + relations)
+      const kg = engine.getKnowledgeLayer();
+      if (kg) {
+        try {
+          const entities = await kg.listEntities({ limit: 200 });
+          const stats = await kg.stats();
+          // Collect all relations by iterating entity relations
+          const relationSet = new Map<string, unknown>();
+          for (const entity of entities) {
+            const relations = await kg.getEntityRelations(entity.id);
+            for (const rel of relations) {
+              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}`;
+              if (!relationSet.has(key)) {
+                relationSet.set(key, rel);
+              }
+            }
+          }
+          exportData['knowledge_graph'] = {
+            entities,
+            relationships: [...relationSet.values()],
+            stats,
+          };
+        } catch {
+          exportData['knowledge_graph'] = { entities: [], relationships: [] };
+        }
+      } else {
+        exportData['knowledge_graph'] = { entities: [], relationships: [] };
+      }
+
+      // CRM contacts + deals
+      const crm = engine.getCRM();
+      if (crm) {
+        exportData['contacts'] = crm.listContacts(undefined, 500);
+        exportData['deals'] = crm.getAllDeals(undefined, 500);
+      } else {
+        exportData['contacts'] = [];
+        exportData['deals'] = [];
+      }
+
+      // DataStore collections + records
+      const ds = engine.getDataStore();
+      if (ds) {
+        const collections = ds.listCollections();
+        const datastoreExport: Record<string, unknown[]> = {};
+        for (const col of collections) {
+          try {
+            const result = ds.queryRecords({ collection: col.name, limit: 500 });
+            datastoreExport[col.name] = result.rows;
+          } catch {
+            datastoreExport[col.name] = [];
+          }
+        }
+        exportData['datastore'] = datastoreExport;
+      } else {
+        exportData['datastore'] = {};
+      }
+
+      // Secret names (never values — GDPR export must not leak secrets)
+      const secretStore = engine.getSecretStore();
+      if (secretStore) {
+        exportData['secrets'] = secretStore.listNames();
+      } else {
+        exportData['secrets'] = [];
+      }
+
+      // Config (redacted)
+      try {
+        const { readUserConfig } = await import('../core/config.js');
+        const config = readUserConfig();
+        const redacted: Record<string, unknown> = { ...config };
+        for (const key of REDACTED_CONFIG_KEYS) {
+          if (key in redacted && redacted[key]) {
+            delete redacted[key];
+            redacted[`${key}_configured`] = true;
+          }
+        }
+        exportData['config'] = redacted;
+      } catch {
+        exportData['config'] = {};
+      }
+
+      jsonResponse(res, 200, exportData);
+    });
+
+    // DELETE /api/data — GDPR Art. 17 (Right to Erasure)
+    this.staticRoutes.set('DELETE /api/data', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const confirm = b && typeof b['confirm'] === 'string' ? b['confirm'] : '';
+      if (confirm !== 'DELETE_ALL_DATA') {
+        errorResponse(res, 400, 'Confirmation required: send { "confirm": "DELETE_ALL_DATA" }');
+        return;
+      }
+
+      // Delete all threads + messages
+      const threadStore = engine.getThreadStore();
+      if (threadStore) {
+        const threads = threadStore.listThreads({ limit: 200, includeArchived: true });
+        for (const t of threads) {
+          threadStore.deleteThread(t.id);
+        }
+      }
+
+      // Delete all flat-file memory
+      const memory = engine.getMemory();
+      if (memory) {
+        for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
+          await memory.save(ns, '');
+        }
+      }
+
+      // Delete all knowledge graph entities (cascades to relations, mentions, cooccurrences)
+      const kg = engine.getKnowledgeLayer();
+      if (kg) {
+        try {
+          const db = kg.getDb();
+          let entities = db.listEntities({ limit: 200 });
+          while (entities.length > 0) {
+            for (const entity of entities) {
+              db.deleteEntity(entity.id);
+            }
+            entities = db.listEntities({ limit: 200 });
+          }
+          // Also deactivate all memories
+          db.deactivateMemoriesByPattern('%');
+        } catch { /* best effort */ }
+      }
+
+      // Delete all DataStore collections (includes CRM tables)
+      const ds = engine.getDataStore();
+      if (ds) {
+        const collections = ds.listCollections();
+        for (const col of collections) {
+          ds.dropCollection(col.name);
+        }
+      }
+
+      // Delete all secrets from vault
+      const secretStore = engine.getSecretStore();
+      if (secretStore) {
+        const names = secretStore.listNames();
+        for (const name of names) {
+          secretStore.deleteSecret(name);
+        }
+      }
+
+      // Reset config to defaults
+      try {
+        const { saveUserConfig } = await import('../core/config.js');
+        saveUserConfig({});
+        await engine.reloadUserConfig();
+      } catch { /* best effort */ }
+
+      jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });
+    });
+
+    // ── Vault ─────────────────────────────────────────────────────
+
+    this.staticRoutes.set('GET /api/vault/key', async (req, res) => {
+      const key = process.env['LYNOX_VAULT_KEY'];
+      if (!key) {
+        jsonResponse(res, 200, { configured: false });
+        return;
+      }
+      // Only return the actual key when explicitly requested (settings page reveal)
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      if (url.searchParams.get('reveal') === 'true') {
+        // Managed mode: never expose vault key to users
+        if (process.env['LYNOX_MANAGED_MODE']) {
+          errorResponse(res, 403, 'Managed instance: vault key is system-controlled');
+          return;
+        }
+        jsonResponse(res, 200, { configured: true, key });
+      } else {
+        jsonResponse(res, 200, { configured: true });
+      }
+    });
+
+    this.staticRoutes.set('POST /api/vault/rotate', async (_req, res, _params, body) => {
+      if (process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 403, 'Managed instance: vault rotation is system-controlled');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const newKey = typeof b?.['newKey'] === 'string' ? b['newKey'] : '';
+      if (!newKey || newKey.length < 16) {
+        errorResponse(res, 400, 'newKey must be at least 16 characters');
+        return;
+      }
+      const currentKey = process.env['LYNOX_VAULT_KEY'];
+      if (!currentKey) {
+        errorResponse(res, 400, 'LYNOX_VAULT_KEY not set — cannot rotate');
+        return;
+      }
+      try {
+        const { resolve } = await import('node:path');
+        const { homedir } = await import('node:os');
+        const { SecretVault } = await import('../core/secret-vault.js');
+        const vaultPath = resolve(homedir(), '.lynox', 'vault.db');
+        const count = SecretVault.rotateVault(vaultPath, currentKey, newKey);
+        jsonResponse(res, 200, { rotated: count, message: 'Update LYNOX_VAULT_KEY and restart' });
+      } catch (err: unknown) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Rotation failed');
+      }
+    });
+
+    // ── Access token (read-only, for Settings UI) ────────────────
+
+    this.staticRoutes.set('GET /api/auth/token', async (req, res) => {
+      const secret = process.env['LYNOX_HTTP_SECRET'];
+      if (!secret) {
+        jsonResponse(res, 200, { configured: false });
+        return;
+      }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      if (url.searchParams.get('reveal') === 'true') {
+        if (process.env['LYNOX_MANAGED_MODE']) {
+          errorResponse(res, 403, 'Managed instance: access token is system-controlled');
+          return;
+        }
+        jsonResponse(res, 200, { configured: true, token: secret });
+      } else {
+        jsonResponse(res, 200, { configured: true });
+      }
+    });
+
+    // ── Files (workspace) ────────────────────────────────────────
+
+    const HIDDEN_PATTERNS = new Set(['.git', '.env', '.DS_Store', 'node_modules', '.cache', '__pycache__', 'thumbs.db']);
+
+    this.staticRoutes.set('GET /api/files', async (req, res) => {
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const dirPath = url.searchParams.get('path') ?? '.';
+      const showHidden = url.searchParams.get('hidden') === '1';
+      try {
+        const { readdir, stat, access } = (await import('node:fs/promises'));
+        const { join, resolve } = await import('node:path');
+        const { getWorkspaceDir } = await import('../core/workspace.js');
+        const { getLynoxDir } = await import('../core/config.js');
+        const { ensureDirSync: ensureDir } = await import('../core/atomic-write.js');
+
+        const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+        try { await access(base); } catch { ensureDir(base); }
+        const target = resolve(base, dirPath);
+        if (target !== base && !target.startsWith(base + '/')) { errorResponse(res, 403, 'Outside workspace'); return; }
+        const dirEntries = await readdir(target, { withFileTypes: true });
+        const filtered = dirEntries.filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)));
+        const entries = await Promise.all(filtered.map(async e => ({
+          name: e.name,
+          isDirectory: e.isDirectory(),
+          size: e.isFile() ? (await stat(join(target, e.name))).size : 0,
+        })));
+        jsonResponse(res, 200, { path: dirPath, entries });
+      } catch {
+        jsonResponse(res, 200, { path: dirPath, entries: [] });
+      }
+    });
+
+    /** Resolve a workspace-relative path, rejecting traversal and symlink escape. */
+    async function resolveWorkspacePath(filePath: string): Promise<string | null> {
+      const { resolve, join } = await import('node:path');
+      const { realpathSync } = await import('node:fs');
+      const { getWorkspaceDir } = await import('../core/workspace.js');
+      const { getLynoxDir } = await import('../core/config.js');
+      const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+      const resolved = resolve(base, filePath);
+      // Logical path must be within workspace
+      if (resolved !== base && !resolved.startsWith(base + '/')) return null;
+      // Real path (after symlink resolution) must also be within workspace
+      try {
+        const real = realpathSync(resolved);
+        if (real !== base && !real.startsWith(base + '/')) return null;
+      } catch {
+        // File doesn't exist yet — logical path check above is sufficient
+      }
+      return resolved;
+    }
+
+    this.staticRoutes.set('GET /api/files/download', async (req, res) => {
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const filePath = url.searchParams.get('path');
+      if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
+      try {
+        const { createReadStream } = await import('node:fs');
+        const { stat } = await import('node:fs/promises');
+        const { basename } = await import('node:path');
+        const resolved = await resolveWorkspacePath(filePath);
+        if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
+        const st = await stat(resolved);
+        if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
+        if (st.size > 100 * 1024 * 1024) { errorResponse(res, 413, 'File too large'); return; }
+        const name = basename(resolved);
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${name.replace(/"/g, '\\"')}"`,
+          'Content-Length': st.size,
+        });
+        createReadStream(resolved).pipe(res);
+      } catch {
+        errorResponse(res, 404, 'File not found');
+      }
+    });
+
+    this.staticRoutes.set('GET /api/files/read', async (req, res) => {
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const filePath = url.searchParams.get('path');
+      if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
+      try {
+        const { readFile, stat } = await import('node:fs/promises');
+        const resolved = await resolveWorkspacePath(filePath);
+        if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
+        const st = await stat(resolved);
+        if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
+        if (st.size > 1024 * 1024) { errorResponse(res, 413, 'File too large for preview (max 1 MB)'); return; }
+        const content = await readFile(resolved, 'utf-8');
+        jsonResponse(res, 200, { content });
+      } catch {
+        errorResponse(res, 404, 'File not found');
+      }
+    });
+
+    this.staticRoutes.set('DELETE /api/files', async (req, res) => {
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const filePath = url.searchParams.get('path');
+      if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
+      try {
+        const { unlink, stat } = await import('node:fs/promises');
+        const resolved = await resolveWorkspacePath(filePath);
+        if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
+        const st = await stat(resolved);
+        if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
+        await unlink(resolved);
+        jsonResponse(res, 200, { ok: true });
+      } catch {
+        errorResponse(res, 404, 'File not found');
+      }
+    });
+
+    // ── Migration (zero-knowledge self-hosted → managed) ─────────────
+
+    this.staticRoutes.set('GET /api/migration/preview', async (_req, res) => {
+      try {
+        const { MigrationExporter } = await import('../core/migration-export.js');
+        const exporter = new MigrationExporter();
+        const preview = exporter.preview();
+        jsonResponse(res, 200, preview);
+      } catch (err: unknown) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Preview failed');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/export', async (req, res, _params, body) => {
+      // Orchestrated migration: engine handles ECDH + export + transfer to target.
+      // Browser is just the orchestrator — progress reported via SSE.
+      const b = body as Record<string, unknown> | null;
+      const targetUrl = typeof b?.['targetUrl'] === 'string' ? b['targetUrl'] : '';
+      const migrationToken = typeof b?.['migrationToken'] === 'string' ? b['migrationToken'] : '';
+
+      if (!targetUrl || !migrationToken) {
+        errorResponse(res, 400, 'Missing targetUrl or migrationToken');
+        return;
+      }
+
+      // Validate targetUrl is HTTPS (or localhost for testing)
+      try {
+        const parsed = new URL(targetUrl);
+        const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || /^192\.168\./.test(parsed.hostname);
+        if (parsed.protocol !== 'https:' && !isLocal) {
+          errorResponse(res, 400, 'targetUrl must use HTTPS');
+          return;
+        }
+      } catch {
+        errorResponse(res, 400, 'Invalid targetUrl');
+        return;
+      }
+
+      // SSE response for progress
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+
+      const sendEvent = (event: string, data: unknown) => {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+
+      try {
+        const crypto = await import('../core/migration-crypto.js');
+        const { MigrationExporter } = await import('../core/migration-export.js');
+
+        // 1. Preview
+        sendEvent('progress', { phase: 'preview', message: 'Collecting data inventory...' });
+        const exporter = new MigrationExporter();
+        const preview = exporter.preview();
+        sendEvent('preview', preview);
+
+        // 2. ECDH Handshake with target
+        sendEvent('progress', { phase: 'handshake', message: 'Establishing secure connection...' });
+
+        const hsRes = await fetch(`${targetUrl}/api/migration/handshake`, {
+          headers: { 'X-Migration-Token': migrationToken, 'Accept': 'application/json' },
+        });
+        if (!hsRes.ok) {
+          const errText = await hsRes.text();
+          throw new Error(`Handshake failed: ${errText}`);
+        }
+        const handshake = await hsRes.json() as { serverPubKey: string; signature: string; challengeNonce: string };
+
+        // Client key agreement
+        const clientKp = crypto.generateEphemeralKeypair();
+        const serverPub = crypto.deserializePublicKey(handshake.serverPubKey);
+        const nonce = Buffer.from(handshake.challengeNonce, 'hex');
+        const transferKey = crypto.deriveTransferKey(clientKp.privateKey, serverPub, nonce);
+
+        const migrationHeaders = {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Migration-Token': migrationToken,
+        };
+
+        const completeRes = await fetch(`${targetUrl}/api/migration/handshake`, {
+          method: 'POST',
+          headers: migrationHeaders,
+          body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
+        });
+        if (!completeRes.ok) throw new Error('Handshake completion failed');
+
+        sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
+
+        // 3. Export + Encrypt
+        sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
+        const { manifest, chunks } = exporter.export(transferKey, (p) => {
+          sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
+        });
+
+        // Zeroize transfer key — no longer needed after encryption
+        crypto.zeroize(transferKey);
+
+        // 4. Send manifest
+        sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });
+        const mRes = await fetch(`${targetUrl}/api/migration/manifest`, {
+          method: 'POST',
+          headers: migrationHeaders,
+          body: JSON.stringify(manifest),
+        });
+        if (!mRes.ok) throw new Error(`Manifest rejected: ${await mRes.text()}`);
+
+        // 5. Send chunks
+        for (let i = 0; i < chunks.length; i++) {
+          sendEvent('progress', {
+            phase: 'transferring',
+            message: `Sending chunk ${String(i + 1)}/${String(chunks.length)}...`,
+            current: i + 1,
+            total: chunks.length,
+          });
+
+          const cRes = await fetch(`${targetUrl}/api/migration/chunk`, {
+            method: 'POST',
+            headers: migrationHeaders,
+            body: JSON.stringify(chunks[i]),
+          });
+          if (!cRes.ok) throw new Error(`Chunk ${String(i)} rejected: ${await cRes.text()}`);
+        }
+
+        // 6. Restore
+        sendEvent('progress', { phase: 'restoring', message: 'Restoring data on target...' });
+        const rRes = await fetch(`${targetUrl}/api/migration/restore`, {
+          method: 'POST',
+          headers: migrationHeaders,
+        });
+        if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
+
+        const result = await rRes.json() as { success: boolean; verification: unknown };
+        sendEvent('done', { success: true, verification: result.verification });
+      } catch (err: unknown) {
+        sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
+      } finally {
+        res.end();
+      }
+    });
+
+    this.staticRoutes.set('GET /api/migration/handshake', async (req, res) => {
+      // Only available on managed instances receiving a migration
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      const token = req.headers['x-migration-token'];
+      if (!token || typeof token !== 'string') {
+        errorResponse(res, 401, 'Missing X-Migration-Token header');
+        return;
+      }
+
+      try {
+        const importer = await this._getOrCreateMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 503, 'Migration not available — missing vault key or HTTP secret');
+          return;
+        }
+
+        // Validate migration token
+        const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+        if (!storedToken) {
+          errorResponse(res, 403, 'No migration token configured for this instance');
+          return;
+        }
+
+        const { verifyMigrationToken } = await import('../core/migration-crypto.js');
+        if (!verifyMigrationToken(token, storedToken)) {
+          errorResponse(res, 403, 'Invalid migration token');
+          return;
+        }
+
+        const payload = importer.startHandshake();
+        jsonResponse(res, 200, payload);
+      } catch (err: unknown) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Handshake failed');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/handshake', async (_req, res, _params, body) => {
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      const b = body as Record<string, unknown> | null;
+      const clientPubKey = typeof b?.['clientPubKey'] === 'string' ? b['clientPubKey'] : '';
+      if (!clientPubKey) {
+        errorResponse(res, 400, 'Missing clientPubKey');
+        return;
+      }
+
+      try {
+        const importer = this._getMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 400, 'No active migration session — start handshake first');
+          return;
+        }
+
+        importer.completeHandshake(clientPubKey);
+        jsonResponse(res, 200, { ready: true });
+      } catch (err: unknown) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Handshake completion failed');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/manifest', async (_req, res, _params, body) => {
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      try {
+        const importer = this._getMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 400, 'No active migration session');
+          return;
+        }
+
+        const manifest = body as import('../core/migration-crypto.js').MigrationManifest;
+        importer.setManifest(manifest);
+        jsonResponse(res, 200, { accepted: true, totalChunks: manifest.totalChunks });
+      } catch (err: unknown) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Manifest rejected');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/chunk', async (_req, res, _params, body) => {
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      try {
+        const importer = this._getMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 400, 'No active migration session');
+          return;
+        }
+
+        const chunk = body as import('../core/migration-crypto.js').EncryptedChunk;
+        const result = importer.receiveChunk(chunk);
+        const complete = importer.isComplete();
+
+        jsonResponse(res, 200, { ...result, complete });
+      } catch (err: unknown) {
+        // On any chunk error, cleanup the session to prevent partial state
+        this._migrationImporter?.cleanup();
+        this._migrationImporter = null;
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Chunk rejected');
+      }
+    });
+
+    this.staticRoutes.set('POST /api/migration/restore', async (_req, res) => {
+      if (!process.env['LYNOX_MANAGED_MODE']) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+
+      try {
+        const importer = this._getMigrationImporter();
+        if (!importer) {
+          errorResponse(res, 400, 'No active migration session');
+          return;
+        }
+
+        const verification = importer.restore();
+
+        // Cleanup crypto material
+        importer.cleanup();
+        this._migrationImporter = null;
+
+        // Invalidate the migration token (one-time use)
+        delete process.env['LYNOX_MIGRATION_TOKEN'];
+
+        jsonResponse(res, 200, { success: true, verification });
+
+        // Auto-restart so engine loads the imported data
+        setTimeout(() => { process.exit(0); }, 1000);
+      } catch (err: unknown) {
+        this._migrationImporter?.cleanup();
+        this._migrationImporter = null;
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Restore failed');
+      }
+    });
+
+    this.staticRoutes.set('DELETE /api/migration', async (_req, res) => {
+      // Cancel an in-progress migration (cleanup keys + memory)
+      if (this._migrationImporter) {
+        this._migrationImporter.cleanup();
+        this._migrationImporter = null;
+      }
+      jsonResponse(res, 200, { cancelled: true });
+    });
+  }
+
+  // ── Migration helpers ──────────────────────────────────────────────────────
+
+  private _migrationImporter: import('../core/migration-import.js').MigrationImporter | null = null;
+
+  private async _getOrCreateMigrationImporter(): Promise<import('../core/migration-import.js').MigrationImporter | null> {
+    if (this._migrationImporter?.isActive) return this._migrationImporter;
+
+    const vaultKey = process.env['LYNOX_VAULT_KEY'];
+    const httpSecret = process.env['LYNOX_HTTP_SECRET'];
+    if (!vaultKey || !httpSecret) return null;
+
+    const { MigrationImporter } = await import('../core/migration-import.js');
+    this._migrationImporter = new MigrationImporter({ vaultKey, httpSecret });
+    return this._migrationImporter;
+  }
+
+  private _getMigrationImporter(): import('../core/migration-import.js').MigrationImporter | null {
+    if (!this._migrationImporter?.isActive) return null;
+    return this._migrationImporter;
+  }
+}

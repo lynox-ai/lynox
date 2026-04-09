@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@font-face {
+	font-family: "Space Grotesk";
+	src: url("/fonts/space-grotesk-latin.woff2") format("woff2");
+	font-weight: 300 700;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "IBM Plex Mono";
+	src: url("/fonts/ibm-plex-mono-400-latin.woff2") format("woff2");
+	font-weight: 400;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "IBM Plex Mono";
+	src: url("/fonts/ibm-plex-mono-700-latin.woff2") format("woff2");
+	font-weight: 700;
+	font-display: swap;
+}
+
+@theme {
+	/* Matched to lynox.ai website design system */
+	--color-bg: #050510;
+	--color-bg-subtle: #0a0a1a;
+	--color-bg-muted: #0c0c20;
+	--color-border: #1a1a4a;
+	--color-border-hover: #2a2a5a;
+	--color-text: #e8e8f0;
+	--color-text-muted: #8888aa;
+	--color-text-subtle: #7e7eaa;
+	--color-accent: #6525EF;
+	--color-accent-hover: #7b3fff;
+	--color-accent-text: #9B8AFF;
+	--color-danger: #ef4444;
+	--color-success: #22c55e;
+	--color-warning: #f59e0b;
+	--font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+	--font-mono: "IBM Plex Mono", ui-monospace, monospace;
+	--radius-sm: 4px;
+	--radius-md: 6px;
+	--radius-lg: 8px;
+}
+
+html {
+	background-color: var(--color-bg);
+	color: var(--color-text);
+	font-family: var(--font-sans);
+	line-height: 1.7;
+	height: 100%;
+	overflow: hidden;
+}
+
+body {
+	height: 100%;
+	overflow: hidden;
+	margin: 0;
+}
+
+/* Custom select styling (dark mode compatible) */
+select {
+	appearance: none;
+	-webkit-appearance: none;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%238888aa' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 0.75rem center;
+	padding-right: 2rem;
+	cursor: pointer;
+	outline: none;
+}
+
+select:focus {
+	outline: none;
+	box-shadow: 0 0 0 1px var(--color-accent);
+}
+
+select option {
+	background: var(--color-bg-subtle);
+	color: var(--color-text);
+	padding: 0.375rem 0.5rem;
+}
+
+/* Hide scrollbar but keep scroll functionality */
+textarea {
+	scrollbar-width: none;
+}
+textarea::-webkit-scrollbar {
+	display: none;
+}
+
+/* Thin scrollbar for content areas */
+.scrollbar-thin {
+	scrollbar-width: thin;
+	scrollbar-color: var(--color-border) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+	width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+	background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+	background-color: var(--color-border);
+	border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+	background-color: var(--color-border-hover);
+}
+
+/* Focus styles matching website */
+:focus-visible {
+	outline: 2px solid var(--color-accent-text);
+	outline-offset: 2px;
+	border-radius: var(--radius-sm);
+}

@@ -1,0 +1,86 @@
+# lynox — single-instance Docker Compose setup
+#
+# Quick start:
+#   1. Copy .env.example to .env and fill in ANTHROPIC_API_KEY
+#   2. docker compose up
+#   3. Open http://localhost:3000 and enter the access token from docker logs
+#
+# Full docs: https://docs.lynox.ai/getting-started/
+
+services:
+  lynox:
+    image: ghcr.io/lynox-ai/lynox:latest
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "3000:3000"
+    tmpfs:
+      - /tmp:size=512M
+      - /workspace:size=256M,uid=1001,gid=1001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    environment:
+      # ── Required ──────────────────────────────────────
+      - ANTHROPIC_API_KEY           # Your Anthropic API key (starts with sk-ant-)
+
+      # ── Recommended ──────────────────────────────────
+      # Set these explicitly for production. If omitted, they are
+      # auto-generated on first start and saved to the volume.
+      # - LYNOX_HTTP_SECRET         # Access token for Web UI login
+      # - LYNOX_VAULT_KEY           # Encrypt data at rest (generate: openssl rand -base64 48)
+
+      # ── Telegram (optional) ──────────────────────────
+      # Mobile access via Telegram bot.
+      # Create a bot: t.me/BotFather → /newbot → copy token
+      - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_ALLOWED_CHAT_IDS
+
+      # ── Web Search ────────────────────────────────────
+      - SEARXNG_URL=http://searxng:8080  # Free, unlimited via SearXNG below
+      # - TAVILY_API_KEY                 # Alternative: tavily.com (1K free/month, set search_provider: 'tavily')
+
+      # ── Optional features ─────────────────────────────
+      # - GOOGLE_CLIENT_ID          # Google Workspace OAuth
+      # - GOOGLE_CLIENT_SECRET      # Google Workspace OAuth
+      # - LYNOX_BUGSINK_DSN         # Error reporting (opt-in, Bugsink)
+
+    # ⚠ CRITICAL: This volume persists your data AND vault key.
+    # Without it, all data and encryption keys are lost on container restart.
+    volumes:
+      - ${HOME}/.lynox:/home/lynox/.lynox
+    networks:
+      - internal
+
+  # ── SearXNG — free web search ──────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge

@@ -1,0 +1,27 @@
+---
+title: lynox Documentation
+description: Run your business. Not your tools.
+template: splash
+hero:
+  tagline: An AI engine that learns your business. Automates workflows, remembers everything. Source-available. Self-hosted.
+  actions:
+    - text: Get Started
+      link: /getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/lynox-ai/lynox
+      icon: external
+      variant: minimal
+---
+
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <LinkCard title="Getting Started" href="/getting-started/" description="Install and run your first session in under a minute." />
+  <LinkCard title="Daily Use" href="/daily-use/web-ui/" description="Web UI and configuration for everyday use." />
+  <LinkCard title="Features" href="/features/memory/" description="Memory, workflows, CRM, security, and backups." />
+  <LinkCard title="Setup & Deployment" href="/setup/docker/" description="LLM providers, Docker, and remote access." />
+  <LinkCard title="Integrations" href="/integrations/telegram/" description="Telegram, Google Workspace, MCP, and SearXNG." />
+  <LinkCard title="For Developers" href="/developers/cli/" description="CLI reference, HTTP API, and extension points." />
+</CardGrid>

@@ -1,0 +1,119 @@
+{
+  "name": "@lynox-ai/core",
+  "version": "1.0.0",
+  "description": "Run your business, not your tools — AI runtime for CRM, workflows, research, monitoring. Self-hosted or managed EU. Source-available (ELv2).",
+  "author": "Rafael Burlet",
+  "license": "Elastic-2.0",
+  "homepage": "https://lynox.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lynox-ai/lynox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lynox-ai/lynox/issues"
+  },
+  "keywords": [
+    "ai-agent",
+    "anthropic",
+    "claude",
+    "autonomous",
+    "business-automation",
+    "mcp",
+    "telegram-bot",
+    "pipeline",
+    "memory",
+    "self-hosted"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./types": {
+      "import": "./dist/types/index.js",
+      "types": "./dist/types/index.d.ts"
+    }
+  },
+  "bin": {
+    "lynox": "dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "node --env-file=.env --watch --import tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "bench": "vitest bench --config vitest.bench.config.ts",
+    "bench:online": "vitest bench --config vitest.bench.config.ts tests/performance/online/",
+    "smoke:manual": "bash scripts/smoke-manual.sh",
+    "test:watch": "vitest",
+    "prepare": "lefthook install || true",
+    "security": "sh scripts/security-scan.sh && vitest run tests/security/",
+    "lint": "eslint src/",
+    "prepack": "find dist -name '*.js.map' -o -name '*.d.ts.map' | xargs rm -f",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@huggingface/transformers": "^3.8.1",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@mozilla/readability": "^0.6.0",
+    "@rolldown/binding-darwin-arm64": "1.0.0-rc.13",
+    "@sentry/node": "^10.46.0",
+    "better-sqlite3": "^12.6.2",
+    "linkedom": "^0.18.12",
+    "telegraf": "^4.16.3",
+    "web-push": "^3.6.7",
+    "zod": "^4.3.6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@evilmartians/lefthook",
+      "better-sqlite3",
+      "onnxruntime-node"
+    ],
+    "overrides": {
+      "path-to-regexp": "^8.4.0",
+      "brace-expansion": "^5.0.5",
+      "lodash-es": ">=4.18.0",
+      "cookie": ">=0.7.0",
+      "hono": ">=4.12.12",
+      "@hono/node-server": ">=1.19.13",
+      "vite": ">=8.0.5"
+    }
+  },
+  "peerDependencies": {
+    "@anthropic-ai/bedrock-sdk": ">=0.15.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/bedrock-sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@evilmartians/lefthook": "^2.1.4",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.3.5",
+    "@types/web-push": "^3.6.4",
+    "@typescript-eslint/eslint-plugin": "^8.57.2",
+    "@typescript-eslint/parser": "^8.57.2",
+    "@vitest/coverage-v8": "^4.1.4",
+    "eslint": "^10.1.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.4"
+  }
+}

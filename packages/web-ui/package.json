@@ -1,0 +1,54 @@
+{
+  "name": "@lynox-ai/web-ui",
+  "version": "1.0.0",
+  "license": "Elastic-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "svelte": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "svelte": "./dist/index.js"
+    },
+    "./style": "./src/app.css"
+  },
+  "files": [
+    "dist/",
+    "src/app.css",
+    "static/"
+  ],
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "package": "svelte-kit sync && svelte-package -o dist",
+    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@simplewebauthn/browser": "^13.3.0",
+    "dompurify": "^3.3.3",
+    "html2canvas": "^1.4.1",
+    "marked": "^17.0.5",
+    "mermaid": "^11.6.0",
+    "shiki": "^4.0.2",
+    "uqr": "^0.1.2"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-node": "^5.2.12",
+    "@sveltejs/kit": "^2.21.1",
+    "@sveltejs/package": "^2.3.10",
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@tailwindcss/vite": "^4.1.8",
+    "@types/dompurify": "^3.2.0",
+    "svelte": "^5.34.7",
+    "svelte-check": "^4.2.1",
+    "tailwindcss": "^4.1.8",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "peerDependencies": {
+    "@sveltejs/kit": "^2.0.0",
+    "svelte": "^5.0.0"
+  }
+}

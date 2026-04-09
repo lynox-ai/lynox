@@ -1,0 +1,37 @@
+/**
+ * Mutable CLI state shared across command handlers and the stream handler.
+ *
+ * All module-level `let` variables from index.ts are collected here so that
+ * extracted command modules can read/write them via a single import.
+ */
+
+import type { Session } from '../core/session.js';
+import { MODEL_MAP } from '../types/index.js';
+import { Spinner } from './spinner.js';
+import { MarkdownStreamer } from './markdown.js';
+import { FooterBar } from './footer.js';
+
+// ── Mutable state ──────────────────────────────────────────────────────
+
+export const state = {
+  showThinking: false,
+  lastResponse: '',
+  responseStarted: false,
+  currentModelId: MODEL_MAP['sonnet'],
+  activeSession: null as Session | null,
+  thinkingStarted: false,
+  showThinkingRendered: false,
+  pipeSummaryEnabled: false,
+  lastUsage: null as Record<string, number> | null,
+  turnCount: 0,
+  hadError: false,
+  sessionTruncated: false,
+  turnStartMs: 0,
+};
+
+// ── Shared instances ───────────────────────────────────────────────────
+
+export const spinner = new Spinner();
+export const md = new MarkdownStreamer();
+export const footer = new FooterBar();
+export const toolsUsed = new Set<string>();
