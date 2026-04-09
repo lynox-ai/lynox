@@ -7,7 +7,7 @@
 
 **Run your business. Not your tools.**
 
-One system that learns your business — replaces your CRM, workflows, outreach, and monitoring. Persistent knowledge graph, workflow capture, background worker. Open, self-hosted, no vendor lock-in.
+One system that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Source-available (ELv2), self-hosted, no vendor lock-in.
 
 ## What it does
 

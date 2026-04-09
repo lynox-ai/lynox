@@ -1,7 +1,7 @@
 {
   "name": "@lynox-ai/core",
   "version": "1.0.0",
-  "description": "One system that learns your business — replaces your CRM, workflows, outreach, and monitoring. Self-hosted, MCP server.",
+  "description": "AI business runtime — CRM, workflows, research, monitoring. Persistent knowledge graph, self-hosted. ELv2 licensed.",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
   "homepage": "https://lynox.ai",
