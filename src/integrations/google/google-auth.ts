@@ -361,6 +361,55 @@ export class GoogleAuth {
   }
 
   /**
+   * Start redirect-based OAuth flow for web-hosted instances.
+   * Returns an auth URL to redirect the user to. After consent, Google redirects
+   * back to the provided redirectUri with an auth code. Call exchangeRedirectCode()
+   * with the code to complete the flow.
+   */
+  startRedirectAuth(redirectUri: string, scopes?: string[]): { authUrl: string; state: string } {
+    const requestedScopes = scopes ?? this.configuredScopes ?? DEFAULT_SCOPES;
+    const state = randomUUID();
+
+    const params = new URLSearchParams({
+      client_id: this.clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: requestedScopes.join(' '),
+      access_type: 'offline',
+      prompt: 'consent',
+      state,
+    });
+
+    return { authUrl: `${AUTH_URL}?${params}`, state };
+  }
+
+  /**
+   * Exchange an authorization code from redirect-based OAuth flow.
+   */
+  async exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
+    const response = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+        code,
+        grant_type: 'authorization_code',
+        redirect_uri: redirectUri,
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Token exchange failed: ${response.status} ${text}`);
+    }
+
+    this.tokenData = validateTokenResponse(await response.json());
+    saveTokenData(this.tokenData, this.vault);
+  }
+
+  /**
    * Start device flow OAuth — for headless/Docker/Telegram environments.
    * Returns a verification URL and user code. The user opens the URL in any browser,
    * enters the code, and the method polls until authorized.

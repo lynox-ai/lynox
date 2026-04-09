@@ -164,6 +164,8 @@ export class LynoxHTTPApi {
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
   private healthCache: { data: Record<string, unknown>; expiresAt: number } | null = null;
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
+  private _googleOAuthState: string | undefined;
+  private _googleRedirectUri: string | undefined;
 
   /** Whether the Web UI handler is loaded (determines default port and bind behavior). */
   hasWebUi(): boolean { return this.webUiHandler !== null; }
@@ -1898,9 +1900,32 @@ export class LynoxHTTPApi {
       });
     });
 
-    this.staticRoutes.set('POST /api/google/auth', async (_req, res) => {
+    this.staticRoutes.set('POST /api/google/auth', async (_req, res, _params, body) => {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
+
+      // Web-hosted instances: use redirect flow (ORIGIN env is set on managed instances)
+      const origin = process.env['ORIGIN'];
+      const b = body as Record<string, unknown> | null;
+      const preferRedirect = b?.['mode'] === 'redirect' || !!origin;
+
+      if (preferRedirect && origin) {
+        try {
+          const redirectUri = `${origin}/api/google/callback`;
+          const { authUrl, state } = google.startRedirectAuth(redirectUri);
+          // Store state for CSRF validation
+          this._googleOAuthState = state;
+          this._googleRedirectUri = redirectUri;
+          jsonResponse(res, 200, { authUrl });
+          return;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errorResponse(res, 500, msg);
+          return;
+        }
+      }
+
+      // Fallback: device flow (self-hosted / headless)
       try {
         const flow = await google.startDeviceFlow();
         jsonResponse(res, 200, {
@@ -1912,6 +1937,47 @@ export class LynoxHTTPApi {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         errorResponse(res, 500, msg);
+      }
+    });
+
+    // Google OAuth callback — handles redirect from Google after user consent
+    this.staticRoutes.set('GET /api/google/callback', async (req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!google) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<html><body><h1>Error</h1><p>Google auth not configured.</p></body></html>');
+        return;
+      }
+
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const error = url.searchParams.get('error');
+
+      if (error) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end(`<html><body><h1>Error</h1><p>${error}</p><p>You can close this tab.</p></body></html>`);
+        return;
+      }
+
+      if (!code || !state || state !== this._googleOAuthState) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<html><body><h1>Error</h1><p>Invalid callback — missing code or state mismatch.</p></body></html>');
+        return;
+      }
+
+      try {
+        await google.exchangeRedirectCode(code, this._googleRedirectUri ?? '');
+        this._googleOAuthState = undefined;
+        this._googleRedirectUri = undefined;
+        // Redirect back to settings page
+        const origin = process.env['ORIGIN'] ?? '';
+        res.writeHead(302, { Location: `${origin}/app/settings/integrations` });
+        res.end();
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        res.writeHead(500, { 'Content-Type': 'text/html' });
+        res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
       }
     });
 

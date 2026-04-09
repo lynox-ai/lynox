@@ -93,11 +93,21 @@
 		connecting = true;
 		flow = null;
 		try {
-			const res = await fetch(`${getApiBase()}/google/auth`, { method: 'POST' });
+			const res = await fetch(`${getApiBase()}/google/auth`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
 			if (res.ok) {
-				flow = (await res.json()) as DeviceFlow;
-				// Auto-open verification URL and copy code to clipboard
-				if (flow) {
+				const data = (await res.json()) as { authUrl?: string; verificationUrl?: string; userCode?: string };
+				if (data.authUrl) {
+					// Redirect flow (managed/web-hosted) — redirect to Google consent
+					window.location.href = data.authUrl;
+					return;
+				}
+				flow = data as DeviceFlow;
+				// Device flow — auto-open verification URL and copy code to clipboard
+				if (flow?.verificationUrl) {
 					window.open(flow.verificationUrl, '_blank', 'noopener');
 					navigator.clipboard.writeText(flow.userCode).then(() => {
 						addToast(t('integrations.google_code_copied'), 'success', 4000);
