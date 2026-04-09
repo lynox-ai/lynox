@@ -745,7 +745,8 @@
 	</div>
 	{/if}
 
-	<!-- Telegram -->
+	<!-- Telegram (hidden in managed — self-hosted only) -->
+	{#if !managed}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">
 			<div>
@@ -882,6 +883,7 @@
 			</div>
 		{/if}
 	</div>
+	{/if}
 
 	<!-- Web Search (hidden in managed — SearXNG pre-configured) -->
 	{#if !managed}
