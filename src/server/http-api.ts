@@ -1875,12 +1875,16 @@ export class LynoxHTTPApi {
         errorResponse(res, 404, 'No push subscriptions registered');
         return;
       }
-      await this.pushChannel.send({
+      const result = await this.pushChannel.sendDetailed({
         title: 'lynox',
         body: 'Push notifications are working.',
         priority: 'normal',
       });
-      jsonResponse(res, 200, { ok: true, subscriptions: count });
+      if (result.sent === 0) {
+        errorResponse(res, 502, `Delivery failed — ${result.cleaned} subscription(s) expired, ${result.failed} failed`);
+        return;
+      }
+      jsonResponse(res, 200, { ok: true, sent: result.sent, failed: result.failed, cleaned: result.cleaned });
     });
 
     // ── Google Auth ──

@@ -170,11 +170,16 @@ export class WebPushNotificationChannel implements NotificationChannel {
   }
 
   async send(msg: NotificationMessage): Promise<boolean> {
+    const result = await this.sendDetailed(msg);
+    return result.sent > 0;
+  }
+
+  async sendDetailed(msg: NotificationMessage): Promise<{ sent: number; failed: number; cleaned: number }> {
     // Prune expired subscriptions on each send (lightweight — SQLite handles it fast)
     this.store.prune();
 
     const subscriptions = this.store.getAll();
-    if (subscriptions.length === 0) return false;
+    if (subscriptions.length === 0) return { sent: 0, failed: 0, cleaned: 0 };
 
     const tag = msg.taskId ?? `lynox-${Date.now()}`;
     const payload: PushPayload = {
@@ -189,6 +194,8 @@ export class WebPushNotificationChannel implements NotificationChannel {
 
     const payloadStr = JSON.stringify(payload);
     const staleEndpoints: string[] = [];
+    let sent = 0;
+    let failed = 0;
 
     await Promise.allSettled(
       subscriptions.map(async (sub) => {
@@ -201,12 +208,14 @@ export class WebPushNotificationChannel implements NotificationChannel {
             payloadStr,
             { TTL: 86400 }, // 24h
           );
+          sent++;
         } catch (err: unknown) {
           // 404 or 410 = subscription expired, remove it
           const statusCode = (err as { statusCode?: number })?.statusCode;
           if (statusCode === 404 || statusCode === 410) {
             staleEndpoints.push(sub.endpoint);
           } else {
+            failed++;
             const detail = err instanceof Error ? err.message : String(err);
             process.stderr.write(
               `[web-push] failed for ${sub.endpoint.slice(0, 50)}…: ${detail}\n`,
@@ -221,6 +230,6 @@ export class WebPushNotificationChannel implements NotificationChannel {
       this.store.remove(ep);
     }
 
-    return true;
+    return { sent, failed, cleaned: staleEndpoints.length };
   }
 }
