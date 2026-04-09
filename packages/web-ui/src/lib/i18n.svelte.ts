@@ -396,6 +396,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.whats_next_mobile_desc': { de: 'QR-Code scannen und als PWA nutzen', en: 'Scan QR code and use as PWA' },
 	'onboard.whats_next_telegram': { de: 'Telegram verbinden', en: 'Connect Telegram' },
 	'onboard.whats_next_telegram_desc': { de: 'Mobiler Zugang — Aufgaben von unterwegs', en: 'Mobile access — tasks on the go' },
+	'onboard.whats_next_notifications': { de: 'Benachrichtigungen aktivieren', en: 'Enable notifications' },
+	'onboard.whats_next_notifications_desc': { de: 'Erhalte Alerts wenn Workflows abgeschlossen sind', en: 'Get alerts when workflows complete' },
 	'onboard.whats_next_knowledge': { de: 'Wissen ansehen', en: 'Explore Knowledge' },
 	'onboard.whats_next_knowledge_desc': { de: 'Was lynox über dich gelernt hat', en: 'What lynox learned about you' },
 	'onboard.whats_next_chat': { de: 'Einfach loschatten', en: 'Just start chatting' },
@@ -624,6 +626,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_paste_credentials': { de: 'Client-ID und Client-Secret hier einfügen:', en: 'Paste your Client ID and Client Secret below:' },
 	'integrations.google_wrong_client_type': { de: 'Falscher Client-Typ. Der OAuth-Client muss als „Desktop-App" erstellt werden, nicht als „Webanwendung".', en: 'Wrong client type. The OAuth client must be created as "Desktop app", not "Web application".' },
 	'integrations.google_invalid_credentials': { de: 'Ungültige Client-ID. Bitte prüfe, ob die Client-ID korrekt aus der Google Cloud Console kopiert wurde.', en: 'Invalid Client ID. Please verify you copied the Client ID correctly from the Google Cloud Console.' },
+	'integrations.change_credentials': { de: 'Credentials ändern', en: 'Change credentials' },
 
 	// Push Notifications
 	'integrations.push_notifications': { de: 'Push-Benachrichtigungen', en: 'Push Notifications' },
@@ -640,6 +643,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.push_test_sent': { de: 'Test-Benachrichtigung gesendet', en: 'Test notification sent' },
 	'integrations.push_test_failed': { de: 'Test fehlgeschlagen', en: 'Test failed' },
 	'integrations.push_denied_hint': { de: 'Benachrichtigungen wurden im Browser blockiert. Setze die Berechtigung in den Browser-Einstellungen zurück.', en: 'Notifications are blocked in your browser. Reset the permission in browser settings.' },
+	'integrations.push_ios_hint': { de: 'Füge lynox zum Homescreen hinzu, um Push-Benachrichtigungen zu aktivieren: Teilen → Zum Home-Bildschirm.', en: 'Add lynox to your home screen to enable push notifications: Share → Add to Home Screen.' },
+	'integrations.push_ios_hint_short': { de: 'Homescreen nötig', en: 'Homescreen required' },
 
 	// Telegram
 	'integrations.telegram': { de: 'Telegram Bot', en: 'Telegram Bot' },

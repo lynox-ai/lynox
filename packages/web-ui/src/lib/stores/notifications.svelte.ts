@@ -20,13 +20,28 @@ let supported = $state(false);
 // Init
 // ---------------------------------------------------------------------------
 
-export function initNotifications(): void {
-  supported =
-    typeof window !== 'undefined' &&
-    'serviceWorker' in navigator &&
-    'PushManager' in window &&
-    'Notification' in window;
+/** Whether this is an iOS device without PWA homescreen installation. */
+let iosWithoutPwa = $state(false);
 
+export function initNotifications(): void {
+  if (typeof window === 'undefined') return;
+
+  const hasSw = 'serviceWorker' in navigator;
+  const hasPush = 'PushManager' in window;
+  const hasNotif = 'Notification' in window;
+
+  // iOS check: PushManager only available when installed to homescreen
+  const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+    || ('standalone' in navigator && (navigator as unknown as { standalone: boolean }).standalone);
+
+  if (isIos && !isStandalone) {
+    iosWithoutPwa = true;
+    supported = false;
+    return;
+  }
+
+  supported = hasSw && hasPush && hasNotif;
   if (!supported) return;
 
   permission = Notification.permission;
@@ -36,6 +51,10 @@ export function initNotifications(): void {
     const sub = await reg.pushManager.getSubscription();
     subscribed = sub !== null;
   });
+}
+
+export function isIosWithoutPwa(): boolean {
+  return iosWithoutPwa;
 }
 
 // ---------------------------------------------------------------------------

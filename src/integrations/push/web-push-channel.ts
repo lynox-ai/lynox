@@ -89,11 +89,25 @@ class PushSubscriptionStore {
   }
 
   add(endpoint: string, p256dh: string, auth: string): void {
+    // Limit to 50 subscriptions per instance (prevents DB bloat)
+    const count = this.count();
+    if (count >= 50) {
+      // Remove oldest subscription to make room
+      this.db.prepare(`DELETE FROM push_subscriptions WHERE rowid IN (SELECT rowid FROM push_subscriptions ORDER BY created_at ASC LIMIT 1)`).run();
+    }
     this.db
       .prepare(
         `INSERT OR REPLACE INTO push_subscriptions (endpoint, keys_p256dh, keys_auth) VALUES (?, ?, ?)`,
       )
       .run(endpoint, p256dh, auth);
+  }
+
+  /** Remove subscriptions older than 90 days. */
+  prune(): number {
+    const result = this.db
+      .prepare(`DELETE FROM push_subscriptions WHERE created_at < datetime('now', '-90 days')`)
+      .run();
+    return result.changes;
   }
 
   remove(endpoint: string): void {
@@ -156,13 +170,16 @@ export class WebPushNotificationChannel implements NotificationChannel {
   }
 
   async send(msg: NotificationMessage): Promise<boolean> {
+    // Prune expired subscriptions on each send (lightweight — SQLite handles it fast)
+    this.store.prune();
+
     const subscriptions = this.store.getAll();
     if (subscriptions.length === 0) return false;
 
     const tag = msg.taskId ?? `lynox-${Date.now()}`;
     const payload: PushPayload = {
-      title: msg.title,
-      body: msg.body,
+      title: msg.title.slice(0, 64),
+      body: msg.body.slice(0, 240),
       tag,
       data: {
         priority: msg.priority,

@@ -121,4 +121,5 @@ export {
   isSubscribed,
   isLoading,
   isSupported,
+  isIosWithoutPwa,
 } from './stores/notifications.svelte.js';

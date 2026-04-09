@@ -11,6 +11,7 @@
 		isSubscribed,
 		isLoading as isPushLoading,
 		isSupported as isPushSupported,
+		isIosWithoutPwa,
 	} from '../stores/notifications.svelte.js';
 
 	async function copyText(text: string) {
@@ -143,6 +144,21 @@
 		}
 		revoking = false;
 		await loadGoogleStatus();
+	}
+
+	async function resetGoogleCredentials() {
+		try {
+			await Promise.all([
+				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, { method: 'DELETE' }),
+				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, { method: 'DELETE' }),
+			]);
+			await fetch(`${getApiBase()}/google/reload`, { method: 'POST' });
+			flow = null;
+			googleCredSaved = false;
+			await loadGoogleStatus();
+		} catch {
+			addToast(t('common.save_failed'), 'error');
+		}
 	}
 
 	// --- Telegram Wizard ---
@@ -661,12 +677,29 @@
 					{connecting ? t('integrations.connecting') : t('integrations.connect_google')}
 				</button>
 				<p class="text-xs text-text-subtle">{t('integrations.device_flow_preview')}</p>
+				<button
+					onclick={resetGoogleCredentials}
+					class="text-xs text-text-subtle hover:text-text-muted transition-colors"
+				>
+					{t('integrations.change_credentials')}
+				</button>
 			</div>
 		{/if}
 	</div>
 
 	<!-- Push Notifications -->
-	{#if isPushSupported()}
+	{#if isIosWithoutPwa()}
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+		<div class="flex items-center justify-between mb-4">
+			<div>
+				<h2 class="font-medium">{t('integrations.push_notifications')}</h2>
+				<p class="text-xs text-text-muted mt-1">{t('integrations.push_desc')}</p>
+			</div>
+			<span class="text-xs text-warning">{t('integrations.push_ios_hint_short')}</span>
+		</div>
+		<p class="text-xs text-text-muted">{t('integrations.push_ios_hint')}</p>
+	</div>
+	{:else if isPushSupported()}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">
 			<div>

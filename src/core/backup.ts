@@ -48,9 +48,9 @@ export interface BackupConfig {
   gdriveUploader?: import('./backup-upload-gdrive.js').GDriveBackupUploader | undefined;
 }
 
-const SQLITE_DBS = ['history.db', 'vault.db', 'datastore.db', 'agent-memory.db'] as const;
+const SQLITE_DBS = ['history.db', 'vault.db', 'datastore.db', 'agent-memory.db', 'push-subscriptions.db'] as const;
 const COPY_DIRS = ['memory', 'sessions'] as const;
-const COPY_FILES = ['config.json'] as const;
+const COPY_FILES = ['config.json', 'vapid-keys.json'] as const;
 
 export class BackupManager {
   private readonly lynoxDir: string;

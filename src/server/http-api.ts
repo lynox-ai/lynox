@@ -1819,11 +1819,26 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Basic endpoint validation — must be HTTPS URL
+      // Endpoint validation — must be HTTPS, must be a known push service
       try {
         const url = new URL(endpoint);
         if (url.protocol !== 'https:') {
           errorResponse(res, 400, 'Subscription endpoint must use HTTPS');
+          return;
+        }
+        // Allow only known Web Push service domains (Google FCM, Mozilla, Apple, Microsoft)
+        const host = url.hostname;
+        const allowedPushDomains = [
+          'fcm.googleapis.com',
+          'updates.push.services.mozilla.com',
+          'push.services.mozilla.com',
+          'web.push.apple.com',
+          'wns2-par02p.notify.windows.com',
+          'wns.windows.com',
+        ];
+        const isAllowed = allowedPushDomains.some((d) => host === d || host.endsWith(`.${d}`));
+        if (!isAllowed) {
+          errorResponse(res, 400, 'Subscription endpoint must be a valid push service');
           return;
         }
       } catch {
