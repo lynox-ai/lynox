@@ -2,6 +2,16 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import {
+		initNotifications,
+		enablePushNotifications,
+		disablePushNotifications,
+		testPushNotification,
+		getNotificationPermission,
+		isSubscribed,
+		isLoading as isPushLoading,
+		isSupported as isPushSupported,
+	} from '../stores/notifications.svelte.js';
 
 	async function copyText(text: string) {
 		await navigator.clipboard.writeText(text);
@@ -41,17 +51,19 @@
 	}
 
 	async function saveGoogleCredentials() {
-		if (!googleClientId.trim() || !googleClientSecret.trim()) return;
+		const trimmedId = googleClientId.trim();
+		const trimmedSecret = googleClientSecret.trim();
+		if (!trimmedId || !trimmedSecret) return;
 		googleCredSaving = true;
 		try {
 			const [r1, r2] = await Promise.all([
 				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, {
 					method: 'PUT', headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ value: googleClientId })
+					body: JSON.stringify({ value: trimmedId })
 				}),
 				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, {
 					method: 'PUT', headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ value: googleClientSecret })
+					body: JSON.stringify({ value: trimmedSecret })
 				}),
 			]);
 			if (!r1.ok || !r2.ok) throw new Error();
@@ -93,8 +105,10 @@
 			} else {
 				const err = (await res.json()) as { error?: string };
 				const errMsg = err.error ?? '';
-				if (errMsg.includes('invalid_client')) {
-					addToast(t('integrations.google_invalid_client'), 'error', 12000);
+				if (errMsg.includes('unauthorized_client')) {
+					addToast(t('integrations.google_wrong_client_type'), 'error', 12000);
+				} else if (errMsg.includes('invalid_client')) {
+					addToast(t('integrations.google_invalid_credentials'), 'error', 12000);
 				} else {
 					addToast(errMsg || t('common.error'), 'error', 6000);
 				}
@@ -270,8 +284,9 @@
 			const data = (await res.json()) as Record<string, unknown>;
 			if (typeof data['managed'] === 'string') managedTier = data['managed'];
 
-			// Managed Google OAuth broker not yet available — always show self-hosted flow
-			// TODO: Re-enable when control plane /oauth/google/start is implemented
+			// Managed Google OAuth broker disabled — Google requires CASA security audit
+			// ($4-15K+) for third-party apps accessing user data. All deployments
+			// (self-hosted + managed) use per-user Desktop App credentials instead.
 			managedGoogleOAuthAvailable = false;
 		} catch { /* ignore */ }
 	}
@@ -556,17 +571,6 @@
 			<div class="flex items-center gap-2 text-sm text-text-muted">
 				<span class="inline-block h-4 w-4 border-2 border-accent border-t-transparent rounded-full animate-spin"></span>
 				{t('integrations.connecting')}
-			</div>
-		{:else if !googleStatus?.available && managed && managedGoogleOAuthAvailable}
-			<!-- Managed: simplified one-click flow -->
-			<div class="space-y-3">
-				<p class="text-sm text-text-muted">{t('integrations.google_managed_desc')}</p>
-				<button
-					onclick={startManagedGoogleOAuth}
-					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90"
-				>
-					{t('integrations.connect_google')}
-				</button>
 			</div>
 		{:else if !googleStatus?.available}
 			<!-- Self-hosted: manual credential setup -->

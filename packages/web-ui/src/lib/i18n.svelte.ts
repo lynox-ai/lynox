@@ -615,14 +615,15 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.connecting': { de: 'Verbinden...', en: 'Connecting...' },
 	'integrations.google_managed_desc': { de: 'Verbinde dein Google-Konto mit einem Klick — wir kümmern uns um den Rest.', en: 'Connect your Google account with one click — we handle the rest.' },
 	'integrations.google_connected_managed': { de: 'Google Workspace verbunden!', en: 'Google Workspace connected!' },
-	'integrations.google_oauth_unavailable': { de: 'Google-Verbindung ist noch nicht verfügbar. Wird bald freigeschaltet.', en: 'Google connection is not yet available. Coming soon.' },
+	'integrations.google_oauth_unavailable': { de: 'Google-Verbindung konnte nicht hergestellt werden.', en: 'Could not establish Google connection.' },
 	'integrations.google_code_copied': { de: 'Code kopiert — im geöffneten Tab einfügen', en: 'Code copied — paste in the opened tab' },
 	'integrations.credentials_saved': { de: 'Credentials gespeichert. Engine wird neu gestartet...', en: 'Credentials saved. Restarting engine...' },
 	'integrations.save_credentials': { de: 'Credentials speichern', en: 'Save credentials' },
 	'integrations.google_setup_guide': { de: 'Folge der Einrichtungsanleitung', en: 'Follow the setup guide' },
 	'integrations.google_setup_guide_suffix': { de: 'um ein Google Cloud Projekt, APIs und OAuth-Credentials einzurichten', en: 'to set up a Google Cloud project, APIs, and OAuth credentials' },
 	'integrations.google_paste_credentials': { de: 'Client-ID und Client-Secret hier einfügen:', en: 'Paste your Client ID and Client Secret below:' },
-	'integrations.google_invalid_client': { de: 'Falscher Client-Typ. Der OAuth-Client muss als „Desktop-App" erstellt werden, nicht als „Webanwendung".', en: 'Wrong client type. The OAuth client must be created as "Desktop app", not "Web application".' },
+	'integrations.google_wrong_client_type': { de: 'Falscher Client-Typ. Der OAuth-Client muss als „Desktop-App" erstellt werden, nicht als „Webanwendung".', en: 'Wrong client type. The OAuth client must be created as "Desktop app", not "Web application".' },
+	'integrations.google_invalid_credentials': { de: 'Ungültige Client-ID. Bitte prüfe, ob die Client-ID korrekt aus der Google Cloud Console kopiert wurde.', en: 'Invalid Client ID. Please verify you copied the Client ID correctly from the Google Cloud Console.' },
 
 	// Telegram
 	'integrations.telegram': { de: 'Telegram Bot', en: 'Telegram Bot' },

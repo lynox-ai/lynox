@@ -11,6 +11,10 @@ lynox integrates with Google Workspace to read and write your business data. Onc
 
 You need a Google Cloud project with OAuth 2.0 credentials. This takes about 5 minutes.
 
+:::note
+This setup applies to **all deployments** — self-hosted, Docker, and managed hosting (lynox.cloud). Each user creates their own Google Cloud project, so no Google security audit is needed.
+:::
+
 ### 1. Create a Google Cloud project
 
 1. Open the [Google Cloud Console](https://console.cloud.google.com/)
@@ -59,8 +63,17 @@ Your app starts in "Testing" mode. This is fine — you just need to add yoursel
 6. Copy the **Client ID** and **Client Secret**
 
 :::caution
-The application type must be **Desktop app**. If you choose "Web application", the OAuth device flow will not work.
+The application type must be **Desktop app**. If you choose "Web application", the OAuth device flow will not work. This applies to all deployments including managed hosting.
 :::
+
+### Troubleshooting
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| "Wrong client type" | OAuth client is set to "Web application" | Delete and recreate as **Desktop app** |
+| "Invalid Client ID" | Client ID is wrong or has extra whitespace | Copy the Client ID again from Credentials page |
+| Device flow not starting | APIs not enabled | Verify all 5 APIs are enabled (step 2) |
+| "Access blocked" | Not added as test user | Add your email under OAuth consent screen → Test users |
 
 ## Configure
 
