@@ -790,7 +790,10 @@ export class Engine {
     const clientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
       ?? process.env['GOOGLE_CLIENT_SECRET']
       ?? this.userConfig.google_client_secret;
-    if (!clientId || !clientSecret) return false;
+    if (!clientId || !clientSecret) {
+      this._googleAuth = null;
+      return false;
+    }
     try {
       const { createGoogleTools } = await import('../integrations/google/index.js');
       const { tools: googleTools, auth: googleAuth } = createGoogleTools({
