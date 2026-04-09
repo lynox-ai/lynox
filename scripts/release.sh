@@ -102,20 +102,30 @@ cd "$ROOT_DIR"
 
 echo ""
 echo "=== Deploying managed instances ==="
-# Fetch instance IDs from control plane, redeploy each one
-INSTANCE_IDS=$(ssh "$CONTROL_PLANE" 'TOKEN=$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \
-  curl -sf http://localhost:4000/admin/instances -H "Authorization: Bearer $TOKEN"' \
-  | node -e "process.stdin.resume();let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{JSON.parse(d).forEach(i=>console.log(i.id))})")
+# Fetch instance IDs from control plane, redeploy each one.
+# This requires SSH access to the control plane — if running on the build
+# server (homelab) which may not have it, print manual commands instead.
+if ssh -o ConnectTimeout=5 -o BatchMode=yes "$CONTROL_PLANE" true 2>/dev/null; then
+  INSTANCE_IDS=$(ssh "$CONTROL_PLANE" 'TOKEN=$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \
+    curl -sf http://localhost:4000/admin/instances -H "Authorization: Bearer $TOKEN"' \
+    | node -e "process.stdin.resume();let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{JSON.parse(d).forEach(i=>console.log(i.id))})")
 
-if [[ -z "$INSTANCE_IDS" ]]; then
-  echo "Warning: No managed instances found (or control plane unreachable)"
+  if [[ -z "$INSTANCE_IDS" ]]; then
+    echo "  Warning: No managed instances found"
+  else
+    for ID in $INSTANCE_IDS; do
+      echo -n "  Redeploying $ID... "
+      ssh "$CONTROL_PLANE" "TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \
+        curl -sf -X POST http://localhost:4000/admin/instances/$ID/redeploy \
+          -H \"Authorization: Bearer \$TOKEN\"" && echo "ok" || echo "FAILED"
+    done
+  fi
 else
-  for ID in $INSTANCE_IDS; do
-    echo "  Redeploying $ID..."
-    ssh "$CONTROL_PLANE" "TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \
-      curl -sf -X POST http://localhost:4000/admin/instances/$ID/redeploy \
-        -H \"Authorization: Bearer \$TOKEN\"" && echo " ok" || echo " FAILED"
-  done
+  echo "  No SSH access to control plane from this machine."
+  echo "  Run from a machine with access:"
+  echo "    ssh $CONTROL_PLANE 'TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \\"
+  echo "      for ID in \$(curl -sf http://localhost:4000/admin/instances -H \"Authorization: Bearer \$TOKEN\" | node -e \"process.stdin.resume();let d=\\\"\\\";process.stdin.on(\\\"data\\\",c=>d+=c);process.stdin.on(\\\"end\\\",()=>{JSON.parse(d).forEach(i=>console.log(i.id))})\"); do \\"
+  echo "        curl -sf -X POST http://localhost:4000/admin/instances/\$ID/redeploy -H \"Authorization: Bearer \$TOKEN\" && echo \"Redeployed \$ID\"; done'"
 fi
 
 echo ""
