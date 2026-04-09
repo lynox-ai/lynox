@@ -1979,10 +1979,12 @@ export class LynoxHTTPApi {
         await google.exchangeRedirectCode(code, this._googleRedirectUri ?? '');
         this._googleOAuthState = undefined;
         this._googleRedirectUri = undefined;
-        // Redirect back to settings page
-        const origin = process.env['ORIGIN'] ?? '';
-        res.writeHead(302, { Location: `${origin}/app/settings/integrations` });
-        res.end();
+        // Navigate back via JS — a 302 would continue the cross-site redirect chain
+        // (Google → callback → settings), so the sameSite:strict session cookie still
+        // wouldn't be sent. A JS navigation starts a fresh same-site context.
+        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/integrations`;
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>window.location.replace(${JSON.stringify(target)})</script></body></html>`);
       } catch (err: unknown) {
         const msg = (err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
