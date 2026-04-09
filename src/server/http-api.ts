@@ -227,17 +227,15 @@ export class LynoxHTTPApi {
     await this.engine.init();
     this.engine.startWorkerLoop();
     this._registerRoutes();
-    this._initPushChannel();
+    await this._initPushChannel();
     await this._tryLoadWebUiHandler();
     await this._tryStartTelegram(config);
   }
 
-  private _initPushChannel(): void {
+  private async _initPushChannel(): Promise<void> {
     try {
-      // Dynamic import to avoid hard dependency — web-push is optional
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { WebPushNotificationChannel } = require('../integrations/push/web-push-channel.js') as typeof import('../integrations/push/web-push-channel.js');
-      const { getLynoxDir } = require('../core/config.js') as typeof import('../core/config.js');
+      const { WebPushNotificationChannel } = await import('../integrations/push/web-push-channel.js');
+      const { getLynoxDir } = await import('../core/config.js');
       const dataDir = getLynoxDir();
       this.pushChannel = new WebPushNotificationChannel(dataDir);
       this.engine!.getNotificationRouter().register(this.pushChannel);

@@ -472,6 +472,7 @@
 	let oauthClaimHandled = false;
 
 	$effect(() => {
+		initNotifications();
 		loadManagedStatus();
 		loadGoogleStatus();
 		loadSecretStatuses();
@@ -663,6 +664,53 @@
 			</div>
 		{/if}
 	</div>
+
+	<!-- Push Notifications -->
+	{#if isPushSupported()}
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+		<div class="flex items-center justify-between mb-4">
+			<div>
+				<h2 class="font-medium">{t('integrations.push_notifications')}</h2>
+				<p class="text-xs text-text-muted mt-1">{t('integrations.push_desc')}</p>
+			</div>
+			{#if isSubscribed()}
+				<span class="text-xs text-success">{t('integrations.push_active')}</span>
+			{:else if getNotificationPermission() === 'denied'}
+				<span class="text-xs text-danger">{t('integrations.push_blocked')}</span>
+			{:else}
+				<span class="text-xs text-text-subtle">{t('integrations.push_inactive')}</span>
+			{/if}
+		</div>
+
+		{#if isSubscribed()}
+			<div class="flex gap-2">
+				<button
+					onclick={async () => { const ok = await testPushNotification(); addToast(ok ? t('integrations.push_test_sent') : t('integrations.push_test_failed'), ok ? 'success' : 'error'); }}
+					class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-base"
+				>
+					{t('integrations.push_test')}
+				</button>
+				<button
+					onclick={async () => { await disablePushNotifications(); addToast(t('integrations.push_disabled'), 'info'); }}
+					disabled={isPushLoading()}
+					class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 disabled:opacity-50"
+				>
+					{t('integrations.push_disable')}
+				</button>
+			</div>
+		{:else if getNotificationPermission() === 'denied'}
+			<p class="text-xs text-text-muted">{t('integrations.push_denied_hint')}</p>
+		{:else}
+			<button
+				onclick={async () => { const ok = await enablePushNotifications(); addToast(ok ? t('integrations.push_enabled') : t('integrations.push_enable_failed'), ok ? 'success' : 'error'); }}
+				disabled={isPushLoading()}
+				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+			>
+				{isPushLoading() ? t('common.loading') : t('integrations.push_enable')}
+			</button>
+		{/if}
+	</div>
+	{/if}
 
 	<!-- Telegram -->
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">

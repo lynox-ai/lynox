@@ -625,6 +625,22 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_wrong_client_type': { de: 'Falscher Client-Typ. Der OAuth-Client muss als „Desktop-App" erstellt werden, nicht als „Webanwendung".', en: 'Wrong client type. The OAuth client must be created as "Desktop app", not "Web application".' },
 	'integrations.google_invalid_credentials': { de: 'Ungültige Client-ID. Bitte prüfe, ob die Client-ID korrekt aus der Google Cloud Console kopiert wurde.', en: 'Invalid Client ID. Please verify you copied the Client ID correctly from the Google Cloud Console.' },
 
+	// Push Notifications
+	'integrations.push_notifications': { de: 'Push-Benachrichtigungen', en: 'Push Notifications' },
+	'integrations.push_desc': { de: 'Erhalte Benachrichtigungen wenn Workflows abgeschlossen sind, Deals Aufmerksamkeit brauchen oder Alerts ausgelöst werden.', en: 'Get notified when workflows complete, deals need attention, or alerts trigger.' },
+	'integrations.push_enable': { de: 'Benachrichtigungen aktivieren', en: 'Enable notifications' },
+	'integrations.push_disable': { de: 'Deaktivieren', en: 'Disable' },
+	'integrations.push_test': { de: 'Testen', en: 'Test' },
+	'integrations.push_active': { de: 'Aktiv', en: 'Active' },
+	'integrations.push_inactive': { de: 'Inaktiv', en: 'Inactive' },
+	'integrations.push_blocked': { de: 'Blockiert', en: 'Blocked' },
+	'integrations.push_enabled': { de: 'Push-Benachrichtigungen aktiviert', en: 'Push notifications enabled' },
+	'integrations.push_disabled': { de: 'Push-Benachrichtigungen deaktiviert', en: 'Push notifications disabled' },
+	'integrations.push_enable_failed': { de: 'Aktivierung fehlgeschlagen — prüfe die Browser-Berechtigung', en: 'Enable failed — check browser permission' },
+	'integrations.push_test_sent': { de: 'Test-Benachrichtigung gesendet', en: 'Test notification sent' },
+	'integrations.push_test_failed': { de: 'Test fehlgeschlagen', en: 'Test failed' },
+	'integrations.push_denied_hint': { de: 'Benachrichtigungen wurden im Browser blockiert. Setze die Berechtigung in den Browser-Einstellungen zurück.', en: 'Notifications are blocked in your browser. Reset the permission in browser settings.' },
+
 	// Telegram
 	'integrations.telegram': { de: 'Telegram Bot', en: 'Telegram Bot' },
 	'integrations.telegram_desc': { de: 'Aufgaben per Telegram-Chat senden', en: 'Send tasks via Telegram chat' },
