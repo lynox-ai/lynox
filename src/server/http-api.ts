@@ -4,7 +4,6 @@
  * Exposes the Engine singleton over REST + SSE for the PWA Gateway.
  * Each process serves exactly one user (process-per-user model).
  *
- * @see pro/docs/internal/prd/engine-api-pwa.md
  */
 
 import { createServer } from 'node:http';
