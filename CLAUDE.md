@@ -15,7 +15,7 @@ pnpm run lint        # eslint src/
 pnpm run build       # tsc → dist/
 pnpm run dev         # watch mode with tsx
 pnpm run security    # security scan + vitest security tests
-npx vitest run       # 113 test files / ~2834 tests
+npx vitest run       # 115 test files
 npx vitest run tests/online/  # 22 real API tests
 
 # Web UI (@lynox-ai/web-ui)
@@ -33,7 +33,7 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — 77 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, etc.
+- `src/core/` — 78 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, Docker installer, setup wizard, watchdog)
 - `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
@@ -45,11 +45,13 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 
 SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
 
-- `src/lib/components/` — 31 components: ChatView (interleaved blocks), AppShell, ThreadList, MemoryView, HistoryView, ArtifactsView, KnowledgeGraphView, WorkflowsHub (list + analytics), WorkflowsView (expandable step details), PipelineProgress (sticky during execution), MarkdownRenderer (deferred artifact rendering), ContextPanel, ContactsView, DataStoreView, CommandPalette, StatusBar, MigrationWizard (5-step zero-knowledge migration), etc.
+- `src/lib/components/` — 33 components (30 exported as library): ChatView (interleaved blocks), AppShell, MemoryView, HistoryView, ArtifactsView, ArtifactsHub, KnowledgeGraphView, KnowledgeHub, WorkflowsHub (list + analytics), WorkflowsView (expandable step details), PipelineProgress (sticky during execution), MarkdownRenderer (deferred artifact rendering), ContextPanel, ContactsView, DataStoreView, ApiStoreView, FileBrowserView, CommandPalette, StatusBar, ActivityHub, ChangesetReview, MigrationWizard (5-step zero-knowledge migration), SetupBanner, PasskeyPrompt, MobileAccess, ToastContainer, etc.
 - `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume, interleaved ContentBlock rendering (text + tool_call blocks in chronological order)
 - `src/lib/stores/threads.svelte.ts` — Thread list store (load, archive, delete, rename)
 - `src/lib/stores/artifacts.svelte.ts` — Artifact gallery store (save, load, delete)
+- `src/lib/stores/context-panel.svelte.ts` — Side panel state (active context: tool, entity, file; pin state)
 - `src/lib/stores/migration.svelte.ts` — Migration wizard store (preview, ECDH handshake, SSE transfer progress, provisioning poll)
+- `src/lib/stores/toast.svelte.ts` — Toast notifications (success, error, info; auto-dismiss)
 - `src/lib/config.svelte.ts` — configurable `apiBase` (/api for standalone, /api/proxy for cloud)
 - `src/lib/i18n.svelte.ts` — DE/EN translations (reactive, runtime switchable)
 - `src/lib/index.ts` — barrel export for library consumers
@@ -95,9 +97,9 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Testing
 
-110 offline test files / ~2878 tests. Co-located *.test.ts.
+108 offline test files (105 in src/, 3 in tests/integration/). Co-located *.test.ts.
 2 security test files in tests/security/.
-5 online test files / 22 tests (real Haiku API).
+5 online test files (real Haiku API) in tests/online/.
 Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/integrations/ (lines >=65%, functions >=60%, branches >=50%, statements >=65%).
 
 ## Git

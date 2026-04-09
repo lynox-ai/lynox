@@ -7,21 +7,60 @@ sidebar:
 
 lynox integrates with Google Workspace to read and write your business data. Once connected, you can ask lynox to check your email, create calendar events, analyze spreadsheets, and more.
 
-## Prerequisites
+## Setup
 
-You need a Google Cloud project with OAuth 2.0 credentials:
+You need a Google Cloud project with OAuth 2.0 credentials. This takes about 5 minutes.
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project (or use an existing one)
-3. Enable the APIs you want:
-   - Gmail API
-   - Google Sheets API
-   - Google Drive API
-   - Google Calendar API
-   - Google Docs API
-4. Go to **Credentials** → **Create Credentials** → **OAuth 2.0 Client ID**
-5. Choose **Desktop app** as application type
+### 1. Create a Google Cloud project
+
+1. Open the [Google Cloud Console](https://console.cloud.google.com/)
+2. Click the project selector at the top → **New Project**
+3. Name it (e.g. "lynox") and click **Create**
+
+If you already have a project, select it instead.
+
+### 2. Enable APIs
+
+1. In the sidebar, go to **APIs & Services** → **Library**
+2. Search for each of these APIs and click **Enable**:
+
+| API name | What it's used for |
+|----------|-------------------|
+| `Gmail API` | Read and send email |
+| `Google Drive API` | Access files in Drive |
+| `Google Calendar API` | Read and manage events |
+| `Google Sheets API` | Read and edit spreadsheets |
+| `Google Docs API` | Read and edit documents |
+
+:::tip
+You can copy each API name and paste it directly into the Library search bar.
+:::
+
+### 3. Configure the OAuth consent screen
+
+1. In the sidebar, go to **OAuth consent screen**
+2. If you see "Google Auth Platform not configured yet", click **Get Started**
+3. **App information** — Enter an app name (e.g. "lynox") and select your email as support email → **Next**
+4. **Audience** — Select **External** → **Next**
+5. **Contact information** — Enter your email → **Next**
+6. **Finish** → Click **Create**
+
+:::note
+Your app starts in "Testing" mode. This is fine — you just need to add yourself as a test user. Go to **OAuth consent screen** → **Test users** → **Add users** → enter your Google email.
+:::
+
+### 4. Create OAuth credentials
+
+1. In the sidebar, go to **Credentials**
+2. Click **Create Credentials** → **OAuth client ID**
+3. **Application type** → select **Desktop app** (not "Web application")
+4. **Name** → enter anything (e.g. "lynox")
+5. Click **Create**
 6. Copy the **Client ID** and **Client Secret**
+
+:::caution
+The application type must be **Desktop app**. If you choose "Web application", the OAuth device flow will not work.
+:::
 
 ## Configure
 

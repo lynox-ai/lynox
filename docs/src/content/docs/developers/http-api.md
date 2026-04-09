@@ -223,6 +223,11 @@ DELETE /api/telegram/setup        # Cancel setup
 GET    /api/google/status         # Google auth status
 POST   /api/google/auth           # Start device flow
 POST   /api/google/revoke         # Revoke auth
+POST   /api/google/reload         # Reload Google integration
+GET    /api/google/oauth-url      # Get OAuth start URL (managed hosting)
+POST   /api/google/claim-managed  # Claim tokens from control plane (managed hosting)
+
+POST   /api/searxng/check         # Validate SearXNG URL
 ```
 
 ### Backups
@@ -266,6 +271,40 @@ GET  /api/vault/key               # Retrieve vault key
 POST /api/vault/rotate            # Rotate vault key
 ```
 
+### Auth
+
+```
+GET  /api/auth/token              # Generate/retrieve auth token
+```
+
+### GDPR / Data
+
+```
+GET    /api/export                # Data export (Art. 15 + Art. 20)
+DELETE /api/data                  # Data deletion (Art. 17)
+```
+
+### Migration
+
+Zero-knowledge self-hosted→managed transfer via X25519 ECDH + AES-256-GCM.
+
+```
+GET  /api/migration/preview       # Preview available databases and sizes
+POST /api/migration/export        # Start migration export (SSE streaming)
+GET  /api/migration/handshake     # Initiate ECDH key exchange (import side)
+POST /api/migration/handshake     # Complete ECDH key exchange (import side)
+POST /api/migration/manifest      # Receive migration manifest
+POST /api/migration/chunk         # Receive encrypted data chunk
+POST /api/migration/restore       # Restore imported data
+```
+
+### Changeset Review
+
+```
+GET  /api/sessions/:id/changeset          # Pending file changes
+POST /api/sessions/:id/changeset/review   # Accept/rollback file changes
+```
+
 ### Other
 
 ```
@@ -275,10 +314,4 @@ GET  /api/patterns                # Detected patterns
 GET  /api/metrics                 # Metrics data
 GET  /api/api-profiles            # API Store profiles
 GET  /api/api-profiles/:id        # Individual API profile
-GET  /api/export                  # GDPR data export (Art. 15 + Art. 20)
-GET  /api/auth/token              # Generate auth token
-POST /api/google/reload           # Reload Google integration
-POST /api/searxng/check           # SearXNG health validation
-POST /api/sessions/:id/changeset/review  # Accept/rollback file changes
-GET  /api/sessions/:id/changeset  # Pending file changes
 ```

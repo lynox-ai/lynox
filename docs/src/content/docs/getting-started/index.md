@@ -51,6 +51,8 @@ If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated. On first 
 
 After setup, lynox opens at [localhost:3000](http://localhost:3000).
 
+If you started without an API key (e.g. manual Docker Compose without `.env`), lynox starts in **browse mode** — you can explore the UI but not chat. A **setup banner** appears at the top with a provider-aware wizard (Anthropic / Bedrock / Custom) where you enter your credentials. They're stored encrypted in the local vault.
+
 Try something:
 
 - *"Summarize this PDF"* — drop a file into the chat
@@ -76,7 +78,7 @@ Without `-v ~/.lynox:/home/lynox/.lynox`, your vault key and all data are lost o
 
 **Port 3000 in use** — Map to a different port: `docker run -p 8080:3000 ...`
 
-**Wrong image** — Use `:webui` for the Web UI. `:latest` is engine-only (Telegram/MCP).
+**Wrong image** — Use `ghcr.io/lynox-ai/lynox:latest` — it includes both Engine and Web UI.
 
 ## Next Steps
 

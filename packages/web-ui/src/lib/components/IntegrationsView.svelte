@@ -64,6 +64,10 @@
 			await new Promise((r) => setTimeout(r, 500));
 			googleCredSaved = false;
 			await loadGoogleStatus();
+			// Auto-start auth flow after credentials are saved
+			if (googleStatus?.available && !googleStatus.authenticated) {
+				await startGoogleAuth();
+			}
 		} catch {
 			addToast(t('common.save_failed'), 'error');
 		}
@@ -570,13 +574,19 @@
 				{#if googleCredSaved}
 					<p class="text-sm text-success">{t('integrations.credentials_saved')}</p>
 				{:else}
-					<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-4">
-						<li>{t('integrations.google_step1')} <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">Google Cloud Console</a> {t('integrations.google_step1_suffix')}</li>
-						<li>{t('integrations.google_step2')}</li>
-						<li>{t('integrations.google_step3')}</li>
-						<li>{t('integrations.google_step4')} <span class="font-semibold text-text">{t('integrations.google_step4_type')}</span> <span class="text-danger">{t('integrations.google_step4_warn')}</span></li>
-						<li>{t('integrations.google_step5')}</li>
-					</ol>
+					<p class="text-xs text-text-muted mb-3">
+						{t('integrations.google_setup_guide_suffix')}:
+					</p>
+					<a
+						href="https://docs.lynox.ai/integrations/google-workspace/#setup"
+						target="_blank"
+						rel="noopener noreferrer"
+						class="inline-flex items-center gap-1.5 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-1.5 text-xs font-medium text-accent-text hover:border-border-hover hover:bg-bg-hover transition-colors mb-4"
+					>
+						{t('integrations.google_setup_guide')}
+						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+					</a>
+					<p class="text-xs text-text-muted mb-2">{t('integrations.google_paste_credentials')}</p>
 					<div class="space-y-2">
 						<input
 							bind:value={googleClientId}
@@ -637,13 +647,16 @@
 			</div>
 		{:else}
 			<!-- Credentials set, not connected -->
-			<button
-				onclick={startGoogleAuth}
-				disabled={connecting}
-				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
-			>
-				{connecting ? t('integrations.connecting') : t('integrations.connect_google')}
-			</button>
+			<div class="space-y-2">
+				<button
+					onclick={startGoogleAuth}
+					disabled={connecting}
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+				>
+					{connecting ? t('integrations.connecting') : t('integrations.connect_google')}
+				</button>
+				<p class="text-xs text-text-subtle">{t('integrations.device_flow_preview')}</p>
+			</div>
 		{/if}
 	</div>
 

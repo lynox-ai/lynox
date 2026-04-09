@@ -74,6 +74,18 @@ lynox tracks token usage per session, day, and month. When a limit is reached, i
 
 Web search is included out of the box via **SearXNG** (bundled in docker-compose). No configuration needed — it works automatically.
 
+```json
+{
+  "search_provider": "searxng",
+  "searxng_url": "http://searxng:8080"
+}
+```
+
+| Setting | Values | Default |
+|---------|--------|---------|
+| `search_provider` | `searxng`, `tavily` | `searxng` |
+| `searxng_url` | SearXNG instance URL | — |
+
 See [SearXNG setup](/integrations/searxng/) for details.
 
 ### Memory
@@ -88,6 +100,34 @@ See [SearXNG setup](/integrations/searxng/) for details.
 - `memory_extraction` — Automatically extract and store insights from conversations
 - `memory_half_life_days` — How quickly memories fade (higher = longer retention)
 
+### Knowledge Graph
+
+```json
+{
+  "knowledge_graph_enabled": true,
+  "embedding_provider": "onnx",
+  "embedding_model": "all-minilm-l6-v2"
+}
+```
+
+| Setting | Values | Default |
+|---------|--------|---------|
+| `knowledge_graph_enabled` | `true`, `false` | `true` |
+| `embedding_provider` | `onnx`, `local` | `onnx` |
+| `embedding_model` | `all-minilm-l6-v2`, `multilingual-e5-small`, `bge-m3` | `all-minilm-l6-v2` |
+
+Use `multilingual-e5-small` or `bge-m3` if you primarily work in non-English languages.
+
+### Changeset Review
+
+```json
+{
+  "changeset_review": true
+}
+```
+
+When enabled, file writes are staged and shown as a diff for review before being applied. Useful for high-autonomy setups where you still want a final check.
+
 ### Backups
 
 ```json
@@ -100,6 +140,31 @@ See [SearXNG setup](/integrations/searxng/) for details.
 ```
 
 See [Backups](/features/backup/) for details.
+
+### Security
+
+```json
+{
+  "enforce_https": false
+}
+```
+
+When `enforce_https` is `true`, all outbound HTTP requests from tools are blocked — only HTTPS is allowed.
+
+### Extensions
+
+```json
+{
+  "agents_dir": "./agents",
+  "manifests_dir": "./workflows",
+  "mcp_servers": [
+    { "name": "my-server", "url": "https://my-mcp-server.example.com/sse" }
+  ],
+  "mcp_exposed_tools": ["lynox_run", "lynox_memory"]
+}
+```
+
+See [Extension Points](/developers/extension-points/) and [MCP](/integrations/mcp/) for details.
 
 ### Experience Mode
 
@@ -148,6 +213,16 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `SEARXNG_URL` | SearXNG instance URL (included in docker-compose, recommended) |
 | `TAVILY_API_KEY` | Tavily API key (alternative to SearXNG, 1K free/month) |
 
+### Network & Server
+
+| Variable | Purpose |
+|----------|---------|
+| `LYNOX_HTTP_PORT` | HTTP API port (default: `3000` in Docker, `3100` locally) |
+| `LYNOX_HTTP_SECRET` | Bearer token for HTTP API authentication |
+| `LYNOX_WEBUI_URL` | Web UI URL (default: `http://localhost:5173`) |
+| `LYNOX_MCP_PORT` | MCP server port (default: `3042`) |
+| `LYNOX_MCP_SECRET` | Bearer token for MCP server authentication |
+
 ### Security & Storage
 
 | Variable | Purpose |
@@ -155,6 +230,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `LYNOX_VAULT_KEY` | Encryption key for the secret vault |
 | `LYNOX_DATA_DIR` | Override data directory (default: `~/.lynox`) |
 | `LYNOX_WORKSPACE` | Working directory for file operations |
+| `LYNOX_BUGSINK_DSN` | Error reporting DSN (self-hosted, opt-in) |
 
 ### Google Workspace
 
