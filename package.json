@@ -1,7 +1,7 @@
 {
   "name": "@lynox-ai/core",
   "version": "1.0.0",
-  "description": "AI business runtime — CRM, workflows, research, monitoring. Persistent knowledge graph, self-hosted. ELv2 licensed.",
+  "description": "Run your business, not your tools — AI runtime for CRM, workflows, research, monitoring. Self-hosted or managed EU. Source-available (ELv2).",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
   "homepage": "https://lynox.ai",
