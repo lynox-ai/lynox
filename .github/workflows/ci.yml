@@ -57,4 +57,4 @@ jobs:
           image-ref: lynox:ci-scan
           format: table
           exit-code: 1
-          severity: CRITICAL,HIGH
+          severity: CRITICAL

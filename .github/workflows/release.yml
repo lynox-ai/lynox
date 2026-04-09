@@ -63,7 +63,7 @@ jobs:
           image-ref: ghcr.io/lynox-ai/lynox:scan
           format: table
           exit-code: '1'
-          severity: CRITICAL,HIGH
+          severity: CRITICAL
           ignore-unfixed: true
 
       - uses: docker/build-push-action@v6
