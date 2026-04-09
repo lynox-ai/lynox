@@ -600,13 +600,13 @@
 				{t('integrations.connecting')}
 			</div>
 		{:else if !googleStatus?.available}
-			<!-- Self-hosted: manual credential setup -->
+			<!-- Manual credential setup (managed: Web app + redirect URI, self-hosted: Desktop app) -->
 			<div class="space-y-3">
 				{#if googleCredSaved}
 					<p class="text-sm text-success">{t('integrations.credentials_saved')}</p>
 				{:else}
 					<p class="text-xs text-text-muted mb-3">
-						{t('integrations.google_setup_guide_suffix')}:
+						{managed ? t('integrations.google_setup_guide_suffix_managed') : t('integrations.google_setup_guide_suffix')}:
 					</p>
 					<a
 						href="https://docs.lynox.ai/integrations/google-workspace/#setup"
@@ -617,6 +617,14 @@
 						{t('integrations.google_setup_guide')}
 						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
 					</a>
+					{#if managed}
+						<div class="mb-3">
+							<p class="text-xs text-text-muted mb-1">{t('integrations.google_redirect_uri_label')}</p>
+							<button onclick={() => copyText(`${window.location.origin}/api/google/callback`)} class="w-full text-left rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs font-mono text-text-muted hover:border-border-hover cursor-pointer" title={t('common.copy')}>
+								{window.location.origin}/api/google/callback
+							</button>
+						</div>
+					{/if}
 					<p class="text-xs text-text-muted mb-2">{t('integrations.google_paste_credentials')}</p>
 					<div class="space-y-2">
 						<input
@@ -686,7 +694,7 @@
 				>
 					{connecting ? t('integrations.connecting') : t('integrations.connect_google')}
 				</button>
-				<p class="text-xs text-text-subtle">{t('integrations.device_flow_preview')}</p>
+				<p class="text-xs text-text-subtle">{managed ? t('integrations.redirect_flow_preview') : t('integrations.device_flow_preview')}</p>
 				<button
 					onclick={resetGoogleCredentials}
 					class="text-xs text-text-subtle hover:text-text-muted transition-colors"

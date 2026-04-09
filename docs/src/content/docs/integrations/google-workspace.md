@@ -55,25 +55,41 @@ Your app starts in "Testing" mode. This is fine — you just need to add yoursel
 
 ### 4. Create OAuth credentials
 
+The application type depends on your deployment:
+
+#### Self-hosted (Docker / local)
+
 1. In the sidebar, go to **Credentials**
 2. Click **Create Credentials** → **OAuth client ID**
-3. **Application type** → select **Desktop app** (not "Web application")
+3. **Application type** → select **Desktop app**
 4. **Name** → enter anything (e.g. "lynox")
 5. Click **Create**
 6. Copy the **Client ID** and **Client Secret**
 
-:::caution
-The application type must be **Desktop app**. If you choose "Web application", the OAuth device flow will not work. This applies to all deployments including managed hosting.
+#### Managed hosting (lynox.cloud)
+
+1. In the sidebar, go to **Credentials**
+2. Click **Create Credentials** → **OAuth client ID**
+3. **Application type** → select **Web application**
+4. **Name** → enter anything (e.g. "lynox")
+5. **Authorized redirect URIs** → click **Add URI** → enter `https://<your-subdomain>.lynox.cloud/api/google/callback`
+6. Click **Create**
+7. Copy the **Client ID** and **Client Secret**
+
+:::tip
+The Web UI shows the exact redirect URI to copy — no need to type it manually.
 :::
 
 ### Troubleshooting
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| "Wrong client type" | OAuth client is set to "Web application" | Delete and recreate as **Desktop app** |
+| "Wrong client type" | Wrong application type for your deployment | Self-hosted: **Desktop app** · Managed: **Web application** |
 | "Invalid Client ID" | Client ID is wrong or has extra whitespace | Copy the Client ID again from Credentials page |
 | Device flow not starting | APIs not enabled | Verify all 5 APIs are enabled (step 2) |
 | "Access blocked" | Not added as test user | Add your email under OAuth consent screen → Test users |
+| Callback returns 401 | Session cookie not sent (sameSite) | Already fixed — update your lynox instance |
+| "redirect_uri_mismatch" | Redirect URI doesn't match | Verify the URI in Google Console matches exactly |
 
 ## Configure
 
@@ -90,13 +106,13 @@ export GOOGLE_CLIENT_SECRET=GOCSPX-...
 
 lynox supports three OAuth flows:
 
-| Flow | Best for | How it works |
-|------|----------|-------------|
-| **Browser** | Local installs | Opens your browser for Google sign-in |
-| **Device Flow** | Docker / headless | Shows a code to enter at google.com/device |
-| **Service Account** | Server-to-server | Uses a key file, no user interaction |
+| Flow | Best for | Client type | How it works |
+|------|----------|-------------|-------------|
+| **Redirect** | Managed hosting / web-hosted | Web application | Redirects to Google, sends you back after approval |
+| **Device Flow** | Self-hosted Docker / headless | Desktop app | Shows a code to enter at google.com/device |
+| **Service Account** | Server-to-server | — | Uses a key file, no user interaction |
 
-The Web UI guides you through the appropriate flow. For Docker, the device flow is used automatically.
+The Web UI detects your deployment and uses the correct flow automatically.
 
 ## Scopes
 

@@ -496,6 +496,14 @@ export class LynoxHTTPApi {
       return;
     }
 
+    // Google OAuth callback — unauthenticated (browser redirect from Google).
+    // Session cookie is unavailable here because sameSite:strict blocks cross-site
+    // navigations. CSRF protection is via the `state` parameter instead.
+    if (method === 'GET' && pathname === '/api/google/callback') {
+      const handler = this.staticRoutes.get('GET /api/google/callback');
+      if (handler) { await handler(req, res, {}, null); return; }
+    }
+
     // CORS — restrict to allowed origins (or allow all for localhost-only mode)
     const requestOrigin = req.headers['origin'] ?? '';
     // Localhost origins accepted in no-auth mode; with auth require explicit LYNOX_ALLOWED_ORIGINS
@@ -1955,8 +1963,9 @@ export class LynoxHTTPApi {
       const error = url.searchParams.get('error');
 
       if (error) {
+        const safe = error.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(`<html><body><h1>Error</h1><p>${error}</p><p>You can close this tab.</p></body></html>`);
+        res.end(`<html><body><h1>Error</h1><p>${safe}</p><p>You can close this tab.</p></body></html>`);
         return;
       }
 
@@ -1975,7 +1984,8 @@ export class LynoxHTTPApi {
         res.writeHead(302, { Location: `${origin}/app/settings/integrations` });
         res.end();
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = (err instanceof Error ? err.message : String(err))
+          .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(500, { 'Content-Type': 'text/html' });
         res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
       }
