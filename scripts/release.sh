@@ -5,10 +5,12 @@
 #   ./scripts/release.sh              # uses version from package.json
 #   ./scripts/release.sh 1.2.3        # explicit version override
 #   ./scripts/release.sh --dry-run    # show what would happen
+#   ./scripts/release.sh --deploy     # also deploy pilots + managed after push
 #
 # Prerequisites:
 #   - Run on amd64 build server (not Mac/ARM64)
 #   - docker login ghcr.io done
+#   - For --deploy: SSH access to control plane (root@46.224.229.143)
 #
 # Tags produced:
 #   ghcr.io/lynox-ai/lynox:1.2.3     (exact version — immutable)
@@ -23,10 +25,12 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Parse args
 DRY_RUN=false
+DEPLOY=false
 VERSION=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
+    --deploy) DEPLOY=true ;;
     *) VERSION="$arg" ;;
   esac
 done
@@ -71,8 +75,48 @@ echo "Pushing $TAG_LATEST..."
 docker push "$TAG_LATEST"
 
 echo ""
-echo "Done. To deploy to managed instances:"
-echo "  curl -X POST https://control.lynox.cloud/admin/updates/rollout \\"
-echo "    -H 'Authorization: Bearer \$MANAGED_ADMIN_TOKEN' \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"targetVersion\": \"$VERSION\"}'"
+echo "Image pushed."
+
+# ── Deploy ──────────────────────────────────────────────────────────
+
+CONTROL_PLANE="root@46.224.229.143"
+PILOT_COMPOSE="/opt/lynox-pilot"
+
+if ! $DEPLOY; then
+  echo ""
+  echo "To deploy, re-run with --deploy or manually:"
+  echo "  # Pilots"
+  echo "  docker tag $TAG_LATEST lynox:webui"
+  echo "  cd $PILOT_COMPOSE && docker compose up -d --force-recreate rafael-lynox alessia-lynox rafael-searxng alessia-searxng"
+  echo "  # Managed (per instance)"
+  echo "  ssh $CONTROL_PLANE 'TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \\"
+  echo "    curl -s -X POST http://localhost:4000/admin/instances/<ID>/redeploy -H \"Authorization: Bearer \$TOKEN\"'"
+  exit 0
+fi
+
+echo ""
+echo "=== Deploying pilots ==="
+docker tag "$TAG_LATEST" lynox:webui
+cd "$PILOT_COMPOSE" && docker compose up -d --force-recreate rafael-lynox alessia-lynox rafael-searxng alessia-searxng
+cd "$ROOT_DIR"
+
+echo ""
+echo "=== Deploying managed instances ==="
+# Fetch instance IDs from control plane, redeploy each one
+INSTANCE_IDS=$(ssh "$CONTROL_PLANE" 'TOKEN=$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \
+  curl -sf http://localhost:4000/admin/instances -H "Authorization: Bearer $TOKEN"' \
+  | node -e "process.stdin.resume();let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{JSON.parse(d).forEach(i=>console.log(i.id))})")
+
+if [[ -z "$INSTANCE_IDS" ]]; then
+  echo "Warning: No managed instances found (or control plane unreachable)"
+else
+  for ID in $INSTANCE_IDS; do
+    echo "  Redeploying $ID..."
+    ssh "$CONTROL_PLANE" "TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \
+      curl -sf -X POST http://localhost:4000/admin/instances/$ID/redeploy \
+        -H \"Authorization: Bearer \$TOKEN\"" && echo " ok" || echo " FAILED"
+  done
+fi
+
+echo ""
+echo "=== Release $VERSION complete ==="
