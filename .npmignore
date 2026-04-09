@@ -32,7 +32,6 @@ pnpm-workspace.yaml
 
 # Docker
 Dockerfile
-Dockerfile.web-ui
 entrypoint.sh
 entrypoint-webui.sh
 docker-compose.yml

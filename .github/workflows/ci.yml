@@ -49,7 +49,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.web-ui
+          file: Dockerfile
           push: false
           tags: lynox:ci-scan
       - uses: aquasecurity/trivy-action@0.35.0

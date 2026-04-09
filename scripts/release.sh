@@ -19,7 +19,7 @@
 set -euo pipefail
 
 REPO="ghcr.io/lynox-ai/lynox"
-DOCKERFILE="Dockerfile.web-ui"
+DOCKERFILE="Dockerfile"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
