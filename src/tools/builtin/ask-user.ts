@@ -1,9 +1,33 @@
-import type { ToolEntry, IAgent, TabQuestion } from '../../types/index.js';
+import type { ToolEntry, IAgent, TabQuestion, StepHint } from '../../types/index.js';
+
+/** An option can be a plain string or an object with an optional StepHint. */
+type AskUserOption = string | { label: string; hint?: StepHint | undefined };
 
 interface AskUserInput {
   question: string;
-  options?: string[] | undefined;
-  questions?: Array<{ question: string; header?: string; options?: string[] }> | undefined;
+  options?: AskUserOption[] | undefined;
+  questions?: Array<{ question: string; header?: string; options?: AskUserOption[] }> | undefined;
+}
+
+/** Extract display label from a plain string or option object. */
+function optionLabel(opt: AskUserOption): string {
+  return typeof opt === 'string' ? opt : opt.label;
+}
+
+/** Find the StepHint for a selected label within options. */
+function findHint(options: AskUserOption[] | undefined, selectedLabel: string): StepHint | undefined {
+  if (!options) return undefined;
+  for (const opt of options) {
+    if (typeof opt !== 'string' && opt.label === selectedLabel && opt.hint) {
+      return opt.hint;
+    }
+  }
+  return undefined;
+}
+
+/** Convert AskUserOption[] to plain string[] for promptUser. */
+function toLabels(options: AskUserOption[]): string[] {
+  return options.map(optionLabel);
 }
 
 export const askUserTool: ToolEntry<AskUserInput> = {
@@ -16,8 +40,28 @@ export const askUserTool: ToolEntry<AskUserInput> = {
         question: { type: 'string', description: 'The question to ask the user' },
         options: {
           type: 'array',
-          items: { type: 'string' },
-          description: 'Choices for the user to select from. STRONGLY PREFERRED over free-text — include 2-5 clear, distinct options. Examples: ["Yes", "No"], ["Staging", "Production", "Both"], ["Fix and retry", "Skip this file", "Abort"]',
+          items: {
+            oneOf: [
+              { type: 'string' },
+              {
+                type: 'object',
+                properties: {
+                  label: { type: 'string', description: 'Display text for this option' },
+                  hint: {
+                    type: 'object',
+                    description: 'Configuration hint for the next step when this option is selected',
+                    properties: {
+                      model: { type: 'string', enum: ['opus', 'sonnet', 'haiku'], description: 'Preferred model tier' },
+                      thinking: { type: 'string', enum: ['adaptive', 'enabled', 'disabled'], description: 'Thinking mode' },
+                      effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'], description: 'Effort level' },
+                    },
+                  },
+                },
+                required: ['label'],
+              },
+            ],
+          },
+          description: 'Choices for the user to select from. Each option can be a plain string or an object with { label, hint? } for step configuration.',
         },
         questions: {
           type: 'array',
@@ -28,7 +72,26 @@ export const askUserTool: ToolEntry<AskUserInput> = {
               header: { type: 'string', description: 'Short tab label (defaults to Q1, Q2, ...)' },
               options: {
                 type: 'array',
-                items: { type: 'string' },
+                items: {
+                  oneOf: [
+                    { type: 'string' },
+                    {
+                      type: 'object',
+                      properties: {
+                        label: { type: 'string' },
+                        hint: {
+                          type: 'object',
+                          properties: {
+                            model: { type: 'string', enum: ['opus', 'sonnet', 'haiku'] },
+                            thinking: { type: 'string', enum: ['adaptive', 'enabled', 'disabled'] },
+                            effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+                          },
+                        },
+                      },
+                      required: ['label'],
+                    },
+                  ],
+                },
                 description: 'Optional choices for this question',
               },
             },
@@ -51,23 +114,44 @@ export const askUserTool: ToolEntry<AskUserInput> = {
         const tabQuestions: TabQuestion[] = input.questions.map(q => ({
           question: q.question,
           header: q.header,
-          options: q.options,
+          options: q.options ? toLabels(q.options) : undefined,
         }));
         const answers = await agent.promptTabs(tabQuestions);
         if (answers.length === 0) return 'User canceled.';
+        // Store hint from last answered question with a matching option
+        for (let i = answers.length - 1; i >= 0; i--) {
+          const hint = findHint(input.questions[i]?.options, answers[i]!);
+          if (hint) {
+            agent.toolContext.pendingStepHint = hint;
+            break;
+          }
+        }
         return answers.map((a, i) => `${input.questions![i]!.question}: ${a}`).join('\n');
       }
       // Sequential fallback: ask each question one at a time
       const answers: string[] = [];
       for (const q of input.questions) {
-        const opts = q.options && q.options.length > 0 ? [...q.options, '\x00'] : q.options;
-        const answer = await agent.promptUser(q.question, opts);
+        const labels = q.options && q.options.length > 0 ? [...toLabels(q.options), '\x00'] : undefined;
+        const answer = await agent.promptUser(q.question, labels);
+        // Store hint for this answer
+        const hint = findHint(q.options, answer);
+        if (hint) {
+          agent.toolContext.pendingStepHint = hint;
+        }
         answers.push(answer);
       }
       return answers.map((a, i) => `${input.questions![i]!.question}: ${a}`).join('\n');
     }
 
-    const opts = input.options && input.options.length > 0 ? [...input.options, '\x00'] : input.options;
-    return agent.promptUser(input.question, opts);
+    const labels = input.options && input.options.length > 0 ? [...toLabels(input.options), '\x00'] : undefined;
+    const answer = await agent.promptUser(input.question, labels);
+
+    // Store hint for selected option (applied at next session.run())
+    const hint = findHint(input.options, answer);
+    if (hint) {
+      agent.toolContext.pendingStepHint = hint;
+    }
+
+    return answer;
   },
 };

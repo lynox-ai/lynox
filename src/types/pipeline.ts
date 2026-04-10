@@ -1,11 +1,15 @@
 // === Pipeline ===
 
-import type { ModelTier } from './models.js';
+import type { ModelTier, ThinkingHint, EffortLevel } from './models.js';
 
 export interface InlinePipelineStep {
   id: string;
   task: string;
   model?: ModelTier | undefined;
+  /** Thinking mode hint for this step. Capability-checked at spawn time (e.g. Haiku ignores 'adaptive'). */
+  thinking?: ThinkingHint | undefined;
+  /** Effort level for this step. */
+  effort?: EffortLevel | undefined;
   /** Role for agent specialization. Used by YAML manifests — not exposed to LLM. */
   role?: string | undefined;
   input_from?: string[] | undefined;

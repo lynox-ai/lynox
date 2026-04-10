@@ -322,12 +322,34 @@ describe('phasesToPipelineSteps', () => {
     expect(steps[1]!.input_from).toEqual(['manual-step']);
   });
 
-  it('should not pass model/role (runtime decides)', () => {
+  it('should not pass model/role when not set on phase', () => {
     const steps = phasesToPipelineSteps([
       { name: 'Step', steps: ['do'] },
     ]);
     expect(steps[0]!.model).toBeUndefined();
     expect(steps[0]!.role).toBeUndefined();
+    expect(steps[0]!.thinking).toBeUndefined();
+    expect(steps[0]!.effort).toBeUndefined();
+  });
+
+  it('should pass model/thinking/effort from phase to pipeline step', () => {
+    const steps = phasesToPipelineSteps([
+      { name: 'Simple', steps: ['format'], model: 'haiku', thinking: 'disabled', effort: 'low' },
+      { name: 'Complex', steps: ['analyze'], model: 'opus', thinking: 'enabled', effort: 'high' },
+      { name: 'Default', steps: ['standard work'] },
+    ]);
+
+    expect(steps[0]!.model).toBe('haiku');
+    expect(steps[0]!.thinking).toBe('disabled');
+    expect(steps[0]!.effort).toBe('low');
+
+    expect(steps[1]!.model).toBe('opus');
+    expect(steps[1]!.thinking).toBe('enabled');
+    expect(steps[1]!.effort).toBe('high');
+
+    expect(steps[2]!.model).toBeUndefined();
+    expect(steps[2]!.thinking).toBeUndefined();
+    expect(steps[2]!.effort).toBeUndefined();
   });
 
   it('should handle independent phases (parallel execution)', () => {

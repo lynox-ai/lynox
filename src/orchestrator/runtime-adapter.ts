@@ -1,7 +1,7 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
-import { MODEL_MAP, getModelId } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
+import { MODEL_MAP, getModelId, clampTier } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
 import { getActiveProvider, isBedrockEuOnly } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from './types.js';
 import { getRole, getRoleNames } from '../core/roles.js';
@@ -77,12 +77,20 @@ export function convertAgentTools(tools: AgentTool[]): ToolEntry[] {
 /**
  * Model resolution: step.model overrides agentDef.defaultTier.
  * If step.model is a ModelTier key, map it. Otherwise use as full model ID.
+ * When maxTier is set (managed hosting), tiers are clamped before resolution.
  */
-export function resolveModel(stepModel: string | undefined, defaultTier: ModelTier): string {
+export function resolveModel(stepModel: string | undefined, defaultTier: ModelTier, maxTier?: ModelTier | undefined): string {
   const provider = getActiveProvider();
   const eu = isBedrockEuOnly();
-  if (!stepModel) return getModelId(defaultTier, provider, eu);
-  return stepModel in MODEL_MAP ? getModelId(stepModel as ModelTier, provider, eu) : stepModel;
+  if (!stepModel) {
+    const clamped = clampTier(defaultTier, maxTier);
+    return getModelId(clamped, provider, eu);
+  }
+  if (stepModel in MODEL_MAP) {
+    const clamped = clampTier(stepModel as ModelTier, maxTier);
+    return getModelId(clamped, provider, eu);
+  }
+  return stepModel;
 }
 
 /**
@@ -102,7 +110,7 @@ export async function spawnViaAgent(
   let tokensOut = 0;
   const startTime = Date.now();
 
-  const model = resolveModel(step.model, agentDef.defaultTier);
+  const model = resolveModel(step.model, agentDef.defaultTier, config.max_tier);
 
   let tools = convertAgentTools(agentDef.tools ?? []);
 
@@ -119,13 +127,20 @@ export async function spawnViaAgent(
     );
   }
 
+  // Resolve thinking from step hint, fallback to adaptive
+  const thinking: ThinkingMode = step.thinking === 'enabled'
+    ? { type: 'enabled', budget_tokens: 10_000 }
+    : step.thinking === 'disabled'
+      ? { type: 'disabled' }
+      : { type: 'adaptive' };
+
   const agent = new Agent({
     name: step.agent,
     model,
     systemPrompt: agentDef.systemPrompt,
     tools,
-    thinking: { type: 'adaptive' },
-    effort: config.effort_level ?? 'medium',
+    thinking,
+    effort: step.effort ?? config.effort_level ?? 'medium',
     maxIterations: 10,
     costGuard: { maxBudgetUSD: model.includes('opus') ? 10 : 2, maxIterations: 10 },
     apiKey: config.api_key,
@@ -184,10 +199,10 @@ export async function spawnInline(
     throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
   }
 
-  // 4-tier resolution: step > role > user config > defaults
+  // 4-tier resolution: step > role > user config > defaults, clamped by max_tier
   const configTier = config.default_tier;
   const modelTier = (step.model ?? resolved?.model ?? configTier ?? 'sonnet') as ModelTier;
-  const model = resolveModel(modelTier, 'sonnet');
+  const model = resolveModel(modelTier, 'sonnet', config.max_tier);
   const systemPrompt = 'You are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.';
   // Use minimal tool set for inline steps unless role specifies custom tools
   const roleProfile = resolved
@@ -195,13 +210,23 @@ export async function spawnInline(
     : null;
   const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => INLINE_CORE_TOOLS.has(t.definition.name));
   const tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
-  // Pipeline steps: Haiku gets explicit thinking budget (improves tool-call reliability)
-  // Agent constructor will map adaptive→disabled for Haiku, so we set explicit budget here
+  // Resolve thinking: step hint > Haiku-specific default > adaptive
+  // Haiku gets explicit thinking budget (improves tool-call reliability)
   const isHaikuStep = model.includes('haiku');
-  const defaultThinking = isHaikuStep
-    ? { type: 'enabled' as const, budget_tokens: 4096 }
-    : { type: 'adaptive' as const };
-  const thinking = defaultThinking;
+  let thinking: ThinkingMode;
+  if (step.thinking) {
+    thinking = step.thinking === 'enabled'
+      ? { type: 'enabled', budget_tokens: isHaikuStep ? 4096 : 10_000 }
+      : step.thinking === 'disabled'
+        ? { type: 'disabled' }
+        : isHaikuStep
+          ? { type: 'enabled', budget_tokens: 4096 }
+          : { type: 'adaptive' };
+  } else {
+    thinking = isHaikuStep
+      ? { type: 'enabled', budget_tokens: 4096 }
+      : { type: 'adaptive' };
+  }
   const effort = step.effort ?? resolved?.effort ?? config.effort_level ?? 'medium';
   const maxIter = 10;
 
@@ -299,6 +324,8 @@ export async function spawnPipeline(
       task: s.task,
       model: s.model,
       role: s.role,
+      effort: s.effort,
+      thinking: s.thinking,
       input_from: s.input_from,
       timeout_ms: s.timeout_ms,
     })),

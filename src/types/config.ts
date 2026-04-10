@@ -131,6 +131,8 @@ export interface LynoxUserConfig {
   /** Use Bedrock EU cross-region inference profile for guaranteed EU data residency (10% surcharge). */
   bedrock_eu_only?: boolean | undefined;
   default_tier?: ModelTier | undefined;
+  /** Maximum allowed model tier. StepHints and pipeline steps requesting a higher tier are clamped. Managed hosting sets 'sonnet'. */
+  max_tier?: ModelTier | undefined;
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;
   max_session_cost_usd?: number | undefined;
