@@ -87,6 +87,9 @@ vi.mock('../core/session-store.js', () => ({
     this.getOrCreate = mockGetOrCreate;
     this.get = mockSessionGet;
     this.reset = mockSessionStoreReset;
+    this.setRunningCheck = vi.fn();
+    this.startEviction = vi.fn();
+    this.stopEviction = vi.fn();
     return this;
   }),
 }));
