@@ -431,9 +431,9 @@
 					<label for="model" class="block text-sm font-medium mb-1">{t('config.model')}</label>
 					<p class="text-xs text-text-muted mb-2">{t('config.model_desc')}</p>
 					<select id="model" bind:value={config.default_tier} class={inputClass} disabled={isManagedEu}>
-						<option value="haiku">{t('config.model_haiku')}</option>
+						<option value="haiku" disabled={isManagedEu}>{t('config.model_haiku')}{isManagedEu ? t('config.model_managed_suffix') : ''}</option>
 						<option value="sonnet">{t('config.model_sonnet')}</option>
-						<option value="opus">{t('config.model_opus')}</option>
+						<option value="opus" disabled={isManagedEu}>{t('config.model_opus')}{isManagedEu ? t('config.model_managed_suffix') : ''}</option>
 					</select>
 					{#if isManagedEu}
 						<p class="text-xs text-text-muted mt-1">{t('config.managed_eu_model_locked')}</p>
