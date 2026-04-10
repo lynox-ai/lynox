@@ -430,6 +430,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.tab_budget': { de: 'Budget', en: 'Budget' },
 	'config.tab_system': { de: 'System', en: 'System' },
 	'config.managed_eu_provider_info': { de: 'Claude wird von lynox bereitgestellt — Bedrock Frankfurt, EU-Datenresidenz.', en: 'Claude is provided by lynox — Bedrock Frankfurt, EU data residency.' },
+	'config.managed_eu_model_locked': { de: 'Das Modell wird von lynox verwaltet und ist im Managed-Tarif nicht änderbar.', en: 'The model is managed by lynox and cannot be changed on Managed plans.' },
 	'config.provider': { de: 'LLM Provider', en: 'LLM Provider' },
 	'config.provider_desc': { de: 'Wohin werden KI-Anfragen gesendet? Daten bleiben immer lokal — nur die Inferenz nutzt den Provider.', en: 'Where are AI requests sent? Your data stays local — only inference uses the provider.' },
 	'config.provider_anthropic': { de: 'Claude (Anthropic)', en: 'Claude (Anthropic)' },

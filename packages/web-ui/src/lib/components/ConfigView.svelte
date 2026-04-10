@@ -430,11 +430,14 @@
 				<div class={cardClass}>
 					<label for="model" class="block text-sm font-medium mb-1">{t('config.model')}</label>
 					<p class="text-xs text-text-muted mb-2">{t('config.model_desc')}</p>
-					<select id="model" bind:value={config.default_tier} class={inputClass}>
+					<select id="model" bind:value={config.default_tier} class={inputClass} disabled={isManagedEu}>
 						<option value="haiku">{t('config.model_haiku')}</option>
 						<option value="sonnet">{t('config.model_sonnet')}</option>
 						<option value="opus">{t('config.model_opus')}</option>
 					</select>
+					{#if isManagedEu}
+						<p class="text-xs text-text-muted mt-1">{t('config.managed_eu_model_locked')}</p>
+					{/if}
 				</div>
 
 				{#if showEffortThinking}

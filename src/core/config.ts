@@ -120,6 +120,13 @@ export function loadConfig(): LynoxUserConfig {
       merged.provider = p;
     }
   }
+  // Model tier override (used by managed EU to lock model)
+  if (process.env['LYNOX_DEFAULT_TIER']) {
+    const tier = process.env['LYNOX_DEFAULT_TIER'];
+    if (tier === 'haiku' || tier === 'sonnet' || tier === 'opus') {
+      merged.default_tier = tier;
+    }
+  }
   if (process.env['AWS_REGION']) {
     merged.aws_region = process.env['AWS_REGION'];
   }
