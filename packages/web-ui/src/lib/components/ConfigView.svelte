@@ -88,7 +88,7 @@
 
 	// ── Secrets / Keys (inline in Provider tab) ────────────────────────────────
 	let secretNames = $state<string[]>([]);
-	let newKeyName = $state('ANTHROPIC_API_KEY');
+	let newKeyName = $state('');
 	let newKeyValue = $state('');
 	let keysSaving = $state(false);
 	let editingSecret = $state<string | null>(null);
