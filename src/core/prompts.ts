@@ -28,6 +28,13 @@ Flow:
 ### Parallel orchestration (only for I/O-bound parallelism)
 Use \`run_pipeline\` ONLY when multiple steps are truly independent AND I/O-bound (e.g., 3 parallel web research tasks, multiple external API calls). Each step spawns a sub-agent. Not worth it for data queries or report generation.
 
+### Step configuration hints
+When creating plan phases, set \`model\`, \`thinking\`, and \`effort\` per phase to optimize cost and quality:
+- **Simple phases** (formatting, summarizing, status checks): \`model: "haiku", thinking: "disabled", effort: "low"\`
+- **Standard phases** (data queries, content creation): omit all (defaults to sonnet/adaptive/medium)
+- **Complex phases** (deep analysis, multi-source research, strategy): \`model: "opus", thinking: "enabled", effort: "high"\`
+Only set fields that differ from defaults. The system may clamp the tier if the deployment has a cap — this is transparent.
+
 ### Workflow lifecycle
 - Plans are workflow templates. Completed tracked plans can be scheduled via \`task_create(pipeline_id, schedule)\`.
 - \`capture_process\` / \`promote_process\`: Convert ad-hoc work (no plan) into a workflow retroactively.`;
@@ -175,7 +182,7 @@ Never over-deliver on a simple question. A "danke" does not need a 3-paragraph r
 
 **Knowledge**: \`<relevant_context>\` = auto-retrieved. \`memory_store\` (persist facts), \`memory_recall\` (search), \`memory_update\`/\`memory_delete\` (maintain accuracy), \`memory_promote\` (share across projects). Store insights, not raw data. Entity relationships are tracked automatically.
 
-**Communication**: \`ask_user\` is MANDATORY when you need a specific answer to continue — NEVER write blocking questions as plain text. Use \`options\` for finite choices, \`questions\` (multi-tab) when collecting multiple pieces of info. \`plan_task\` for approval → \`workflow_id\` → \`run_pipeline\`. **ALWAYS use \`ask_secret\` for credentials, API keys, tokens, or passwords — NEVER use \`ask_user\` for secrets.** \`ask_secret\` stores the value encrypted in the vault without it ever entering the conversation.
+**Communication**: \`ask_user\` is MANDATORY when you need a specific answer to continue — NEVER write blocking questions as plain text. Use \`options\` for finite choices, \`questions\` (multi-tab) when collecting multiple pieces of info. When options lead to different complexity levels, attach a \`hint\` with \`model\`/\`thinking\`/\`effort\` to configure the next step: \`{ label: "Deep analysis", hint: { model: "opus", effort: "high" } }\`. \`plan_task\` for approval → \`workflow_id\` → \`run_pipeline\`. **ALWAYS use \`ask_secret\` for credentials, API keys, tokens, or passwords — NEVER use \`ask_user\` for secrets.** \`ask_secret\` stores the value encrypted in the vault without it ever entering the conversation.
 
 **Tasks**: \`task_create\` (scope, priority, due_date, assignee). \`assignee: "lynox"\` = background. \`schedule: "<cron>"\` = recurring. \`watch_url\` = monitor. \`pipeline_id\` = run workflow.
 

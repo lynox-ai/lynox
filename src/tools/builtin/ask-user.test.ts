@@ -1,6 +1,32 @@
 import { describe, it, expect, vi } from 'vitest';
 import { askUserTool } from './ask-user.js';
 import type { IAgent } from '../../types/index.js';
+import type { ToolContext } from '../../core/tool-context.js';
+
+function makeToolContext(overrides: Partial<ToolContext> = {}): ToolContext {
+  return {
+    dataStore: null,
+    taskManager: null,
+    knowledgeLayer: null,
+    runHistory: null,
+    userConfig: {},
+    tools: [],
+    streamHandler: null,
+    networkPolicy: undefined,
+    allowedHosts: undefined,
+    allowedWildcards: [],
+    rateLimitProvider: null,
+    hourlyRateLimit: Infinity,
+    dailyRateLimit: Infinity,
+    apiStore: null,
+    artifactStore: null,
+    isolationEnvOverride: undefined,
+    isolationMinimalEnv: false,
+    activePlan: null,
+    pendingStepHint: null,
+    ...overrides,
+  };
+}
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   return {
@@ -9,8 +35,9 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     memory: null,
     tools: [],
     onStream: null,
+    toolContext: makeToolContext(),
     ...overrides,
-  };
+  } as IAgent;
 }
 
 describe('askUserTool', () => {
@@ -23,7 +50,7 @@ describe('askUserTool', () => {
     expect(promptUser).toHaveBeenCalledWith('What color?', undefined);
   });
 
-  it('passes options to promptUser', async () => {
+  it('passes string options to promptUser', async () => {
     const promptUser = vi.fn().mockResolvedValue('blue');
     const agent = makeAgent({ promptUser });
 
@@ -88,5 +115,109 @@ describe('askUserTool', () => {
     expect(promptUser).toHaveBeenCalledTimes(2);
     expect(promptUser).toHaveBeenCalledWith('Q1', undefined);
     expect(promptUser).toHaveBeenCalledWith('Q2', undefined);
+  });
+
+  // --- StepHint tests ---
+
+  it('extracts labels from object options and passes to promptUser', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Deep analysis');
+    const agent = makeAgent({ promptUser });
+
+    const result = await askUserTool.handler({
+      question: 'How to proceed?',
+      options: [
+        { label: 'Quick summary', hint: { model: 'haiku', effort: 'low' } },
+        { label: 'Deep analysis', hint: { model: 'opus', effort: 'high' } },
+      ],
+    }, agent);
+
+    expect(result).toBe('Deep analysis');
+    expect(promptUser).toHaveBeenCalledWith(
+      'How to proceed?',
+      ['Quick summary', 'Deep analysis', '\x00'],
+    );
+  });
+
+  it('stores pendingStepHint on toolContext when user selects option with hint', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Deep analysis');
+    const toolContext = makeToolContext();
+    const agent = makeAgent({ promptUser, toolContext });
+
+    await askUserTool.handler({
+      question: 'How to proceed?',
+      options: [
+        { label: 'Quick summary', hint: { model: 'haiku', effort: 'low' } },
+        { label: 'Deep analysis', hint: { model: 'opus', thinking: 'enabled', effort: 'high' } },
+      ],
+    }, agent);
+
+    expect(toolContext.pendingStepHint).toEqual({
+      model: 'opus',
+      thinking: 'enabled',
+      effort: 'high',
+    });
+  });
+
+  it('does not set pendingStepHint when user selects plain string option', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const toolContext = makeToolContext();
+    const agent = makeAgent({ promptUser, toolContext });
+
+    await askUserTool.handler({
+      question: 'Continue?',
+      options: [
+        { label: 'Analyze', hint: { model: 'opus' } },
+        'Cancel',
+      ],
+    }, agent);
+
+    expect(toolContext.pendingStepHint).toBeNull();
+  });
+
+  it('does not set pendingStepHint when option has no hint', async () => {
+    const promptUser = vi.fn().mockResolvedValue('No hint');
+    const toolContext = makeToolContext();
+    const agent = makeAgent({ promptUser, toolContext });
+
+    await askUserTool.handler({
+      question: 'Pick',
+      options: [{ label: 'No hint' }],
+    }, agent);
+
+    expect(toolContext.pendingStepHint).toBeNull();
+  });
+
+  it('supports mixed string and object options', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Yes');
+    const agent = makeAgent({ promptUser });
+
+    const result = await askUserTool.handler({
+      question: 'Proceed?',
+      options: [
+        'Yes',
+        { label: 'No', hint: { model: 'haiku' } },
+      ],
+    }, agent);
+
+    expect(result).toBe('Yes');
+    expect(promptUser).toHaveBeenCalledWith('Proceed?', ['Yes', 'No', '\x00']);
+  });
+
+  it('stores hint from sequential multi-question fallback', async () => {
+    const promptUser = vi.fn()
+      .mockResolvedValueOnce('answer 1')
+      .mockResolvedValueOnce('Opus mode');
+    const toolContext = makeToolContext();
+    const agent = makeAgent({ promptUser, toolContext });
+
+    await askUserTool.handler({
+      question: 'Multi',
+      questions: [
+        { question: 'Q1' },
+        { question: 'Q2', options: [{ label: 'Opus mode', hint: { model: 'opus' } }] },
+      ],
+    }, agent);
+
+    expect(toolContext.pendingStepHint).toEqual({ model: 'opus' });
   });
 });

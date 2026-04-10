@@ -127,6 +127,13 @@ export function loadConfig(): LynoxUserConfig {
       merged.default_tier = tier;
     }
   }
+  // Max tier cap (managed hosting cost control — StepHints and pipelines are clamped)
+  if (process.env['LYNOX_MAX_TIER']) {
+    const tier = process.env['LYNOX_MAX_TIER'];
+    if (tier === 'haiku' || tier === 'sonnet' || tier === 'opus') {
+      merged.max_tier = tier;
+    }
+  }
   if (process.env['AWS_REGION']) {
     merged.aws_region = process.env['AWS_REGION'];
   }

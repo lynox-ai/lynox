@@ -17,6 +17,7 @@ import type {
   ToolEntry,
   StreamHandler,
   NetworkPolicy,
+  StepHint,
 } from '../types/index.js';
 
 /** Provider for cross-session HTTP rate limiting (implemented by RunHistory). */
@@ -56,6 +57,9 @@ export interface ToolContext {
 
   // ── Tracked plan execution ──
   activePlan: ActiveTrackedPlan | null;
+
+  // ── Step hint from ask_user (applied at next session.run()) ──
+  pendingStepHint: StepHint | null;
 }
 
 export interface TrackedStepResult {
@@ -97,6 +101,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
     activePlan: null,
+    pendingStepHint: null,
   };
 }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
+import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline, ModelTier, ThinkingHint, EffortLevel } from '../../types/index.js';
 import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { startTrackedPlan } from '../../core/plan-tracker.js';
@@ -11,6 +11,9 @@ type PhaseAssignee = 'agent' | 'user';
 interface PlanPhase {
   name: string;
   steps: string[];
+  model?: ModelTier | undefined;
+  thinking?: ThinkingHint | undefined;
+  effort?: EffortLevel | undefined;
   verification?: string | undefined;
   depends_on?: string[] | undefined;
   assignee?: PhaseAssignee | undefined;
@@ -96,7 +99,7 @@ export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[]
         if (input_from.length === 0) input_from = undefined;
       }
 
-      return { id, task: taskLines.join('\n'), input_from };
+      return { id, task: taskLines.join('\n'), input_from, model: phase.model, thinking: phase.thinking, effort: phase.effort };
     });
 }
 
@@ -207,6 +210,21 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
                 type: 'array',
                 items: { type: 'string' },
                 description: 'What happens in this step',
+              },
+              model: {
+                type: 'string',
+                enum: ['opus', 'sonnet', 'haiku'],
+                description: 'Model tier for this step. Omit to use session default. Prefer haiku for simple tasks, sonnet for standard, opus only for complex analysis.',
+              },
+              thinking: {
+                type: 'string',
+                enum: ['adaptive', 'enabled', 'disabled'],
+                description: 'Thinking mode for this step. Omit for adaptive (default).',
+              },
+              effort: {
+                type: 'string',
+                enum: ['low', 'medium', 'high', 'max'],
+                description: 'Effort level for this step. Omit for medium (default).',
               },
               verification: {
                 type: 'string',

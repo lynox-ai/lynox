@@ -16,7 +16,7 @@ import type {
   TabQuestion,
   IAgent,
 } from '../types/index.js';
-import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW, getModelId } from '../types/index.js';
+import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW, getModelId, clampTier } from '../types/index.js';
 import { getActiveProvider, isBedrockEuOnly } from './llm-client.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
@@ -293,6 +293,28 @@ export class Session {
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
           return `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
         }
+      }
+    }
+
+    // Apply pending step hint from previous ask_user selection
+    const toolCtx = this.getToolContext();
+    const pendingHint = toolCtx.pendingStepHint;
+    if (pendingHint) {
+      toolCtx.pendingStepHint = null;
+      const maxTier = toolCtx.userConfig.max_tier;
+      if (pendingHint.model) {
+        this._model = clampTier(pendingHint.model, maxTier);
+        this._recreateAgent();
+      }
+      if (pendingHint.effort) {
+        this._effort = pendingHint.effort;
+      }
+      if (pendingHint.thinking) {
+        this._thinking = pendingHint.thinking === 'enabled'
+          ? { type: 'enabled', budget_tokens: 10_000 }
+          : pendingHint.thinking === 'disabled'
+            ? { type: 'disabled' }
+            : { type: 'adaptive' };
       }
     }
 

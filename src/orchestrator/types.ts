@@ -19,6 +19,7 @@ export interface ManifestStep {
   model?: string | undefined;
   role?: string | undefined;
   effort?: import('../types/index.js').EffortLevel | undefined;
+  thinking?: import('../types/index.js').ThinkingHint | undefined;
   input_from?: string[] | undefined;
   conditions?: ManifestCondition[] | undefined;
   timeout_ms?: number | undefined;

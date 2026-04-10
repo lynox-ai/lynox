@@ -84,6 +84,8 @@ function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'st
       task: s.task,
       model: s.model,
       role: s.role,
+      effort: s.effort,
+      thinking: s.thinking,
       input_from: s.input_from,
       timeout_ms: s.timeout_ms,
     })),

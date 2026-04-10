@@ -116,4 +116,24 @@ export type ThinkingMode =
   | { type: 'adaptive' }
   | { type: 'disabled' };
 
+export type ThinkingHint = ThinkingMode['type'];
+
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+
+// === Step Hints (LLM-driven per-step configuration) ===
+
+/** Hints the LLM attaches to options or plan phases to configure the next step. */
+export interface StepHint {
+  model?: ModelTier | undefined;
+  thinking?: ThinkingHint | undefined;
+  effort?: EffortLevel | undefined;
+}
+
+/** Tier ordering for clamping — lower index = cheaper/faster. */
+const TIER_ORDER: Record<ModelTier, number> = { haiku: 0, sonnet: 1, opus: 2 };
+
+/** Clamp a requested tier to the maximum allowed tier. Returns requested if no cap set. */
+export function clampTier(requested: ModelTier, maxTier: ModelTier | undefined): ModelTier {
+  if (!maxTier) return requested;
+  return TIER_ORDER[requested] > TIER_ORDER[maxTier] ? maxTier : requested;
+}
