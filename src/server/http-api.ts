@@ -445,10 +445,15 @@ export class LynoxHTTPApi {
         if (entry.resetAt < now) this.rateCounts.delete(ip);
       }
     }, 5 * 60_000);
+
+    // Session idle eviction — prevents unbounded memory growth
+    this.sessionStore.setRunningCheck((id) => this.runningSessions.has(id));
+    this.sessionStore.startEviction();
   }
 
   async shutdown(): Promise<void> {
     if (this.rateGcTimer) clearInterval(this.rateGcTimer);
+    this.sessionStore.stopEviction();
     // Expire all pending prompts in SQLite on shutdown
     this.engine?.getPromptStore()?.expireAll();
     this.server?.close();
@@ -1418,7 +1423,7 @@ export class LynoxHTTPApi {
       // Managed EU mode: block provider/credential changes (lynox provides Bedrock)
       // Starter (BYOK) mode: provider changes are allowed (customer brings own key)
       if (process.env['LYNOX_MANAGED_MODE'] === 'eu') {
-        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'aws_region', 'bedrock_eu_only'];
+        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'aws_region', 'bedrock_eu_only', 'default_tier'];
         const attempted = LOCKED_FIELDS.filter(f => f in (parsed.data as Record<string, unknown>));
         if (attempted.length > 0) {
           errorResponse(res, 403, `Managed EU instance: cannot change ${attempted.join(', ')}`);

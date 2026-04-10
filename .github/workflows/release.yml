@@ -20,6 +20,9 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm exec vitest run
 
+  # This workflow builds and publishes artifacts only.
+  # It does NOT deploy to any managed instance.
+  # Production deploy is always manual via admin API after explicit confirmation.
   docker:
     needs: test
     runs-on: ubuntu-latest
