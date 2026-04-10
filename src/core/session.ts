@@ -371,7 +371,7 @@ export class Session {
           useGraphExpansion: true,
         });
         this._retrievedMemoryIds = result.memories.map(m => m.id);
-        this.agent.setKnowledgeContext(knowledgeLayer.formatRetrievalContext(result));
+        this.agent.setKnowledgeContext(knowledgeLayer.formatRetrievalContext(result, undefined, task));
       } catch {
         this.agent.setKnowledgeContext('');
       }

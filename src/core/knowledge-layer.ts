@@ -243,11 +243,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return this.retrievalEngine.retrieve(query, scopes, options);
   }
 
-  formatRetrievalContext(result: KnowledgeRetrievalResult, maxChars?: number | undefined): string {
+  formatRetrievalContext(
+    result: KnowledgeRetrievalResult,
+    maxChars?: number | undefined,
+    query?: string | undefined,
+  ): string {
     let context = this.retrievalEngine.formatContext(result, maxChars);
 
-    // Inject active patterns and recent relevant episodes into context
-    const extras = this._formatIntelligenceContext();
+    // Inject active patterns filtered by query relevance
+    const extras = this._formatIntelligenceContext(query);
     if (extras && context) {
       context = context.replace('</relevant_context>', `${extras}\n</relevant_context>`);
     } else if (extras && !context) {
@@ -257,16 +261,35 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return context;
   }
 
-  /** Format active patterns as context for the agent. */
-  private _formatIntelligenceContext(): string {
-    // Active patterns with high confidence
-    const patterns = this.db.getPatterns({ activeOnly: true, limit: 5 });
+  /** Format active patterns as context for the agent, filtered by query relevance. */
+  private _formatIntelligenceContext(query?: string | undefined): string {
+    const patterns = this.db.getPatterns({ activeOnly: true, limit: 20 });
     const strongPatterns = patterns.filter(p => p.confidence >= 0.6 && p.evidence_count >= 3);
     if (strongPatterns.length === 0) return '';
 
-    const lines = strongPatterns.map(p =>
-      `- [${p.pattern_type}] ${p.description} (${(p.confidence * 100).toFixed(0)}% confidence, ${p.evidence_count}x observed)`,
-    );
+    let selected = strongPatterns;
+
+    if (query) {
+      const queryTokens = new Set(
+        query.toLowerCase().split(/\s+/).filter(w => w.length > 3),
+      );
+      const scored = strongPatterns.map(p => {
+        const descTokens = p.description.toLowerCase().split(/\s+/);
+        const overlap = descTokens.filter(w => queryTokens.has(w)).length;
+        return { pattern: p, overlap };
+      });
+      const relevant = scored.filter(s => s.overlap > 0);
+      selected = relevant.length > 0
+        ? relevant.sort((a, b) => b.overlap - a.overlap).slice(0, 5).map(s => s.pattern)
+        : strongPatterns.slice(0, 3);
+    } else {
+      selected = strongPatterns.slice(0, 5);
+    }
+
+    const lines = selected.map(p => {
+      const seen = p.last_seen_at.slice(0, 10);
+      return `- [${p.pattern_type}] ${p.description} (${(p.confidence * 100).toFixed(0)}% confidence, ${p.evidence_count}x observed, last ${seen})`;
+    });
     return `<learned_patterns>\n${lines.join('\n')}\n</learned_patterns>`;
   }
 

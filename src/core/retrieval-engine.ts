@@ -244,6 +244,7 @@ export class RetrievalEngine {
         score: c.vectorScore / VECTOR_WEIGHT,
         finalScore: c.finalScore,
         source: c.source,
+        createdAt: c.createdAt,
       })),
       entities,
       contextGraph,
@@ -290,9 +291,10 @@ export class RetrievalEngine {
     for (const scopeType of scopeOrder) {
       const bucket = grouped.get(scopeType);
       if (!bucket || bucket.length === 0) continue;
-      const entries = bucket.map(m =>
-        `[${escapeXml(m.namespace)}] (${(m.finalScore * 100).toFixed(0)}%)\n${escapeXml(m.text)}`,
-      ).join('\n\n');
+      const entries = bucket.map(m => {
+        const date = m.createdAt.slice(0, 10);
+        return `[${escapeXml(m.namespace)}] (${(m.finalScore * 100).toFixed(0)}%) — ${date}\n${escapeXml(m.text)}`;
+      }).join('\n\n');
       sections.push(`<scope type="${escapeXml(scopeType)}">\n${entries}\n</scope>`);
     }
 
@@ -411,9 +413,10 @@ export class RetrievalEngine {
   private async _formatContextGraphWithData(entities: EntityRecord[]): Promise<string> {
     if (entities.length === 0) return '';
 
-    const entityLines = entities.map(e =>
-      `${escapeXml(e.canonicalName)} (${e.entityType}, ${e.mentionCount} mentions)`,
-    );
+    const entityLines = entities.map(e => {
+      const seen = e.lastSeenAt.slice(0, 10);
+      return `${escapeXml(e.canonicalName)} (${e.entityType}, ${e.mentionCount} mentions, last ${seen})`;
+    });
     const parts = [`Entities: ${entityLines.join(', ')}`];
 
     if (this.dataStoreBridge && entities.length > 0) {

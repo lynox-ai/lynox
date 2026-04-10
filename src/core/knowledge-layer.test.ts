@@ -226,7 +226,7 @@ describe('KnowledgeLayer', () => {
       id: `mem-${i}`, text: 'x'.repeat(500),
       namespace: 'knowledge' as const, scopeType: 'context' as const,
       scopeId: 'test', score: 0.9 - i * 0.1, finalScore: 0.9 - i * 0.1,
-      source: 'vector' as const,
+      source: 'vector' as const, createdAt: '2026-04-01T00:00:00Z',
     }));
 
     const fullCtx = layer.formatRetrievalContext({ memories, entities: [], contextGraph: '' });
@@ -246,7 +246,7 @@ describe('KnowledgeLayer', () => {
       id: `mem-${i}`, text: 'y'.repeat(1000),
       namespace: 'knowledge' as const, scopeType: 'context' as const,
       scopeId: 'test', score: 0.9 - i * 0.01, finalScore: 0.9 - i * 0.01,
-      source: 'vector' as const,
+      source: 'vector' as const, createdAt: '2026-04-01T00:00:00Z',
     }));
 
     const ctx = layer.formatRetrievalContext({ memories, entities: [], contextGraph: '' });

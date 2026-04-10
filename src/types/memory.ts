@@ -132,6 +132,7 @@ export interface KnowledgeRetrievalResult {
     score: number;
     finalScore: number;
     source: 'vector' | 'graph' | 'fts';
+    createdAt: string;
   }>;
   entities: EntityRecord[];
   contextGraph: string;
