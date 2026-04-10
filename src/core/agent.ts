@@ -555,8 +555,10 @@ export class Agent implements IAgent {
   private _buildSystemPrompt(): Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> {
     const blocks: Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> = [];
     // Block-level cache_control: supported on Anthropic + Bedrock, not on custom proxies
-    // Use 1-hour TTL to survive pauses between messages (SDK types lag behind API support)
-    const cc = this.isCustomProxy ? undefined : { type: 'ephemeral_1h' } as unknown as BetaCacheControlEphemeral;
+    // Anthropic-direct: 1h TTL to survive pauses between messages; Bedrock: 5min only (API limitation)
+    const cc = this.isCustomProxy ? undefined
+      : this.isNonDirectAnthropic ? { type: 'ephemeral' as const }
+      : { type: 'ephemeral_1h' } as unknown as BetaCacheControlEphemeral;
 
     const staticPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;
 
