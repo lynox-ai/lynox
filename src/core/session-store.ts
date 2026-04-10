@@ -67,10 +67,16 @@ async function generateThreadSummary(
   }
 }
 
+const DEFAULT_MAX_IDLE_MS = 30 * 60_000; // 30 minutes
+const DEFAULT_EVICT_INTERVAL_MS = 5 * 60_000; // check every 5 minutes
+
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
+  private readonly lastAccessed = new Map<string, number>();
+  private evictTimer: ReturnType<typeof setInterval> | null = null;
 
   getOrCreate(sessionId: string, engine: Engine, opts?: SessionOptions): Session {
+    this.lastAccessed.set(sessionId, Date.now());
     let session = this.sessions.get(sessionId);
     if (!session) {
       const threadStore = engine.getThreadStore();
@@ -118,10 +124,55 @@ export class SessionStore {
   }
 
   get(sessionId: string): Session | undefined {
-    return this.sessions.get(sessionId);
+    const s = this.sessions.get(sessionId);
+    if (s) this.lastAccessed.set(sessionId, Date.now());
+    return s;
   }
 
   reset(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.lastAccessed.delete(sessionId);
+  }
+
+  /** Number of cached sessions (for diagnostics). */
+  get size(): number {
+    return this.sessions.size;
+  }
+
+  /** Start periodic eviction of idle sessions. */
+  startEviction(
+    maxIdleMs = DEFAULT_MAX_IDLE_MS,
+    intervalMs = DEFAULT_EVICT_INTERVAL_MS,
+  ): void {
+    if (this.evictTimer) return;
+    this.evictTimer = setInterval(() => {
+      const cutoff = Date.now() - maxIdleMs;
+      for (const [id, ts] of this.lastAccessed) {
+        if (ts < cutoff && !this.isRunning(id)) {
+          this.sessions.delete(id);
+          this.lastAccessed.delete(id);
+        }
+      }
+    }, intervalMs);
+    this.evictTimer.unref();
+  }
+
+  /** Stop eviction timer. */
+  stopEviction(): void {
+    if (this.evictTimer) {
+      clearInterval(this.evictTimer);
+      this.evictTimer = null;
+    }
+  }
+
+  /** Hook for checking if a session is actively running (set externally). */
+  private _isRunning: ((id: string) => boolean) | null = null;
+
+  setRunningCheck(fn: (id: string) => boolean): void {
+    this._isRunning = fn;
+  }
+
+  private isRunning(id: string): boolean {
+    return this._isRunning ? this._isRunning(id) : false;
   }
 }

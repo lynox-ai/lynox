@@ -90,6 +90,77 @@ describe('SessionStore', () => {
     });
   });
 
+  describe('eviction', () => {
+    it('evicts idle sessions after maxIdleMs', () => {
+      vi.useFakeTimers();
+      const store = new SessionStore();
+      const engine = makeMockEngine();
+
+      store.getOrCreate('idle-1', engine);
+      store.getOrCreate('idle-2', engine);
+      expect(store.size).toBe(2);
+
+      // Start eviction with 10s idle, 5s interval
+      store.startEviction(10_000, 5_000);
+
+      // Advance past idle threshold + one interval
+      vi.advanceTimersByTime(15_000);
+      expect(store.size).toBe(0);
+      expect(store.get('idle-1')).toBeUndefined();
+      expect(store.get('idle-2')).toBeUndefined();
+
+      store.stopEviction();
+      vi.useRealTimers();
+    });
+
+    it('keeps recently accessed sessions', () => {
+      vi.useFakeTimers();
+      const store = new SessionStore();
+      const engine = makeMockEngine();
+
+      store.getOrCreate('active', engine);
+      store.getOrCreate('stale', engine);
+      store.startEviction(10_000, 5_000);
+
+      // After 8s, touch 'active' — 'stale' untouched
+      vi.advanceTimersByTime(8_000);
+      store.get('active');
+
+      // At 15s: 'stale' is 15s idle (>10s), 'active' is 7s idle (<10s)
+      vi.advanceTimersByTime(7_000);
+      expect(store.size).toBe(1);
+      expect(store.get('active')).toBeDefined();
+      expect(store.get('stale')).toBeUndefined();
+
+      store.stopEviction();
+      vi.useRealTimers();
+    });
+
+    it('does not evict sessions that are actively running', () => {
+      vi.useFakeTimers();
+      const store = new SessionStore();
+      const engine = makeMockEngine();
+
+      store.getOrCreate('running', engine);
+      store.setRunningCheck((id) => id === 'running');
+      store.startEviction(10_000, 5_000);
+
+      vi.advanceTimersByTime(15_000);
+      // Should still be present because it's running
+      expect(store.size).toBe(1);
+
+      store.stopEviction();
+      vi.useRealTimers();
+    });
+
+    it('startEviction is idempotent', () => {
+      const store = new SessionStore();
+      store.startEviction(10_000, 5_000);
+      store.startEviction(10_000, 5_000); // no-op
+      store.stopEviction();
+    });
+  });
+
   describe('get', () => {
     it('returns undefined for unknown session ID', () => {
       const store = new SessionStore();

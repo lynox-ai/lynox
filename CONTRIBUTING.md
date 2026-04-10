@@ -12,7 +12,20 @@ lynox is developed by a small, focused team. We are **not accepting external pul
 - **Request features** — Open an issue describing your use case. We read every one.
 - **Security vulnerabilities** — See [SECURITY.md](SECURITY.md) for responsible disclosure.
 
-## Why No PRs?
+## Internal Development
+
+For team members with write access:
+
+1. Create a feature branch (`fix/...`, `feat/...`, `chore/...`)
+2. Open a PR against `main` — CI runs automatically (lint, typecheck, tests, security scan)
+3. All checks must pass before merge
+4. After merge, a staging image builds automatically for validation
+
+`main` is protected: no force push, no direct push without CI passing.
+
+See `pro/docs/internal/release-strategy.md` for the full release process.
+
+## Why No External PRs?
 
 Early-stage projects benefit from a tight feedback loop and consistent vision. Reviewing and integrating external contributions takes more time than it saves right now. This will change as the project matures — watch this file for updates.
 
