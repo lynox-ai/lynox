@@ -37,6 +37,10 @@ describe('LYNOX_BETAS', () => {
     expect(LYNOX_BETAS).toContain('token-efficient-tools-2025-02-19');
   });
 
+  it('contains extended-cache-ttl beta', () => {
+    expect(LYNOX_BETAS).toContain('extended-cache-ttl-2025-04-11');
+  });
+
   it('does not contain outdated prompt-caching beta', () => {
     expect(LYNOX_BETAS).not.toContain('prompt-caching-2024-07-31');
   });
