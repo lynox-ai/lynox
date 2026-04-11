@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MODEL_MAP, LYNOX_BETAS } from './index.js';
+import { MODEL_MAP, LYNOX_BETAS, getBetasForProvider } from './index.js';
 
 describe('MODEL_MAP', () => {
   it('has 3 tiers', () => {
@@ -43,5 +43,24 @@ describe('LYNOX_BETAS', () => {
 
   it('does not contain outdated prompt-caching beta', () => {
     expect(LYNOX_BETAS).not.toContain('prompt-caching-2024-07-31');
+  });
+});
+
+describe('getBetasForProvider', () => {
+  it('returns all betas for anthropic provider', () => {
+    const betas = getBetasForProvider('anthropic');
+    expect(betas).toContain('token-efficient-tools-2025-02-19');
+    expect(betas).toContain('extended-cache-ttl-2025-04-11');
+  });
+
+  it('returns only compatible betas for bedrock provider', () => {
+    const betas = getBetasForProvider('bedrock');
+    expect(betas).toContain('token-efficient-tools-2025-02-19');
+    expect(betas).not.toContain('extended-cache-ttl-2025-04-11');
+  });
+
+  it('returns empty array for custom provider', () => {
+    const betas = getBetasForProvider('custom');
+    expect(betas).toHaveLength(0);
   });
 });
