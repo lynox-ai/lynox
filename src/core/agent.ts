@@ -16,8 +16,9 @@ import type {
   PreApproveAuditLike,
   SecretStoreLike,
   ChangesetManagerLike,
+  LLMProvider,
 } from '../types/index.js';
-import { LYNOX_BETAS, CHARS_PER_TOKEN, getContextWindow, getDefaultMaxTokens, getMaxContinuations } from '../types/index.js';
+import { getBetasForProvider, CHARS_PER_TOKEN, getContextWindow, getDefaultMaxTokens, getMaxContinuations } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -62,6 +63,7 @@ export class Agent implements IAgent {
   private readonly isNonDirectAnthropic: boolean;
   /** True only for custom (non-Claude) — additionally strips betas, block-level cache_control, thinking, effort */
   private readonly isCustomProxy: boolean;
+  private readonly provider: LLMProvider;
   private readonly systemPrompt: string | undefined;
   private readonly mcpServers: MCPServer[] | undefined;
   private thinking: ThinkingMode;
@@ -124,6 +126,7 @@ export class Agent implements IAgent {
     //   bedrock:         Claude features (thinking, effort, betas, block cache_control) but no top-level cache_control, web_search, MCP, eager_input_streaming
     //   custom:          basic only (chat, streaming, tool calling)
     const activeProvider = config.provider ?? getActiveProvider();
+    this.provider = activeProvider;
     this.isNonDirectAnthropic = activeProvider !== 'anthropic';
     this.isCustomProxy = activeProvider === 'custom';
     this.mcpServers = activeProvider === 'anthropic' ? config.mcpServers : undefined;
@@ -513,8 +516,7 @@ export class Agent implements IAgent {
           ...(this.isNonDirectAnthropic ? {} : { cache_control: { type: 'ephemeral', ttl: '1h' } as unknown as BetaCacheControlEphemeral }),
           system: systemBlocks,
           messages: this.messages,
-          // Betas: supported on Anthropic + Bedrock, not on custom proxies
-          ...(this.isCustomProxy ? {} : { betas: [...LYNOX_BETAS] }),
+          ...( this.isCustomProxy ? {} : { betas: getBetasForProvider(this.provider) }),
           tools: toolsDef,
           ...(this.mcpServers ? { mcp_servers: this.mcpServers } : {}),
         }, { signal });

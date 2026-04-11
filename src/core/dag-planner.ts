@@ -1,5 +1,5 @@
 import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from '../types/index.js';
-import { LYNOX_BETAS, getModelId } from '../types/index.js';
+import { getBetasForProvider, getModelId } from '../types/index.js';
 import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
 import { resolveModel } from '../orchestrator/runtime-adapter.js';
 
@@ -82,7 +82,7 @@ export async function planDAG(
         {
           model,
           max_tokens: 4096,
-          ...(isCustomProvider() ? {} : { betas: [...LYNOX_BETAS] }),
+          ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
           system: systemText,
           tool_choice: { type: 'tool', name: 'propose_dag' },
           tools: [PROPOSE_DAG_TOOL],

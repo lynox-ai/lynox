@@ -80,10 +80,24 @@ export interface MCPServer {
 
 // === 4.7 Beta Headers ===
 
-export const LYNOX_BETAS: AnthropicBeta[] = [
+/** Betas supported by all Claude providers (Anthropic + Bedrock). */
+const BEDROCK_COMPATIBLE_BETAS: AnthropicBeta[] = [
   'token-efficient-tools-2025-02-19',
+];
+
+/** Betas only supported by direct Anthropic API (e.g. extended cache TTL — Bedrock has fixed 5-min TTL). */
+const ANTHROPIC_ONLY_BETAS: AnthropicBeta[] = [
   'extended-cache-ttl-2025-04-11',
 ];
+
+export const LYNOX_BETAS: AnthropicBeta[] = [...BEDROCK_COMPATIBLE_BETAS, ...ANTHROPIC_ONLY_BETAS];
+
+/** Return the beta flags appropriate for the given LLM provider. */
+export function getBetasForProvider(provider: LLMProvider): AnthropicBeta[] {
+  if (provider === 'custom') return [];
+  if (provider === 'bedrock') return [...BEDROCK_COMPATIBLE_BETAS];
+  return [...LYNOX_BETAS];
+}
 
 // === Additional types for stubs ===
 
