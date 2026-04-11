@@ -82,6 +82,7 @@ export interface MCPServer {
 
 export const LYNOX_BETAS: AnthropicBeta[] = [
   'token-efficient-tools-2025-02-19',
+  'extended-cache-ttl-2025-04-11',
 ];
 
 // === Additional types for stubs ===

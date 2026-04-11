@@ -510,7 +510,7 @@ export class Agent implements IAgent {
           ...(thinkingEnabled ? { thinking: thinkingConfig } : {}),
           ...(this.effort ? { output_config: { effort: this.effort } } : {}),
           // Top-level cache_control: Anthropic-direct only (Bedrock rejects it)
-          ...(this.isNonDirectAnthropic ? {} : { cache_control: { type: 'ephemeral_1h' } as unknown as BetaCacheControlEphemeral }),
+          ...(this.isNonDirectAnthropic ? {} : { cache_control: { type: 'ephemeral', ttl: '1h' } as unknown as BetaCacheControlEphemeral }),
           system: systemBlocks,
           messages: this.messages,
           // Betas: supported on Anthropic + Bedrock, not on custom proxies
@@ -558,7 +558,7 @@ export class Agent implements IAgent {
     // Anthropic-direct: 1h TTL to survive pauses between messages; Bedrock: 5min only (API limitation)
     const cc = this.isCustomProxy ? undefined
       : this.isNonDirectAnthropic ? { type: 'ephemeral' as const }
-      : { type: 'ephemeral_1h' } as unknown as BetaCacheControlEphemeral;
+      : { type: 'ephemeral', ttl: '1h' } as unknown as BetaCacheControlEphemeral;
 
     const staticPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;
 
