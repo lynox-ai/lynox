@@ -1,4 +1,4 @@
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile } from '../../types/index.js';
 import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
 import { getActiveProvider, isBedrockEuOnly } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
@@ -63,11 +63,22 @@ async function executeThinker(
 
   // 4-tier resolution: spec fields > role defaults > user config > global default
   const userConfig = loadConfig();
+
+  // Model profile override: if spec.profile is set, use OpenAI-compatible provider
+  const profile: ModelProfile | undefined = spec.profile
+    ? userConfig.model_profiles?.[spec.profile]
+    : undefined;
+  if (spec.profile && !profile) {
+    throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
+  }
+
   const modelTier = (spec.model ?? resolved?.model ?? userConfig.default_tier ?? 'sonnet') as ModelTier;
-  const model = getModelId(modelTier, getActiveProvider(), isBedrockEuOnly());
+  // Profile overrides model ID + provider; otherwise use Claude tier resolution
+  const model = profile ? profile.model_id : getModelId(modelTier, getActiveProvider(), isBedrockEuOnly());
   const systemPrompt = spec.system_prompt;
-  const thinking = spec.thinking;
-  const effort = spec.effort ?? resolved?.effort;
+  // OpenAI providers don't support thinking or effort
+  const thinking = profile ? { type: 'disabled' as const } : spec.thinking;
+  const effort = profile ? undefined : (spec.effort ?? resolved?.effort);
   const maxIterations = spec.max_turns;
 
   // Tool scoping — map RoleConfig fields to resolveTools interface
@@ -123,7 +134,7 @@ async function executeThinker(
     tools,
     thinking,
     effort,
-    maxTokens: spec.max_tokens,
+    maxTokens: spec.max_tokens ?? profile?.max_tokens,
     memory,
     onStream: parentOnStream ?? undefined,
     spawnDepth: childDepth,
@@ -131,10 +142,12 @@ async function executeThinker(
     isolation: childIsolation,
     autonomy: parentAgent.autonomy,
     costGuard,
-    apiKey: userConfig.api_key,
-    apiBaseURL: userConfig.api_base_url,
-    provider: userConfig.provider,
+    // Profile overrides provider credentials
+    apiKey: profile?.api_key ?? userConfig.api_key,
+    apiBaseURL: profile?.api_base_url ?? userConfig.api_base_url,
+    provider: profile?.provider ?? userConfig.provider,
     awsRegion: userConfig.aws_region,
+    openaiModelId: profile?.model_id,
   });
 
   // Track child for abort propagation
@@ -174,6 +187,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               tools: { type: 'array', items: { type: 'string' } },
               max_turns: { type: 'number' },
               max_budget_usd: { type: 'number' },
+              profile: { type: 'string', description: 'Named model profile for non-Claude provider (e.g. "mistral-eu", "gemini-research"). Configured in config.json.' },
             },
             required: ['name', 'task'],
           },

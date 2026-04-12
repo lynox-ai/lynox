@@ -116,9 +116,13 @@ export function loadConfig(): LynoxUserConfig {
   // LLM provider
   if (process.env['LYNOX_LLM_PROVIDER']) {
     const p = process.env['LYNOX_LLM_PROVIDER'];
-    if (p === 'anthropic' || p === 'bedrock' || p === 'custom') {
+    if (p === 'anthropic' || p === 'bedrock' || p === 'custom' || p === 'openai') {
       merged.provider = p;
     }
+  }
+  // OpenAI model ID (for provider: 'openai')
+  if (process.env['OPENAI_MODEL_ID']) {
+    merged.openai_model_id = process.env['OPENAI_MODEL_ID'];
   }
   // Model tier override (used by managed EU to lock model)
   if (process.env['LYNOX_DEFAULT_TIER']) {

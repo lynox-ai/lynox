@@ -498,6 +498,8 @@ export async function initMemoryInstance(
     contextId,
     maskFn,
     isFeatureEnabled('flat-file-memory'),
+    userConfig.provider,
+    userConfig.openai_model_id,
   );
 
   if (activeScopes.length > 0) {

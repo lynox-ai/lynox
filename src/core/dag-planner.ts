@@ -59,12 +59,19 @@ export async function planDAG(
     model?: string | undefined;
     apiKey?: string | undefined;
     apiBaseURL?: string | undefined;
+    provider?: import('../types/index.js').LLMProvider | undefined;
+    openaiModelId?: string | undefined;
     maxSteps?: number | undefined;
     projectContext?: string | undefined;
   },
 ): Promise<DagPlanResult | null> {
   try {
-    const client = createLLMClient({ apiKey: options?.apiKey, apiBaseURL: options?.apiBaseURL });
+    const client = createLLMClient({
+      apiKey: options?.apiKey,
+      apiBaseURL: options?.apiBaseURL,
+      provider: options?.provider,
+      openaiModelId: options?.openaiModelId,
+    });
 
     const model = options?.model ?? getModelId('haiku', getActiveProvider(), isBedrockEuOnly());
     const maxSteps = options?.maxSteps ?? 15;

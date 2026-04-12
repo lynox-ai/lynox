@@ -128,7 +128,7 @@ export class Agent implements IAgent {
     const activeProvider = config.provider ?? getActiveProvider();
     this.provider = activeProvider;
     this.isNonDirectAnthropic = activeProvider !== 'anthropic';
-    this.isCustomProxy = activeProvider === 'custom';
+    this.isCustomProxy = activeProvider === 'custom' || activeProvider === 'openai';
     this.mcpServers = activeProvider === 'anthropic' ? config.mcpServers : undefined;
     const isHaiku = this.model.includes('haiku');
     const requestedThinking = config.thinking ?? { type: 'adaptive' };
@@ -165,6 +165,7 @@ export class Agent implements IAgent {
       apiKey: config.apiKey,
       apiBaseURL: config.apiBaseURL,
       awsRegion: config.awsRegion,
+      openaiModelId: config.openaiModelId,
     });
   }
 

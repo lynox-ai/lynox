@@ -94,6 +94,7 @@ export class Session {
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
   private _changesetManager: ChangesetManager | null = null;
+  private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   private _isCompacting = false;
   onStream: StreamHandler | null = null;
   private _promptUser: ((question: string, options?: string[]) => Promise<string>) | null = null;
@@ -764,8 +765,19 @@ export class Session {
     excludeTools?: string[] | undefined;
     systemPromptSuffix?: string | undefined;
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
+    /** Named model profile — overrides provider to OpenAI-compatible for this session. */
+    profile?: string | undefined;
   }): void {
     this.agentOverrides = overrides ?? {};
+    // Resolve model profile override if specified
+    if (overrides?.profile) {
+      const profiles = this.engine.getUserConfig().model_profiles;
+      const profile = profiles?.[overrides.profile];
+      if (!profile) throw new Error(`Unknown model profile "${overrides.profile}". Available: ${Object.keys(profiles ?? {}).join(', ') || 'none'}.`);
+      this._profileOverride = profile;
+    } else {
+      this._profileOverride = null;
+    }
     const messages = this.saveMessages();
     this._createAgent();
     this.loadMessages(messages);
@@ -873,10 +885,11 @@ export class Session {
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,
       excludeTools: this.agentOverrides.excludeTools,
-      apiKey: userConfig.api_key,
-      apiBaseURL: userConfig.api_base_url,
-      provider: userConfig.provider,
+      apiKey: this._profileOverride?.api_key ?? userConfig.api_key,
+      apiBaseURL: this._profileOverride?.api_base_url ?? userConfig.api_base_url,
+      provider: this._profileOverride?.provider ?? userConfig.provider,
       awsRegion: userConfig.aws_region,
+      openaiModelId: this._profileOverride?.model_id ?? userConfig.openai_model_id,
       briefing: this._briefingConsumed ? undefined : this.briefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,

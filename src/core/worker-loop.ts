@@ -262,7 +262,9 @@ export class WorkerLoop {
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
     });
     // Cost control: cap agent loop iterations for background tasks
-    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous' });
+    // Worker profile: route background tasks to cheaper provider (e.g. Mistral)
+    const workerProfile = this.engine.getUserConfig().worker_profile;
+    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
 
     // Wire promptUser so background tasks can ask questions via notifications
     session.promptUser = (question: string, options?: string[]): Promise<string> => {
@@ -369,7 +371,8 @@ ${stepsDescription}`;
       autonomy: 'autonomous',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
     });
-    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous' });
+    const workerProfile2 = this.engine.getUserConfig().worker_profile;
+    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile2 });
 
     // Activate tracked plan on the session's toolContext
     const toolContext = this.engine.getToolContext();
@@ -493,6 +496,10 @@ ${stepsDescription}`;
       autonomy: 'autonomous',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
     });
+    const workerProfile3 = this.engine.getUserConfig().worker_profile;
+    if (workerProfile3) {
+      analysisSession._recreateAgent({ profile: workerProfile3 });
+    }
 
     const isFirstRun = !previousHash;
     const analysisPrompt = isFirstRun

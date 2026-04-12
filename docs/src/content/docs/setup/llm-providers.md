@@ -13,34 +13,34 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 
 ## At a Glance
 
-| | **Claude (Anthropic)** | **Claude (AWS Bedrock)** | **Custom Proxy** |
-|---|---|---|---|
-| **Status** | Stable | Stable | Experimental |
-| **Setup** | API key | AWS account + IAM | Proxy URL |
-| **AI quality** | Claude | Claude (same models) | Model-dependent |
-| | | | |
-| **Features** | | | |
-| Chat + Streaming | ✅ | ✅ | ✅ |
-| Tool Calling | ✅ | ✅ | ✅ via LiteLLM |
-| Extended Thinking | ✅ | ✅ | ❌ Auto-disabled |
-| Prompt Caching | ✅ | ✅ | ❌ |
-| Web Search (built-in) | ✅ | ❌ | ❌ |
-| Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ |
-| MCP Server-Side | ✅ | ❌ | ❌ |
-| | | | |
-| **Privacy** | | | |
-| Data residency | US | 🇪🇺 EU (6 regions) | 🏠 Your server |
-| DPA available | ✅ Auto | ✅ AWS | N/A |
-| Training on data | ❌ Never | ❌ Never | ❌ Never |
-| CLOUD Act exposure | ⚠️ Yes | ⚠️ AWS US parent | ❌ None |
-| GDPR compliant | ✅ With DPA | ✅ | ✅ |
-| Art. 321 StGB (CH) | ⚠️ Counsel | ⚠️ Better | ✅ Safe |
-| | | | |
-| **Cost** | | | |
-| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | Same | Free (your hardware) |
-| EU surcharge | — | +10% (EU CRIS) | — |
-| Infrastructure | — | — | GPU server ~€150/mo |
-| Typical monthly | €30–150 | €33–165 | €150 fixed |
+| | **Claude (Anthropic)** | **Claude (AWS Bedrock)** | **OpenAI-Compatible** | **Custom Proxy** |
+|---|---|---|---|---|
+| **Status** | Stable | Stable | Stable | Experimental |
+| **Setup** | API key | AWS account + IAM | API key + base URL | Proxy URL |
+| **AI quality** | Claude | Claude (same models) | Model-dependent | Model-dependent |
+| | | | | |
+| **Features** | | | | |
+| Chat + Streaming | ✅ | ✅ | ✅ | ✅ |
+| Tool Calling | ✅ | ✅ | ✅ Native | ✅ via LiteLLM |
+| Extended Thinking | ✅ | ✅ | ❌ Auto-disabled | ❌ Auto-disabled |
+| Prompt Caching | ✅ | ✅ | ❌ | ❌ |
+| Web Search (built-in) | ✅ | ❌ | ❌ | ❌ |
+| Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ | ✅ |
+| MCP Server-Side | ✅ | ❌ | ❌ | ❌ |
+| | | | | |
+| **Privacy** | | | | |
+| Data residency | US | 🇪🇺 EU (6 regions) | Provider-dependent | 🏠 Your server |
+| DPA available | ✅ Auto | ✅ AWS | Provider-dependent | N/A |
+| Training on data | ❌ Never | ❌ Never | Provider-dependent | ❌ Never |
+| CLOUD Act exposure | ⚠️ Yes | ⚠️ AWS US parent | Provider-dependent | ❌ None |
+| GDPR compliant | ✅ With DPA | ✅ | Provider-dependent | ✅ |
+| Art. 321 StGB (CH) | ⚠️ Counsel | ⚠️ Better | Provider-dependent | ✅ Safe |
+| | | | | |
+| **Cost** | | | | |
+| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | Same | From $0.50/$1.50 (Mistral) | Free (your hardware) |
+| EU surcharge | — | +10% (EU CRIS) | — | — |
+| Infrastructure | — | — | — | GPU server ~€150/mo |
+| Typical monthly | €30–150 | €33–165 | €10–50 | €150 fixed |
 
 ## Claude (Anthropic) — Default
 
@@ -103,6 +103,73 @@ When `aws_region` starts with `eu-`, lynox auto-selects EU model IDs — you don
 
 **EU regions with Claude:**
 `eu-central-1` (Frankfurt), `eu-west-1` (Ireland), `eu-west-3` (Paris), `eu-north-1` (Stockholm), `eu-central-2` (Zurich), `eu-south-1` (Milan)
+
+## OpenAI-Compatible Providers — Mistral & Gemini
+
+Connect directly to any OpenAI-compatible LLM API. No proxy needed — lynox translates natively.
+
+```json
+{
+  "provider": "openai",
+  "api_base_url": "https://api.mistral.ai/v1",
+  "openai_model_id": "mistral-large-latest"
+}
+```
+
+**Environment:**
+```bash
+LYNOX_LLM_PROVIDER=openai
+ANTHROPIC_BASE_URL=https://api.mistral.ai/v1
+ANTHROPIC_API_KEY=your-mistral-key
+OPENAI_MODEL_ID=mistral-large-latest
+```
+
+### Supported Providers
+
+| Provider | Base URL | Model ID | Role | Pricing |
+|----------|----------|----------|------|---------|
+| **Mistral Large 3** (France) | `https://api.mistral.ai/v1` | `mistral-large-latest` | Fallback + background + bulk | $0.50/$1.50 per MTok |
+| **Gemini 2.5 Flash** (Google) | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` | Long-context tasks only | $0.30/$2.50 per MTok |
+
+Tool calling quality validated against lynox's agent loop: Mistral 97%, Gemini 80% (fails on complex aggregations).
+
+:::tip[Mistral — Main Fallback]
+Mistral Large 3 is lynox's official Claude fallback. It scored 97% on tool calling tests — near Claude quality at ~6x lower cost. EU and US endpoints available. No CLOUD Act exposure (French company).
+:::
+
+:::caution[Gemini — Long-Context Only]
+Use Gemini only for tasks that need its 1M context window (deep research, large document processing, inbox triage). Gemini failed on structured aggregation queries in testing — use Mistral for anything else. Google AI Studio endpoint has no regional data residency guarantee — for strict EU sovereignty, use Mistral only.
+:::
+
+### Model Profiles (Multi-Provider)
+
+Use named profiles to run different models for different tasks. Claude handles your interactive sessions while cheaper models handle background tasks and sub-agents.
+
+```json
+{
+  "provider": "anthropic",
+  "model_profiles": {
+    "mistral-eu": {
+      "provider": "openai",
+      "api_base_url": "https://api.mistral.ai/v1",
+      "api_key": "your-mistral-key",
+      "model_id": "mistral-large-latest"
+    },
+    "gemini-research": {
+      "provider": "openai",
+      "api_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key": "your-gemini-key",
+      "model_id": "gemini-2.5-flash",
+      "context_window": 1000000
+    }
+  },
+  "worker_profile": "mistral-eu"
+}
+```
+
+- **Interactive sessions**: Claude (best quality, thinking, caching)
+- **Background tasks** (`worker_profile`): Mistral or other — runs cron jobs, watch tasks, scheduled reports
+- **Spawn agents** (`profile` in spawn spec): Sub-agents can use any profile for delegated tasks
 
 ## Custom Proxy — Experimental
 

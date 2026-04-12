@@ -57,6 +57,7 @@ function makeEngine(opts?: {
   return {
     getTaskManager: vi.fn(() => tm),
     createSession: vi.fn(() => session),
+    getUserConfig: vi.fn(() => ({})),
   } as unknown as Engine;
 }
 
@@ -433,6 +434,7 @@ describe('WorkerLoop', () => {
     // Intercept the session to capture promptUser after it's assigned
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager([makeTask()])),
+      getUserConfig: vi.fn(() => ({})),
       createSession: vi.fn(() => {
         // Return a proxy that captures promptUser assignment
         return new Proxy(session, {
@@ -475,6 +477,7 @@ describe('WorkerLoop', () => {
     const tm = makeTaskManager([task]);
     const engine = {
       getTaskManager: vi.fn(() => tm),
+      getUserConfig: vi.fn(() => ({})),
       createSession: vi.fn(() => session),
     } as unknown as Engine;
     const router = makeNotificationRouter();
