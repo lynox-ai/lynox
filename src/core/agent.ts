@@ -59,7 +59,7 @@ export class Agent implements IAgent {
   readonly spawnDepth: number;
 
   private readonly client: Anthropic;
-  /** True for bedrock/custom — strips top-level cache_control + eager_input_streaming + web_search + MCP */
+  /** True for vertex/custom/openai — strips features only supported by direct Anthropic API */
   private readonly isNonDirectAnthropic: boolean;
   /** True only for custom (non-Claude) — additionally strips betas, block-level cache_control, thinking, effort */
   private readonly isCustomProxy: boolean;
@@ -123,10 +123,12 @@ export class Agent implements IAgent {
     this.systemPrompt = config.systemPrompt;
     // Provider capability detection:
     //   anthropic:       all features
-    //   bedrock:         Claude features (thinking, effort, betas, block cache_control) but no top-level cache_control, web_search, MCP, eager_input_streaming
+    //   vertex:          Claude features (thinking, effort, betas, block cache_control, 1h TTL) but no web_search, MCP, eager_input_streaming
     //   custom:          basic only (chat, streaming, tool calling)
     const activeProvider = config.provider ?? getActiveProvider();
     this.provider = activeProvider;
+    // isNonDirectAnthropic: strips features not supported outside direct Anthropic API
+    // (top-level cache_control, web_search, MCP, eager_input_streaming)
     this.isNonDirectAnthropic = activeProvider !== 'anthropic';
     this.isCustomProxy = activeProvider === 'custom' || activeProvider === 'openai';
     this.mcpServers = activeProvider === 'anthropic' ? config.mcpServers : undefined;
@@ -164,7 +166,8 @@ export class Agent implements IAgent {
       provider: config.provider,
       apiKey: config.apiKey,
       apiBaseURL: config.apiBaseURL,
-      awsRegion: config.awsRegion,
+      gcpProjectId: config.gcpProjectId,
+      gcpRegion: config.gcpRegion,
       openaiModelId: config.openaiModelId,
     });
   }
@@ -452,7 +455,7 @@ export class Agent implements IAgent {
     const systemBlocks = this._buildSystemPrompt();
     const thinkingEnabled = this.thinking.type !== 'disabled';
     const thinkingConfig: BetaThinkingConfigParam = this.thinking as BetaThinkingConfigParam;
-    // web_search is an Anthropic-direct-only server-side tool — not supported on Bedrock or custom.
+    // web_search is an Anthropic-direct-only server-side tool — not supported on Vertex AI or custom.
     // Disabled when web_research (SearXNG/Tavily) is registered to avoid redundant search tools.
     const hasWebResearch = this.tools.some(t => t.definition.name === 'web_research');
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch
@@ -464,7 +467,7 @@ export class Agent implements IAgent {
         .map(t => t.definition),
       ...builtinTools,
     ];
-    // Strip eager_input_streaming for non-direct-Anthropic providers (Bedrock/Custom don't support it)
+    // Strip eager_input_streaming for non-direct-Anthropic providers (Vertex/Custom don't support it)
     const toolsDef = !this.isNonDirectAnthropic
       ? rawTools
       : rawTools.map(t => {
@@ -513,7 +516,7 @@ export class Agent implements IAgent {
           max_tokens: this.maxTokens,
           ...(thinkingEnabled ? { thinking: thinkingConfig } : {}),
           ...(this.effort ? { output_config: { effort: this.effort } } : {}),
-          // Top-level cache_control: Anthropic-direct only (Bedrock rejects it)
+          // Top-level cache_control: Anthropic-direct only (other providers may reject it; block-level works for all)
           ...(this.isNonDirectAnthropic ? {} : { cache_control: { type: 'ephemeral', ttl: '1h' } as unknown as BetaCacheControlEphemeral }),
           system: systemBlocks,
           messages: this.messages,
@@ -557,10 +560,8 @@ export class Agent implements IAgent {
 
   private _buildSystemPrompt(): Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> {
     const blocks: Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> = [];
-    // Block-level cache_control: supported on Anthropic + Bedrock, not on custom proxies
-    // Anthropic-direct: 1h TTL to survive pauses between messages; Bedrock: 5min only (API limitation)
+    // Block-level cache_control: supported on Anthropic + Vertex (both 1h TTL), not on custom/openai proxies
     const cc = this.isCustomProxy ? undefined
-      : this.isNonDirectAnthropic ? { type: 'ephemeral' as const }
       : { type: 'ephemeral', ttl: '1h' } as unknown as BetaCacheControlEphemeral;
 
     const staticPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;

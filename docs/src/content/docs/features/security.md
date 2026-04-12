@@ -9,7 +9,7 @@ lynox is designed for self-hosting. Your data stays on your machine, your API ke
 
 ## Bring Your Own Key (BYOK)
 
-lynox never proxies your API calls. Your credentials talk directly to your chosen provider — Claude (Anthropic), Claude (AWS Bedrock), or a custom proxy. All providers serve the same Claude models. There's no middleman, no data collection, no usage tracking. The installer lets you choose your provider and enter credentials on first run. All credentials are stored encrypted in the local vault.
+lynox never proxies your API calls. Your credentials talk directly to your chosen provider — Claude (Anthropic), Claude (Google Vertex AI), OpenAI-compatible (Mistral, Gemini), or a custom proxy. Claude providers serve the same Claude models. There's no middleman, no data collection, no usage tracking. The installer lets you choose your provider and enter credentials on first run. All credentials are stored encrypted in the local vault.
 
 ## Authentication
 

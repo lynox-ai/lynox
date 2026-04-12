@@ -308,10 +308,10 @@ export async function runDockerInstaller(): Promise<void> {
     stdout.write(`\n  ${BOLD}LLM Provider${RESET}\n`);
     stdout.write(`  ${DIM}Where should AI requests be sent?${RESET}\n\n`);
 
-    type ProviderChoice = 'anthropic' | 'bedrock' | 'custom';
+    type ProviderChoice = 'anthropic' | 'vertex' | 'custom';
     const provider = await select<ProviderChoice>([
       { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended' },
-      { label: 'Claude (AWS Bedrock)', value: 'bedrock', hint: 'EU data residency' },
+      { label: 'Claude (Google Vertex AI)', value: 'vertex', hint: 'EU data residency' },
       { label: 'Custom Proxy', value: 'custom', hint: 'experimental' },
     ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'anthropic';
 
@@ -324,26 +324,23 @@ export async function runDockerInstaller(): Promise<void> {
       if (!key) return;
       envVars['ANTHROPIC_API_KEY'] = key;
 
-    } else if (provider === 'bedrock') {
-      envVars['LYNOX_LLM_PROVIDER'] = 'bedrock';
-      stdout.write(`\n  ${BOLD}AWS Bedrock${RESET}\n`);
+    } else if (provider === 'vertex') {
+      envVars['LYNOX_LLM_PROVIDER'] = 'vertex';
+      stdout.write(`\n  ${BOLD}Google Vertex AI${RESET}\n`);
+
+      const projectId = (await rl.question(`  ${BOLD}GCP Project ID:${RESET} `)).trim();
+      if (projectId) envVars['GCP_PROJECT_ID'] = projectId;
+      else stdout.write(`  ${YELLOW}⚠${RESET} Set GCP_PROJECT_ID in .env before starting.\n`);
 
       const region = await select([
-        { label: 'eu-central-1 (Frankfurt)', value: 'eu-central-1' },
-        { label: 'eu-west-1 (Ireland)', value: 'eu-west-1' },
-        { label: 'us-east-1 (N. Virginia)', value: 'us-east-1' },
-        { label: 'us-west-2 (Oregon)', value: 'us-west-2' },
-      ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'eu-central-1';
-      envVars['AWS_REGION'] = region;
+        { label: 'europe-west4 (Netherlands)', value: 'europe-west4' },
+        { label: 'europe-west1 (Belgium)', value: 'europe-west1' },
+        { label: 'us-east5 (Columbus)', value: 'us-east5' },
+        { label: 'us-central1 (Iowa)', value: 'us-central1' },
+      ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'europe-west4';
+      envVars['CLOUD_ML_REGION'] = region;
       stdout.write(`  ${GREEN}✓${RESET} Region: ${region}\n`);
-
-      const accessKey = (await rl.question(`  ${BOLD}AWS Access Key ID:${RESET} `)).trim();
-      if (accessKey) envVars['AWS_ACCESS_KEY_ID'] = accessKey;
-      else stdout.write(`  ${YELLOW}⚠${RESET} Set AWS_ACCESS_KEY_ID in .env before starting.\n`);
-
-      const secretKey = await readSecret(`${BOLD}AWS Secret Access Key:${RESET}`, stdin.isTTY ? undefined : rl);
-      if (secretKey) envVars['AWS_SECRET_ACCESS_KEY'] = secretKey;
-      else stdout.write(`  ${YELLOW}⚠${RESET} Set AWS_SECRET_ACCESS_KEY in .env before starting.\n`);
+      stdout.write(`  ${YELLOW}⚠${RESET} Mount service account JSON into the container and set GOOGLE_APPLICATION_CREDENTIALS.\n`);
 
     } else {
       envVars['LYNOX_LLM_PROVIDER'] = 'custom';

@@ -4,7 +4,7 @@
 	import { clearError } from '../stores/chat.svelte.js';
 	import { onMount } from 'svelte';
 
-	type Provider = 'anthropic' | 'bedrock' | 'custom';
+	type Provider = 'anthropic' | 'vertex' | 'custom' | 'openai';
 
 	let apiKeyMissing = $state(false);
 	let dismissed = $state(false);
@@ -19,10 +19,12 @@
 
 	// Credential fields
 	let anthropicKey = $state('');
-	let bedrockAccessKey = $state('');
-	let bedrockSecretKey = $state('');
+	let vertexProjectId = $state('');
+	let vertexRegion = $state('europe-west4');
 	let customUrl = $state('');
 	let customKey = $state('');
+	let openaiUrl = $state('');
+	let openaiKey = $state('');
 
 	let saving = $state(false);
 	let saveError = $state('');
@@ -86,8 +88,9 @@
 
 	const canSave = $derived(
 		selectedProvider === 'anthropic' ? !!anthropicKey.trim() :
-		selectedProvider === 'bedrock' ? (!!bedrockAccessKey.trim() && !!bedrockSecretKey.trim()) :
+		selectedProvider === 'vertex' ? (!!vertexProjectId.trim() && !!vertexRegion.trim()) :
 		selectedProvider === 'custom' ? !!customUrl.trim() :
+		selectedProvider === 'openai' ? (!!openaiUrl.trim() && !!openaiKey.trim()) :
 		false
 	);
 
@@ -100,12 +103,15 @@
 
 			// 1. Save provider config
 			const providerConfig: Record<string, unknown> = { provider: selectedProvider };
-			if (selectedProvider === 'bedrock') {
-				providerConfig['aws_region'] = 'eu-central-1';
-				providerConfig['bedrock_eu_only'] = true;
+			if (selectedProvider === 'vertex') {
+				providerConfig['gcp_project_id'] = vertexProjectId.trim();
+				providerConfig['gcp_region'] = vertexRegion.trim();
 			}
 			if (selectedProvider === 'custom') {
 				providerConfig['api_base_url'] = customUrl.trim();
+			}
+			if (selectedProvider === 'openai') {
+				providerConfig['api_base_url'] = openaiUrl.trim();
 			}
 
 			const configRes = await fetch(`${base}/config`, {
@@ -118,12 +124,12 @@
 			// 2. Save credentials to vault
 			if (selectedProvider === 'anthropic') {
 				await saveSecret('ANTHROPIC_API_KEY', anthropicKey.trim());
-			} else if (selectedProvider === 'bedrock') {
-				await saveSecret('AWS_ACCESS_KEY_ID', bedrockAccessKey.trim());
-				await saveSecret('AWS_SECRET_ACCESS_KEY', bedrockSecretKey.trim());
 			} else if (selectedProvider === 'custom' && customKey.trim()) {
 				await saveSecret('ANTHROPIC_API_KEY', customKey.trim());
+			} else if (selectedProvider === 'openai') {
+				await saveSecret('OPENAI_API_KEY', openaiKey.trim());
 			}
+			// vertex: credentials come from GOOGLE_APPLICATION_CREDENTIALS env var — no secret to save
 
 			saveSuccess = true;
 			apiKeyMissing = false;
@@ -153,13 +159,15 @@
 
 	const providers: { id: Provider; label: string; desc: string }[] = [
 		{ id: 'anthropic', label: 'Claude (Anthropic)', desc: 'setup.provider_anthropic_desc' },
-		{ id: 'bedrock', label: 'Claude (AWS Bedrock)', desc: 'setup.provider_bedrock_desc' },
+		{ id: 'vertex', label: 'Claude (Vertex AI)', desc: 'setup.provider_vertex_desc' },
 		{ id: 'custom', label: 'Custom Proxy', desc: 'setup.provider_custom_desc' },
+		{ id: 'openai', label: 'OpenAI-compatible', desc: 'setup.provider_openai_desc' },
 	];
 
 	const subtitleKey = $derived(
-		selectedProvider === 'bedrock' ? 'setup.subtitle_bedrock' :
+		selectedProvider === 'vertex' ? 'setup.subtitle_vertex' :
 		selectedProvider === 'custom' ? 'setup.subtitle_custom' :
+		selectedProvider === 'openai' ? 'setup.subtitle_openai' :
 		'setup.subtitle'
 	);
 
@@ -248,33 +256,32 @@
 								</p>
 							</div>
 
-						{:else if selectedProvider === 'bedrock'}
+						{:else if selectedProvider === 'vertex'}
 							<div class="space-y-2">
-								<label for="setup-bedrock-access" class="text-sm font-medium text-text">{t('setup.label_bedrock_access')}</label>
+								<label for="setup-vertex-project" class="text-sm font-medium text-text">{t('setup.label_vertex_project')}</label>
 								<input
-									id="setup-bedrock-access"
+									id="setup-vertex-project"
 									type="text"
-									bind:value={bedrockAccessKey}
-									placeholder="AKIA..."
+									bind:value={vertexProjectId}
+									placeholder="lynox-prod"
 									autocomplete="off"
 									class={inputClass}
 								/>
 							</div>
 							<div class="space-y-2">
-								<label for="setup-bedrock-secret" class="text-sm font-medium text-text">{t('setup.label_bedrock_secret')}</label>
-								<input
-									id="setup-bedrock-secret"
-									type="password"
-									bind:value={bedrockSecretKey}
-									placeholder="wJal..."
-									autocomplete="off"
+								<label for="setup-vertex-region" class="text-sm font-medium text-text">{t('setup.label_vertex_region')}</label>
+								<select
+									id="setup-vertex-region"
+									bind:value={vertexRegion}
 									class={inputClass}
-								/>
+								>
+									<option value="europe-west4">europe-west4 (Netherlands — EU residency)</option>
+									<option value="europe-west1">europe-west1 (Belgium)</option>
+									<option value="us-east5">us-east5 (Columbus)</option>
+									<option value="us-central1">us-central1 (Iowa)</option>
+								</select>
 							</div>
-							<p class="text-xs text-text-subtle">
-								{t('setup.hint_bedrock')}
-								<a href="https://console.aws.amazon.com/iam/" target="_blank" rel="noopener" class="text-accent-text hover:underline">AWS IAM Console</a>
-							</p>
+							<p class="text-xs text-text-subtle">{t('setup.hint_vertex')}</p>
 
 						{:else if selectedProvider === 'custom'}
 							<div class="space-y-2">
@@ -300,6 +307,31 @@
 								/>
 							</div>
 							<p class="text-xs text-text-subtle">{t('setup.hint_custom')}</p>
+
+						{:else if selectedProvider === 'openai'}
+							<div class="space-y-2">
+								<label for="setup-openai-url" class="text-sm font-medium text-text">{t('setup.label_openai_url')}</label>
+								<input
+									id="setup-openai-url"
+									type="url"
+									bind:value={openaiUrl}
+									placeholder="https://api.mistral.ai/v1"
+									autocomplete="off"
+									class={inputClass}
+								/>
+							</div>
+							<div class="space-y-2">
+								<label for="setup-openai-key" class="text-sm font-medium text-text">{t('setup.label_openai_key')}</label>
+								<input
+									id="setup-openai-key"
+									type="password"
+									bind:value={openaiKey}
+									placeholder="sk-..."
+									autocomplete="off"
+									class={inputClass}
+								/>
+							</div>
+							<p class="text-xs text-text-subtle">{t('setup.hint_openai')}</p>
 						{/if}
 					</div>
 

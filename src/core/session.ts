@@ -17,7 +17,7 @@ import type {
   IAgent,
 } from '../types/index.js';
 import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW, getModelId, clampTier } from '../types/index.js';
-import { getActiveProvider, isBedrockEuOnly } from './llm-client.js';
+import { getActiveProvider } from './llm-client.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -338,7 +338,7 @@ export class Session {
       if (runOptions?.thinking !== undefined) this.agent.setThinking(runOptions.thinking);
     }
 
-    const model = getModelId(this._model, getActiveProvider(), isBedrockEuOnly());
+    const model = getModelId(this._model, getActiveProvider());
     const startTime = Date.now();
     this.runToolCallSeq = 0;
     this._userWaitMs = 0;
@@ -722,7 +722,7 @@ export class Session {
     this._model = tier;
     this._createAgent();
     this.loadMessages(messages);
-    return getModelId(tier, getActiveProvider(), isBedrockEuOnly());
+    return getModelId(tier, getActiveProvider());
   }
 
   getModelTier(): ModelTier {
@@ -795,7 +795,7 @@ export class Session {
     toolContext.tools = registry.getEntries();
     toolContext.streamHandler = this.onStream ?? null;
 
-    const model = getModelId(this._model, getActiveProvider(), isBedrockEuOnly());
+    const model = getModelId(this._model, getActiveProvider());
     const mcpServers = registry.getMCPServers();
     const entries = registry.getEntries();
     const tools = pluginManager
@@ -888,7 +888,8 @@ export class Session {
       apiKey: this._profileOverride?.api_key ?? userConfig.api_key,
       apiBaseURL: this._profileOverride?.api_base_url ?? userConfig.api_base_url,
       provider: this._profileOverride?.provider ?? userConfig.provider,
-      awsRegion: userConfig.aws_region,
+      gcpProjectId: userConfig.gcp_project_id,
+      gcpRegion: userConfig.gcp_region,
       openaiModelId: this._profileOverride?.model_id ?? userConfig.openai_model_id,
       briefing: this._briefingConsumed ? undefined : this.briefing,
       autonomy: this.agentOverrides.autonomy,

@@ -23,17 +23,17 @@ Project configs cannot override security-sensitive fields like API keys or vault
 ```json
 {
   "provider": "anthropic",
-  "aws_region": "eu-central-1",
-  "bedrock_eu_only": true,
+  "gcp_project_id": "my-project",
+  "gcp_region": "europe-west4",
   "api_base_url": "http://localhost:4000"
 }
 ```
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `provider` | `anthropic`, `bedrock`, `custom` | `anthropic` |
-| `aws_region` | Any AWS region (e.g. `eu-central-1`) | — |
-| `bedrock_eu_only` | `true`, `false` | `false` |
+| `provider` | `anthropic`, `vertex`, `custom`, `openai` | `anthropic` |
+| `gcp_project_id` | GCP project ID (Vertex only) | — |
+| `gcp_region` | GCP region, e.g. `europe-west4`, `us-east5` | — |
 | `api_base_url` | Custom proxy URL | — |
 
 Only configure the fields relevant to your provider. See [LLM Providers](/setup/llm-providers/) for full setup guides.
@@ -195,16 +195,23 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider) |
 | `ANTHROPIC_BASE_URL` | Custom API base URL (for LiteLLM/proxy) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `bedrock`, `custom` |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `vertex`, `custom`, `openai` |
 
-### AWS Bedrock
+### Google Vertex AI
 
 | Variable | Purpose |
 |----------|---------|
-| `AWS_REGION` | AWS region (e.g. `us-east-1`, `eu-west-1`) |
-| `AWS_ACCESS_KEY_ID` | IAM access key (or use IAM role on EC2/ECS) |
-| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
-| `AWS_SESSION_TOKEN` | Temporary session token (for assumed roles / SSO) |
+| `GCP_PROJECT_ID` | GCP project ID with Vertex AI enabled |
+| `CLOUD_ML_REGION` | Region, e.g. `europe-west4`, `us-east5` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON key file |
+
+### OpenAI-Compatible
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-large-latest`, `gemini-2.5-flash` |
+| `ANTHROPIC_API_KEY` | API key for the provider (reused env var) |
+| `ANTHROPIC_BASE_URL` | Provider base URL, e.g. `https://api.mistral.ai/v1` |
 
 ### Web Search
 

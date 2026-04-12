@@ -113,7 +113,7 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/int
 **Single image** (`Dockerfile`): Combined Engine + Web UI for all deployments.
 Single process: Engine HTTP API auto-loads SvelteKit handler as fallback for non-API routes.
 Entrypoint: entrypoint-webui.sh (env setup, then `exec node dist/index.js --http-api`).
-LLM credentials are optional at startup — without them, engine starts in browse mode and SetupBanner shows a provider-aware wizard (Anthropic / Bedrock / Custom) to enter credentials via the UI (stored in vault). Never set placeholder env vars as env vars override vault.
+LLM credentials are optional at startup — without them, engine starts in browse mode and SetupBanner shows a provider-aware wizard (Anthropic / Vertex / Custom / OpenAI) to enter credentials via the UI (stored in vault). Never set placeholder env vars as env vars override vault.
 Web UI handler resolved from `/app/web-ui/handler.js` (adapter-node export).
 `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:latest`
 

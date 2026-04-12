@@ -152,18 +152,20 @@ describe('setup-wizard', () => {
     expect(config!.api_key).toBe('sk-ant-net-error-key-12345');
   });
 
-  it('saves bedrock config with region', async () => {
+  it('saves vertex config with project and region', async () => {
     const rl = mockReadline([
-      '2',  // select Bedrock
-      '1',  // select eu-central-1
+      '2',                   // select Vertex AI
+      'my-gcp-project',      // GCP Project ID
+      '1',                   // select europe-west4
     ]);
 
     const { runSetupWizard } = await import('./setup-wizard.js');
     const config = await runSetupWizard(rl);
 
     expect(config).not.toBeNull();
-    expect(config!.provider).toBe('bedrock');
-    expect(config!.aws_region).toBe('eu-central-1');
+    expect(config!.provider).toBe('vertex');
+    expect(config!.gcp_project_id).toBe('my-gcp-project');
+    expect(config!.gcp_region).toBe('europe-west4');
     expect(config!.api_key).toBeUndefined();
   });
 

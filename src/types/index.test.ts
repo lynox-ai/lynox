@@ -53,14 +53,19 @@ describe('getBetasForProvider', () => {
     expect(betas).toContain('extended-cache-ttl-2025-04-11');
   });
 
-  it('returns only compatible betas for bedrock provider', () => {
-    const betas = getBetasForProvider('bedrock');
+  it('returns all betas for vertex provider (supports 1h TTL)', () => {
+    const betas = getBetasForProvider('vertex');
     expect(betas).toContain('token-efficient-tools-2025-02-19');
-    expect(betas).not.toContain('extended-cache-ttl-2025-04-11');
+    expect(betas).toContain('extended-cache-ttl-2025-04-11');
   });
 
   it('returns empty array for custom provider', () => {
     const betas = getBetasForProvider('custom');
+    expect(betas).toHaveLength(0);
+  });
+
+  it('returns empty array for openai provider', () => {
+    const betas = getBetasForProvider('openai');
     expect(betas).toHaveLength(0);
   });
 });

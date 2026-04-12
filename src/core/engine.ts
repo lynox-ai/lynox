@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
-import { createLLMClient, initLLMProvider, setBedrockEuOnly } from './llm-client.js';
+import { createLLMClient, initLLMProvider } from './llm-client.js';
 import type {
   LynoxConfig,
   LynoxUserConfig,
@@ -212,18 +212,7 @@ export class Engine {
     if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase || newProvider !== oldProvider) {
       // Provider switch: load new SDK if needed
       if (newProvider && newProvider !== oldProvider) {
-        if (newProvider === 'bedrock') {
-          await initLLMProvider(newProvider);
-        } else {
-          // anthropic / custom — just update active provider, no SDK loading
-          await initLLMProvider(newProvider === 'custom' ? 'custom' : 'anthropic');
-        }
-      }
-      if (newProvider === 'bedrock') {
-        const region = this.userConfig.aws_region ?? process.env['AWS_REGION'] ?? '';
-        setBedrockEuOnly(this.userConfig.bedrock_eu_only || region.startsWith('eu-'));
-      } else {
-        setBedrockEuOnly(false);
+        await initLLMProvider(newProvider);
       }
       this._recreateClient();
     }
@@ -240,24 +229,19 @@ export class Engine {
     const apiKey = process.env['ANTHROPIC_API_KEY']
       ?? this.secretStore?.resolve('ANTHROPIC_API_KEY')
       ?? this.userConfig.api_key;
-    // BYOK: resolve AWS credentials from env > vault
-    const awsAccessKey = process.env['AWS_ACCESS_KEY_ID']
-      ?? this.secretStore?.resolve('AWS_ACCESS_KEY_ID')
-      ?? undefined;
-    const awsSecretKey = process.env['AWS_SECRET_ACCESS_KEY']
-      ?? this.secretStore?.resolve('AWS_SECRET_ACCESS_KEY')
-      ?? undefined;
-    const awsSessionToken = process.env['AWS_SESSION_TOKEN']
-      ?? this.secretStore?.resolve('AWS_SESSION_TOKEN')
-      ?? undefined;
+    // Vertex AI: resolve GCP credentials from env > vault > config
+    const gcpProjectId = process.env['GCP_PROJECT_ID']
+      ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']
+      ?? this.secretStore?.resolve('GCP_PROJECT_ID')
+      ?? this.userConfig.gcp_project_id;
+    const gcpRegion = process.env['CLOUD_ML_REGION']
+      ?? this.userConfig.gcp_region;
     this.client = createLLMClient({
       provider: this.userConfig.provider,
       apiKey,
       apiBaseURL: this.userConfig.api_base_url,
-      awsRegion: this.userConfig.aws_region,
-      awsAccessKey,
-      awsSecretKey,
-      awsSessionToken,
+      gcpProjectId,
+      gcpRegion,
       openaiModelId: this.userConfig.openai_model_id,
     });
   }
@@ -266,20 +250,13 @@ export class Engine {
     // Activate debug logging early (before any channel publishing)
     initDebugSubscriber();
 
-    // Initialize LLM provider SDK if using bedrock/custom
+    // Initialize LLM provider SDK if using vertex/custom/openai
     const provider = this.userConfig.provider;
     if (provider && provider !== 'anthropic') {
-      if (provider === 'bedrock') {
-        await initLLMProvider(provider);
-        // Auto-detect EU from region or explicit config
-        const region = this.userConfig.aws_region ?? process.env['AWS_REGION'] ?? '';
-        const isEu = this.userConfig.bedrock_eu_only || region.startsWith('eu-');
-        setBedrockEuOnly(isEu);
-        this._recreateClient(); // Recreate with correct SDK now that module is loaded
-      } else if (provider === 'custom') {
-        // Custom provider (LiteLLM etc.) uses standard Anthropic SDK with api_base_url
-        // No SDK loading needed — just set active provider for model ID resolution
-        await initLLMProvider(provider);
+      await initLLMProvider(provider);
+      if (provider === 'vertex') {
+        // Recreate client after Vertex SDK is loaded
+        this._recreateClient();
       }
     }
 
@@ -816,12 +793,13 @@ export class Engine {
   getTaskManager(): import('./task-manager.js').TaskManager | null { return this._taskManager; }
   getDataStore(): DataStore | null { return this._dataStore; }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
-  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; awsRegion?: string | undefined; openaiModelId?: string | undefined } {
+  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; gcpProjectId?: string | undefined; gcpRegion?: string | undefined; openaiModelId?: string | undefined } {
     return {
       apiKey: this.userConfig.api_key,
       apiBaseURL: this.userConfig.api_base_url,
       provider: this.userConfig.provider,
-      awsRegion: this.userConfig.aws_region,
+      gcpProjectId: this.userConfig.gcp_project_id,
+      gcpRegion: this.userConfig.gcp_region,
       openaiModelId: this.userConfig.openai_model_id,
     };
   }

@@ -1,6 +1,6 @@
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile } from '../../types/index.js';
 import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
-import { getActiveProvider, isBedrockEuOnly } from '../../core/llm-client.js';
+import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
@@ -74,7 +74,7 @@ async function executeThinker(
 
   const modelTier = (spec.model ?? resolved?.model ?? userConfig.default_tier ?? 'sonnet') as ModelTier;
   // Profile overrides model ID + provider; otherwise use Claude tier resolution
-  const model = profile ? profile.model_id : getModelId(modelTier, getActiveProvider(), isBedrockEuOnly());
+  const model = profile ? profile.model_id : getModelId(modelTier, getActiveProvider());
   const systemPrompt = spec.system_prompt;
   // OpenAI providers don't support thinking or effort
   const thinking = profile ? { type: 'disabled' as const } : spec.thinking;
@@ -146,7 +146,8 @@ async function executeThinker(
     apiKey: profile?.api_key ?? userConfig.api_key,
     apiBaseURL: profile?.api_base_url ?? userConfig.api_base_url,
     provider: profile?.provider ?? userConfig.provider,
-    awsRegion: userConfig.aws_region,
+    gcpProjectId: userConfig.gcp_project_id,
+    gcpRegion: userConfig.gcp_region,
     openaiModelId: profile?.model_id,
   });
 

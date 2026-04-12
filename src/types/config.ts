@@ -31,7 +31,8 @@ export interface AgentConfig {
   apiKey?:             string | undefined;
   apiBaseURL?:         string | undefined;
   provider?:           LLMProvider | undefined;
-  awsRegion?:          string | undefined;
+  gcpProjectId?:       string | undefined;
+  gcpRegion?:          string | undefined;
   currentRunId?:       string | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
@@ -82,22 +83,15 @@ export interface MCPServer {
 
 // === 4.7 Beta Headers ===
 
-/** Betas supported by all Claude providers (Anthropic + Bedrock). */
-const BEDROCK_COMPATIBLE_BETAS: AnthropicBeta[] = [
+/** Beta flags used by lynox. Vertex AI + Anthropic Direct both support extended cache TTL. */
+export const LYNOX_BETAS: AnthropicBeta[] = [
   'token-efficient-tools-2025-02-19',
-];
-
-/** Betas only supported by direct Anthropic API (e.g. extended cache TTL — Bedrock has fixed 5-min TTL). */
-const ANTHROPIC_ONLY_BETAS: AnthropicBeta[] = [
   'extended-cache-ttl-2025-04-11',
 ];
 
-export const LYNOX_BETAS: AnthropicBeta[] = [...BEDROCK_COMPATIBLE_BETAS, ...ANTHROPIC_ONLY_BETAS];
-
 /** Return the beta flags appropriate for the given LLM provider. */
 export function getBetasForProvider(provider: LLMProvider): AnthropicBeta[] {
-  if (provider === 'custom') return [];
-  if (provider === 'bedrock') return [...BEDROCK_COMPATIBLE_BETAS];
+  if (provider === 'custom' || provider === 'openai') return [];
   return [...LYNOX_BETAS];
 }
 
@@ -143,12 +137,12 @@ export interface LynoxConfig {
 export interface LynoxUserConfig {
   api_key?: string | undefined;
   api_base_url?: string | undefined;
-  /** LLM provider: 'anthropic' (default), 'bedrock' (AWS), or 'custom' (LiteLLM/proxy). */
+  /** LLM provider: 'anthropic' (default), 'vertex' (GCP), 'custom' (proxy), or 'openai' (Mistral/Gemini). */
   provider?: LLMProvider | undefined;
-  /** AWS region for Bedrock provider (e.g. 'eu-central-1'). */
-  aws_region?: string | undefined;
-  /** Use Bedrock EU cross-region inference profile for guaranteed EU data residency (10% surcharge). */
-  bedrock_eu_only?: boolean | undefined;
+  /** GCP project ID for Vertex AI provider. */
+  gcp_project_id?: string | undefined;
+  /** GCP region for Vertex AI (e.g. 'europe-west4', 'us-east5'). */
+  gcp_region?: string | undefined;
   default_tier?: ModelTier | undefined;
   /** Maximum allowed model tier. StepHints and pipeline steps requesting a higher tier are clamped. Managed hosting sets 'sonnet'. */
   max_tier?: ModelTier | undefined;

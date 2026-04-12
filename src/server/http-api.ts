@@ -687,22 +687,22 @@ export class LynoxHTTPApi {
 
     const provider = getActiveProvider();
 
-    // Custom providers have no public status page — rely solely on run history
-    if (provider === 'custom') {
-      const data = this.getRunBasedStatus(now, 'Custom');
+    // Custom + OpenAI providers have no public status page — rely solely on run history
+    if (provider === 'custom' || provider === 'openai') {
+      const label = provider === 'openai' ? 'OpenAI-compatible' : 'Custom';
+      const data = this.getRunBasedStatus(now, label);
       this.providerStatusCache = { data, expiresAt: now + 60_000 };
       return data;
     }
 
-    // Bedrock uses AWS health dashboard
-    const statusUrl = provider === 'bedrock'
-      ? 'https://health.aws.amazon.com/health/status'
+    // Vertex AI uses Google Cloud status; Anthropic has native status page
+    const statusUrl = provider === 'vertex'
+      ? 'https://status.cloud.google.com/incidents.json'
       : 'https://status.anthropic.com/api/v2/status.json';
-    const providerLabel = provider === 'bedrock' ? 'AWS Bedrock' : 'Anthropic';
+    const providerLabel = provider === 'vertex' ? 'Google Vertex AI' : 'Anthropic';
 
-    // AWS health dashboard doesn't offer a simple JSON API like Anthropic's statuspage,
-    // so for bedrock we fall back to run-history-based status
-    if (provider === 'bedrock') {
+    // GCP incidents API has different format — fall back to run-history-based status
+    if (provider === 'vertex') {
       const data = this.getRunBasedStatus(now, providerLabel);
       this.providerStatusCache = { data, expiresAt: now + 60_000 };
       return data;
@@ -1307,13 +1307,15 @@ export class LynoxHTTPApi {
       const provider = userConfig.provider ?? 'anthropic';
       // Provider-aware LLM configured check (BYOK)
       let llmConfigured: boolean;
-      if (provider === 'bedrock') {
-        // Bedrock needs AWS credentials — from vault or env
-        llmConfigured = (names.has('AWS_ACCESS_KEY_ID') && names.has('AWS_SECRET_ACCESS_KEY'))
-          || (!!process.env['AWS_ACCESS_KEY_ID'] && !!process.env['AWS_SECRET_ACCESS_KEY']);
+      if (provider === 'vertex') {
+        // Vertex needs GCP project + service account creds
+        llmConfigured = !!(userConfig.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
       } else if (provider === 'custom') {
         // Custom needs api_base_url configured
         llmConfigured = !!(userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL']);
+      } else if (provider === 'openai') {
+        // OpenAI-compatible needs api_base_url + api_key + model id
+        llmConfigured = !!(userConfig.api_base_url && userConfig.api_key && userConfig.openai_model_id);
       } else {
         // Anthropic direct — needs API key
         llmConfigured = names.has('ANTHROPIC_API_KEY')
@@ -1420,10 +1422,10 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
-      // Managed EU mode: block provider/credential changes (lynox provides Bedrock)
+      // Managed mode: block provider/credential changes (lynox provides the LLM)
       // Starter (BYOK) mode: provider changes are allowed (customer brings own key)
-      if (process.env['LYNOX_MANAGED_MODE'] === 'eu') {
-        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'aws_region', 'bedrock_eu_only', 'default_tier'];
+      if (process.env['LYNOX_MANAGED_MODE'] === 'managed' || process.env['LYNOX_MANAGED_MODE'] === 'managed_pro' || process.env['LYNOX_MANAGED_MODE'] === 'eu') {
+        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'gcp_project_id', 'gcp_region', 'openai_model_id', 'default_tier'];
         const attempted = LOCKED_FIELDS.filter(f => f in (parsed.data as Record<string, unknown>));
         if (attempted.length > 0) {
           errorResponse(res, 403, `Managed EU instance: cannot change ${attempted.join(', ')}`);
