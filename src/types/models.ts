@@ -10,8 +10,10 @@ export interface ModelProfile {
   provider: 'openai';
   /** API base URL (e.g. 'https://api.mistral.ai/v1'). */
   api_base_url: string;
-  /** API key for this provider. */
+  /** API key for this provider. Ignored if `auth: 'google-vertex'` (OAuth token generated from service account). */
   api_key: string;
+  /** Authentication mode. 'static' (default) uses api_key as-is. 'google-vertex' generates OAuth tokens from GOOGLE_APPLICATION_CREDENTIALS. */
+  auth?: 'static' | 'google-vertex' | undefined;
   /** Model ID to send in requests (e.g. 'mistral-large-latest'). */
   model_id: string;
   /** Context window size in tokens. Default: 200000. */
@@ -30,11 +32,11 @@ export const MODEL_MAP: Record<ModelTier, string> = {
   'haiku':  'claude-haiku-4-5-20251001',
 };
 
-/** Vertex AI Claude model identifiers (Google Cloud, regional). */
+/** Vertex AI Claude model identifiers (Google Cloud). */
 export const VERTEX_MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'claude-opus-4-6@20260101',
-  'sonnet': 'claude-sonnet-4-6@20260101',
-  'haiku':  'claude-haiku-4-5@20251001',
+  'opus':   'claude-opus-4-6',
+  'sonnet': 'claude-sonnet-4-6',
+  'haiku':  'claude-haiku-4-5',
 };
 
 const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<ModelTier, string>> = {
