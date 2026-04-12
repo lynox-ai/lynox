@@ -13,34 +13,34 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 
 ## At a Glance
 
-| | **Claude (Anthropic)** | **Claude (AWS Bedrock)** | **OpenAI-Compatible** | **Custom Proxy** |
+| | **Claude (Anthropic)** | **Claude (Google Vertex AI)** | **OpenAI-Compatible** | **Custom Proxy** |
 |---|---|---|---|---|
 | **Status** | Stable | Stable | Stable | Experimental |
-| **Setup** | API key | AWS account + IAM | API key + base URL | Proxy URL |
+| **Setup** | API key | GCP project + service account | API key + base URL | Proxy URL |
 | **AI quality** | Claude | Claude (same models) | Model-dependent | Model-dependent |
 | | | | | |
 | **Features** | | | | |
 | Chat + Streaming | ✅ | ✅ | ✅ | ✅ |
 | Tool Calling | ✅ | ✅ | ✅ Native | ✅ via LiteLLM |
 | Extended Thinking | ✅ | ✅ | ❌ Auto-disabled | ❌ Auto-disabled |
-| Prompt Caching | ✅ | ✅ | ❌ | ❌ |
+| Prompt Caching (1h TTL) | ✅ | ✅ | ❌ | ❌ |
 | Web Search (built-in) | ✅ | ❌ | ❌ | ❌ |
 | Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ | ✅ |
 | MCP Server-Side | ✅ | ❌ | ❌ | ❌ |
 | | | | | |
 | **Privacy** | | | | |
-| Data residency | US | 🇪🇺 EU (6 regions) | Provider-dependent | 🏠 Your server |
-| DPA available | ✅ Auto | ✅ AWS | Provider-dependent | N/A |
+| Data residency | US | 🇪🇺 EU (europe-west4) | Provider-dependent | 🏠 Your server |
+| DPA available | ✅ Auto | ✅ Google Cloud | Provider-dependent | N/A |
 | Training on data | ❌ Never | ❌ Never | Provider-dependent | ❌ Never |
-| CLOUD Act exposure | ⚠️ Yes | ⚠️ AWS US parent | Provider-dependent | ❌ None |
+| CLOUD Act exposure | ⚠️ Yes | ⚠️ Google US parent | Provider-dependent | ❌ None |
 | GDPR compliant | ✅ With DPA | ✅ | Provider-dependent | ✅ |
 | Art. 321 StGB (CH) | ⚠️ Counsel | ⚠️ Better | Provider-dependent | ✅ Safe |
 | | | | | |
 | **Cost** | | | | |
-| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | Same | From $0.50/$1.50 (Mistral) | Free (your hardware) |
-| EU surcharge | — | +10% (EU CRIS) | — | — |
+| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | Same as Anthropic | From $0.50/$1.50 (Mistral) | Free (your hardware) |
+| Region surcharge | — | — | — | — |
 | Infrastructure | — | — | — | GPU server ~€150/mo |
-| Typical monthly | €30–150 | €33–165 | €10–50 | €150 fixed |
+| Typical monthly | €30–150 | €30–150 | €10–50 | €150 fixed |
 
 ## Claude (Anthropic) — Default
 
@@ -63,46 +63,47 @@ Direct connection to the Anthropic API. Simplest setup, recommended for most use
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-## Claude (AWS Bedrock)
+## Claude (Google Vertex AI)
 
-Same Claude models, hosted in AWS EU regions. Your data never leaves the EU.
+Same Claude models, hosted in Google Cloud regions. Full EU data residency via `europe-west4`. Supports 1-hour prompt cache TTL (same as Anthropic Direct).
 
 ```json
 {
-  "provider": "bedrock",
-  "aws_region": "eu-central-1",
-  "bedrock_eu_only": true
+  "provider": "vertex",
+  "gcp_project_id": "my-project-id",
+  "gcp_region": "europe-west4"
 }
 ```
 
 **Setup:**
-1. Create an [AWS account](https://console.aws.amazon.com)
-2. Open **Amazon Bedrock** → **Model access** → enable Anthropic Claude models
-3. Create IAM credentials with `AmazonBedrockFullAccess` policy
-4. Install the SDK: `pnpm add @anthropic-ai/bedrock-sdk` (pre-installed in Docker images)
+1. Create a [GCP project](https://console.cloud.google.com)
+2. Enable **Vertex AI API** in the project
+3. Go to **Vertex AI → Model Garden** → enable Claude models
+4. Create a service account with `Vertex AI User` role
+5. Download the service account JSON key
+6. Install the SDK: `pnpm add @anthropic-ai/vertex-sdk` (pre-installed in Docker images)
 
-**Credentials (choose one):**
+**Credentials:**
 
-**Web UI (recommended):** Enter your AWS Access Key ID and Secret Access Key in the setup banner on first run. Stored encrypted in the local vault. You can also add them later in **Settings → Keys**.
+Set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to the path of the service account JSON key file:
 
-**Environment variables:**
 ```bash
-LYNOX_LLM_PROVIDER=bedrock
-AWS_REGION=eu-central-1
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
+LYNOX_LLM_PROVIDER=vertex
+GCP_PROJECT_ID=my-project-id
+CLOUD_ML_REGION=europe-west4
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 ```
 
-Environment variables always override vault-stored credentials.
+**Regions with Claude models:**
 
-**EU Data Residency:**
+| Region | Location | Use for |
+|--------|----------|---------|
+| `europe-west4` | Netherlands | EU data residency (recommended for EU customers) |
+| `europe-west1` | Belgium | EU data residency |
+| `us-east5` | Columbus, OH | US customers |
+| `us-central1` | Iowa | US customers |
 
-With `bedrock_eu_only: true`, lynox uses EU Cross-Region Inference profiles (`eu.anthropic.claude-*`). This guarantees requests are routed exclusively to EU data centers (Frankfurt, Paris, Dublin, Stockholm, Zurich, Milan). 10% cost surcharge applies.
-
-When `aws_region` starts with `eu-`, lynox auto-selects EU model IDs — you don't need `bedrock_eu_only` explicitly. The flag exists for cases where you want to force EU routing regardless of region.
-
-**EU regions with Claude:**
-`eu-central-1` (Frankfurt), `eu-west-1` (Ireland), `eu-west-3` (Paris), `eu-north-1` (Stockholm), `eu-central-2` (Zurich), `eu-south-1` (Milan)
+**Why Vertex AI over AWS Bedrock:** Vertex AI supports full 1-hour prompt cache TTL (Bedrock is stuck at 5 minutes), generally has lower pricing for Claude models, and offers Gemini in the same regions for long-context tasks. No AWS region surcharge.
 
 ## OpenAI-Compatible Providers — Mistral & Gemini
 
@@ -272,7 +273,7 @@ For maximum data control, run lynox on a server close to your LLM provider — a
 
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
-| **Hetzner + Bedrock** | Bedrock `eu-central-1` | Hetzner VPS (Falkenstein/Helsinki) | Everything in EU |
+| **Hetzner + Vertex AI** | Vertex AI `europe-west4` | Hetzner VPS (Falkenstein/Helsinki) | Everything in EU |
 | **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no CLOUD Act |
 | **Fully local** | Ollama on your server | Docker on your server | Nothing leaves your network |
 

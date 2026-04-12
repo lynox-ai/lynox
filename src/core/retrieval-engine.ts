@@ -7,7 +7,7 @@ import type {
   KnowledgeRetrievalResult,
 } from '../types/index.js';
 import { getBetasForProvider, NAMESPACE_HALF_LIFE, getModelId } from '../types/index.js';
-import { getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
+import { getActiveProvider, isCustomProvider } from './llm-client.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
@@ -309,7 +309,7 @@ export class RetrievalEngine {
     if (!this.anthropicClient) return null;
     try {
       const stream = this.anthropicClient.beta.messages.stream({
-        model: getModelId('haiku', getActiveProvider(), isBedrockEuOnly()),
+        model: getModelId('haiku', getActiveProvider()),
         max_tokens: 256,
         ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
         messages: [{

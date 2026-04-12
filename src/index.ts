@@ -132,7 +132,7 @@ import { Engine } from './core/engine.js';
 import type { Session } from './core/session.js';
 import type { StreamEvent } from './types/index.js';
 import { getModelId } from './types/index.js';
-import { getActiveProvider, isBedrockEuOnly } from './core/llm-client.js';
+import { getActiveProvider } from './core/llm-client.js';
 import { hasApiKey, setDataDir } from './core/config.js';
 import { renderError, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from './cli/ui.js';
 import { Watchdog } from './cli/watchdog.js';
@@ -383,7 +383,7 @@ Docs: https://docs.lynox.ai
   }
 
   const engine = new Engine({});
-  state.currentModelId = getModelId(engine.config.model ?? 'sonnet', getActiveProvider(), isBedrockEuOnly());
+  state.currentModelId = getModelId(engine.config.model ?? 'sonnet', getActiveProvider());
   const initPromise = engine.init();
 
   let session: Session;

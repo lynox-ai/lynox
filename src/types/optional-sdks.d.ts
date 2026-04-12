@@ -3,16 +3,14 @@
  * These packages are optional peer dependencies — only installed when needed.
  */
 
-declare module '@anthropic-ai/bedrock-sdk' {
+declare module '@anthropic-ai/vertex-sdk' {
   import type Anthropic from '@anthropic-ai/sdk';
-  export class AnthropicBedrock extends Anthropic {
+  export class AnthropicVertex extends Anthropic {
     constructor(opts?: {
-      awsRegion?: string | undefined;
-      awsAccessKey?: string | undefined;
-      awsSecretKey?: string | undefined;
-      awsSessionToken?: string | undefined;
+      projectId?: string | undefined;
+      region?: string | undefined;
+      accessToken?: string | undefined;
     });
   }
-  export default AnthropicBedrock;
+  export default AnthropicVertex;
 }
-

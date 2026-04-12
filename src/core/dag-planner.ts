@@ -1,6 +1,6 @@
 import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from '../types/index.js';
 import { getBetasForProvider, getModelId } from '../types/index.js';
-import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
+import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
 import { resolveModel } from '../orchestrator/runtime-adapter.js';
 
 export interface DagPlanResult {
@@ -73,7 +73,7 @@ export async function planDAG(
       openaiModelId: options?.openaiModelId,
     });
 
-    const model = options?.model ?? getModelId('haiku', getActiveProvider(), isBedrockEuOnly());
+    const model = options?.model ?? getModelId('haiku', getActiveProvider());
     const maxSteps = options?.maxSteps ?? 15;
 
     let systemText = PLANNING_SYSTEM;

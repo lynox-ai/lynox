@@ -116,7 +116,7 @@ export function loadConfig(): LynoxUserConfig {
   // LLM provider
   if (process.env['LYNOX_LLM_PROVIDER']) {
     const p = process.env['LYNOX_LLM_PROVIDER'];
-    if (p === 'anthropic' || p === 'bedrock' || p === 'custom' || p === 'openai') {
+    if (p === 'anthropic' || p === 'vertex' || p === 'custom' || p === 'openai') {
       merged.provider = p;
     }
   }
@@ -138,8 +138,12 @@ export function loadConfig(): LynoxUserConfig {
       merged.max_tier = tier;
     }
   }
-  if (process.env['AWS_REGION']) {
-    merged.aws_region = process.env['AWS_REGION'];
+  // GCP config for Vertex AI
+  if (process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']) {
+    merged.gcp_project_id = process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID'];
+  }
+  if (process.env['CLOUD_ML_REGION']) {
+    merged.gcp_region = process.env['CLOUD_ML_REGION'];
   }
   if (process.env['GOOGLE_CLIENT_ID']) {
     merged.google_client_id = process.env['GOOGLE_CLIENT_ID'];
@@ -191,7 +195,7 @@ export function hasApiKey(): boolean {
   // Non-Anthropic providers don't need ANTHROPIC_API_KEY
   const config = loadConfig();
   const provider = config.provider;
-  if (provider === 'bedrock' || provider === 'custom') return true;
+  if (provider === 'vertex' || provider === 'custom' || provider === 'openai') return true;
   if (process.env['ANTHROPIC_API_KEY']) return true;
   if (config.api_key !== undefined && config.api_key !== null && config.api_key !== '') return true;
   // Check vault (cached — avoids repeated SQLite opens)

@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { EntityType, MemoryNamespace } from '../types/index.js';
 import { getBetasForProvider, getModelId } from '../types/index.js';
-import { getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
+import { getActiveProvider, isCustomProvider } from './llm-client.js';
 
 export interface ExtractedEntity {
   name: string;
@@ -250,7 +250,7 @@ export async function extractEntitiesLLM(
   _llmExtractionCount++;
   try {
     const stream = client.beta.messages.stream({
-      model: getModelId('haiku', getActiveProvider(), isBedrockEuOnly()),
+      model: getModelId('haiku', getActiveProvider()),
       max_tokens: 512,
       ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
       messages: [{ role: 'user', content: ENTITY_EXTRACTION_PROMPT + text.slice(0, 2000) }],

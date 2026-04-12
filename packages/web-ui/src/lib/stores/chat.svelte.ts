@@ -373,7 +373,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		});
 	}
 
-	// Provider error (502/503) — retry once after 2s (Bedrock cold start)
+	// Provider error (502/503) — retry once after 2s (Vertex AI cold start)
 	if ((res.status === 502 || res.status === 503) && !retried) {
 		retryStatus = { attempt: 1, maxAttempts: 1 };
 		await new Promise(r => setTimeout(r, 2000));

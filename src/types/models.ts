@@ -2,7 +2,7 @@
 
 export type ModelTier = 'opus' | 'sonnet' | 'haiku';
 
-export type LLMProvider = 'anthropic' | 'bedrock' | 'custom' | 'openai';
+export type LLMProvider = 'anthropic' | 'vertex' | 'custom' | 'openai';
 
 /** Named model profile for non-Claude providers (Mistral, Gemini, Grok, etc.). */
 export interface ModelProfile {
@@ -30,33 +30,22 @@ export const MODEL_MAP: Record<ModelTier, string> = {
   'haiku':  'claude-haiku-4-5-20251001',
 };
 
-/** Bedrock US cross-region inference profiles. */
-export const BEDROCK_MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'us.anthropic.claude-opus-4-6-v1',
-  'sonnet': 'us.anthropic.claude-sonnet-4-6',
-  'haiku':  'us.anthropic.claude-haiku-4-5-20251001-v1:0',
-};
-
-/** Bedrock EU Cross-Region Inference — guaranteed EU data residency. */
-export const BEDROCK_EU_MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'eu.anthropic.claude-opus-4-6-v1',
-  'sonnet': 'eu.anthropic.claude-sonnet-4-6',
-  'haiku':  'eu.anthropic.claude-haiku-4-5-20251001-v1:0',
+/** Vertex AI Claude model identifiers (Google Cloud, regional). */
+export const VERTEX_MODEL_MAP: Record<ModelTier, string> = {
+  'opus':   'claude-opus-4-6@20260101',
+  'sonnet': 'claude-sonnet-4-6@20260101',
+  'haiku':  'claude-haiku-4-5@20251001',
 };
 
 const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<ModelTier, string>> = {
   anthropic: MODEL_MAP,
-  bedrock: BEDROCK_MODEL_MAP,
+  vertex: VERTEX_MODEL_MAP,
 };
 
 /**
  * Resolve a tier name to a provider-specific model ID.
- * For Bedrock, auto-selects EU or US cross-region inference profile based on awsRegion.
  */
-export function getModelId(tier: ModelTier, provider: LLMProvider = 'anthropic', bedrockEu = false): string {
-  if (provider === 'bedrock') {
-    return bedrockEu ? BEDROCK_EU_MODEL_MAP[tier] : BEDROCK_MODEL_MAP[tier];
-  }
+export function getModelId(tier: ModelTier, provider: LLMProvider = 'anthropic'): string {
   // 'custom' provider (LiteLLM etc.) uses standard Anthropic model IDs — proxy maps them
   if (provider === 'custom') return MODEL_MAP[tier];
   // 'openai' provider uses model ID from profile — tier is ignored (caller sets model directly)
@@ -66,16 +55,12 @@ export function getModelId(tier: ModelTier, provider: LLMProvider = 'anthropic',
 
 /**
  * Normalize a provider-specific model ID to its base Anthropic model ID.
- * E.g. 'eu.anthropic.claude-sonnet-4-6' → 'claude-sonnet-4-6'
- *      'us.anthropic.claude-opus-4-6-v1' → 'claude-opus-4-6'
+ * E.g. 'claude-sonnet-4-6@20260101' → 'claude-sonnet-4-6'
  * Returns the input unchanged if already a base model ID or tier alias.
  */
 export function normalizeModelId(model: string): string {
-  // Strip Bedrock region prefix: 'eu.anthropic.' / 'us.anthropic.'
-  let normalized = model.replace(/^(?:eu|us)\.anthropic\./, '');
-  // Strip Bedrock version suffix: '-v1', '-v1:0'
-  normalized = normalized.replace(/-v\d+(?::\d+)?$/, '');
-  return normalized;
+  // Strip Vertex AI version suffix: '@YYYYMMDD'
+  return model.replace(/@\d{8}$/, '');
 }
 
 /** Approximate characters per token for context estimation. */

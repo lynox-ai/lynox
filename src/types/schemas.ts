@@ -12,14 +12,15 @@ const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'max']);
 
 // === LynoxUserConfig ===
 
-const LLMProviderSchema = z.enum(['anthropic', 'bedrock', 'custom']);
+const LLMProviderSchema = z.enum(['anthropic', 'vertex', 'custom', 'openai']);
 
 export const LynoxUserConfigSchema = z.object({
   api_key:              z.string().optional(),
   api_base_url:         z.string().optional(),
   provider:             LLMProviderSchema.optional(),
-  aws_region:           z.string().optional(),
-  bedrock_eu_only:      z.boolean().optional(),
+  gcp_project_id:       z.string().optional(),
+  gcp_region:           z.string().optional(),
+  openai_model_id:      z.string().optional(),
   default_tier:         ModelTierSchema.optional(),
   thinking_mode:        z.enum(['adaptive', 'disabled']).optional(),
   effort_level:         EffortLevelSchema.optional(),

@@ -2,7 +2,7 @@ import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/message
 import { Agent } from '../core/agent.js';
 import { MODEL_MAP, getModelId, clampTier } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
-import { getActiveProvider, isBedrockEuOnly } from '../core/llm-client.js';
+import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from './types.js';
 import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
@@ -81,14 +81,13 @@ export function convertAgentTools(tools: AgentTool[]): ToolEntry[] {
  */
 export function resolveModel(stepModel: string | undefined, defaultTier: ModelTier, maxTier?: ModelTier | undefined): string {
   const provider = getActiveProvider();
-  const eu = isBedrockEuOnly();
   if (!stepModel) {
     const clamped = clampTier(defaultTier, maxTier);
-    return getModelId(clamped, provider, eu);
+    return getModelId(clamped, provider);
   }
   if (stepModel in MODEL_MAP) {
     const clamped = clampTier(stepModel as ModelTier, maxTier);
-    return getModelId(clamped, provider, eu);
+    return getModelId(clamped, provider);
   }
   return stepModel;
 }
@@ -146,7 +145,9 @@ export async function spawnViaAgent(
     apiKey: config.api_key,
     apiBaseURL: config.api_base_url,
     provider: config.provider,
-    awsRegion: config.aws_region,
+    gcpProjectId: config.gcp_project_id,
+    gcpRegion: config.gcp_region,
+    openaiModelId: config.openai_model_id,
     preApproval,
     autonomy,
     onStream: (event: StreamEvent) => {
@@ -240,7 +241,9 @@ export async function spawnInline(
     apiKey: config.api_key,
     apiBaseURL: config.api_base_url,
     provider: config.provider,
-    awsRegion: config.aws_region,
+    gcpProjectId: config.gcp_project_id,
+    gcpRegion: config.gcp_region,
+    openaiModelId: config.openai_model_id,
     preApproval,
     autonomy,
     toolContext: parentToolContext,

@@ -9,7 +9,8 @@ sidebar:
 
 - **A Claude API account** — all providers serve the same Claude models:
   - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended, direct API
-  - [Claude (AWS Bedrock)](https://console.aws.amazon.com) — EU data residency
+  - [Claude (Google Vertex AI)](https://console.cloud.google.com/vertex-ai) — EU data residency
+  - OpenAI-compatible (Mistral, Gemini) — for fallback or specialized tasks
   - Custom Proxy (LiteLLM, OpenRouter) — experimental
 
 The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in Settings. A typical business day costs **$1–5**.
@@ -51,7 +52,7 @@ If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated. On first 
 
 After setup, lynox opens at [localhost:3000](http://localhost:3000).
 
-If you started without an API key (e.g. manual Docker Compose without `.env`), lynox starts in **browse mode** — you can explore the UI but not chat. A **setup banner** appears at the top with a provider-aware wizard (Anthropic / Bedrock / Custom) where you enter your credentials. They're stored encrypted in the local vault.
+If you started without an API key (e.g. manual Docker Compose without `.env`), lynox starts in **browse mode** — you can explore the UI but not chat. A **setup banner** appears at the top with a provider-aware wizard (Anthropic / Vertex / Custom) where you enter your credentials. They're stored encrypted in the local vault.
 
 Try something:
 
@@ -85,6 +86,6 @@ Without `-v ~/.lynox:/home/lynox/.lynox`, your vault key and all data are lost o
 - [Web UI Guide](/daily-use/web-ui/) — Learn the interface
 - [Configuration](/daily-use/configuration/) — Model, cost limits, and more
 - [Docker Deployment](/setup/docker/) — Production setup
-- [LLM Providers](/setup/llm-providers/) — Bedrock or local models
+- [LLM Providers](/setup/llm-providers/) — Vertex AI, OpenAI-compatible, or local models
 - [Google Workspace](/integrations/google-workspace/) — Connect Gmail, Calendar, Drive
 - [Telegram](/integrations/telegram/) — Mobile access via Telegram bot

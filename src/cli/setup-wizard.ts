@@ -195,16 +195,17 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     // ── LLM Provider ─────────────────────────────────────────────
     stdout.write(`\n  ${BOLD}LLM Provider${RESET}\n`);
     stdout.write(`${DIM}  Where should AI requests be sent?${RESET}\n\n`);
-    type ProviderChoice = 'anthropic' | 'bedrock' | 'custom';
+    type ProviderChoice = 'anthropic' | 'vertex' | 'custom';
     const providerChoice = await select<ProviderChoice>([
       { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended' },
-      { label: 'Claude (AWS Bedrock)', value: 'bedrock', hint: 'EU data residency' },
+      { label: 'Claude (Google Vertex AI)', value: 'vertex', hint: 'EU data residency' },
       { label: 'Custom Proxy', value: 'custom', hint: 'experimental' },
     ], { default: 0, rl: stdin.isTTY ? undefined : rl });
     const provider: ProviderChoice = providerChoice ?? 'anthropic';
 
     let apiKey = '';
-    let awsRegion: string | undefined;
+    let gcpProjectId: string | undefined;
+    let gcpRegion: string | undefined;
     let apiBaseUrl: string | undefined;
 
     if (provider === 'anthropic') {
@@ -244,24 +245,22 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
         apiKey = input.trim();
         break;
       }
-    } else if (provider === 'bedrock') {
-      // ── AWS Bedrock ──
-      stdout.write(`\n  ${BOLD}Claude (AWS Bedrock)${RESET}\n`);
-      stdout.write(`${DIM}  Requires: AWS credentials (env vars or ~/.aws/credentials)${RESET}\n`);
-      stdout.write(`${DIM}  Install SDK: pnpm add @anthropic-ai/bedrock-sdk${RESET}\n\n`);
+    } else if (provider === 'vertex') {
+      // ── Google Vertex AI ──
+      stdout.write(`\n  ${BOLD}Claude (Google Vertex AI)${RESET}\n`);
+      stdout.write(`${DIM}  Requires: GCP project with Vertex AI enabled + service account${RESET}\n`);
+      stdout.write(`${DIM}  Install SDK: pnpm add @anthropic-ai/vertex-sdk${RESET}\n\n`);
+      const projectInput = await rl.question(`  ${BOLD}GCP Project ID:${RESET} `);
+      gcpProjectId = projectInput.trim();
       const regionChoice = await select([
-        { label: 'eu-central-1 (Frankfurt)', value: 'eu-central-1' },
-        { label: 'eu-central-2 (Zurich)', value: 'eu-central-2' },
-        { label: 'eu-west-1 (Ireland)', value: 'eu-west-1' },
-        { label: 'eu-west-3 (Paris)', value: 'eu-west-3' },
-        { label: 'eu-north-1 (Stockholm)', value: 'eu-north-1' },
-        { label: 'eu-south-1 (Milan)', value: 'eu-south-1' },
-        { label: 'us-east-1 (N. Virginia)', value: 'us-east-1' },
-        { label: 'us-west-2 (Oregon)', value: 'us-west-2' },
+        { label: 'europe-west4 (Netherlands)', value: 'europe-west4', hint: 'EU residency' },
+        { label: 'europe-west1 (Belgium)', value: 'europe-west1' },
+        { label: 'us-east5 (Columbus)', value: 'us-east5' },
+        { label: 'us-central1 (Iowa)', value: 'us-central1' },
       ], { default: 0, rl: stdin.isTTY ? undefined : rl });
-      awsRegion = regionChoice ?? 'eu-central-1';
-      stdout.write(`  ${GREEN}✓${RESET} Region: ${awsRegion}\n`);
-      stdout.write(`  ${DIM}Credentials: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars${RESET}\n`);
+      gcpRegion = regionChoice ?? 'europe-west4';
+      stdout.write(`  ${GREEN}✓${RESET} Region: ${gcpRegion}\n`);
+      stdout.write(`  ${DIM}Credentials: set GOOGLE_APPLICATION_CREDENTIALS env var to service account JSON path${RESET}\n`);
     } else {
       // ── Custom / LiteLLM ──
       stdout.write(`\n  ${BOLD}Custom Proxy${RESET} ${DIM}(experimental)${RESET}\n`);
@@ -300,7 +299,8 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       default_tier: tier,
       ...(provider !== 'anthropic' ? { provider } : {}),
       ...(apiKey ? { api_key: apiKey } : {}),
-      ...(awsRegion ? { aws_region: awsRegion } : {}),
+      ...(gcpProjectId ? { gcp_project_id: gcpProjectId } : {}),
+      ...(gcpRegion ? { gcp_region: gcpRegion } : {}),
       ...(apiBaseUrl ? { api_base_url: apiBaseUrl } : {}),
     };
     saveUserConfig(config);
@@ -308,7 +308,7 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
 
     // ── Summary ─────────────────────────────────────────────────
     const providerLabel = provider === 'anthropic' ? 'Claude (Anthropic)'
-      : provider === 'bedrock' ? `Claude (AWS Bedrock, ${awsRegion})`
+      : provider === 'vertex' ? `Claude (Vertex AI, ${gcpRegion})`
       : `Custom Proxy (${apiBaseUrl})`;
     stdout.write(`\n  ${GREEN}${BOLD}✓ Setup complete${RESET}\n\n`);
     stdout.write(`  Provider       ${GREEN}✓${RESET} ${providerLabel}\n`);

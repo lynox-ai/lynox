@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { getBetasForProvider, getModelId } from '../types/index.js';
-import { createLLMClient, getActiveProvider, isBedrockEuOnly, isCustomProvider } from './llm-client.js';
+import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
 import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
 
@@ -124,7 +124,7 @@ export async function captureProcess(
   // Call Haiku for step naming + parameter identification
   const client = createLLMClient({ apiKey: options.apiKey, apiBaseURL: options.apiBaseURL });
   const response = await client.beta.messages.create({
-    model: getModelId('haiku', getActiveProvider(), isBedrockEuOnly()),
+    model: getModelId('haiku', getActiveProvider()),
     max_tokens: 4096,
     ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
     system: EXTRACTION_SYSTEM,
