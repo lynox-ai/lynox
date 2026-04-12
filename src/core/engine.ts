@@ -258,6 +258,7 @@ export class Engine {
       awsAccessKey,
       awsSecretKey,
       awsSessionToken,
+      openaiModelId: this.userConfig.openai_model_id,
     });
   }
 
@@ -815,12 +816,13 @@ export class Engine {
   getTaskManager(): import('./task-manager.js').TaskManager | null { return this._taskManager; }
   getDataStore(): DataStore | null { return this._dataStore; }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
-  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; awsRegion?: string | undefined } {
+  getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; awsRegion?: string | undefined; openaiModelId?: string | undefined } {
     return {
       apiKey: this.userConfig.api_key,
       apiBaseURL: this.userConfig.api_base_url,
       provider: this.userConfig.provider,
       awsRegion: this.userConfig.aws_region,
+      openaiModelId: this.userConfig.openai_model_id,
     };
   }
   getBatchIndex(): BatchIndex { return this.batchIndex; }

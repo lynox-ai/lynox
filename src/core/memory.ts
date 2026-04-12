@@ -103,8 +103,10 @@ export class Memory implements IMemory {
     contextId?: string | undefined,
     maskFn?: ((text: string) => string) | undefined,
     flatFileEnabled?: boolean | undefined,
+    provider?: import('../types/index.js').LLMProvider | undefined,
+    openaiModelId?: string | undefined,
   ) {
-    this.client = createLLMClient({ apiKey, apiBaseURL });
+    this.client = createLLMClient({ apiKey, apiBaseURL, provider, openaiModelId });
     this.apiKey = apiKey;
     this.apiBaseURL = apiBaseURL;
     this.baseDir = path.join(workingDir ?? getLynoxDir(), DEFAULT_DIR);

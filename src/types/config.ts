@@ -2,7 +2,7 @@
 
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
-import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider } from './models.js';
+import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
 import type { TabQuestion } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
@@ -50,6 +50,8 @@ export interface AgentConfig {
   changesetManager?:   ChangesetManagerLike | undefined;
   /** Shared tool context — replaces closure-based module-level setters. */
   toolContext?:        import('../core/tool-context.js').ToolContext | undefined;
+  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). Used with provider: 'openai'. */
+  openaiModelId?:      string | undefined;
 }
 
 /** Minimal interface to avoid circular deps between agent and changeset module */
@@ -116,6 +118,8 @@ export interface SpawnSpec {
   context?:         string | undefined;
   isolated_memory?: boolean | undefined;
   isolation?:        IsolationConfig | undefined;
+  /** Named model profile for non-Claude provider (e.g. 'mistral-eu', 'gemini-research'). */
+  profile?:         string | undefined;
 }
 
 export interface LynoxConfig {
@@ -230,6 +234,12 @@ export interface LynoxUserConfig {
   mcp_exposed_tools?: string[] | undefined;
   /** Experience level: controls output style. 'business' (default) = UI-focused, no CLI/env hints. 'developer' (experimental) = technical details, CLI commands, config snippets. */
   experience?: 'business' | 'developer' | undefined;
+  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). Required when provider is 'openai'. */
+  openai_model_id?: string | undefined;
+  /** Named model profiles for non-Claude providers (Mistral, Gemini, Grok, etc.). */
+  model_profiles?: Record<string, ModelProfile> | undefined;
+  /** Model profile to use for background tasks (WorkerLoop, Cron). Uses Claude if unset. */
+  worker_profile?: string | undefined;
 }
 
 // === DataStore ===

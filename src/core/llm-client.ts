@@ -1,16 +1,18 @@
 /**
  * Centralized LLM client factory.
  *
- * Supports three providers:
+ * Supports four providers:
  *   - anthropic (default): direct Anthropic API
  *   - bedrock: AWS Bedrock (requires @anthropic-ai/bedrock-sdk)
  *   - custom: LiteLLM or other Anthropic-compatible proxy
+ *   - openai: OpenAI-compatible APIs (Mistral, Gemini, etc.)
  *
  * For bedrock, call `initLLMProvider()` once at startup (async)
  * before calling `createLLMClient()` (sync).
  */
 import Anthropic from '@anthropic-ai/sdk';
 import type { LLMProvider } from '../types/index.js';
+import { OpenAIAdapter } from './openai-adapter.js';
 
 // Cached dynamic module reference — loaded once via initLLMProvider()
 type BedrockCtor = new (opts: { awsRegion?: string | undefined; awsAccessKey?: string | undefined; awsSecretKey?: string | undefined; awsSessionToken?: string | undefined }) => Anthropic;
@@ -48,14 +50,29 @@ export interface LLMClientOptions {
   awsAccessKey?: string | undefined;
   awsSecretKey?: string | undefined;
   awsSessionToken?: string | undefined;
+  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). */
+  openaiModelId?: string | undefined;
 }
 
 /**
  * Create an Anthropic-compatible client for the configured provider.
  * Returns the base Anthropic type — bedrock SDK extends it.
+ * For 'openai' provider, returns an OpenAIAdapter cast to Anthropic
+ * (Agent only uses client.beta.messages.stream() which the adapter implements).
  */
 export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
   const provider = opts.provider ?? _activeProvider;
+
+  if (provider === 'openai') {
+    if (!opts.apiBaseURL || !opts.apiKey || !opts.openaiModelId) {
+      throw new Error('OpenAI provider requires apiBaseURL, apiKey, and openaiModelId.');
+    }
+    return new OpenAIAdapter({
+      baseURL: opts.apiBaseURL,
+      apiKey: opts.apiKey,
+      modelId: opts.openaiModelId,
+    }) as unknown as Anthropic;
+  }
 
   if (provider === 'bedrock') {
     if (!_bedrockCtor) {
@@ -84,9 +101,9 @@ export function getActiveProvider(): LLMProvider {
   return _activeProvider;
 }
 
-/** Whether the active provider is a custom (non-Anthropic) proxy. */
+/** Whether the active provider is a custom (non-Anthropic) proxy or OpenAI-compatible. */
 export function isCustomProvider(): boolean {
-  return _activeProvider === 'custom';
+  return _activeProvider === 'custom' || _activeProvider === 'openai';
 }
 
 /** Whether Bedrock EU cross-region inference is active. */

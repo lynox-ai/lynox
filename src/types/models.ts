@@ -2,7 +2,27 @@
 
 export type ModelTier = 'opus' | 'sonnet' | 'haiku';
 
-export type LLMProvider = 'anthropic' | 'bedrock' | 'custom';
+export type LLMProvider = 'anthropic' | 'bedrock' | 'custom' | 'openai';
+
+/** Named model profile for non-Claude providers (Mistral, Gemini, Grok, etc.). */
+export interface ModelProfile {
+  /** Provider type — always 'openai' (OpenAI-compatible API). */
+  provider: 'openai';
+  /** API base URL (e.g. 'https://api.mistral.ai/v1'). */
+  api_base_url: string;
+  /** API key for this provider. */
+  api_key: string;
+  /** Model ID to send in requests (e.g. 'mistral-large-latest'). */
+  model_id: string;
+  /** Context window size in tokens. Default: 200000. */
+  context_window?: number | undefined;
+  /** Max output tokens. Default: 16000. */
+  max_tokens?: number | undefined;
+  /** Max continuation attempts. Default: 5. */
+  max_continuations?: number | undefined;
+  /** Pricing per million tokens (for cost guards). */
+  pricing?: { input: number; output: number } | undefined;
+}
 
 export const MODEL_MAP: Record<ModelTier, string> = {
   'opus':   'claude-opus-4-6',
@@ -24,7 +44,7 @@ export const BEDROCK_EU_MODEL_MAP: Record<ModelTier, string> = {
   'haiku':  'eu.anthropic.claude-haiku-4-5-20251001-v1:0',
 };
 
-const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom'>, Record<ModelTier, string>> = {
+const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<ModelTier, string>> = {
   anthropic: MODEL_MAP,
   bedrock: BEDROCK_MODEL_MAP,
 };
@@ -39,6 +59,8 @@ export function getModelId(tier: ModelTier, provider: LLMProvider = 'anthropic',
   }
   // 'custom' provider (LiteLLM etc.) uses standard Anthropic model IDs — proxy maps them
   if (provider === 'custom') return MODEL_MAP[tier];
+  // 'openai' provider uses model ID from profile — tier is ignored (caller sets model directly)
+  if (provider === 'openai') return MODEL_MAP[tier];
   return ALL_MODEL_MAPS[provider][tier];
 }
 

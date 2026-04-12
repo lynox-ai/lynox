@@ -264,6 +264,8 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
       const plan = await planDAG(input.summary, {
         apiKey: planConfig.api_key,
         apiBaseURL: planConfig.api_base_url,
+        provider: planConfig.provider,
+        openaiModelId: planConfig.openai_model_id,
         maxSteps: 10,
         projectContext: input.context?.summary,
       });
