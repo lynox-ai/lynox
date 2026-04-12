@@ -25,7 +25,8 @@
 		max_http_requests_per_hour?: number | undefined;
 		search_provider?: string;
 		update_check?: boolean;
-		managed?: string; // 'starter' (BYOK) | 'eu' (Managed Vertex) | undefined (self-hosted)
+		managed?: string; // 'starter' (Hosted/BYOK) | 'managed' | 'managed_pro' | 'eu' (legacy) | undefined (self-hosted)
+		llm_mode?: 'standard' | 'eu-sovereign'; // managed-instance toggle: Anthropic Claude vs Mistral Large 3
 		[key: string]: unknown;
 	}
 
@@ -362,7 +363,12 @@
 
 	// ── Derived state ──────────────────────────────────────────────────────────
 	const managed = $derived(!!config.managed);
-	const isManagedEu = $derived(config.managed === 'eu');
+	// Any managed tier where lynox provides the LLM (Managed / Managed Pro / legacy 'eu').
+	// Excludes 'starter' (Hosted/BYOK) where the customer brings their own key.
+	const isManagedTier = $derived(
+		config.managed === 'managed' || config.managed === 'managed_pro' || config.managed === 'eu'
+	);
+	const isManagedEu = $derived(isManagedTier); // legacy alias used elsewhere in this view
 	const isAnthropicDirect = $derived(config.provider === 'anthropic' || !config.provider);
 	const isNonDirect = $derived(config.provider === 'custom' || config.provider === 'vertex' || config.provider === 'openai');
 	const showEffortThinking = $derived(isAnthropicDirect || managed);
@@ -489,10 +495,47 @@
 		<!-- ═══════════════════════════════════════════════════════════════════ -->
 		{:else if activeTab === 'provider'}
 			<div class="space-y-4">
-				{#if isManagedEu}
+				{#if isManagedTier}
 					<div class={cardClass}>
 						<p class="text-sm font-medium">{t('config.provider')}</p>
 						<p class="text-xs text-text-muted mt-1">{t('config.managed_eu_provider_info')}</p>
+					</div>
+
+					<div class={cardClass}>
+						<p class="text-sm font-medium mb-1">{t('config.llm_mode')}</p>
+						<p class="text-xs text-text-muted mb-3">{t('config.llm_mode_desc')}</p>
+
+						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors mb-2">
+							<input
+								type="radio"
+								name="llm-mode"
+								value="standard"
+								checked={(config.llm_mode ?? 'standard') === 'standard'}
+								onchange={() => { config.llm_mode = 'standard'; }}
+								class="mt-1 accent-accent shrink-0"
+							/>
+							<div class="flex-1 min-w-0">
+								<p class="text-sm font-medium">{t('config.llm_mode_standard')}</p>
+								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_standard_desc')}</p>
+							</div>
+						</label>
+
+						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors">
+							<input
+								type="radio"
+								name="llm-mode"
+								value="eu-sovereign"
+								checked={config.llm_mode === 'eu-sovereign'}
+								onchange={() => { config.llm_mode = 'eu-sovereign'; }}
+								class="mt-1 accent-accent shrink-0"
+							/>
+							<div class="flex-1 min-w-0">
+								<p class="text-sm font-medium">{t('config.llm_mode_eu_sovereign')}</p>
+								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_eu_sovereign_desc')}</p>
+							</div>
+						</label>
+
+						<p class="text-xs text-text-muted mt-3 italic">{t('config.llm_mode_restart_required')}</p>
 					</div>
 				{:else}
 					<div class={cardClass}>

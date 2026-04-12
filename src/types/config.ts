@@ -236,6 +236,13 @@ export interface LynoxUserConfig {
   model_profiles?: Record<string, ModelProfile> | undefined;
   /** Model profile to use for background tasks (WorkerLoop, Cron). Uses Claude if unset. */
   worker_profile?: string | undefined;
+  /**
+   * LLM mode for managed instances. 'standard' (default) uses Claude Sonnet 4.6 via Anthropic Direct.
+   * 'eu-sovereign' switches the main LLM to Mistral Large 3 via the OpenAI adapter (Paris) — full
+   * EU data sovereignty, no CLOUD Act exposure. Toggleable in the Web UI under Settings → LLM Mode.
+   * Engine.init() reads this and overrides provider/api_key/api_base_url at runtime.
+   */
+  llm_mode?: 'standard' | 'eu-sovereign' | undefined;
 }
 
 // === DataStore ===

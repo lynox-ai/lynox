@@ -120,6 +120,19 @@ export function loadConfig(): LynoxUserConfig {
       merged.provider = p;
     }
   }
+  // LLM mode (managed-instance toggle: standard | eu-sovereign).
+  // The env var is set by managed hosting on first boot. The local config.json
+  // wins after the user toggles in the Web UI: env loads first here, then the
+  // user value comes from readConfigFile(...) above and remains in `merged`
+  // because we never overwrite it back to the env value once it's set.
+  // (Local config llm_mode takes precedence because env applies before
+  //  the explicit override below only if the local value is still undefined.)
+  if (process.env['LYNOX_LLM_MODE'] && merged.llm_mode === undefined) {
+    const m = process.env['LYNOX_LLM_MODE'];
+    if (m === 'standard' || m === 'eu-sovereign') {
+      merged.llm_mode = m;
+    }
+  }
   // OpenAI model ID (for provider: 'openai')
   if (process.env['OPENAI_MODEL_ID']) {
     merged.openai_model_id = process.env['OPENAI_MODEL_ID'];
@@ -157,6 +170,20 @@ export function loadConfig(): LynoxUserConfig {
   }
   if (process.env['SEARXNG_URL']) {
     merged.searxng_url = process.env['SEARXNG_URL'];
+  }
+
+  // EU Sovereign mode override (managed-instance toggle).
+  // When the user has flipped Settings → LLM Mode to 'eu-sovereign' (saved in
+  // local config.json) AND the host has MISTRAL_API_KEY in the environment
+  // (delivered by the managed control plane on first boot), swap the active
+  // LLM out from Anthropic Claude over to Mistral Large 3 via the OpenAI
+  // adapter. The user can flip back to 'standard' at any time without losing
+  // their Anthropic credentials, since both keys remain in the environment.
+  if (merged.llm_mode === 'eu-sovereign' && process.env['MISTRAL_API_KEY']) {
+    merged.provider = 'openai';
+    merged.api_key = process.env['MISTRAL_API_KEY'];
+    merged.api_base_url = 'https://api.mistral.ai/v1';
+    merged.openai_model_id = 'mistral-large-latest';
   }
 
   _cachedConfig = merged;
