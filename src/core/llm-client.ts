@@ -12,7 +12,8 @@
  */
 import Anthropic from '@anthropic-ai/sdk';
 import type { LLMProvider } from '../types/index.js';
-import { OpenAIAdapter } from './openai-adapter.js';
+import { OpenAIAdapter, type ApiKeyProvider } from './openai-adapter.js';
+import { createVertexOAuthProvider } from './vertex-oauth.js';
 
 // Cached dynamic module reference — loaded once via initLLMProvider()
 type VertexCtor = new (opts: { projectId?: string | undefined; region?: string | undefined; accessToken?: string | undefined }) => Anthropic;
@@ -51,6 +52,8 @@ export interface LLMClientOptions {
   gcpRegion?: string | undefined;
   /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). */
   openaiModelId?: string | undefined;
+  /** Auth mode for 'openai' provider. 'google-vertex' uses GOOGLE_APPLICATION_CREDENTIALS to generate OAuth tokens. Default: 'static'. */
+  openaiAuth?: 'static' | 'google-vertex' | undefined;
 }
 
 /**
@@ -63,12 +66,19 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
   const provider = opts.provider ?? _activeProvider;
 
   if (provider === 'openai') {
-    if (!opts.apiBaseURL || !opts.apiKey || !opts.openaiModelId) {
-      throw new Error('OpenAI provider requires apiBaseURL, apiKey, and openaiModelId.');
+    if (!opts.apiBaseURL || !opts.openaiModelId) {
+      throw new Error('OpenAI provider requires apiBaseURL and openaiModelId.');
+    }
+    // Auth mode: static API key OR dynamic OAuth token from GCP service account
+    const apiKey: ApiKeyProvider = opts.openaiAuth === 'google-vertex'
+      ? createVertexOAuthProvider()
+      : opts.apiKey ?? '';
+    if (!apiKey) {
+      throw new Error('OpenAI provider requires apiKey (for static auth) or openaiAuth: "google-vertex" (for Vertex AI OAuth).');
     }
     return new OpenAIAdapter({
       baseURL: opts.apiBaseURL,
-      apiKey: opts.apiKey,
+      apiKey,
       modelId: opts.openaiModelId,
     }) as unknown as Anthropic;
   }

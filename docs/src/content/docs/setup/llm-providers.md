@@ -130,7 +130,7 @@ OPENAI_MODEL_ID=mistral-large-latest
 | Provider | Base URL | Model ID | Role | Pricing |
 |----------|----------|----------|------|---------|
 | **Mistral Large 3** (France) | `https://api.mistral.ai/v1` | `mistral-large-latest` | Fallback + background + bulk | $0.50/$1.50 per MTok |
-| **Gemini 2.5 Flash** (Google) | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` | Long-context tasks only | $0.30/$2.50 per MTok |
+| **Gemini 3 Flash** (Google) | Vertex AI regional or `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` (or `google/gemini-2.5-flash` on Vertex) | Long-context tasks, agentic workflows | ~$0.30/$2.50 per MTok |
 
 Tool calling quality validated against lynox's agent loop: Mistral 97%, Gemini 80% (fails on complex aggregations).
 

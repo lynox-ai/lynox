@@ -149,6 +149,7 @@ async function executeThinker(
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     openaiModelId: profile?.model_id,
+    openaiAuth: profile?.auth,
   });
 
   // Track child for abort propagation

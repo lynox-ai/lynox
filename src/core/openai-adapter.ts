@@ -324,15 +324,24 @@ async function* translateStream(
 
 // ── Adapter Class ───────────────────────────────────────────────
 
+/** Static API key or a function that returns a fresh token (e.g. OAuth refresh). */
+export type ApiKeyProvider = string | (() => Promise<string>);
+
 export class OpenAIAdapter {
   private baseURL: string;
-  private apiKey: string;
+  private apiKeyProvider: ApiKeyProvider;
   private modelId: string;
 
-  constructor(opts: { baseURL: string; apiKey: string; modelId: string }) {
+  constructor(opts: { baseURL: string; apiKey: ApiKeyProvider; modelId: string }) {
     this.baseURL = opts.baseURL.replace(/\/+$/, '');
-    this.apiKey = opts.apiKey;
+    this.apiKeyProvider = opts.apiKey;
     this.modelId = opts.modelId;
+  }
+
+  private async resolveApiKey(): Promise<string> {
+    return typeof this.apiKeyProvider === 'function'
+      ? await this.apiKeyProvider()
+      : this.apiKeyProvider;
   }
 
   /**
@@ -467,10 +476,11 @@ export class OpenAIAdapter {
       body.tool_choice = 'auto';
     }
 
+    const apiKey = await this.resolveApiKey();
     const response = await fetch(`${this.baseURL}/chat/completions`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
+        'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),

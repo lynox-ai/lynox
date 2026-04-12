@@ -53,6 +53,8 @@ export interface AgentConfig {
   toolContext?:        import('../core/tool-context.js').ToolContext | undefined;
   /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). Used with provider: 'openai'. */
   openaiModelId?:      string | undefined;
+  /** Auth mode for OpenAI provider. 'google-vertex' uses GOOGLE_APPLICATION_CREDENTIALS to generate OAuth tokens. */
+  openaiAuth?:         'static' | 'google-vertex' | undefined;
 }
 
 /** Minimal interface to avoid circular deps between agent and changeset module */

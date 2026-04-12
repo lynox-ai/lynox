@@ -169,6 +169,7 @@ export class Agent implements IAgent {
       gcpProjectId: config.gcpProjectId,
       gcpRegion: config.gcpRegion,
       openaiModelId: config.openaiModelId,
+      openaiAuth: config.openaiAuth,
     });
   }
 
