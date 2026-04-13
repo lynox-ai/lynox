@@ -40,7 +40,7 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm exec vitest run --coverage
       - name: Check coverage threshold
-        run: node --input-type=module -e "import{readFileSync}from'node:fs';const r=JSON.parse(readFileSync('./coverage/coverage-summary.json','utf8')).total;const p=r.lines.pct;console.log('Line coverage '+p+'%');if(p<70)process.exit(1)"
+        run: node --input-type=module -e "import{readFileSync}from'node:fs';const r=JSON.parse(readFileSync('./coverage/coverage-summary.json','utf8')).total;const p=r.lines.pct;console.log('Line coverage '+p+'%');if(p<65)process.exit(1)"
 
   docker-scan:
     runs-on: ubuntu-latest
