@@ -46,6 +46,7 @@
   },
   "files": [
     "dist/",
+    "scripts/postinstall.cjs",
     "README.md",
     "LICENSE"
   ],
@@ -60,6 +61,7 @@
     "bench:online": "vitest bench --config vitest.bench.config.ts tests/performance/online/",
     "smoke:manual": "bash scripts/smoke-manual.sh",
     "test:watch": "vitest",
+    "postinstall": "node scripts/postinstall.cjs",
     "prepare": "lefthook install || true",
     "security": "sh scripts/security-scan.sh && vitest run tests/security/",
     "lint": "eslint src/",
