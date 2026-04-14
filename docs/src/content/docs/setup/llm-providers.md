@@ -13,34 +13,34 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 
 ## At a Glance
 
-| | **Claude (Anthropic)** | **Claude (Google Vertex AI)** | **OpenAI-Compatible** | **Custom Proxy** |
+| | **Claude (Anthropic)** | **Claude (AWS Bedrock)** | **OpenAI-Compatible** | **Custom Proxy** |
 |---|---|---|---|---|
 | **Status** | Stable | Stable | Stable | Experimental |
-| **Setup** | API key | GCP project + service account | API key + base URL | Proxy URL |
+| **Setup** | API key | AWS IAM credentials | API key + base URL | Proxy URL |
 | **AI quality** | Claude | Claude (same models) | Model-dependent | Model-dependent |
 | | | | | |
 | **Features** | | | | |
 | Chat + Streaming | ✅ | ✅ | ✅ | ✅ |
 | Tool Calling | ✅ | ✅ | ✅ Native | ✅ via LiteLLM |
 | Extended Thinking | ✅ | ✅ | ❌ Auto-disabled | ❌ Auto-disabled |
-| Prompt Caching (1h TTL) | ✅ | ✅ | ❌ | ❌ |
+| Prompt Caching | ✅ 1h TTL | ✅ 5min TTL | ❌ | ❌ |
 | Web Search (built-in) | ✅ | ❌ | ❌ | ❌ |
 | Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ | ✅ |
 | MCP Server-Side | ✅ | ❌ | ❌ | ❌ |
 | | | | | |
 | **Privacy** | | | | |
-| Data residency | US | 🇪🇺 EU (europe-west4) | Provider-dependent | 🏠 Your server |
-| DPA available | ✅ Auto | ✅ Google Cloud | Provider-dependent | N/A |
+| Data residency | US | Your AWS region | Provider-dependent | 🏠 Your server |
+| DPA available | ✅ Auto | ✅ AWS | Provider-dependent | N/A |
 | Training on data | ❌ Never | ❌ Never | Provider-dependent | ❌ Never |
-| CLOUD Act exposure | ⚠️ Yes | ⚠️ Google US parent | Provider-dependent | ❌ None |
-| GDPR compliant | ✅ With DPA | ✅ | Provider-dependent | ✅ |
-| Art. 321 StGB (CH) | ⚠️ Counsel | ⚠️ Better | Provider-dependent | ✅ Safe |
 | | | | | |
 | **Cost** | | | | |
-| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | Same as Anthropic | From $0.50/$1.50 (Mistral) | Free (your hardware) |
-| Region surcharge | — | — | — | — |
+| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | Similar to Anthropic (region surcharge may apply) | From $0.50/$1.50 (Mistral) | Free (your hardware) |
 | Infrastructure | — | — | — | GPU server ~€150/mo |
-| Typical monthly | €30–150 | €30–150 | €10–50 | €150 fixed |
+| Typical monthly | $30–150 | $30–150 | $10–50 | $150 fixed |
+
+:::note[BYOK only]
+AWS Bedrock is supported as a **Bring-Your-Own-Key** option for Self-Hosted and Hosted tier customers who already run on AWS. lynox's own Managed / Managed Pro tiers ship with Anthropic Direct as the primary model and Mistral AI as the secondary model — AWS Bedrock is not part of those managed offerings.
+:::
 
 ## Claude (Anthropic) — Default
 
@@ -63,47 +63,31 @@ Direct connection to the Anthropic API. Simplest setup, recommended for most use
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-## Claude (Google Vertex AI)
+## Claude (AWS Bedrock) — BYOK
 
-Same Claude models, hosted in Google Cloud regions. Full EU data residency via `europe-west4`. Supports 1-hour prompt cache TTL (same as Anthropic Direct).
+Same Claude models, hosted in your own AWS account. Useful if you already have an AWS footprint, need to keep LLM billing inside AWS, or have a regional residency requirement that your AWS region covers.
 
 ```json
 {
-  "provider": "vertex",
-  "gcp_project_id": "my-project-id",
-  "gcp_region": "europe-west4"
+  "provider": "bedrock",
+  "aws_region": "eu-central-1"
 }
 ```
 
 **Setup:**
-1. Create a [GCP project](https://console.cloud.google.com)
-2. Enable **Vertex AI API** in the project
-3. Go to **Vertex AI → Model Garden** → enable Claude models
-4. Create a service account with `Vertex AI User` role
-5. Download the service account JSON key
-6. Install the SDK: `pnpm add @anthropic-ai/vertex-sdk` (pre-installed in Docker images)
+1. Enable Claude models in **AWS Bedrock → Model Access**
+2. Create an IAM user (or role) with `bedrock:InvokeModel` + `bedrock:InvokeModelWithResponseStream`
+3. Generate access keys for that user
 
-**Credentials:**
-
-Set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to the path of the service account JSON key file:
-
+**Environment:**
 ```bash
-LYNOX_LLM_PROVIDER=vertex
-GCP_PROJECT_ID=my-project-id
-CLOUD_ML_REGION=europe-west4
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
+LYNOX_LLM_PROVIDER=bedrock
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=eu-central-1
 ```
 
-**Regions with Claude models:**
-
-| Region | Location | Use for |
-|--------|----------|---------|
-| `europe-west4` | Netherlands | EU data residency (recommended for EU customers) |
-| `europe-west1` | Belgium | EU data residency |
-| `us-east5` | Columbus, OH | US customers |
-| `us-central1` | Iowa | US customers |
-
-**Why Vertex AI over AWS Bedrock:** Vertex AI supports full 1-hour prompt cache TTL (Bedrock is stuck at 5 minutes), generally has lower pricing for Claude models, and offers Gemini in the same regions for long-context tasks. No AWS region surcharge.
+**Trade-offs vs. Anthropic Direct:** Prompt cache TTL is 5 minutes on Bedrock vs. 1 hour on Anthropic, which materially affects costs on cache-heavy workflows. A region surcharge may apply depending on your AWS region. Web Search (built-in) and MCP server-side are not available through the Bedrock path.
 
 ## OpenAI-Compatible Providers — Mistral & Gemini
 
@@ -129,13 +113,13 @@ OPENAI_MODEL_ID=mistral-large-latest
 
 | Provider | Base URL | Model ID | Role | Pricing |
 |----------|----------|----------|------|---------|
-| **Mistral Large 3** (France) | `https://api.mistral.ai/v1` | `mistral-large-latest` | Fallback + background + bulk | $0.50/$1.50 per MTok |
-| **Gemini 3 Flash** (Google) | Vertex AI regional or `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` (or `google/gemini-2.5-flash` on Vertex) | Long-context tasks, agentic workflows | ~$0.30/$2.50 per MTok |
+| **Mistral Large** (France) | `https://api.mistral.ai/v1` | `mistral-large-latest` | Fallback + background + bulk | $0.50/$1.50 per MTok |
+| **Gemini 2.5 Flash** (Google) | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` | Long-context tasks, agentic workflows | ~$0.30/$2.50 per MTok |
 
 Tool calling quality validated against lynox's agent loop: Mistral 97%, Gemini 80% (fails on complex aggregations).
 
 :::tip[Mistral — Main Fallback]
-Mistral Large 3 is lynox's official Claude fallback. It scored 97% on tool calling tests — near Claude quality at ~6x lower cost. EU and US endpoints available. No CLOUD Act exposure (French company).
+Mistral Large is lynox's official Claude fallback. It scored 97% on tool calling tests — near Claude quality at ~6x lower cost. No CLOUD Act exposure (French company).
 :::
 
 :::caution[Gemini — Long-Context Only]
@@ -260,7 +244,7 @@ Models: Qwen 3, DeepSeek V3/R1, Llama 3.3, GLM-4.5.
 ```
 
 :::tip[EU Data Sovereignty]
-Mistral, Scaleway, and Nebius are EU-based companies (or EU-hosted infrastructure). Unlike AWS Bedrock, they are not subject to the US CLOUD Act. For regulated industries (healthcare, legal, finance), this can be a decisive compliance advantage.
+Mistral, Scaleway, and Nebius are EU-based companies (or EU-hosted infrastructure) and are not subject to the US CLOUD Act. For regulated industries (healthcare, legal, finance), this can be a decisive compliance advantage over US-headquartered model providers.
 :::
 
 :::caution
@@ -273,7 +257,6 @@ For maximum data control, run lynox on a server close to your LLM provider — a
 
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
-| **Hetzner + Vertex AI** | Vertex AI `europe-west4` | Hetzner VPS (Falkenstein/Helsinki) | Everything in EU |
 | **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no CLOUD Act |
 | **Fully local** | Ollama on your server | Docker on your server | Nothing leaves your network |
 
