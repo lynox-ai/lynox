@@ -9,6 +9,9 @@
 
 One system that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Source-available (ELv2), self-hosted, no vendor lock-in.
 
+> [!IMPORTANT]
+> **lynox is a CLI, not a library.** Run `npx @lynox-ai/core`, not `npm install @lynox-ai/core`. The npm page sidebar suggests `npm i` by default, but that only installs lynox as a dependency without running anything.
+
 ## What it does
 
 - **"Check my emails and tell me what's important"** — lynox reads your inbox, prioritizes, drafts replies in your tone. Tomorrow it remembers your style.
@@ -23,16 +26,9 @@ One system that learns your business — handles CRM, workflows, research, and m
 npx @lynox-ai/core
 ```
 
-You need Node.js 22+ and an [Anthropic API key](https://console.anthropic.com/) — the setup wizard asks for it. That's all.
+You need Node.js 22+, Docker, and an [Anthropic API key](https://console.anthropic.com/) (or Vertex AI / a custom proxy). The interactive installer asks for the key, generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000).
 
-### Docker (recommended for always-on)
-
-```bash
-cp .env.example .env       # add your API key
-docker compose up -d        # starts lynox + SearXNG (web search)
-```
-
-Open [localhost:3000](http://localhost:3000) and enter the access token from `docker logs lynox`. Includes web search out of the box via SearXNG.
+Prefer to edit `.env` yourself before the first run? Jump to [manual Docker](#docker) below.
 
 ## Documentation
 
@@ -104,17 +100,17 @@ See [Docker docs](https://docs.lynox.ai/daily-use/docker/) for Telegram, encrypt
 
 ## Your first run
 
-After setup, lynox starts the Engine HTTP API and opens the Web UI in your browser:
+`npx @lynox-ai/core` walks you through an interactive installer: provider selection, API key, Docker Compose scaffolding, container pull, health check, and finally it opens the Web UI at [localhost:3000](http://localhost:3000). Save the access token and vault key it prints — the vault key cannot be recovered if lost.
+
+### One-shot mode
+
+With `ANTHROPIC_API_KEY` already in your environment, you can run a single task inline without the Docker path:
 
 ```bash
-npx @lynox-ai/core    # Starts Engine + opens Web UI
+ANTHROPIC_API_KEY=sk-ant-... npx @lynox-ai/core "Summarize the last 5 commits in this repo"
 ```
 
-One-shot mode — run a task and exit:
-
-```bash
-npx @lynox-ai/core "Summarize the last 5 commits in this repo"
-```
+This starts an in-process engine, runs the task, and exits.
 
 ### Telegram (mobile)
 
