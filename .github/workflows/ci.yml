@@ -34,12 +34,9 @@ jobs:
       - uses: pnpm/action-setup@v4
         with: { version: 'latest' }
       - run: pnpm install --frozen-lockfile
-      # prod-only, high+ — transitive build-tool vulns are tolerated
-      # TODO(release-workflow-sprint): replace with audit-ci or equivalent.
-      # pnpm audit hits the legacy npm advisory endpoint which returned 410
-      # ('endpoint being retired') on 2026-04-15. Soft-failing keeps the gate
-      # visible as a CI warning without blocking merges.
-      - run: pnpm audit --prod --audit-level=high || echo "::warning::pnpm audit endpoint retired; gate bypassed"
+      # high+ severity hard-fails merges. Uses audit-ci which hits npm's bulk
+      # advisory endpoint (the legacy pnpm audit endpoint was retired 2026-04-15).
+      - run: pnpm exec audit-ci --config .audit-ci.jsonc
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm exec vitest run --coverage

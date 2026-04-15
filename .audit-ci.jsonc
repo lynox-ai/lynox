@@ -1,0 +1,9 @@
+{
+  // audit-ci config — replaces `pnpm audit --prod --audit-level=high`.
+  // pnpm's legacy advisory endpoint was retired 2026-04-15; audit-ci hits
+  // npm's bulk advisory endpoint instead.
+  "package-manager": "pnpm",
+  "high": true,
+  "critical": true,
+  "allowlist": []
+}
