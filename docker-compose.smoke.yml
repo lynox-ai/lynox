@@ -1,0 +1,74 @@
+# docker-compose.smoke.yml — local pre-release smoke test stack.
+#
+# Used by scripts/smoke-local.sh to build the current source into an ephemeral
+# lynox container and run Playwright smoke tests against http://localhost:3333.
+# Not for production or regular dev use — the main docker-compose.yml covers
+# those. This file exists so the smoke test never touches Rafael's real
+# ~/.lynox data directory and never collides with a running dev stack on :3000.
+#
+# Key differences from docker-compose.yml:
+#   - builds from local source instead of pulling :latest
+#   - listens on :3333 instead of :3000
+#   - /home/lynox/.lynox is tmpfs (ephemeral, not $HOME/.lynox)
+#   - ANTHROPIC_API_KEY is optional — without it the engine starts in
+#     "browse mode" and smoke tests only verify the setup wizard renders
+
+services:
+  lynox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    read_only: true
+    ports:
+      - "3333:3000"
+    tmpfs:
+      - /tmp:size=512M
+      - /workspace:size=256M,uid=1001,gid=1001
+      - /home/lynox/.lynox:size=256M,uid=1001,gid=1001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    environment:
+      # Optional — enables full chat flow tests when present. Without it the
+      # engine starts in browse mode and the smoke test only verifies the
+      # setup wizard is reachable.
+      - ANTHROPIC_API_KEY
+      # Fixed smoke-only values. Safe to hard-code because tmpfs destroys all
+      # state on container stop and these never encrypt anything real.
+      - LYNOX_HTTP_SECRET=smoke-test-http-secret-ephemeral
+      - SEARXNG_URL=http://searxng:8080
+    networks:
+      - smoke
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - smoke
+
+networks:
+  smoke:
+    driver: bridge
