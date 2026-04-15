@@ -141,7 +141,13 @@ describe('handshake signing', () => {
     const signingKey = deriveSigningKey(httpSecret);
 
     const signature = signHandshake(pubKeyB64, signingKey);
-    const tampered = signature.slice(0, -2) + 'ff';
+    // XOR-flip the last byte so the tampered signature is GUARANTEED different
+    // from the original. A fixed "append ff" strategy is flaky at 1/256 when
+    // the real signature already ends in ff — then tampered === original.
+    const lastByte = parseInt(signature.slice(-2), 16);
+    const flippedByte = (lastByte ^ 0xff).toString(16).padStart(2, '0');
+    const tampered = signature.slice(0, -2) + flippedByte;
+    expect(tampered).not.toBe(signature);
     expect(verifyHandshake(pubKeyB64, tampered, signingKey)).toBe(false);
   });
 
