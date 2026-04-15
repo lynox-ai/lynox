@@ -20,11 +20,23 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm exec vitest run
 
+  # Gate: verify NPM_TOKEN is valid before any docker/npm side effects.
+  # Protects against token drift — see scripts/pre-release-check.sh for history.
+  pre-release-check:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify NPM_TOKEN is valid
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: ./scripts/pre-release-check.sh
+
   # This workflow builds and publishes artifacts only.
   # It does NOT deploy to any managed instance.
   # Production deploy is always manual via admin API after explicit confirmation.
   docker:
-    needs: test
+    needs: pre-release-check
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -85,7 +97,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   npm:
-    needs: test
+    needs: pre-release-check
     runs-on: ubuntu-latest
     permissions:
       contents: read
