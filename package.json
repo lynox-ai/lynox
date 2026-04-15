@@ -60,6 +60,7 @@
     "bench": "vitest bench --config vitest.bench.config.ts",
     "bench:online": "vitest bench --config vitest.bench.config.ts tests/performance/online/",
     "smoke:manual": "bash scripts/smoke-manual.sh",
+    "smoke:local": "bash scripts/smoke-local.sh",
     "test:watch": "vitest",
     "postinstall": "node -e \"const f='scripts/postinstall.cjs';require('node:fs').existsSync(f)&&require('node:child_process').spawnSync(process.execPath,[f],{stdio:'inherit'})\"",
     "prepare": "lefthook install || true",
@@ -112,6 +113,7 @@
   "devDependencies": {
     "@anthropic-ai/vertex-sdk": "^0.16.0",
     "@evilmartians/lefthook": "^2.1.4",
+    "@playwright/test": "^1.48.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.3.5",
     "@types/web-push": "^3.6.4",

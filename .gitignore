@@ -20,5 +20,7 @@ tests/performance/results.json
 tests/performance/*.log
 *.debug.log
 .playwright-mcp/
+playwright-report/
+test-results/
 .wrangler/
 .claude/settings.local.json
