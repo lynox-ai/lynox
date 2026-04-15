@@ -145,15 +145,37 @@ jobs:
   # Pro listens for `engine-release-published` via:
   #   - release-web.yml           — wrangler pages deploy lynox-web --branch=main
   #   - release-control-plane.yml — rsync + migrate + rebuild control.lynox.cloud
-  #                                 (gated on GH environment "production" with
-  #                                  required reviewer = Rafael)
   # Keeps the prod admin token + control plane SSH key out of this public repo.
-  # Release tag + sha are passed through env vars (never interpolated directly
-  # into the shell command) and the JSON payload is built with `jq -n` to avoid
-  # any shell injection risk via a specially-crafted tag string.
+  #
+  # ── APPROVAL GATE ─────────────────────────────────────────────────
+  # This job runs under the "production" GitHub environment, which has a
+  # required-reviewer protection rule (Rafael). The dispatch to lynox-pro
+  # WILL NOT FIRE until Rafael manually approves the pending deployment
+  # on the GH Actions run page. This is the security boundary honoring
+  # feedback_production_deploy_safety: cut-release.sh + release.yml push
+  # the release up to the tag layer, but the actual fan-out to pro (and
+  # downstream to control.lynox.cloud) requires an explicit human go.
+  #
+  # The gate lives here in core (public repo) instead of in pro because
+  # environment protection rules on private repos require GitHub Team+
+  # at the org level, and GH's feature propagation after a plan upgrade
+  # is unreliable. Core is public, so protection rules are free here
+  # regardless of any org-level billing state. If the pro org's Team
+  # plan eventually propagates, we can add a second gate on pro's side
+  # as belt-and-suspenders without changing this one.
+  #
+  # ── SECURITY NOTES ────────────────────────────────────────────────
+  # Release tag + sha are passed through env vars (never interpolated
+  # directly into the shell command) and the JSON payload is built with
+  # `jq -n` to avoid any shell injection risk via a specially-crafted
+  # tag string. PRO_DISPATCH_TOKEN should be a fine-grained PAT with
+  # actions:write on lynox-ai/lynox-pro only, rotated ~every 90 days.
   dispatch-pro-release:
     needs: [docker, npm]
     runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://control.lynox.cloud
     steps:
       - name: Dispatch release to lynox-pro
         env:
