@@ -62,3 +62,22 @@ jobs:
             org.opencontainers.image.created=${{ steps.meta.outputs.created }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Trigger engine redeploy on staging.lynox.cloud in the pro repo.
+      # Pro's staging-engine-redeploy.yml listens for this event and calls
+      # the prod control plane admin API to `docker pull + recreate` the
+      # staging managed instance with the freshly pushed :staging image.
+      # Keeps the prod admin token out of this public repo — only the
+      # dispatch PAT lives here, which can only trigger workflows, not
+      # call the admin API directly.
+      - name: Dispatch engine redeploy to lynox-pro
+        env:
+          PRO_DISPATCH_TOKEN: ${{ secrets.PRO_DISPATCH_TOKEN }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          curl -sSf -X POST \
+            -H "Authorization: Bearer $PRO_DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/lynox-ai/lynox-pro/dispatches \
+            -d "{\"event_type\":\"engine-image-updated\",\"client_payload\":{\"sha\":\"$SHA\",\"tag\":\"staging\"}}"
