@@ -34,9 +34,35 @@ jobs:
       - uses: pnpm/action-setup@v4
         with: { version: 'latest' }
       - run: pnpm install --frozen-lockfile
-      # high+ severity hard-fails merges. Uses audit-ci which hits npm's bulk
-      # advisory endpoint (the legacy pnpm audit endpoint was retired 2026-04-15).
-      - run: pnpm exec audit-ci --config .audit-ci.jsonc
+
+      # Dependency audit via osv-scanner. audit-ci was replaced 2026-04-15
+      # because it shells out to `pnpm audit`, and pnpm audit still hits the
+      # retired npm legacy advisory endpoint (HTTP 410). osv-scanner reads
+      # pnpm-lock.yaml natively and queries OSV.dev (aggregates GHSA + npm
+      # advisories + more). High/critical fail the job; moderate/low are
+      # reported as warnings to match the prior Phase 1 policy.
+      - name: Install osv-scanner
+        run: |
+          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /tmp/osv-scanner
+          chmod +x /tmp/osv-scanner
+          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+      - name: Scan dependencies (high+critical hard-fail)
+        run: |
+          set -euo pipefail
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv.json || true
+          osv-scanner scan source --lockfile=pnpm-lock.yaml || true
+          HIGH=$(jq '[.results[]?.packages[]?.vulnerabilities[]? | select((.database_specific.severity // "") | IN("HIGH","CRITICAL"))] | length' /tmp/osv.json)
+          TOTAL=$(jq '[.results[]?.packages[]?.vulnerabilities[]?] | length' /tmp/osv.json)
+          echo "total=${TOTAL} high_or_critical=${HIGH}"
+          if [ "${HIGH}" -gt 0 ]; then
+            echo "::error::${HIGH} high/critical vulnerability(ies) — failing CI"
+            exit 1
+          fi
+          if [ "${TOTAL}" -gt 0 ]; then
+            echo "::warning::${TOTAL} moderate/low vulnerability(ies) reported (not blocking)"
+          fi
+
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm exec vitest run --coverage

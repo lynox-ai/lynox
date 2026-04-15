@@ -118,7 +118,6 @@
     "@typescript-eslint/eslint-plugin": "^8.57.2",
     "@typescript-eslint/parser": "^8.57.2",
     "@vitest/coverage-v8": "^4.1.4",
-    "audit-ci": "^7.1.0",
     "eslint": "^10.1.0",
     "google-auth-library": "^10.6.2",
     "tsx": "^4.0.0",
