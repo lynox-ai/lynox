@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Release script: build, tag, and push Docker image with proper versioning.
+# Docker build + push script for ad-hoc manual image rebuilds.
+#
+# For regular releases prefer ./scripts/cut-release.sh X.Y.Z which bumps
+# versions, creates PRs, polls for merge, tags, and delegates docker + npm
+# publish to the release.yml workflow on tag push. This script exists only
+# for manual out-of-band docker rebuilds (homelab, debugging, pilot hotfix).
 #
 # Usage:
-#   ./scripts/release.sh              # uses version from package.json
-#   ./scripts/release.sh 1.2.3        # explicit version override
-#   ./scripts/release.sh --dry-run    # show what would happen
-#   ./scripts/release.sh --deploy     # also deploy pilots + managed after push
+#   ./scripts/build-docker.sh              # uses version from package.json
+#   ./scripts/build-docker.sh 1.2.3        # explicit version override
+#   ./scripts/build-docker.sh --dry-run    # show what would happen
+#   ./scripts/build-docker.sh --deploy     # also deploy pilots + managed after push
 #
 # Prerequisites:
 #   - Run on amd64 build server (not Mac/ARM64)
