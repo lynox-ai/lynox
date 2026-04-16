@@ -290,11 +290,20 @@
 	}
 
 	function suggestIdFromAddress() {
-		if (formAddress && !formId) {
-			formId = formAddress.replace(/@/g, '-at-').replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
+		if (!formAddress) return;
+		const local = formAddress.split('@')[0] ?? '';
+		const presetLabel = formPreset === 'custom' ? 'mail' : formPreset;
+		if (!formId) {
+			const name = local.split(/[.+_]/)[0] ?? local;
+			formId = `${name}-${presetLabel}`.toLowerCase().replace(/[^a-z0-9-]/g, '');
 		}
-		if (formAddress && !formDisplayName) {
-			formDisplayName = formAddress;
+		if (!formDisplayName) {
+			const name = local
+				.split(/[.+_]/)
+				.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+				.join(' ');
+			const label = selectedPreset?.label ?? presetLabel;
+			formDisplayName = `${name} — ${label}`;
 		}
 	}
 
@@ -428,19 +437,46 @@
 							{selectedPreset.smtp.secure ? '(TLS)' : '(STARTTLS)'}
 						</p>
 						{#if selectedPreset.appPasswordUrl}
-							<p>
-								<strong>{selectedPreset.requires2FA ? '2FA required.' : ''}</strong>
-								Create an app-password:
-								<a
-									href={selectedPreset.appPasswordUrl}
-									target="_blank"
-									rel="noopener noreferrer"
-									class="text-accent-text underline"
-									data-testid="mail-app-password-link"
-								>
-									{selectedPreset.appPasswordUrl}
-								</a>
-							</p>
+							<div class="space-y-1">
+								<p><strong>{selectedPreset.requires2FA ? '2FA required. ' : ''}How to create an app-password:</strong></p>
+								{#if formPreset === 'gmail'}
+									<ol class="ml-4 list-decimal space-y-0.5">
+										<li>Open <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">myaccount.google.com/apppasswords</a></li>
+										<li>Enter a name (e.g. "lynox") and click "Create"</li>
+										<li>Copy the 16-character password and paste it below</li>
+									</ol>
+								{:else if formPreset === 'icloud'}
+									<ol class="ml-4 list-decimal space-y-0.5">
+										<li>Open <a href="https://account.apple.com/account/manage/section/security" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">account.apple.com → Security</a></li>
+										<li>Click <strong>"App-Specific Passwords"</strong> → "Generate"</li>
+										<li>Enter a label (e.g. "lynox"), copy the generated password</li>
+										<li>Use your <strong>@icloud.com address</strong> as the email below (not your Apple ID if different)</li>
+									</ol>
+								{:else if formPreset === 'fastmail'}
+									<ol class="ml-4 list-decimal space-y-0.5">
+										<li>Open <a href="https://www.fastmail.com/settings/security/devicekeys" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">Fastmail → Security → App passwords</a></li>
+										<li>Click "New app password", name it "lynox"</li>
+										<li>Copy the password and paste it below</li>
+									</ol>
+								{:else if formPreset === 'yahoo'}
+									<ol class="ml-4 list-decimal space-y-0.5">
+										<li>Open <a href="https://login.yahoo.com/myaccount/security/app-passwords/list" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">Yahoo → Security → App passwords</a></li>
+										<li>Select "Other app", name it "lynox"</li>
+										<li>Copy the generated password and paste it below</li>
+									</ol>
+								{:else if formPreset === 'outlook'}
+									<ol class="ml-4 list-decimal space-y-0.5">
+										<li>Open <a href="https://account.live.com/proofs/AppPassword" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">Microsoft → Security → App passwords</a></li>
+										<li>Click "Create a new app password"</li>
+										<li>Copy the password and paste it below</li>
+									</ol>
+								{:else}
+									<p>
+										Create an app-password:
+										<a href={selectedPreset.appPasswordUrl} target="_blank" rel="noopener noreferrer" class="text-accent-text underline">{selectedPreset.appPasswordUrl}</a>
+									</p>
+								{/if}
+							</div>
 						{/if}
 					</div>
 				{/if}
