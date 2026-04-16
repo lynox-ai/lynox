@@ -425,6 +425,31 @@
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 	let transcribing = $state(false);
+	// Active transcription provider, fetched once on mount. `null` until known.
+	// Controls which privacy hint text renders under the recording/transcribing UI.
+	let transcribeProvider = $state<'mistral-voxtral' | 'whisper-cpp' | null>(null);
+
+	$effect(() => {
+		let cancelled = false;
+		void (async () => {
+			try {
+				const res = await fetch(`${getApiBase()}/transcribe/info`);
+				if (!res.ok || cancelled) return;
+				const data = (await res.json()) as { provider?: unknown };
+				if (cancelled) return;
+				if (data.provider === 'mistral-voxtral' || data.provider === 'whisper-cpp') {
+					transcribeProvider = data.provider;
+				}
+			} catch { /* best-effort — hint stays hidden on failure */ }
+		})();
+		return () => { cancelled = true; };
+	});
+
+	const voicePrivacyKey = $derived(
+		transcribeProvider === 'mistral-voxtral' ? 'chat.voice_privacy_hint'
+		: transcribeProvider === 'whisper-cpp' ? 'chat.voice_privacy_hint_local'
+		: null,
+	);
 
 	const pendingChangeset = $derived(getPendingChangeset());
 	const changesetLoading = $derived(getChangesetLoading());
@@ -1726,6 +1751,11 @@
 				{/if}
 			{/if}
 		</div>
+		{#if (recording || transcribing) && voicePrivacyKey}
+			<p class="mt-1.5 max-w-3xl mx-auto text-[11px] text-text-subtle px-3 leading-snug">
+				{t(voicePrivacyKey)}
+			</p>
+		{/if}
 		{#if isStreaming && queueLength > 0}
 			<div class="hidden md:flex mt-1.5 max-w-3xl mx-auto items-center gap-3">
 				<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">

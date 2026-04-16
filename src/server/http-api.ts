@@ -1649,6 +1649,16 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { deleted: true });
     }));
 
+    // ── Transcription (provider info for UI hint) ──
+    this.staticRoutes.set('GET /api/transcribe/info', async (_req, res) => {
+      const { getActiveTranscribeProvider, hasTranscribeProvider } = await import('../core/transcribe.js');
+      const provider = getActiveTranscribeProvider();
+      jsonResponse(res, 200, {
+        available: hasTranscribeProvider(),
+        provider: provider?.name ?? null,
+      });
+    });
+
     // ── Transcription (streaming via SSE) ──
     this.staticRoutes.set('POST /api/transcribe', async (_req, res, _params, body) => {
       const {

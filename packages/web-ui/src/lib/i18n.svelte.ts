@@ -340,8 +340,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
 	'chat.transcribing': { de: 'Wird transkribiert…', en: 'Transcribing…' },
 	'chat.voice_privacy_hint': {
-		de: 'Sprachnachrichten werden zur Transkription an Mistral (Paris, EU) gesendet. Der Anbieter speichert keine Audiodaten.',
-		en: 'Voice messages are sent to Mistral (Paris, EU) for transcription. The provider stores no audio.',
+		de: 'Sprachnachrichten werden zur Transkription an Mistral (Paris, EU) gesendet. Der Anbieter speichert keine Audiodaten. Dein Verbrauch zählt wie bei Text-Eingaben zu deinem inkludierten Limit.',
+		en: 'Voice messages are sent to Mistral (Paris, EU) for transcription. The provider stores no audio. Your usage counts toward your included limit the same as text input.',
 	},
 	'chat.voice_privacy_hint_local': {
 		de: 'Sprachnachrichten werden lokal auf diesem Server transkribiert. Keine Audiodaten verlassen das System.',
