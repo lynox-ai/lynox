@@ -27,7 +27,7 @@
 		{ id: 'nav-activity', label: t('nav.activity'), group: t('cmd.nav'), action: () => goto('/app/activity'), keywords: 'activity history tasks runs kosten' },
 		{ id: 'nav-settings', label: t('nav.settings'), group: t('cmd.nav'), action: () => goto('/app/settings'), keywords: 'settings einstellungen config' },
 		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/keys'), keywords: 'keys api schluessel' },
-		{ id: 'nav-integrations', label: t('settings.integrations'), group: t('cmd.nav'), action: () => goto('/app/settings/integrations'), keywords: 'integrations google telegram tavily' },
+		{ id: 'nav-integrations', label: t('settings.integrations'), group: t('cmd.nav'), action: () => goto('/app/settings/integrations'), keywords: 'integrations google telegram tavily mail email imap smtp' },
 		{ id: 'nav-config', label: t('settings.config'), group: t('cmd.nav'), action: () => goto('/app/settings/config'), keywords: 'config model effort thinking budget backup' },
 	];
 

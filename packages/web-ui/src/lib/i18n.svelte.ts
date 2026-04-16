@@ -420,7 +420,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.section_access': { de: 'Zugang', en: 'Access' },
 	'settings.keys': { de: 'API Keys', en: 'API Keys' },
 	'settings.integrations': { de: 'Integrationen', en: 'Integrations' },
-	'settings.integrations_desc': { de: 'Google Workspace (Gmail, Drive, Calendar, Sheets, Docs)', en: 'Google Workspace (Gmail, Drive, Calendar, Sheets, Docs)' },
+	'settings.integrations_desc': { de: 'E-Mail (IMAP/SMTP), Google Workspace, Telegram, Websuche', en: 'Email (IMAP/SMTP), Google Workspace, Telegram, Web Search' },
 	'settings.tasks': { de: 'Scheduled Tasks', en: 'Scheduled Tasks' },
 	'settings.save': { de: 'Speichern', en: 'Save' },
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
