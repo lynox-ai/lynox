@@ -532,6 +532,15 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     }
   }
 
+  // Mail (provider-agnostic IMAP/SMTP) write tools — block in autonomous mode
+  const MAIL_WRITE_TOOLS = new Set(['mail_send', 'mail_reply']);
+  if (MAIL_WRITE_TOOLS.has(toolName)) {
+    if (autonomy === 'autonomous') {
+      return `⚠ ${toolName} [BLOCKED — sending mail needs your OK]`;
+    }
+    return `⚠ ${toolName} — sends external mail`;
+  }
+
   // Google Workspace write actions — block in autonomous mode
   const GOOGLE_TOOLS = ['google_gmail', 'google_drive', 'google_calendar', 'google_sheets', 'google_docs'];
   if (GOOGLE_TOOLS.includes(toolName) && input && typeof input === 'object' && 'action' in input) {

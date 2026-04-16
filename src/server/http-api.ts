@@ -2094,6 +2094,205 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, stats);
     });
 
+    // ── Mail (provider-agnostic IMAP/SMTP + app-password) ──
+
+    this.staticRoutes.set('GET /api/mail/presets', async (_req, res) => {
+      const { listPresets } = await import('../integrations/mail/providers/presets.js');
+      const { ALL_ACCOUNT_TYPES, defaultPersonaFor, isReceiveOnlyType } = await import('../integrations/mail/provider.js');
+      const accountTypes = ALL_ACCOUNT_TYPES.map(type => ({
+        type,
+        receiveOnly: isReceiveOnlyType(type),
+        defaultPersona: defaultPersonaFor(type),
+      }));
+      jsonResponse(res, 200, { presets: listPresets(), accountTypes });
+    });
+
+    // Autodiscover for custom preset: given an email address, try to find
+    // IMAP/SMTP servers via autoconfig.thunderbird.net. Returns a draft config.
+    this.staticRoutes.set('POST /api/mail/autodiscover', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const address = typeof b?.['address'] === 'string' ? b['address'] : '';
+      if (!address) { errorResponse(res, 400, 'address is required'); return; }
+      try {
+        const { autodiscover } = await import('../integrations/mail/providers/presets.js');
+        const result = await autodiscover(address);
+        jsonResponse(res, 200, result);
+      } catch (err: unknown) {
+        const { MailError } = await import('../integrations/mail/provider.js');
+        if (err instanceof MailError) {
+          errorResponse(res, err.code === 'not_found' ? 404 : 502, err.message);
+        } else {
+          errorResponse(res, 500, err instanceof Error ? err.message : String(err));
+        }
+      }
+    });
+
+    this.staticRoutes.set('GET /api/mail/accounts', async (_req, res) => {
+      const ctx = engine.getMailContext();
+      if (!ctx) { jsonResponse(res, 200, { accounts: [] }); return; }
+      jsonResponse(res, 200, { accounts: ctx.listAccounts() });
+    });
+
+    this.staticRoutes.set('POST /api/mail/accounts', async (_req, res, _params, body) => {
+      const ctx = engine.getMailContext();
+      if (!requireService(res, ctx, 'Mail integration')) return;
+
+      const b = body as Record<string, unknown> | null;
+      if (!b) { errorResponse(res, 400, 'Missing request body'); return; }
+
+      try {
+        const { buildPresetAccount, buildCustomAccount } = await import('../integrations/mail/providers/presets.js');
+        const { isValidAccountType } = await import('../integrations/mail/provider.js');
+        const id = typeof b['id'] === 'string' ? b['id'] : '';
+        const displayName = typeof b['displayName'] === 'string' ? b['displayName'] : '';
+        const address = typeof b['address'] === 'string' ? b['address'] : '';
+        const preset = typeof b['preset'] === 'string' ? b['preset'] : '';
+        const rawType = b['type'];
+        const type = isValidAccountType(rawType) ? rawType : 'personal';
+        const personaPrompt = typeof b['personaPrompt'] === 'string' && b['personaPrompt'].trim() ? b['personaPrompt'].trim() : undefined;
+        const creds = b['credentials'] as { user?: unknown; pass?: unknown } | undefined;
+        const user = typeof creds?.user === 'string' ? creds.user : '';
+        const pass = typeof creds?.pass === 'string' ? creds.pass : '';
+
+        if (!id || !displayName || !address || !preset) {
+          errorResponse(res, 400, 'id, displayName, address, preset are required'); return;
+        }
+        if (!user || !pass) {
+          errorResponse(res, 400, 'credentials.user and credentials.pass are required'); return;
+        }
+
+        let account;
+        if (preset === 'custom') {
+          const custom = b['custom'] as { imap?: { host?: unknown; port?: unknown; secure?: unknown }; smtp?: { host?: unknown; port?: unknown; secure?: unknown } } | undefined;
+          const imapHost = typeof custom?.imap?.host === 'string' ? custom.imap.host : '';
+          const imapPort = typeof custom?.imap?.port === 'number' ? custom.imap.port : 993;
+          const imapSecure = custom?.imap?.secure !== false;
+          const smtpHost = typeof custom?.smtp?.host === 'string' ? custom.smtp.host : '';
+          const smtpPort = typeof custom?.smtp?.port === 'number' ? custom.smtp.port : 465;
+          const smtpSecure = custom?.smtp?.secure !== false;
+          if (!imapHost || !smtpHost) {
+            errorResponse(res, 400, 'custom preset requires non-empty imap.host and smtp.host'); return;
+          }
+          account = buildCustomAccount({
+            id, displayName, address, type, personaPrompt,
+            imap: { host: imapHost, port: imapPort, secure: imapSecure },
+            smtp: { host: smtpHost, port: smtpPort, secure: smtpSecure },
+          });
+        } else if (preset === 'gmail' || preset === 'icloud' || preset === 'fastmail' || preset === 'yahoo' || preset === 'outlook') {
+          account = buildPresetAccount(preset, { id, displayName, address, type, personaPrompt });
+        } else {
+          errorResponse(res, 400, `Unknown preset "${preset}"`); return;
+        }
+
+        // Optional pre-save connection test — on by default
+        const skipTest = b['skipTest'] === true;
+        if (!skipTest) {
+          const probe = await ctx!.testAccount({ config: account, credentials: { user, pass } });
+          if (!probe.ok) {
+            errorResponse(res, 400, `Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`);
+            return;
+          }
+        }
+
+        await ctx!.addAccount({ config: account, credentials: { user, pass } });
+        jsonResponse(res, 200, { ok: true, account: ctx!.listAccounts().find(a => a.id === id) });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errorResponse(res, 500, msg);
+      }
+    });
+
+    // In-memory rate limiter for /api/mail/accounts/test. Closes the
+    // credential-probe oracle: an attacker cannot brute-force test many
+    // stolen credentials against the endpoint. 10 probes per 60s rolling
+    // window per remote address. Reset on the client side via time.
+    const mailTestRateLimit = new Map<string, number[]>();
+    const MAIL_TEST_WINDOW_MS = 60_000;
+    const MAIL_TEST_MAX_PROBES = 10;
+    const mailTestRateCheck = (req: IncomingMessage): string | null => {
+      const ip = req.socket.remoteAddress ?? 'unknown';
+      const now = Date.now();
+      const history = mailTestRateLimit.get(ip) ?? [];
+      const recent = history.filter(t => now - t < MAIL_TEST_WINDOW_MS);
+      if (recent.length >= MAIL_TEST_MAX_PROBES) {
+        return `Rate limit exceeded: max ${String(MAIL_TEST_MAX_PROBES)} test probes per minute`;
+      }
+      recent.push(now);
+      mailTestRateLimit.set(ip, recent);
+      // Opportunistic cleanup: every ~100 hits, prune expired entries
+      if (recent.length === 1 && mailTestRateLimit.size > 100) {
+        for (const [k, v] of mailTestRateLimit.entries()) {
+          const stillRecent = v.filter(t => now - t < MAIL_TEST_WINDOW_MS);
+          if (stillRecent.length === 0) mailTestRateLimit.delete(k);
+          else mailTestRateLimit.set(k, stillRecent);
+        }
+      }
+      return null;
+    };
+
+    this.staticRoutes.set('POST /api/mail/accounts/test', async (req, res, _params, body) => {
+      const rateErr = mailTestRateCheck(req);
+      if (rateErr) { errorResponse(res, 429, rateErr); return; }
+
+      const ctx = engine.getMailContext();
+      if (!requireService(res, ctx, 'Mail integration')) return;
+      const b = body as Record<string, unknown> | null;
+      if (!b) { errorResponse(res, 400, 'Missing request body'); return; }
+
+      try {
+        const { buildPresetAccount, buildCustomAccount } = await import('../integrations/mail/providers/presets.js');
+        const { isValidAccountType } = await import('../integrations/mail/provider.js');
+        const id = typeof b['id'] === 'string' ? b['id'] : 'draft';
+        const displayName = typeof b['displayName'] === 'string' ? b['displayName'] : 'Draft';
+        const address = typeof b['address'] === 'string' ? b['address'] : '';
+        const preset = typeof b['preset'] === 'string' ? b['preset'] : '';
+        const rawType = b['type'];
+        const type = isValidAccountType(rawType) ? rawType : 'personal';
+        const creds = b['credentials'] as { user?: unknown; pass?: unknown } | undefined;
+        const user = typeof creds?.user === 'string' ? creds.user : '';
+        const pass = typeof creds?.pass === 'string' ? creds.pass : '';
+
+        if (!address || !preset || !user || !pass) {
+          errorResponse(res, 400, 'address, preset, credentials.user, credentials.pass are required'); return;
+        }
+
+        let account;
+        if (preset === 'custom') {
+          const custom = b['custom'] as { imap?: { host?: unknown; port?: unknown; secure?: unknown }; smtp?: { host?: unknown; port?: unknown; secure?: unknown } } | undefined;
+          const imapHost = typeof custom?.imap?.host === 'string' ? custom.imap.host : '';
+          const imapPort = typeof custom?.imap?.port === 'number' ? custom.imap.port : 993;
+          const imapSecure = custom?.imap?.secure !== false;
+          const smtpHost = typeof custom?.smtp?.host === 'string' ? custom.smtp.host : '';
+          const smtpPort = typeof custom?.smtp?.port === 'number' ? custom.smtp.port : 465;
+          const smtpSecure = custom?.smtp?.secure !== false;
+          if (!imapHost || !smtpHost) { errorResponse(res, 400, 'custom preset requires imap.host + smtp.host'); return; }
+          account = buildCustomAccount({
+            id, displayName, address, type,
+            imap: { host: imapHost, port: imapPort, secure: imapSecure },
+            smtp: { host: smtpHost, port: smtpPort, secure: smtpSecure },
+          });
+        } else if (preset === 'gmail' || preset === 'icloud' || preset === 'fastmail' || preset === 'yahoo' || preset === 'outlook') {
+          account = buildPresetAccount(preset, { id, displayName, address, type });
+        } else {
+          errorResponse(res, 400, `Unknown preset "${preset}"`); return;
+        }
+
+        const result = await ctx!.testAccount({ config: account, credentials: { user, pass } });
+        jsonResponse(res, 200, result);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errorResponse(res, 500, msg);
+      }
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/mail/accounts/:id', async (_req, res, params) => {
+      const ctx = engine.getMailContext();
+      if (!requireService(res, ctx, 'Mail integration')) return;
+      const removed = await ctx!.removeAccount(params['id']!);
+      if (!removed) { errorResponse(res, 404, `Account "${params['id']}" not found`); return; }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!kg) { jsonResponse(res, 200, { entities: [] }); return; }

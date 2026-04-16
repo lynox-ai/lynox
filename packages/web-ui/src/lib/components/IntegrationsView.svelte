@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import MailSettings from './MailSettings.svelte';
 	import {
 		initNotifications,
 		enablePushNotifications,
@@ -588,6 +589,9 @@
 			</div>
 		</div>
 	{/if}
+
+	<!-- Mail (IMAP/SMTP + app-password) -->
+	<MailSettings />
 
 	<!-- Google Workspace -->
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">

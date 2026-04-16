@@ -820,6 +820,41 @@ describe('isDangerous', () => {
       expect(result).toBeNull();
     });
 
+    // Mail (provider-agnostic IMAP/SMTP) — write tools BLOCKED in autonomous
+    it('BLOCKS mail_send in autonomous mode', () => {
+      const result = isDangerous('mail_send', { to: 'a@b.c', subject: 's', body: 'b' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('BLOCKS mail_reply in autonomous mode', () => {
+      const result = isDangerous('mail_reply', { uid: 1, body: 'reply' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('warns (no block) on mail_send in interactive mode', () => {
+      const result = isDangerous('mail_send', { to: 'a@b.c', subject: 's', body: 'b' });
+      expect(result).not.toBeNull();
+      expect(result).toContain('sends external mail');
+      expect(result).not.toContain('[BLOCKED');
+    });
+
+    it('ALLOWS mail_search in autonomous mode (read-only)', () => {
+      const result = isDangerous('mail_search', { from: 'alice@example.com' }, 'autonomous');
+      expect(result).toBeNull();
+    });
+
+    it('ALLOWS mail_read in autonomous mode (read-only)', () => {
+      const result = isDangerous('mail_read', { uid: 42 }, 'autonomous');
+      expect(result).toBeNull();
+    });
+
+    it('ALLOWS mail_triage in autonomous mode (read-only)', () => {
+      const result = isDangerous('mail_triage', {}, 'autonomous');
+      expect(result).toBeNull();
+    });
+
     // http_request — DELETE blocked in autonomous
     it('BLOCKS http_request DELETE in autonomous mode', () => {
       const result = isDangerous('http_request', { method: 'DELETE', url: 'https://api.example.com/item/1' }, 'autonomous');

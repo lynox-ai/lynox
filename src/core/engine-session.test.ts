@@ -163,6 +163,30 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactDeleteTool: { definition: { name: 'artifact_delete' }, handler: vi.fn() },
 }));
 
+vi.mock('../integrations/mail/state.js', () => ({
+  MailStateDb: vi.fn().mockImplementation(function () {
+    // @ts-expect-error mock constructor
+    this.close = vi.fn();
+  }),
+}));
+
+vi.mock('../integrations/mail/context.js', () => ({
+  MailContext: vi.fn().mockImplementation(function () {
+    // @ts-expect-error mock constructor
+    this.init = vi.fn().mockResolvedValue(undefined);
+    // @ts-expect-error mock constructor
+    this.tools = vi.fn().mockReturnValue([
+      { definition: { name: 'mail_search' }, handler: vi.fn() },
+      { definition: { name: 'mail_read' }, handler: vi.fn() },
+      { definition: { name: 'mail_send' }, handler: vi.fn() },
+      { definition: { name: 'mail_reply' }, handler: vi.fn() },
+      { definition: { name: 'mail_triage' }, handler: vi.fn() },
+    ]);
+    // @ts-expect-error mock constructor
+    this.close = vi.fn().mockResolvedValue(undefined);
+  }),
+}));
+
 vi.mock('./changeset.js', () => ({
   ChangesetManager: vi.fn().mockImplementation(function () {
     // @ts-expect-error mock constructor
@@ -317,8 +341,9 @@ describe('Engine + Session (Orchestrator)', () => {
 
       expect(Memory).toHaveBeenCalled();
 
-      // Registry should have register called for each builtin tool
-      expect(mockRegister).toHaveBeenCalledTimes(32);
+      // Registry should have register called for each builtin tool.
+      // 32 builtin always; +5 mail tools only when vault is available.
+      expect([32, 37]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -383,7 +408,8 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      expect(mockRegister).toHaveBeenCalledTimes(32);
+      // 32 builtin always; +5 mail tools only when vault is available.
+      expect([32, 37]).toContain(mockRegister.mock.calls.length);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

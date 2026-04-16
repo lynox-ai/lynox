@@ -1,0 +1,315 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MailStateDb } from './state.js';
+import type { MailEnvelope } from './provider.js';
+
+let db: MailStateDb;
+
+beforeEach(() => {
+  db = new MailStateDb({ path: ':memory:' });
+});
+
+afterEach(() => {
+  db.close();
+});
+
+function envelope(uid: number, messageId: string | undefined): MailEnvelope {
+  return {
+    uid,
+    messageId,
+    folder: 'INBOX',
+    threadKey: messageId,
+    inReplyTo: undefined,
+    from: [{ address: 'a@x.com' }],
+    to: [{ address: 'me@x.com' }],
+    cc: [],
+    replyTo: [],
+    subject: `msg-${String(uid)}`,
+    date: new Date(),
+    flags: [],
+    snippet: '',
+    hasAttachments: false,
+    attachmentCount: 0,
+    sizeBytes: 0,
+    isAutoReply: false,
+  };
+}
+
+describe('MailStateDb — hasSeen / markSeen', () => {
+  it('reports false for unknown messages', () => {
+    expect(db.hasSeen('acct', '<missing>')).toBe(false);
+  });
+
+  it('round-trips a single message', () => {
+    db.markSeen('acct', envelope(1, '<m-1@x>'));
+    expect(db.hasSeen('acct', '<m-1@x>')).toBe(true);
+  });
+
+  it('isolates accounts', () => {
+    db.markSeen('acct-a', envelope(1, '<shared@x>'));
+    expect(db.hasSeen('acct-a', '<shared@x>')).toBe(true);
+    expect(db.hasSeen('acct-b', '<shared@x>')).toBe(false);
+  });
+
+  it('skips envelopes without a Message-ID (no-op)', () => {
+    db.markSeen('acct', envelope(2, undefined));
+    expect(db.countForAccount('acct')).toBe(0);
+    expect(db.hasSeen('acct', '')).toBe(false);
+  });
+
+  it('treats an empty Message-ID as not-seen', () => {
+    expect(db.hasSeen('acct', '')).toBe(false);
+  });
+
+  it('updates last_seen_at on re-mark, leaves first_seen_at alone', () => {
+    db.markSeen('acct', envelope(1, '<m-1@x>'));
+    db.markSeen('acct', envelope(99, '<m-1@x>')); // same id, different uid
+    expect(db.countForAccount('acct')).toBe(1);
+  });
+});
+
+describe('MailStateDb — partition', () => {
+  it('returns empty arrays for empty input', () => {
+    const result = db.partition('acct', []);
+    expect(result.fresh).toEqual([]);
+    expect(result.alreadySeen).toEqual([]);
+  });
+
+  it('separates fresh and already-seen envelopes', () => {
+    db.markSeen('acct', envelope(1, '<seen-1@x>'));
+    db.markSeen('acct', envelope(2, '<seen-2@x>'));
+
+    const result = db.partition('acct', [
+      envelope(1, '<seen-1@x>'),
+      envelope(2, '<seen-2@x>'),
+      envelope(3, '<new-1@x>'),
+      envelope(4, '<new-2@x>'),
+    ]);
+
+    expect(result.fresh.map(e => e.uid)).toEqual([3, 4]);
+    expect(result.alreadySeen.map(e => e.uid)).toEqual([1, 2]);
+  });
+
+  it('treats no-message-id envelopes as fresh even when other ids are known', () => {
+    db.markSeen('acct', envelope(2, '<known@x>'));
+    const result = db.partition('acct', [envelope(1, undefined), envelope(2, '<known@x>')]);
+    expect(result.fresh).toHaveLength(1);
+    expect(result.fresh[0]?.uid).toBe(1);
+    expect(result.alreadySeen).toHaveLength(1);
+    expect(result.alreadySeen[0]?.uid).toBe(2);
+  });
+});
+
+describe('MailStateDb — markSeenBatch', () => {
+  it('marks all envelopes in a single transaction', () => {
+    const inserted = db.markSeenBatch('acct', [
+      envelope(1, '<m-1@x>'),
+      envelope(2, '<m-2@x>'),
+      envelope(3, '<m-3@x>'),
+    ]);
+    expect(inserted).toBe(3);
+    expect(db.countForAccount('acct')).toBe(3);
+  });
+
+  it('skips envelopes without a Message-ID', () => {
+    const inserted = db.markSeenBatch('acct', [
+      envelope(1, '<m-1@x>'),
+      envelope(2, undefined),
+    ]);
+    expect(inserted).toBe(1);
+    expect(db.countForAccount('acct')).toBe(1);
+  });
+
+  it('returns 0 for empty input', () => {
+    expect(db.markSeenBatch('acct', [])).toBe(0);
+  });
+});
+
+describe('MailStateDb — pruneOlderThan', () => {
+  it('keeps recent rows, drops old rows', () => {
+    db.markSeen('acct', envelope(1, '<m-1@x>'));
+    // Force the row to look old by direct SQL
+    const internal = (db as unknown as { db: import('better-sqlite3').Database }).db;
+    internal
+      .prepare(`UPDATE processed_mail_messages SET first_seen_at = datetime('now', '-100 days') WHERE message_id = ?`)
+      .run('<m-1@x>');
+
+    expect(db.pruneOlderThan(30)).toBe(1);
+    expect(db.countForAccount('acct')).toBe(0);
+  });
+
+  it('returns 0 for a non-positive day count', () => {
+    db.markSeen('acct', envelope(1, '<m-1@x>'));
+    expect(db.pruneOlderThan(0)).toBe(0);
+    expect(db.pruneOlderThan(-5)).toBe(0);
+  });
+});
+
+describe('MailStateDb — forgetAccount', () => {
+  it('drops everything for one account, leaves others alone', () => {
+    db.markSeen('acct-a', envelope(1, '<m-1@x>'));
+    db.markSeen('acct-a', envelope(2, '<m-2@x>'));
+    db.markSeen('acct-b', envelope(3, '<m-3@x>'));
+
+    expect(db.forgetAccount('acct-a')).toBe(2);
+    expect(db.countForAccount('acct-a')).toBe(0);
+    expect(db.countForAccount('acct-b')).toBe(1);
+  });
+});
+
+// ── Follow-ups (Phase 0.2) ──────────────────────────────────────────────────
+
+describe('MailStateDb — recordFollowup', () => {
+  it('persists a followup with all fields', () => {
+    const reminderAt = new Date('2026-04-22T10:00:00Z');
+    const id = db.recordFollowup({
+      accountId: 'acct',
+      sentMessageId: '<sent-1@x>',
+      threadKey: '<sent-1@x>',
+      recipient: 'bob@example.com',
+      type: 'awaiting_reply',
+      reason: 'awaiting contract',
+      reminderAt,
+      source: 'user',
+    });
+    expect(id).toMatch(/^fu_/);
+    const list = db.listFollowups('acct');
+    expect(list).toHaveLength(1);
+    expect(list[0]?.recipient).toBe('bob@example.com');
+    expect(list[0]?.reason).toBe('awaiting contract');
+    expect(list[0]?.status).toBe('pending');
+    expect(list[0]?.reminderAt.toISOString()).toBe(reminderAt.toISOString());
+  });
+
+  it('counts pending followups per account', () => {
+    db.recordFollowup({
+      accountId: 'a', sentMessageId: '<1@x>', threadKey: '<1@x>',
+      recipient: 'x@x.com', type: 'awaiting_reply', reason: 'r',
+      reminderAt: new Date(),
+    });
+    db.recordFollowup({
+      accountId: 'a', sentMessageId: '<2@x>', threadKey: '<2@x>',
+      recipient: 'y@x.com', type: 'awaiting_reply', reason: 'r',
+      reminderAt: new Date(),
+    });
+    db.recordFollowup({
+      accountId: 'b', sentMessageId: '<3@x>', threadKey: '<3@x>',
+      recipient: 'z@x.com', type: 'awaiting_reply', reason: 'r',
+      reminderAt: new Date(),
+    });
+    expect(db.countPendingFollowups('a')).toBe(2);
+    expect(db.countPendingFollowups('b')).toBe(1);
+    expect(db.countPendingFollowups('c')).toBe(0);
+  });
+});
+
+describe('MailStateDb — resolveFollowupsByReply', () => {
+  it('resolves a followup when a reply from the tracked recipient arrives', () => {
+    db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<msg@x>', threadKey: '<msg@x>',
+      recipient: 'bob@example.com', type: 'awaiting_reply', reason: 'contract',
+      reminderAt: new Date('2026-04-30T00:00:00Z'),
+    });
+
+    const resolved = db.resolveFollowupsByReply('acct', '<msg@x>', 'bob@example.com');
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.status).toBe('resolved');
+    expect(resolved[0]?.resolvedBy).toBe('reply_received');
+    expect(db.countPendingFollowups('acct')).toBe(0);
+  });
+
+  it('ignores replies from a different address', () => {
+    db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<msg@x>', threadKey: '<msg@x>',
+      recipient: 'bob@example.com', type: 'awaiting_reply', reason: 'r',
+      reminderAt: new Date(),
+    });
+    const resolved = db.resolveFollowupsByReply('acct', '<msg@x>', 'alice@example.com');
+    expect(resolved).toHaveLength(0);
+    expect(db.countPendingFollowups('acct')).toBe(1);
+  });
+
+  it('matches case-insensitively on recipient address', () => {
+    db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<msg@x>', threadKey: '<msg@x>',
+      recipient: 'Bob@Example.COM', type: 'awaiting_reply', reason: 'r',
+      reminderAt: new Date(),
+    });
+    const resolved = db.resolveFollowupsByReply('acct', '<msg@x>', 'bob@example.com');
+    expect(resolved).toHaveLength(1);
+  });
+
+  it('does not touch followups in other threads', () => {
+    db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<m1@x>', threadKey: '<m1@x>',
+      recipient: 'bob@example.com', type: 'awaiting_reply', reason: 'r1',
+      reminderAt: new Date(),
+    });
+    db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<m2@x>', threadKey: '<m2@x>',
+      recipient: 'bob@example.com', type: 'awaiting_reply', reason: 'r2',
+      reminderAt: new Date(),
+    });
+    db.resolveFollowupsByReply('acct', '<m1@x>', 'bob@example.com');
+    expect(db.countPendingFollowups('acct')).toBe(1);
+  });
+});
+
+describe('MailStateDb — dueFollowups + markReminded + cancel', () => {
+  it('lists pending followups whose reminder_at is due', () => {
+    const past = new Date('2026-04-10T00:00:00Z');
+    const future = new Date('2026-04-20T00:00:00Z');
+    db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<a@x>', threadKey: '<a@x>',
+      recipient: 'x@x.com', type: 'awaiting_reply', reason: 'old',
+      reminderAt: past,
+    });
+    db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<b@x>', threadKey: '<b@x>',
+      recipient: 'x@x.com', type: 'awaiting_reply', reason: 'new',
+      reminderAt: future,
+    });
+
+    const due = db.dueFollowups(new Date('2026-04-15T00:00:00Z'));
+    expect(due).toHaveLength(1);
+    expect(due[0]?.reason).toBe('old');
+  });
+
+  it('markFollowupReminded transitions pending→reminded once', () => {
+    const id = db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<a@x>', threadKey: '<a@x>',
+      recipient: 'x@x.com', type: 'awaiting_reply', reason: 'r',
+      reminderAt: new Date('2026-04-10T00:00:00Z'),
+    });
+    expect(db.markFollowupReminded(id)).toBe(true);
+    // Second call is a no-op (row is 'reminded' now, not 'pending')
+    expect(db.markFollowupReminded(id)).toBe(false);
+    // dueFollowups no longer returns it
+    expect(db.dueFollowups(new Date())).toHaveLength(0);
+  });
+
+  it('cancelFollowup transitions any non-terminal status to cancelled', () => {
+    const id = db.recordFollowup({
+      accountId: 'acct', sentMessageId: '<a@x>', threadKey: '<a@x>',
+      recipient: 'x@x.com', type: 'awaiting_reply', reason: 'r',
+      reminderAt: new Date('2026-04-30T00:00:00Z'),
+    });
+    expect(db.cancelFollowup(id)).toBe(true);
+    expect(db.countPendingFollowups('acct')).toBe(0);
+  });
+});
+
+describe('MailStateDb — schema migration', () => {
+  it('migrates to the current schema version on first open', () => {
+    const internal = (db as unknown as { db: import('better-sqlite3').Database }).db;
+    const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
+    // The current version reflects the number of entries in the MIGRATIONS array.
+    // Bumping this is fine — it just tracks the expected head.
+    expect(row.v).toBe(4);
+  });
+
+  it('is idempotent — re-opening the same path does not error', () => {
+    db.close();
+    db = new MailStateDb({ path: ':memory:' });
+    expect(db.countForAccount('any')).toBe(0);
+  });
+});

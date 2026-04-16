@@ -155,6 +155,7 @@ export class Engine {
   private _hooks: LynoxHooks[] = [];
   private _toolContext: ToolContext;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
+  private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
@@ -566,6 +567,27 @@ export class Engine {
       }
     }
 
+    // Provider-agnostic Mail integration (IMAP/SMTP + app-password).
+    // Always initialised when a vault is available — the state DB is cheap
+    // and supports zero accounts. Tools are registered when the context has
+    // a vault to bind credentials to. reloadMail() is the runtime path for
+    // account add/remove after startup.
+    try {
+      const { MailContext } = await import('../integrations/mail/context.js');
+      const { MailStateDb } = await import('../integrations/mail/state.js');
+      if (this.secretVault) {
+        const stateDb = new MailStateDb();
+        const mailCtx = new MailContext(stateDb, this.secretVault);
+        await mailCtx.init();
+        for (const tool of mailCtx.tools()) {
+          this.registry.register(tool);
+        }
+        this._mailContext = mailCtx;
+      }
+    } catch {
+      // Mail init failed — non-critical, continue without it
+    }
+
     // Pipeline tools registered conditionally
     this._pipelinesEnabled = false;
 
@@ -759,6 +781,7 @@ export class Engine {
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
+  getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {
