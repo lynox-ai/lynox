@@ -38,7 +38,7 @@ interface PresetServers {
 const PRESETS: Record<Exclude<MailPresetSlug, 'custom'>, PresetServers> = {
   gmail: {
     imap: { host: 'imap.gmail.com', port: 993, secure: true },
-    smtp: { host: 'smtp.gmail.com', port: 465, secure: true },
+    smtp: { host: 'smtp.gmail.com', port: 587, secure: false }, // STARTTLS — port 465 blocked by many hosting providers
     appPasswordUrl: 'https://myaccount.google.com/apppasswords',
     requires2FA: true,
     label: 'Gmail',
@@ -53,14 +53,14 @@ const PRESETS: Record<Exclude<MailPresetSlug, 'custom'>, PresetServers> = {
   },
   fastmail: {
     imap: { host: 'imap.fastmail.com', port: 993, secure: true },
-    smtp: { host: 'smtp.fastmail.com', port: 465, secure: true },
+    smtp: { host: 'smtp.fastmail.com', port: 587, secure: false }, // STARTTLS — port 465 blocked by many hosting providers
     appPasswordUrl: 'https://www.fastmail.com/settings/security/devicekeys',
     requires2FA: false,
     label: 'Fastmail',
   },
   yahoo: {
     imap: { host: 'imap.mail.yahoo.com', port: 993, secure: true },
-    smtp: { host: 'smtp.mail.yahoo.com', port: 465, secure: true },
+    smtp: { host: 'smtp.mail.yahoo.com', port: 587, secure: false }, // STARTTLS — port 465 blocked by many hosting providers
     appPasswordUrl: 'https://login.yahoo.com/myaccount/security/app-passwords/list',
     requires2FA: true,
     label: 'Yahoo Mail',
