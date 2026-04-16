@@ -35,7 +35,21 @@ import { fileURLToPath } from 'node:url';
 const ENDPOINT = 'https://api.mistral.ai/v1/audio/speech';
 const VOICES_ENDPOINT = 'https://api.mistral.ai/v1/audio/voices';
 
-const MODELS = ['voxtral-tts-26-03', 'voxtral-tts-latest'] as const;
+// Phase-0 finding: the PRD's documented name `voxtral-tts-26-03` is wrong.
+// /v1/models on 2026-04-16 exposes `voxtral-mini-tts-2603`
+// (alias `voxtral-mini-tts-latest`) with capability `audio_speech`. The
+// `voxtral-tts-*` family does not exist on this account.
+const MODELS = ['voxtral-mini-tts-2603', 'voxtral-mini-tts-latest'] as const;
+
+// Phase-0 finding: voice catalog as of 2026-04-16 exposes only English voices
+// (8× en_us Paul, 1× en_gb Oliver, 1× en_gb Jane). No German voice is
+// available on this account tier despite the model being documented as
+// multi-lingual. For the DE evaluation we use the most neutral-sounding
+// English voice and probe whether (a) the model reads DE text with an
+// EN-voice, and (b) the `language` hint changes output. Cross-match:
+// `voice: en_paul_neutral` + `language: de`.
+const DEFAULT_VOICE = 'en_paul_neutral';
+const DE_BASELINE_VOICE = 'gb_oliver_neutral'; // sanity — does en_gb behave differently?
 
 interface Prompt {
   readonly id: string;
@@ -101,16 +115,34 @@ interface RunMode {
 
 // Modes probed per (model, prompt). Kept minimal to keep run time bounded;
 // quality judgements happen on the "plain" outputs, latency curves span both.
+// Per Phase-0 finding the API requires `voice` (or `ref_audio`) — our
+// candidate voice is en_paul_neutral for all DE prompts since no DE voice
+// exists in the catalog yet.
 const RUN_MODES: readonly RunMode[] = [
   {
     key: 'plain',
-    label: 'plain',
-    body: (p, m) => ({ model: m, input: p.text }),
+    label: 'plain / en-voice',
+    body: (p, m) => ({ model: m, input: p.text, voice: DEFAULT_VOICE }),
   },
   {
     key: 'stream',
-    label: 'stream',
-    body: (p, m) => ({ model: m, input: p.text, stream: true }),
+    label: 'stream / en-voice',
+    body: (p, m) => ({ model: m, input: p.text, voice: DEFAULT_VOICE, stream: true }),
+  },
+  {
+    key: 'lang-de',
+    label: 'plain / en-voice + language=de',
+    body: (p, m) => ({
+      model: m,
+      input: p.text,
+      voice: DEFAULT_VOICE,
+      language: p.lang === 'en' ? 'en' : 'de',
+    }),
+  },
+  {
+    key: 'gb-voice',
+    label: 'plain / gb_oliver_neutral',
+    body: (p, m) => ({ model: m, input: p.text, voice: DE_BASELINE_VOICE }),
   },
 ];
 

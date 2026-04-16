@@ -22,6 +22,8 @@ tests/fixtures/voice/*.webm
 tests/fixtures/voice/*.wav
 tests/fixtures/voice/*.mp3
 tests/fixtures/voice/*.ogg
+tests/fixtures/voice/*.json
+tests/fixtures/voice/*.bin
 *.debug.log
 .playwright-mcp/
 playwright-report/
