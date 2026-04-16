@@ -801,6 +801,7 @@ export class Session {
     const tools = pluginManager
       ? entries.map(entry => ({
           definition: entry.definition,
+          requiresConfirmation: entry.requiresConfirmation,
           handler: async (input: unknown, agent: IAgent): Promise<string> => {
             const gate = await pluginManager.fireToolGate(entry.definition.name, input);
             if (gate === false) {

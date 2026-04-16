@@ -1511,7 +1511,13 @@
 		<div class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-2">
 				<div class="flex items-start gap-2">
-					<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
+					{#if isPermissionGuard}
+						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
+					{:else}
+						<div class="flex-1 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1">
+							<MarkdownRenderer content={pendingPermission.question} streaming={false} />
+						</div>
+					{/if}
 					<div class="flex items-center gap-1.5 shrink-0">
 						{#if promptSecondsLeft != null}
 							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}">{Math.floor(promptSecondsLeft / 60)}:{String(promptSecondsLeft % 60).padStart(2, '0')}</span>
