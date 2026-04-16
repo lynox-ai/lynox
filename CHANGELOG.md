@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.5 — Release Workflow & CI Hardening (2026-04-16)
+
+### Added
+
+- **Local smoke test** — `smoke-local.sh` runs Docker Compose + Playwright before every release cut, catching runtime regressions that unit tests miss.
+- **One-command release cut** — `cut-release.sh` automates lockstep version bumps, cross-repo PRs, merge polling, and tag creation across core + pro.
+- **Production gate** — Release pipeline pauses for manual approval before deploying to production; email notification on gate readiness.
+- **Docs auto-deploy** — Documentation site deploys automatically on release via Cloudflare Pages.
+- **Cross-repo dispatch** — Core release triggers pro release workflows (website + control plane) automatically after gate approval.
+
+### Changed
+
+- **CI scanner** — Replaced `pnpm audit` / `audit-ci` with `osv-scanner` for more reliable vulnerability detection.
+- **NPM publish** — Added `NPM_TOKEN` pre-release gate to catch auth issues before they break the publish step.
+
+### Fixed
+
+- **Migration crypto test** — Deterministic tamper in signature test eliminates rare false failures on CI.
+
+---
+
 ## 1.0.4 — Multi-Provider Support (2026-04-15)
 
 ### Added
