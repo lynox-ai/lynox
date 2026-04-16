@@ -318,7 +318,8 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool
-      expect(mockRegister).toHaveBeenCalledTimes(32);
+      // 32 builtin + 5 mail tools (mail_search/read/send/reply/triage)
+      expect(mockRegister).toHaveBeenCalledTimes(37);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -383,7 +384,8 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      expect(mockRegister).toHaveBeenCalledTimes(32);
+      // 32 builtin + 5 mail tools (mail_search/read/send/reply/triage)
+      expect(mockRegister).toHaveBeenCalledTimes(37);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
