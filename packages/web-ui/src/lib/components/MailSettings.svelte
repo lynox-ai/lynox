@@ -289,21 +289,34 @@
 		}
 	}
 
+	/** Standard provider domains — if the address domain doesn't match, it's a custom/Workspace domain. */
+	const PROVIDER_DOMAINS: Record<string, string> = {
+		gmail: 'gmail.com', icloud: 'icloud.com', fastmail: 'fastmail.com',
+		yahoo: 'yahoo.com', outlook: 'outlook.com',
+	};
+
 	function suggestIdFromAddress() {
 		if (!formAddress) return;
-		const local = formAddress.split('@')[0] ?? '';
-		const presetLabel = formPreset === 'custom' ? 'mail' : formPreset;
+		const parts = formAddress.split('@');
+		const local = parts[0] ?? '';
+		const domain = parts[1] ?? '';
+		const providerDomain = PROVIDER_DOMAINS[formPreset] ?? '';
+		const isCustomDomain = domain.toLowerCase() !== providerDomain.toLowerCase();
+		const name = local.split(/[.+_]/)[0] ?? local;
+
 		if (!formId) {
-			const name = local.split(/[.+_]/)[0] ?? local;
-			formId = `${name}-${presetLabel}`.toLowerCase().replace(/[^a-z0-9-]/g, '');
+			// "rafael-lynox-ai" for Workspace, "rafael-gmail" for standard Gmail
+			const suffix = isCustomDomain && domain ? domain.replace(/\./g, '-') : formPreset === 'custom' ? 'mail' : formPreset;
+			formId = `${name}-${suffix}`.toLowerCase().replace(/[^a-z0-9-]/g, '');
 		}
 		if (!formDisplayName) {
-			const name = local
+			const displayName = local
 				.split(/[.+_]/)
 				.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
 				.join(' ');
-			const label = selectedPreset?.label ?? presetLabel;
-			formDisplayName = `${name} — ${label}`;
+			// "Rafael — lynox.ai" for Workspace, "Rafael — Gmail" for standard
+			const label = isCustomDomain && domain ? domain : (selectedPreset?.label ?? formPreset);
+			formDisplayName = `${displayName} — ${label}`;
 		}
 	}
 
@@ -445,6 +458,11 @@
 										<li>Enter a name (e.g. "lynox") and click "Create"</li>
 										<li>Copy the 16-character password and paste it below</li>
 									</ol>
+									<p class="mt-1.5 text-[10px] text-text-subtle">
+										<strong>Google Workspace:</strong> If you see "Setting not available for your account", your Workspace admin needs to
+										<a href="https://support.google.com/a/answer/7676854" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">enable app passwords</a>
+										in Admin Console → Security → Authentication → App passwords. 2FA must also be enabled for the user.
+									</p>
 								{:else if formPreset === 'icloud'}
 									<ol class="ml-4 list-decimal space-y-0.5">
 										<li>Open <a href="https://account.apple.com/account/manage/section/security" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">account.apple.com → Security</a></li>
