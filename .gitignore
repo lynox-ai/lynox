@@ -18,6 +18,10 @@ cliproxyapi
 coverage/
 tests/performance/results.json
 tests/performance/*.log
+tests/fixtures/voice/*.webm
+tests/fixtures/voice/*.wav
+tests/fixtures/voice/*.mp3
+tests/fixtures/voice/*.ogg
 *.debug.log
 .playwright-mcp/
 playwright-report/

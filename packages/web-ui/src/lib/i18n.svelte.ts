@@ -339,6 +339,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.attach_file': { de: 'Datei anhängen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
 	'chat.transcribing': { de: 'Wird transkribiert…', en: 'Transcribing…' },
+	'chat.voice_privacy_hint': {
+		de: 'Sprachnachrichten werden zur Transkription an Mistral (Paris, EU) gesendet. Der Anbieter speichert keine Audiodaten.',
+		en: 'Voice messages are sent to Mistral (Paris, EU) for transcription. The provider stores no audio.',
+	},
+	'chat.voice_privacy_hint_local': {
+		de: 'Sprachnachrichten werden lokal auf diesem Server transkribiert. Keine Audiodaten verlassen das System.',
+		en: 'Voice messages are transcribed locally on this server. No audio leaves the system.',
+	},
 	'chat.thinking_label': { de: 'Thinking', en: 'Thinking' },
 	'chat.expand_all': { de: 'Alle aufklappen', en: 'Expand all' },
 	'chat.edit_answer': { de: 'Antworten verwerfen & neu starten', en: 'Discard answers & restart' },
