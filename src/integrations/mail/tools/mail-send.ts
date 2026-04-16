@@ -123,18 +123,20 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
           personaLine = `\n  Persona: ${truncate(personaFor(accountConfig), 160)}`;
         }
 
+        const bodyPreview = truncate(input.body.replace(/\s+/g, ' '), 200);
         const preview = isMassSend
-          ? `⚠ MASS SEND — ${String(uniqueRecipients.size)} recipients. Review carefully before confirming.
-  Account: ${provider.accountId}${personaLine}
-  Recipients (full list):
-${[...to, ...cc, ...bcc].map(a => `    • ${a.address}`).join('\n')}
-  Subject: ${input.subject}
-  Body:    ${truncate(input.body.replace(/\s+/g, ' '), 200)}`
-          : `Send email?
-  Account: ${provider.accountId}${personaLine}
-  To:      ${to.map(a => a.address).join(', ')}${cc.length > 0 ? `\n  Cc:      ${cc.map(a => a.address).join(', ')}` : ''}${bcc.length > 0 ? `\n  Bcc:     ${bcc.map(a => a.address).join(', ')}` : ''}
-  Subject: ${input.subject}
-  Body:    ${truncate(input.body.replace(/\s+/g, ' '), 200)}`;
+          ? `⚠ **MASS SEND** — ${String(uniqueRecipients.size)} recipients\n\n` +
+            `**Account:** ${provider.accountId}${personaLine ? `\n**Persona:** ${truncate(personaFor(accountConfig!), 120)}` : ''}\n` +
+            `**Recipients:**\n${[...to, ...cc, ...bcc].map(a => `  • ${a.address}`).join('\n')}\n` +
+            `**Subject:** ${input.subject}\n\n` +
+            `> ${bodyPreview}`
+          : `**Send email?**\n\n` +
+            `**To:** ${to.map(a => a.address).join(', ')}` +
+            `${cc.length > 0 ? `\n**Cc:** ${cc.map(a => a.address).join(', ')}` : ''}` +
+            `${bcc.length > 0 ? `\n**Bcc:** ${bcc.map(a => a.address).join(', ')}` : ''}\n` +
+            `**Subject:** ${input.subject}\n` +
+            `**From:** ${provider.accountId}${personaLine ? ` · _${truncate(personaFor(accountConfig!), 80)}_` : ''}\n\n` +
+            `> ${bodyPreview}`;
 
         const answer = await agent.promptUser(preview, ['Yes', 'No']);
         if (!isApproval(answer)) {

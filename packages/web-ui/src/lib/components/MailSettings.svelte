@@ -460,13 +460,18 @@
 									</ol>
 									<details class="mt-1.5 text-[10px] text-text-subtle">
 										<summary class="cursor-pointer font-medium">Google Workspace: "Setting not available"?</summary>
-										<ol class="ml-4 mt-1 list-decimal space-y-0.5">
-											<li>Open <a href="https://admin.google.com/ac/security/2sv" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">admin.google.com → Security → 2-Step Verification</a></li>
+										<p class="ml-4 mt-1 mb-1">App passwords require 2-Step Verification. Two steps needed:</p>
+										<p class="ml-4 mb-0.5 font-medium">1. Admin enables 2FA for the organization:</p>
+										<ol class="ml-8 list-decimal space-y-0.5">
+											<li><a href="https://admin.google.com/ac/security/2sv" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">admin.google.com → Security → 2-Step Verification</a></li>
 											<li>Check <strong>"Allow users to turn on 2-Step Verification"</strong></li>
-											<li>Under <strong>Enforcement</strong>, select <strong>"On"</strong> (or "On from date")</li>
+											<li>Enforcement can stay <strong>"Off"</strong> — users just need the ability to opt in</li>
 											<li>Click <strong>Save</strong></li>
-											<li>Each user must then set up 2FA on their own account</li>
-											<li>After 2FA is active, <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">app passwords</a> become available</li>
+										</ol>
+										<p class="ml-4 mt-1 mb-0.5 font-medium">2. Each user activates 2FA on their own account:</p>
+										<ol class="ml-8 list-decimal space-y-0.5">
+											<li><a href="https://myaccount.google.com/signinoptions/twosv" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">myaccount.google.com → Security → 2-Step Verification</a> → activate</li>
+											<li>After 2FA is active, <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">App Passwords</a> become available</li>
 										</ol>
 									</details>
 								{:else if formPreset === 'icloud'}
