@@ -243,6 +243,14 @@ export interface LynoxUserConfig {
    * Engine.init() reads this and overrides provider/api_key/api_base_url at runtime.
    */
   llm_mode?: 'standard' | 'eu-sovereign' | undefined;
+  /**
+   * Audio transcription provider.
+   *   'mistral' → Mistral Voxtral Mini Transcribe v2 (requires MISTRAL_API_KEY)
+   *   'whisper' → local whisper.cpp (requires whisper-cli + ggml models)
+   *   'auto'    → Mistral if MISTRAL_API_KEY is set, else whisper.cpp
+   * Env var `LYNOX_TRANSCRIBE_PROVIDER` overrides this.
+   */
+  transcription_provider?: 'mistral' | 'whisper' | 'auto' | undefined;
 }
 
 // === DataStore ===

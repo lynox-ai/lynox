@@ -72,4 +72,5 @@ export const LynoxUserConfigSchema = z.object({
   knowledge_graph_enabled: z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),
+  transcription_provider:  z.enum(['mistral', 'whisper', 'auto']).optional(),
 }).passthrough(); // allow unknown keys for forward compat
