@@ -460,8 +460,8 @@
 									</ol>
 									<p class="mt-1.5 text-[10px] text-text-subtle">
 										<strong>Google Workspace:</strong> If you see "Setting not available for your account", your Workspace admin needs to
-										<a href="https://support.google.com/a/answer/7676854" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">enable app passwords</a>
-										in Admin Console → Security → Authentication → App passwords. 2FA must also be enabled for the user.
+										<a href="https://admin.google.com/ac/security/2sv" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">enable 2-Step Verification</a>
+										in Admin Console (admin.google.com → Security → 2-Step Verification → Allow users to turn on). After 2FA is enforced, app passwords become available automatically.
 									</p>
 								{:else if formPreset === 'icloud'}
 									<ol class="ml-4 list-decimal space-y-0.5">
