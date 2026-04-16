@@ -12,10 +12,10 @@ import { MailError } from '../provider.js';
 describe('describePreset / listPresets', () => {
   it('returns hardcoded servers for each known preset', () => {
     expect(describePreset('gmail').imap).toEqual({ host: 'imap.gmail.com', port: 993, secure: true });
-    expect(describePreset('gmail').smtp).toEqual({ host: 'smtp.gmail.com', port: 465, secure: true });
+    expect(describePreset('gmail').smtp).toEqual({ host: 'smtp.gmail.com', port: 587, secure: false });
     expect(describePreset('icloud').smtp).toEqual({ host: 'smtp.mail.me.com', port: 587, secure: false });
     expect(describePreset('fastmail').imap).toEqual({ host: 'imap.fastmail.com', port: 993, secure: true });
-    expect(describePreset('yahoo').smtp).toEqual({ host: 'smtp.mail.yahoo.com', port: 465, secure: true });
+    expect(describePreset('yahoo').smtp).toEqual({ host: 'smtp.mail.yahoo.com', port: 587, secure: false });
     expect(describePreset('outlook').smtp).toEqual({ host: 'smtp-mail.outlook.com', port: 587, secure: false });
   });
 
