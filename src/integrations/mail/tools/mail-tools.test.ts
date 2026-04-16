@@ -714,7 +714,6 @@ describe('mail_send — persona hint in confirmation prompt', () => {
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string) => { prompt = q; return 'Yes'; } } as unknown as IAgent;
     await tool.handler({ to: 'bob@example.com', subject: 's', body: 'b' }, agent);
-    expect(prompt).toContain('Persona:');
     expect(prompt).toContain('Professional');
   });
 

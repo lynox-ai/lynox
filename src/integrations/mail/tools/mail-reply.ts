@@ -155,16 +155,18 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // Persona hint shown in the confirmation prompt so the user knows
         // what voice will be used. Phase 1 will inject this as a compose-time
         // system prompt; Phase 0.1 is just the advisory render.
-        let personaLine = '';
-        if (sendAccountConfig) {
-          personaLine = `\n  Persona: ${truncate(personaFor(sendAccountConfig), 160)}`;
-        }
+        const smartNote = sendProvider.accountId !== readProvider.accountId
+          ? ` _(smart reply-from, read via ${readProvider.accountId})_` : '';
+        const personaNote = sendAccountConfig
+          ? ` · _${truncate(personaFor(sendAccountConfig), 80)}_` : '';
+        const bodyPreview = truncate(input.body.replace(/\s+/g, ' '), 200);
 
-        const preview = `Reply to "${original.envelope.subject || '(no subject)'}"?
-  Account: ${sendProvider.accountId}${sendProvider.accountId !== readProvider.accountId ? ` (smart reply-from, original was read via ${readProvider.accountId})` : ''}${personaLine}
-  To:      ${toAddrs.map(a => a.address).join(', ')}${ccAddrs.length > 0 ? `\n  Cc:      ${ccAddrs.map(a => a.address).join(', ')}` : ''}
-  Subject: ${subject}
-  Body:    ${truncate(input.body.replace(/\s+/g, ' '), 200)}`;
+        const preview = `**Reply to "${original.envelope.subject || '(no subject)'}"?**\n\n` +
+          `**To:** ${toAddrs.map(a => a.address).join(', ')}` +
+          `${ccAddrs.length > 0 ? `\n**Cc:** ${ccAddrs.map(a => a.address).join(', ')}` : ''}\n` +
+          `**Subject:** ${subject}\n` +
+          `**From:** ${sendProvider.accountId}${smartNote}${personaNote}\n\n` +
+          `> ${bodyPreview}`;
 
         const answer = await agent.promptUser(preview, ['Yes', 'No']);
         if (!isApproval(answer)) {
