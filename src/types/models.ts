@@ -70,11 +70,11 @@ export const CHARS_PER_TOKEN = 3.5;
 
 const _CONTEXT_WINDOW: Record<string, number> = {
   'claude-opus-4-6':         1_000_000,
-  'claude-sonnet-4-6':         200_000,
+  'claude-sonnet-4-6':       1_000_000,
   'claude-haiku-4-5-20251001': 200_000,
   // Tier-keyed aliases (provider-independent)
   'opus':   1_000_000,
-  'sonnet':   200_000,
+  'sonnet': 1_000_000,
   'haiku':    200_000,
 };
 

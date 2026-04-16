@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ToolEntry, StreamEvent } from '../types/index.js';
+import { CHARS_PER_TOKEN, getContextWindow } from '../types/index.js';
 
 // === Mocks ===
 
@@ -1109,18 +1110,19 @@ describe('Agent', () => {
   describe('context_pressure event', () => {
     it('emits context_pressure when messages are truncated', async () => {
       const events: StreamEvent[] = [];
+      const model = 'claude-sonnet-4-6';
       const agent = new Agent({
         name: 'test',
-        model: 'claude-sonnet-4-6',
+        model,
         onStream: (e: StreamEvent) => { events.push(e); },
       });
 
-      // Fill up message history with enough data to trigger truncation
-      // CONTEXT_WINDOW for claude-sonnet-4-6 = 200_000
-      // Budget is 85% = 170_000 tokens. Each char ~ 0.25 tokens.
-      // So we need ~680_000 chars of messages to trigger.
-      const bigContent = 'x'.repeat(200_000);
-      for (let i = 0; i < 5; i++) {
+      // Overshoot the context window so _truncateHistory drops messages.
+      // Need messages.length > keep threshold (up to 25 for 1M contexts) AND
+      // overshoot > 1.0x — use 30 messages × 15% of budget ≈ 450% of budget.
+      const budgetChars = getContextWindow(model) * CHARS_PER_TOKEN;
+      const bigContent = 'x'.repeat(Math.ceil(budgetChars * 0.15));
+      for (let i = 0; i < 15; i++) {
         agent.loadMessages([
           ...agent.getMessages(),
           { role: 'user', content: bigContent },
@@ -1211,15 +1213,17 @@ describe('Agent', () => {
   describe('context_budget event', () => {
     it('emits context_budget when usage exceeds 70%', async () => {
       const events: StreamEvent[] = [];
+      const model = 'claude-sonnet-4-6';
       const agent = new Agent({
         name: 'test',
-        model: 'claude-sonnet-4-6', // 200K context
+        model,
         onStream: (e: StreamEvent) => { events.push(e); },
       });
 
-      // Fill message history to ~73% of context (200K × 0.73 × 3.5 chars/token ≈ 511K chars)
-      // Use 85K per message (6 × 85K = 510K) — stays above 70% but below 85% truncation threshold
-      const bigContent = 'x'.repeat(85_000);
+      // Fill to ~73% of context — above the 70% budget warning, below the 85% truncation threshold.
+      const maxCtx = getContextWindow(model);
+      const budgetChars = maxCtx * CHARS_PER_TOKEN;
+      const bigContent = 'x'.repeat(Math.ceil(budgetChars * 0.73 / 6));
       for (let i = 0; i < 3; i++) {
         agent.loadMessages([
           ...agent.getMessages(),
@@ -1235,7 +1239,7 @@ describe('Agent', () => {
       expect(budgetEvents.length).toBeGreaterThanOrEqual(1);
       const be = budgetEvents[0] as { type: 'context_budget'; systemTokens: number; toolTokens: number;
         messageTokens: number; totalTokens: number; maxTokens: number; usagePercent: number };
-      expect(be.maxTokens).toBe(200_000);
+      expect(be.maxTokens).toBe(maxCtx);
       expect(be.usagePercent).toBeGreaterThan(70);
       expect(be.systemTokens).toBeGreaterThan(0);
       expect(be.messageTokens).toBeGreaterThan(0);
