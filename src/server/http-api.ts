@@ -1659,6 +1659,88 @@ export class LynoxHTTPApi {
       });
     });
 
+    // ── Voice info (combined STT + TTS capabilities for the Web UI) ──
+    // Drives the privacy hint + auto-speak toggle visibility. Prefer this
+    // over /api/transcribe/info for new callers — the old path stays for
+    // back-compat with existing clients.
+    this.staticRoutes.set('GET /api/voice/info', async (_req, res) => {
+      const [transcribeMod, speakMod] = await Promise.all([
+        import('../core/transcribe.js'),
+        import('../core/speak.js'),
+      ]);
+      const sttProvider = transcribeMod.getActiveTranscribeProvider();
+      const ttsProvider = speakMod.getActiveSpeakProvider();
+      jsonResponse(res, 200, {
+        stt: {
+          available: transcribeMod.hasTranscribeProvider(),
+          provider: sttProvider?.name ?? null,
+        },
+        tts: {
+          available: speakMod.hasSpeakProvider(),
+          provider: ttsProvider?.name ?? null,
+        },
+      });
+    });
+
+    // ── TTS (streaming via SSE) ──
+    // Body: { text: string, voice?: string, model?: string }
+    // Response: text/event-stream
+    //   data: {"status":"synthesizing", characters, model, voice}
+    //   data: {"chunk":"<base64 MP3 chunk>"}   ← repeated
+    //   data: {"done":true, latencyMs, ttfbMs}
+    //   data: {"error":"..."}
+    // Client concatenates chunk payloads (base64-decoded) into one MP3 blob
+    // and plays via <audio>. See pro/docs/internal/prd/voice-tts.md for the
+    // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
+    // replies > ~200 chars).
+    this.staticRoutes.set('POST /api/speak', async (_req, res, _params, body) => {
+      const { hasSpeakProvider, speakStream } = await import('../core/speak.js');
+      if (!hasSpeakProvider()) {
+        errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const text = b && typeof b['text'] === 'string' ? b['text'] : '';
+      const voice = b && typeof b['voice'] === 'string' ? b['voice'] : undefined;
+      const model = b && typeof b['model'] === 'string' ? b['model'] : undefined;
+      if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+
+      let firstByteSent = false;
+      const meta = await speakStream(text, (chunk) => {
+        if (!firstByteSent) {
+          // TTFB signal — fire once before the first chunk so the client can
+          // render a "synthesizing" state without waiting for full audio.
+          res.write(`data: ${JSON.stringify({ status: 'synthesizing' })}\n\n`);
+          firstByteSent = true;
+        }
+        const b64 = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString('base64');
+        res.write(`data: ${JSON.stringify({ chunk: b64 })}\n\n`);
+      }, {
+        ...(voice ? { voice } : {}),
+        ...(model ? { model } : {}),
+      });
+
+      if (meta) {
+        res.write(`data: ${JSON.stringify({
+          done: true,
+          characters: meta.characters,
+          model: meta.model,
+          voice: meta.voice,
+          latencyMs: meta.latencyMs,
+          ttfbMs: meta.ttfbMs,
+        })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ error: 'TTS synthesis failed' })}\n\n`);
+      }
+      res.end();
+    });
+
     // ── Transcription (streaming via SSE) ──
     this.staticRoutes.set('POST /api/transcribe', async (_req, res, _params, body) => {
       const {
