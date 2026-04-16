@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voxtral spike — recorder</title>
+<style>
+  :root {
+    --bg: #0b0b10;
+    --panel: #14141c;
+    --panel2: #1a1a24;
+    --line: #24243a;
+    --text: #e6e6f0;
+    --muted: #8a8aa0;
+    --accent: #b39cff;
+    --accent2: #7a5cff;
+    --danger: #ff5577;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--text); margin: 0; padding: 0; }
+  body { font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  header {
+    padding: 24px 32px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  header h1 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  header ul { margin: 12px 0 0 18px; padding: 0; color: var(--muted); font-size: 13px; }
+  main { padding: 24px 32px; max-width: 960px; margin: 0 auto; }
+  .clip {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+  }
+  .clip.done { border-color: #2e4a36; background: linear-gradient(180deg, var(--panel) 0%, #14241a 100%); }
+  .clip.recording { border-color: var(--danger); box-shadow: 0 0 0 2px rgba(255,85,119,.15); }
+  .hdr { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+  .hdr .id { font-weight: 600; color: var(--accent); font-size: 14px; letter-spacing: .02em; }
+  .hdr .cat { color: var(--muted); font-size: 12px; }
+  .hdr .dur { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .script {
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 16px;
+    font-size: 18px;
+    line-height: 1.55;
+    color: var(--text);
+    margin: 10px 0 14px;
+  }
+  .script.freeform {
+    font-style: italic;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    border: 1px solid var(--line);
+    background: var(--panel2);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background .1s, border .1s;
+  }
+  button:hover { background: #20202e; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+  button.primary:hover { background: var(--accent); border-color: var(--accent); }
+  button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  button.danger:hover { filter: brightness(1.1); }
+  .meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; margin-left: auto; }
+  audio { height: 32px; vertical-align: middle; }
+  .banner {
+    background: rgba(122, 92, 255, .1);
+    border: 1px solid rgba(122, 92, 255, .3);
+    padding: 10px 14px;
+    border-radius: 6px;
+    margin-bottom: 20px;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .pulse {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--danger);
+    animation: pulse 1s infinite;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Voxtral spike — recorder</h1>
+  <p>Zeichnet 10 Clips auf (WebM/Opus, wie Web UI MediaRecorder) für <code>core/tests/fixtures/voice/</code>.</p>
+  <ul>
+    <li>Ruhiger Raum, gleicher Abstand zum Mikro, gleiche Lautstärke bei allen Clips — sonst misst du Setup-Unterschiede statt Modell-Unterschiede.</li>
+    <li>Natürlich sprechen, nicht diktieren. Ist okay wenn du dich verhaspelst — Ground Truth ist das Skript oben, nicht was du tatsächlich sagst.</li>
+    <li>Clip #9 bewusst schnell und genuschelt lesen (Robustheits-Test).</li>
+    <li>Clip #10 ist freeform — kein Skript, einfach reden wie in einer echten Sprachnachricht.</li>
+    <li>Download legt die Datei in deinen Browser-Download-Ordner. Danach nach <code>core/tests/fixtures/voice/</code> verschieben.</li>
+  </ul>
+</header>
+<main>
+  <div class="banner" id="banner">Browser fragt beim ersten Aufnehmen nach Mikrofon-Zugriff.</div>
+  <div id="clips"></div>
+</main>
+
+<script>
+const CLIPS = [
+  {
+    id: '01', dur: '~5s', cat: 'Pure DE',
+    script: 'Fass mir bitte die wichtigsten Punkte von heute zusammen.',
+  },
+  {
+    id: '02', dur: '~5s', cat: 'Pure EN',
+    script: "Give me a quick summary of yesterday's action items.",
+  },
+  {
+    id: '03', dur: '~10s', cat: 'DE + light Anglicisms',
+    script: 'Kannst du das Meeting von Montag zusammenfassen und mir die Action Items als Liste schicken?',
+  },
+  {
+    id: '04', dur: '~10s', cat: 'DE + tech Anglicisms',
+    script: 'Push das Deployment auf Staging und schick mir ein Update wenn die Pipeline durch ist.',
+  },
+  {
+    id: '05', dur: '~15s', cat: 'DE + heavy code-switching',
+    script: 'Ich brauch ein Follow-up für den Call mit dem Marketing-Team. Die wollen wissen ob wir den Launch auf nächste Woche shiften oder ob wir beim Original-Timing bleiben.',
+  },
+  {
+    id: '06', dur: '~15s', cat: 'DE + product terms',
+    script: 'Erstell mir einen neuen Thread zum Thema Onboarding Flow. Der Setup Wizard muss vor dem Go-Live fertig sein, das ist ein Blocker für die Customer Journey.',
+  },
+  {
+    id: '07', dur: '~20s', cat: 'DE business ramble',
+    script: 'Also ich hab mir das nochmal angeschaut mit dem Pricing. Die Starter Tier ist okay aber ich glaub wir müssen das Messaging nochmal überarbeiten. Vielleicht sollten wir A/B Testing machen auf der Landing Page, was meinst du?',
+  },
+  {
+    id: '08', dur: '~30s', cat: 'DE + names + numbers',
+    script: 'Der Roland hat mir geschrieben, sein Dashboard zeigt seit Freitag falsche Zahlen an. Ich glaub das hängt mit dem letzten Release zusammen, Version eins Punkt null Punkt fünf. Kannst du dir mal die Logs anschauen auf dem Server? Die Instanz heisst war Punkt lynox Punkt cloud.',
+  },
+  {
+    id: '09', dur: '~20s', cat: 'DE mumbled/fast (same script as #7)',
+    script: 'Also ich hab mir das nochmal angeschaut mit dem Pricing. Die Starter Tier ist okay aber ich glaub wir müssen das Messaging nochmal überarbeiten. Vielleicht sollten wir A/B Testing machen auf der Landing Page, was meinst du?',
+    hint: 'Das gleiche Skript wie #7 — aber schnell, genuschelt, weniger artikuliert. Teste Robustheit des Modells.',
+  },
+  {
+    id: '10', dur: '~60s', cat: 'Long DE mixed (free-form)',
+    script: null,
+    hint: 'Keine Vorlage. ~1 Minute freies Reden — typischer Arbeits-Update: Status, Blocker, nächste Schritte. Mische DE/EN so wie du es natürlich machen würdest. Ist okay wenn du abschweifst.',
+  },
+];
+
+const MIME = 'audio/webm;codecs=opus';
+if (!window.MediaRecorder || !MediaRecorder.isTypeSupported(MIME)) {
+  document.getElementById('banner').textContent =
+    'Browser unterstützt audio/webm;codecs=opus nicht — nutze Chrome, Edge oder Firefox.';
+  document.getElementById('banner').style.borderColor = 'var(--danger)';
+}
+
+const state = new Map(); // id -> { recorder, chunks, blob, startedAt, card, timer }
+
+function fmtDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+function fmtSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+async function startRecording(clipId) {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const recorder = new MediaRecorder(stream, { mimeType: MIME });
+    const chunks = [];
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    recorder.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(chunks, { type: MIME });
+      const s = state.get(clipId);
+      if (!s) return;
+      s.blob = blob;
+      clearInterval(s.timer);
+      renderClip(clipId);
+    };
+    recorder.start();
+    const card = document.querySelector(`[data-clip="${clipId}"]`);
+    const s = {
+      recorder,
+      chunks,
+      blob: null,
+      startedAt: Date.now(),
+      card,
+      timer: null,
+    };
+    state.set(clipId, s);
+    s.timer = setInterval(() => {
+      const el = card.querySelector('.dur');
+      if (el) el.textContent = `● ${fmtDuration(Date.now() - s.startedAt)}`;
+    }, 250);
+    renderClip(clipId);
+  } catch (err) {
+    alert(`Mikrofon-Zugriff fehlgeschlagen: ${err.message}`);
+  }
+}
+
+function stopRecording(clipId) {
+  const s = state.get(clipId);
+  if (s && s.recorder.state === 'recording') s.recorder.stop();
+}
+
+function downloadClip(clipId) {
+  const s = state.get(clipId);
+  if (!s || !s.blob) return;
+  const url = URL.createObjectURL(s.blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `spike-${clipId}.webm`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function resetClip(clipId) {
+  const s = state.get(clipId);
+  if (s && s.timer) clearInterval(s.timer);
+  if (s && s.recorder.state === 'recording') s.recorder.stop();
+  state.delete(clipId);
+  renderClip(clipId);
+}
+
+function makeEl(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+function renderClip(clipId) {
+  const clip = CLIPS.find((c) => c.id === clipId);
+  if (!clip) return;
+  const s = state.get(clipId);
+  const card = document.querySelector(`[data-clip="${clipId}"]`);
+  if (!card) return;
+  const isRecording = s && s.recorder && s.recorder.state === 'recording';
+  const hasRecording = s && s.blob;
+  card.classList.toggle('recording', Boolean(isRecording));
+  card.classList.toggle('done', Boolean(hasRecording));
+
+  const durText = isRecording
+    ? `● ${fmtDuration(Date.now() - s.startedAt)}`
+    : clip.dur;
+  card.querySelector('.dur').textContent = durText;
+
+  const controls = card.querySelector('.controls');
+  controls.replaceChildren();
+
+  if (isRecording) {
+    const stopBtn = makeEl('button', 'danger');
+    stopBtn.appendChild(makeEl('span', 'pulse'));
+    stopBtn.appendChild(document.createTextNode('Stop'));
+    stopBtn.onclick = () => stopRecording(clipId);
+    controls.appendChild(stopBtn);
+  } else if (hasRecording) {
+    const audioEl = makeEl('audio');
+    audioEl.controls = true;
+    audioEl.src = URL.createObjectURL(s.blob);
+    controls.appendChild(audioEl);
+
+    const dlBtn = makeEl('button', 'primary', `Download spike-${clipId}.webm`);
+    dlBtn.onclick = () => downloadClip(clipId);
+    controls.appendChild(dlBtn);
+
+    const redoBtn = makeEl('button', null, 'Neu aufnehmen');
+    redoBtn.onclick = () => resetClip(clipId);
+    controls.appendChild(redoBtn);
+
+    controls.appendChild(makeEl('span', 'meta', fmtSize(s.blob.size)));
+  } else {
+    const recBtn = makeEl('button', 'primary', 'Aufnehmen');
+    recBtn.onclick = () => startRecording(clipId);
+    controls.appendChild(recBtn);
+  }
+}
+
+function mount() {
+  const container = document.getElementById('clips');
+  for (const clip of CLIPS) {
+    const card = makeEl('div', 'clip');
+    card.dataset.clip = clip.id;
+
+    const hdr = makeEl('div', 'hdr');
+    const left = makeEl('span');
+    left.appendChild(makeEl('span', 'id', `#${clip.id}`));
+    left.appendChild(document.createTextNode(' '));
+    left.appendChild(makeEl('span', 'cat', clip.cat));
+    hdr.appendChild(left);
+    hdr.appendChild(makeEl('span', 'dur', clip.dur));
+    card.appendChild(hdr);
+
+    if (clip.script) card.appendChild(makeEl('div', 'script', clip.script));
+    if (clip.hint) card.appendChild(makeEl('div', 'script freeform', clip.hint));
+
+    card.appendChild(makeEl('div', 'controls'));
+
+    container.appendChild(card);
+    renderClip(clip.id);
+  }
+}
+mount();
+</script>
+</body>
+</html>
