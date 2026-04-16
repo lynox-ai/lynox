@@ -15,6 +15,7 @@ export {
   transcribeAudioStream,
   transcribe,
   transcribeWithStream,
+  extractSessionContext,
   mistralVoxtralProvider,
   whisperCppProvider,
   hasMistralVoxtral,

@@ -51,6 +51,8 @@ export type { GlossaryTerm } from './glossary/core-terms.js';
 export { applyGlossary, applySessionGlossary, DEFAULT_STOP_LIST } from './glossary/apply.js';
 export { buildSessionGlossary, SessionGlossaryCache } from './glossary/session-builder.js';
 export type { SessionSources, BuildGlossaryOptions } from './glossary/session-builder.js';
+export { extractSessionContext } from './session-context.js';
+export type { ExtractOptions } from './session-context.js';
 
 // ── Provider resolution ────────────────────────────────────────────────────
 

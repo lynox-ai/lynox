@@ -35,6 +35,11 @@ export interface TelegramEngine {
   createSession(opts?: Record<string, unknown>): TelegramSession;
   getWorkerLoop(): { resolveTaskInput(taskId: string, answer: string): boolean } | null;
   getGoogleAuth(): import('../google/google-auth.js').GoogleAuth | null;
+  /** Stores read by the voice-transcription session context. All nullable — returning null is always safe. */
+  getCRM(): import('../../core/crm.js').CRM | null;
+  getApiStore(): import('../../core/api-store.js').ApiStore | null;
+  getThreadStore(): import('../../core/thread-store.js').ThreadStore | null;
+  getKnowledgeLayer(): import('../../core/knowledge-layer.js').KnowledgeLayer | null;
 }
 
 // ---------------------------------------------------------------------------

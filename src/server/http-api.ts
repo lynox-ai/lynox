@@ -1651,33 +1651,48 @@ export class LynoxHTTPApi {
 
     // ── Transcription (streaming via SSE) ──
     this.staticRoutes.set('POST /api/transcribe', async (_req, res, _params, body) => {
-      const { HAS_WHISPER, transcribeAudioStream } = await import('../core/transcribe.js');
+      const {
+        HAS_WHISPER,
+        transcribeWithStream,
+        extractSessionContext,
+      } = await import('../core/transcribe.js');
       if (!HAS_WHISPER) {
-        errorResponse(res, 503, 'Whisper not available (install whisper.cpp + ffmpeg)');
+        errorResponse(res, 503, 'Transcription not available (set MISTRAL_API_KEY or install whisper.cpp + ffmpeg)');
         return;
       }
       const b = body as Record<string, unknown> | null;
       const audioData = b && typeof b['audio'] === 'string' ? b['audio'] : '';
       const filename = b && typeof b['filename'] === 'string' ? b['filename'] : 'audio.webm';
       const language = b && typeof b['language'] === 'string' ? b['language'] : undefined;
+      const sessionId = b && typeof b['sessionId'] === 'string' ? b['sessionId']
+        : b && typeof b['thread_id'] === 'string' ? b['thread_id']
+        : null;
       if (!audioData) { errorResponse(res, 400, 'Missing audio (base64)'); return; }
       const buffer = Buffer.from(audioData, 'base64');
 
-      // SSE streaming — send segments as whisper processes them
+      // Session context pulls CRM contacts, API profile names, thread titles
+      // and KG entity labels so the session glossary can correct proper-noun
+      // mishearings. Sessionless calls still get the static core glossary.
+      const sessionContext = extractSessionContext(engine, sessionId);
+
+      // SSE streaming — forward provider segments (whisper) or a single final
+      // segment (Voxtral, no native streaming).
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
       });
 
-      const text = await transcribeAudioStream(buffer, filename, (segment) => {
+      const text = await transcribeWithStream(buffer, filename, (segment) => {
         if (!segment) {
-          // Empty segment = ffmpeg done, whisper starting
           res.write(`data: ${JSON.stringify({ status: 'transcribing' })}\n\n`);
         } else {
           res.write(`data: ${JSON.stringify({ segment })}\n\n`);
         }
-      }, language);
+      }, {
+        ...(language ? { language } : {}),
+        session: sessionContext,
+      });
 
       if (text) {
         res.write(`data: ${JSON.stringify({ done: true, text })}\n\n`);
