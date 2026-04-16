@@ -833,11 +833,14 @@ describe('isDangerous', () => {
       expect(result).toContain('[BLOCKED');
     });
 
-    it('warns (no block) on mail_send in interactive mode', () => {
+    it('no permission-guard warning on mail_send in interactive mode (tool has its own promptUser)', () => {
       const result = isDangerous('mail_send', { to: 'a@b.c', subject: 's', body: 'b' });
-      expect(result).not.toBeNull();
-      expect(result).toContain('sends external mail');
-      expect(result).not.toContain('[BLOCKED');
+      expect(result).toBeNull();
+    });
+
+    it('no permission-guard warning on mail_reply in interactive mode', () => {
+      const result = isDangerous('mail_reply', { uid: 1, body: 'reply' });
+      expect(result).toBeNull();
     });
 
     it('ALLOWS mail_search in autonomous mode (read-only)', () => {
