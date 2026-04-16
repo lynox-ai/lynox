@@ -163,6 +163,30 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactDeleteTool: { definition: { name: 'artifact_delete' }, handler: vi.fn() },
 }));
 
+vi.mock('../integrations/mail/state.js', () => ({
+  MailStateDb: vi.fn().mockImplementation(function () {
+    // @ts-expect-error mock constructor
+    this.close = vi.fn();
+  }),
+}));
+
+vi.mock('../integrations/mail/context.js', () => ({
+  MailContext: vi.fn().mockImplementation(function () {
+    // @ts-expect-error mock constructor
+    this.init = vi.fn().mockResolvedValue(undefined);
+    // @ts-expect-error mock constructor
+    this.tools = vi.fn().mockReturnValue([
+      { definition: { name: 'mail_search' }, handler: vi.fn() },
+      { definition: { name: 'mail_read' }, handler: vi.fn() },
+      { definition: { name: 'mail_send' }, handler: vi.fn() },
+      { definition: { name: 'mail_reply' }, handler: vi.fn() },
+      { definition: { name: 'mail_triage' }, handler: vi.fn() },
+    ]);
+    // @ts-expect-error mock constructor
+    this.close = vi.fn().mockResolvedValue(undefined);
+  }),
+}));
+
 vi.mock('./changeset.js', () => ({
   ChangesetManager: vi.fn().mockImplementation(function () {
     // @ts-expect-error mock constructor
