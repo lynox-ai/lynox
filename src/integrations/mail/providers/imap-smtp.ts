@@ -256,8 +256,13 @@ export function isAutoSubmittedHeader(rawHeader: string | undefined): boolean {
 function isAuthError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err.name === 'AuthenticationFailure') return true;
+  // imapflow sets authenticationFailed on the error object
+  if ('authenticationFailed' in err && (err as unknown as Record<string, unknown>).authenticationFailed) return true;
+  // imapflow responseStatus / responseText carry the IMAP response code
+  const resp = String((err as unknown as Record<string, unknown>).responseText ?? '').toLowerCase();
+  if (resp.includes('authenticationfailed') || resp.includes('authenticate')) return true;
   const msg = err.message.toLowerCase();
-  return msg.includes('authentication') || msg.includes('invalid credentials') || msg.includes('login');
+  return msg.includes('authentication') || msg.includes('invalid credentials') || msg.includes('login failed') || msg.includes('login');
 }
 
 function wrapImapError(err: unknown, fallback: string): MailError {
