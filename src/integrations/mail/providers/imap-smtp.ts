@@ -209,8 +209,11 @@ export function htmlToTextSnippet(html: string): string {
     .replace(/<[^>]*\bstyle\s*=\s*"[^"]*display\s*:\s*none[^"]*"[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
     .replace(/<[^>]*\bstyle\s*=\s*'[^']*display\s*:\s*none[^']*'[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
     .replace(/<[^>]*\bstyle\s*=\s*"[^"]*visibility\s*:\s*hidden[^"]*"[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
+    .replace(/<[^>]*\bstyle\s*=\s*'[^']*visibility\s*:\s*hidden[^']*'[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
     .replace(/<[^>]*\bstyle\s*=\s*"[^"]*font-size\s*:\s*0[^"]*"[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
+    .replace(/<[^>]*\bstyle\s*=\s*'[^']*font-size\s*:\s*0[^']*'[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
     .replace(/<[^>]*\bstyle\s*=\s*"[^"]*opacity\s*:\s*0[^"]*"[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
+    .replace(/<[^>]*\bstyle\s*=\s*'[^']*opacity\s*:\s*0[^']*'[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
     // Content-bearing but non-visible elements
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -734,7 +737,10 @@ export class ImapSmtpProvider implements MailProvider {
 // ── small utils kept private to this file ─────────────────────────────────
 
 function addressToString(a: MailAddress): string {
-  return a.name ? `"${a.name.replace(/"/g, '\\"')}" <${a.address}>` : a.address;
+  // Strip CRLF from both fields — defense-in-depth against header injection
+  const name = a.name?.replace(/[\r\n]/g, '') ?? '';
+  const addr = a.address.replace(/[\r\n]/g, '');
+  return name ? `"${name.replace(/"/g, '\\"')}" <${addr}>` : addr;
 }
 
 function addrToPlain(a: string | { address?: string }): string {
