@@ -10,7 +10,8 @@ import type { TelegramEngine } from './telegram-session.js';
 import { t, detectLang } from './telegram-i18n.js';
 import { createRateLimiterFromEnv } from '../../core/rate-limiter.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
-import { HAS_WHISPER, transcribeAudio } from '../../core/transcribe.js';
+import { HAS_WHISPER, transcribe, extractSessionContext } from '../../core/transcribe.js';
+import type { Engine } from '../../core/engine.js';
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;    // 4MB — Claude's limit is ~5MB base64
 const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // 10MB — practical limit for file analysis
@@ -300,8 +301,17 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
       const arrayBuffer = await response.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
 
+
       void ctx.reply(t('msg.voice_transcribing', lang));
-      const text = await transcribeAudio(buffer, `voice-${chatId}.ogg`, lang);
+      // Session context: CRM contacts + API profile names + recent thread titles +
+      // KG entities let the session glossary correct proper-noun mishearings for
+      // this user's vocabulary. The Telegram TelegramEngine exposes the same
+      // store getters as the full Engine class, so the cast is structural-safe.
+      const sessionContext = extractSessionContext(engine as unknown as Engine, String(chatId));
+      const text = await transcribe(buffer, `voice-${chatId}.ogg`, {
+        language: lang,
+        session: sessionContext,
+      });
       if (!text) {
         void ctx.reply(t('msg.voice_failed', lang));
         return;
