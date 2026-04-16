@@ -55,6 +55,7 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 			"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com https://static.cloudflareinsights.com",
 			"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com",
 			"img-src 'self' data: blob:",
+			"media-src 'self' blob:",
 			"font-src 'self' https://fonts.gstatic.com",
 			"connect-src 'self' https://cloudflareinsights.com",
 			"frame-src blob: data:",
