@@ -78,6 +78,7 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
         required: ['to', 'subject', 'body'],
       },
     },
+    requiresConfirmation: true,
     handler: async (input: MailSendToolInput, agent: IAgent): Promise<string> => {
       try {
         if (!input.to) return 'mail_send error: "to" is required';
@@ -136,7 +137,7 @@ ${[...to, ...cc, ...bcc].map(a => `    • ${a.address}`).join('\n')}
   Body:    ${truncate(input.body.replace(/\s+/g, ' '), 200)}`;
 
         const answer = await agent.promptUser(preview, ['Yes', 'No']);
-        if (answer.toLowerCase() !== 'yes' && answer !== '1') {
+        if (!isApproval(answer)) {
           return isMassSend ? 'mail_send cancelled by user (mass send).' : 'mail_send cancelled by user.';
         }
 
@@ -211,6 +212,12 @@ function parseAddress(raw: string): MailAddress | null {
   }
   if (raw.includes('@')) return { address: raw };
   return null;
+}
+
+/** Accept yes/ja/ok/1/y as approval — anything else is denial. */
+function isApproval(answer: string): boolean {
+  const a = answer.toLowerCase().trim();
+  return ['yes', 'ja', 'ok', 'y', 'j', '1', 'sure', 'send', 'senden'].includes(a);
 }
 
 function truncate(s: string, max: number): string {

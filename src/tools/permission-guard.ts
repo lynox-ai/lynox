@@ -533,15 +533,14 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   }
 
   // Mail (provider-agnostic IMAP/SMTP) write tools — block in autonomous mode.
-  // In interactive mode, the tool handler itself calls agent.promptUser() with
-  // a full email preview (To/Subject/Body), so a Permission Guard warning would
-  // be a redundant second confirmation.
+  // In interactive mode, the ToolEntry.requiresConfirmation flag causes the
+  // agent to skip this generic warning (the tool shows its own email preview).
   const MAIL_WRITE_TOOLS = new Set(['mail_send', 'mail_reply']);
   if (MAIL_WRITE_TOOLS.has(toolName)) {
     if (autonomy === 'autonomous') {
       return `⚠ ${toolName} [BLOCKED — sending mail needs your OK]`;
     }
-    return null; // tool-level promptUser is the single confirmation gate
+    return `⚠ ${toolName} — sends external mail`;
   }
 
   // Google Workspace write actions — block in autonomous mode

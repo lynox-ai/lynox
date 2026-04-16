@@ -54,6 +54,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         required: ['uid', 'body'],
       },
     },
+    requiresConfirmation: true,
     handler: async (input: MailReplyToolInput, agent: IAgent): Promise<string> => {
       try {
         if (typeof input.uid !== 'number' || !Number.isFinite(input.uid)) {
@@ -166,7 +167,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
   Body:    ${truncate(input.body.replace(/\s+/g, ' '), 200)}`;
 
         const answer = await agent.promptUser(preview, ['Yes', 'No']);
-        if (answer.toLowerCase() !== 'yes' && answer !== '1') {
+        if (!isApproval(answer)) {
           return 'mail_reply cancelled by user.';
         }
 
@@ -209,6 +210,12 @@ function parseAddress(raw: string): MailAddress | null {
   }
   if (raw.includes('@')) return { address: raw };
   return null;
+}
+
+/** Accept yes/ja/ok/1/y as approval — anything else is denial. */
+function isApproval(answer: string): boolean {
+  const a = answer.toLowerCase().trim();
+  return ['yes', 'ja', 'ok', 'y', 'j', '1', 'sure', 'send', 'senden'].includes(a);
 }
 
 function truncate(s: string, max: number): string {
