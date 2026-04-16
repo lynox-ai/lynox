@@ -251,6 +251,13 @@ export interface LynoxUserConfig {
    * Env var `LYNOX_TRANSCRIBE_PROVIDER` overrides this.
    */
   transcription_provider?: 'mistral' | 'whisper' | 'auto' | undefined;
+  /**
+   * Text-to-speech provider.
+   *   'mistral' → Mistral Voxtral TTS (requires MISTRAL_API_KEY)
+   *   'auto'    → Mistral if MISTRAL_API_KEY is set, else none
+   * Env var `LYNOX_TTS_PROVIDER` overrides this.
+   */
+  tts_provider?: 'mistral' | 'auto' | undefined;
 }
 
 // === DataStore ===
