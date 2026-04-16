@@ -42,6 +42,7 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { playSpeech, stopSpeech, getSpeakState, isSpeakActive } from '../stores/speak.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick } from 'svelte';
 
@@ -425,21 +426,29 @@
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 	let transcribing = $state(false);
-	// Active transcription provider, fetched once on mount. `null` until known.
-	// Controls which privacy hint text renders under the recording/transcribing UI.
+	// Active voice providers, fetched once on mount. `null` until known.
+	// STT provider controls which privacy hint renders under the recording UI;
+	// TTS availability controls whether the speak button on assistant replies
+	// is rendered at all.
 	let transcribeProvider = $state<'mistral-voxtral' | 'whisper-cpp' | null>(null);
+	let ttsAvailable = $state(false);
 
 	$effect(() => {
 		let cancelled = false;
 		void (async () => {
 			try {
-				const res = await fetch(`${getApiBase()}/transcribe/info`);
+				const res = await fetch(`${getApiBase()}/voice/info`);
 				if (!res.ok || cancelled) return;
-				const data = (await res.json()) as { provider?: unknown };
+				const data = (await res.json()) as {
+					stt?: { provider?: unknown } | undefined;
+					tts?: { available?: unknown } | undefined;
+				};
 				if (cancelled) return;
-				if (data.provider === 'mistral-voxtral' || data.provider === 'whisper-cpp') {
-					transcribeProvider = data.provider;
+				const sttProvider = data.stt?.provider;
+				if (sttProvider === 'mistral-voxtral' || sttProvider === 'whisper-cpp') {
+					transcribeProvider = sttProvider;
 				}
+				if (data.tts?.available === true) ttsAvailable = true;
 			} catch { /* best-effort — hint stays hidden on failure */ }
 		})();
 		return () => { cancelled = true; };
@@ -885,7 +894,7 @@
 	}
 	$effect(() => { focusInput(); });
 	// Re-focus after SvelteKit navigation (goto('/app') resets focus)
-	afterNavigate(() => { focusInput(); });
+	afterNavigate(() => { focusInput(); stopSpeech(); });
 
 	// Slash commands handled client-side (navigate instead of sending to agent)
 	const SLASH_ROUTES: Record<string, string> = {
@@ -998,6 +1007,32 @@
 		el.style.overflowY = el.scrollHeight > maxH ? 'auto' : 'hidden';
 	}
 </script>
+
+{#snippet speakButton(msgKey: string, msgContent: string)}
+	{#if ttsAvailable && !isStreaming}
+		{@const speakState = getSpeakState()}
+		{@const active = isSpeakActive(msgKey) && speakState !== 'idle'}
+		<button
+			onclick={() => {
+				if (active) { stopSpeech(); return; }
+				void playSpeech(msgContent, msgKey).then((err) => {
+					if (err) addToast(t('chat.speak_failed'), 'error');
+				});
+			}}
+			class="text-text-subtle hover:text-text transition-all p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted {active ? 'opacity-100' : 'opacity-0 group-hover/copy:opacity-100 focus:opacity-100'}"
+			title={active ? (speakState === 'playing' ? t('chat.stop_speaking') : t('chat.speak_synthesizing')) : t('chat.speak')}
+			aria-label={active ? t('chat.stop_speaking') : t('chat.speak')}
+		>
+			{#if active && speakState === 'synthesizing'}
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+			{:else if active && speakState === 'playing'}
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><rect x="6" y="6" width="12" height="12" rx="1" stroke-linejoin="round" /></svg>
+			{:else}
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
+			{/if}
+		</button>
+	{/if}
+{/snippet}
 
 <div class="flex h-full flex-col">
 	<!-- Messages -->
@@ -1220,15 +1255,19 @@
 								{@const hasArtifact = gBlock.text.includes('```html') && (gBlock.text.includes('<!DOCTYPE') || gBlock.text.includes('<html'))}
 								<div class="relative group/copy">
 									<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
-									{#if !hasArtifact}
-										<button
-											onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
-											class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
-											title={t('common.copy')}
-										>
-											<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
-										</button>
-									{/if}
+									<div class="absolute top-0 right-0 flex gap-1">
+										{@render speakButton(`msg-${msgIdx}`, msg.content)}
+										{#if !hasArtifact}
+											<button
+												onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
+												class="opacity-0 group-hover/copy:opacity-100 focus:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
+												title={t('common.copy')}
+												aria-label={t('common.copy')}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+											</button>
+										{/if}
+									</div>
 								</div>
 						{/if}
 						{/each}
@@ -1247,15 +1286,19 @@
 								{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
 								<div class="relative group/copy">
 									<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
-									{#if !hasArtifact}
-										<button
-											onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
-											class="absolute top-0 right-0 opacity-0 group-hover/copy:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
-											title={t('common.copy')}
-										>
-											<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
-										</button>
-									{/if}
+									<div class="absolute top-0 right-0 flex gap-1">
+										{@render speakButton(`msg-${msgIdx}`, msg.content)}
+										{#if !hasArtifact}
+											<button
+												onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
+												class="opacity-0 group-hover/copy:opacity-100 focus:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
+												title={t('common.copy')}
+												aria-label={t('common.copy')}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+											</button>
+										{/if}
+									</div>
 								</div>
 							{/if}
 						{/if}
