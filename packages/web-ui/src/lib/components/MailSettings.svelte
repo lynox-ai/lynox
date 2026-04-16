@@ -458,11 +458,17 @@
 										<li>Enter a name (e.g. "lynox") and click "Create"</li>
 										<li>Copy the 16-character password and paste it below</li>
 									</ol>
-									<p class="mt-1.5 text-[10px] text-text-subtle">
-										<strong>Google Workspace:</strong> If you see "Setting not available for your account", your Workspace admin needs to
-										<a href="https://admin.google.com/ac/security/2sv" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">enable 2-Step Verification</a>
-										in Admin Console (admin.google.com → Security → 2-Step Verification → Allow users to turn on). After 2FA is enforced, app passwords become available automatically.
-									</p>
+									<details class="mt-1.5 text-[10px] text-text-subtle">
+										<summary class="cursor-pointer font-medium">Google Workspace: "Setting not available"?</summary>
+										<ol class="ml-4 mt-1 list-decimal space-y-0.5">
+											<li>Open <a href="https://admin.google.com/ac/security/2sv" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">admin.google.com → Security → 2-Step Verification</a></li>
+											<li>Check <strong>"Allow users to turn on 2-Step Verification"</strong></li>
+											<li>Under <strong>Enforcement</strong>, select <strong>"On"</strong> (or "On from date")</li>
+											<li>Click <strong>Save</strong></li>
+											<li>Each user must then set up 2FA on their own account</li>
+											<li>After 2FA is active, <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">app passwords</a> become available</li>
+										</ol>
+									</details>
 								{:else if formPreset === 'icloud'}
 									<ol class="ml-4 list-decimal space-y-0.5">
 										<li>Open <a href="https://account.apple.com/account/manage/section/security" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">account.apple.com → Security</a></li>

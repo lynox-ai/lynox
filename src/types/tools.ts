@@ -11,6 +11,16 @@ export type ToolHandler<TInput = unknown> =
 export interface ToolEntry<TInput = unknown> {
   definition: BetaTool;
   handler:    ToolHandler<TInput>;
+  /**
+   * When true, the tool handles its own user confirmation via
+   * agent.promptUser() — the Permission Guard skips the generic warning
+   * in interactive mode but still BLOCKS in autonomous mode.
+   *
+   * Use this for tools that show a meaningful preview to the user
+   * (e.g. mail_send shows To/Subject/Body) instead of the guard's
+   * generic "sends external mail" warning.
+   */
+  requiresConfirmation?: boolean | undefined;
 }
 
 // === 4.3 Stream Event Union ===

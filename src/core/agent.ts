@@ -699,13 +699,19 @@ export class Agent implements IAgent {
       }
     }
 
-    // Skip danger check for write_file when changeset is active (review happens post-run)
+    // Skip danger check for write_file when changeset is active (review happens post-run).
+    // Skip for tools that handle their own confirmation via promptUser (requiresConfirmation)
+    // — those still get BLOCKED in autonomous mode via isDangerous, but the generic
+    // "Allow / Deny" prompt is replaced by the tool's own contextual confirmation.
+    const selfConfirming = tool?.requiresConfirmation === true;
     const danger = (tc.name === 'write_file' && this.changesetManager?.active)
       ? null
       : isDangerous(tc.name, tc.input, this.autonomy, this.preApproval, this.audit);
-    if (danger) {
+    // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
+    const effectiveDanger = (selfConfirming && danger && !danger.includes('[BLOCKED')) ? null : danger;
+    if (effectiveDanger) {
       if (this.promptUser) {
-        const answer = await this.promptUser(danger, ['Allow', 'Deny', '\x00']);
+        const answer = await this.promptUser(effectiveDanger, ['Allow', 'Deny', '\x00']);
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
           return {
             type: 'tool_result',
