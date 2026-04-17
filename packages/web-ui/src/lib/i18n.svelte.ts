@@ -223,6 +223,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.connected': { de: 'Verbunden', en: 'Connected' },
 	'status.disconnected': { de: 'Nicht verbunden', en: 'Disconnected' },
 	'status.api_keys': { de: 'API-Schlüssel', en: 'API Keys' },
+	'status.api_status': { de: 'API-Status', en: 'API Status' },
 	'status.api_key': { de: 'LLM Provider', en: 'LLM Provider' },
 	'status.api_key_managed': { de: 'LLM (managed)', en: 'LLM (managed)' },
 	'status.telegram': { de: 'Telegram', en: 'Telegram' },

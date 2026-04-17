@@ -505,6 +505,14 @@ export class LynoxHTTPApi {
       return;
     }
 
+    // Multi-provider status — returns primary provider + any configured secondary
+    // providers (Mistral fallback, TTS, etc.). Public, unauthenticated.
+    if (method === 'GET' && (pathname === '/api/providers/status')) {
+      const providers = await this.getProvidersStatus();
+      jsonResponse(res, 200, { providers });
+      return;
+    }
+
     // Google OAuth callback — unauthenticated (browser redirect from Google).
     // Session cookie is unavailable here because sameSite:strict blocks cross-site
     // navigations. CSRF protection is via the `state` parameter instead.
@@ -791,6 +799,64 @@ export class LynoxHTTPApi {
         : { indicator: 'minor', description: 'Last run failed (not recent)', provider: providerLabel };
     }
     return { indicator: 'none', description: 'Ready', provider: providerLabel };
+  }
+
+  // ── Multi-provider status ────────────────────────────────────────────────
+
+  /**
+   * Return status for every LLM provider currently configured on this instance.
+   * The primary provider is the first entry; Mistral follows if MISTRAL_API_KEY
+   * is set (used as fallback/worker in standard mode or primary in eu-sovereign).
+   * Voxtral voice provider shares the Mistral key — if the key is present it is
+   * already covered by the Mistral entry.
+   */
+  private async getProvidersStatus(): Promise<ProviderStatus[]> {
+    const primary = await this.getProviderStatus();
+    const list: ProviderStatus[] = [primary];
+
+    // Mistral is present when MISTRAL_API_KEY is configured AND we are not
+    // already reporting Mistral as the primary (eu-sovereign mode).
+    const hasMistralKey = !!(process.env['MISTRAL_API_KEY']?.length);
+    const primaryIsMistral = primary.provider?.toLowerCase().includes('mistral') ?? false;
+    if (hasMistralKey && !primaryIsMistral) {
+      list.push(this.getMistralStatus());
+    }
+
+    return list;
+  }
+
+  /**
+   * Derive Mistral status from run history. Mistral does not publish a
+   * Statuspage-compatible JSON endpoint, so we infer health from recent runs
+   * whose model_id starts with "mistral". If there are no Mistral runs yet, we
+   * report "Configured" with an unknown indicator.
+   */
+  private getMistralStatus(): ProviderStatus {
+    const label = 'Mistral AI';
+    const history = this.engine?.getRunHistory();
+    if (!history) return { indicator: 'unknown', description: 'Configured (no run history)', provider: label };
+
+    const recent = history.getRecentRuns(50);
+    const mistralRun = recent.find(r => r.model_id?.toLowerCase().startsWith('mistral'));
+
+    if (!mistralRun) {
+      return { indicator: 'unknown', description: 'Configured (no runs yet)', provider: label };
+    }
+
+    const lastRunTime = new Date(mistralRun.created_at).getTime();
+    const fiveMinAgo = Date.now() - 5 * 60_000;
+
+    if (mistralRun.status === 'completed') {
+      return lastRunTime > fiveMinAgo
+        ? { indicator: 'none', description: 'All Systems Operational', provider: label }
+        : { indicator: 'none', description: 'API OK (last success older than 5min)', provider: label };
+    }
+    if (mistralRun.status === 'failed') {
+      return lastRunTime > fiveMinAgo
+        ? { indicator: 'major', description: 'Last run failed', provider: label }
+        : { indicator: 'minor', description: 'Last run failed (not recent)', provider: label };
+    }
+    return { indicator: 'none', description: 'Ready', provider: label };
   }
 
   // ── Route registration ───────────────────────────────────────────────────
