@@ -12,6 +12,10 @@ lynox accepts voice input on two surfaces:
 
 Transcription happens server-side. Two providers are supported; you can choose which one runs.
 
+## Keyboard shortcut
+
+In the Web UI, **double-tap ⌘ (macOS) or Ctrl (Windows/Linux)** to start or stop recording — no chord, just two quick taps on the bare modifier within 350 ms. The shortcut is intentionally collision-free with every other browser/OS binding (a bare modifier is never used as a hotkey anywhere else), so it works the same in any focused field. Stop with the same gesture or click the microphone icon.
+
 ## Provider matrix
 
 | Provider              | Speed (60 s clip) | German WER (business speech) | Cost        | Hosting                    | When to use                                                       |
