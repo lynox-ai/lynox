@@ -43,6 +43,8 @@
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { playSpeech, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
+	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
+	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick } from 'svelte';
 
@@ -426,33 +428,12 @@
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 	let transcribing = $state(false);
-	// Active voice providers, fetched once on mount. `null` until known.
-	// STT provider controls which privacy hint renders under the recording UI;
-	// TTS availability controls whether the speak button on assistant replies
-	// is rendered at all.
-	let transcribeProvider = $state<'mistral-voxtral' | 'whisper-cpp' | null>(null);
-	let ttsAvailable = $state(false);
-
-	$effect(() => {
-		let cancelled = false;
-		void (async () => {
-			try {
-				const res = await fetch(`${getApiBase()}/voice/info`);
-				if (!res.ok || cancelled) return;
-				const data = (await res.json()) as {
-					stt?: { provider?: unknown } | undefined;
-					tts?: { available?: unknown } | undefined;
-				};
-				if (cancelled) return;
-				const sttProvider = data.stt?.provider;
-				if (sttProvider === 'mistral-voxtral' || sttProvider === 'whisper-cpp') {
-					transcribeProvider = sttProvider;
-				}
-				if (data.tts?.available === true) ttsAvailable = true;
-			} catch { /* best-effort — hint stays hidden on failure */ }
-		})();
-		return () => { cancelled = true; };
-	});
+	// Voice capabilities come from the shared voice-info store so StatusBar
+	// (auto-speak toggle) and ChatView (speaker button, privacy hint) stay in
+	// lockstep without duplicating the /api/voice/info probe.
+	void ensureVoiceInfoProbed();
+	const transcribeProvider = $derived(getSttProvider());
+	const ttsAvailable = $derived(isTtsAvailable());
 
 	const voicePrivacyKey = $derived(
 		transcribeProvider === 'mistral-voxtral' ? 'chat.voice_privacy_hint'
@@ -836,6 +817,80 @@
 	const isStreaming = $derived(getIsStreaming());
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());
+
+	// Auto-speak: when a streaming assistant reply finishes AND auto-speak is on
+	// AND TTS is available, trigger playSpeech on the new reply. Guarded by a
+	// prev-streaming check so token-stream tick re-runs of this effect don't
+	// trigger playback mid-reply.
+	let prevStreaming = false;
+	$effect(() => {
+		const streaming = isStreaming;
+		if (!prevStreaming || streaming) {
+			prevStreaming = streaming;
+			return;
+		}
+		prevStreaming = false;
+		if (!ttsAvailable || !isAutoSpeakEnabled()) return;
+		const idx = messages.length - 1;
+		const last = idx >= 0 ? messages[idx] : undefined;
+		if (last?.role !== 'assistant' || !last.content?.trim()) return;
+		maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
+		void playSpeech(last.content, `msg-${idx}`).then((err) => {
+			if (err) addToast(t('chat.speak_failed'), 'error');
+		});
+	});
+
+	// Double-tap the modifier key (⌘ on macOS, Ctrl on Win/Linux) to toggle
+	// voice recording — Raycast/Spotlight-style, zero collision with any
+	// other shortcut because the modifier alone is never bound to anything.
+	//
+	// Detection rule: two bare modifier presses within 350 ms without any
+	// other key pressed in between. "Bare" means we saw the keydown + keyup
+	// of the modifier with no intervening keydown of another key — that
+	// filters out normal chord usage like ⌘K, where the modifier goes down
+	// first but is followed by another key.
+	$effect(() => {
+		const TAP_WINDOW_MS = 350;
+		let lastTap = 0;
+		let heldModifier: 'Meta' | 'Control' | null = null;
+		let chordBroken = false;
+
+		function onKeyDown(e: KeyboardEvent): void {
+			if (e.key === 'Meta' || e.key === 'Control') {
+				if (heldModifier === null) {
+					heldModifier = e.key;
+					chordBroken = false;
+				}
+				return;
+			}
+			if (heldModifier !== null) chordBroken = true;
+		}
+
+		function onKeyUp(e: KeyboardEvent): void {
+			if (e.key !== 'Meta' && e.key !== 'Control') return;
+			if (heldModifier !== e.key) return;
+			const wasBareTap = !chordBroken;
+			heldModifier = null;
+			chordBroken = false;
+			if (!wasBareTap) { lastTap = 0; return; }
+
+			const now = Date.now();
+			if (now - lastTap < TAP_WINDOW_MS) {
+				lastTap = 0;
+				if (recording) stopRecording();
+				else void startRecording();
+			} else {
+				lastTap = now;
+			}
+		}
+
+		window.addEventListener('keydown', onKeyDown);
+		window.addEventListener('keyup', onKeyUp);
+		return () => {
+			window.removeEventListener('keydown', onKeyDown);
+			window.removeEventListener('keyup', onKeyUp);
+		};
+	});
 	const streamingLabel = $derived.by(() => {
 		if (!isStreaming) return '';
 		if (streamActivity === 'writing') return t('chat.activity.writing');
@@ -1787,6 +1842,7 @@
 						disabled={!ready}
 						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
 						aria-label={t('chat.voice_input')}
+						title="{t('chat.voice_input')} ({t('shortcut.voice_record')})"
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
