@@ -360,8 +360,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.autospeak_on': { de: 'Antworten automatisch vorlesen — an', en: 'Auto-read replies — on' },
 	'status.autospeak_playing': { de: 'Wird vorgelesen — klicken zum Stoppen', en: 'Reading aloud — click to stop' },
 	'shortcut.voice_record': {
-		de: typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? '⌘⇧V' : 'Strg+Umschalt+V',
-		en: typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? '⌘⇧V' : 'Ctrl+Shift+V',
+		de: typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? 'Doppeltipp ⌘' : 'Doppeltipp Strg',
+		en: typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? 'Double-tap ⌘' : 'Double-tap Ctrl',
 	},
 	'chat.thinking_label': { de: 'Thinking', en: 'Thinking' },
 	'chat.expand_all': { de: 'Alle aufklappen', en: 'Expand all' },

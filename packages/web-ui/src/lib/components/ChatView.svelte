@@ -840,21 +840,56 @@
 		});
 	});
 
-	// Global keyboard shortcut: Cmd/Ctrl+Shift+V toggles voice recording.
-	// Same key binding works on macOS (⌘⇧V) and Win/Linux (Ctrl+Shift+V).
-	// Press once to start, press again to stop + send. Ignored while an
-	// input/textarea is focused and the user is typing normally — but the
-	// chord itself is unambiguous enough that we fire regardless of focus.
+	// Double-tap the modifier key (⌘ on macOS, Ctrl on Win/Linux) to toggle
+	// voice recording — Raycast/Spotlight-style, zero collision with any
+	// other shortcut because the modifier alone is never bound to anything.
+	//
+	// Detection rule: two bare modifier presses within 350 ms without any
+	// other key pressed in between. "Bare" means we saw the keydown + keyup
+	// of the modifier with no intervening keydown of another key — that
+	// filters out normal chord usage like ⌘K, where the modifier goes down
+	// first but is followed by another key.
 	$effect(() => {
-		function onHotkey(e: KeyboardEvent) {
-			if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
-			if (e.key !== 'V' && e.key !== 'v') return;
-			e.preventDefault();
-			if (recording) stopRecording();
-			else void startRecording();
+		const TAP_WINDOW_MS = 350;
+		let lastTap = 0;
+		let heldModifier: 'Meta' | 'Control' | null = null;
+		let chordBroken = false;
+
+		function onKeyDown(e: KeyboardEvent): void {
+			if (e.key === 'Meta' || e.key === 'Control') {
+				if (heldModifier === null) {
+					heldModifier = e.key;
+					chordBroken = false;
+				}
+				return;
+			}
+			if (heldModifier !== null) chordBroken = true;
 		}
-		window.addEventListener('keydown', onHotkey);
-		return () => window.removeEventListener('keydown', onHotkey);
+
+		function onKeyUp(e: KeyboardEvent): void {
+			if (e.key !== 'Meta' && e.key !== 'Control') return;
+			if (heldModifier !== e.key) return;
+			const wasBareTap = !chordBroken;
+			heldModifier = null;
+			chordBroken = false;
+			if (!wasBareTap) { lastTap = 0; return; }
+
+			const now = Date.now();
+			if (now - lastTap < TAP_WINDOW_MS) {
+				lastTap = 0;
+				if (recording) stopRecording();
+				else void startRecording();
+			} else {
+				lastTap = now;
+			}
+		}
+
+		window.addEventListener('keydown', onKeyDown);
+		window.addEventListener('keyup', onKeyUp);
+		return () => {
+			window.removeEventListener('keydown', onKeyDown);
+			window.removeEventListener('keyup', onKeyUp);
+		};
 	});
 	const streamingLabel = $derived.by(() => {
 		if (!isStreaming) return '';
