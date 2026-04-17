@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.2.0 — 2026-04-17
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.1.0 (delete this block before saving):
+
+Core:
+- fix(whatsapp): bypass auth for webhook + status endpoints (#82)
+- feat(whatsapp): inbox integration Phase 0 behind feature flag (#80)
+- feat(speak): MSE progressive playback + auto-speak toggle + voice hotkey (#79)
+- feat(web-ui): model breakdown panel in history dashboard (#78)
+- feat(web-ui): multi-provider API status in footer (#77)
+- fix(ask_user): guard malformed options + surface tool errors to UI (#81)
+- fix(scripts): handle multiline CHANGELOG draft + merge commit title (#51)
+- fix(pricing): correct Opus 4.6 and Haiku 4.5 rates, add Opus 4.7 (#75)
+- fix(speak): Phase 1.1 production-hardening (#76)
+- fix(web-ui): allow blob: media for TTS audio playback (#74)
+- feat(web-ui): speak button on assistant replies + voice-output docs (#71)
+- feat(speak): HTTP API — POST /api/speak + GET /api/voice/info (#70)
+- feat(speak): Voxtral TTS facade + text-prep sanitizer (#69)
+- chore(scripts): add Phase 0 Voxtral TTS spike (#68)
+- feat(web-ui): extend voice privacy hint with quota note
+- feat(web-ui): render voice privacy hint under the recording UI
+- chore(scripts): add Phase 0 Voxtral spike + recorder (dev tooling)
+- feat(transcribe): thread session context into HTTP API + Telegram
+- feat(transcribe): Voxtral provider + two-layer glossary
+- docs: add mail integration page + update onboarding references
+
+Pro:
+- fix(ci): update staging engine instance ID after 2026-04-16 reprovision (#58)
+- docs(prd): voice TTS Phase 0 results + auto-speak toggle (#57)
+- feat(managed): document + pin MISTRAL_API_KEY flow for Voxtral voice
+- fix(scripts): use rollout endpoint instead of per-instance redeploy
+- feat: add mail integration to website + welcome email
+-->
 ## 1.0.5 — Release Workflow & CI Hardening (2026-04-16)
 
 ### Added
