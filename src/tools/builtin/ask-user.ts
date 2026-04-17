@@ -53,7 +53,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
                     properties: {
                       model: { type: 'string', enum: ['opus', 'sonnet', 'haiku'], description: 'Preferred model tier' },
                       thinking: { type: 'string', enum: ['adaptive', 'enabled', 'disabled'], description: 'Thinking mode' },
-                      effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'], description: 'Effort level' },
+                      effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'], description: 'Effort level' },
                     },
                   },
                 },
@@ -84,7 +84,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
                           properties: {
                             model: { type: 'string', enum: ['opus', 'sonnet', 'haiku'] },
                             thinking: { type: 'string', enum: ['adaptive', 'enabled', 'disabled'] },
-                            effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+                            effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
                           },
                         },
                       },

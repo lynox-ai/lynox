@@ -516,7 +516,8 @@ export class Agent implements IAgent {
           model: this.model,
           max_tokens: this.maxTokens,
           ...(thinkingEnabled ? { thinking: thinkingConfig } : {}),
-          ...(this.effort ? { output_config: { effort: this.effort } } : {}),
+          // Cast needed until Anthropic SDK types catch up with Opus 4.7's `xhigh` effort level.
+          ...(this.effort ? { output_config: { effort: this.effort as 'low' | 'medium' | 'high' | 'max' } } : {}),
           // Top-level cache_control: Anthropic-direct only (other providers may reject it; block-level works for all)
           ...(this.isNonDirectAnthropic ? {} : { cache_control: { type: 'ephemeral', ttl: '1h' } as unknown as BetaCacheControlEphemeral }),
           system: systemBlocks,

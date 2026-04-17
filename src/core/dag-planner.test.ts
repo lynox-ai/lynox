@@ -403,7 +403,7 @@ describe('estimatePipelineCost', () => {
     expect(sonnetCost.totalCostUsd).toBeGreaterThan(haikuCost.totalCostUsd);
 
     // Verify resolved model IDs
-    expect(opusCost.steps[0]!.model).toBe('claude-opus-4-6');
+    expect(opusCost.steps[0]!.model).toBe('claude-opus-4-7');
     expect(sonnetCost.steps[0]!.model).toBe('claude-sonnet-4-6');
     expect(haikuCost.steps[0]!.model).toBe('claude-haiku-4-5-20251001');
   });

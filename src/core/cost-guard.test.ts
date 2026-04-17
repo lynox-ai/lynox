@@ -25,17 +25,17 @@ describe('CostGuard', () => {
     it('sets warnAtUSD to 80% of maxBudgetUSD when not specified', () => {
       const cg = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');
       // Record enough to get past 80% ($8) but not 100%
-      // opus input: $15 per 1M tokens → 1M tokens = $15, so ~533_333 tokens = $8
-      cg.recordTurn(usage(533_334, 0));
+      // opus input: $5 per 1M tokens → 1M tokens = $5, so 1.6M tokens = $8
+      cg.recordTurn(usage(1_600_001, 0));
       expect(cg.shouldWarn()).toBe(true);
     });
 
     it('falls back to opus pricing for unknown model', () => {
       const cg = new CostGuard({ maxBudgetUSD: 1 }, 'unknown-model-xyz');
-      // 1M input tokens at opus pricing = $15
+      // 1M input tokens at opus pricing = $5
       cg.recordTurn(usage(1_000_000, 0));
       const snap = cg.snapshot();
-      expect(snap.estimatedCostUSD).toBe(15);
+      expect(snap.estimatedCostUSD).toBe(5);
     });
   });
 
@@ -141,8 +141,8 @@ describe('CostGuard', () => {
     });
 
     it('budgetPercent reflects cost ratio', () => {
-      // opus input $15/1M, so 1M input = $15 → 50% of $30 budget
-      const cg = new CostGuard({ maxBudgetUSD: 30 }, 'claude-opus-4-6');
+      // opus input $5/1M, so 1M input = $5 → 50% of $10 budget
+      const cg = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');
       cg.recordTurn(usage(1_000_000, 0));
       expect(cg.snapshot().budgetPercent).toBe(50);
     });
@@ -153,8 +153,8 @@ describe('CostGuard', () => {
       const cg = new CostGuard({}, 'claude-opus-4-6');
       cg.recordTurn(usage(1_000_000, 1_000_000, 1_000_000, 1_000_000));
       const snap = cg.snapshot();
-      // input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 → total: 110.25
-      expect(snap.estimatedCostUSD).toBeCloseTo(110.25, 2);
+      // input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 → total: 36.75
+      expect(snap.estimatedCostUSD).toBeCloseTo(36.75, 2);
     });
 
     it('calculates sonnet pricing correctly', () => {
@@ -169,21 +169,21 @@ describe('CostGuard', () => {
       const cg = new CostGuard({}, 'claude-haiku-4-5-20251001');
       cg.recordTurn(usage(1_000_000, 1_000_000, 1_000_000, 1_000_000));
       const snap = cg.snapshot();
-      // input: 0.80, output: 4, cacheWrite: 1.0, cacheRead: 0.08 → total: 5.88
-      expect(snap.estimatedCostUSD).toBeCloseTo(5.88, 2);
+      // input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 → total: 7.35
+      expect(snap.estimatedCostUSD).toBeCloseTo(7.35, 2);
     });
 
     it('cache write tokens use cacheWrite rate, not input rate', () => {
       const cg = new CostGuard({}, 'claude-opus-4-6');
       // Only cache write tokens, no input/output
       cg.recordTurn(usage(0, 0, 1_000_000, 0));
-      expect(cg.snapshot().estimatedCostUSD).toBeCloseTo(18.75, 2);
+      expect(cg.snapshot().estimatedCostUSD).toBeCloseTo(6.25, 2);
     });
 
     it('cache read tokens use cacheRead rate', () => {
       const cg = new CostGuard({}, 'claude-opus-4-6');
       cg.recordTurn(usage(0, 0, 0, 1_000_000));
-      expect(cg.snapshot().estimatedCostUSD).toBeCloseTo(1.5, 2);
+      expect(cg.snapshot().estimatedCostUSD).toBeCloseTo(0.50, 2);
     });
   });
 
