@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.1 — 2026-04-17
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.2.0 (delete this block before saving):
+
+Core:
+- feat(speak,web-ui): per-block auto-speak + monochrome voice prefix + tool icon refactor (#88)
+- fix: ask_secret on managed + Migration race in Settings (#87)
+- feat(web-ui): toast on stale client bundle after deploy (#86)
+- docs: voice hotkey, model breakdown, WhatsApp beta note for v1.2.0 (#85)
+
+Pro:
+- feat(web): add Voice entry to Communication integrations (#62)
+-->
 ## 1.2.0 — 2026-04-17
 
 ### Added
