@@ -65,6 +65,7 @@ export interface SessionOptions {
   onStream?: StreamHandler | undefined;
   promptUser?: ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?: ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
+  promptSecret?: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
   tenantId?: string | undefined;
   messages?: BetaMessageParam[] | undefined;
   systemPromptSuffix?: string | undefined;
@@ -135,6 +136,7 @@ export class Session {
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;
+    this._promptSecret = opts?.promptSecret ?? null;
     this._tenantId = opts?.tenantId ?? null;
     if (opts?.systemPromptSuffix) {
       this.agentOverrides.systemPromptSuffix = opts.systemPromptSuffix;
@@ -882,6 +884,9 @@ export class Session {
         : undefined,
       promptTabs: this._promptTabs
         ? (qs: TabQuestion[]) => this._promptTabs!(qs)
+        : undefined,
+      promptSecret: this._promptSecret
+        ? (name: string, prompt: string, keyType?: string) => this._promptSecret!(name, prompt, keyType)
         : undefined,
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,

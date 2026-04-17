@@ -16,13 +16,19 @@
 
 	let { extraItems = [] }: { extraItems?: SettingsItem[] } = $props();
 
-	let managed = $state(false);
+	// `null` = not yet probed. We deliberately DO NOT default to `false` —
+	// on managed instances the /api/config round-trip would otherwise flash
+	// the "Migration zu Managed Hosting" entry during the ~300 ms before the
+	// response arrives, which is confusing for customers who already have a
+	// managed instance. The filter below hides self-host-only items until we
+	// have a confirmed answer (Rafael reported this on engine.lynox.cloud).
+	let managed = $state<boolean | null>(null);
 
 	$effect(() => {
 		fetch(`${getApiBase()}/config`)
 			.then(r => r.json())
 			.then((data: Record<string, unknown>) => { managed = !!data['managed']; })
-			.catch(() => {});
+			.catch(() => { managed = false; });
 	});
 
 	const sections: SettingsSection[] = [
@@ -51,13 +57,17 @@
 		},
 	];
 
+	// Hide self-host-only items when managed is true OR still unknown.
+	// Only show them when we've confirmed managed === false.
+	const hideSelfHostOnly = $derived(managed !== false);
+
 	const finalSections = $derived(
 		sections.map(section => ({
 			labelKey: section.labelKey,
-			items: section.items.filter(i => !i.selfHostOnly || !managed),
+			items: section.items.filter(i => !i.selfHostOnly || !hideSelfHostOnly),
 		})).concat(
 			extraItems.length > 0
-				? [{ labelKey: '', items: extraItems.filter(i => !i.selfHostOnly || !managed) }]
+				? [{ labelKey: '', items: extraItems.filter(i => !i.selfHostOnly || !hideSelfHostOnly) }]
 				: []
 		).filter(s => s.items.length > 0)
 	);
