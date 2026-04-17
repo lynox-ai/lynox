@@ -883,6 +883,9 @@ export class Session {
       promptTabs: this._promptTabs
         ? (qs: TabQuestion[]) => this._promptTabs!(qs)
         : undefined,
+      promptSecret: this._promptSecret
+        ? (name: string, prompt: string, keyType?: string) => this._promptSecret!(name, prompt, keyType)
+        : undefined,
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,
       excludeTools: this.agentOverrides.excludeTools,
