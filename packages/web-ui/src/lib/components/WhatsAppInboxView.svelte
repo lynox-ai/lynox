@@ -49,8 +49,46 @@
 	let loadingThread = $state(false);
 	let composeText = $state('');
 	let sending = $state(false);
+	let filterText = $state('');
 
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+	// Pause polling when the browser tab is hidden to save battery on mobile.
+	// Resume + immediate refresh on visibilitychange when the tab comes back.
+	let tabVisible = $state(typeof document !== 'undefined' ? document.visibilityState === 'visible' : true);
+
+	// Per-thread draft cache, persisted in localStorage so a page refresh
+	// mid-reply doesn't lose what the user was typing.
+	const DRAFT_STORAGE_KEY = 'lynox-whatsapp-drafts';
+	function loadDraftsFromStorage(): Record<string, string> {
+		if (typeof localStorage === 'undefined') return {};
+		try {
+			const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+			if (!raw) return {};
+			const parsed: unknown = JSON.parse(raw);
+			if (typeof parsed !== 'object' || parsed === null) return {};
+			const out: Record<string, string> = {};
+			for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+				if (typeof v === 'string') out[k] = v;
+			}
+			return out;
+		} catch { return {}; }
+	}
+	function persistDrafts(): void {
+		if (typeof localStorage === 'undefined') return;
+		try { localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(drafts)); } catch { /* quota or disabled */ }
+	}
+	let drafts = $state<Record<string, string>>(loadDraftsFromStorage());
+
+	const filteredThreads = $derived.by(() => {
+		const q = filterText.trim().toLowerCase();
+		if (q.length === 0) return threads;
+		return threads.filter(t =>
+			(t.displayName && t.displayName.toLowerCase().includes(q)) ||
+			t.phoneE164.includes(q.replace(/[^0-9]/g, '')) ||
+			t.lastMessagePreview.toLowerCase().includes(q),
+		);
+	});
 
 	async function loadStatus(): Promise<boolean> {
 		try {
@@ -82,7 +120,15 @@
 	}
 
 	async function openThread(threadId: string) {
+		// Save the in-progress draft for the thread the user is leaving.
+		if (selectedThreadId && selectedThreadId !== threadId) {
+			const trimmed = composeText.trim();
+			if (trimmed.length > 0) drafts[selectedThreadId] = composeText;
+			else delete drafts[selectedThreadId];
+			persistDrafts();
+		}
 		selectedThreadId = threadId;
+		composeText = drafts[threadId] ?? '';
 		loadingThread = true;
 		messages = [];
 		contact = null;
@@ -116,6 +162,9 @@
 				throw new Error(err.error ?? 'Send failed');
 			}
 			composeText = '';
+			// Clear the persisted draft for this thread on successful send.
+			delete drafts[selectedThread.threadId];
+			persistDrafts();
 			addToast('Gesendet', 'success', 1500);
 			// Reload thread to reflect the new message + refresh inbox.
 			await openThread(selectedThread.threadId);
@@ -160,12 +209,26 @@
 		}
 	}
 
+	function handleVisibilityChange() {
+		tabVisible = document.visibilityState === 'visible';
+		if (tabVisible) {
+			// Immediate refresh when the user returns to the tab so they aren't
+			// staring at stale data for up to the next poll tick.
+			void loadInbox();
+			if (selectedThreadId) void openThread(selectedThreadId);
+		}
+	}
+
 	onMount(async () => {
 		const enabled = await loadStatus();
 		if (!enabled) { loading = false; return; }
 		void loadInbox();
-		// Poll every 10s for new messages. Phase 1 switches to SSE push.
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+		// Poll every 10s for new messages — skip ticks when tab is hidden so
+		// mobile browsers don't drain the battery while the UI isn't visible.
+		// Phase 1 replaces this with SSE push.
 		refreshTimer = setInterval(() => {
+			if (!tabVisible) return;
 			void loadInbox();
 			if (selectedThreadId) void openThread(selectedThreadId);
 		}, 10_000);
@@ -173,6 +236,9 @@
 
 	onDestroy(() => {
 		if (refreshTimer) clearInterval(refreshTimer);
+		if (typeof document !== 'undefined') {
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+		}
 	});
 </script>
 
@@ -193,8 +259,18 @@
 		{:else if threads.length === 0}
 			<p class="muted">Noch keine WhatsApp-Nachrichten. Warte auf eingehende Nachrichten oder prüfe die Integration.</p>
 		{:else}
+			<input
+				type="search"
+				class="filter"
+				placeholder="Name, Nummer oder Text …"
+				bind:value={filterText}
+				aria-label="Threads filtern"
+			/>
+			{#if filteredThreads.length === 0}
+				<p class="muted">Kein Treffer für „{filterText}".</p>
+			{/if}
 			<ul>
-				{#each threads as thread (thread.threadId)}
+				{#each filteredThreads as thread (thread.threadId)}
 					<li>
 						<button
 							class="thread-item"
@@ -303,6 +379,12 @@
 	}
 	.refresh:hover { background: rgba(255,255,255,0.05); }
 	.thread-list ul { list-style: none; margin: 0; padding: 0; }
+	.filter {
+		width: 100%; padding: 0.35rem 0.55rem; margin-bottom: 0.4rem;
+		border-radius: 0.35rem; border: 1px solid var(--color-border, #333);
+		background: var(--color-bg, #0d0d0d); color: inherit;
+		font-family: inherit; font-size: 0.8rem;
+	}
 	.thread-list li { margin: 0; }
 	.thread-item {
 		width: 100%; text-align: left; background: none; border: none;
