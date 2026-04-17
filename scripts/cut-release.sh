@@ -331,22 +331,21 @@ DRAFT
     return
   fi
 
-  # Prepend draft after top "# Changelog" header
-  local tmp
+  # Prepend draft after top "# Changelog" header.
+  # We avoid awk -v because the draft may contain newlines and special chars
+  # from commit messages that break "newline in string" parsing.
+  local tmp draft_file
   tmp=$(mktemp)
-  awk -v draft="$draft" '
-    BEGIN { inserted = 0 }
-    /^# Changelog/ && inserted == 0 {
-      print
-      print ""
-      print draft
-      inserted = 1
-      skip_next_blank = 1
-      next
-    }
-    skip_next_blank == 1 && /^$/ { skip_next_blank = 0; next }
-    { skip_next_blank = 0; print }
-  ' "$changelog" > "$tmp"
+  draft_file=$(mktemp)
+  printf '%s\n' "$draft" > "$draft_file"
+  {
+    head -n 1 "$changelog"          # "# Changelog"
+    echo ""
+    cat "$draft_file"
+    # Skip the first line (header) and any immediately following blank line
+    tail -n +2 "$changelog" | awk 'NR == 1 && /^$/ { next } { print }'
+  } > "$tmp"
+  rm -f "$draft_file"
   mv "$tmp" "$changelog"
 
   if ! $NO_EDIT; then
@@ -599,10 +598,15 @@ tag_and_release() {
     return
   fi
 
-  local core_head_msg
-  core_head_msg=$(git -C "$CORE_DIR" log -1 --format=%s)
-  if [[ "$core_head_msg" != *"chore(release): $TAG"* ]]; then
-    die "core HEAD is not the release commit (got: '$core_head_msg'). Was the PR merged with a different title?"
+  # Verify HEAD carries the release version. We check package.json instead of
+  # the commit subject because GitHub merge commits have their own title
+  # ("Merge pull request #N from ..."), not the original commit message.
+  local head_version
+  head_version=$(pkg_version "core/package.json")
+  if [[ "$head_version" != "$VERSION" ]]; then
+    local core_head_msg
+    core_head_msg=$(git -C "$CORE_DIR" log -1 --format=%s)
+    die "core HEAD does not carry version $VERSION (package.json has '$head_version', commit: '$core_head_msg'). Was the correct PR merged?"
   fi
 
   if git -C "$CORE_DIR" rev-parse "$TAG" >/dev/null 2>&1; then
