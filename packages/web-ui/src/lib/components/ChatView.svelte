@@ -10,6 +10,8 @@
 		getIsStreaming,
 		getStreamingActivity,
 		getStreamingToolName,
+		getCompletedTextBlockGen,
+		getCompletedTextBlock,
 		getQueueLength,
 		getPendingPermission,
 		getPendingSecretPrompt,
@@ -36,13 +38,15 @@
 	} from '../stores/chat.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
+	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
+	import { getToolIcon } from '../utils/tool-icons.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { playSpeech, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
+	import { playSpeech, playSpeechQueued, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
@@ -267,7 +271,7 @@
 
 	type GroupedBlock =
 		| { type: 'text'; text: string }
-		| { type: 'tools'; action: string; subjects: string[] }
+		| { type: 'tools'; action: string; subjects: string[]; toolName: string }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'step_done'; stepId: string; summary: string };
 
@@ -331,7 +335,7 @@
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
 				} else {
-					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [] });
+					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name });
 				}
 			}
 		}
@@ -818,24 +822,25 @@
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());
 
-	// Auto-speak: when a streaming assistant reply finishes AND auto-speak is on
-	// AND TTS is available, trigger playSpeech on the new reply. Guarded by a
-	// prev-streaming check so token-stream tick re-runs of this effect don't
-	// trigger playback mid-reply.
-	let prevStreaming = false;
+	// Auto-speak per text-block. The chat store bumps `completedTextBlockGen`
+	// every time the assistant closes a text block — either because a tool
+	// call interrupts the writing or the turn ends. We pick that up here and
+	// enqueue the block via `playSpeechQueued`, which chains playbacks via
+	// `audio.onended` so block-N speaks while the model is still writing
+	// block-(N+1). The first block's TTS request fires within ~100 ms of the
+	// model starting the next tool call, so the user hears something almost
+	// immediately instead of waiting for the whole turn to finish.
+	const completedBlockGen = $derived(getCompletedTextBlockGen());
+	let prevCompletedGen = 0;
 	$effect(() => {
-		const streaming = isStreaming;
-		if (!prevStreaming || streaming) {
-			prevStreaming = streaming;
-			return;
-		}
-		prevStreaming = false;
+		const gen = completedBlockGen;
+		if (gen <= prevCompletedGen) return;
+		prevCompletedGen = gen;
 		if (!ttsAvailable || !isAutoSpeakEnabled()) return;
-		const idx = messages.length - 1;
-		const last = idx >= 0 ? messages[idx] : undefined;
-		if (last?.role !== 'assistant' || !last.content?.trim()) return;
+		const block = getCompletedTextBlock();
+		if (!block.content.trim()) return;
 		maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
-		void playSpeech(last.content, `msg-${idx}`).then((err) => {
+		void playSpeechQueued(block.content, block.key).then((err) => {
 			if (err) addToast(t('chat.speak_failed'), 'error');
 		});
 	});
@@ -1259,7 +1264,11 @@
 							onclick={() => { if (msg.failed) { sendMessage(msg.content); msg.failed = false; } else { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); } }}
 							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
-							{msg.content}
+							{#if hasVoicePrefix(msg.content)}
+								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(msg.content)}
+							{:else}
+								{msg.content}
+							{/if}
 							{#if msg.failed}
 								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-danger/70 mt-1">{t('chat.send_failed')}</span>
 							{:else if msg.queued}
@@ -1303,8 +1312,11 @@
 									<span class="text-text-muted"><span class="font-medium">{stepName}</span>{#if gBlock.summary}<span class="text-text-subtle/70"> — {gBlock.summary.length > 120 ? gBlock.summary.slice(0, 120) + '...' : gBlock.summary}</span>{/if}</span>
 								</div>
 							{:else if gBlock.type === 'tools'}
+								{@const toolDef = getToolIcon(gBlock.toolName)}
 								<div class="flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 border-l-2 border-border pl-3 py-1 md:py-0.5">
-									<span class="inline-block h-1.5 w-1.5 md:h-1 md:w-1 rounded-full bg-success flex-shrink-0"></span>
+									<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 {toolDef.color}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+										{#each toolDef.paths as p}<path stroke-linecap="round" stroke-linejoin="round" d={p} />{/each}
+									</svg>
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
 								</div>
 							{:else if gBlock.type === 'text' && gBlock.text}
@@ -1332,8 +1344,11 @@
 							{@const legacyGroups = groupedToolCalls((msg.toolCalls ?? []).map((_, i) => ({ type: 'tool_call' as const, index: i })), msg.toolCalls ?? [])}
 							{#each legacyGroups as lg}
 								{#if lg.type === 'tools'}
+									{@const lgDef = getToolIcon(lg.toolName)}
 									<div class="flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 py-1 md:py-0.5">
-										<span class="inline-block h-1.5 w-1.5 md:h-1 md:w-1 rounded-full bg-success flex-shrink-0"></span>
+										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 {lgDef.color}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+											{#each lgDef.paths as p}<path stroke-linecap="round" stroke-linejoin="round" d={p} />{/each}
+										</svg>
 										<span>{lg.action}{lg.subjects.length > 0 ? ': ' + lg.subjects.join(', ') : ''}</span>
 									</div>
 								{/if}
@@ -1440,28 +1455,28 @@
 					<p class="text-xs text-text-muted mb-3">{t('onboard.whats_next_subtitle')}</p>
 					<div class="space-y-2">
 						<a href="/app/settings/integrations" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<span class="text-sm">📧</span>
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
 							<div>
 								<span class="text-sm font-medium text-text">{t('onboard.whats_next_google')}</span>
 								<p class="text-xs text-text-muted">{t('onboard.whats_next_google_desc')}</p>
 							</div>
 						</a>
 						<a href="/app/settings/mobile" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<span class="text-sm">📱</span>
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 0 0 6 3.75v16.5a2.25 2.25 0 0 0 2.25 2.25h7.5A2.25 2.25 0 0 0 18 20.25V3.75a2.25 2.25 0 0 0-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" /></svg>
 							<div>
 								<span class="text-sm font-medium text-text">{t('onboard.whats_next_mobile')}</span>
 								<p class="text-xs text-text-muted">{t('onboard.whats_next_mobile_desc')}</p>
 							</div>
 						</a>
 						<a href="/app/settings/integrations" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<span class="text-sm">🔔</span>
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" /></svg>
 							<div>
 								<span class="text-sm font-medium text-text">{t('onboard.whats_next_notifications')}</span>
 								<p class="text-xs text-text-muted">{t('onboard.whats_next_notifications_desc')}</p>
 							</div>
 						</a>
 						<a href="/app/knowledge" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<span class="text-sm">🧠</span>
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" /></svg>
 							<div>
 								<span class="text-sm font-medium text-text">{t('onboard.whats_next_knowledge')}</span>
 								<p class="text-xs text-text-muted">{t('onboard.whats_next_knowledge_desc')}</p>

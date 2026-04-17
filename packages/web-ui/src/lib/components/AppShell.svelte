@@ -7,6 +7,7 @@
 	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import { timeAgo } from '../utils/time.js';
+	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { getApiBase } from '../config.svelte.js';
 	import StatusBar from './StatusBar.svelte';
 	import SetupBanner from './SetupBanner.svelte';
@@ -380,7 +381,11 @@
 														ondblclick={() => startRename(thread.id, thread.title || formatThreadDate(thread.created_at))}
 														class="flex-1 text-left px-2 py-2 text-sm truncate"
 													>
-														{thread.title || formatThreadDate(thread.created_at)}
+														{#if hasVoicePrefix(thread.title)}
+															<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3 w-3 mr-1 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(thread.title!)}
+														{:else}
+															{thread.title || formatThreadDate(thread.created_at)}
+														{/if}
 													</button>
 												{/if}
 													{#if thread.is_favorite || thread.skip_extraction}

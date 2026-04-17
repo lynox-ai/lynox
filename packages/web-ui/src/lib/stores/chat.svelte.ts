@@ -188,6 +188,23 @@ let chatError = $state<string | null>(null);
 let chatErrorDetail = $state<string | null>(null);
 let authError = $state(false);
 let messageQueue = $state<QueuedMessage[]>([]);
+
+// Auto-speak per-block signal: bumped each time the assistant closes a text
+// block during a streaming turn (i.e. a tool call interrupts the text, or
+// the turn ends). ChatView watches this counter, reads the matched content,
+// and enqueues the playback so block-N starts speaking while block-(N+1) is
+// still being written by the model.
+let completedTextBlockGen = $state(0);
+let completedTextBlockContent = '';
+let completedTextBlockKey = '';
+function emitCompletedTextBlock(content: string, key: string): void {
+	const trimmed = content.trim();
+	if (!trimmed) return;
+	completedTextBlockContent = content;
+	completedTextBlockKey = key;
+	completedTextBlockGen++;
+}
+
 let sessionModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
@@ -562,8 +579,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				&& JSON.stringify(lastTc.input) === JSON.stringify(toolInput))) {
 				const tcIndex = msg.toolCalls.length;
 				msg.toolCalls.push({ name: toolName, input: toolInput, status: 'running' });
-				// Interleaved blocks: add tool_call block in order
+				// Interleaved blocks: add tool_call block in order. If the previous
+				// block was text, that text just became "complete" — emit it so
+				// auto-speak can start playing it without waiting for turn_end.
 				msg.blocks = msg.blocks ?? [];
+				const prevBlock = msg.blocks[msg.blocks.length - 1];
+				if (prevBlock && prevBlock.type === 'text') {
+					emitCompletedTextBlock(prevBlock.text, `msg-${idx}-block-${msg.blocks.length - 1}`);
+				}
 				msg.blocks.push({ type: 'tool_call', index: tcIndex });
 			}
 			msg._toolSinceText = true;
@@ -642,6 +665,16 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				if (!contextBudget || inTok > (contextBudget.totalTokens ?? 0)) {
 					const pct = Math.round(inTok / contextWindow * 100);
 					contextBudget = { totalTokens: inTok, maxTokens: contextWindow, usagePercent: pct };
+				}
+			}
+			// Final text block: if the assistant ended on text (no trailing tool
+			// call), emit it now so auto-speak picks up the closing paragraph.
+			// Tool-call paths already emitted earlier; this only fires for the
+			// last block of the turn.
+			if (msg.blocks && msg.blocks.length > 0) {
+				const lastBlock = msg.blocks[msg.blocks.length - 1];
+				if (lastBlock && lastBlock.type === 'text') {
+					emitCompletedTextBlock(lastBlock.text, `msg-${idx}-block-${msg.blocks.length - 1}-final`);
 				}
 			}
 			break;
@@ -909,6 +942,14 @@ export function getStreamingToolName() {
 }
 export function getQueueLength() {
 	return messageQueue.length;
+}
+/** Monotonic counter, bumped each time a streaming text block closes. */
+export function getCompletedTextBlockGen(): number {
+	return completedTextBlockGen;
+}
+/** Snapshot of the last completed text block (read after `getCompletedTextBlockGen()` increments). */
+export function getCompletedTextBlock(): { content: string; key: string } {
+	return { content: completedTextBlockContent, key: completedTextBlockKey };
 }
 export function getPendingPermission() {
 	return pendingPermission;
