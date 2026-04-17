@@ -62,6 +62,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.desc.activity': { de: 'Runs, Kosten, Aufgaben', en: 'Runs, costs, tasks' },
 	'nav.workflows': { de: 'Abläufe', en: 'Workflows' },
 	'nav.desc.workflows': { de: 'Pipelines und Automatisierungen', en: 'Pipelines and automations' },
+	'nav.whatsapp': { de: 'WhatsApp', en: 'WhatsApp' },
+	'nav.desc.whatsapp': { de: 'Kundennachrichten triagen', en: 'Triage customer messages' },
 
 	// Hub tabs
 	'hub.knowledge.wissen': { de: 'Wissen', en: 'Knowledge' },

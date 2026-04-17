@@ -7,6 +7,7 @@ describe('features', () => {
   const envVars = [
     'LYNOX_FEATURE_TRIGGERS',
     'LYNOX_FEATURE_PLUGINS',
+    'LYNOX_FEATURE_WHATSAPP_INBOX',
     'LYNOX_FEATURE_CUSTOM',
   ];
 
@@ -51,6 +52,12 @@ describe('features', () => {
 
     it('returns false for unknown flag', () => {
       expect(isFeatureEnabled('nonexistent')).toBe(false);
+    });
+
+    it('whatsapp-inbox defaults off (Phase 0 pilot gating)', () => {
+      expect(isFeatureEnabled('whatsapp-inbox')).toBe(false);
+      process.env['LYNOX_FEATURE_WHATSAPP_INBOX'] = '1';
+      expect(isFeatureEnabled('whatsapp-inbox')).toBe(true);
     });
   });
 

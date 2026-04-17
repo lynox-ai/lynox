@@ -342,7 +342,8 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 32 builtin always; +5 mail tools only when vault is available.
+      // 32 builtin always; +5 mail tools when vault is available.
+      // WhatsApp is gated behind LYNOX_FEATURE_WHATSAPP_INBOX (off in tests).
       expect([32, 37]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
@@ -408,7 +409,8 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 32 builtin always; +5 mail tools only when vault is available.
+      // 32 builtin always; +5 mail tools when vault is available.
+      // WhatsApp is gated behind LYNOX_FEATURE_WHATSAPP_INBOX (off in tests).
       expect([32, 37]).toContain(mockRegister.mock.calls.length);
     });
 

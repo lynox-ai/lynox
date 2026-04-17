@@ -3,6 +3,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import MailSettings from './MailSettings.svelte';
+	import WhatsAppSettings from './WhatsAppSettings.svelte';
 	import {
 		initNotifications,
 		enablePushNotifications,
@@ -592,6 +593,9 @@
 
 	<!-- Mail (IMAP/SMTP + app-password) -->
 	<MailSettings />
+
+	<!-- WhatsApp Business (Coexistence, BYOK) -->
+	<WhatsAppSettings />
 
 	<!-- Google Workspace -->
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
