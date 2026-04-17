@@ -5,9 +5,13 @@
 	import { onDestroy } from 'svelte';
 	import { getContextBudget, getSessionModel, getAuthError } from '../stores/chat.svelte.js';
 
+	type Indicator = 'none' | 'minor' | 'major' | 'critical' | 'unknown';
+	interface ProviderEntry { indicator: Indicator; description: string; provider: string }
+
 	let engineOk = $state<boolean | null>(null);
-	let apiStatus = $state<'none' | 'minor' | 'major' | 'critical' | 'unknown' | null>(null);
+	let apiStatus = $state<Indicator | null>(null);
 	let providerName = $state('Anthropic API');
+	let providers = $state<ProviderEntry[]>([]);
 	let activeTasks = $state(0);
 	let todayCost = $state(0);
 	let todayRuns = $state(0);
@@ -45,23 +49,30 @@
 
 	async function poll() {
 		try {
-			const [healthRes, tasksRes, dailyRes, providerRes] = await Promise.all([
+			const [healthRes, tasksRes, dailyRes, providersRes] = await Promise.all([
 				fetch(`${getApiBase()}/health`).catch(() => null),
 				fetch(`${getApiBase()}/tasks?status=in_progress`).catch(() => null),
 				fetch(`${getApiBase()}/history/cost/daily?days=1`).catch(() => null),
-				fetch(`${getApiBase()}/provider/status`).catch(() => null),
+				fetch(`${getApiBase()}/providers/status`).catch(() => null),
 			]);
 
 			engineOk = healthRes?.ok ?? false;
 
-			if (providerRes?.ok) {
-				const data = (await providerRes.json()) as { indicator: string; provider?: string };
-				const ind = data.indicator;
-				apiStatus = ind === 'none' || ind === 'minor' || ind === 'major' || ind === 'critical'
-					? ind : 'unknown';
-				if (data.provider) providerName = data.provider;
+			if (providersRes?.ok) {
+				const data = (await providersRes.json()) as { providers: ProviderEntry[] };
+				providers = Array.isArray(data.providers) ? data.providers : [];
+				const primary = providers[0];
+				if (primary) {
+					const ind = primary.indicator;
+					apiStatus = ind === 'none' || ind === 'minor' || ind === 'major' || ind === 'critical'
+						? ind : 'unknown';
+					if (primary.provider) providerName = primary.provider;
+				} else {
+					apiStatus = 'unknown';
+				}
 			} else {
 				apiStatus = 'unknown';
+				providers = [];
 			}
 
 			if (tasksRes?.ok) {
@@ -233,10 +244,31 @@
 				<span class="font-medium text-text">Engine: {engineOk === true ? t('status.connected') : t('status.disconnected')}</span>
 			</div>
 
-			<!-- Provider API Status -->
-			<div class="flex items-center gap-2">
-				<span class="inline-block h-2 w-2 rounded-full {apiStatusClass()}"></span>
-				<span class="font-medium text-text">{providerName}: {apiStatusLabel()}</span>
+			<!-- Provider API Status — one row per configured provider -->
+			<div>
+				<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.api_status')}</p>
+				<div class="space-y-1.5">
+					{#if providers.length === 0}
+						<div class="flex items-center gap-2 text-sm">
+							<span class="inline-block h-2 w-2 rounded-full {apiStatusClass()}"></span>
+							<span class="font-medium text-text">{providerName}: {apiStatusLabel()}</span>
+						</div>
+					{:else}
+						{#each providers as p, i (p.provider)}
+							<div class="flex items-center gap-2 text-sm" title={p.description}>
+								<span class="inline-block h-2 w-2 rounded-full {
+									hasAuthError && i === 0 ? 'bg-danger'
+									: p.indicator === 'none' ? 'bg-success'
+									: p.indicator === 'minor' ? 'bg-warning'
+									: p.indicator === 'major' || p.indicator === 'critical' ? 'bg-danger'
+									: 'bg-text-subtle animate-pulse'
+								}"></span>
+								<span class="font-medium text-text">{p.provider}</span>
+								<span class="text-xs text-text-subtle">— {p.description}</span>
+							</div>
+						{/each}
+					{/if}
+				</div>
 			</div>
 
 			<!-- API Keys -->
