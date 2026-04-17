@@ -131,11 +131,11 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
         cache_read_input_tokens: 200_000,
       });
 
-      // input:  500k * $0.80/M  = $0.40
-      // output: 100k * $4.00/M  = $0.40
-      // cacheW:  50k * $1.00/M  = $0.05
-      // cacheR: 200k * $0.08/M  = $0.016
-      const expected = 0.40 + 0.40 + 0.05 + 0.016;
+      // input:  500k * $1.00/M  = $0.50
+      // output: 100k * $5.00/M  = $0.50
+      // cacheW:  50k * $1.25/M  = $0.0625
+      // cacheR: 200k * $0.10/M  = $0.02
+      const expected = 0.50 + 0.50 + 0.0625 + 0.02;
       expect(cost).toBeCloseTo(expected, 4);
     });
 
@@ -161,9 +161,9 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
         output_tokens: 100_000,
       });
 
-      // input:  200k * $15.0/M = $3.00
-      // output: 100k * $75.0/M = $7.50
-      const expected = 3.0 + 7.5;
+      // input:  200k * $5.00/M = $1.00
+      // output: 100k * $25.0/M = $2.50
+      const expected = 1.0 + 2.5;
       expect(cost).toBeCloseTo(expected, 4);
     });
 
