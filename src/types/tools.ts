@@ -33,7 +33,7 @@ export type StreamEvent =
   | { type: 'thinking';    thinking: string;                       agent: string }
   | { type: 'thinking_done';                                       agent: string }
   | { type: 'tool_call';   name: string; input: unknown;           agent: string }
-  | { type: 'tool_result'; name: string; result: string;           agent: string }
+  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean }
   | { type: 'spawn';       agents: string[]; estimatedCostUSD?: number | undefined; agent: string }
   | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  model?: string | undefined; agent: string }
   | { type: 'error';       message: string;                        agent: string }

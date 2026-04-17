@@ -366,6 +366,30 @@ describe('Agent', () => {
       expect(badResult!.is_error).toBe(true);
     });
 
+    it('emits tool_result stream event with isError=true when handler throws', async () => {
+      const failTool = makeTool('bad_tool', vi.fn().mockRejectedValue(new Error('boom')));
+      const onStream = vi.fn();
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_bad', name: 'bad_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('OK'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [failTool],
+        onStream,
+      });
+      await agent.send('Use it');
+
+      const toolResultEvents = onStream.mock.calls
+        .map(c => c[0])
+        .filter(e => e.type === 'tool_result' && e.name === 'bad_tool');
+      expect(toolResultEvents).toHaveLength(1);
+      expect(toolResultEvents[0]!.isError).toBe(true);
+      expect(toolResultEvents[0]!.result).toContain('boom');
+    });
+
     it('tool not found: returns error result', async () => {
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_missing', name: 'nonexistent', input: {} }]))

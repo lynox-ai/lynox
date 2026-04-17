@@ -60,7 +60,17 @@ export interface RunStats {
   total_tokens_out: number;
   total_cost_usd: number;
   avg_duration_ms: number;
-  cost_by_model: Array<{ model_id: string; cost_usd: number; run_count: number }>;
+  cost_by_model: Array<ModelBreakdownEntry>;
+}
+
+export interface ModelBreakdownEntry {
+  model_id: string;
+  cost_usd: number;
+  run_count: number;
+  tokens_in: number;
+  tokens_out: number;
+  tokens_cache_read: number;
+  tokens_cache_write: number;
 }
 
 /** Per-run data for Pattern Engine analysis. */
@@ -926,10 +936,16 @@ export class RunHistory {
     `).get() as { total_runs: number; total_tokens_in: number; total_tokens_out: number; total_cost_usd: number; avg_duration_ms: number };
 
     const costByModel = this.db.prepare(`
-      SELECT model_id, COALESCE(SUM(cost_usd), 0) as cost_usd, COUNT(*) as run_count
+      SELECT model_id,
+             COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COUNT(*) as run_count,
+             COALESCE(SUM(tokens_in), 0) as tokens_in,
+             COALESCE(SUM(tokens_out), 0) as tokens_out,
+             COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read,
+             COALESCE(SUM(tokens_cache_write), 0) as tokens_cache_write
       FROM runs WHERE status NOT IN ('running', 'failed')
       GROUP BY model_id ORDER BY cost_usd DESC
-    `).all() as Array<{ model_id: string; cost_usd: number; run_count: number }>;
+    `).all() as ModelBreakdownEntry[];
 
     return { ...totals, cost_by_model: costByModel };
   }
@@ -944,11 +960,17 @@ export class RunHistory {
     `).all(`-${days} days`) as Array<{ day: string; cost_usd: number; run_count: number }>;
   }
 
-  getCostByModel(): Array<{ model_id: string; cost_usd: number; run_count: number }> {
+  getCostByModel(): ModelBreakdownEntry[] {
     return this.db.prepare(`
-      SELECT model_id, COALESCE(SUM(cost_usd), 0) as cost_usd, COUNT(*) as run_count
+      SELECT model_id,
+             COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COUNT(*) as run_count,
+             COALESCE(SUM(tokens_in), 0) as tokens_in,
+             COALESCE(SUM(tokens_out), 0) as tokens_out,
+             COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read,
+             COALESCE(SUM(tokens_cache_write), 0) as tokens_cache_write
       FROM runs GROUP BY model_id ORDER BY cost_usd DESC
-    `).all() as Array<{ model_id: string; cost_usd: number; run_count: number }>;
+    `).all() as ModelBreakdownEntry[];
   }
 
   /** Count tool calls of a specific type within the last N hours (via run timestamps). */
