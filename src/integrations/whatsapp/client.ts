@@ -8,6 +8,12 @@ import type { WhatsAppCredentials } from './types.js';
 const GRAPH_VERSION = 'v22.0';
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
+// Hard ceiling on every Meta API call so a hung network request can't wedge
+// the engine (voice-note transcription fires from a webhook handler that must
+// respond quickly; a hung fetchMedia would pile up in the background).
+const META_REQUEST_TIMEOUT_MS = 15_000;
+const META_MEDIA_DOWNLOAD_TIMEOUT_MS = 30_000;
+
 export interface SendTextResult {
   /** Meta's returned wa_id for the outbound message. */
   readonly messageId: string;
@@ -67,6 +73,7 @@ export class WhatsAppClient {
 
     const binRes = await fetch(url, {
       headers: { Authorization: `Bearer ${this.creds.accessToken}` },
+      signal: AbortSignal.timeout(META_MEDIA_DOWNLOAD_TIMEOUT_MS),
     });
     if (!binRes.ok) {
       throw new Error(`Media download failed: ${binRes.status} ${binRes.statusText}`);
@@ -95,6 +102,7 @@ export class WhatsAppClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(META_REQUEST_TIMEOUT_MS),
     });
     return parseOrThrow(res);
   }
@@ -102,6 +110,7 @@ export class WhatsAppClient {
   private async get(url: string): Promise<Record<string, unknown>> {
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${this.creds.accessToken}` },
+      signal: AbortSignal.timeout(META_REQUEST_TIMEOUT_MS),
     });
     return parseOrThrow(res);
   }
