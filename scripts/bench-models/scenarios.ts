@@ -340,8 +340,193 @@ Format: nummerierte Liste. Erst Tagline, dann Begründung in Klammern darunter.`
   },
 ];
 
-/** All scenarios: Phase 1 + Phase 2. */
-export const ALL_SCENARIOS: readonly BenchScenario[] = [...SCENARIOS, ...PHASE_2_SCENARIOS];
+// =============================================================================
+// Phase 3: Tool-use, deeper long-context, orchestration planning. These are the
+// last scenarios informing the Managed-Opus-xhigh decision — if Opus wins
+// nowhere here, the final verdict is "niche opt-in only". Real web_search is
+// enabled automatically when no web_research tool is registered (see agent.ts
+// builtinTools).
+// =============================================================================
+
+/** Build a ~50k-token support corpus by scaling the Phase 2 set to 100 tickets. */
+function buildLongSupportCorpus(): string {
+  const baseTickets: [string, string][] = [
+    ['Login broken after password reset', 'I reset my password via the email link but now I cannot log in. Error says "invalid credentials". Tried three times. Cleared cookies. Still same error. Customer is premium tier, urgent.'],
+    ['Billing shows CHF 79 instead of CHF 39', 'I signed up for Starter (CHF 39) but my card was charged CHF 79. I never upgraded. Can you refund the difference?'],
+    ['Integration with Gmail stopped working', 'Three days ago my Gmail integration stopped syncing. Tried disconnecting and reconnecting — OAuth says "app not verified by Google". Was working fine before.'],
+    ['Slow response times in last week', 'Agent responses used to take 2-3 seconds, now 15-30 seconds. Same prompts, same context. Started Tuesday. I have 5 long-running threads open.'],
+    ['Cannot delete old threads', 'Trying to delete threads from 6 months ago. Button clicks but nothing happens. Browser console shows 500 error on DELETE /api/threads/{id}.'],
+    ['Data export fails silently', 'Requested full data export via Settings > Export. Email never arrived. Ran it twice yesterday and once today. No error shown in UI.'],
+    ['Upgrade from Starter to Managed silently failed', 'Clicked upgrade in dashboard, Stripe checkout succeeded, card charged. Instance still shows Starter tier. Would expect auto-provisioning of Managed.'],
+    ['Email notifications never arrive', 'Enabled email notifications for task completion. Tested with a 5-minute task. Nothing arrived at my Gmail or my Spam folder. Sender address configured correctly.'],
+    ['KG browser crashes on large dataset', 'Opened Knowledge Graph view — 3000+ nodes. Browser hangs for 60 seconds then crashes (Chrome tab killed). Was working at 1500 nodes last month.'],
+    ['Password reset email goes to spam in Outlook', 'Corporate users on Outlook report the password reset email lands in spam. Gmail users are fine. SPF/DKIM setup?'],
+    ['Webhook retries not working', 'Custom webhook fails intermittently but lynox does not retry. Docs say 3 retries with backoff. Logs show single attempt, no retry.'],
+    ['CRM contact merge loses data', 'Merged two duplicate contacts. The notes from the older contact disappeared after merge. Expected: combined notes preserved.'],
+    ['Mobile UI: ask_user dialog not dismissable', 'On iPhone Safari, when agent asks a question the dialog blocks the screen. No way to dismiss it. Have to kill the app.'],
+    ['Telegram bot stops responding after 24h', 'Set up Telegram bot per docs. Works for ~24h then silently stops. Restart via /start fixes it until next day.'],
+    ['API rate limit unclear', 'Got 429 responses but dashboard does not show current rate limit state. Docs say 200/hour. Was I actually over? When does window reset?'],
+    ['Cannot change primary email', 'My work email changed. Settings > Account only lets me add secondary emails, not change primary. Support said "use admin portal" — I do not have admin access.'],
+    ['File attachments disappear in Telegram', 'Sending images from Telegram to lynox — image arrives but gets processed into text summary then deleted. Would prefer it stays in the thread.'],
+    ['DataStore query performance cliff', 'Tables with >10k rows: queries that took 200ms now take 30+ seconds. Smaller tables unaffected. Added indexes, no improvement.'],
+    ['Docker image keeps pulling on every restart', 'Self-hosted docker compose setup. Every `docker compose restart` pulls the image fresh instead of using local cache. Bandwidth cost.'],
+    ['Web UI dark mode broken on one page', 'Dark mode works everywhere except /settings/billing — page uses light theme colors on dark background. Text unreadable.'],
+    ['Multi-factor auth bypass via OAuth login', 'SECURITY: I enabled MFA but logging in via Google OAuth skips the MFA step entirely. Expected: OAuth login should also require MFA.'],
+    ['Cost tracking numbers do not match Anthropic dashboard', 'lynox dashboard shows $52 used this month. My Anthropic console shows $31. Which is right? Big discrepancy.'],
+    ['Context window auto-compact too aggressive', 'Agent compacts at 75% usage. Sometimes drops useful early context. Is there a way to tune this per-thread?'],
+    ['Search returns nothing from archived threads', 'Global search only searches active threads. Archived threads with important history are invisible. Can we include archives?'],
+    ['Duplicate entity creation in CRM', 'CRM creates duplicate company entities when agent sees "Acme Corp", "Acme", "acme corp" in different messages. Expected: fuzzy-match and merge.'],
+    ['Installation script fails on Apple Silicon', 'Ran the npx installer on M3 Mac. Fails with "no matching docker image for linux/arm64/v8". Expected: multi-arch image.'],
+    ['Billing invoice PDF missing VAT line', 'CHF 39 invoice for Swiss customer. PDF shows "Total: CHF 39" with no VAT breakdown. Swiss tax law requires separate VAT line even at 0%.'],
+    ['Agent keeps asking same question in loop', 'Agent asks "Which customer do you mean?" — I answer — it asks again — I answer — it asks again. Seems to not be storing the answer. Thread ID consistent.'],
+    ['Slack integration: attachments not previewed', 'Posting lynox responses to Slack. Images included in response show as raw URLs, not inline previews. Slack unfurl not triggered.'],
+    ['Budget alert fires repeatedly', 'Set $100 monthly budget alert. Email alert fires every hour once I hit 80%. Expected: once per threshold crossing, not continuously.'],
+    ['CSV export breaks with commas in values', 'Exported CRM contacts. Rows with commas in company name (e.g. "Smith, Jones & Partners") break the CSV — subsequent columns shift right. No quoting.'],
+    ['Search relevance has degraded', 'Semantic search results used to surface the right thread in top 3. Now relevant threads are on page 2-3. Nothing changed on my end. Index stale?'],
+    ['Session cookie expires mid-conversation', 'Long agent conversations (>30min) get interrupted with "session expired, please log in again". Lose all in-progress state. Can you extend session TTL?'],
+    ['New-thread button disabled in some workspaces', 'In three of my workspaces the "New Thread" button is greyed out. Other workspaces work fine. No clear error message.'],
+    ['Agent gives wrong timezone in scheduled tasks', 'Created a task "Send report every Monday 9am". Task fires at 17:00 CET. Account configured to Europe/Zurich. Looks like UTC.'],
+    ['File upload progress bar frozen at 99%', 'Uploading 50MB PDF. Progress hits 99% and sits there for 5+ minutes. Network console shows no active transfer. Eventually succeeds or times out randomly.'],
+    ['Copy-paste of agent response loses formatting', 'When I copy a markdown response (with bullets, code blocks) and paste into Notion/Slack, everything becomes plain text. Would expect markdown preserved.'],
+    ['User invitation emails use wrong sender name', 'Invited a collaborator — email sender shows "lynox-noreply@anthropic.com". Our brand is "Acme Hosting". Can we customize sender identity?'],
+    ['Billing cycle shifted unexpectedly', 'My billing date was always the 15th. This month I got charged on the 3rd. No notice. Usage logs show the subscription restarted?'],
+    ['Knowledge graph loses entities after import', 'Imported CRM data CSV with 500 companies. Only 340 appear in the knowledge graph afterwards. No error, no warning.'],
+    ['Agent memory promotion inconsistent', 'Some facts get auto-promoted to long-term memory, others with identical phrasing do not. Feels random.'],
+    ['Dashboard stats do not match individual runs', 'Usage Dashboard says 1200 runs this month. Running `SELECT COUNT(*) FROM runs` via MCP gives 1547. 347 runs missing from dashboard.'],
+    ['Telegram bot sends messages to wrong chat', 'Set up bot for my personal chat. When the task completes, notification arrives in a different Telegram group (one I accidentally added the bot to weeks ago).'],
+    ['Pipeline execution stops at step 3 silently', 'A 5-step pipeline completes steps 1-2, gets stuck on step 3 with no error, no log entry. Can see the "in_progress" status in DB.'],
+    ['Google Drive integration re-uploads files', 'Every sync re-uploads files it already uploaded yesterday. Quota exhausted fast. Expected: only changed files.'],
+    ['Password requirements unclear', 'New password field says "at least 8 chars, include number and special". Rejected a 10-char password with 2 numbers and # — no hint what was wrong.'],
+    ['Receipt PDF has garbled umlauts', 'My German invoice PDF shows "Gr??ung" instead of "Grüßung". UTF-8 encoding issue? Attached sample.'],
+    ['Concurrent edits cause data loss', 'Two users editing the same workspace document — later save overwrites the first without warning. No merge, no conflict detection.'],
+    ['Rate limit on free tier too aggressive', 'Free tier shows "3 requests/minute" in docs. Hit limit after 2 requests. Then 429 for 60 seconds. Am I miscounting?'],
+    ['Admin audit log missing deletions', 'Audit log shows all create/update events but no delete events. Regulatory requirement — we NEED delete audit trail for GDPR.'],
+  ];
+
+  // Repeat to reach 100 tickets (duplicate with slight context variation)
+  const tickets: [string, string][] = [];
+  for (let i = 0; i < 2; i++) {
+    for (const [subject, body] of baseTickets) {
+      tickets.push([subject, i === 0 ? body : `Reported again by a different customer — same issue: ${body}`]);
+    }
+  }
+  return tickets.slice(0, 100)
+    .map((t, i) => `## Ticket #${String(i + 1).padStart(3, '0')}\n**Subject:** ${t[0]}\n**Body:** ${t[1]}\n`)
+    .join('\n');
+}
+
+const LONG_SUPPORT_CORPUS = buildLongSupportCorpus();
+
+export const PHASE_3_SCENARIOS: readonly BenchScenario[] = [
+  {
+    id: 'tool-chain-research',
+    category: 'reasoning',
+    description: 'Real web_search: recherchiere faktisches aktuelles Wissen + synthesiere. Testet Tool-Chaining + Fakten-Recall.',
+    prompt: 'Nutze Websuche: Welche neuen Feature-Releases hat Anthropic für Claude-Modelle im Jahr 2025 angekündigt (z.B. Opus, Sonnet, Haiku-Versionen, Tool-Updates)? Liste maximal 5 konkrete Releases mit Monat und kurzer Beschreibung. Keine Spekulation — nur was du über die Suche belegen kannst.',
+    judgeRubric: [
+      'Mindestens 3 konkrete Releases genannt (z.B. Claude 4, Sonnet 4.5, Haiku 4.5, Opus 4.1/4.5/4.6, Agent Skills)',
+      'Jeder Release mit Monat/Quartal versehen (2025)',
+      'Keine offensichtlichen Fakten-Halluzinationen (erfundene Modellnamen oder erfundene Features)',
+      'Maximal 5 Items — nicht 10, nicht 2',
+      'Erwähnt Quellen oder sagt explizit "laut Websuche"',
+    ],
+    referenceAnswer: 'Beispielhafte 2025-Releases: Claude 4 Familie (Mai 2025, Sonnet 4 + Opus 4), Claude Opus 4.1 (August 2025), Claude Sonnet 4.5 + Haiku 4.5 (September/Oktober 2025), Claude Opus 4.5 (November 2025), diverse SDK-Updates (computer use, memory tool, extended caching). Exakte Daten variieren — Judge wertet Vollständigkeit und Abwesenheit von Halluzinationen.',
+    maxIterations: 5,
+    timeoutMs: 180_000,
+  },
+  {
+    id: 'long-context-100',
+    category: 'summarization',
+    description: '100-Ticket Support-Corpus (~50k Tokens) — Cluster + Security-Bug-Triage. Testet Context-Rot-Grenze.',
+    prompt: `Du bekommst einen Auszug aus unserem Support-Ticket-Backlog (100 Tickets). Analysiere und liefere:
+
+1. Top-5 thematische Cluster (je: Titel, betroffene Ticket-Nummern, Root-Cause-Hypothese, Prio 1-3)
+2. Alle Security-/Compliance-Bugs (Ticket-Nummer + Schweregrad)
+3. Die 3 am dringendsten zu behebenden Tickets (mit Begründung)
+4. Zählung: wie viele Tickets fallen in Kategorie "Billing/Invoicing"?
+
+Antworte strukturiert. Keine Halluzinationen.
+
+--- TICKETS ---
+${LONG_SUPPORT_CORPUS}`,
+    judgeRubric: [
+      'Identifiziert mindestens 5 realistische Cluster mit korrekten Ticket-Nummern',
+      'Security/Compliance-Bugs umfassen #21/#71 (MFA-Bypass — erscheint 2×), #48 (Audit-Log)',
+      'Zählt Billing-Tickets korrekt: ~8-12 in 100 (je nach Kategorisierung: #2, #7, #22, #27, #30, #39, plus Duplikate in 51-100)',
+      'Priorisierung nennt Security-Bugs (MFA-Bypass) als höchste Prio',
+      'Keine halluzinierten Ticket-Nummern (>100)',
+      'Keine Auslassung großer Cluster (Auth, Integration, Data, Billing)',
+    ],
+    referenceAnswer: 'Cluster: (1) Auth/Login (#1/#10/#16/#21/#33/#51/#60/#66/#71), (2) Billing/Compliance (#2/#7/#22/#27/#30/#39/#46/#52/#57/#72), (3) Integration/Sync (#3/#8/#11/#14/#17/#19/#29/#40/#45/#53/#58/#61/#67), (4) Data/Performance (#4/#18/#34/#54/#68), (5) UI/UX (#5/#13/#20/#31/#36/#37/#55/#63/#70/#87). Security-Bugs: #21/#71 MFA-Bypass (CRITICAL), #48/#98 Audit-Log-Lücke (HIGH für GDPR). Priorität: MFA-Bypass > Billing-Discrepancies > Audit-Log. Billing-Kategorie: ~10-12 Tickets (je nach Definition).',
+    maxIterations: 2,
+    timeoutMs: 180_000,
+  },
+  {
+    id: 'orchestration-planning',
+    category: 'reasoning',
+    description: 'Multi-Agent-Orchestrations-Plan. Testet ob Modell sinnvolle Spawn-Entscheidungen trifft.',
+    prompt: `Als lynox-Agent sollst du folgendes Projekt planen — entscheide wann parallele Subagents sinnvoll sind und wann sequentielle Schritte:
+
+**Projekt:** Launch eines neuen Pricing-Tiers "Managed Team" (CHF 199/mo) für 3-10 User pro Tenant. Alles soll in 4 Wochen live sein.
+
+**Sub-Tasks:**
+- Tech: Tenant-Modell um Multi-User erweitern (User-Rollen, Shared-Billing)
+- Billing: Stripe-Setup für Volume-Tier + Seat-basierte Upgrades
+- Marketing: Landing-Page-Copy + Pricing-Page-Update
+- Sales: Outbound-Liste von 50 Prospects + Cold-Email-Sequence
+- Legal: AGB-Update für Multi-User-Handling + DPA-Revision
+- Support: Docs + FAQ + Onboarding-Flow für Team-Accounts
+
+**Liefer-Format:**
+1. Workflow-Diagramm in Text (5-8 Steps), markiere parallele/sequentielle
+2. Für jeden Step: welcher spezialisierte Subagent (researcher, creator, operator, reviewer)?
+3. Geschätzte Dauer pro Step + kritischer Pfad
+4. 3 explizite Abhängigkeiten die sequentiell bleiben MÜSSEN
+
+Sei konkret — keine Generik.`,
+    judgeRubric: [
+      'Sinnvolle Parallelisierung: unabhängige Streams (Tech vs Marketing vs Legal) laufen parallel',
+      'Sequentielle Dependencies korrekt: Tech muss VOR Sales outbound stehen (sonst verkauft man Vaporware)',
+      'Jeder Step hat begründete Subagent-Zuweisung (nicht alles "creator")',
+      'Kritischer Pfad konkret identifiziert mit Begründung',
+      'Mindestens 3 echte (nicht künstliche) Abhängigkeiten identifiziert',
+      '5-8 Workflow-Steps — nicht 3 generische, nicht 20 Mikro-Tasks',
+      'Keine erfundenen Agent-Typen außerhalb der genannten Rollen',
+    ],
+    referenceAnswer: 'Parallel: Tech + Legal + Marketing + Sales-Recherche laufen gleichzeitig in Woche 1-2. Sequenzen: Billing benötigt Tech-Definition der User-Rollen (→ Wartezeit bis Woche 2), Landing Page benötigt Pricing finalized von Legal-Review, Sales-Outbound wartet auf Marketing-Copy UND Tech-Ready. Subagents: researcher (Sales-Prospects, Competitive-Analysis), creator (Landing-Copy, Docs, Email-Sequence), operator (Tech + Billing-Integration + DB-Migrations), reviewer (Legal-AGB, QA). Kritischer Pfad: Tech (2 W) → Billing (1 W) → QA + Onboarding (1 W). 3 Mandatory-Sequential: (1) Legal AGB vor Landing Page, (2) Tech User-Rollen vor Billing Seat-Flow, (3) Tech + QA vor Sales-Go-Live.',
+    maxIterations: 2,
+    timeoutMs: 90_000,
+  },
+  {
+    id: 'creative-copy-v2',
+    category: 'reasoning',
+    description: 'Entschärfte Creative-Copy-Version: 3 Email-Openings mit loseren Constraints.',
+    prompt: `Schreib 3 unterschiedliche Email-Openings (je 2-3 Sätze) für eine Outbound-Kampagne an Operations-Leader in 50-200-Personen-Firmen. Kontext: lynox ersetzt SaaS-Tool-Stacks durch KI-Agents.
+
+Constraints:
+- Jedes Opening öffnet MIT einer spezifischen Situation/Pain, nicht mit "Ich schreibe Ihnen weil..."
+- Keine Floskeln ("im Zeitalter der Digitalisierung", "moderne Unternehmen", "in der heutigen Zeit")
+- Je Opening ein anderer Angle (z.B. #1: Kosten-Angle, #2: Produktivitäts-Angle, #3: Tool-Frust-Angle)
+- Deutsch, Sie-Form
+- Je Opening 2-3 Sätze — nicht mehr, nicht weniger
+
+Format: nummerierte Liste, jedes Opening als Block, kurz Angle-Label darunter.`,
+    judgeRubric: [
+      'Genau 3 Varianten geliefert',
+      'Jedes Opening 2-3 Sätze (Varianz von ±1 Satz tolerieren)',
+      'Keine Floskeln wie "im Zeitalter der Digitalisierung" o.ä.',
+      'Jedes Opening hat einen erkennbar anderen Angle',
+      'Jedes Opening öffnet spezifisch (mit Situation), nicht generisch',
+      'Stilistisch geeignet für B2B-Outbound (nicht zu salesy, nicht zu verspielt)',
+    ],
+    referenceAnswer: '1. (Kosten-Angle): "Ihre Ops-Abteilung zahlt vermutlich aktuell zwischen 15 und 30 Tools pro Monat — von CRM über Projekt-Management bis Billing. Für die meisten 50-200-Personen-Firmen summiert sich das auf über CHF 100k/Jahr, bevor jemand die Integration zusammenklebt."\n2. (Produktivitäts-Angle): "Wie oft kopieren Ihre Teams Daten manuell zwischen Tabellen, Tickets und Dashboards? Wir haben gemessen dass Ops-Leader ~40% ihrer Zeit in Tool-Navigation statt in Arbeit verbringen."\n3. (Tool-Frust-Angle): "Jede neue SaaS-Integration fühlt sich wie eine Pflicht, keine Lösung. Ihre Teams wechseln zwischen Dashboards, weil keines allein den Job macht."',
+    maxIterations: 1,
+    timeoutMs: 60_000,
+  },
+];
+
+/** All scenarios: Phase 1 + Phase 2 + Phase 3. */
+export const ALL_SCENARIOS: readonly BenchScenario[] = [...SCENARIOS, ...PHASE_2_SCENARIOS, ...PHASE_3_SCENARIOS];
 
 export function getScenario(id: string): BenchScenario | undefined {
   return ALL_SCENARIOS.find(s => s.id === id);

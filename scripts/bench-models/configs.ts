@@ -26,10 +26,21 @@ export const PHASE_2_CONFIGS: readonly BenchConfig[] = [
   { label: 'opus-47-xhigh',   tier: 'opus',   modelId: OPUS_47, effort: 'xhigh',  thinking: 'adaptive' },
 ];
 
+/**
+ * Phase 3 matrix: opus-47-high dropped (strictly dominated by xhigh per Phase 2).
+ * Focus on the 3 non-dominated configs for the final Managed-Opus decision.
+ */
+export const PHASE_3_CONFIGS: readonly BenchConfig[] = [
+  { label: 'haiku',           tier: 'haiku',  modelId: HAIKU,   effort: 'none',   thinking: 'disabled' },
+  { label: 'sonnet-high',     tier: 'sonnet', modelId: SONNET,  effort: 'high',   thinking: 'adaptive' },
+  { label: 'opus-47-xhigh',   tier: 'opus',   modelId: OPUS_47, effort: 'xhigh',  thinking: 'adaptive' },
+];
+
 /** Smoke-test config: single cheapest run to validate infra. */
 export const SMOKE_CONFIG: BenchConfig = PHASE_1_CONFIGS[0]!;
 
 export function getConfig(label: string): BenchConfig | undefined {
   return PHASE_1_CONFIGS.find(c => c.label === label)
-      ?? PHASE_2_CONFIGS.find(c => c.label === label);
+      ?? PHASE_2_CONFIGS.find(c => c.label === label)
+      ?? PHASE_3_CONFIGS.find(c => c.label === label);
 }

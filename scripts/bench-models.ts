@@ -22,15 +22,15 @@ import { homedir } from 'node:os';
 import { runOne } from './bench-models/run-one.js';
 import { judgeRun } from './bench-models/judge.js';
 import { buildMarkdownReport } from './bench-models/report.js';
-import { SCENARIOS, PHASE_2_SCENARIOS, ALL_SCENARIOS, getScenario } from './bench-models/scenarios.js';
-import { PHASE_1_CONFIGS, PHASE_2_CONFIGS, SMOKE_CONFIG, getConfig } from './bench-models/configs.js';
+import { SCENARIOS, PHASE_2_SCENARIOS, PHASE_3_SCENARIOS, ALL_SCENARIOS, getScenario } from './bench-models/scenarios.js';
+import { PHASE_1_CONFIGS, PHASE_2_CONFIGS, PHASE_3_CONFIGS, SMOKE_CONFIG, getConfig } from './bench-models/configs.js';
 import type { BenchConfig, BenchReport, BenchScenario, JudgedRun } from './bench-models/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RESULTS_DIR = join(__dirname, 'bench-models', 'results');
 
 interface CliArgs {
-  mode: 'smoke' | 'phase1' | 'phase2' | 'list' | 'custom';
+  mode: 'smoke' | 'phase1' | 'phase2' | 'phase3' | 'list' | 'custom';
   scenarioId?: string;
   configLabel?: string;
   iterations: number;
@@ -43,6 +43,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     if (a === '--smoke') args.mode = 'smoke';
     else if (a === '--phase1') args.mode = 'phase1';
     else if (a === '--phase2') args.mode = 'phase2';
+    else if (a === '--phase3') args.mode = 'phase3';
     else if (a === '--list') args.mode = 'list';
     else if (a === '--scenario') { args.scenarioId = argv[++i]; args.mode = 'custom'; }
     else if (a === '--config') { args.configLabel = argv[++i]; args.mode = 'custom'; }
@@ -78,6 +79,9 @@ function buildMatrix(args: CliArgs): { scenarios: readonly BenchScenario[]; conf
   if (args.mode === 'phase2') {
     return { scenarios: PHASE_2_SCENARIOS, configs: PHASE_2_CONFIGS, runs: args.iterations };
   }
+  if (args.mode === 'phase3') {
+    return { scenarios: PHASE_3_SCENARIOS, configs: PHASE_3_CONFIGS, runs: args.iterations };
+  }
   // custom
   const scenarios = args.scenarioId
     ? [getScenario(args.scenarioId) ?? throwError(`Unknown scenario: ${args.scenarioId}`)]
@@ -105,10 +109,14 @@ async function main(): Promise<void> {
     for (const s of SCENARIOS) process.stdout.write(`  ${s.id.padEnd(22)} ${s.category.padEnd(14)} ${s.description}\n`);
     process.stdout.write('\nPhase 2 Scenarios:\n');
     for (const s of PHASE_2_SCENARIOS) process.stdout.write(`  ${s.id.padEnd(22)} ${s.category.padEnd(14)} ${s.description}\n`);
+    process.stdout.write('\nPhase 3 Scenarios:\n');
+    for (const s of PHASE_3_SCENARIOS) process.stdout.write(`  ${s.id.padEnd(22)} ${s.category.padEnd(14)} ${s.description}\n`);
     process.stdout.write('\nPhase 1 Configs:\n');
     for (const c of PHASE_1_CONFIGS) process.stdout.write(`  ${c.label.padEnd(18)} ${c.modelId.padEnd(32)} effort=${c.effort} thinking=${c.thinking}\n`);
     process.stdout.write('\nPhase 2 Configs:\n');
     for (const c of PHASE_2_CONFIGS) process.stdout.write(`  ${c.label.padEnd(18)} ${c.modelId.padEnd(32)} effort=${c.effort} thinking=${c.thinking}\n`);
+    process.stdout.write('\nPhase 3 Configs:\n');
+    for (const c of PHASE_3_CONFIGS) process.stdout.write(`  ${c.label.padEnd(18)} ${c.modelId.padEnd(32)} effort=${c.effort} thinking=${c.thinking}\n`);
     return;
   }
 
@@ -153,7 +161,7 @@ async function main(): Promise<void> {
 
   mkdirSync(RESULTS_DIR, { recursive: true });
   const stamp = report.timestamp.replace(/[:.]/g, '-');
-  const suffix = args.mode === 'phase2' ? '-phase2' : args.mode === 'phase1' ? '-phase1' : '';
+  const suffix = args.mode === 'phase3' ? '-phase3' : args.mode === 'phase2' ? '-phase2' : args.mode === 'phase1' ? '-phase1' : '';
   const jsonPath = join(RESULTS_DIR, `${stamp}${suffix}.json`);
   const mdPath = join(RESULTS_DIR, `${stamp}${suffix}.md`);
   writeFileSync(jsonPath, JSON.stringify(report, null, 2));

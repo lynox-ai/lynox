@@ -26,6 +26,7 @@ export interface BenchUsage {
   readonly outputTokens: number;
   readonly cacheWriteTokens: number;
   readonly cacheReadTokens: number;
+  readonly webSearchRequests: number;
 }
 
 export interface BenchRun {
