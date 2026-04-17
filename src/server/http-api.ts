@@ -2012,6 +2012,8 @@ export class LynoxHTTPApi {
     // Send a message — UI calls this after user approves a draft. No engine-
     // level approval gate here because the UI IS the approval UI; the engine
     // tool handler enforces it for LLM-initiated sends.
+    // Optional `replyTo` carries the wa_id of the message being quoted — Meta
+    // renders it as a tappable preview above the reply for the recipient.
     this.staticRoutes.set('POST /api/whatsapp/send', async (_req, res, _params, body) => {
       const waCtx = this.engine?.getWhatsAppContext();
       if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
@@ -2019,12 +2021,13 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const to = b && typeof b['to'] === 'string' ? b['to'].replace(/[^0-9]/g, '') : '';
       const bodyText = b && typeof b['body'] === 'string' ? b['body'].trim() : '';
+      const replyTo = b && typeof b['replyTo'] === 'string' ? b['replyTo'].trim() : '';
       if (!to || !bodyText) { errorResponse(res, 400, 'Fields "to" and "body" required'); return; }
       const client = waCtx.getClient();
       if (!client) { errorResponse(res, 503, 'WhatsApp client not initialized'); return; }
       try {
         const { threadIdForPhone } = await import('../integrations/whatsapp/webhook-parser.js');
-        const result = await client.sendText(to, bodyText);
+        const result = await client.sendText(to, bodyText, replyTo || undefined);
         waCtx.getStateDb().upsertMessage({
           id: result.messageId,
           threadId: threadIdForPhone(to),

@@ -29,16 +29,24 @@ export interface MediaFetchResult {
 export class WhatsAppClient {
   constructor(private readonly creds: WhatsAppCredentials) {}
 
-  /** Send a plain-text message to a contact. Caller is responsible for enforcing approval flow. */
-  async sendText(toPhoneE164: string, body: string): Promise<SendTextResult> {
+  /**
+   * Send a plain-text message to a contact. Caller is responsible for enforcing
+   * approval flow. Pass `replyToMessageId` (the wa_id of the message being
+   * answered) to turn this into a quote-reply — the recipient's WhatsApp app
+   * renders the original message as a tappable preview above the new reply.
+   */
+  async sendText(toPhoneE164: string, body: string, replyToMessageId?: string): Promise<SendTextResult> {
     const url = `${GRAPH_BASE}/${this.creds.phoneNumberId}/messages`;
-    const payload = {
+    const payload: Record<string, unknown> = {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
       to: toPhoneE164,
       type: 'text',
       text: { preview_url: false, body },
     };
+    if (replyToMessageId && replyToMessageId.length > 0) {
+      payload['context'] = { message_id: replyToMessageId };
+    }
     const res = await this.post(url, payload);
     const messageId = extractMessageId(res);
     if (!messageId) {

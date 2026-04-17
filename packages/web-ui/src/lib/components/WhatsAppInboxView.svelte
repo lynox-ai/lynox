@@ -50,6 +50,30 @@
 	let composeText = $state('');
 	let sending = $state(false);
 	let filterText = $state('');
+	let replyingTo = $state<WhatsAppMessage | null>(null);
+	let composeTextarea = $state<HTMLTextAreaElement | null>(null);
+	let showEmojis = $state(false);
+
+	// Curated set covering ~95% of real conversational usage without pulling in
+	// a 10-MB emoji library. Recents (localStorage) float to the front.
+	const DEFAULT_EMOJIS = ['😊','😂','❤️','👍','🙏','🎉','👌','✅','🔥','💯','😅','🤔','👋','😍','🥰','😭','😎','👏','🙌','💪','☝️','👇','🤝','🙈','🤷','😉','😬','😴','🤗','😇'];
+	const EMOJI_RECENTS_KEY = 'lynox-whatsapp-emoji-recents';
+	function loadEmojiRecents(): string[] {
+		if (typeof localStorage === 'undefined') return [];
+		try {
+			const raw = localStorage.getItem(EMOJI_RECENTS_KEY);
+			if (!raw) return [];
+			const arr: unknown = JSON.parse(raw);
+			if (!Array.isArray(arr)) return [];
+			return arr.filter((x: unknown): x is string => typeof x === 'string').slice(0, 8);
+		} catch { return []; }
+	}
+	let emojiRecents = $state<string[]>(loadEmojiRecents());
+	const emojiList = $derived.by(() => {
+		const seen = new Set(emojiRecents);
+		const rest = DEFAULT_EMOJIS.filter(e => !seen.has(e));
+		return [...emojiRecents, ...rest];
+	});
 
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -147,21 +171,82 @@
 		loadingThread = false;
 	}
 
+	// ── Composer: formatting toolbar + emoji picker + reply-quote ──
+
+	function wrapSelection(prefix: string, suffix: string): void {
+		const ta = composeTextarea;
+		if (!ta) return;
+		const start = ta.selectionStart;
+		const end = ta.selectionEnd;
+		const selected = composeText.slice(start, end);
+		const before = composeText.slice(0, start);
+		const after = composeText.slice(end);
+		composeText = `${before}${prefix}${selected}${suffix}${after}`;
+		// Restore selection around the wrapped text.
+		const newStart = start + prefix.length;
+		const newEnd = newStart + selected.length;
+		requestAnimationFrame(() => {
+			ta.focus();
+			ta.setSelectionRange(newStart, newEnd);
+		});
+	}
+
+	function insertEmoji(e: string): void {
+		const ta = composeTextarea;
+		const pos = ta?.selectionStart ?? composeText.length;
+		composeText = `${composeText.slice(0, pos)}${e}${composeText.slice(pos)}`;
+		// Bump this emoji to the front of recents and persist.
+		emojiRecents = [e, ...emojiRecents.filter(x => x !== e)].slice(0, 8);
+		if (typeof localStorage !== 'undefined') {
+			try { localStorage.setItem(EMOJI_RECENTS_KEY, JSON.stringify(emojiRecents)); } catch { /* quota */ }
+		}
+		showEmojis = false;
+		requestAnimationFrame(() => {
+			if (!ta) return;
+			ta.focus();
+			const newPos = pos + e.length;
+			ta.setSelectionRange(newPos, newPos);
+		});
+	}
+
+	function startReply(m: WhatsAppMessage): void {
+		replyingTo = m;
+		requestAnimationFrame(() => composeTextarea?.focus());
+	}
+
+	function cancelReply(): void {
+		replyingTo = null;
+	}
+
+	function replyPreview(m: WhatsAppMessage): string {
+		if (m.transcript) return `🎤 ${m.transcript}`;
+		if (m.text) return m.text;
+		switch (m.kind) {
+			case 'voice': return '🎤 Sprachnachricht';
+			case 'image': return '🖼️ Bild';
+			case 'document': return '📄 Dokument';
+			default: return `[${m.kind}]`;
+		}
+	}
+
 	async function sendReply() {
 		const body = composeText.trim();
 		if (!body || !selectedThread) return;
 		sending = true;
 		try {
+			const payload: Record<string, unknown> = { to: selectedThread.phoneE164, body };
+			if (replyingTo) payload['replyTo'] = replyingTo.id;
 			const res = await fetch(`${getApiBase()}/whatsapp/send`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ to: selectedThread.phoneE164, body }),
+				body: JSON.stringify(payload),
 			});
 			if (!res.ok) {
 				const err = (await res.json().catch(() => ({ error: 'Send failed' }))) as { error?: string };
 				throw new Error(err.error ?? 'Send failed');
 			}
 			composeText = '';
+			replyingTo = null;
 			// Clear the persisted draft for this thread on successful send.
 			delete drafts[selectedThread.threadId];
 			persistDrafts();
@@ -328,21 +413,48 @@
 								{fmtDate(msg.timestamp)}
 								{#if msg.isEcho}· via Mobile App{/if}
 							</div>
+							<button class="reply-btn" title="Antworten" aria-label="Antworten" onclick={() => startReply(msg)}>↩</button>
 						</div>
 					</div>
 				{/each}
 			</div>
 			<div class="compose">
-				<textarea
-					bind:value={composeText}
-					onkeydown={handleKeydown}
-					placeholder="Antwort schreiben… (Enter = senden, Shift+Enter = neue Zeile)"
-					rows="2"
-					disabled={sending}
-				></textarea>
-				<button class="send" onclick={sendReply} disabled={sending || composeText.trim().length === 0}>
-					{sending ? 'Sende …' : 'Senden'}
-				</button>
+				{#if replyingTo}
+					<div class="reply-preview">
+						<div class="reply-col">
+							<div class="reply-meta">Antwort auf {replyingTo.direction === 'outbound' ? 'dich' : (contact?.displayName ?? 'Kontakt')}</div>
+							<div class="reply-body">{replyPreview(replyingTo)}</div>
+						</div>
+						<button class="reply-close" onclick={cancelReply} aria-label="Antwort verwerfen">×</button>
+					</div>
+				{/if}
+				<div class="format-bar">
+					<button type="button" class="fmt" title="Fett (*text*)" onclick={() => wrapSelection('*', '*')}><strong>B</strong></button>
+					<button type="button" class="fmt" title="Kursiv (_text_)" onclick={() => wrapSelection('_', '_')}><em>I</em></button>
+					<button type="button" class="fmt" title="Durchgestrichen (~text~)" onclick={() => wrapSelection('~', '~')}><s>S</s></button>
+					<button type="button" class="fmt" title="Code (```text```)" onclick={() => wrapSelection('```', '```')}>&lt;/&gt;</button>
+					<button type="button" class="fmt emoji-toggle" title="Emoji" onclick={() => { showEmojis = !showEmojis; }}>😊</button>
+				</div>
+				{#if showEmojis}
+					<div class="emoji-popup" role="menu">
+						{#each emojiList as e (e)}
+							<button type="button" class="emoji" onclick={() => insertEmoji(e)}>{e}</button>
+						{/each}
+					</div>
+				{/if}
+				<div class="compose-row">
+					<textarea
+						bind:this={composeTextarea}
+						bind:value={composeText}
+						onkeydown={handleKeydown}
+						placeholder="Antwort schreiben… (Enter = senden, Shift+Enter = neue Zeile)"
+						rows="2"
+						disabled={sending}
+					></textarea>
+					<button class="send" onclick={sendReply} disabled={sending || composeText.trim().length === 0}>
+						{sending ? 'Sende …' : 'Senden'}
+					</button>
+				</div>
 			</div>
 		{/if}
 	</section>
@@ -435,6 +547,9 @@
 	.meta { font-size: 0.65rem; color: var(--color-muted, #888); margin-top: 0.25rem; }
 	.compose {
 		padding: 0.75rem 1rem; border-top: 1px solid var(--color-border, #2a2a2a);
+		display: flex; flex-direction: column; gap: 0.4rem;
+	}
+	.compose-row {
 		display: flex; gap: 0.5rem; align-items: flex-end;
 	}
 	.compose textarea {
@@ -447,6 +562,52 @@
 		padding: 0.5rem 1rem; cursor: pointer; font-size: 0.9rem; white-space: nowrap;
 	}
 	.compose .send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+	.format-bar { display: flex; gap: 0.2rem; flex-wrap: wrap; }
+	.fmt {
+		background: transparent; border: 1px solid var(--color-border, #333);
+		border-radius: 0.25rem; color: var(--color-muted, #bbb);
+		font-size: 0.8rem; padding: 0.15rem 0.5rem; min-width: 1.8rem; cursor: pointer;
+	}
+	.fmt:hover { background: rgba(255,255,255,0.05); }
+	.fmt strong, .fmt em, .fmt s { font-family: inherit; }
+	.emoji-popup {
+		display: grid; grid-template-columns: repeat(8, 1fr); gap: 0.1rem;
+		padding: 0.4rem; background: var(--color-surface, #141414);
+		border: 1px solid var(--color-border, #333); border-radius: 0.3rem;
+		max-width: 100%;
+	}
+	.emoji {
+		background: transparent; border: none; font-size: 1.1rem;
+		padding: 0.2rem; cursor: pointer; border-radius: 0.2rem;
+	}
+	.emoji:hover { background: rgba(255,255,255,0.08); }
+
+	.reply-preview {
+		display: flex; gap: 0.5rem; align-items: flex-start;
+		padding: 0.4rem 0.6rem;
+		border-left: 3px solid #3b82f6;
+		background: rgba(59, 130, 246, 0.08); border-radius: 0.3rem;
+	}
+	.reply-col { flex: 1; min-width: 0; }
+	.reply-meta { font-size: 0.7rem; color: var(--color-muted, #888); }
+	.reply-body {
+		font-size: 0.85rem; color: var(--color-muted, #ccc);
+		overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	}
+	.reply-close {
+		background: none; border: none; color: var(--color-muted, #888);
+		font-size: 1.2rem; cursor: pointer; padding: 0 0.3rem;
+	}
+	.reply-btn {
+		position: absolute; top: 0.25rem; right: 0.25rem;
+		background: rgba(0,0,0,0.3); border: none; color: var(--color-muted, #aaa);
+		font-size: 0.8rem; padding: 0.1rem 0.35rem; border-radius: 0.2rem;
+		cursor: pointer; opacity: 0; transition: opacity 120ms;
+	}
+	.bubble { position: relative; }
+	.bubble:hover .reply-btn { opacity: 1; }
+	.reply-btn:hover { background: rgba(0,0,0,0.5); color: inherit; }
 
 	@media (max-width: 760px) {
 		.wa-inbox { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
