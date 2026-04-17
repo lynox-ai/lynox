@@ -2,34 +2,10 @@
 	import { getContext, isPinned, togglePin, closePanel } from '../stores/context-panel.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { getToolIcon } from '../utils/tool-icons.js';
 
 	const ctx = $derived(getContext());
 	const pinned = $derived(isPinned());
-
-	// Tool icons + colors (labels via i18n)
-	const TOOL_ICONS: Record<string, { icon: string; color: string }> = {
-		write_file:       { icon: '📄', color: 'text-success' },
-		read_file:        { icon: '📖', color: 'text-accent-text' },
-		bash:             { icon: '⚡', color: 'text-warning' },
-		http_request:     { icon: '🌐', color: 'text-accent-text' },
-		web_research:     { icon: '🔍', color: 'text-accent-text' },
-		google_gmail:     { icon: '📧', color: 'text-accent-text' },
-		google_sheets:    { icon: '📊', color: 'text-success' },
-		google_drive:     { icon: '📁', color: 'text-accent-text' },
-		google_calendar:  { icon: '📅', color: 'text-accent-text' },
-		google_docs:      { icon: '📝', color: 'text-accent-text' },
-		spawn_agent:      { icon: '🤖', color: 'text-warning' },
-		memory_store:     { icon: '🧠', color: 'text-success' },
-		memory_recall:    { icon: '💭', color: 'text-accent-text' },
-		memory_update:    { icon: '✏️', color: 'text-warning' },
-		data_store_query: { icon: '📊', color: 'text-accent-text' },
-		data_store_insert:{ icon: '💾', color: 'text-success' },
-		data_store_create:{ icon: '🗂️', color: 'text-success' },
-		run_pipeline:     { icon: '⚙️', color: 'text-warning' },
-		ask_user:         { icon: '❓', color: 'text-accent-text' },
-		task_create:      { icon: '✅', color: 'text-success' },
-		plan_task:        { icon: '📋', color: 'text-accent-text' },
-	};
 
 	const TOOL_LABELS: Record<string, string> = {
 		write_file: 'tool.file_created', read_file: 'tool.file_read',
@@ -44,10 +20,10 @@
 	};
 
 	function meta(name: string) {
-		const icons = TOOL_ICONS[name] ?? { icon: '🔧', color: 'text-text-subtle' };
+		const def = getToolIcon(name);
 		const labelKey = TOOL_LABELS[name];
 		const label = labelKey ? t(labelKey) : name;
-		return { label, ...icons };
+		return { label, paths: def.paths, color: def.color };
 	}
 
 	function getInput(key: string): string {
@@ -66,12 +42,15 @@
 </script>
 
 {#if ctx}
+	{@const headerMeta = meta(ctx.title)}
 	<aside class="w-80 shrink-0 border-l border-border bg-bg-subtle overflow-y-auto overflow-x-hidden scrollbar-thin hidden lg:flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-4 py-2.5 border-b border-border">
 			<div class="flex items-center gap-2">
-				<span class="text-base">{meta(ctx.title).icon}</span>
-				<span class="text-xs font-medium text-text">{meta(ctx.title).label}</span>
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 {headerMeta.color}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+					{#each headerMeta.paths as p}<path stroke-linecap="round" stroke-linejoin="round" d={p} />{/each}
+				</svg>
+				<span class="text-xs font-medium text-text">{headerMeta.label}</span>
 			</div>
 			<div class="flex items-center gap-1.5">
 				<button
