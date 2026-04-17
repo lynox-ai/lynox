@@ -7,6 +7,7 @@
 	import { ensureVoiceInfoProbed, isTtsAvailable } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled, toggleAutoSpeak } from '../stores/autospeak.svelte.js';
 	import { getSpeakState } from '../stores/speak.svelte.js';
+	import { addToast } from '../stores/toast.svelte.js';
 
 	void ensureVoiceInfoProbed();
 	const ttsAvailable = $derived(isTtsAvailable());
@@ -71,6 +72,7 @@
 					const data = (await healthRes.json()) as { version?: unknown };
 					if (typeof data.version === 'string' && data.version.length > 0) {
 						engineVersion = data.version;
+						maybeNotifyStaleBundle(data.version);
 					}
 				} catch { /* non-JSON body — ignore */ }
 			}
@@ -125,6 +127,20 @@
 
 	function closePanel() {
 		panelOpen = false;
+	}
+
+	// Stale-bundle detection — the build-time web-ui version baked in by Vite.
+	// After a deploy, returning users may still be running yesterday's JS
+	// against a newer engine; drifted response shapes silently break things
+	// (thread list, SSE events). One toast per session is enough — a reload
+	// either clears the cache or confirms the user has intentionally pinned.
+	const BUILT_VERSION: string = typeof __LYNOX_WEB_UI_VERSION__ === 'string' ? __LYNOX_WEB_UI_VERSION__ : '';
+	let staleBundleNotified = false;
+	function maybeNotifyStaleBundle(engineV: string): void {
+		if (staleBundleNotified) return;
+		if (!BUILT_VERSION || BUILT_VERSION === engineV) return;
+		staleBundleNotified = true;
+		addToast(t('status.stale_bundle'), 'info', 30_000);
 	}
 
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
