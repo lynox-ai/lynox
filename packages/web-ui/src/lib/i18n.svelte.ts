@@ -356,6 +356,7 @@ const translations: Record<string, Record<Locale, string>> = {
 		de: 'Vorgelesene Antworten werden zur Sprachausgabe an Mistral (Paris, EU) gesendet. Keine Speicherung durch den Anbieter.',
 		en: 'Read-aloud audio is synthesized by Mistral (Paris, EU). The provider stores nothing.',
 	},
+	'status.engine_version': { de: 'lynox Engine Version', en: 'lynox engine version' },
 	'status.autospeak_off': { de: 'Antworten automatisch vorlesen — aus', en: 'Auto-read replies — off' },
 	'status.autospeak_on': { de: 'Antworten automatisch vorlesen — an', en: 'Auto-read replies — on' },
 	'status.autospeak_playing': { de: 'Wird vorgelesen — klicken zum Stoppen', en: 'Reading aloud — click to stop' },

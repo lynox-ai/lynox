@@ -17,6 +17,7 @@
 	interface ProviderEntry { indicator: Indicator; description: string; provider: string }
 
 	let engineOk = $state<boolean | null>(null);
+	let engineVersion = $state<string | null>(null);
 	let apiStatus = $state<Indicator | null>(null);
 	let providerName = $state('Anthropic API');
 	let providers = $state<ProviderEntry[]>([]);
@@ -65,6 +66,14 @@
 			]);
 
 			engineOk = healthRes?.ok ?? false;
+			if (healthRes?.ok) {
+				try {
+					const data = (await healthRes.json()) as { version?: unknown };
+					if (typeof data.version === 'string' && data.version.length > 0) {
+						engineVersion = data.version;
+					}
+				} catch { /* non-JSON body — ignore */ }
+			}
 
 			if (providersRes?.ok) {
 				const data = (await providersRes.json()) as { providers: ProviderEntry[] };
@@ -240,8 +249,12 @@
 		</div>
 	{/if}
 
-	<!-- Legal (right-aligned) -->
+	<!-- Legal + version (right-aligned) -->
 	<div class="flex items-center gap-2 ml-auto px-3 shrink-0">
+		{#if engineVersion}
+			<span class="text-text-subtle/70 font-mono" title={t('status.engine_version')}>v{engineVersion}</span>
+			<span class="text-border">·</span>
+		{/if}
 		<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/agb/' : 'terms'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.terms')}</a>
 		<span class="text-border">·</span>
 		<a href="https://lynox.ai/{getLocale() === 'de' ? 'de/datenschutz/' : 'privacy'}" target="_blank" rel="noopener" class="hover:text-text transition-colors">{t('legal.privacy')}</a>
