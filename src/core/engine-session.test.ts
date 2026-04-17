@@ -550,6 +550,27 @@ describe('Engine + Session (Orchestrator)', () => {
       session.promptUser = fn;
       expect(session.promptUser).toBe(fn);
     });
+
+    it('_recreateAgent preserves promptSecret set on the session', async () => {
+      // Regression: session.run() can call _recreateAgent() (e.g. when the
+      // changeset manager kicks in or the tool registry has changed). The
+      // recreate path used to drop promptSecret because _createAgent did
+      // not read it back from this._promptSecret — it only forwarded the
+      // initial constructor arg. ask_secret then returned "Secure secret
+      // input is not available in this context" on managed instances.
+      const { Agent } = await import('./agent.js');
+      const agentCtor = Agent as unknown as { mock: { calls: Array<Array<Record<string, unknown>>> } };
+
+      const { session } = await createEngineAndSession();
+
+      const fn = vi.fn().mockResolvedValue(true);
+      session.promptSecret = fn;
+
+      const callsBefore = agentCtor.mock.calls.length;
+      session._recreateAgent();
+      const ctorArgs = agentCtor.mock.calls[callsBefore]?.[0];
+      expect(typeof ctorArgs?.['promptSecret']).toBe('function');
+    });
   });
 
   describe('session ID', () => {
