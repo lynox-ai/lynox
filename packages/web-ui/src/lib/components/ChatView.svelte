@@ -39,6 +39,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
+	import { getToolIcon } from '../utils/tool-icons.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
@@ -270,7 +271,7 @@
 
 	type GroupedBlock =
 		| { type: 'text'; text: string }
-		| { type: 'tools'; action: string; subjects: string[] }
+		| { type: 'tools'; action: string; subjects: string[]; toolName: string }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'step_done'; stepId: string; summary: string };
 
@@ -334,7 +335,7 @@
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
 				} else {
-					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [] });
+					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name });
 				}
 			}
 		}
@@ -1311,8 +1312,11 @@
 									<span class="text-text-muted"><span class="font-medium">{stepName}</span>{#if gBlock.summary}<span class="text-text-subtle/70"> — {gBlock.summary.length > 120 ? gBlock.summary.slice(0, 120) + '...' : gBlock.summary}</span>{/if}</span>
 								</div>
 							{:else if gBlock.type === 'tools'}
+								{@const toolDef = getToolIcon(gBlock.toolName)}
 								<div class="flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 border-l-2 border-border pl-3 py-1 md:py-0.5">
-									<span class="inline-block h-1.5 w-1.5 md:h-1 md:w-1 rounded-full bg-success flex-shrink-0"></span>
+									<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 {toolDef.color}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+										{#each toolDef.paths as p}<path stroke-linecap="round" stroke-linejoin="round" d={p} />{/each}
+									</svg>
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
 								</div>
 							{:else if gBlock.type === 'text' && gBlock.text}
@@ -1340,8 +1344,11 @@
 							{@const legacyGroups = groupedToolCalls((msg.toolCalls ?? []).map((_, i) => ({ type: 'tool_call' as const, index: i })), msg.toolCalls ?? [])}
 							{#each legacyGroups as lg}
 								{#if lg.type === 'tools'}
+									{@const lgDef = getToolIcon(lg.toolName)}
 									<div class="flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 py-1 md:py-0.5">
-										<span class="inline-block h-1.5 w-1.5 md:h-1 md:w-1 rounded-full bg-success flex-shrink-0"></span>
+										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 {lgDef.color}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+											{#each lgDef.paths as p}<path stroke-linecap="round" stroke-linejoin="round" d={p} />{/each}
+										</svg>
 										<span>{lg.action}{lg.subjects.length > 0 ? ': ' + lg.subjects.join(', ') : ''}</span>
 									</div>
 								{/if}
