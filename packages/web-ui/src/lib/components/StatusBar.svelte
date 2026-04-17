@@ -4,6 +4,14 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
 	import { getContextBudget, getSessionModel, getAuthError } from '../stores/chat.svelte.js';
+	import { ensureVoiceInfoProbed, isTtsAvailable } from '../stores/voice-info.svelte.js';
+	import { isAutoSpeakEnabled, toggleAutoSpeak } from '../stores/autospeak.svelte.js';
+	import { getSpeakState } from '../stores/speak.svelte.js';
+
+	void ensureVoiceInfoProbed();
+	const ttsAvailable = $derived(isTtsAvailable());
+	const autoSpeakOn = $derived(isAutoSpeakEnabled());
+	const speakState = $derived(getSpeakState());
 
 	type Indicator = 'none' | 'minor' | 'major' | 'critical' | 'unknown';
 	interface ProviderEntry { indicator: Indicator; description: string; provider: string }
@@ -195,6 +203,23 @@
 	</a>
 
 	<span class="text-border">|</span>
+
+	<!-- Auto-speak toggle — hidden entirely when no TTS provider is available -->
+	{#if ttsAvailable}
+		<button
+			onclick={toggleAutoSpeak}
+			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSpeakOn ? 'text-accent-text' : 'text-text-subtle'}"
+			title={autoSpeakOn ? (speakState === 'playing' ? t('status.autospeak_playing') : t('status.autospeak_on')) : t('status.autospeak_off')}
+			aria-label={autoSpeakOn ? t('status.autospeak_on') : t('status.autospeak_off')}
+			aria-pressed={autoSpeakOn}
+		>
+			{#if autoSpeakOn}
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 {speakState === 'playing' ? 'motion-safe:animate-pulse' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
+			{:else}
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
+			{/if}
+		</button>
+	{/if}
 
 	<!-- Mobile Access shortcut -->
 	<a href="/app/settings/mobile" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" title={t('mobile.title')}>

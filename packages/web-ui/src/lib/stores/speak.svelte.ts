@@ -11,10 +11,21 @@
  *   { done: true, ... }          — final
  *   { error: '...' }             — on failure
  *
- * Chunks are concatenated client-side into a single MP3 blob and played via
- * <audio>. MediaSource Extensions would let playback start mid-stream, but
- * that's a Phase 2 optimization — the server-side streaming already buys the
- * ~1 s TTFB win that matters for the 1.5 s p50 target.
+ * Playback strategy — two paths selected by browser capability:
+ *
+ *   - **MSE progressive** (Chrome/Edge/Firefox; iOS Safari 17.1+). Each
+ *     SSE chunk is `appendBuffer()`'d onto a MediaSource-backed <audio>,
+ *     so playback starts ~100 ms after the first chunk arrives — a second
+ *     after the click, independent of total reply length. This is the fast
+ *     path and matches what the user expects from a "read aloud" button.
+ *   - **Blob fallback** (older Safari, rare MSE-less browsers). Chunks are
+ *     collected into a single MP3 blob, then played at the end of the
+ *     stream. Same correctness, higher perceived latency — user waits the
+ *     full stream duration before audio starts.
+ *
+ * Capability detection is synchronous at call time (`MediaSource.isTypeSupported`).
+ * If MSE throws mid-stream we return an error rather than falling back —
+ * re-fetching would double the Mistral bill, and graceful errors are cheap.
  */
 
 import { getApiBase } from '../config.svelte.js';
@@ -44,10 +55,6 @@ export function isSpeakActive(key: string): boolean {
  * Surface the "Audio is synthesized by Mistral (Paris, EU)" privacy hint
  * once per browser on the first TTS playback. Caller passes the translated
  * string so this store doesn't need to pull in the i18n module.
- *
- * Flag is persistent (localStorage) — first install sees it, then silent
- * until the user clears storage. Matches the STT hint's one-time-discovery
- * pattern without the clutter of rendering it under every speaker button.
  */
 export function maybeShowPrivacyHint(translatedHint: string): void {
 	try {
@@ -55,9 +62,7 @@ export function maybeShowPrivacyHint(translatedHint: string): void {
 		if (localStorage.getItem(PRIVACY_HINT_KEY)) return;
 		addToast(translatedHint, 'info', PRIVACY_HINT_DURATION_MS);
 		localStorage.setItem(PRIVACY_HINT_KEY, '1');
-	} catch {
-		/* localStorage unavailable (SSR, privacy mode) — skip silently */
-	}
+	} catch { /* localStorage unavailable — skip silently */ }
 }
 
 export function stopSpeech(): void {
@@ -72,13 +77,18 @@ export function stopSpeech(): void {
 	activeKey = null;
 }
 
+function canUseMse(): boolean {
+	try {
+		return typeof MediaSource !== 'undefined'
+			&& typeof MediaSource.isTypeSupported === 'function'
+			&& MediaSource.isTypeSupported('audio/mpeg');
+	} catch { return false; }
+}
+
 /**
- * Fetch TTS for `text`, accumulate SSE chunks into a single MP3 blob, then
- * play it. `key` identifies the source (e.g. a message index) so the UI can
- * show the active state next to the right button.
- *
- * Returns null on success, or an error message on failure. Errors are also
- * surfaced via state reset to 'idle' so the caller can toast if it wants.
+ * Start TTS for `text`. Playback begins as soon as audio data is decodable
+ * (MSE path: ~100 ms after first chunk; Blob path: after full stream).
+ * Returns null on success or an error message the caller can surface.
  */
 export async function playSpeech(text: string, key: string): Promise<string | null> {
 	stopSpeech();
@@ -107,16 +117,98 @@ export async function playSpeech(text: string, key: string): Promise<string | nu
 		return `HTTP ${res.status}`;
 	}
 
+	return canUseMse()
+		? playViaMse(res.body, ctrl)
+		: playViaBlob(res.body, ctrl);
+}
+
+async function playViaMse(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<string | null> {
+	const audio = new Audio();
+	audioEl = audio;
+	const ms = new MediaSource();
+	const url = URL.createObjectURL(ms);
+	objectUrl = url;
+	audio.src = url;
+
+	audio.onended = () => {
+		if (audioEl === audio) {
+			if (objectUrl === url) { URL.revokeObjectURL(url); objectUrl = null; }
+			audioEl = null;
+			state = 'idle';
+			activeKey = null;
+			abortCtrl = null;
+		}
+	};
+	audio.onerror = () => { if (audioEl === audio) resetOnError(); };
+	audio.onplaying = () => { if (audioEl === audio) state = 'playing'; };
+
+	let sb: SourceBuffer | null = null;
+	const queue: Uint8Array[] = [];
+	let streamEnded = false;
+	let sourceOpenErr: string | null = null;
+
+	const flush = (): void => {
+		if (!sb || sb.updating) return;
+		const next = queue.shift();
+		if (next) {
+			try { sb.appendBuffer(next as BufferSource); } catch { /* malformed chunk — skip */ }
+			return;
+		}
+		if (streamEnded && ms.readyState === 'open') {
+			try { ms.endOfStream(); } catch { /* already ended / closed */ }
+		}
+	};
+
+	const sourceOpen = new Promise<void>((resolve) => {
+		ms.addEventListener('sourceopen', () => {
+			try {
+				sb = ms.addSourceBuffer('audio/mpeg');
+				sb.addEventListener('updateend', flush);
+			} catch (e) {
+				sourceOpenErr = e instanceof Error ? e.message : 'MediaSource setup failed';
+			}
+			resolve();
+		}, { once: true });
+	});
+
+	// Kick off playback — browser waits on the MediaSource until buffered.
+	audio.play().catch(() => {
+		if (audioEl === audio && !ctrl.signal.aborted) resetOnError();
+	});
+
+	await sourceOpen;
+	if (sourceOpenErr) { resetOnError(); return sourceOpenErr; }
+
+	try {
+		for await (const frame of parseSseFrames(body)) {
+			if (ctrl.signal.aborted) return null;
+			if (frame.error) { resetOnError(); return frame.error; }
+			if (frame.chunk) {
+				queue.push(base64ToBytes(frame.chunk));
+				flush();
+			}
+			if (frame.done) break;
+		}
+	} catch {
+		if (ctrl.signal.aborted) return null;
+		resetOnError();
+		return 'Stream error';
+	}
+
+	streamEnded = true;
+	flush();
+	return null;
+}
+
+async function playViaBlob(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<string | null> {
 	const mp3Parts: Uint8Array[] = [];
 	let errorMsg: string | null = null;
 
 	try {
-		for await (const frame of parseSseFrames(res.body)) {
+		for await (const frame of parseSseFrames(body)) {
 			if (ctrl.signal.aborted) return null;
 			if (frame.error) { errorMsg = frame.error; break; }
-			if (frame.chunk) {
-				mp3Parts.push(base64ToBytes(frame.chunk));
-			}
+			if (frame.chunk) mp3Parts.push(base64ToBytes(frame.chunk));
 			if (frame.done) break;
 		}
 	} catch {
@@ -137,17 +229,14 @@ export async function playSpeech(text: string, key: string): Promise<string | nu
 	audioEl = audio;
 	audio.onended = () => {
 		if (audioEl === audio) {
-			URL.revokeObjectURL(url);
-			if (objectUrl === url) objectUrl = null;
+			if (objectUrl === url) { URL.revokeObjectURL(url); objectUrl = null; }
 			audioEl = null;
 			state = 'idle';
 			activeKey = null;
 			abortCtrl = null;
 		}
 	};
-	audio.onerror = () => {
-		if (audioEl === audio) resetOnError();
-	};
+	audio.onerror = () => { if (audioEl === audio) resetOnError(); };
 
 	state = 'playing';
 	try {
@@ -193,9 +282,7 @@ async function* parseSseFrames(stream: ReadableStream<Uint8Array>): AsyncGenerat
 				if (!data) continue;
 				try {
 					yield JSON.parse(data) as SseFrame;
-				} catch {
-					// skip malformed frame
-				}
+				} catch { /* skip malformed frame */ }
 			}
 		}
 	} finally {

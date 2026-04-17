@@ -43,6 +43,8 @@
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { playSpeech, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
+	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
+	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick } from 'svelte';
 
@@ -426,33 +428,12 @@
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 	let transcribing = $state(false);
-	// Active voice providers, fetched once on mount. `null` until known.
-	// STT provider controls which privacy hint renders under the recording UI;
-	// TTS availability controls whether the speak button on assistant replies
-	// is rendered at all.
-	let transcribeProvider = $state<'mistral-voxtral' | 'whisper-cpp' | null>(null);
-	let ttsAvailable = $state(false);
-
-	$effect(() => {
-		let cancelled = false;
-		void (async () => {
-			try {
-				const res = await fetch(`${getApiBase()}/voice/info`);
-				if (!res.ok || cancelled) return;
-				const data = (await res.json()) as {
-					stt?: { provider?: unknown } | undefined;
-					tts?: { available?: unknown } | undefined;
-				};
-				if (cancelled) return;
-				const sttProvider = data.stt?.provider;
-				if (sttProvider === 'mistral-voxtral' || sttProvider === 'whisper-cpp') {
-					transcribeProvider = sttProvider;
-				}
-				if (data.tts?.available === true) ttsAvailable = true;
-			} catch { /* best-effort — hint stays hidden on failure */ }
-		})();
-		return () => { cancelled = true; };
-	});
+	// Voice capabilities come from the shared voice-info store so StatusBar
+	// (auto-speak toggle) and ChatView (speaker button, privacy hint) stay in
+	// lockstep without duplicating the /api/voice/info probe.
+	void ensureVoiceInfoProbed();
+	const transcribeProvider = $derived(getSttProvider());
+	const ttsAvailable = $derived(isTtsAvailable());
 
 	const voicePrivacyKey = $derived(
 		transcribeProvider === 'mistral-voxtral' ? 'chat.voice_privacy_hint'
@@ -836,6 +817,45 @@
 	const isStreaming = $derived(getIsStreaming());
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());
+
+	// Auto-speak: when a streaming assistant reply finishes AND auto-speak is on
+	// AND TTS is available, trigger playSpeech on the new reply. Guarded by a
+	// prev-streaming check so token-stream tick re-runs of this effect don't
+	// trigger playback mid-reply.
+	let prevStreaming = false;
+	$effect(() => {
+		const streaming = isStreaming;
+		if (!prevStreaming || streaming) {
+			prevStreaming = streaming;
+			return;
+		}
+		prevStreaming = false;
+		if (!ttsAvailable || !isAutoSpeakEnabled()) return;
+		const idx = messages.length - 1;
+		const last = idx >= 0 ? messages[idx] : undefined;
+		if (last?.role !== 'assistant' || !last.content?.trim()) return;
+		maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
+		void playSpeech(last.content, `msg-${idx}`).then((err) => {
+			if (err) addToast(t('chat.speak_failed'), 'error');
+		});
+	});
+
+	// Global keyboard shortcut: Cmd/Ctrl+Shift+V toggles voice recording.
+	// Same key binding works on macOS (⌘⇧V) and Win/Linux (Ctrl+Shift+V).
+	// Press once to start, press again to stop + send. Ignored while an
+	// input/textarea is focused and the user is typing normally — but the
+	// chord itself is unambiguous enough that we fire regardless of focus.
+	$effect(() => {
+		function onHotkey(e: KeyboardEvent) {
+			if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
+			if (e.key !== 'V' && e.key !== 'v') return;
+			e.preventDefault();
+			if (recording) stopRecording();
+			else void startRecording();
+		}
+		window.addEventListener('keydown', onHotkey);
+		return () => window.removeEventListener('keydown', onHotkey);
+	});
 	const streamingLabel = $derived.by(() => {
 		if (!isStreaming) return '';
 		if (streamActivity === 'writing') return t('chat.activity.writing');
@@ -1787,6 +1807,7 @@
 						disabled={!ready}
 						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
 						aria-label={t('chat.voice_input')}
+						title="{t('chat.voice_input')} ({t('shortcut.voice_record')})"
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
