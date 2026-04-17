@@ -40,6 +40,18 @@ let audioEl: HTMLAudioElement | null = null;
 let abortCtrl: AbortController | null = null;
 let objectUrl: string | null = null;
 
+// FIFO queue for `playSpeechQueued` callers (auto-speak per-block playback).
+// When the current playback ends, the next entry is dequeued and played.
+// Cleared by `stopSpeech` so a manual cancel wipes pending blocks too.
+const playbackQueue: Array<{ text: string; key: string }> = [];
+
+function drainQueue(): void {
+	const next = playbackQueue.shift();
+	if (next) {
+		void playSpeech(next.text, next.key);
+	}
+}
+
 const PRIVACY_HINT_KEY = 'lynox_tts_privacy_seen';
 const PRIVACY_HINT_DURATION_MS = 8000;
 
@@ -73,8 +85,29 @@ export function stopSpeech(): void {
 		audioEl = null;
 	}
 	if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+	// Manual stop → drop any auto-speak items the user no longer wants.
+	playbackQueue.length = 0;
 	state = 'idle';
 	activeKey = null;
+}
+
+/**
+ * Enqueue a TTS playback. If idle, fires immediately; if synthesizing or
+ * playing, appends to a FIFO queue that drains on `audio.onended`. Used by
+ * auto-speak so the assistant can speak block-N while the model is still
+ * writing block-(N+1) under a tool call. Manual `playSpeech` (speaker
+ * button) is unchanged: it interrupts whatever is playing.
+ */
+export async function playSpeechQueued(text: string, key: string): Promise<string | null> {
+	if (state === 'idle') {
+		return playSpeech(text, key);
+	}
+	// De-dupe: skip if this key is already active or queued (rapid re-renders
+	// can otherwise enqueue the same block twice).
+	if (activeKey === key) return null;
+	if (playbackQueue.some(q => q.key === key)) return null;
+	playbackQueue.push({ text, key });
+	return null;
 }
 
 function canUseMse(): boolean {
@@ -137,6 +170,7 @@ async function playViaMse(body: ReadableStream<Uint8Array>, ctrl: AbortControlle
 			state = 'idle';
 			activeKey = null;
 			abortCtrl = null;
+			drainQueue();
 		}
 	};
 	audio.onerror = () => { if (audioEl === audio) resetOnError(); };
@@ -234,6 +268,7 @@ async function playViaBlob(body: ReadableStream<Uint8Array>, ctrl: AbortControll
 			state = 'idle';
 			activeKey = null;
 			abortCtrl = null;
+			drainQueue();
 		}
 	};
 	audio.onerror = () => { if (audioEl === audio) resetOnError(); };

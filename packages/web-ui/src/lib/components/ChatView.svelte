@@ -10,6 +10,8 @@
 		getIsStreaming,
 		getStreamingActivity,
 		getStreamingToolName,
+		getCompletedTextBlockGen,
+		getCompletedTextBlock,
 		getQueueLength,
 		getPendingPermission,
 		getPendingSecretPrompt,
@@ -36,13 +38,14 @@
 	} from '../stores/chat.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
+	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { playSpeech, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
+	import { playSpeech, playSpeechQueued, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
@@ -818,24 +821,25 @@
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());
 
-	// Auto-speak: when a streaming assistant reply finishes AND auto-speak is on
-	// AND TTS is available, trigger playSpeech on the new reply. Guarded by a
-	// prev-streaming check so token-stream tick re-runs of this effect don't
-	// trigger playback mid-reply.
-	let prevStreaming = false;
+	// Auto-speak per text-block. The chat store bumps `completedTextBlockGen`
+	// every time the assistant closes a text block — either because a tool
+	// call interrupts the writing or the turn ends. We pick that up here and
+	// enqueue the block via `playSpeechQueued`, which chains playbacks via
+	// `audio.onended` so block-N speaks while the model is still writing
+	// block-(N+1). The first block's TTS request fires within ~100 ms of the
+	// model starting the next tool call, so the user hears something almost
+	// immediately instead of waiting for the whole turn to finish.
+	const completedBlockGen = $derived(getCompletedTextBlockGen());
+	let prevCompletedGen = 0;
 	$effect(() => {
-		const streaming = isStreaming;
-		if (!prevStreaming || streaming) {
-			prevStreaming = streaming;
-			return;
-		}
-		prevStreaming = false;
+		const gen = completedBlockGen;
+		if (gen <= prevCompletedGen) return;
+		prevCompletedGen = gen;
 		if (!ttsAvailable || !isAutoSpeakEnabled()) return;
-		const idx = messages.length - 1;
-		const last = idx >= 0 ? messages[idx] : undefined;
-		if (last?.role !== 'assistant' || !last.content?.trim()) return;
+		const block = getCompletedTextBlock();
+		if (!block.content.trim()) return;
 		maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
-		void playSpeech(last.content, `msg-${idx}`).then((err) => {
+		void playSpeechQueued(block.content, block.key).then((err) => {
 			if (err) addToast(t('chat.speak_failed'), 'error');
 		});
 	});
@@ -1259,7 +1263,11 @@
 							onclick={() => { if (msg.failed) { sendMessage(msg.content); msg.failed = false; } else { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); } }}
 							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
-							{msg.content}
+							{#if hasVoicePrefix(msg.content)}
+								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(msg.content)}
+							{:else}
+								{msg.content}
+							{/if}
 							{#if msg.failed}
 								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-danger/70 mt-1">{t('chat.send_failed')}</span>
 							{:else if msg.queued}
