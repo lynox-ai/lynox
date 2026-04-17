@@ -13,6 +13,14 @@ Text-to-speech runs server-side. The Web UI sends the reply text to `POST /api/s
 
 Only one message speaks at a time — clicking a second speaker cancels the first.
 
+## Auto-read replies
+
+A toggle in the StatusBar (the speaker icon next to the run counter) flips lynox into auto-read mode. While on, every assistant reply is spoken back automatically — no clicks required.
+
+The trigger fires per **text block**, not per turn. Long answers that interleave text and tool calls start speaking the first paragraph the moment a tool call begins; subsequent blocks queue up via `audio.onended` so playback chains seamlessly. You hear the assistant within ~1 s of the first paragraph completing instead of waiting for the entire turn (which can run 30 s+ on tool-heavy replies).
+
+Toggling the speaker off mid-stream stops current audio and clears the queue.
+
 ## Provider
 
 | Property              | Mistral Voxtral TTS                     |
