@@ -580,8 +580,16 @@ export class LynoxHTTPApi {
     // Two-tier: LYNOX_HTTP_SECRET = user scope, LYNOX_HTTP_ADMIN_SECRET = admin scope.
     // When only LYNOX_HTTP_SECRET is set, it implicitly grants admin (backwards compat).
     // Migration endpoints accept X-Migration-Token as alternative auth (admin scope).
+    //
+    // Public routes carry their own auth (HMAC signature for webhooks) or expose
+    // no sensitive data (status probes hit before login). Skipping the bearer
+    // requirement for them is the only way Meta + the pre-auth UI can reach them.
+    const isPublicWhatsAppPath =
+      (method === 'GET'  && pathname === '/api/whatsapp/status')   ||
+      (method === 'GET'  && pathname === '/api/webhooks/whatsapp') ||
+      (method === 'POST' && pathname === '/api/webhooks/whatsapp');
     let authScope: AuthScope = 'admin'; // default for no-secret (localhost) mode
-    if (secret) {
+    if (secret && !isPublicWhatsAppPath) {
       // Migration token auth — grants admin scope for /api/migration/* endpoints only
       const migrationToken = req.headers['x-migration-token'];
       const isMigrationEndpoint = pathname.startsWith('/api/migration/') && pathname !== '/api/migration/preview';

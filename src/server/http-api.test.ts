@@ -200,6 +200,24 @@ describe('LynoxHTTPApi', () => {
       const res = await jsonFetch('/api/secrets');
       expect(res.status).toBe(200);
     });
+
+    it('lets public WhatsApp paths through without bearer token', async () => {
+      // Meta hits the webhook unauthenticated (it carries its own HMAC signature).
+      // The pre-login UI hits /status to decide whether to render WA surfaces.
+      // All three must reach their handler instead of being 401'd by the auth gate.
+      const status = await fetch(`${baseUrl}/api/whatsapp/status`);
+      expect(status.status).not.toBe(401);
+
+      const webhookGet = await fetch(`${baseUrl}/api/webhooks/whatsapp`);
+      expect(webhookGet.status).not.toBe(401);
+
+      const webhookPost = await fetch(`${baseUrl}/api/webhooks/whatsapp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(webhookPost.status).not.toBe(401);
+    });
   });
 
   describe('CORS', () => {
