@@ -809,6 +809,7 @@ export class Agent implements IAgent {
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput });
 
       if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, isError: true });
         await this.onStream({ type: 'error', message: toolError.message, agent: this.name });
       }
       return {

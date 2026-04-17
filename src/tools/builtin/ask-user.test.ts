@@ -203,6 +203,35 @@ describe('askUserTool', () => {
     expect(promptUser).toHaveBeenCalledWith('Proceed?', ['Yes', 'No', '\x00']);
   });
 
+  it('rejects malformed options (non-array) with a clear error', async () => {
+    const promptUser = vi.fn();
+    const agent = makeAgent({ promptUser });
+
+    await expect(
+      askUserTool.handler(
+        // Simulates a model leaking XML tool-use syntax into the options field
+        { question: 'Pick', options: '<parameter name="options"><option>A</option></parameter>' } as unknown as Parameters<typeof askUserTool.handler>[0],
+        agent,
+      ),
+    ).rejects.toThrow(/must be an array/i);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed nested questions[].options', async () => {
+    const promptUser = vi.fn();
+    const agent = makeAgent({ promptUser });
+
+    await expect(
+      askUserTool.handler(
+        {
+          question: 'Multi',
+          questions: [{ question: 'Q1', options: 'not-an-array' }],
+        } as unknown as Parameters<typeof askUserTool.handler>[0],
+        agent,
+      ),
+    ).rejects.toThrow(/questions\[0\]\.options.*must be an array/i);
+  });
+
   it('stores hint from sequential multi-question fallback', async () => {
     const promptUser = vi.fn()
       .mockResolvedValueOnce('answer 1')
