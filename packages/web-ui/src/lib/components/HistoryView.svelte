@@ -69,11 +69,20 @@
 			})
 			.filter(Boolean)
 	);
+	interface ModelBreakdownEntry {
+		model_id: string;
+		cost_usd: number;
+		run_count: number;
+		tokens_in: number;
+		tokens_out: number;
+		tokens_cache_read: number;
+		tokens_cache_write: number;
+	}
 	let stats = $state<{
 		total_runs?: number;
 		total_cost_usd?: number;
 		avg_duration_ms?: number;
-		cost_by_model?: Array<{ model_id: string; cost_usd: number; run_count: number }>;
+		cost_by_model?: ModelBreakdownEntry[];
 	} | null>(null);
 	let hasMore = $state(true);
 	let error = $state('');
@@ -95,6 +104,30 @@
 	// Cost chart
 	let costData = $state<CostDay[]>([]);
 	let showCostChart = $state(false);
+
+	// Model breakdown panel
+	let showModelBreakdown = $state(false);
+
+	/** Map a raw model_id to a display label and provider tag. */
+	function prettyModel(id: string): { label: string; provider: string; tone: 'anthropic' | 'mistral' | 'openai' | 'other' } {
+		const lower = id.toLowerCase();
+		if (lower.startsWith('claude-opus'))   return { label: id.replace(/claude-opus-(\d)-(\d).*/, 'Claude Opus $1.$2'), provider: 'Anthropic', tone: 'anthropic' };
+		if (lower.startsWith('claude-sonnet')) return { label: id.replace(/claude-sonnet-(\d)-(\d).*/, 'Claude Sonnet $1.$2'), provider: 'Anthropic', tone: 'anthropic' };
+		if (lower.startsWith('claude-haiku'))  return { label: id.replace(/claude-haiku-(\d)-(\d).*/, 'Claude Haiku $1.$2'), provider: 'Anthropic', tone: 'anthropic' };
+		if (lower.startsWith('claude-'))       return { label: id, provider: 'Anthropic', tone: 'anthropic' };
+		if (lower.startsWith('mistral'))       return { label: id.replace(/^mistral-/, 'Mistral ').replace(/-latest$/, ''), provider: 'Mistral', tone: 'mistral' };
+		if (lower.includes('gpt-'))            return { label: id, provider: 'OpenAI-compatible', tone: 'openai' };
+		return { label: id || 'unknown', provider: '—', tone: 'other' };
+	}
+
+	function toneClasses(tone: 'anthropic' | 'mistral' | 'openai' | 'other'): string {
+		switch (tone) {
+			case 'anthropic': return 'bg-accent/15 text-accent-text border-accent/30';
+			case 'mistral':   return 'bg-warning/15 text-warning border-warning/30';
+			case 'openai':    return 'bg-success/15 text-success border-success/30';
+			default:          return 'bg-text-subtle/15 text-text-subtle border-border';
+		}
+	}
 
 	// Available models for filter (derived from stats)
 	let availableModels = $derived(stats?.cost_by_model?.map((m) => m.model_id) ?? []);
@@ -348,6 +381,12 @@
 					{t('history.cost_chart')}
 				</button>
 				<button
+					onclick={() => (showModelBreakdown = !showModelBreakdown)}
+					class="rounded-[var(--radius-md)] border border-border px-2.5 py-1 text-xs hover:text-text hover:border-border-hover transition-all {showModelBreakdown ? 'bg-accent/10 text-accent-text' : 'text-text-muted'}"
+				>
+					{t('history.model_breakdown')}
+				</button>
+				<button
 					onclick={exportCSV}
 					class="rounded-[var(--radius-md)] border border-border px-2.5 py-1 text-xs text-text-muted hover:text-text hover:border-border-hover transition-all"
 				>
@@ -380,6 +419,47 @@
 				<div class="flex justify-between mt-1 text-xs md:text-[10px] text-text-subtle">
 					<span>{costData[costData.length - 1]?.day}</span>
 					<span>{costData[0]?.day}</span>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- Model Breakdown -->
+	{#if showModelBreakdown}
+		{@const breakdown = stats?.cost_by_model ?? []}
+		{@const totalCost = breakdown.reduce((s, m) => s + m.cost_usd, 0)}
+		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 mb-4">
+			{#if breakdown.length === 0}
+				<p class="text-xs text-text-subtle">{t('history.no_model_data')}</p>
+			{:else}
+				<div class="space-y-2">
+					{#each breakdown as m (m.model_id)}
+						{@const pretty = prettyModel(m.model_id)}
+						{@const share = totalCost > 0 ? (m.cost_usd / totalCost) * 100 : 0}
+						<div class="group">
+							<div class="flex items-center justify-between gap-2 text-sm">
+								<div class="flex items-center gap-2 min-w-0">
+									<span class="inline-block text-[10px] px-1.5 py-0.5 rounded border {toneClasses(pretty.tone)} shrink-0">{pretty.provider}</span>
+									<span class="text-text truncate" title={m.model_id}>{pretty.label}</span>
+								</div>
+								<div class="flex items-center gap-3 text-xs text-text-muted shrink-0 font-mono">
+									<span>{m.run_count} {t('history.runs')}</span>
+									<span class="text-text">{formatCost(m.cost_usd)}</span>
+									<span class="w-10 text-right">{share.toFixed(1)}%</span>
+								</div>
+							</div>
+							<div class="mt-1 h-1 rounded-full bg-border overflow-hidden">
+								<div class="h-full bg-accent/60 rounded-full transition-all duration-500" style="width: {share}%"></div>
+							</div>
+							<div class="mt-1 flex gap-3 text-[10px] text-text-subtle font-mono">
+								<span title={t('history.tokens_in')}>↓ {m.tokens_in.toLocaleString()}</span>
+								<span title={t('history.tokens_out')}>↑ {m.tokens_out.toLocaleString()}</span>
+								{#if m.tokens_cache_read > 0}
+									<span title={t('history.tokens_cache_read')}>⚡ {m.tokens_cache_read.toLocaleString()}</span>
+								{/if}
+							</div>
+						</div>
+					{/each}
 				</div>
 			{/if}
 		</div>
