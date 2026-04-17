@@ -2,18 +2,31 @@
 # Recommended: docker compose up (includes SearXNG for web search)
 # Standalone:  docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:latest
 
+# Build acceleration notes
+#   - `--mount=type=cache` keeps the pnpm store + apt lists between builds when
+#     the BuildKit backend has a persistent cache (GitHub Actions `type=gha`,
+#     Docker Build Cloud, or local docker buildx). Cuts ~1–2 min per build by
+#     avoiding redundant package downloads when only application code changed.
+#   - We deliberately drop the `rm -rf /var/lib/apt/lists/*` lines because the
+#     directories are tmpfs-mounted via `--mount=type=cache`; trying to remove
+#     them at build time would just re-download next time. The lists are not
+#     copied into the final image (multi-stage), so image size is unaffected.
+
 # --- Stage 1: Build Engine ---
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS build-engine
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
-    && rm -rf /var/lib/apt/lists/* \
     && corepack enable && corepack prepare pnpm@latest --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # Install only engine deps (web-ui has separate install)
-RUN pnpm install --frozen-lockfile --filter @lynox-ai/core
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm install --frozen-lockfile --filter @lynox-ai/core
 COPY src/ src/
 COPY tsconfig.json ./
 RUN pnpm run build
@@ -26,7 +39,8 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 
 COPY packages/web-ui/package.json packages/web-ui/package.json
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN cd packages/web-ui && pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    cd packages/web-ui && pnpm install --frozen-lockfile
 COPY packages/web-ui/ packages/web-ui/
 RUN cd packages/web-ui && pnpm run build
 
@@ -34,21 +48,26 @@ RUN cd packages/web-ui && pnpm run build
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS deps
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
-    && rm -rf /var/lib/apt/lists/* \
     && corepack enable && corepack prepare pnpm@latest --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile --prod \
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm install --frozen-lockfile --prod \
     && node -e "const db = require('better-sqlite3')(':memory:'); db.prepare('SELECT 1').get(); db.close(); console.log('better-sqlite3 OK')"
 
 # --- Stage 4: Whisper.cpp (audio transcription) ---
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS whisper-build
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake make g++ git curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    cmake make g++ git curl ca-certificates
 
 RUN git clone --depth 1 --branch v1.8.4 https://github.com/ggerganov/whisper.cpp /tmp/whisper \
     && cd /tmp/whisper \
@@ -70,9 +89,11 @@ RUN mkdir -p /usr/share/whisper \
 # --- Stage 5: Production image ---
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS production
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget ffmpeg libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    wget ffmpeg libstdc++6
 
 # Whisper.cpp binaries + model
 COPY --from=whisper-build /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
