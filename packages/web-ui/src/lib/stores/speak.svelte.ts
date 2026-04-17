@@ -18,6 +18,7 @@
  */
 
 import { getApiBase } from '../config.svelte.js';
+import { addToast } from './toast.svelte.js';
 
 export type SpeakState = 'idle' | 'synthesizing' | 'playing';
 
@@ -28,12 +29,35 @@ let audioEl: HTMLAudioElement | null = null;
 let abortCtrl: AbortController | null = null;
 let objectUrl: string | null = null;
 
+const PRIVACY_HINT_KEY = 'lynox_tts_privacy_seen';
+const PRIVACY_HINT_DURATION_MS = 8000;
+
 export function getSpeakState(): SpeakState {
 	return state;
 }
 
 export function isSpeakActive(key: string): boolean {
 	return activeKey === key;
+}
+
+/**
+ * Surface the "Audio is synthesized by Mistral (Paris, EU)" privacy hint
+ * once per browser on the first TTS playback. Caller passes the translated
+ * string so this store doesn't need to pull in the i18n module.
+ *
+ * Flag is persistent (localStorage) — first install sees it, then silent
+ * until the user clears storage. Matches the STT hint's one-time-discovery
+ * pattern without the clutter of rendering it under every speaker button.
+ */
+export function maybeShowPrivacyHint(translatedHint: string): void {
+	try {
+		if (typeof localStorage === 'undefined') return;
+		if (localStorage.getItem(PRIVACY_HINT_KEY)) return;
+		addToast(translatedHint, 'info', PRIVACY_HINT_DURATION_MS);
+		localStorage.setItem(PRIVACY_HINT_KEY, '1');
+	} catch {
+		/* localStorage unavailable (SSR, privacy mode) — skip silently */
+	}
 }
 
 export function stopSpeech(): void {

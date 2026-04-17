@@ -89,6 +89,10 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
+/** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
+const SPEAK_MAX_TEXT_CHARS = 10_000;
+/** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
+const SPEAK_USD_PER_CHAR = 0.016 / 1000;
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
@@ -1694,7 +1698,10 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.staticRoutes.set('POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream } = await import('../core/speak.js');
+      const [{ hasSpeakProvider, speakStream }, { recordSessionCost }] = await Promise.all([
+        import('../core/speak.js'),
+        import('../core/session-budget.js'),
+      ]);
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -1704,6 +1711,13 @@ export class LynoxHTTPApi {
       const voice = b && typeof b['voice'] === 'string' ? b['voice'] : undefined;
       const model = b && typeof b['model'] === 'string' ? b['model'] : undefined;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
+      // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
+      // tested up to 2 687 chars; 10 k gives headroom for long replies without
+      // a single call burning through a tenant's budget.
+      if (text.length > SPEAK_MAX_TEXT_CHARS) {
+        errorResponse(res, 413, `Text too long — max ${String(SPEAK_MAX_TEXT_CHARS)} characters (got ${String(text.length)})`);
+        return;
+      }
 
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -1727,6 +1741,11 @@ export class LynoxHTTPApi {
       });
 
       if (meta) {
+        // Bill the post-prep character count into the session-budget counter so
+        // TTS usage shares a ceiling with LLM runs + spawns. Mistral doesn't
+        // surface usage headers — $0.016/1 000 chars is the documented rate,
+        // applied after text-prep has stripped Markdown noise.
+        recordSessionCost(meta.characters * SPEAK_USD_PER_CHAR);
         res.write(`data: ${JSON.stringify({
           done: true,
           characters: meta.characters,
