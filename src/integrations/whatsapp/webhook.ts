@@ -39,11 +39,15 @@ export function dispatchWebhook(ctx: WhatsAppContext, payload: unknown): Dispatc
       event.msg.mediaId !== null &&
       persisted.messageInserted
     ) {
-      // Fire-and-forget background transcription. Failures update nothing —
-      // the message stays without a transcript and the UI falls back to
-      // "play original". A future retry job can reprocess by media-id.
+      // Fire-and-forget background transcription. On failure we log server-side
+      // and leave the message transcript-less; the UI falls back to the raw
+      // audio player (served by /api/whatsapp/media/:messageId).
       transcribed += 1;
-      void transcribeVoiceNote(ctx, event.msg.id, event.msg.mediaId).catch(() => { /* swallow */ });
+      const contactName = event.contact?.displayName ?? null;
+      void transcribeVoiceNote(ctx, event.msg.id, event.msg.mediaId, contactName).catch((err: unknown) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(`[whatsapp] voice transcription failed for ${event.msg.id}: ${reason}`);
+      });
     }
   }
 
@@ -54,7 +58,12 @@ export function dispatchWebhook(ctx: WhatsAppContext, payload: unknown): Dispatc
   };
 }
 
-async function transcribeVoiceNote(ctx: WhatsAppContext, messageId: string, mediaId: string): Promise<void> {
+async function transcribeVoiceNote(
+  ctx: WhatsAppContext,
+  messageId: string,
+  mediaId: string,
+  contactName: string | null,
+): Promise<void> {
   const client = ctx.getClient();
   if (!client) return;
 
@@ -62,7 +71,18 @@ async function transcribeVoiceNote(ctx: WhatsAppContext, messageId: string, medi
   const filename = filenameForMime(mimeType);
 
   const { transcribe } = await import('../../core/transcribe/index.js');
-  const transcript = await transcribe(buffer, filename, { language: 'de' });
+
+  // No language hint — Voxtral auto-detects, so a CH-German contact gets Swiss
+  // German, a French contact gets French, without config. The contact display
+  // name is passed as a glossary term so proper nouns ("Max Müller") survive
+  // the STT post-processing.
+  const session = contactName && contactName.length > 0
+    ? { contactNames: [contactName] }
+    : undefined;
+
+  const transcript = await transcribe(buffer, filename, {
+    ...(session ? { session } : {}),
+  });
   if (transcript && transcript.length > 0) {
     ctx.getStateDb().setTranscript(messageId, transcript);
   }

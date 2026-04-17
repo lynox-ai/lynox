@@ -2045,6 +2045,39 @@ export class LynoxHTTPApi {
       }
     });
 
+    // Media passthrough for voice-note playback in the UI.
+    // Meta media URLs expire after ~5 min; this endpoint re-resolves the
+    // current URL via the access token and streams the audio bytes. Only the
+    // message must exist locally AND have a media-id — the message ID is
+    // guessed-resistant (Meta's wa_id is a long opaque string).
+    this.dynamicRoutes.push({
+      method: 'GET',
+      pattern: /^\/api\/whatsapp\/media\/([^/]+)$/,
+      paramNames: ['messageId'],
+      handler: async (_req, res, params) => {
+        const waCtx = this.engine?.getWhatsAppContext();
+        if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+        if (!waCtx.isConfigured()) { errorResponse(res, 503, 'WhatsApp not configured'); return; }
+        const messageId = params['messageId'] ?? '';
+        const msg = waCtx.getStateDb().getMessageById(messageId);
+        if (!msg || !msg.mediaId) { errorResponse(res, 404, 'Media not found'); return; }
+        const client = waCtx.getClient();
+        if (!client) { errorResponse(res, 503, 'WhatsApp client not initialized'); return; }
+        try {
+          const { buffer, mimeType } = await client.fetchMedia(msg.mediaId);
+          res.writeHead(200, {
+            'Content-Type': mimeType,
+            'Content-Length': buffer.byteLength,
+            // Media-id URLs are short-lived; don't cache client-side past the session.
+            'Cache-Control': 'private, max-age=300',
+          });
+          res.end(buffer);
+        } catch (err) {
+          errorResponse(res, 502, err instanceof Error ? err.message : 'Media fetch failed');
+        }
+      },
+    });
+
     // ── Telegram Setup (chat ID auto-detection via Telegram Bot API) ──
 
     // In-memory state for the setup wizard — only one setup at a time

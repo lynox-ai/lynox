@@ -139,7 +139,9 @@
 		if (m.transcript) return m.transcript;
 		if (m.text) return m.text;
 		switch (m.kind) {
-			case 'voice': return '🎤 Sprachnachricht (keine Transkription)';
+			// Voice bubbles render the <audio> element separately — the text row is
+			// only shown to fall back when transcription isn't done yet.
+			case 'voice': return '';
 			case 'image': return '🖼️ Bild';
 			case 'document': return '📄 Dokument';
 			case 'location': return '📍 Standort';
@@ -232,8 +234,18 @@
 				{#each messages as msg (msg.id)}
 					<div class="msg" class:out={msg.direction === 'outbound'} class:echo={msg.isEcho}>
 						<div class="bubble">
-							{#if msg.kind === 'voice' && msg.transcript}
-								<div class="voice-badge">🎤 Transkript</div>
+							{#if msg.kind === 'voice'}
+								<div class="voice-badge">
+									🎤
+									{#if msg.transcript}
+										Transkript (Voxtral)
+									{:else}
+										Wird transkribiert…
+									{/if}
+								</div>
+								<audio controls preload="none" src="{getApiBase()}/whatsapp/media/{encodeURIComponent(msg.id)}">
+									<track kind="captions" />
+								</audio>
 							{/if}
 							<div class="body">{messageBody(msg)}</div>
 							<div class="meta">
@@ -334,8 +346,10 @@
 	}
 	.msg.out .bubble { background: rgba(59, 130, 246, 0.15); }
 	.msg.echo .bubble { background: rgba(168, 85, 247, 0.12); }
-	.voice-badge { font-size: 0.65rem; color: var(--color-muted, #bbb); margin-bottom: 0.15rem; }
+	.voice-badge { font-size: 0.65rem; color: var(--color-muted, #bbb); margin-bottom: 0.25rem; }
+	.bubble audio { width: 100%; margin: 0.25rem 0; max-width: 280px; }
 	.body { white-space: pre-wrap; word-break: break-word; }
+	.body:empty { display: none; }
 	.meta { font-size: 0.65rem; color: var(--color-muted, #888); margin-top: 0.25rem; }
 	.compose {
 		padding: 0.75rem 1rem; border-top: 1px solid var(--color-border, #2a2a2a);
