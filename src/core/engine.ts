@@ -156,6 +156,7 @@ export class Engine {
   private _toolContext: ToolContext;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
+  private _whatsappContext: import('../integrations/whatsapp/context.js').WhatsAppContext | null = null;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
@@ -588,6 +589,27 @@ export class Engine {
       // Mail init failed — non-critical, continue without it
     }
 
+    // WhatsApp Business Cloud API integration (Coexistence Mode, BYOK Phase 0).
+    // Gated behind the `whatsapp-inbox` feature flag (LYNOX_FEATURE_WHATSAPP_INBOX=1).
+    // State DB initialized whenever a vault exists AND the flag is on — tools are
+    // registered and report "not configured" until the user saves credentials.
+    if (isFeatureEnabled('whatsapp-inbox')) {
+      try {
+        const { WhatsAppContext } = await import('../integrations/whatsapp/context.js');
+        const { WhatsAppStateDb } = await import('../integrations/whatsapp/state.js');
+        if (this.secretVault) {
+          const waState = new WhatsAppStateDb();
+          const waCtx = new WhatsAppContext(waState, this.secretVault);
+          for (const tool of waCtx.tools()) {
+            this.registry.register(tool);
+          }
+          this._whatsappContext = waCtx;
+        }
+      } catch {
+        // WhatsApp init failed — non-critical, continue without it
+      }
+    }
+
     // Pipeline tools registered conditionally
     this._pipelinesEnabled = false;
 
@@ -782,6 +804,7 @@ export class Engine {
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
+  getWhatsAppContext(): import('../integrations/whatsapp/context.js').WhatsAppContext | null { return this._whatsappContext; }
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {

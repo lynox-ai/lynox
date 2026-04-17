@@ -10,17 +10,21 @@
 
 export type FeatureFlag =
   | 'plugins'
-  | 'flat-file-memory';
+  | 'flat-file-memory'
+  | 'whatsapp-inbox';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'plugins': 'LYNOX_FEATURE_PLUGINS',
   'flat-file-memory': 'LYNOX_FEATURE_FLAT_FILE_MEMORY',
+  'whatsapp-inbox': 'LYNOX_FEATURE_WHATSAPP_INBOX',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   'plugins': true,
   'flat-file-memory': true,
+  // Phase-0 BYOK pilot. Off by default — flip to `true` when the feature graduates.
+  'whatsapp-inbox': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

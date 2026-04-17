@@ -83,6 +83,8 @@ function requiresAdmin(method: string, pathname: string): boolean {
   if (method === 'DELETE' && pathname === '/api/data') return true;
   // Migration endpoints require admin scope (except preview which is read-only)
   if (pathname.startsWith('/api/migration') && pathname !== '/api/migration/preview') return true;
+  // WhatsApp credential mutations are admin-scope; read-only status stays user-scope.
+  if ((method === 'POST' || method === 'DELETE') && pathname === '/api/whatsapp/credentials') return true;
   return false;
 }
 const RATE_WINDOW_MS = 60_000;
@@ -135,6 +137,36 @@ async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknow
       try {
         const raw = Buffer.concat(chunks).toString('utf-8');
         resolve(raw ? JSON.parse(raw) as unknown : null);
+      } catch {
+        reject(new Error('Invalid JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+/**
+ * Read raw bytes AND parsed JSON. Used by webhook routes that need to verify
+ * HMAC signatures over the exact bytes sent by the provider — re-serializing
+ * via JSON.stringify cannot reproduce those bytes byte-for-byte.
+ */
+async function parseBodyWithRaw(req: IncomingMessage, maxBytes: number): Promise<{ raw: string; parsed: unknown }> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    req.on('data', (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        req.destroy();
+        reject(new Error('Body too large'));
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf-8');
+      if (!raw) { resolve({ raw: '', parsed: null }); return; }
+      try {
+        resolve({ raw, parsed: JSON.parse(raw) as unknown });
       } catch {
         reject(new Error('Invalid JSON'));
       }
@@ -644,7 +676,15 @@ export class LynoxHTTPApi {
         return;
       }
       try {
-        body = await parseBody(req, MAX_BODY_BYTES);
+        // Webhook routes need raw bytes for provider HMAC verification.
+        // Attach rawBody to req so the route handler can read it back.
+        if (pathname.startsWith('/api/webhooks/')) {
+          const { raw, parsed } = await parseBodyWithRaw(req, MAX_BODY_BYTES);
+          body = parsed;
+          (req as IncomingMessage & { rawBody?: string }).rawBody = raw;
+        } else {
+          body = await parseBody(req, MAX_BODY_BYTES);
+        }
       } catch {
         errorResponse(res, 400, 'Invalid request body');
         return;
@@ -1811,6 +1851,198 @@ export class LynoxHTTPApi {
         res.write(`data: ${JSON.stringify({ error: 'Transcription failed' })}\n\n`);
       }
       res.end();
+    });
+
+    // ── WhatsApp Business Cloud API (Coexistence Mode, BYOK Phase 0) ──
+
+    // Meta webhook verification GET:
+    //   GET /api/webhooks/whatsapp?hub.mode=subscribe&hub.challenge=X&hub.verify_token=Y
+    // Respond with hub.challenge as plain text if verify_token matches what the
+    // customer configured in their Meta App webhook setup.
+    // Returns 404 when the `whatsapp-inbox` feature flag is off (waCtx is null).
+    this.staticRoutes.set('GET /api/webhooks/whatsapp', async (req, res) => {
+      const waCtx = this.engine?.getWhatsAppContext();
+      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+      if (!waCtx.isConfigured()) {
+        errorResponse(res, 503, 'WhatsApp not configured');
+        return;
+      }
+      const url = new URL(req.url ?? '', 'http://localhost');
+      const mode = url.searchParams.get('hub.mode');
+      const token = url.searchParams.get('hub.verify_token');
+      const challenge = url.searchParams.get('hub.challenge');
+      const expected = waCtx.getWebhookVerifyToken();
+      if (mode !== 'subscribe' || !token || !challenge || token !== expected) {
+        errorResponse(res, 403, 'Verify token mismatch');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(challenge);
+    });
+
+    // Meta webhook event POST — HMAC-verified raw body, dispatched to context.
+    this.staticRoutes.set('POST /api/webhooks/whatsapp', async (req, res, _params, body) => {
+      const waCtx = this.engine?.getWhatsAppContext();
+      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+      if (!waCtx.isConfigured()) {
+        errorResponse(res, 503, 'WhatsApp not configured');
+        return;
+      }
+      const appSecret = waCtx.getAppSecret();
+      if (!appSecret) { errorResponse(res, 503, 'WhatsApp app secret missing'); return; }
+
+      const raw = (req as IncomingMessage & { rawBody?: string }).rawBody ?? '';
+      const signature = (req.headers['x-hub-signature-256'] as string | undefined) ?? null;
+      const { verifySignature } = await import('../integrations/whatsapp/signature.js');
+      if (!verifySignature(raw, signature, appSecret)) {
+        errorResponse(res, 401, 'Invalid signature');
+        return;
+      }
+
+      try {
+        const { dispatchWebhook } = await import('../integrations/whatsapp/webhook.js');
+        const result = dispatchWebhook(waCtx, body);
+        jsonResponse(res, 200, { ok: true, ...result });
+      } catch (err) {
+        // Return 200 anyway — Meta retries on non-2xx and we don't want a
+        // poison payload to spam us. Internal error is logged server-side.
+        console.error('[whatsapp] webhook dispatch failed:', err);
+        jsonResponse(res, 200, { ok: false });
+      }
+    });
+
+    // Settings API — status snapshot for the UI.
+    // `featureEnabled` = the `whatsapp-inbox` feature flag is on in this instance.
+    // `available` = the backend context initialized (flag on AND vault present).
+    // When featureEnabled is false, the UI hides all WhatsApp surfaces entirely.
+    this.staticRoutes.set('GET /api/whatsapp/status', async (_req, res) => {
+      const { isFeatureEnabled } = await import('../core/features.js');
+      const featureEnabled = isFeatureEnabled('whatsapp-inbox');
+      const waCtx = this.engine?.getWhatsAppContext();
+      if (!waCtx) { jsonResponse(res, 200, { featureEnabled, available: false, configured: false }); return; }
+      jsonResponse(res, 200, {
+        featureEnabled,
+        available: true,
+        configured: waCtx.isConfigured(),
+      });
+    });
+
+    // Save BYOK credentials (admin-scope in requiresAdmin() — see below).
+    this.staticRoutes.set('POST /api/whatsapp/credentials', async (_req, res, _params, body) => {
+      const waCtx = this.engine?.getWhatsAppContext();
+      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+      const b = body as Record<string, unknown> | null;
+      if (!b) { errorResponse(res, 400, 'Body required'); return; }
+      const accessToken = typeof b['accessToken'] === 'string' ? b['accessToken'].trim() : '';
+      const wabaId = typeof b['wabaId'] === 'string' ? b['wabaId'].trim() : '';
+      const phoneNumberId = typeof b['phoneNumberId'] === 'string' ? b['phoneNumberId'].trim() : '';
+      const appSecret = typeof b['appSecret'] === 'string' ? b['appSecret'].trim() : '';
+      const webhookVerifyToken = typeof b['webhookVerifyToken'] === 'string' ? b['webhookVerifyToken'].trim() : '';
+      if (!accessToken || !wabaId || !phoneNumberId || !appSecret || !webhookVerifyToken) {
+        errorResponse(res, 400, 'All fields required: accessToken, wabaId, phoneNumberId, appSecret, webhookVerifyToken');
+        return;
+      }
+      try {
+        waCtx.saveCredentials({ accessToken, wabaId, phoneNumberId, appSecret, webhookVerifyToken });
+      } catch (err) {
+        errorResponse(res, 500, err instanceof Error ? err.message : 'Failed to save credentials');
+        return;
+      }
+      // Probe Meta for a sanity check (not fatal — network hiccups shouldn't block save).
+      const client = waCtx.getClient();
+      let verified: { displayPhoneNumber: string; verifiedName: string | null } | null = null;
+      let probeError: string | null = null;
+      if (client) {
+        try {
+          verified = await client.verifyCredentials();
+        } catch (err) {
+          probeError = err instanceof Error ? err.message : String(err);
+        }
+      }
+      jsonResponse(res, 200, { saved: true, verified, probeError });
+    });
+
+    this.staticRoutes.set('DELETE /api/whatsapp/credentials', async (_req, res) => {
+      const waCtx = this.engine?.getWhatsAppContext();
+      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+      waCtx.clearCredentials();
+      jsonResponse(res, 200, { cleared: true });
+    });
+
+    // Inbox API — for the Web UI inbox view.
+    this.staticRoutes.set('GET /api/whatsapp/threads', async (req, res) => {
+      const waCtx = this.engine?.getWhatsAppContext();
+      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+      const url = new URL(req.url ?? '', 'http://localhost');
+      const limitParam = parseInt(url.searchParams.get('limit') ?? '50', 10);
+      const limit = Number.isFinite(limitParam) ? Math.max(1, Math.min(limitParam, 200)) : 50;
+      const threads = waCtx.getStateDb().listThreadSummaries(limit);
+      jsonResponse(res, 200, { threads });
+    });
+
+    this.dynamicRoutes.push({
+      method: 'GET',
+      pattern: /^\/api\/whatsapp\/threads\/([^/]+)$/,
+      paramNames: ['threadId'],
+      handler: async (_req, res, params) => {
+        const waCtx = this.engine?.getWhatsAppContext();
+        if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+        const threadId = params['threadId'] ?? '';
+        const messages = waCtx.getStateDb().getMessagesForThread(threadId, 200);
+        const phone = threadId.replace(/^whatsapp-/, '');
+        const contact = waCtx.getStateDb().getContact(phone);
+        jsonResponse(res, 200, { threadId, contact, messages });
+      },
+    });
+
+    this.dynamicRoutes.push({
+      method: 'POST',
+      pattern: /^\/api\/whatsapp\/threads\/([^/]+)\/read$/,
+      paramNames: ['threadId'],
+      handler: async (_req, res, params) => {
+        const waCtx = this.engine?.getWhatsAppContext();
+        if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+        if (!waCtx.isConfigured()) { errorResponse(res, 503, 'WhatsApp not configured'); return; }
+        const threadId = params['threadId'] ?? '';
+        waCtx.getStateDb().markThreadRead(threadId);
+        jsonResponse(res, 200, { ok: true });
+      },
+    });
+
+    // Send a message — UI calls this after user approves a draft. No engine-
+    // level approval gate here because the UI IS the approval UI; the engine
+    // tool handler enforces it for LLM-initiated sends.
+    this.staticRoutes.set('POST /api/whatsapp/send', async (_req, res, _params, body) => {
+      const waCtx = this.engine?.getWhatsAppContext();
+      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
+      if (!waCtx.isConfigured()) { errorResponse(res, 503, 'WhatsApp not configured'); return; }
+      const b = body as Record<string, unknown> | null;
+      const to = b && typeof b['to'] === 'string' ? b['to'].replace(/[^0-9]/g, '') : '';
+      const bodyText = b && typeof b['body'] === 'string' ? b['body'].trim() : '';
+      if (!to || !bodyText) { errorResponse(res, 400, 'Fields "to" and "body" required'); return; }
+      const client = waCtx.getClient();
+      if (!client) { errorResponse(res, 503, 'WhatsApp client not initialized'); return; }
+      try {
+        const { threadIdForPhone } = await import('../integrations/whatsapp/webhook-parser.js');
+        const result = await client.sendText(to, bodyText);
+        waCtx.getStateDb().upsertMessage({
+          id: result.messageId,
+          threadId: threadIdForPhone(to),
+          phoneE164: to,
+          direction: 'outbound',
+          kind: 'text',
+          text: bodyText,
+          mediaId: null,
+          transcript: null,
+          mimeType: null,
+          timestamp: Math.floor(Date.now() / 1000),
+          isEcho: false,
+          rawJson: JSON.stringify({ source: 'lynox-ui', messageId: result.messageId }),
+        });
+        jsonResponse(res, 200, { messageId: result.messageId });
+      } catch (err) {
+        errorResponse(res, 502, err instanceof Error ? err.message : 'Send failed');
+      }
     });
 
     // ── Telegram Setup (chat ID auto-detection via Telegram Bot API) ──

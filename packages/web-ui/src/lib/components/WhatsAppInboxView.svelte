@@ -1,0 +1,359 @@
+<script lang="ts">
+	// WhatsApp inbox — Phase 0 MVP. List threads, read messages (incl. voice
+	// transcripts), type and send. LLM-assisted drafting happens in the main
+	// chat via the `whatsapp` tool; this view is the manual mirror.
+
+	import { onMount, onDestroy } from 'svelte';
+	import { getApiBase } from '../config.svelte.js';
+	import { addToast } from '../stores/toast.svelte.js';
+
+	type Direction = 'inbound' | 'outbound';
+	type Kind = 'text' | 'voice' | 'image' | 'document' | 'location' | 'contact' | 'sticker' | 'reaction' | 'unsupported';
+
+	interface ThreadSummary {
+		threadId: string;
+		phoneE164: string;
+		displayName: string | null;
+		lastMessageAt: number;
+		lastMessagePreview: string;
+		unreadCount: number;
+		hasVoiceNote: boolean;
+	}
+	interface WhatsAppMessage {
+		id: string;
+		threadId: string;
+		phoneE164: string;
+		direction: Direction;
+		kind: Kind;
+		text: string | null;
+		transcript: string | null;
+		mimeType: string | null;
+		timestamp: number;
+		isEcho: boolean;
+	}
+	interface ContactInfo {
+		phoneE164: string;
+		displayName: string | null;
+		profileName: string | null;
+		lastSeenAt: number;
+	}
+
+	interface Status { featureEnabled: boolean; available: boolean; configured: boolean; }
+
+	let featureEnabled = $state<boolean | null>(null);
+	let threads = $state<ThreadSummary[]>([]);
+	let loading = $state(true);
+	let selectedThreadId = $state<string | null>(null);
+	let messages = $state<WhatsAppMessage[]>([]);
+	let contact = $state<ContactInfo | null>(null);
+	let loadingThread = $state(false);
+	let composeText = $state('');
+	let sending = $state(false);
+
+	let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+	async function loadStatus(): Promise<boolean> {
+		try {
+			const res = await fetch(`${getApiBase()}/whatsapp/status`);
+			if (!res.ok) return false;
+			const data = await res.json() as Status;
+			featureEnabled = data.featureEnabled;
+			return data.featureEnabled;
+		} catch {
+			featureEnabled = false;
+			return false;
+		}
+	}
+
+	const selectedThread = $derived(
+		selectedThreadId ? threads.find(t => t.threadId === selectedThreadId) ?? null : null,
+	);
+
+	async function loadInbox() {
+		try {
+			const res = await fetch(`${getApiBase()}/whatsapp/threads`);
+			if (!res.ok) throw new Error();
+			const data = await res.json() as { threads: ThreadSummary[] };
+			threads = data.threads;
+		} catch {
+			threads = [];
+		}
+		loading = false;
+	}
+
+	async function openThread(threadId: string) {
+		selectedThreadId = threadId;
+		loadingThread = true;
+		messages = [];
+		contact = null;
+		try {
+			const res = await fetch(`${getApiBase()}/whatsapp/threads/${encodeURIComponent(threadId)}`);
+			if (!res.ok) throw new Error();
+			const data = await res.json() as { messages: WhatsAppMessage[]; contact: ContactInfo | null };
+			messages = data.messages;
+			contact = data.contact;
+			// Mark as read (fire-and-forget).
+			void fetch(`${getApiBase()}/whatsapp/threads/${encodeURIComponent(threadId)}/read`, { method: 'POST' });
+			await loadInbox(); // refresh unread counts
+		} catch {
+			addToast('Thread konnte nicht geladen werden', 'error');
+		}
+		loadingThread = false;
+	}
+
+	async function sendReply() {
+		const body = composeText.trim();
+		if (!body || !selectedThread) return;
+		sending = true;
+		try {
+			const res = await fetch(`${getApiBase()}/whatsapp/send`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ to: selectedThread.phoneE164, body }),
+			});
+			if (!res.ok) {
+				const err = (await res.json().catch(() => ({ error: 'Send failed' }))) as { error?: string };
+				throw new Error(err.error ?? 'Send failed');
+			}
+			composeText = '';
+			addToast('Gesendet', 'success', 1500);
+			// Reload thread to reflect the new message + refresh inbox.
+			await openThread(selectedThread.threadId);
+		} catch (e) {
+			addToast(e instanceof Error ? e.message : 'Send fehlgeschlagen', 'error');
+		}
+		sending = false;
+	}
+
+	function fmtDate(ts: number): string {
+		const d = new Date(ts * 1000);
+		const now = new Date();
+		const isToday = d.toDateString() === now.toDateString();
+		return isToday
+			? d.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' })
+			: d.toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit' }) + ' ' +
+			  d.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' });
+	}
+
+	function messageBody(m: WhatsAppMessage): string {
+		if (m.transcript) return m.transcript;
+		if (m.text) return m.text;
+		switch (m.kind) {
+			case 'voice': return '🎤 Sprachnachricht (keine Transkription)';
+			case 'image': return '🖼️ Bild';
+			case 'document': return '📄 Dokument';
+			case 'location': return '📍 Standort';
+			case 'contact': return '👤 Kontakt';
+			case 'sticker': return 'Sticker';
+			case 'reaction': return 'Reaktion';
+			default: return '[nicht unterstützter Inhalt]';
+		}
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		// Enter submits, Shift+Enter inserts a newline (standard messenger UX)
+		if (e.key === 'Enter' && !e.shiftKey) {
+			e.preventDefault();
+			void sendReply();
+		}
+	}
+
+	onMount(async () => {
+		const enabled = await loadStatus();
+		if (!enabled) { loading = false; return; }
+		void loadInbox();
+		// Poll every 10s for new messages. Phase 1 switches to SSE push.
+		refreshTimer = setInterval(() => {
+			void loadInbox();
+			if (selectedThreadId) void openThread(selectedThreadId);
+		}, 10_000);
+	});
+
+	onDestroy(() => {
+		if (refreshTimer) clearInterval(refreshTimer);
+	});
+</script>
+
+{#if featureEnabled === false}
+	<div class="feature-off">
+		<h2>WhatsApp Inbox nicht aktiviert</h2>
+		<p>Dieses Feature ist derzeit nicht für deine Instanz freigeschaltet.</p>
+	</div>
+{:else}
+<div class="wa-inbox">
+	<aside class="thread-list">
+		<header>
+			<h2>WhatsApp</h2>
+			<button class="refresh" onclick={loadInbox} disabled={loading} aria-label="Neu laden">↻</button>
+		</header>
+		{#if loading}
+			<p class="muted">Lade …</p>
+		{:else if threads.length === 0}
+			<p class="muted">Noch keine WhatsApp-Nachrichten. Warte auf eingehende Nachrichten oder prüfe die Integration.</p>
+		{:else}
+			<ul>
+				{#each threads as thread (thread.threadId)}
+					<li>
+						<button
+							class="thread-item"
+							class:active={selectedThreadId === thread.threadId}
+							class:unread={thread.unreadCount > 0}
+							onclick={() => openThread(thread.threadId)}
+						>
+							<div class="thread-head">
+								<span class="name">{thread.displayName ?? thread.phoneE164}</span>
+								<span class="time">{fmtDate(thread.lastMessageAt)}</span>
+							</div>
+							<div class="preview">
+								{#if thread.hasVoiceNote}🎤 {/if}
+								{thread.lastMessagePreview}
+							</div>
+							{#if thread.unreadCount > 0}
+								<span class="badge">{thread.unreadCount}</span>
+							{/if}
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</aside>
+
+	<section class="thread-view">
+		{#if !selectedThreadId}
+			<div class="placeholder">Wähle einen Chat aus der Liste.</div>
+		{:else if loadingThread}
+			<div class="placeholder">Lade Thread …</div>
+		{:else}
+			<header class="thread-header">
+				<h3>{contact?.displayName ?? selectedThread?.phoneE164}</h3>
+				<p class="phone">+{selectedThread?.phoneE164}</p>
+			</header>
+			<div class="messages">
+				{#each messages as msg (msg.id)}
+					<div class="msg" class:out={msg.direction === 'outbound'} class:echo={msg.isEcho}>
+						<div class="bubble">
+							{#if msg.kind === 'voice' && msg.transcript}
+								<div class="voice-badge">🎤 Transkript</div>
+							{/if}
+							<div class="body">{messageBody(msg)}</div>
+							<div class="meta">
+								{fmtDate(msg.timestamp)}
+								{#if msg.isEcho}· via Mobile App{/if}
+							</div>
+						</div>
+					</div>
+				{/each}
+			</div>
+			<div class="compose">
+				<textarea
+					bind:value={composeText}
+					onkeydown={handleKeydown}
+					placeholder="Antwort schreiben… (Enter = senden, Shift+Enter = neue Zeile)"
+					rows="2"
+					disabled={sending}
+				></textarea>
+				<button class="send" onclick={sendReply} disabled={sending || composeText.trim().length === 0}>
+					{sending ? 'Sende …' : 'Senden'}
+				</button>
+			</div>
+		{/if}
+	</section>
+</div>
+{/if}
+
+<style>
+	.feature-off { padding: 3rem 1.5rem; text-align: center; color: var(--color-muted, #888); }
+	.feature-off h2 { margin-bottom: 0.5rem; font-size: 1.2rem; color: inherit; }
+	.wa-inbox {
+		display: grid;
+		grid-template-columns: 320px 1fr;
+		height: 100%;
+		min-height: 500px;
+		background: var(--color-bg, #0d0d0d);
+	}
+	.thread-list {
+		border-right: 1px solid var(--color-border, #2a2a2a);
+		overflow-y: auto;
+		padding: 0.75rem;
+	}
+	.thread-list header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding-bottom: 0.75rem;
+		border-bottom: 1px solid var(--color-border, #2a2a2a);
+		margin-bottom: 0.5rem;
+	}
+	.thread-list h2 { margin: 0; font-size: 1.05rem; }
+	.refresh {
+		background: none; border: 1px solid var(--color-border, #333); color: inherit;
+		border-radius: 999px; width: 28px; height: 28px; cursor: pointer;
+	}
+	.refresh:hover { background: rgba(255,255,255,0.05); }
+	.thread-list ul { list-style: none; margin: 0; padding: 0; }
+	.thread-list li { margin: 0; }
+	.thread-item {
+		width: 100%; text-align: left; background: none; border: none;
+		color: inherit; padding: 0.6rem 0.5rem; border-radius: 0.4rem;
+		cursor: pointer; position: relative; display: block;
+		border-bottom: 1px solid rgba(255,255,255,0.04);
+	}
+	.thread-item:hover { background: rgba(255,255,255,0.04); }
+	.thread-item.active { background: rgba(59, 130, 246, 0.08); }
+	.thread-item.unread .name { font-weight: 600; }
+	.thread-head { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.15rem; }
+	.name { font-size: 0.9rem; }
+	.time { font-size: 0.7rem; color: var(--color-muted, #888); white-space: nowrap; }
+	.preview {
+		font-size: 0.8rem; color: var(--color-muted, #aaa);
+		overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	}
+	.badge {
+		position: absolute; top: 0.5rem; right: 0.5rem;
+		background: #3b82f6; color: white; font-size: 0.7rem;
+		padding: 0.05rem 0.4rem; border-radius: 0.8rem;
+	}
+	.thread-view { display: flex; flex-direction: column; height: 100%; }
+	.placeholder {
+		display: flex; align-items: center; justify-content: center;
+		flex: 1; color: var(--color-muted, #888);
+	}
+	.thread-header {
+		padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border, #2a2a2a);
+	}
+	.thread-header h3 { margin: 0; font-size: 1rem; }
+	.phone { margin: 0.1rem 0 0 0; color: var(--color-muted, #888); font-size: 0.75rem; }
+	.messages {
+		flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.5rem;
+	}
+	.msg { display: flex; }
+	.msg.out { justify-content: flex-end; }
+	.bubble {
+		max-width: 70%; padding: 0.5rem 0.75rem; border-radius: 0.6rem;
+		background: rgba(255,255,255,0.05); font-size: 0.9rem;
+	}
+	.msg.out .bubble { background: rgba(59, 130, 246, 0.15); }
+	.msg.echo .bubble { background: rgba(168, 85, 247, 0.12); }
+	.voice-badge { font-size: 0.65rem; color: var(--color-muted, #bbb); margin-bottom: 0.15rem; }
+	.body { white-space: pre-wrap; word-break: break-word; }
+	.meta { font-size: 0.65rem; color: var(--color-muted, #888); margin-top: 0.25rem; }
+	.compose {
+		padding: 0.75rem 1rem; border-top: 1px solid var(--color-border, #2a2a2a);
+		display: flex; gap: 0.5rem; align-items: flex-end;
+	}
+	.compose textarea {
+		flex: 1; padding: 0.5rem; border-radius: 0.3rem;
+		border: 1px solid var(--color-border, #333); background: var(--color-bg, #0d0d0d);
+		color: inherit; font-family: inherit; font-size: 0.9rem; resize: vertical; min-height: 2.2rem;
+	}
+	.compose .send {
+		background: #3b82f6; color: white; border: none; border-radius: 0.3rem;
+		padding: 0.5rem 1rem; cursor: pointer; font-size: 0.9rem; white-space: nowrap;
+	}
+	.compose .send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+	@media (max-width: 760px) {
+		.wa-inbox { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+		.thread-list { max-height: 40vh; border-right: none; border-bottom: 1px solid var(--color-border, #2a2a2a); }
+	}
+</style>
