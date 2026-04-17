@@ -359,6 +359,10 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'Read-aloud audio is synthesized by Mistral (Paris, EU). The provider stores nothing.',
 	},
 	'status.engine_version': { de: 'lynox Engine Version', en: 'lynox engine version' },
+	'status.stale_bundle': {
+		de: 'Neue lynox-Version verfügbar — Seite neu laden, um auf den aktuellen Stand zu wechseln.',
+		en: 'A newer lynox release is live — reload the page to catch up with the running engine.',
+	},
 	'status.autospeak_off': { de: 'Antworten automatisch vorlesen — aus', en: 'Auto-read replies — off' },
 	'status.autospeak_on': { de: 'Antworten automatisch vorlesen — an', en: 'Auto-read replies — on' },
 	'status.autospeak_playing': { de: 'Wird vorgelesen — klicken zum Stoppen', en: 'Reading aloud — click to stop' },
