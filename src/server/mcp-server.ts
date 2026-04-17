@@ -772,7 +772,9 @@ export class LynoxMCPServer {
                 }
               }
             }
-            const isError = event.result.startsWith('Error:') || event.result.startsWith('error:');
+            const isError = event.isError === true
+              || event.result.startsWith('Error:')
+              || event.result.startsWith('error:');
             pushEvent('tool_result', {
               name: event.name,
               success: !isError,

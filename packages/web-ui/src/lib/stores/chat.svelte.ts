@@ -580,7 +580,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				?? msg.toolCalls?.findLast((t) => t.name === toolName);
 			if (tc) {
 				tc.result = String(data['result'] ?? '');
-				tc.status = 'done';
+				tc.status = data['isError'] === true ? 'error' : 'done';
 				setContext({
 					type: tc.name === 'write_file' ? 'file' : 'tool',
 					toolName: tc.name,

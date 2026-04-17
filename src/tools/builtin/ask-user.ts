@@ -30,6 +30,22 @@ function toLabels(options: AskUserOption[]): string[] {
   return options.map(optionLabel);
 }
 
+/**
+ * Models occasionally emit a stringified tool-use payload (e.g. leaked
+ * `<parameter name="options">…</parameter>` XML) instead of a real array.
+ * Reject early with a clear message so the next turn can correct itself
+ * instead of crashing inside `.map`.
+ */
+function assertOptionsArray(
+  value: unknown,
+  field: string,
+): asserts value is AskUserOption[] | undefined {
+  if (value === undefined || Array.isArray(value)) return;
+  throw new Error(
+    `ask_user: \`${field}\` must be an array of strings or { label, hint? } objects, got ${typeof value}. Retry the call with a proper JSON array.`,
+  );
+}
+
 export const askUserTool: ToolEntry<AskUserInput> = {
   definition: {
     name: 'ask_user',
@@ -106,6 +122,13 @@ export const askUserTool: ToolEntry<AskUserInput> = {
   handler: async (input: AskUserInput, agent: IAgent): Promise<string> => {
     if (!agent.promptUser) {
       return 'Interactive input not available in this context.';
+    }
+
+    assertOptionsArray(input.options, 'options');
+    if (input.questions) {
+      for (const [i, q] of input.questions.entries()) {
+        assertOptionsArray(q.options, `questions[${i}].options`);
+      }
     }
 
     if (input.questions && input.questions.length > 0) {
