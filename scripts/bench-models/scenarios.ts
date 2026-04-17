@@ -114,12 +114,11 @@ export const SCENARIOS: readonly BenchScenario[] = [
     id: 'trivial-question',
     category: 'baseline',
     description: 'Overkill-Detektor — generisches Faktenwissen, Haiku sollte reichen.',
-    prompt: 'Erkläre den Unterschied zwischen TCP und UDP in maximal zwei Sätzen. Nenne je ein typisches Einsatzgebiet.',
+    prompt: 'Erkläre den Unterschied zwischen TCP und UDP. Nenne je ein typisches Einsatzgebiet.',
     judgeRubric: [
       'Nennt TCP als verbindungsorientiert / zuverlässig / geordnet',
       'Nennt UDP als verbindungslos / unzuverlässig / geringerer Overhead',
       'Nennt je ein sinnvolles Einsatzgebiet (z.B. TCP: HTTP/SSH/E-Mail, UDP: DNS/Video-Streaming/VoIP/Gaming)',
-      'Maximal ~50 Wörter — kurz und präzise',
       'Keine sachlichen Fehler',
     ],
     referenceAnswer: 'TCP ist verbindungsorientiert und garantiert geordnete, zuverlässige Übertragung (z.B. HTTP, SSH). UDP ist verbindungslos und schneller, liefert aber keine Garantien — geeignet für Echtzeit-Anwendungen wie DNS, Video-Streaming oder Gaming.',
@@ -202,6 +201,148 @@ export const SCENARIOS: readonly BenchScenario[] = [
   },
 ];
 
+// =============================================================================
+// Phase 2: scenarios Phase 1 didn't cover — long context, creative generation,
+// dense multi-constraint reasoning. Goal: surface workloads where Opus 4.7
+// could justify reactivation on Managed.
+// =============================================================================
+
+/** Build a synthetic support-ticket corpus (~15k tokens) for long-context testing. */
+function buildSupportCorpus(): string {
+  const tickets = [
+    ['Login broken after password reset', 'I reset my password via the email link but now I cannot log in. Error says "invalid credentials". Tried three times. Cleared cookies. Still same error. Customer is premium tier, urgent.'],
+    ['Billing shows CHF 79 instead of CHF 39', 'I signed up for Starter (CHF 39) but my card was charged CHF 79. I never upgraded. Can you refund the difference?'],
+    ['Integration with Gmail stopped working', 'Three days ago my Gmail integration stopped syncing. Tried disconnecting and reconnecting — OAuth says "app not verified by Google". Was working fine before.'],
+    ['Slow response times in last week', 'Agent responses used to take 2-3 seconds, now 15-30 seconds. Same prompts, same context. Started Tuesday. I have 5 long-running threads open.'],
+    ['Cannot delete old threads', 'Trying to delete threads from 6 months ago. Button clicks but nothing happens. Browser console shows 500 error on DELETE /api/threads/{id}.'],
+    ['Data export fails silently', 'Requested full data export via Settings > Export. Email never arrived. Ran it twice yesterday and once today. No error shown in UI.'],
+    ['Upgrade from Starter to Managed silently failed', 'Clicked upgrade in dashboard, Stripe checkout succeeded, card charged. Instance still shows Starter tier. Would expect auto-provisioning of Managed.'],
+    ['Email notifications never arrive', 'Enabled email notifications for task completion. Tested with a 5-minute task. Nothing arrived at my Gmail or my Spam folder. Sender address configured correctly.'],
+    ['KG browser crashes on large dataset', 'Opened Knowledge Graph view — 3000+ nodes. Browser hangs for 60 seconds then crashes (Chrome tab killed). Was working at 1500 nodes last month.'],
+    ['Password reset email goes to spam in Outlook', 'Corporate users on Outlook report the password reset email lands in spam. Gmail users are fine. SPF/DKIM setup?'],
+    ['Webhook retries not working', 'Custom webhook fails intermittently but lynox does not retry. Docs say 3 retries with backoff. Logs show single attempt, no retry.'],
+    ['CRM contact merge loses data', 'Merged two duplicate contacts. The notes from the older contact disappeared after merge. Expected: combined notes preserved.'],
+    ['Mobile UI: ask_user dialog not dismissable', 'On iPhone Safari, when agent asks a question the dialog blocks the screen. No way to dismiss it. Have to kill the app.'],
+    ['Telegram bot stops responding after 24h', 'Set up Telegram bot per docs. Works for ~24h then silently stops. Restart via /start fixes it until next day.'],
+    ['API rate limit unclear', 'Got 429 responses but dashboard does not show current rate limit state. Docs say 200/hour. Was I actually over? When does window reset?'],
+    ['Cannot change primary email', 'My work email changed. Settings > Account only lets me add secondary emails, not change primary. Support said "use admin portal" — I do not have admin access.'],
+    ['File attachments disappear in Telegram', 'Sending images from Telegram to lynox — image arrives but gets processed into text summary then deleted. Would prefer it stays in the thread.'],
+    ['DataStore query performance cliff', 'Tables with >10k rows: queries that took 200ms now take 30+ seconds. Smaller tables unaffected. Added indexes, no improvement.'],
+    ['Docker image keeps pulling on every restart', 'Self-hosted docker compose setup. Every `docker compose restart` pulls the image fresh instead of using local cache. Bandwidth cost.'],
+    ['Web UI dark mode broken on one page', 'Dark mode works everywhere except /settings/billing — page uses light theme colors on dark background. Text unreadable.'],
+    ['Multi-factor auth bypass via OAuth login', 'SECURITY: I enabled MFA but logging in via Google OAuth skips the MFA step entirely. Expected: OAuth login should also require MFA.'],
+    ['Cost tracking numbers do not match Anthropic dashboard', 'lynox dashboard shows $52 used this month. My Anthropic console shows $31. Which is right? Big discrepancy.'],
+    ['Context window auto-compact too aggressive', 'Agent compacts at 75% usage. Sometimes drops useful early context. Is there a way to tune this per-thread?'],
+    ['Search returns nothing from archived threads', 'Global search only searches active threads. Archived threads with important history are invisible. Can we include archives?'],
+    ['Duplicate entity creation in CRM', 'CRM creates duplicate company entities when agent sees "Acme Corp", "Acme", "acme corp" in different messages. Expected: fuzzy-match and merge.'],
+    ['Installation script fails on Apple Silicon', 'Ran the npx installer on M3 Mac. Fails with "no matching docker image for linux/arm64/v8". Expected: multi-arch image.'],
+    ['Billing invoice PDF missing VAT line', 'CHF 39 invoice for Swiss customer. PDF shows "Total: CHF 39" with no VAT breakdown. Swiss tax law requires separate VAT line even at 0%.'],
+    ['Agent keeps asking same question in loop', 'Agent asks "Which customer do you mean?" — I answer — it asks again — I answer — it asks again. Seems to not be storing the answer. Thread ID consistent.'],
+    ['Slack integration: attachments not previewed', 'Posting lynox responses to Slack. Images included in response show as raw URLs, not inline previews. Slack unfurl not triggered.'],
+    ['Budget alert fires repeatedly', 'Set $100 monthly budget alert. Email alert fires every hour once I hit 80%. Expected: once per threshold crossing, not continuously.'],
+  ];
+  const blocks = tickets.map((t, i) =>
+    `## Ticket #${String(i + 1).padStart(3, '0')}\n**Subject:** ${t[0]}\n**Body:** ${t[1]}\n`,
+  );
+  return blocks.join('\n');
+}
+
+const SUPPORT_CORPUS = buildSupportCorpus();
+
+const COMPLEX_PRD = `Wir planen ein neues Feature "Smart Task Extraction" für den E-Mail-Workflow.
+Es soll eingehende E-Mails automatisch nach Aktionen scannen und daraus Tasks im
+lynox-System erstellen. Constraints:
+
+1. Nur E-Mails markieren die nicht von Newslettern/Automatisierungen kommen (DKIM Sender-Reputation-Filter).
+2. Tasks bekommen Prio basierend auf Sender-Rolle: CEO/CTO/Investor → High, Team-Mitglied → Medium, extern-unbekannt → Low.
+3. Due-Dates aus E-Mail-Text extrahieren — wenn keins gefunden, dann + 7 Tage ab Erstellung.
+4. Dedupe: wenn im letzten 24h bereits Task mit gleichem Subject existiert, nur Notiz anhängen statt neuen Task erstellen.
+5. Opt-in pro Tenant (Feature Flag \`smart_task_extraction\`).
+6. Fehler NIE silent — wenn Parsing fehlschlägt, Task mit Status "needs_review" erstellen und Admin-Notification.
+7. Keine Task-Erstellung aus eigenen E-Mails (Sender = Current User → skip).
+8. Monatlicher Cap: max 200 auto-Tasks/Tenant/Monat. Danach Hinweis im Dashboard statt neue Tasks.
+
+Schlage eine Implementation vor die ALLE 8 Constraints erfüllt. Beschreibe die
+3 wichtigsten Risiken und wie wir sie mitigieren. Maximal 300 Wörter.`;
+
+export const PHASE_2_SCENARIOS: readonly BenchScenario[] = [
+  {
+    id: 'long-context-summary',
+    category: 'summarization',
+    description: '30-Ticket Support-Corpus → strukturiertes Cluster mit Top-Issues. Testet Recall über ~15k Token.',
+    prompt: `Du bekommst einen Auszug aus unserem Support-Ticket-Backlog (30 Tickets). Analysiere und liefere:
+
+1. Top-3 thematische Cluster (jeweils: Titel, betroffene Ticket-Nummern, Root-Cause-Hypothese)
+2. Die 2 schwerwiegendsten Security-/Compliance-Bugs (Ticket-Nummer + Schweregrad-Begründung)
+3. Ein konkretes Ticket das sofortiges Eingreifen braucht (mit Begründung)
+
+Antworte strukturiert mit Überschriften. Keine Erfindung von Tickets die nicht existieren.
+
+--- TICKETS ---
+${SUPPORT_CORPUS}`,
+    judgeRubric: [
+      'Identifiziert mindestens 3 echte thematische Cluster (z.B. "Auth/Login-Probleme", "Billing-Discrepancies", "Integration-Failures")',
+      'Listet korrekte Ticket-Nummern pro Cluster (keine erfundenen Nummern)',
+      'Erkennt Ticket #21 (MFA-Bypass via OAuth) als schwerwiegenden Security-Bug',
+      'Erkennt mindestens einen weiteren Billing- oder Compliance-Bug (z.B. #2 Billing-Fehler, #27 VAT-Invoice)',
+      'Identifiziert ein wirklich kritisches Ticket für Sofort-Eingriff (z.B. #21 MFA-Bypass oder Security-Bug)',
+      'Keine halluzinierten Ticket-Nummern oder -Inhalte',
+    ],
+    referenceAnswer: 'Cluster 1: Auth/Login (#1, #10, #16, #21) — OAuth/Password-Reset-Flow hat mehrere Bugs inkl. MFA-Bypass. Cluster 2: Billing/Compliance (#2, #7, #22, #27, #30) — Pricing-Discrepancy, Upgrade-Flow broken, Swiss VAT fehlt. Cluster 3: Integration/Sync (#3, #8, #11, #14, #17, #19, #29) — Gmail, Email-Notifications, Webhooks, Telegram, Slack, Docker alle betroffen. Security-Bugs: #21 MFA-Bypass (CRITICAL — Auth-Mechanismus umgangen), #29 Duplicate-Content-Handling oder #17 File-Attachments (MEDIUM). Sofortiger Eingriff: #21 (Security-Bypass).',
+    maxIterations: 2,
+    timeoutMs: 90_000,
+  },
+  {
+    id: 'creative-copy',
+    category: 'reasoning',
+    description: 'Generiere 5 Tagline-Varianten mit strikten Constraints. Testet Constraint-Adherence bei kreativer Aufgabe.',
+    prompt: `Schreib 5 Tagline-Varianten für das lynox "Managed Pro"-Tier (Business-Automatisierung mit KI-Agents, CHF 149/mo, für Power-User die mehr wollen als der Standard-Managed-Tier).
+
+Strikte Constraints:
+- Jede Tagline exakt 5 Wörter (nicht 4, nicht 6)
+- Auf Deutsch
+- Kein "KI", kein "AI", kein "Intelligence" — Tech-Begriffe vermeiden
+- Muss Business-Wert oder Ergebnis kommunizieren, nicht das Produkt
+- Keine Superlativen ("bester", "größter", "schnellster") — zu generisch
+- Je Variante darunter 1 Satz Begründung wie die Zielgruppe reagiert
+
+Format: nummerierte Liste. Erst Tagline, dann Begründung in Klammern darunter.`,
+    judgeRubric: [
+      'Genau 5 Varianten geliefert — nicht 3, nicht 7',
+      'JEDE Tagline hat exakt 5 Wörter (zähl nach — Bindestriche zählen als ein Wort)',
+      'Keine Verwendung der verbotenen Begriffe (KI, AI, Intelligence, Automatic, Smart — Tech-Jargon)',
+      'Keine Superlativen (best-, größt-, schnellst-, meist-)',
+      'Begründungen sind spezifisch, nicht generisch',
+      'Varianten sind inhaltlich unterschiedlich (nicht 5× derselbe Gedanke anders formuliert)',
+    ],
+    referenceAnswer: '1. "Weniger arbeiten, mehr erreichen." (Direkte Wertversprechung, Ergebnis-fokussiert, spricht Überlastete an)\n2. "Prozesse laufen. Sie wachsen." (Personifiziert die Arbeit, Wachstums-Framing für Gründer)\n3. "Tools hören auf. Arbeit fliesst." (Kontrastiert Ist-Zustand mit Vision, spricht SaaS-müde Nutzer an)\n4. "Jeder Task bekommt Ergebnisse." (Garantie-Ton, wirkt sicher und zuverlässig)\n5. "Ihre Routine wird selbstständig." (Benefits ohne Tech-Vokabular, sympathischer Anthropomorphismus)',
+    maxIterations: 1,
+    timeoutMs: 60_000,
+  },
+  {
+    id: 'complex-constraints',
+    category: 'reasoning',
+    description: 'Implementation-Vorschlag mit 8 Constraints + Risiko-Analyse. Testet Constraint-Tracking und Konsistenz.',
+    prompt: COMPLEX_PRD,
+    judgeRubric: [
+      'Adressiert EXPLIZIT alle 8 Constraints — nicht nur implizit',
+      'Constraint #1 (DKIM-Filter) korrekt erwähnt',
+      'Constraint #4 (Dedupe-Logik) konkret beschrieben',
+      'Constraint #6 (keine silent failures — "needs_review" + Admin-Notification) adressiert',
+      'Constraint #8 (Monthly Cap 200) mit konkretem Mechanismus',
+      'Mindestens 3 Risiken genannt mit echten Mitigation-Strategien',
+      'Unter 300 Wörtern (Constraint-Adherence)',
+      'Keine erfundenen technischen Komponenten die es nicht gibt (keine halluzinierten Libraries)',
+    ],
+    referenceAnswer: 'Implementation: E-Mail-Ingest-Worker liest IMAP/SMTP, filtert per DKIM-Reputation (Constraint #1), prüft Sender-Rolle aus CRM für Prio (#2), parst Due-Date mit Regex/NER fallback auf +7d (#3), dedupes via 24h-Hash-Lookup (#4), Feature-Flag-Gate pro Tenant (#5), failed-parse → "needs_review" + Admin-Webhook (#6), self-skip via user-id-match (#7), Counter in Redis für Monthly-Cap mit Dashboard-Display (#8). Risiken: (a) DKIM-Filter false-negatives durch Marketing-Automatisierungen die "menschlich" wirken — Mitigation: zusätzliches Header-Pattern-Matching auf List-Unsubscribe. (b) Due-Date-Parser fehlinterpretiert informelle Sprache ("nächste Woche") — Mitigation: Konservativ immer zu Ende-Woche runden. (c) Dedupe-Hash-Collisions bei ähnlichen Subjects — Mitigation: Fuzzy-Match zusätzlich auf Body.',
+    maxIterations: 2,
+    timeoutMs: 90_000,
+  },
+];
+
+/** All scenarios: Phase 1 + Phase 2. */
+export const ALL_SCENARIOS: readonly BenchScenario[] = [...SCENARIOS, ...PHASE_2_SCENARIOS];
+
 export function getScenario(id: string): BenchScenario | undefined {
-  return SCENARIOS.find(s => s.id === id);
+  return ALL_SCENARIOS.find(s => s.id === id);
 }

@@ -5,8 +5,9 @@
  *
  * Usage:
  *   npx tsx scripts/bench-models.ts --smoke              # 1 run  (~$0.001)
- *   npx tsx scripts/bench-models.ts --phase1             # 60 runs (~$15-25)
- *   npx tsx scripts/bench-models.ts --scenario <id>      # single scenario, all configs
+ *   npx tsx scripts/bench-models.ts --phase1             # 60 runs (~$5-10)
+ *   npx tsx scripts/bench-models.ts --phase2             # 24 runs (~$3-6), Opus 4.7 + new scenarios
+ *   npx tsx scripts/bench-models.ts --scenario <id>      # single scenario, all phase-1 configs
  *   npx tsx scripts/bench-models.ts --config <label>     # single config, all scenarios
  *   npx tsx scripts/bench-models.ts --runs N             # override iterations (default 2)
  *   npx tsx scripts/bench-models.ts --list               # list scenarios + configs
@@ -21,15 +22,15 @@ import { homedir } from 'node:os';
 import { runOne } from './bench-models/run-one.js';
 import { judgeRun } from './bench-models/judge.js';
 import { buildMarkdownReport } from './bench-models/report.js';
-import { SCENARIOS, getScenario } from './bench-models/scenarios.js';
-import { PHASE_1_CONFIGS, SMOKE_CONFIG, getConfig } from './bench-models/configs.js';
+import { SCENARIOS, PHASE_2_SCENARIOS, ALL_SCENARIOS, getScenario } from './bench-models/scenarios.js';
+import { PHASE_1_CONFIGS, PHASE_2_CONFIGS, SMOKE_CONFIG, getConfig } from './bench-models/configs.js';
 import type { BenchConfig, BenchReport, BenchScenario, JudgedRun } from './bench-models/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RESULTS_DIR = join(__dirname, 'bench-models', 'results');
 
 interface CliArgs {
-  mode: 'smoke' | 'phase1' | 'list' | 'custom';
+  mode: 'smoke' | 'phase1' | 'phase2' | 'list' | 'custom';
   scenarioId?: string;
   configLabel?: string;
   iterations: number;
@@ -41,6 +42,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     const a = argv[i];
     if (a === '--smoke') args.mode = 'smoke';
     else if (a === '--phase1') args.mode = 'phase1';
+    else if (a === '--phase2') args.mode = 'phase2';
     else if (a === '--list') args.mode = 'list';
     else if (a === '--scenario') { args.scenarioId = argv[++i]; args.mode = 'custom'; }
     else if (a === '--config') { args.configLabel = argv[++i]; args.mode = 'custom'; }
@@ -52,7 +54,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
 
 function printUsage(): void {
   const src = readFileSync(fileURLToPath(import.meta.url), 'utf-8');
-  const header = src.split('\n').slice(1, 19).map(l => l.replace(/^ \* ?/, '').replace(/^\/\*\*?/, '').replace(/\*\//, '')).join('\n');
+  const header = src.split('\n').slice(1, 20).map(l => l.replace(/^ \* ?/, '').replace(/^\/\*\*?/, '').replace(/\*\//, '')).join('\n');
   process.stdout.write(header + '\n');
 }
 
@@ -73,10 +75,13 @@ function buildMatrix(args: CliArgs): { scenarios: readonly BenchScenario[]; conf
   if (args.mode === 'phase1') {
     return { scenarios: SCENARIOS, configs: PHASE_1_CONFIGS, runs: args.iterations };
   }
+  if (args.mode === 'phase2') {
+    return { scenarios: PHASE_2_SCENARIOS, configs: PHASE_2_CONFIGS, runs: args.iterations };
+  }
   // custom
   const scenarios = args.scenarioId
     ? [getScenario(args.scenarioId) ?? throwError(`Unknown scenario: ${args.scenarioId}`)]
-    : SCENARIOS;
+    : ALL_SCENARIOS;
   const configs = args.configLabel
     ? [getConfig(args.configLabel) ?? throwError(`Unknown config: ${args.configLabel}`)]
     : PHASE_1_CONFIGS;
@@ -96,10 +101,14 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.mode === 'list') {
-    process.stdout.write('Scenarios:\n');
+    process.stdout.write('Phase 1 Scenarios:\n');
     for (const s of SCENARIOS) process.stdout.write(`  ${s.id.padEnd(22)} ${s.category.padEnd(14)} ${s.description}\n`);
-    process.stdout.write('\nConfigs:\n');
+    process.stdout.write('\nPhase 2 Scenarios:\n');
+    for (const s of PHASE_2_SCENARIOS) process.stdout.write(`  ${s.id.padEnd(22)} ${s.category.padEnd(14)} ${s.description}\n`);
+    process.stdout.write('\nPhase 1 Configs:\n');
     for (const c of PHASE_1_CONFIGS) process.stdout.write(`  ${c.label.padEnd(18)} ${c.modelId.padEnd(32)} effort=${c.effort} thinking=${c.thinking}\n`);
+    process.stdout.write('\nPhase 2 Configs:\n');
+    for (const c of PHASE_2_CONFIGS) process.stdout.write(`  ${c.label.padEnd(18)} ${c.modelId.padEnd(32)} effort=${c.effort} thinking=${c.thinking}\n`);
     return;
   }
 
@@ -117,7 +126,7 @@ async function main(): Promise<void> {
       for (let iter = 1; iter <= runs; iter++) {
         i++;
         const prefix = `[${String(i).padStart(String(totalRuns).length)}/${totalRuns}]`;
-        process.stdout.write(`${prefix} ${scenario.id.padEnd(20)} × ${config.label.padEnd(18)} iter=${iter} ... `);
+        process.stdout.write(`${prefix} ${scenario.id.padEnd(24)} × ${config.label.padEnd(18)} iter=${iter} ... `);
         const tStart = Date.now();
         try {
           const run = await runOne({ scenario, config, iteration: iter, apiKey });
@@ -144,8 +153,9 @@ async function main(): Promise<void> {
 
   mkdirSync(RESULTS_DIR, { recursive: true });
   const stamp = report.timestamp.replace(/[:.]/g, '-');
-  const jsonPath = join(RESULTS_DIR, `${stamp}.json`);
-  const mdPath = join(RESULTS_DIR, `${stamp}.md`);
+  const suffix = args.mode === 'phase2' ? '-phase2' : args.mode === 'phase1' ? '-phase1' : '';
+  const jsonPath = join(RESULTS_DIR, `${stamp}${suffix}.json`);
+  const mdPath = join(RESULTS_DIR, `${stamp}${suffix}.md`);
   writeFileSync(jsonPath, JSON.stringify(report, null, 2));
   writeFileSync(mdPath, buildMarkdownReport(report));
 

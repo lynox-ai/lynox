@@ -457,7 +457,7 @@ describe('Engine + Session (Orchestrator)', () => {
     it('returns the resolved model ID', async () => {
       const { session } = await createEngineAndSession();
 
-      expect(session.setModel('opus')).toBe('claude-opus-4-6');
+      expect(session.setModel('opus')).toBe('claude-opus-4-7');
       expect(session.setModel('sonnet')).toBe('claude-sonnet-4-6');
       expect(session.setModel('haiku')).toBe('claude-haiku-4-5-20251001');
     });

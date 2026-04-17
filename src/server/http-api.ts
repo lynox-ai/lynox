@@ -841,7 +841,7 @@ export class LynoxHTTPApi {
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
 
       // Optional per-run overrides (e.g. onboarding uses low effort)
-      const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'max']);
+      const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
       const runEffort = typeof b?.['effort'] === 'string' && VALID_EFFORTS.has(b['effort'])
         ? b['effort'] as import('../types/index.js').EffortLevel
         : undefined;

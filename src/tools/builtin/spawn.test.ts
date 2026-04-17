@@ -304,7 +304,7 @@ describe('spawn_agent tool', () => {
     const agentCall = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
     expect(agentCall['systemPrompt']).toBe('Custom prompt.');
     expect(agentCall['effort']).toBe('max');
-    expect(agentCall['model']).toBe('claude-opus-4-6');
+    expect(agentCall['model']).toBe('claude-opus-4-7');
   });
 
   it('throws for unknown role', async () => {
@@ -402,7 +402,7 @@ describe('spawn_agent tool', () => {
     );
 
     const agentCall = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
-    expect(agentCall['model']).toBe('claude-opus-4-6'); // from role
+    expect(agentCall['model']).toBe('claude-opus-4-7'); // from role
     expect(agentCall['effort']).toBe('max'); // from spec (overrides role)
   });
 
