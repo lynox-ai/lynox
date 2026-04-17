@@ -17,7 +17,7 @@ import type { ToolEntry } from '../../types/index.js';
 import { loadCredentials, hasCredentials, saveCredentials, clearCredentials } from './auth.js';
 import { WhatsAppClient } from './client.js';
 import type { MetaWebhookEvent, WhatsAppCredentials } from './types.js';
-import { WhatsAppStateDb } from './state.js';
+import type { WhatsAppStateDb } from './state.js';
 import { createWhatsAppTool } from './tools/index.js';
 
 export class WhatsAppContext {
