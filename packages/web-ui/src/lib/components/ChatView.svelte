@@ -42,7 +42,7 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { playSpeech, stopSpeech, getSpeakState, isSpeakActive } from '../stores/speak.svelte.js';
+	import { playSpeech, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick } from 'svelte';
 
@@ -1015,6 +1015,7 @@
 		<button
 			onclick={() => {
 				if (active) { stopSpeech(); return; }
+				maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
 				void playSpeech(msgContent, msgKey).then((err) => {
 					if (err) addToast(t('chat.speak_failed'), 'error');
 				});
