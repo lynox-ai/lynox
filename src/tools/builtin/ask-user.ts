@@ -126,6 +126,12 @@ export const askUserTool: ToolEntry<AskUserInput> = {
 
     assertOptionsArray(input.options, 'options');
     if (input.questions) {
+      // Bound to prevent UI overload + DoS via unbounded question arrays.
+      // 20 is a soft cap — tabs UI becomes unusable well before that.
+      const MAX_QUESTIONS = 20;
+      if (input.questions.length > MAX_QUESTIONS) {
+        throw new Error(`ask_user: \`questions\` has ${input.questions.length} entries (max ${MAX_QUESTIONS}). Split into smaller batches.`);
+      }
       for (const [i, q] of input.questions.entries()) {
         assertOptionsArray(q.options, `questions[${i}].options`);
       }

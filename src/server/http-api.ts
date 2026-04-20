@@ -958,6 +958,12 @@ export class LynoxHTTPApi {
       const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
 
+      // Client-capability negotiation. protocol=2 enables one-shot multi-question
+      // ask_user via `prompt_tabs` SSE event + /reply-tabs endpoint. Older or
+      // legacy clients omit it and fall back to sequential per-question prompts.
+      const clientProtocol = typeof b?.['protocol'] === 'number' ? b['protocol'] : 1;
+      const tabsCapable = clientProtocol >= 2;
+
       // Optional per-run overrides (e.g. onboarding uses low effort)
       const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'max']);
       const runEffort = typeof b?.['effort'] === 'string' && VALID_EFFORTS.has(b['effort'])
@@ -1023,7 +1029,7 @@ export class LynoxHTTPApi {
       const sessionAbortController = new AbortController();
       let hasActivePendingPrompt = false;
 
-      // Wire promptUser — writes prompt to SQLite, polls for answer
+      // Wire promptUser — writes prompt to SQLite, event-driven wait.
       session.promptUser = async (question: string, options?: string[]): Promise<string> => {
         if (!promptStore) return 'n'; // fallback if store unavailable
         const promptId = promptStore.insertAskUser(sessionId, question, options);
@@ -1033,10 +1039,46 @@ export class LynoxHTTPApi {
           const data = JSON.stringify({ promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
-        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
-        return row?.answer ?? 'n';
+        if (outcome.status === 'answered') return outcome.row.answer ?? '__dismissed__';
+        // Surface an explicit reason to the client — no silent 'n' default.
+        if (!aborted && !res.writableEnded) {
+          const data = JSON.stringify({ promptId, reason: outcome.status });
+          res.write(`event: prompt_error\ndata: ${data}\n\n`);
+        }
+        return '__dismissed__';
       };
+
+      // Wire promptTabs — one-shot multi-question path (v2 clients only).
+      // Legacy clients fall back to the sequential agent-handler loop that
+      // still uses session.promptUser per question.
+      if (tabsCapable) {
+        session.promptTabs = async (questions): Promise<string[]> => {
+          if (!promptStore) return [];
+          const promptId = promptStore.insertAskUserTabs(sessionId, questions);
+          hasActivePendingPrompt = true;
+          if (!aborted && !res.writableEnded) {
+            const data = JSON.stringify({ promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS });
+            res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
+          }
+          const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
+          hasActivePendingPrompt = false;
+          if (outcome.status === 'answered' && outcome.row.answer) {
+            try {
+              const parsed = JSON.parse(outcome.row.answer) as unknown;
+              if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+                return parsed as string[];
+              }
+            } catch { /* malformed — treat as cancel */ }
+          }
+          if (!aborted && !res.writableEnded) {
+            const data = JSON.stringify({ promptId, reason: outcome.status });
+            res.write(`event: prompt_error\ndata: ${data}\n\n`);
+          }
+          return []; // empty array = "user canceled" per ask-user.ts contract
+        };
+      }
 
       // Wire promptSecret — secret value never enters SSE, only the prompt metadata
       session.promptSecret = async (name: string, prompt: string, keyType?: string): Promise<boolean> => {
@@ -1111,12 +1153,16 @@ export class LynoxHTTPApi {
       const row = ps.getPending(params['id']!);
       if (!row) { jsonResponse(res, 200, { pending: false }); return; }
       // Never leak secret answers back to client
+      const isTabs = row.prompt_type === 'ask_user' && !!row.questions_json;
       jsonResponse(res, 200, {
         pending: true,
         promptId: row.id,
         promptType: row.prompt_type,
+        kind: isTabs ? 'tabs' : row.prompt_type === 'ask_secret' ? 'secret' : 'single',
         question: row.question,
         options: row.options_json ? JSON.parse(row.options_json) as string[] : undefined,
+        questions: row.questions_json ? JSON.parse(row.questions_json) as unknown[] : undefined,
+        partialAnswers: row.partial_answers_json ? JSON.parse(row.partial_answers_json) as unknown[] : undefined,
         secretName: row.secret_name,
         secretKeyType: row.secret_key_type,
         timeoutMs: PROMPT_TIMEOUT_MS,
@@ -1133,18 +1179,86 @@ export class LynoxHTTPApi {
       const answer = b && typeof b['answer'] === 'string' ? b['answer'] : '';
       if (!answer && !promptId) { errorResponse(res, 400, 'Missing answer'); return; }
 
-      // Try by promptId first (preferred — idempotent), fall back to session lookup
-      let answered = false;
+      // Idempotency: if the client retries with the same promptId after a
+      // successful answer (network blip), return 200 so the client can move
+      // on instead of seeing 404 and wedging. Stale/unknown promptId → 404;
+      // expired → 410. Cross-session IDs → 409.
       if (promptId) {
-        answered = ps.answerUser(promptId, answer);
-      }
-      if (!answered) {
-        const pending = ps.getPending(params['id']!);
-        if (pending && pending.prompt_type === 'ask_user') {
-          answered = ps.answerUser(pending.id, answer);
+        const existing = ps.getById(promptId);
+        if (existing) {
+          if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
+          if (existing.status === 'expired') { errorResponse(res, 410, 'Prompt expired'); return; }
+          if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
         }
+        if (ps.answerUser(promptId, answer)) { jsonResponse(res, 200, { ok: true }); return; }
       }
-      if (!answered) { errorResponse(res, 404, 'No pending prompt'); return; }
+
+      // Fallback for clients that didn't echo the promptId (legacy path).
+      const pending = ps.getPending(params['id']!);
+      if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
+        if (ps.answerUser(pending.id, answer)) { jsonResponse(res, 200, { ok: true }); return; }
+      }
+
+      errorResponse(res, 404, 'No pending prompt');
+    }));
+
+    // POST /sessions/:id/reply-tabs — one-shot reply for multi-question tabs prompts.
+    // Body: { promptId: string, answers: string[] }. Each answer corresponds
+    // to a question in order; '__dismissed__' is the canonical skip marker.
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/reply-tabs', async (_req, res, params, body) => {
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { errorResponse(res, 404, 'No pending prompt'); return; }
+
+      const b = body as Record<string, unknown> | null;
+      const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : '';
+      const answers = b && Array.isArray(b['answers']) ? b['answers'] : undefined;
+      if (!promptId) { errorResponse(res, 400, 'Missing promptId'); return; }
+      if (!answers || !answers.every((a): a is string => typeof a === 'string')) {
+        errorResponse(res, 400, 'Missing or invalid answers array'); return;
+      }
+
+      const existing = ps.getById(promptId);
+      if (!existing) { errorResponse(res, 404, 'No pending prompt'); return; }
+      if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
+      if (existing.status === 'expired') { errorResponse(res, 410, 'Prompt expired'); return; }
+      if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+      if (!existing.questions_json) { errorResponse(res, 400, 'Prompt is not a tabs prompt — use /reply'); return; }
+
+      // Length sanity: answers must match question count.
+      try {
+        const questions = JSON.parse(existing.questions_json) as unknown[];
+        if (!Array.isArray(questions) || answers.length !== questions.length) {
+          errorResponse(res, 400, `answers length ${answers.length} does not match questions length ${Array.isArray(questions) ? questions.length : '?'}`); return;
+        }
+      } catch {
+        errorResponse(res, 500, 'Stored questions malformed'); return;
+      }
+
+      if (ps.answerUserTabs(promptId, answers)) { jsonResponse(res, 200, { ok: true }); return; }
+      errorResponse(res, 404, 'No pending prompt');
+    }));
+
+    // POST /sessions/:id/tab-progress — persist partial answers (optional).
+    // Called by the client as the user answers individual tabs so a mid-batch
+    // reconnect restores progress. Does NOT settle the prompt.
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/tab-progress', async (_req, res, params, body) => {
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { errorResponse(res, 404, 'No pending prompt'); return; }
+
+      const b = body as Record<string, unknown> | null;
+      const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : '';
+      const partial = b && Array.isArray(b['partial']) ? b['partial'] : undefined;
+      if (!promptId || !partial) { errorResponse(res, 400, 'Missing promptId or partial'); return; }
+      if (!partial.every((a) => typeof a === 'string' || a === null)) {
+        errorResponse(res, 400, 'partial must be array of string|null'); return;
+      }
+
+      const existing = ps.getById(promptId);
+      if (!existing) { errorResponse(res, 404, 'No pending prompt'); return; }
+      if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
+      if (existing.status !== 'pending') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+
+      ps.setPartialAnswers(promptId, partial as (string | null)[]);
       jsonResponse(res, 200, { ok: true });
     }));
 

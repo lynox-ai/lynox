@@ -573,6 +573,18 @@ const MIGRATIONS: string[] = [
   // v26: Per-thread knowledge extraction toggle
   `INSERT OR IGNORE INTO schema_version (version) VALUES (26);
    ALTER TABLE threads ADD COLUMN skip_extraction INTEGER NOT NULL DEFAULT 0;`,
+
+  // v27: Multi-question (tabs) support + unicity per session + partial-answer
+  // persistence for reconnect-mid-batch. Any pending prompts from v26 and
+  // earlier are expired — on a cold start the engine calls expireAll()
+  // anyway, so this is a no-op in practice but makes the UNIQUE index safe
+  // to add.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (27);
+   UPDATE pending_prompts SET status = 'expired' WHERE status = 'pending';
+   ALTER TABLE pending_prompts ADD COLUMN questions_json TEXT;
+   ALTER TABLE pending_prompts ADD COLUMN partial_answers_json TEXT;
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_prompts_session_unique
+     ON pending_prompts(session_id) WHERE status = 'pending';`,
 ];
 
 export class RunHistory {
