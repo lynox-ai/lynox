@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.2.2 — 2026-04-20
+
+### Fixed
+
+- `ask_user` no longer hangs or crashes when asking multiple questions in one
+  call. The old protocol looped N sequential `prompt` events over SSE and
+  relied on the client replying with fixed timing, which raced on slow mobile
+  connections and silently dropped answers. Replies now use a single
+  `prompt_tabs` SSE event + one-shot `/reply-tabs` POST.
+- `POST /api/sessions/:id/reply` is now idempotent — retrying after a network
+  blip returns 200 with `idempotent: true` instead of 404.
+- Passkey setup prompt on the Web UI no longer renders with a transparent
+  background (Tailwind class `bg-bg-raised` didn't exist in the theme) and no
+  longer overlaps the chat input on mobile.
+- Timeout/abort on a pending prompt now surfaces a `prompt_error` SSE event to
+  the client instead of silently defaulting the answer to `'n'`.
+
+### Added
+
+- `POST /api/sessions/:id/reply-tabs` for one-shot multi-question replies.
+- `POST /api/sessions/:id/tab-progress` for optional mid-batch partial-answer
+  persistence, so a reconnect mid-batch restores answered questions.
+- `GET /api/sessions/:id/pending-prompt` now returns `kind`, `questions`, and
+  `partialAnswers` when the pending prompt is a tabs prompt.
+- Engine `Agent.promptTabs` is now wired over the HTTP API when the client
+  advertises `protocol: 2` on `/run`. MCP and older clients fall back to the
+  previous sequential path.
+- Schema migration v27: `questions_json`, `partial_answers_json`, and a
+  UNIQUE index enforcing one pending prompt per session.
+
+### Changed
+
+- `PromptStore.waitForAnswer` is now event-driven (Node `EventEmitter`)
+  instead of polling every 2s. Sub-millisecond resolution after an answer
+  arrives, same SQLite durability.
+- `ask_user` tool caps the `questions` array at 20 entries.
+
 ## 1.2.1 — 2026-04-17
 
 ### Added
