@@ -364,6 +364,7 @@ const translations: Record<string, Record<Locale, string>> = {
 		de: 'Neue lynox-Version verfügbar — Seite neu laden, um auf den aktuellen Stand zu wechseln.',
 		en: 'A newer lynox release is live — reload the page to catch up with the running engine.',
 	},
+	'status.stale_bundle_action': { de: 'Jetzt neu laden', en: 'Reload now' },
 	'status.autospeak_off': { de: 'Antworten automatisch vorlesen — aus', en: 'Auto-read replies — off' },
 	'status.autospeak_on': { de: 'Antworten automatisch vorlesen — an', en: 'Auto-read replies — on' },
 	'status.autospeak_playing': { de: 'Wird vorgelesen — klicken zum Stoppen', en: 'Reading aloud — click to stop' },
