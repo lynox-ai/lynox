@@ -103,7 +103,7 @@
 </script>
 
 {#if visible}
-	<div class="fixed bottom-4 right-4 z-50 w-80 rounded-xl border border-border bg-bg-raised p-4 shadow-lg">
+	<div class="fixed inset-x-4 bottom-24 z-50 rounded-xl border border-border bg-bg-subtle p-4 shadow-2xl backdrop-blur-sm sm:bottom-12 sm:left-auto sm:right-4 sm:w-80">
 		{#if success}
 			<div class="flex items-center gap-3">
 				<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-green-500/10 text-green-400">
@@ -148,7 +148,7 @@
 				<button
 					onclick={dismiss}
 					class="rounded-[var(--radius-md)] px-3 py-1.5 text-xs text-text-muted
-						transition-colors hover:text-text hover:bg-bg-subtle"
+						transition-colors hover:text-text hover:bg-bg-muted"
 				>
 					{t('passkeySetupDismiss')}
 				</button>

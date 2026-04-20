@@ -117,6 +117,26 @@ export interface PermissionPrompt {
 	promptId?: string;
 }
 
+/** Question descriptor inside a multi-question tabs prompt. Mirrors the
+ * engine's TabQuestion shape. */
+export interface TabsPromptQuestion {
+	question: string;
+	header?: string;
+	options?: string[];
+}
+
+/** State for a server-sent multi-question prompt (protocol=2). Populated from
+ * the SSE `prompt_tabs` event or restored via /pending-prompt on reconnect. */
+export interface TabsPrompt {
+	promptId: string;
+	questions: TabsPromptQuestion[];
+	/** Partial answers the user submitted in a previous connection, restored
+	 * on reconnect. Indexed by question position; undefined entries = unanswered. */
+	partialAnswers?: (string | null)[];
+	timeoutMs?: number;
+	receivedAt?: number;
+}
+
 interface QueuedMessage {
 	task: string;
 	files?: FileAttachment[];
@@ -182,6 +202,7 @@ let isStreaming = $state(false);
 let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
 let streamingToolName = $state<string | null>(null);
 let pendingPermission = $state<PermissionPrompt | null>(null);
+let pendingTabsPrompt = $state<TabsPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
 let secretPromptGeneration = $state(0);
 let chatError = $state<string | null>(null);
@@ -352,7 +373,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 
 	isStreaming = true;
 
-	const payload: Record<string, unknown> = { task };
+	const payload: Record<string, unknown> = { task, protocol: 2 };
 	if (files && files.length > 0) {
 		payload['files'] = files;
 	}
@@ -495,6 +516,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	streamingActivity = 'idle';
 	streamingToolName = null;
 	pendingPermission = null;
+	pendingTabsPrompt = null;
 	retryStatus = null;
 
 	// Parse follow-up suggestions from assistant response
@@ -625,6 +647,27 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				promptId: data['promptId'] as string | undefined,
 			};
 			break;
+		case 'prompt_tabs': {
+			const questions = Array.isArray(data['questions']) ? (data['questions'] as TabsPromptQuestion[]) : [];
+			const promptId = typeof data['promptId'] === 'string' ? data['promptId'] : '';
+			if (!promptId || questions.length === 0) break; // malformed, ignore
+			pendingTabsPrompt = {
+				promptId,
+				questions,
+				timeoutMs: typeof data['timeoutMs'] === 'number' ? data['timeoutMs'] : undefined,
+				receivedAt: Date.now(),
+			};
+			break;
+		}
+		case 'prompt_error': {
+			// Server aborted/expired a pending prompt (SSE disconnect without reconnect,
+			// session abort, etc). Clear local state so the UI doesn't leave a dead form.
+			const promptId = typeof data['promptId'] === 'string' ? data['promptId'] : '';
+			if (pendingPermission?.promptId === promptId) pendingPermission = null;
+			if (pendingTabsPrompt?.promptId === promptId) pendingTabsPrompt = null;
+			if (pendingSecretPrompt?.promptId === promptId) pendingSecretPrompt = null;
+			break;
+		}
 		case 'secret_prompt':
 			pendingSecretPrompt = {
 				name: String(data['name'] ?? ''),
@@ -762,14 +805,58 @@ export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
 	pendingPermission = null;
+	await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply`, { answer, promptId });
+}
+
+/** One-shot reply for a multi-question tabs prompt. Answers are ordered to
+ * match the questions. '__dismissed__' is the canonical per-question skip. */
+export async function replyPermissionTabs(answers: string[]): Promise<void> {
+	if (!sessionId) return;
+	const promptId = pendingTabsPrompt?.promptId;
+	if (!promptId) return;
+	pendingTabsPrompt = null;
+	await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply-tabs`, { promptId, answers });
+}
+
+/** Optionally persist partial answers so a mid-batch reconnect restores
+ * progress. Best-effort — failure does not surface to the user. */
+export async function postTabProgress(promptId: string, partial: (string | null)[]): Promise<void> {
+	if (!sessionId) return;
 	try {
-		await fetch(`${getApiBase()}/sessions/${sessionId}/reply`, {
+		await fetch(`${getApiBase()}/sessions/${sessionId}/tab-progress`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ answer, promptId })
+			body: JSON.stringify({ promptId, partial }),
 		});
-	} catch {
-		// Prompt may have expired or been cancelled — ignore silently
+	} catch { /* best-effort */ }
+}
+
+/** POST a reply with a single retry on transient network error. The server
+ * is idempotent for repeat promptIds (returns 200 with `idempotent: true`),
+ * so retrying is safe. */
+async function postReplyWithRetry(url: string, body: Record<string, unknown>): Promise<void> {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const res = await fetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+			});
+			// 2xx or expected terminal states (410 expired, 404 stale) are all "done".
+			if (res.ok || res.status === 404 || res.status === 410) return;
+			// 5xx → retry once
+			if (res.status >= 500 && attempt === 0) {
+				await new Promise(r => setTimeout(r, 500));
+				continue;
+			}
+			return;
+		} catch {
+			if (attempt === 0) {
+				await new Promise(r => setTimeout(r, 500));
+				continue;
+			}
+			return;
+		}
 	}
 }
 
@@ -840,7 +927,16 @@ export async function checkPendingPrompt(): Promise<void> {
 		if (!data['pending']) return;
 
 		const promptType = data['promptType'] as string;
-		if (promptType === 'ask_user') {
+		const kind = data['kind'] as string | undefined;
+		if (promptType === 'ask_user' && kind === 'tabs' && Array.isArray(data['questions'])) {
+			pendingTabsPrompt = {
+				promptId: String(data['promptId'] ?? ''),
+				questions: data['questions'] as TabsPromptQuestion[],
+				partialAnswers: Array.isArray(data['partialAnswers']) ? (data['partialAnswers'] as (string | null)[]) : undefined,
+				timeoutMs: data['timeoutMs'] as number | undefined,
+				receivedAt: Date.now(),
+			};
+		} else if (promptType === 'ask_user') {
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
 				options: data['options'] as string[] | undefined,
@@ -954,6 +1050,9 @@ export function getCompletedTextBlock(): { content: string; key: string } {
 export function getPendingPermission() {
 	return pendingPermission;
 }
+export function getPendingTabsPrompt() {
+	return pendingTabsPrompt;
+}
 export function getChatError() {
 	return chatError;
 }
@@ -1047,6 +1146,7 @@ export function newChat() {
 	streamingActivity = 'idle';
 	streamingToolName = null;
 	pendingPermission = null;
+	pendingTabsPrompt = null;
 	pendingSecretPrompt = null;
 	pendingChangeset = null;
 	changesetLoading = false;
@@ -1082,6 +1182,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	streamingActivity = 'idle';
 	streamingToolName = null;
 	pendingPermission = null;
+	pendingTabsPrompt = null;
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;

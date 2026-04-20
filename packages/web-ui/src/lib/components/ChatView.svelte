@@ -3,6 +3,9 @@
 		sendMessage,
 		abortRun,
 		replyPermission,
+		replyPermissionTabs,
+		postTabProgress,
+		getPendingTabsPrompt,
 		getMessages,
 		pushPlaceholder,
 		updatePlaceholder,
@@ -421,13 +424,23 @@
 		secretConsented = false;
 	}
 
-	// Multi-question batch mode: collect all answers before sending
+	// Multi-question batch mode: collect all answers before sending.
+	// Two sources feed this UI:
+	//   v2 (protocol=2): server sends a single `prompt_tabs` SSE event →
+	//        pendingTabsPrompt is populated, `submitBatch` resolves the whole
+	//        batch in ONE reply via /reply-tabs.
+	//   v1 (legacy): server sends N sequential `prompt` events for one
+	//        multi-question ask_user → we sniff the tool_call's `questions`
+	//        array, collect answers locally, reply sequentially with
+	//        waitForNextPrompt between replies.
 	interface BatchQuestion { question: string; options: string[]; header?: string; }
 	let batchQuestions = $state<BatchQuestion[]>([]);
 	let batchAnswers = $state<string[]>([]);
 	let batchSelections = $state<string[][]>([]);
 	let batchFocusIdx = $state(0);
 	let inBatchMode = $state(false);
+	let batchMode = $state<'v1' | 'v2' | null>(null);
+	let batchTabsPromptId = $state<string | null>(null);
 	let batchFreetext = $state('');
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
@@ -704,13 +717,18 @@
 	}
 
 	function answerPrompt(answer: string) {
-		if (!pendingPermission) return;
-
-		// Batch mode: collect answer, advance to next or submit all
+		// Batch mode handles both v1 (sequential) and v2 (tabs). The v2 path
+		// has no pendingPermission — it has pendingTabsPrompt instead — so we
+		// must NOT early-return on !pendingPermission in batch mode.
 		if (inBatchMode) {
 			batchAnswers[batchFocusIdx] = answer;
 			batchAnswers = [...batchAnswers]; // trigger reactivity
 			selectedOptions = [];
+
+			// v2: persist partial progress so a reconnect restores the batch.
+			if (batchMode === 'v2' && batchTabsPromptId) {
+				postTabProgress(batchTabsPromptId, batchAnswers.map(a => a || null));
+			}
 
 			// Find next unanswered
 			const nextEmpty = batchAnswers.findIndex((a, i) => i > batchFocusIdx && !a);
@@ -729,44 +747,94 @@
 			return;
 		}
 
+		// Single-question path: requires pendingPermission.
+		if (!pendingPermission) return;
 		answeredPrompts = [...answeredPrompts, { question: pendingPermission.question, answer }];
 		selectedOptions = [];
 		promptAnswer = '';
 		replyPermission(answer);
 	}
 
-	function submitBatch() {
-		// Send answers one by one (Engine expects sequential replies)
-		let idx = 0;
-		function sendNext() {
-			if (idx >= batchAnswers.length) {
-				inBatchMode = false;
-				batchQuestions = [];
-				batchAnswers = [];
-				batchFocusIdx = 0;
-				return;
-			}
-			replyPermission(batchAnswers[idx]!);
-			idx++;
-			// Small delay between replies so Engine can process
-			setTimeout(sendNext, 200);
+	async function submitBatch() {
+		// v2: one-shot reply. Engine's promptTabs resolves with the whole array.
+		if (batchMode === 'v2' && batchTabsPromptId) {
+			await replyPermissionTabs(batchAnswers.map(a => a || '__dismissed__'));
+			resetBatch();
+			return;
 		}
-		sendNext();
+		// v1 legacy fallback: Engine's ask-user.ts loops through `questions` and
+		// calls promptUser once per question — each with its own promptId. We
+		// reply then wait for the NEXT promptId via SSE before sending the next
+		// answer. Fixed timing (setTimeout) raced on slow connections; the
+		// observer approach below removes that race for legacy engines.
+		for (let idx = 0; idx < batchAnswers.length; idx++) {
+			const prevPromptId = getPendingPermission()?.promptId;
+			replyPermission(batchAnswers[idx]!);
+			if (idx + 1 < batchAnswers.length) {
+				const arrived = await waitForNextPrompt(prevPromptId);
+				if (!arrived) break; // tool errored or completed early — stop sending
+			}
+		}
+		resetBatch();
 	}
 
-	// Detect multi-question ask_user from tool_call input
+	function resetBatch(): void {
+		inBatchMode = false;
+		batchMode = null;
+		batchTabsPromptId = null;
+		batchQuestions = [];
+		batchAnswers = [];
+		batchSelections = [];
+		batchFocusIdx = 0;
+		lastBatchToolId = '';
+	}
+
+	/** Resolve true once pendingPermission carries a new promptId, or false on timeout. */
+	async function waitForNextPrompt(prevPromptId: string | undefined, timeoutMs = 15_000): Promise<boolean> {
+		const start = Date.now();
+		while (Date.now() - start < timeoutMs) {
+			const cur = getPendingPermission();
+			if (cur && cur.promptId !== prevPromptId) return true;
+			await new Promise(r => setTimeout(r, 50));
+		}
+		return false;
+	}
+
+	// v1 fallback: detect multi-question ask_user from tool_call input
 	let lastBatchToolId = $state('');
 
+	// v2 path: server sends a single `prompt_tabs` SSE event. This effect
+	// observes pendingTabsPrompt and enters batch mode authoritatively (no
+	// sniffing). Wins over v1 if both signals arrive.
 	$effect(() => {
+		const tabs = pendingTabsPrompt;
+		if (!tabs) {
+			if (batchMode === 'v2') resetBatch();
+			return;
+		}
+		if (batchMode === 'v2' && batchTabsPromptId === tabs.promptId) return;
+		batchQuestions = tabs.questions.map(q => ({
+			question: q.question,
+			options: (q.options ?? []).filter((o: string) => o !== '\x00'),
+			header: q.header,
+		}));
+		// Restore partial answers if the server had any (reconnect mid-batch).
+		const partial = tabs.partialAnswers ?? [];
+		batchAnswers = tabs.questions.map((_q, i) => partial[i] ?? '');
+		batchSelections = tabs.questions.map(() => [] as string[]);
+		batchFocusIdx = batchAnswers.findIndex(a => !a);
+		if (batchFocusIdx < 0) batchFocusIdx = 0;
+		batchMode = 'v2';
+		batchTabsPromptId = tabs.promptId;
+		inBatchMode = true;
+	});
+
+	// v1 fallback: sniff tool_call.input.questions when pendingPermission is set
+	// and no v2 tabs prompt is active.
+	$effect(() => {
+		if (pendingTabsPrompt) return; // v2 path owns it
 		if (!pendingPermission) {
-			// No prompt active — clear stale batch if streaming ended
-			if (!isStreaming && inBatchMode) {
-				inBatchMode = false;
-				batchQuestions = [];
-				batchAnswers = [];
-				batchSelections = [];
-				lastBatchToolId = '';
-			}
+			if (!isStreaming && inBatchMode && batchMode === 'v1') resetBatch();
 			return;
 		}
 		const lastMsg = messages[messages.length - 1];
@@ -790,6 +858,7 @@
 			batchSelections = questions.map(() => [] as string[]);
 			batchFocusIdx = 0;
 			inBatchMode = true;
+			batchMode = 'v1';
 			lastBatchToolId = tcId;
 		}
 	});
@@ -921,6 +990,7 @@
 	});
 	const queueLength = $derived(getQueueLength());
 	const pendingPermission = $derived(getPendingPermission());
+	const pendingTabsPrompt = $derived(getPendingTabsPrompt());
 	const pendingSecret = $derived(getPendingSecretPrompt());
 	const chatError = $derived(getChatError());
 	const chatErrorDetail = $derived(getChatErrorDetail());
@@ -1550,8 +1620,9 @@
 		</div>
 	{/if}
 
-	<!-- Batch mode: all questions as form -->
-	{#if inBatchMode && pendingPermission}
+	<!-- Batch mode: all questions as form. Drives off either pendingTabsPrompt
+	     (v2, one-shot reply) or pendingPermission (v1, sequential fallback). -->
+	{#if inBatchMode && (pendingPermission || pendingTabsPrompt)}
 		<div role="dialog" aria-label={t('chat.batch_mode')} tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3"
 			onkeydown={(e) => { if (e.key === 'Escape') answerPrompt('__dismissed__'); }}>
 			<div class="max-w-3xl mx-auto space-y-1">
@@ -1588,21 +1659,26 @@
 									>{t('chat.skip')}</button>
 								</div>
 							{:else}
-								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex gap-1.5">
-									<input bind:value={batchFreetext} placeholder={q.question} class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[16px] md:text-xs outline-none focus:border-border-hover" />
-									<button type="submit" disabled={!batchFreetext.trim()} class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
-									<button type="button" onclick={() => answerPrompt('__dismissed__')} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-xs text-text-subtle hover:text-text transition-all">{t('chat.skip')}</button>
+								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex flex-col sm:flex-row gap-1.5">
+									<input bind:value={batchFreetext} placeholder={q.question} class="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[16px] md:text-xs outline-none focus:border-border-hover" />
+									<div class="flex gap-1.5">
+										<button type="submit" disabled={!batchFreetext.trim()} class="flex-1 sm:flex-none rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
+										<button type="button" onclick={() => answerPrompt('__dismissed__')} class="flex-1 sm:flex-none rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-xs text-text-subtle hover:text-text transition-all">{t('chat.skip')}</button>
+									</div>
 								</form>
 							{/if}
 						</div>
 					{:else}
-						<!-- Compact: answered or unanswered -->
-						<button onclick={() => { if (batchAnswers[i]) { batchAnswers[i] = ''; batchSelections[i] = []; batchAnswers = [...batchAnswers]; batchSelections = [...batchSelections]; } batchFocusIdx = i; }}
-							class="w-full flex flex-col md:flex-row items-start md:items-center gap-1 md:gap-2 rounded-[var(--radius-sm)] px-3 py-1.5 text-xs text-left transition-all {batchAnswers[i] ? 'text-text-muted hover:bg-bg-muted' : 'text-text-subtle italic hover:bg-bg'}">
-							<span class="font-medium shrink-0 w-auto md:w-20 truncate">{q.header ?? '?'}</span>
-							<span class="{batchAnswers[i] ? 'text-accent-text' : ''} truncate">{batchAnswers[i] || q.question}</span>
-							{#if batchAnswers[i]}
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle hover:text-accent-text ml-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+						{@const ans = batchAnswers[i]}
+						{@const isDismissed = ans === '__dismissed__'}
+						{@const isAnswered = !!ans && !isDismissed}
+						<!-- Compact: answered, dismissed, or unanswered -->
+						<button onclick={() => { if (ans) { batchAnswers[i] = ''; batchSelections[i] = []; batchAnswers = [...batchAnswers]; batchSelections = [...batchSelections]; } batchFocusIdx = i; }}
+							class="w-full flex flex-col md:flex-row items-start md:items-center gap-0.5 md:gap-2 rounded-[var(--radius-sm)] px-3 py-1.5 text-xs text-left transition-all {isAnswered ? 'text-text-muted hover:bg-bg-muted' : isDismissed ? 'text-text-subtle hover:bg-bg-muted' : 'text-text-subtle italic hover:bg-bg'}">
+							<span class="font-medium shrink-0 w-auto md:w-20 md:truncate">{q.header ?? '?'}</span>
+							<span class="min-w-0 md:flex-1 break-words md:truncate {isAnswered ? 'text-accent-text' : isDismissed ? 'text-text-subtle' : ''}">{isDismissed ? t('chat.skipped') : (ans || q.question)}</span>
+							{#if isAnswered}
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle hover:text-accent-text md:ml-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
 							{/if}
 						</button>
 					{/if}
