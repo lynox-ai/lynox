@@ -278,6 +278,53 @@ describe('prepareForSpeech', () => {
     });
   });
 
+  describe('price/rate per unit expansion', () => {
+    it('expands N/mo to "per month" in EN context', () => {
+      expect(prepareForSpeech('Starter costs 39/mo for solo use.')).toBe(
+        'Starter costs 39 per month for solo use.',
+      );
+    });
+
+    it('expands N/mo to "pro Monat" in DE context', () => {
+      expect(prepareForSpeech('Starter kostet CHF 49/mo für Solo-Nutzung.')).toBe(
+        'Starter kostet CHF 49 pro Monat für Solo-Nutzung.',
+      );
+    });
+
+    it('expands N/yr to "per year" in EN', () => {
+      expect(prepareForSpeech('Growth at 199/yr includes priority support.')).toBe(
+        'Growth at 199 per year includes priority support.',
+      );
+    });
+
+    it('expands N/yr to "pro Jahr" in DE', () => {
+      // "mit" triggers DE markers; otherwise /yr would fall through to EN default.
+      expect(prepareForSpeech('Das Jahresabo kostet 199/yr mit allem drin.')).toBe(
+        'Das Jahresabo kostet 199 pro Jahr mit allem drin.',
+      );
+    });
+
+    it('handles uppercase unit variants', () => {
+      expect(prepareForSpeech('Plan: 79/Mo standard')).toBe('Plan: 79 per month standard');
+    });
+
+    it('handles long-form "month"', () => {
+      expect(prepareForSpeech('Pro at 149/month scales.')).toBe('Pro at 149 per month scales.');
+    });
+
+    it('handles German long form /Monat', () => {
+      expect(prepareForSpeech('Für 149/Monat mit nicht beliebten Aufgaben.')).toBe(
+        'Für 149 pro Monat mit nicht beliebten Aufgaben.',
+      );
+    });
+
+    it('expands rates in parenthetical prices', () => {
+      expect(prepareForSpeech('Upgrade to Managed (CHF 149/mo) for more resources.')).toBe(
+        'Upgrade to Managed (CHF 149 per month) for more resources.',
+      );
+    });
+  });
+
   describe('slash between word-tokens', () => {
     it('converts letter/letter to ", " (list separator)', () => {
       expect(prepareForSpeech('Wachstum/SLA nötig')).toBe('Wachstum, SLA nötig');
