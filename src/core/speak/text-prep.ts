@@ -35,6 +35,10 @@ export function prepareForSpeech(input: string): string {
   text = text.replace(/\s*(?:→|←|↔|⇒|⇐|⇔)\s*/g, arrowConnector);
   text = text.replace(/\s*(?:<->|<=>|->|<-|=>|<=)\s*/g, arrowConnector);
 
+  // Em-dash — is a Markdown/prose separator; TTS reads it as "em dash"
+  // or inserts a jarring long pause. A comma gives a normal clause break.
+  text = text.replace(/\s*—\s*/g, ', ');
+
   // Less-than + digit (e.g. "<4h", "<100ms") — strip the "<" so TTS reads
   // the quantity naturally instead of choking on the bracket. We lose the
   // "less than" nuance, but preserving a readable quantity is more important.
@@ -66,6 +70,22 @@ export function prepareForSpeech(input: string): string {
   text = text.replace(/(\d)\s*\/\s*(?:day|Tag|d)\b/gi, `$1${perDay}`);
   text = text.replace(/(\d)\s*\/\s*(?:hour|Stunde|h)\b/gi, `$1${perHour}`);
 
+  // CHF currency name expansion in DE context. "CHF 79" reads as "C H F
+  // seventy-nine" by the EN voice speaking German text. Expand to the
+  // full name so prosody is natural. EN context leaves the ISO code
+  // alone — most English speakers recognize it.
+  if (deContext) {
+    text = text.replace(/CHF\s*(\d+(?:[.,]\d+)?)/g, '$1 Schweizer Franken');
+  }
+
+  // Multiplier expansion. "1×", "1.5×", "10x" etc. read as "nits" or
+  // "by" on the Voxtral voice. Convert to the spoken word. Language-aware.
+  // Unicode × first (unambiguous); ASCII `x` requires a word boundary
+  // afterwards so "Linux", "2xl" (size), "box" don't match.
+  const timesWord = deContext ? 'mal' : 'times';
+  text = text.replace(/(\d+(?:\.\d+)?)\s*×/g, `$1 ${timesWord} `);
+  text = text.replace(/(\d+(?:\.\d+)?)x\b/g, `$1 ${timesWord} `);
+
   // Generic slash between word-tokens (e.g. "Wachstum/SLA", "EU/US",
   // "customer/invoice") — convert to ", " so TTS treats them as a list.
   // Two passes: letter on the left (letter-first cases), and digit on the
@@ -75,7 +95,22 @@ export function prepareForSpeech(input: string): string {
   text = text.replace(/(\p{L})\s*\/\s*([\p{L}\p{N}])/gu, '$1, $2');
   text = text.replace(/(\p{N})\s*\/\s*(\p{L})/gu, '$1, $2');
 
+  // Time HH:MM → "HH Uhr MM" in DE context. EN voices render "22:55"
+  // naturally as "twenty-two fifty-five"; German speakers say
+  // "zweiundzwanzig Uhr fünfundfünfzig". Requires 2-digit minutes so
+  // ratios like "3:1" pass through.
+  if (deContext) {
+    text = text.replace(/\b(\d{1,2}):(\d{2})\b/g, '$1 Uhr $2');
+  }
+
   text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
+
+  // Issue/PR references like "#42" read as "hash 42" by TTS. Expand to
+  // the spoken word. Runs AFTER the Markdown header strip above (which
+  // requires `#` followed by space), so `#42` is the remaining case.
+  // Does not match hashtags (letters after #) — those usually read fine.
+  const numberWord = deContext ? 'Nummer' : 'number';
+  text = text.replace(/#(\d+)/g, `${numberWord} $1`);
 
   text = text.replace(/(\*\*|__)(.+?)\1/g, '$2');
   text = text.replace(/(?<![*_])[*_]([^*_\n]+)[*_](?![*_])/g, '$1');
