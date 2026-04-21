@@ -211,33 +211,75 @@ describe('speak facade — text-prep pipeline', () => {
       expect(voices.find(v => v.id === 'en_paul_neutral')).toBeDefined();
     });
 
-    it('parses Mistral live shape (items + slug + languages array)', async () => {
+    it('parses Mistral live shape across paginated responses', async () => {
       stubMistralKey(true);
-      // Real Mistral response shape probed against the live API 2026-04-21.
-      // Deliberately minimal fixture — just the fields we parse — so if
-      // Mistral adds new fields the test doesn't need updating.
-      const liveResponse = {
+      // Mistral caps page_size at 10; full catalog (~30 voices today) spans
+      // 3 pages. This fixture has total_pages=3 — the loop must fetch all
+      // three and concatenate uniquely.
+      const page1 = {
         items: [
           { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'] },
-          { slug: 'gb_oliver_neutral', name: 'Oliver - Neutral', languages: ['en_gb'] },
-          { slug: 'fr_aurelie', name: 'Aurélie', languages: ['fr_fr'] },
+          { slug: 'en_alex_neutral', name: 'Alex - Neutral', languages: ['en_us'] },
         ],
-        total: 3, page: 1, page_size: 10, total_pages: 1,
+        total: 6, page: 1, page_size: 10, total_pages: 3,
       };
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-        new Response(JSON.stringify(liveResponse), { status: 200, headers: { 'content-type': 'application/json' } }),
-      );
+      const page2 = {
+        items: [
+          { slug: 'gb_oliver_neutral', name: 'Oliver - Neutral', languages: ['en_gb'] },
+          { slug: 'gb_jane_sarcasm', name: 'Jane - Sarcasm', languages: ['en_gb'] },
+        ],
+        total: 6, page: 2, page_size: 10, total_pages: 3,
+      };
+      const page3 = {
+        items: [
+          { slug: 'fr_aurelie', name: 'Aurélie', languages: ['fr_fr'] },
+          // Intentional duplicate — parser must dedupe.
+          { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'] },
+        ],
+        total: 6, page: 3, page_size: 10, total_pages: 3,
+      };
+      const pages = [page1, page2, page3];
+      let callIdx = 0;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        const body = pages[callIdx] ?? pages[pages.length - 1];
+        callIdx++;
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
       try {
-        // Bust the module-scoped voices cache from any previous test.
         await vi.resetModules();
         const fresh = await import('./index.js');
         const voices = await fresh.listMistralVoices();
-        expect(voices.length).toBe(3);
-        expect(voices[0]!.id).toBe('en_paul_neutral');  // slug, not UUID
-        expect(voices[0]!.language).toBe('en');          // first of languages[], normalized
-        expect(voices[0]!.description).toBe('Paul - Neutral'); // from `name`
-        expect(voices[2]!.id).toBe('fr_aurelie');
-        expect(voices[2]!.language).toBe('fr');
+        // 5 unique — the duplicate en_paul_neutral on page 3 is deduped.
+        expect(voices.length).toBe(5);
+        expect(voices.map(v => v.id)).toEqual([
+          'en_paul_neutral', 'en_alex_neutral',
+          'gb_oliver_neutral', 'gb_jane_sarcasm',
+          'fr_aurelie',
+        ]);
+        // Pagination hit all 3 pages.
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+        // URLs use `page=N` — confirm page 2 and page 3 were requested.
+        const urls = fetchSpy.mock.calls.map(c => String(c[0]));
+        expect(urls[0]).toContain('page=1');
+        expect(urls[1]).toContain('page=2');
+        expect(urls[2]).toContain('page=3');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('falls back if first page returns non-ok (any page)', async () => {
+      stubMistralKey(true);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('nope', { status: 503 }),
+      );
+      try {
+        await vi.resetModules();
+        const fresh = await import('./index.js');
+        const voices = await fresh.listMistralVoices();
+        // Fallback catalog has at least en_paul_neutral.
+        expect(voices.find(v => v.id === 'en_paul_neutral')).toBeDefined();
+        expect(voices.length).toBeGreaterThan(0);
       } finally {
         fetchSpy.mockRestore();
       }

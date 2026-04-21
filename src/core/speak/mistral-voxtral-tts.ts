@@ -38,10 +38,12 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-latest';
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
 const API_URL = 'https://api.mistral.ai/v1/audio/speech';
-// Default page_size is 10 (≈3 pages for the current 30-voice catalog).
-// Request 100 to get all voices in one call — keeps the picker simple at
-// the cost of one slightly larger response, which is still < 30 KB.
-const VOICES_URL = 'https://api.mistral.ai/v1/audio/voices?page_size=100';
+// Mistral caps `page_size` at 10 regardless of what we request — confirmed
+// 2026-04-21 against the live API. We paginate explicitly to fetch all voices.
+const VOICES_BASE_URL = 'https://api.mistral.ai/v1/audio/voices';
+// Hard page ceiling so a buggy `total_pages` response can't spin forever.
+// 30 voices × 10/page = 3 pages today; 100 pages would be 1000 voices.
+const VOICES_MAX_PAGES = 100;
 
 /**
  * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
@@ -74,6 +76,56 @@ const VOICES_TTL_MS = 60 * 60_000; // 1 hour
  * (no key, network error, unexpected shape) returns the hardcoded
  * FALLBACK_VOICES so the UI is never voice-pickerless.
  */
+/**
+ * Parse one page of the Mistral voices response into our VoiceInfo shape.
+ * Separated from the pagination loop so the shape-tolerance logic stays
+ * readable. Accepts `items` / `data` / `voices` / bare array containers.
+ */
+function parseVoicesPage(body: unknown): { voices: VoiceInfo[]; totalPages: number } {
+  // Mistral's actual response shape (probed 2026-04-21):
+  //   { items: [{ slug, name, languages: [...], gender, age, tags, id, ... }], total, page, page_size, total_pages }
+  // `slug` is the synthesis-friendly voice selector ('en_paul_neutral').
+  // `id` is a provider UUID and not usable as a voice parameter.
+  const raw: unknown[] = Array.isArray(body)
+    ? body
+    : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['items'])
+      ? (body as { items: unknown[] }).items
+      : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['data'])
+        ? (body as { data: unknown[] }).data
+        : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['voices'])
+          ? (body as { voices: unknown[] }).voices
+          : [];
+  const totalPages = body && typeof body === 'object' && typeof (body as { total_pages?: unknown }).total_pages === 'number'
+    ? (body as { total_pages: number }).total_pages
+    : 1;
+  const voices = raw.flatMap((entry): VoiceInfo[] => {
+    if (!entry || typeof entry !== 'object') return [];
+    const e = entry as Record<string, unknown>;
+    // Prefer `slug` (Mistral's synthesis selector). Fall back to `voice` or
+    // `id` for other provider shapes. Note: Mistral's `id` is a UUID — accept
+    // it last, since using it as a voice param would fail.
+    const id = typeof e['slug'] === 'string' ? e['slug']
+      : typeof e['voice'] === 'string' ? e['voice']
+      : typeof e['id'] === 'string' ? e['id']
+      : undefined;
+    if (!id) return [];
+    // `languages` is an array (['en_us']); take the first and normalize
+    // 'en_us' → 'en' for the UI. Single-string `language` accepted as fallback.
+    const languages = Array.isArray(e['languages']) ? e['languages'] as unknown[] : null;
+    const rawLang = languages && typeof languages[0] === 'string' ? languages[0] as string
+      : typeof e['language'] === 'string' ? e['language']
+      : id.split('_')[0];
+    const language = rawLang ? rawLang.split('_')[0] : undefined;
+    // `name` is the human-readable label ('Paul - Neutral').
+    const description = typeof e['name'] === 'string' ? e['name']
+      : typeof e['description'] === 'string' ? e['description']
+      : typeof e['display_name'] === 'string' ? e['display_name']
+      : undefined;
+    return [language !== undefined ? { id, language, ...(description ? { description } : {}) } : { id, ...(description ? { description } : {}) }];
+  });
+  return { voices, totalPages };
+}
+
 export async function listMistralVoices(): Promise<VoiceInfo[]> {
   const now = Date.now();
   if (_voicesCache && _voicesCache.expiresAt > now) return _voicesCache.voices;
@@ -81,66 +133,48 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   if (!apiKey) return [...FALLBACK_VOICES];
   try {
     const controller = new AbortController();
+    // 2 s per request × up to MAX_PAGES pages means worst case ~200 s, but in
+    // practice the catalog has 3 pages and completes in < 500 ms total.
+    // Signal controls the whole loop — if the first page is slow we still
+    // bail after 2 s without starting page 2.
     const timer = setTimeout(() => controller.abort(), 2_000);
-    let voices: VoiceInfo[];
+    const voices: VoiceInfo[] = [];
     try {
-      const response = await fetch(VOICES_URL, {
-        method: 'GET',
-        headers: { 'Authorization': `Bearer ${apiKey}` },
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body: unknown = await response.json();
-      // Mistral's actual response shape (probed 2026-04-21):
-      //   { items: [{ slug, name, languages: [...], gender, age, tags, id, ... }], total, page, ... }
-      // `slug` is the synthesis-friendly voice selector ('en_paul_neutral').
-      // `id` is a provider UUID and not usable as a voice parameter.
-      // Other containers (`data` / `voices` / bare array) accepted too so the
-      // parser survives an API shape change without another code round-trip.
-      const raw: unknown[] = Array.isArray(body)
-        ? body
-        : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['items'])
-          ? (body as { items: unknown[] }).items
-          : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['data'])
-            ? (body as { data: unknown[] }).data
-            : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['voices'])
-              ? (body as { voices: unknown[] }).voices
-              : [];
-      voices = raw.flatMap((entry): VoiceInfo[] => {
-        if (!entry || typeof entry !== 'object') return [];
-        const e = entry as Record<string, unknown>;
-        // Prefer `slug` (Mistral's synthesis selector). Fall back to `voice`
-        // or `id` for other provider shapes. Note: Mistral's `id` field is
-        // a UUID — accept it last, since using it as voice param would fail.
-        const id = typeof e['slug'] === 'string' ? e['slug']
-          : typeof e['voice'] === 'string' ? e['voice']
-          : typeof e['id'] === 'string' ? e['id']
-          : undefined;
-        if (!id) return [];
-        // `languages` is an array (['en_us']); take the first and normalize
-        // 'en_us' → 'en' for the UI. Single-string `language` is accepted
-        // as a fallback for alternative shapes.
-        const languages = Array.isArray(e['languages']) ? e['languages'] as unknown[] : null;
-        const rawLang = languages && typeof languages[0] === 'string' ? languages[0] as string
-          : typeof e['language'] === 'string' ? e['language']
-          : id.split('_')[0];
-        const language = rawLang ? rawLang.split('_')[0] : undefined;
-        // `name` is the human-readable label ('Paul - Neutral'). `description`
-        // / `display_name` accepted for non-Mistral shapes.
-        const description = typeof e['name'] === 'string' ? e['name']
-          : typeof e['description'] === 'string' ? e['description']
-          : typeof e['display_name'] === 'string' ? e['display_name']
-          : undefined;
-        return [language !== undefined ? { id, language, ...(description ? { description } : {}) } : { id, ...(description ? { description } : {}) }];
-      });
+      // Fetch page 1 first so we know how many pages exist. Subsequent pages
+      // come from the `total_pages` hint. Dedup by id as a belt-and-suspenders
+      // measure — Mistral could in principle return overlapping pages.
+      const seen = new Set<string>();
+      let page = 1;
+      let totalPages = 1;
+      do {
+        const url = `${VOICES_BASE_URL}?page=${page}`;
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${apiKey}` },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status} on page ${page}`);
+        const body: unknown = await response.json();
+        const parsed = parseVoicesPage(body);
+        for (const v of parsed.voices) {
+          if (seen.has(v.id)) continue;
+          seen.add(v.id);
+          voices.push(v);
+        }
+        if (page === 1) totalPages = Math.min(parsed.totalPages, VOICES_MAX_PAGES);
+        page++;
+      } while (page <= totalPages);
     } finally {
       clearTimeout(timer);
     }
-    if (voices.length === 0) voices = [...FALLBACK_VOICES];
-    _voicesCache = { voices, expiresAt: now + VOICES_TTL_MS };
-    return voices;
+    // If Mistral returned an empty first page (mis-deployed shape, etc.) fall
+    // back so the UI isn't voice-pickerless.
+    const final = voices.length === 0 ? [...FALLBACK_VOICES] : voices;
+    _voicesCache = { voices: final, expiresAt: now + VOICES_TTL_MS };
+    return final;
   } catch {
-    // Cache the fallback briefly too (60s) so a flapping network doesn't spam Mistral every request.
+    // Cache the fallback briefly too (60 s) so a flapping network doesn't
+    // spam Mistral every request.
     _voicesCache = { voices: [...FALLBACK_VOICES], expiresAt: now + 60_000 };
     return [...FALLBACK_VOICES];
   }
