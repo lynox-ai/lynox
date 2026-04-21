@@ -159,17 +159,65 @@ interface QueuedMessage {
 	files?: FileAttachment[];
 }
 
-// Restore from localStorage
-function loadPersistedChat(): { messages: ChatMessage[]; sessionId: string | null } {
-	if (typeof localStorage === 'undefined') return { messages: [], sessionId: null };
+/**
+ * Local persistence model — per-thread.
+ *
+ * One localStorage key `lynox-chat` holds `{ sessionId, threads }` where
+ * `threads[threadId]` is that thread's last-known message list. Per-thread
+ * storage exists because the previous single-blob model wiped user-turns
+ * any time `resumeThread` cleared `messages = []` before the server fetch
+ * returned: a mid-flight SSE run hadn't yet persisted the user turn
+ * server-side, and the local clear erased the only remaining copy.
+ *
+ * With the per-thread split:
+ *   - resumeThread hydrates from local first (no flash, no loss).
+ *   - server fetch is still authoritative once it returns; but if the
+ *     server returned FEWER messages than local has, we treat that as
+ *     "server mid-persist" and keep local — protects in-flight user turns.
+ */
+interface PersistedChat {
+	sessionId: string | null;
+	threads: Record<string, ChatMessage[]>;
+}
+
+function readPersistedRoot(): PersistedChat {
+	if (typeof localStorage === 'undefined') return { sessionId: null, threads: {} };
 	try {
 		const saved = localStorage.getItem('lynox-chat');
-		if (saved) {
-			const data = JSON.parse(saved) as { messages?: ChatMessage[]; sessionId?: string };
-			return { messages: data.messages ?? [], sessionId: data.sessionId ?? null };
+		if (!saved) return { sessionId: null, threads: {} };
+		const raw = JSON.parse(saved) as Partial<PersistedChat> & { messages?: ChatMessage[] };
+		// Migration: old single-blob format { messages, sessionId } → put
+		// those messages under threads[sessionId].
+		if (Array.isArray(raw.messages) && !raw.threads) {
+			const sid = typeof raw.sessionId === 'string' ? raw.sessionId : null;
+			return {
+				sessionId: sid,
+				threads: sid ? { [sid]: raw.messages } : {},
+			};
 		}
+		return {
+			sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : null,
+			threads: raw.threads ?? {},
+		};
 	} catch { /* corrupt data */ }
-	return { messages: [], sessionId: null };
+	return { sessionId: null, threads: {} };
+}
+
+function writePersistedRoot(root: PersistedChat): void {
+	if (typeof localStorage === 'undefined') return;
+	try { localStorage.setItem('lynox-chat', JSON.stringify(root)); }
+	catch { /* quota exceeded */ }
+}
+
+function loadPersistedChat(): { messages: ChatMessage[]; sessionId: string | null } {
+	const root = readPersistedRoot();
+	const msgs = root.sessionId ? root.threads[root.sessionId] ?? [] : [];
+	return { messages: msgs, sessionId: root.sessionId };
+}
+
+/** Read messages for a specific thread; empty array if absent. */
+function loadPersistedThread(threadId: string): ChatMessage[] {
+	return readPersistedRoot().threads[threadId] ?? [];
 }
 
 let _persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -180,9 +228,7 @@ function persistChat(): void {
 	if (_persistTimer) clearTimeout(_persistTimer);
 	_persistTimer = setTimeout(() => {
 		_persistTimer = null;
-		try {
-			localStorage.setItem('lynox-chat', JSON.stringify({ messages, sessionId }));
-		} catch { /* quota exceeded */ }
+		persistChatNow();
 	}, 500);
 }
 
@@ -193,9 +239,12 @@ function persistChatNow(): void {
 		_persistTimer = null;
 	}
 	if (typeof localStorage === 'undefined') return;
-	try {
-		localStorage.setItem('lynox-chat', JSON.stringify({ messages, sessionId }));
-	} catch { /* quota exceeded */ }
+	const root = readPersistedRoot();
+	root.sessionId = sessionId;
+	if (sessionId) {
+		root.threads[sessionId] = messages;
+	}
+	writePersistedRoot(root);
 }
 
 export interface ContextBudget {
@@ -1267,8 +1316,11 @@ export async function resumeThread(threadId: string): Promise<void> {
 	const controller = new AbortController();
 	_resumeController = controller;
 
-	// Clear state immediately so UI doesn't show stale data
-	messages = [];
+	// Hydrate from per-thread local persistence FIRST so the UI doesn't
+	// blink empty while the server fetch runs — and so we never end up
+	// with an empty chat if the fetch is slow/failing.
+	const localMessages = loadPersistedThread(threadId);
+	messages = localMessages;
 	sessionId = threadId;
 	chatError = null;
 	isStreaming = false;
@@ -1319,11 +1371,22 @@ export async function resumeThread(threadId: string): Promise<void> {
 		if (gen !== _resumeGeneration) return; // superseded by newer click
 		if (msgRes.ok) {
 			const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
-			messages = msgData.messages.map((m) => ({
+			const serverMessages: ChatMessage[] = msgData.messages.map((m) => ({
 				role: m.role as 'user' | 'assistant',
 				content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
 				toolCalls: extractToolCalls(m.content),
 			}));
+			// Server is authoritative once it returns, BUT: a mid-persist
+			// window can return fewer messages than the local snapshot
+			// (classic case: user sent a turn, navigated to /app/artifacts
+			// before the run finished, came back here). If the server has
+			// strictly fewer messages than what we already have locally,
+			// keep the local copy — it probably contains the in-flight
+			// user turn that the server hasn't persisted yet. Equal-or-more
+			// means the server caught up; use it.
+			if (serverMessages.length >= localMessages.length) {
+				messages = serverMessages;
+			}
 		}
 
 		persistChatNow();

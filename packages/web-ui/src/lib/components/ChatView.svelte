@@ -310,13 +310,14 @@
 							const title = String(inp?.['title'] ?? 'Artifact');
 							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
 							if (artifactType === 'markdown') {
-								// Inline markdown + small footer chip so the user can
-								// tell this was persisted (vs. regular prose) and click
-								// through to the gallery. The `artifact-saved-chip` is
-								// styled in app.css, links to /app/artifacts.
+								// Inline markdown + passive footer badge. The markdown is
+								// already rendered in chat, so the badge is just a
+								// "saved to gallery" indicator — NOT a click target.
+								// Making it a link broke the UX pattern (inline artifacts
+								// expand in place; link navigates away).
 								result.push({
 									type: 'text',
-									text: `**${title}**\n\n${content}\n\n<a href="/app/artifacts" class="artifact-saved-chip">${t('artifacts.saved_chip')} · ${title}</a>`,
+									text: `**${title}**\n\n${content}\n\n<span class="artifact-saved-chip">${t('artifacts.saved_chip')} · ${title}</span>`,
 								});
 							} else {
 								result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
