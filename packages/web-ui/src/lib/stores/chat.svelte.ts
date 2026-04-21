@@ -631,7 +631,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg._toolSinceText = true;
 			streamingActivity = 'tool';
 			streamingToolName = toolName;
-			if (toolName !== 'ask_user' && toolName !== 'ask_secret') {
+			// Skip sidebar update for tools whose dedicated stream event carries
+			// richer live state. spawn_agent emits a separate 'spawn' event a
+			// few ticks later with running/done counts; letting the tool_call
+			// path set tool+spawn_agent first causes a visible flash to the
+			// generic tool card before the spawn view takes over.
+			if (toolName !== 'ask_user' && toolName !== 'ask_secret' && toolName !== 'spawn_agent') {
 				setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			}
 			break;
@@ -669,13 +674,35 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			};
 			streamingActivity = 'tool';
 			streamingToolName = 'spawn_agent';
+			// Surface delegation in the Context panel so the sidebar shows
+			// live sub-agent state alongside the inline ChatView block.
+			setContext({
+				type: 'spawn',
+				title: 'spawn_agent',
+				spawnAgents: agents,
+				spawnRunning: [...agents],
+				spawnDone: [],
+				spawnLastTool: {},
+				spawnElapsedS: 0,
+			});
 			break;
 		}
 		case 'spawn_progress': {
 			if (!msg.spawn) break;
 			msg.spawn.elapsedS = Number(data['elapsedS'] ?? 0);
 			msg.spawn.running = (data['running'] as string[] | undefined) ?? msg.spawn.running;
-			msg.spawn.lastToolBySub = (data['lastToolBySub'] as Record<string, string> | undefined) ?? {};
+			msg.spawn.lastToolBySub = (data['lastToolBySub'] as Record<string, string> | undefined) ?? msg.spawn.lastToolBySub;
+			// Keep the Context-panel in sync; done list carries over since
+			// progress events don't re-emit it.
+			setContext({
+				type: 'spawn',
+				title: 'spawn_agent',
+				spawnAgents: msg.spawn.agents,
+				spawnRunning: [...msg.spawn.running],
+				spawnDone: [...msg.spawn.done],
+				spawnLastTool: { ...msg.spawn.lastToolBySub },
+				spawnElapsedS: msg.spawn.elapsedS,
+			});
 			break;
 		}
 		case 'spawn_child_done': {
@@ -685,6 +712,15 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const elapsedS = Number(data['elapsedS'] ?? 0);
 			msg.spawn.running = msg.spawn.running.filter(a => a !== sub);
 			msg.spawn.done = [...msg.spawn.done, { name: sub, ok, elapsedS }];
+			setContext({
+				type: 'spawn',
+				title: 'spawn_agent',
+				spawnAgents: msg.spawn.agents,
+				spawnRunning: [...msg.spawn.running],
+				spawnDone: [...msg.spawn.done],
+				spawnLastTool: { ...msg.spawn.lastToolBySub },
+				spawnElapsedS: msg.spawn.elapsedS,
+			});
 			break;
 		}
 		case 'prompt':
