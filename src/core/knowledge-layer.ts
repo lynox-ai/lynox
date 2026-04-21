@@ -21,6 +21,7 @@ import { EntityResolver, toEntityRecord } from './entity-resolver.js';
 import { RetrievalEngine } from './retrieval-engine.js';
 import type { RetrievalOptions } from './retrieval-engine.js';
 import { extractEntities } from './entity-extractor.js';
+import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { detectContradictions, hasHeuristicContradiction } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { PatternEngine } from './pattern-engine.js';
@@ -44,6 +45,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly anthropicClient: Anthropic | undefined;
   private readonly patternEngine: PatternEngine | null;
   private readonly runHistory: RunHistory | null;
+  /** Tool-call extractor (Haiku + strict schema). Opt-in via LYNOX_KG_EXTRACTOR=v2. */
+  private readonly useV2Extractor: boolean;
 
   constructor(
     dbPath: string,
@@ -61,6 +64,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.anthropicClient = anthropicClient;
     this.runHistory = runHistory ?? null;
     this.patternEngine = runHistory ? new PatternEngine(runHistory, this.db) : null;
+    this.useV2Extractor = process.env['LYNOX_KG_EXTRACTOR'] === 'v2';
   }
 
   // === Lifecycle ===
@@ -149,14 +153,41 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     });
 
     // 6. Extract entities and relations (async LLM call — outside transaction)
+    const { resolvedEntities, resolvedRelations } = this.useV2Extractor
+      && this.anthropicClient
+      && shouldExtractV2(trimmedText, namespace)
+      ? await this._extractAndPersistV2(trimmedText, scope, memoryId)
+      : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId);
+
+    // 10. Publish event
+    if (channels.knowledgeGraph.hasSubscribers) {
+      channels.knowledgeGraph.publish({
+        event: 'memory_stored', memoryId, namespace,
+        entityCount: resolvedEntities.length,
+        relationCount: resolvedRelations.length,
+        contradictionCount: contradictions.length,
+      });
+    }
+
+    return {
+      memoryId, entities: resolvedEntities, relations: resolvedRelations,
+      contradictions, stored: true, deduplicated: false,
+    };
+  }
+
+  /** V1 extraction path — regex + optional Haiku free-text JSON. */
+  private async _extractAndPersistV1(
+    trimmedText: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    memoryId: string,
+  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[] }> {
     const extraction = await extractEntities(trimmedText, namespace, this.anthropicClient);
 
-    // 7+8+9. Resolve entities, create mentions/relations/cooccurrences (atomic transaction)
-    const { resolvedEntities, resolvedRelations } = this.db.transaction(() => {
+    return this.db.transaction(() => {
       const entities: EntityRecord[] = [];
       const entityIdMap = new Map<string, string>();
 
-      // Batch lookup: resolve all entity names in one query
       const entityNames = extraction.entities.map(e => e.name);
       const existingEntities = this.db.findEntitiesByNames(entityNames);
       const idsToIncrement: string[] = [];
@@ -168,25 +199,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           idsToIncrement.push(row.id);
           entity = toEntityRecord(row);
         } else {
-          const scopeRef = scope;
           const id = this.db.createEntity({
             canonicalName: ext.name, entityType: ext.type,
-            aliases: [ext.name], scopeType: scopeRef.type, scopeId: scopeRef.id,
+            aliases: [ext.name], scopeType: scope.type, scopeId: scope.id,
           });
           entity = {
             id, canonicalName: ext.name, entityType: ext.type, aliases: [ext.name],
-            description: '', scopeType: scopeRef.type, scopeId: scopeRef.id,
+            description: '', scopeType: scope.type, scopeId: scope.id,
             mentionCount: 1, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
           };
         }
-        if (entity) {
-          entities.push(entity);
-          entityIdMap.set(ext.name.toLowerCase(), entity.id);
-          this.db.createMention(memoryId, entity.id);
-        }
+        entities.push(entity);
+        entityIdMap.set(ext.name.toLowerCase(), entity.id);
+        this.db.createMention(memoryId, entity.id);
       }
 
-      // Batch increment mentions for existing entities
       this.db.incrementEntityMentionsBatch(idsToIncrement);
 
       const relations: RelationRecord[] = [];
@@ -203,26 +230,73 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         }
       }
 
-      // Batch cooccurrence upsert (single prepared statement reused for all pairs)
       this.db.updateCooccurrencesBatch([...entityIdMap.values()]);
-
       return { resolvedEntities: entities, resolvedRelations: relations };
     });
+  }
 
-    // 10. Publish event
-    if (channels.knowledgeGraph.hasSubscribers) {
-      channels.knowledgeGraph.publish({
-        event: 'memory_stored', memoryId, namespace,
-        entityCount: resolvedEntities.length,
-        relationCount: resolvedRelations.length,
-        contradictionCount: contradictions.length,
-      });
-    }
+  /** V2 extraction path — Haiku + strict tool-call schema with aliases. */
+  private async _extractAndPersistV2(
+    trimmedText: string,
+    scope: MemoryScopeRef,
+    memoryId: string,
+  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[] }> {
+    const extraction = await extractEntitiesV2(trimmedText, this.anthropicClient!);
 
-    return {
-      memoryId, entities: resolvedEntities, relations: resolvedRelations,
-      contradictions, stored: true, deduplicated: false,
-    };
+    return this.db.transaction(() => {
+      const entities: EntityRecord[] = [];
+      const entityIdMap = new Map<string, string>();
+
+      const canonicalNames = extraction.entities.map(e => e.canonicalName);
+      const existing = this.db.findEntitiesByNames(canonicalNames);
+      const idsToIncrement: string[] = [];
+
+      for (const ext of extraction.entities) {
+        const row = existing.get(ext.canonicalName.toLowerCase());
+        let entity: EntityRecord;
+        if (row) {
+          idsToIncrement.push(row.id);
+          entity = toEntityRecord(row);
+          // Register any new aliases seen in this chunk
+          for (const alias of ext.aliases) this.db.addEntityAlias(row.id, alias);
+        } else {
+          const id = this.db.createEntity({
+            canonicalName: ext.canonicalName, entityType: ext.type,
+            aliases: [ext.canonicalName, ...ext.aliases],
+            scopeType: scope.type, scopeId: scope.id,
+          });
+          entity = {
+            id, canonicalName: ext.canonicalName, entityType: ext.type,
+            aliases: [ext.canonicalName, ...ext.aliases],
+            description: '', scopeType: scope.type, scopeId: scope.id,
+            mentionCount: 1, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+          };
+        }
+        entities.push(entity);
+        entityIdMap.set(ext.canonicalName.toLowerCase(), entity.id);
+        this.db.createMention(memoryId, entity.id);
+      }
+
+      this.db.incrementEntityMentionsBatch(idsToIncrement);
+
+      const relations: RelationRecord[] = [];
+      for (const rel of extraction.relations) {
+        const fromId = entityIdMap.get(rel.subject.toLowerCase());
+        const toId = entityIdMap.get(rel.object.toLowerCase());
+        if (fromId && toId && fromId !== toId) {
+          this.db.createRelation(fromId, toId, rel.predicate, '', memoryId);
+          relations.push({
+            fromEntityId: fromId, toEntityId: toId,
+            relationType: rel.predicate, description: '',
+            confidence: rel.confidence, sourceMemoryId: memoryId,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      }
+
+      this.db.updateCooccurrencesBatch([...entityIdMap.values()]);
+      return { resolvedEntities: entities, resolvedRelations: relations };
+    });
   }
 
   /**
