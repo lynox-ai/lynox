@@ -285,9 +285,9 @@ describe('prepareForSpeech', () => {
       );
     });
 
-    it('expands N/mo to "pro Monat" in DE context', () => {
+    it('expands N/mo to "pro Monat" in DE context (and CHF to currency name)', () => {
       expect(prepareForSpeech('Starter kostet CHF 49/mo für Solo-Nutzung.')).toBe(
-        'Starter kostet CHF 49 pro Monat für Solo-Nutzung.',
+        'Starter kostet 49 Schweizer Franken pro Monat für Solo-Nutzung.',
       );
     });
 
@@ -344,6 +344,152 @@ describe('prepareForSpeech', () => {
 
     it('combines with less-than stripping', () => {
       expect(prepareForSpeech('Multi-Region/<4h Response')).toBe('Multi-Region, 4h Response');
+    });
+  });
+
+  // Swiss-Franc reads as "C H F" when spoken letter-by-letter by an EN voice.
+  // Expanding to the full currency name fixes DE pronunciation. EN context
+  // keeps "CHF" intact (most English speakers recognize the ISO code).
+  describe('CHF currency expansion', () => {
+    it('expands "CHF N" to "N Schweizer Franken" in DE context', () => {
+      expect(prepareForSpeech('Managed für CHF 79 ist sehr fair.')).toBe(
+        'Managed für 79 Schweizer Franken ist sehr fair.',
+      );
+    });
+
+    it('handles decimal amounts', () => {
+      expect(prepareForSpeech('Das kostet CHF 19.90 pro Nutzer mit Mehrwertsteuer.')).toBe(
+        'Das kostet 19.90 Schweizer Franken pro Nutzer mit Mehrwertsteuer.',
+      );
+    });
+
+    it('handles CHF with no space before number', () => {
+      expect(prepareForSpeech('Für CHF39 ist das sehr günstig.')).toBe(
+        'Für 39 Schweizer Franken ist das sehr günstig.',
+      );
+    });
+
+    it('leaves CHF intact in EN context', () => {
+      expect(prepareForSpeech('Starter is CHF 39 per month.')).toBe(
+        'Starter is CHF 39 per month.',
+      );
+    });
+
+    it('leaves standalone "in CHF" untouched when no amount follows', () => {
+      expect(prepareForSpeech('Alle Preise sind in CHF angegeben.')).toBe(
+        'Alle Preise sind in CHF angegeben.',
+      );
+    });
+  });
+
+  // `1×`, `1.5×`, `2x` after a number read as "nits" or "by" by some voices.
+  // Expand to the real spoken word so prosody is right. Language-aware.
+  describe('multiplier × / Nx expansion', () => {
+    it('expands Unicode × after a number to " mal " in DE', () => {
+      expect(prepareForSpeech('Spiel in 1× oder 1.5× Geschwindigkeit für die Prüfung.')).toBe(
+        'Spiel in 1 mal oder 1.5 mal Geschwindigkeit für die Prüfung.',
+      );
+    });
+
+    it('expands Unicode × after a number to " times " in EN', () => {
+      expect(prepareForSpeech('Play at 1× or 1.5× speed.')).toBe(
+        'Play at 1 times or 1.5 times speed.',
+      );
+    });
+
+    it('expands ASCII Nx to " mal " in DE (10x schneller)', () => {
+      // Note: "Die" → "Dee" fires because "ist" is a DE stopword —
+      // the multiplier rule runs independently of the pronunciation rule.
+      expect(prepareForSpeech('Die App ist jetzt 10x schneller.')).toBe(
+        'Dee App ist jetzt 10 mal schneller.',
+      );
+    });
+
+    it('expands ASCII Nx to " times " in EN', () => {
+      expect(prepareForSpeech('The app is now 10x faster.')).toBe(
+        'The app is now 10 times faster.',
+      );
+    });
+
+    it('leaves word-internal x alone (Linux, axis, etc.)', () => {
+      expect(prepareForSpeech('Linux runs on this box.')).toBe('Linux runs on this box.');
+    });
+  });
+
+  // 22:55 reads as "twenty-two fifty-five" in EN (ok) but "twenty-two
+  // minutes fifty-five" in the EN voice reading German text (wrong).
+  // In DE context, expand to "22 Uhr 55" so the voice speaks it like a
+  // German would. EN context left alone.
+  describe('time HH:MM expansion', () => {
+    it('expands HH:MM to "HH Uhr MM" in DE context', () => {
+      expect(prepareForSpeech('Der Termin ist um 22:55 für alle Beteiligten.')).toBe(
+        'Der Termin ist um 22 Uhr 55 für alle Beteiligten.',
+      );
+    });
+
+    it('handles early-hour single digit', () => {
+      expect(prepareForSpeech('Wir starten um 9:05 mit der Präsentation.')).toBe(
+        'Wir starten um 9 Uhr 05 mit der Präsentation.',
+      );
+    });
+
+    it('leaves HH:MM untouched in EN context', () => {
+      expect(prepareForSpeech('The meeting is at 22:55 sharp.')).toBe(
+        'The meeting is at 22:55 sharp.',
+      );
+    });
+
+    it('does not match ratios (single-digit after colon)', () => {
+      // `3:1` is not a time — stays intact so TTS reads it as "three to one".
+      expect(prepareForSpeech('Der Unterschied ist 3:1 für die rote Seite.')).toBe(
+        'Der Unterschied ist 3:1 für die rote Seite.',
+      );
+    });
+  });
+
+  // Em-dash `—` is a common Markdown/prose separator but TTS voices either
+  // read it as "em dash" or insert a jarring long pause. Convert to comma
+  // so prosody gets a normal clause break.
+  describe('em-dash handling', () => {
+    it('replaces — with a comma in EN', () => {
+      expect(prepareForSpeech('Starter — simple and cheap — is a good start.')).toBe(
+        'Starter, simple and cheap, is a good start.',
+      );
+    });
+
+    it('replaces — with a comma in DE', () => {
+      expect(prepareForSpeech('Der Plan — nächste Woche — wird besprochen.')).toBe(
+        'Der Plan, nächste Woche, wird besprochen.',
+      );
+    });
+
+    it('handles — with no surrounding spaces', () => {
+      expect(prepareForSpeech('Plan—Review')).toBe('Plan, Review');
+    });
+  });
+
+  // `#2`, `#12` (issue/PR refs) read as "hash 2" / "pound 12". Expand to
+  // "Nummer N" / "number N" for natural speech. Doesn't touch Markdown
+  // headers — those are already stripped earlier.
+  describe('hash-number reference expansion', () => {
+    it('expands #N to "Nummer N" in DE', () => {
+      expect(prepareForSpeech('Siehe Ticket #42 für die weiteren Änderungen.')).toBe(
+        'Siehe Ticket Nummer 42 für die weiteren Änderungen.',
+      );
+    });
+
+    it('expands #N to "number N" in EN', () => {
+      expect(prepareForSpeech('See PR #42 for details.')).toBe(
+        'See PR number 42 for details.',
+      );
+    });
+
+    it('leaves hashtags (letters after #) alone', () => {
+      expect(prepareForSpeech('Use #agenda tomorrow.')).toBe('Use #agenda tomorrow.');
+    });
+
+    it('still strips Markdown headers (# followed by space)', () => {
+      expect(prepareForSpeech('# Heading\n\nBody.')).toBe('Heading. Body.');
     });
   });
 });
