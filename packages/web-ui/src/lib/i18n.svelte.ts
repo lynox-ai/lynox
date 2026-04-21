@@ -52,6 +52,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'panel.pin': { de: 'Fixieren', en: 'Pin' },
 	'panel.pinned': { de: 'Fixiert', en: 'Pinned' },
 
+	// Spawn (sub-agent delegation — sidebar progress view)
+	'spawn.active': { de: 'aktiv', en: 'active' },
+	'spawn.done': { de: 'fertig', en: 'done' },
+	'spawn.running': { de: 'Laufend', en: 'Running' },
+	'spawn.completed': { de: 'Abgeschlossen', en: 'Completed' },
+
 	// Nav (extended)
 	'nav.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'nav.desc.chat': { de: 'Dein KI-Assistent', en: 'Your AI assistant' },
