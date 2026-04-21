@@ -472,7 +472,7 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// LLM Mode toggle (managed instances) — switches main LLM between Anthropic Claude and Mistral
 	'config.llm_mode': { de: 'LLM-Modus', en: 'LLM Mode' },
-	'config.llm_mode_desc': { de: 'Welches LLM dein Managed-Plan verwendet. Wechseln erfordert einen Engine-Neustart.', en: 'Which LLM your managed plan uses. Switching requires an engine restart.' },
+	'config.llm_mode_desc': { de: 'Welches LLM verwendet wird. Wechseln erfordert einen Engine-Neustart.', en: 'Which LLM is used. Switching requires an engine restart.' },
 	'config.llm_mode_standard': { de: 'Standard — Claude Sonnet 4.6 (Anthropic Direct)', en: 'Standard — Claude Sonnet 4.6 (Anthropic Direct)' },
 	'config.llm_mode_standard_desc': { de: 'Höchste Qualität, Extended Thinking, 1h Prompt-Cache. Anthropic verarbeitet Prompts in den USA unter DPA und DSGVO.', en: 'Highest quality, Extended Thinking, 1h prompt cache. Anthropic processes prompts in the US under DPA and GDPR.' },
 	'config.llm_mode_eu_sovereign': { de: 'EU Sovereign — Mistral Large 3 (Paris)', en: 'EU Sovereign — Mistral Large 3 (Paris)' },

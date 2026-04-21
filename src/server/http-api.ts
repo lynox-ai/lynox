@@ -1643,6 +1643,15 @@ export class LynoxHTTPApi {
       if (process.env['LYNOX_MANAGED_MODE']) {
         redacted['managed'] = process.env['LYNOX_MANAGED_MODE'];
       }
+      // Capability probe: what this instance *can* do, independent of tier.
+      // Drives capability-based gating in the Web UI so working features stop
+      // being hidden by tier checks (see prd/settings-compliance-overhaul.md).
+      const secretStore = engine.getSecretStore();
+      const secretNames = secretStore ? new Set(secretStore.listNames()) : new Set<string>();
+      const mistralAvailable = secretNames.has('MISTRAL_API_KEY') || !!process.env['MISTRAL_API_KEY'];
+      redacted['capabilities'] = {
+        mistral_available: mistralAvailable,
+      };
       jsonResponse(res, 200, redacted);
     });
 

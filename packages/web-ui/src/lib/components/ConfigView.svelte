@@ -26,8 +26,17 @@
 		search_provider?: string;
 		update_check?: boolean;
 		managed?: string; // 'starter' (Hosted/BYOK) | 'managed' | 'managed_pro' | 'eu' (legacy) | undefined (self-hosted)
-		llm_mode?: 'standard' | 'eu-sovereign'; // managed-instance toggle: Anthropic Claude vs Mistral Large 3
+		llm_mode?: 'standard' | 'eu-sovereign'; // LLM routing toggle: Anthropic Claude vs Mistral Large 3
+		capabilities?: Capabilities;
 		[key: string]: unknown;
+	}
+
+	// Capability probe from GET /api/config — reflects what this instance *can*
+	// do right now, regardless of tier. Drives capability-based gating so a
+	// working feature (e.g. llm_mode eu-sovereign) stops being hidden by a
+	// tier check from users who have the prerequisite in env or vault.
+	interface Capabilities {
+		mistral_available?: boolean;
 	}
 
 	// ── Config state ───────────────────────────────────────────────────────────
@@ -373,6 +382,11 @@
 	const isNonDirect = $derived(config.provider === 'custom' || config.provider === 'vertex' || config.provider === 'openai');
 	const showEffortThinking = $derived(isAnthropicDirect || managed);
 
+	// Capability-based gating (see prd/settings-compliance-overhaul.md §3).
+	// `mistralAvailable` is the shown/hidden signal for the llm_mode toggle —
+	// anyone with a Mistral key (managed-provided OR BYOK) can switch modes.
+	const mistralAvailable = $derived(config.capabilities?.mistral_available === true);
+
 	// Update default key name when provider changes
 	$effect(() => {
 		const defaultKey = providerKeyDefaults[config.provider ?? 'anthropic'] ?? 'ANTHROPIC_API_KEY';
@@ -627,7 +641,7 @@
 						<div class="flex items-start justify-between gap-4">
 							<dt class="text-text-muted shrink-0">{t('config.residency_llm')}</dt>
 							<dd class="text-right">
-								{#if isManagedTier && config.llm_mode === 'eu-sovereign'}
+								{#if mistralAvailable && config.llm_mode === 'eu-sovereign'}
 									Mistral — Paris (EU)
 								{:else if isManagedTier}
 									Anthropic — US (DPA + GDPR)
@@ -664,7 +678,8 @@
 				</div>
 
 				<!-- ── LLM Mode (moved from Provider tab) ─────────────────────── -->
-				{#if isManagedTier}
+				<!-- Capability-gated: anyone with a Mistral key (managed or BYOK) can switch. -->
+				{#if mistralAvailable}
 					<p class={sectionClass}>{t('config.llm_mode')}</p>
 					<div class={cardClass}>
 						<p class="text-xs text-text-muted mb-3">{t('config.llm_mode_desc')}</p>

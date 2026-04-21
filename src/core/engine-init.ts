@@ -313,6 +313,17 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
         }
       }
 
+      // Mistral API key — BYOK users may store it via Web UI (vault) without
+      // exporting an env var. Voice (speak/transcribe) and the llm_mode
+      // eu-sovereign override (core/config.ts) read from process.env, so sync
+      // vault → env here on init. Env still wins if the user set both.
+      if (!process.env['MISTRAL_API_KEY']) {
+        const mistralKey = vault.get('MISTRAL_API_KEY');
+        if (mistralKey) {
+          process.env['MISTRAL_API_KEY'] = mistralKey;
+        }
+      }
+
       // Warn if MCP secret is stale (>90 days since last update)
       _warnStaleMcpSecret(vault);
 
