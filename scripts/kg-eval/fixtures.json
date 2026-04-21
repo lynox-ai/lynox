@@ -1,0 +1,339 @@
+{
+  "version": 1,
+  "description": "Seed fixtures for entity-extractor-v2 eval. Hand-labeled. Expand via Sonnet-generated corpus in phase 2.",
+  "cases": [
+    {
+      "id": "adv-01-timeline-tools-pipeline",
+      "category": "adversarial-generic-nouns",
+      "text": "the timeline shows tools in the pipeline",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-02-einzeltools-price",
+      "category": "adversarial-from-screenshot",
+      "text": "Einzeltools kosten CHF 39/mo direct bei lynox.ai",
+      "expected_entities": [
+        { "canonical_name": "lynox.ai", "type": "organization" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-03-crm-status-flow",
+      "category": "adversarial-enum-values",
+      "text": "our pipeline has stages: lead/qualified, proposal, negotiation, closed",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-04-review-workflow",
+      "category": "adversarial-generic-nouns",
+      "text": "please review the workflow in the dashboard and update the report",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-05-pure-price",
+      "category": "adversarial-price-expr",
+      "text": "pricing is CHF 39/mo for starter and CHF 79/mo for managed",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-06-draft-status",
+      "category": "adversarial-enum-values",
+      "text": "migration flow: draft → review → approved → archived",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-07-direct-adverb",
+      "category": "adversarial-adverb",
+      "text": "we sell direct without resellers",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-08-active-new",
+      "category": "adversarial-adjectives",
+      "text": "active deals in new pipeline have pending status",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-09-hetzner-price-mix",
+      "category": "mixed-positive-and-price",
+      "text": "hosted on Hetzner for CHF 49/mo, scales to CHF 199/mo on managed tier",
+      "expected_entities": [
+        { "canonical_name": "Hetzner", "type": "organization" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-10-timeline-shift",
+      "category": "adversarial-single-generic",
+      "text": "timeline shifted by two weeks after scope change",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-11-tools-standard",
+      "category": "adversarial-generic-nouns",
+      "text": "Einzeltools are standard tools without customization",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "adv-12-meeting-later",
+      "category": "adversarial-empty-conversation",
+      "text": "let me think about it — we should discuss this later",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "pos-01-peter-brandfusion-zurich",
+      "category": "clean-positive",
+      "text": "Peter Huber works for Brandfusion in Zurich",
+      "expected_entities": [
+        { "canonical_name": "Peter Huber", "type": "person" },
+        { "canonical_name": "Brandfusion", "type": "organization" },
+        { "canonical_name": "Zurich", "type": "location" }
+      ],
+      "expected_relations": [
+        { "subject": "Peter Huber", "predicate": "works_for", "object": "Brandfusion" },
+        { "subject": "Brandfusion", "predicate": "located_in", "object": "Zurich" }
+      ]
+    },
+    {
+      "id": "pos-02-postgres-mongo",
+      "category": "clean-positive",
+      "text": "we chose Postgres over MongoDB for the data layer",
+      "expected_entities": [
+        { "canonical_name": "Postgres", "type": "product" },
+        { "canonical_name": "MongoDB", "type": "product" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "pos-03-rafael-migration",
+      "category": "clean-positive",
+      "text": "Rafael runs Brandfusion and migrated from Webflow to Astro",
+      "expected_entities": [
+        { "canonical_name": "Rafael", "type": "person" },
+        { "canonical_name": "Brandfusion", "type": "organization" },
+        { "canonical_name": "Webflow", "type": "product" },
+        { "canonical_name": "Astro", "type": "product" }
+      ],
+      "expected_relations": [
+        { "subject": "Rafael", "predicate": "manages", "object": "Brandfusion" },
+        { "subject": "Brandfusion", "predicate": "uses", "object": "Astro" }
+      ]
+    },
+    {
+      "id": "pos-04-cloudflare-pages",
+      "category": "clean-positive",
+      "text": "deployed brandfusion.ch via Cloudflare Pages",
+      "expected_entities": [
+        { "canonical_name": "brandfusion.ch", "type": "organization" },
+        { "canonical_name": "Cloudflare Pages", "type": "product" }
+      ],
+      "expected_relations": [
+        { "subject": "brandfusion.ch", "predicate": "uses", "object": "Cloudflare Pages" }
+      ]
+    },
+    {
+      "id": "pos-05-anthropic-claude",
+      "category": "clean-positive",
+      "text": "Anthropic released Claude Haiku 4.5 in late 2025",
+      "expected_entities": [
+        { "canonical_name": "Anthropic", "type": "organization" },
+        { "canonical_name": "Claude Haiku 4.5", "type": "product" }
+      ],
+      "expected_relations": [
+        { "subject": "Claude Haiku 4.5", "predicate": "created_by", "object": "Anthropic" }
+      ]
+    },
+    {
+      "id": "pos-06-quoted-project",
+      "category": "clean-positive",
+      "text": "project \"Finance Monthly\" wraps Q2 reports for SwissCo AG",
+      "expected_entities": [
+        { "canonical_name": "Finance Monthly", "type": "project" },
+        { "canonical_name": "SwissCo AG", "type": "organization" }
+      ],
+      "expected_relations": [
+        { "subject": "Finance Monthly", "predicate": "related_to", "object": "SwissCo AG" }
+      ]
+    },
+    {
+      "id": "pos-07-mistral-eu",
+      "category": "clean-positive",
+      "text": "we use Mistral AI as the EU fallback provider",
+      "expected_entities": [
+        { "canonical_name": "Mistral AI", "type": "organization" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "pos-08-sveltekit",
+      "category": "clean-positive-de",
+      "text": "wir nutzen SvelteKit für die Weboberfläche",
+      "expected_entities": [
+        { "canonical_name": "SvelteKit", "type": "product" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "pos-09-brandfusion-gmbh",
+      "category": "clean-positive-de",
+      "text": "Brandfusion GmbH wurde in Zürich gegründet",
+      "expected_entities": [
+        { "canonical_name": "Brandfusion GmbH", "type": "organization" },
+        { "canonical_name": "Zürich", "type": "location" }
+      ],
+      "expected_relations": [
+        { "subject": "Brandfusion GmbH", "predicate": "located_in", "object": "Zürich" }
+      ]
+    },
+    {
+      "id": "pos-10-switch-providers",
+      "category": "clean-positive",
+      "text": "switched transactional email from Resend to Brevo last quarter",
+      "expected_entities": [
+        { "canonical_name": "Resend", "type": "product" },
+        { "canonical_name": "Brevo", "type": "product" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "mix-01-kunde-thomas",
+      "category": "mixed-de-role-name",
+      "text": "Kunde Thomas möchte einen Termin mit Dr. Müller bei UBS",
+      "expected_entities": [
+        { "canonical_name": "Thomas", "type": "person" },
+        { "canonical_name": "Dr. Müller", "type": "person", "acceptable_aliases": ["Müller"] },
+        { "canonical_name": "UBS", "type": "organization" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "mix-02-de-en-tech",
+      "category": "mixed-de-en",
+      "text": "für das deployment nutzen wir Docker auf Hetzner Cloud",
+      "expected_entities": [
+        { "canonical_name": "Docker", "type": "product" },
+        { "canonical_name": "Hetzner Cloud", "type": "product", "acceptable_aliases": ["Hetzner"] }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "mix-03-roland-warlynox",
+      "category": "mixed-positive",
+      "text": "meeting mit Roland über war.lynox.cloud nächste Woche",
+      "expected_entities": [
+        { "canonical_name": "Roland", "type": "person" },
+        { "canonical_name": "war.lynox.cloud", "type": "organization" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "mix-04-project-german",
+      "category": "mixed-positive",
+      "text": "Projekt \"Finanzreporting Q2\" läuft bis Juni auf Postgres",
+      "expected_entities": [
+        { "canonical_name": "Finanzreporting Q2", "type": "project" },
+        { "canonical_name": "Postgres", "type": "product" }
+      ],
+      "expected_relations": [
+        { "subject": "Finanzreporting Q2", "predicate": "uses", "object": "Postgres" }
+      ]
+    },
+    {
+      "id": "mix-05-herr-keller-ubs",
+      "category": "mixed-de-title",
+      "text": "Herr Keller hat ein neues Konto bei UBS eröffnet",
+      "expected_entities": [
+        { "canonical_name": "Keller", "type": "person", "acceptable_aliases": ["Herr Keller"] },
+        { "canonical_name": "UBS", "type": "organization" }
+      ],
+      "expected_relations": [
+        { "subject": "Keller", "predicate": "related_to", "object": "UBS" }
+      ]
+    },
+    {
+      "id": "emp-01-meta-conversation",
+      "category": "empty-conversation",
+      "text": "let's schedule a meeting to discuss this next week",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "emp-02-german-chat",
+      "category": "empty-conversation",
+      "text": "das war echt gut, lass uns das weiter vertiefen",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "emp-03-abstract-musing",
+      "category": "empty-conversation",
+      "text": "I think we should review our approach before moving forward",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "emp-04-generic-plan",
+      "category": "empty-conversation",
+      "text": "the plan is to update everything and ship by end of month",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "edge-01-concept-named",
+      "category": "concept-named-identifier",
+      "text": "we publish under the ELv2 license and are GDPR compliant",
+      "expected_entities": [
+        { "canonical_name": "ELv2", "type": "concept", "acceptable_aliases": ["ELv2 license"] },
+        { "canonical_name": "GDPR", "type": "concept" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "edge-02-domain-only",
+      "category": "domain-as-org",
+      "text": "customer signed up via rafael.lynox.cloud yesterday",
+      "expected_entities": [
+        { "canonical_name": "rafael.lynox.cloud", "type": "organization" }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "edge-03-product-with-version",
+      "category": "product-version",
+      "text": "upgraded to Postgres 16 running on Ubuntu 24.04",
+      "expected_entities": [
+        { "canonical_name": "Postgres 16", "type": "product", "acceptable_aliases": ["Postgres"] },
+        { "canonical_name": "Ubuntu 24.04", "type": "product", "acceptable_aliases": ["Ubuntu"] }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "edge-04-mixed-everything",
+      "category": "mixed-full-scenario",
+      "text": "Peter von Brandfusion nutzt lynox für CHF 79/mo — hosted auf Hetzner in Nürnberg",
+      "expected_entities": [
+        { "canonical_name": "Peter", "type": "person" },
+        { "canonical_name": "Brandfusion", "type": "organization" },
+        { "canonical_name": "lynox", "type": "product" },
+        { "canonical_name": "Hetzner", "type": "organization" },
+        { "canonical_name": "Nürnberg", "type": "location" }
+      ],
+      "expected_relations": [
+        { "subject": "Peter", "predicate": "works_for", "object": "Brandfusion" },
+        { "subject": "Brandfusion", "predicate": "uses", "object": "lynox" },
+        { "subject": "lynox", "predicate": "depends_on", "object": "Hetzner" },
+        { "subject": "Hetzner", "predicate": "located_in", "object": "Nürnberg" }
+      ]
+    }
+  ]
+}
