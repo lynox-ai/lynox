@@ -95,6 +95,8 @@ const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in S
 const SPEAK_MAX_TEXT_CHARS = 10_000;
 /** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
 const SPEAK_USD_PER_CHAR = 0.016 / 1000;
+/** Usage Dashboard summary cache: 30 s per (period, windowStart). Long enough to dedupe tab re-opens, short enough to feel live. */
+const USAGE_SUMMARY_TTL_MS = 30_000;
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
@@ -199,6 +201,11 @@ export class LynoxHTTPApi {
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
   private healthCache: { data: Record<string, unknown>; expiresAt: number } | null = null;
+  // 30 s TTL per (period, windowStart) key. Usage Dashboard typically re-opens
+  // the tab with the same window multiple times in quick succession — this
+  // keeps repeated SQLite scans off the hot path without stale-data risk, since
+  // the period window itself rolls forward and evicts old entries.
+  private readonly _usageSummaryCache = new Map<string, { summary: import('../core/run-history.js').UsageSummary; expiresAt: number }>();
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
   private _googleOAuthState: string | undefined;
   private _googleRedirectUri: string | undefined;
@@ -1747,6 +1754,80 @@ export class LynoxHTTPApi {
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const data = history.getCostByDay(days);
       jsonResponse(res, 200, data);
+    });
+
+    // ── Usage Summary (Usage Dashboard Phase 1) ──
+    // Aggregates the local RunHistory into the shape the Web UI's
+    // Usage Dashboard renders. Managed tiers currently get the same
+    // local-only view; the control-plane included-credit integration
+    // is Phase 3. 30-second instance-scoped TTL cache so repeated tab
+    // opens don't re-hammer SQLite for the same window.
+    this.staticRoutes.set('GET /api/usage/summary', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const { readUserConfig } = await import('../core/config.js');
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const rawPeriod = url.searchParams.get('period') ?? 'current';
+      const period = rawPeriod === 'prev' || rawPeriod === '7d' || rawPeriod === '30d' ? rawPeriod : 'current';
+
+      const now = new Date();
+      let startIso: string;
+      let endIso: string;
+      let source: 'calendar-month' | 'rolling';
+      let label: string;
+      const monthFmt = (d: Date) => d.toLocaleString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+      if (period === 'current') {
+        const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+        startIso = start.toISOString();
+        endIso = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+        source = 'calendar-month';
+        label = `${monthFmt(start)} – ${monthFmt(now)}`;
+      } else if (period === 'prev') {
+        const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+        const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+        startIso = start.toISOString();
+        endIso = end.toISOString();
+        source = 'calendar-month';
+        const lastDay = new Date(end.getTime() - 86_400_000);
+        label = `${monthFmt(start)} – ${monthFmt(lastDay)}`;
+      } else {
+        const days = period === '7d' ? 7 : 30;
+        const start = new Date(now.getTime() - days * 86_400_000);
+        startIso = start.toISOString();
+        endIso = now.toISOString();
+        source = 'rolling';
+        label = `${monthFmt(start)} – ${monthFmt(now)}`;
+      }
+
+      const cacheKey = `${period}:${startIso}`;
+      const cached = this._usageSummaryCache.get(cacheKey);
+      const nowMs = Date.now();
+      let summary;
+      if (cached && cached.expiresAt > nowMs) {
+        summary = cached.summary;
+      } else {
+        summary = history.getUsageSummary({ startIso, endIso, source, label });
+        this._usageSummaryCache.set(cacheKey, { summary, expiresAt: nowMs + USAGE_SUMMARY_TTL_MS });
+      }
+
+      // Tier-appropriate budget. Self-Host + Hosted (BYOK) expose their
+      // configured monthly ceiling. Managed/Managed-Pro return 0 until the
+      // Phase 3 control-plane proxy lands — the UI should then pull the
+      // included-credit meter from a separate endpoint.
+      const config = readUserConfig();
+      const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
+      const budgetCents = tier === 'managed' || tier === 'managed_pro' || tier === 'eu'
+        ? 0
+        : typeof config.max_monthly_cost_usd === 'number'
+          ? Math.round(config.max_monthly_cost_usd * 100)
+          : 0;
+
+      jsonResponse(res, 200, {
+        tier,
+        ...summary,
+        budget_cents: budgetCents,
+      });
     });
 
     // ── Pipelines ──
