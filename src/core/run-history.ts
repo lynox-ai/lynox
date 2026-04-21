@@ -82,6 +82,36 @@ export interface ModelBreakdownEntry {
   tokens_cache_write: number;
 }
 
+// Usage Dashboard (PRD: pro/docs/internal/prd/usage-dashboard.md).
+// Phase 1 — engine-local aggregation over RunHistory. Managed tiers ignore
+// included-credit math here; Phase 3 will fill tier-budget via a control-plane
+// proxy. cost in cents (integer) to avoid float rounding in JSON transport.
+export interface UsageSummary {
+  period: {
+    label: string;          // e.g. "Apr 1 – Apr 21"
+    start_iso: string;
+    end_iso: string;
+    source: 'calendar-month' | 'rolling';
+  };
+  used_cents: number;
+  by_model: Array<{
+    model_id: string;
+    cost_cents: number;
+    run_count: number;
+    tokens_in: number;
+    tokens_out: number;
+    tokens_cache_read: number;
+  }>;
+  by_kind: Array<{
+    kind: 'llm' | 'voice_stt' | 'voice_tts';
+    cost_cents: number;
+    unit_count: number;   // tokens for llm, characters for voice_tts, seconds for voice_stt
+    unit_label: 'tokens' | 'characters' | 'seconds';
+    run_count: number;
+  }>;
+  daily: Array<{ date: string; cost_cents: number }>;  // zero-filled ISO date range
+}
+
 /** Per-run data for Pattern Engine analysis. */
 export interface AnalysisRun {
   id: string;
@@ -1008,6 +1038,121 @@ export class RunHistory {
              COALESCE(SUM(tokens_cache_write), 0) as tokens_cache_write
       FROM runs GROUP BY model_id ORDER BY cost_usd DESC
     `).all() as ModelBreakdownEntry[];
+  }
+
+  /**
+   * Usage Dashboard Phase 1 — aggregates completed runs in a time window into
+   * the `UsageSummary` shape required by `GET /api/usage/summary`. Pre-v28
+   * rows (kind=NULL) count as 'llm'. cost is returned in cents as an integer
+   * so the HTTP response has no fractional-dollar rounding surprises.
+   *
+   * The period boundaries (`startIso`, `endIso`) are computed in the HTTP
+   * handler — this method only does the aggregation + zero-fill.
+   */
+  getUsageSummary(opts: {
+    startIso: string;
+    endIso: string;
+    source: 'calendar-month' | 'rolling';
+    label: string;
+  }): UsageSummary {
+    const { startIso, endIso } = opts;
+
+    const byModelRows = this.db.prepare(`
+      SELECT model_id,
+             COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COUNT(*) as run_count,
+             COALESCE(SUM(tokens_in), 0) as tokens_in,
+             COALESCE(SUM(tokens_out), 0) as tokens_out,
+             COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read
+      FROM runs
+      WHERE status NOT IN ('running', 'failed')
+        AND created_at >= ? AND created_at < ?
+      GROUP BY model_id
+      ORDER BY cost_usd DESC
+    `).all(startIso, endIso) as Array<{
+      model_id: string;
+      cost_usd: number;
+      run_count: number;
+      tokens_in: number;
+      tokens_out: number;
+      tokens_cache_read: number;
+    }>;
+
+    // Per-kind aggregation with `units` interpreted per-kind:
+    //   llm        → tokens_in + tokens_out
+    //   voice_stt  → units (seconds; 0 until providers surface duration)
+    //   voice_tts  → units (characters)
+    const byKindRows = this.db.prepare(`
+      SELECT COALESCE(kind, 'llm') as kind,
+             COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COALESCE(SUM(
+               CASE WHEN COALESCE(kind, 'llm') = 'llm'
+                    THEN tokens_in + tokens_out
+                    ELSE units END
+             ), 0) as unit_count,
+             COUNT(*) as run_count
+      FROM runs
+      WHERE status NOT IN ('running', 'failed')
+        AND created_at >= ? AND created_at < ?
+      GROUP BY COALESCE(kind, 'llm')
+      ORDER BY cost_usd DESC
+    `).all(startIso, endIso) as Array<{
+      kind: 'llm' | 'voice_stt' | 'voice_tts';
+      cost_usd: number;
+      unit_count: number;
+      run_count: number;
+    }>;
+
+    const dailyRaw = this.db.prepare(`
+      SELECT date(created_at) as day, COALESCE(SUM(cost_usd), 0) as cost_usd
+      FROM runs
+      WHERE status NOT IN ('running', 'failed')
+        AND created_at >= ? AND created_at < ?
+      GROUP BY date(created_at)
+      ORDER BY day ASC
+    `).all(startIso, endIso) as Array<{ day: string; cost_usd: number }>;
+
+    const dailyMap = new Map(dailyRaw.map(r => [r.day, r.cost_usd]));
+    const daily: Array<{ date: string; cost_cents: number }> = [];
+    const startDate = new Date(startIso);
+    const endDate = new Date(endIso);
+    for (let d = new Date(startDate); d < endDate; d.setUTCDate(d.getUTCDate() + 1)) {
+      const iso = d.toISOString().slice(0, 10);
+      daily.push({ date: iso, cost_cents: Math.round((dailyMap.get(iso) ?? 0) * 100) });
+    }
+
+    const usedCents = Math.round(
+      byModelRows.reduce((sum, r) => sum + r.cost_usd, 0) * 100,
+    );
+
+    const unitLabelFor = (k: 'llm' | 'voice_stt' | 'voice_tts'): 'tokens' | 'characters' | 'seconds' =>
+      k === 'voice_tts' ? 'characters' : k === 'voice_stt' ? 'seconds' : 'tokens';
+
+    return {
+      period: {
+        label: opts.label,
+        start_iso: startIso,
+        end_iso: endIso,
+        source: opts.source,
+      },
+      used_cents: usedCents,
+      by_model: byModelRows.map(r => ({
+        model_id: r.model_id,
+        cost_cents: Math.round(r.cost_usd * 100),
+        run_count: r.run_count,
+        tokens_in: r.tokens_in,
+        tokens_out: r.tokens_out,
+        tokens_cache_read: r.tokens_cache_read,
+      })),
+      by_kind: byKindRows.map(r => ({
+        kind: r.kind,
+        cost_cents: Math.round(r.cost_usd * 100),
+        unit_count: r.unit_count,
+        unit_label: unitLabelFor(r.kind),
+        run_count: r.run_count,
+      })),
+      daily,
+    };
   }
 
   /** Count tool calls of a specific type within the last N hours (via run timestamps). */
