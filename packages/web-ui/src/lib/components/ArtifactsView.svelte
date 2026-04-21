@@ -181,6 +181,12 @@
 				<div class="p-6 overflow-auto h-full">
 					<MarkdownRenderer content={'```mermaid\n' + selected.content + '\n```'} />
 				</div>
+			{:else if selected.type === 'markdown'}
+				<div class="p-6 overflow-auto h-full bg-bg">
+					<article class="prose prose-invert max-w-3xl mx-auto">
+						<MarkdownRenderer content={selected.content} />
+					</article>
+				</div>
 			{/if}
 		</div>
 	</div>

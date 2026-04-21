@@ -297,14 +297,23 @@
 				if (!tc) continue;
 				if (HIDDEN_TOOLS.has(tc.name)) continue;
 
-				// Special: artifact_save → render inline if not already in text
+				// Special: artifact_save → render inline if not already in text.
+				// Markdown-typed artifacts render as plain markdown (no iframe):
+				// content is already prose-shaped, an iframe wrapper adds cost
+				// without visual benefit. HTML/SVG/Mermaid still wrap in the
+				// ```artifact fence MarkdownRenderer turns into a sandboxed iframe.
 				if (tc.name === 'artifact_save') {
 					if (!hasInlineArtifact) {
 						const inp = tc.input as Record<string, unknown> | undefined;
 						const content = String(inp?.['content'] ?? '');
 						if (content) {
 							const title = String(inp?.['title'] ?? 'Artifact');
-							result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
+							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
+							if (artifactType === 'markdown') {
+								result.push({ type: 'text', text: `**${title}**\n\n${content}` });
+							} else {
+								result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
+							}
 						}
 					}
 					continue;

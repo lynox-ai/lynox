@@ -151,6 +151,13 @@ export function loadConfig(): LynoxUserConfig {
       merged.max_tier = tier;
     }
   }
+  // Account plan tier (separate from LLM model tier) — 'pro' unlocks
+  // capabilities like the researcher-role Opus override. Defaults to
+  // 'standard' when unset.
+  if (process.env['LYNOX_ACCOUNT_TIER']) {
+    const t = process.env['LYNOX_ACCOUNT_TIER'];
+    if (t === 'standard' || t === 'pro') merged.account_tier = t;
+  }
   // GCP config for Vertex AI
   if (process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']) {
     merged.gcp_project_id = process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID'];

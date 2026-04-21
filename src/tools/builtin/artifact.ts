@@ -3,7 +3,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 interface ArtifactSaveInput {
   title: string;
   content: string;
-  type?: 'html' | 'mermaid' | 'svg' | undefined;
+  type?: 'html' | 'mermaid' | 'svg' | 'markdown' | undefined;
   description?: string | undefined;
   id?: string | undefined;
 }
@@ -19,14 +19,14 @@ interface ArtifactDeleteInput {
 export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
   definition: {
     name: 'artifact_save',
-    description: 'Save or update a persistent artifact (dashboard, diagram, report, chart). Displays the artifact inline in the chat AND persists it to the Artifacts gallery. You do NOT need to include the HTML as a code block in your text — this tool handles display automatically. Use `id` to update an existing artifact.',
+    description: 'Save or update a persistent artifact. Displays inline in the chat AND persists to the Artifacts gallery. PREFER `type: "markdown"` for comparison tables, tier overviews, recommendations, structured prose — it renders fast, costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view. Reserve `type: "html"` ONLY for genuinely interactive output: clickable prototypes, dashboards with charts, time-series visualizations, mini-apps. Never embed Web Speech API, TTS, audio controls, or media players in HTML artifacts — the chat UI already provides audio output. Use `id` to update an existing artifact.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
       properties: {
         title: { type: 'string', description: 'Short descriptive title for the artifact' },
-        content: { type: 'string', description: 'Full HTML content (for type html), Mermaid syntax (for type mermaid), or SVG markup (for type svg)' },
-        type: { type: 'string', enum: ['html', 'mermaid', 'svg'], description: 'Artifact type. Default: html' },
+        content: { type: 'string', description: 'Markdown (for type markdown — preferred default), full HTML (for type html), Mermaid syntax (for type mermaid), or SVG markup (for type svg)' },
+        type: { type: 'string', enum: ['markdown', 'html', 'mermaid', 'svg'], description: 'Artifact type. Default: markdown. Use html only for interactive output (dashboards, prototypes, charts).' },
         description: { type: 'string', description: 'Optional one-line description' },
         id: { type: 'string', description: 'Existing artifact ID to update. Omit to create new.' },
       },

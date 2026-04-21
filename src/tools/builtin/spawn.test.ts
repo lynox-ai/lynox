@@ -23,9 +23,14 @@ vi.mock('../../core/observability.js', () => ({
 
 const mockGetRole = vi.fn().mockReturnValue(undefined);
 const mockGetRoleNames = vi.fn().mockReturnValue(['researcher', 'creator', 'operator', 'collector']);
+// applyTierGate: pass-through mock — the tier-gating behavior has its own
+// unit tests in roles.test.ts; spawn tests only care that the override
+// threads through without being dropped.
+const mockApplyTierGate = vi.fn().mockImplementation((requested: unknown) => requested);
 vi.mock('../../core/roles.js', () => ({
   getRole: (...args: unknown[]) => mockGetRole(...args),
   getRoleNames: (...args: unknown[]) => mockGetRoleNames(...args),
+  applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
 }));
 
 import { spawnAgentTool, resetSessionSpawnCost } from './spawn.js';
