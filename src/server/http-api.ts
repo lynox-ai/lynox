@@ -2177,6 +2177,15 @@ export class LynoxHTTPApi {
       });
 
       const sttStartMs = Date.now();
+      // Run ffprobe in parallel with the transcription request — the Usage
+      // Dashboard wants seconds-of-audio as the `units` value, but we don't
+      // want to block the user's transcription waiting for a ~20 ms probe.
+      // Provider-agnostic: one path for whisper + Mistral + future providers.
+      const durationPromise = (async () => {
+        const { getAudioDurationSec } = await import('../core/audio-duration.js');
+        return getAudioDurationSec(buffer, filename);
+      })();
+
       const text = await transcribeWithStream(buffer, filename, (segment) => {
         if (!segment) {
           res.write(`data: ${JSON.stringify({ status: 'transcribing' })}\n\n`);
@@ -2191,9 +2200,10 @@ export class LynoxHTTPApi {
       if (text) {
         // Persist as a RunRecord so the Usage Dashboard can show voice STT
         // as its own line item. See prd/usage-dashboard.md.
-        // TODO(phase-0.5): wire seconds of audio from provider response into
-        // `units` once transcribeWithStream surfaces duration; set to 0 now
-        // so the row at least reflects that a voice_stt call occurred.
+        // ffprobe gives seconds of audio for cost attribution; null on
+        // failure → `units: 0` (same as pre-0.5 behavior; dashboard shows
+        // run count but no duration).
+        const durationSec = await durationPromise;
         try {
           const history = engine.getRunHistory();
           if (history) {
@@ -2203,7 +2213,7 @@ export class LynoxHTTPApi {
               modelTier: 'voice',
               modelId: 'voxtral-mini-transcribe',
               kind: 'voice_stt',
-              units: 0,
+              units: durationSec !== null ? Math.round(durationSec) : 0,
             });
             history.updateRun(runId, {
               durationMs: Date.now() - sttStartMs,
