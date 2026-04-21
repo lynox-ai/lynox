@@ -15,6 +15,7 @@ export {
   speakMistralVoxtral,
   speakMistralVoxtralStream,
   hasMistralVoxtralTts,
+  listMistralVoices,
   VOXTRAL_TTS_MODEL,
   DEFAULT_VOICE,
 } from './speak/index.js';
@@ -27,4 +28,5 @@ export type {
   SpeakProvider,
   SpeakProviderName,
   AudioChunkCallback,
+  VoiceInfo,
 } from './speak/index.js';

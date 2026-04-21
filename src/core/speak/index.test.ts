@@ -201,4 +201,14 @@ describe('speak facade — text-prep pipeline', () => {
     const out = await facade.speakStream('hello', () => void 0);
     expect(out).toBeNull();
   });
+
+  describe('listMistralVoices (Compliance Phase 2)', () => {
+    it('returns the hardcoded fallback catalog when no Mistral key is set', async () => {
+      stubMistralKey(false);
+      const voices = await facade.listMistralVoices();
+      expect(voices.length).toBeGreaterThan(0);
+      expect(voices[0]).toHaveProperty('id');
+      expect(voices.find(v => v.id === 'en_paul_neutral')).toBeDefined();
+    });
+  });
 });

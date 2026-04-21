@@ -258,6 +258,13 @@ export interface LynoxUserConfig {
    * Env var `LYNOX_TTS_PROVIDER` overrides this.
    */
   tts_provider?: 'mistral' | 'auto' | undefined;
+  /**
+   * TTS voice slug (e.g. 'en_paul_neutral'). When unset, the provider falls
+   * back to its DEFAULT_VOICE. The Web UI populates the picker from the live
+   * Mistral voices catalog (`GET /v1/audio/voices`) so new voices show up
+   * without a code change.
+   */
+  tts_voice?: string | undefined;
 }
 
 // === DataStore ===
