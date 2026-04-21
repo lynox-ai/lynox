@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.3.1 — 2026-04-22
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.0 (delete this block before saving):
+
+Core:
+- feat(agent): annotate non-retryable tool errors so the model stops grinding (#125)
+- feat: markdown artifact template + researcher-role Sonnet default (#124)
+- feat(web-ui): show live sub-agent delegation in Context sidebar (#123)
+- fix: voice TTS reads CHF, numbers-with-x, times, and #refs as noise (#122)
+- fix(spawn): advertise only the roles that actually exist (#121)
+- fix(voice): expand "N/mo" price patterns to natural phrasing (#120)
+- fix(voice): don't mangle English arrows with German "dann" (#119)
+- feat(spawn): stream sub-agent progress to the parent UI (#118)
+- fix(voice): handle slashes, <N, arrow prosody, and DE Die pronunciation (#117)
+- fix: voice TTS reads tables and arrow symbols as noise (#116)
+- fix: voice TTS playback accelerates and garbles on longer replies (#115)
+- fix: prevent agent context-drift on short followups (#114)
+- feat(kg): add v2 entity extractor behind LYNOX_KG_EXTRACTOR flag (#113)
+
+Pro:
+- fix(managed): refuse sync-env when secret preserve would leak sentinel (#77)
+- chore(ci): add one-shot admin-credit-grant workflow (#76)
+- feat(managed): add POST /admin/customers/:id/credit endpoint (#75)
+- feat(managed): add POST /admin/instances/:id/sync-env endpoint (#74)
+- feat(managed): enable KG extractor v2 by default on managed instances (#73)
+- chore(release): v1.3.0 (#72)
+-->
 ## 1.3.0 — 2026-04-21
 
 Two themes ship together: a user-facing **Usage Dashboard** that
