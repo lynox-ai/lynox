@@ -232,7 +232,7 @@ describe('spawn_agent tool', () => {
     );
   });
 
-  it('does not pass parent onStream to child agents', async () => {
+  it('forwards a filtered stream wrapper to child agents for progress visibility', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     const onStream = vi.fn() as StreamHandler;
     const agent = makeAgent({ onStream });
@@ -241,9 +241,14 @@ describe('spawn_agent tool', () => {
       agent,
     );
 
-    // Child agent should NOT receive parent's onStream — prevents interleaved output
+    // Child agent receives a wrapper (not the raw parent stream) so we can
+    // filter which sub-agent events surface in the parent UI.
     expect(vi.mocked(MockAgent)).toHaveBeenCalledWith(
-      expect.objectContaining({ onStream: undefined }),
+      expect.objectContaining({ onStream: expect.any(Function) }),
+    );
+    // Parent gets at least the spawn_child_done event for visibility.
+    expect(onStream).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'spawn_child_done', subAgent: 'silent' }),
     );
   });
 

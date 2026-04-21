@@ -29,12 +29,15 @@ import type { BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messag
 export type { BetaUsage as Usage };
 
 export type StreamEvent =
-  | { type: 'text';        text: string;                           agent: string }
-  | { type: 'thinking';    thinking: string;                       agent: string }
-  | { type: 'thinking_done';                                       agent: string }
-  | { type: 'tool_call';   name: string; input: unknown;           agent: string }
-  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean }
+  | { type: 'text';        text: string;                           agent: string; subAgent?: string | undefined }
+  | { type: 'thinking';    thinking: string;                       agent: string; subAgent?: string | undefined }
+  | { type: 'thinking_done';                                       agent: string; subAgent?: string | undefined }
+  | { type: 'tool_call';   name: string; input: unknown;           agent: string; subAgent?: string | undefined }
+  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean; subAgent?: string | undefined }
   | { type: 'spawn';       agents: string[]; estimatedCostUSD?: number | undefined; agent: string }
+  | { type: 'spawn_progress'; elapsedS: number; running: string[];
+      lastToolBySub: Record<string, string>; agent: string }
+  | { type: 'spawn_child_done'; subAgent: string; ok: boolean; elapsedS: number; agent: string }
   | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  model?: string | undefined; agent: string }
   | { type: 'error';       message: string;                        agent: string }
   | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }

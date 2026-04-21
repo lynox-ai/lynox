@@ -73,6 +73,8 @@ export interface ChatMessage {
 	/** Ordered blocks for interleaved rendering (text ↔ tool calls) */
 	blocks?: ContentBlock[];
 	pipeline?: PipelineInfo;
+	/** Sub-agent delegation progress (set when spawn_agent fires). */
+	spawn?: SpawnProgress;
 	thinking?: string;
 	usage?: UsageInfo;
 	queued?: boolean;
@@ -82,6 +84,21 @@ export interface ChatMessage {
 	followUps?: FollowUpSuggestion[];
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
+}
+
+export interface SpawnProgress {
+	/** All sub-agents spawned in this delegation. */
+	agents: string[];
+	/** Sub-agents currently running. */
+	running: string[];
+	/** Sub-agents that have completed, with outcome. */
+	done: Array<{ name: string; ok: boolean; elapsedS: number }>;
+	/** Last-seen tool name per sub-agent. */
+	lastToolBySub: Record<string, string>;
+	/** Seconds since the delegation started. */
+	elapsedS: number;
+	/** Client timestamp when the spawn started (for fallback elapsed if no heartbeat). */
+	startedAt: number;
 }
 
 export interface ToolCallInfo {
@@ -636,6 +653,38 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				});
 				persistChat();
 			}
+			break;
+		}
+		case 'spawn': {
+			// Delegation started. Track progress so the UI can show which
+			// sub-agents are running, elapsed time, and last tool per sub.
+			const agents = (data['agents'] as string[] | undefined) ?? [];
+			msg.spawn = {
+				agents,
+				running: [...agents],
+				done: [],
+				lastToolBySub: {},
+				elapsedS: 0,
+				startedAt: Date.now(),
+			};
+			streamingActivity = 'tool';
+			streamingToolName = 'spawn_agent';
+			break;
+		}
+		case 'spawn_progress': {
+			if (!msg.spawn) break;
+			msg.spawn.elapsedS = Number(data['elapsedS'] ?? 0);
+			msg.spawn.running = (data['running'] as string[] | undefined) ?? msg.spawn.running;
+			msg.spawn.lastToolBySub = (data['lastToolBySub'] as Record<string, string> | undefined) ?? {};
+			break;
+		}
+		case 'spawn_child_done': {
+			if (!msg.spawn) break;
+			const sub = String(data['subAgent'] ?? '');
+			const ok = data['ok'] === true;
+			const elapsedS = Number(data['elapsedS'] ?? 0);
+			msg.spawn.running = msg.spawn.running.filter(a => a !== sub);
+			msg.spawn.done = [...msg.spawn.done, { name: sub, ok, elapsedS }];
 			break;
 		}
 		case 'prompt':
