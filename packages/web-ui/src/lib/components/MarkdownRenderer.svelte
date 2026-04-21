@@ -701,6 +701,26 @@
 		margin-right: auto;
 	}
 
+	/* Small chip shown under inline markdown-type artifacts so the user
+	   can see it was persisted, and click through to the gallery. */
+	div :global(.artifact-saved-chip) {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-size: 0.6875rem;
+		color: var(--color-text-subtle);
+		background: var(--color-bg-subtle);
+		border: 1px solid var(--color-border);
+		border-radius: 999px;
+		padding: 0.125rem 0.625rem;
+		margin-top: 0.5rem;
+		text-decoration: none;
+	}
+	div :global(.artifact-saved-chip:hover) {
+		color: var(--color-text);
+		border-color: var(--color-accent-text, #9B8AFF);
+	}
+
 	div :global(.artifact-btn) {
 		background: none;
 		border: 1px solid transparent;

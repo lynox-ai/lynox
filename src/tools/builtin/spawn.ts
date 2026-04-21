@@ -5,7 +5,7 @@ import { Agent } from '../../core/agent.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
-import { getRole, getRoleNames } from '../../core/roles.js';
+import { getRole, getRoleNames, applyTierGate } from '../../core/roles.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget, resetSessionCost } from '../../core/session-budget.js';
@@ -75,7 +75,12 @@ async function executeThinker(
     throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
   }
 
-  const modelTier = (spec.model ?? resolved?.model ?? userConfig.default_tier ?? 'sonnet') as ModelTier;
+  // Account-tier gate: explicit `spec.model` overrides are checked before
+  // falling through to role defaults. Today only Opus is gated — non-Pro
+  // tenants requesting Opus get a silent downgrade to Sonnet so role
+  // defaults + budget caps stay predictable.
+  const gatedOverride = applyTierGate(spec.model as ModelTier | undefined, userConfig.account_tier);
+  const modelTier = (gatedOverride ?? resolved?.model ?? userConfig.default_tier ?? 'sonnet') as ModelTier;
   // Profile overrides model ID + provider; otherwise use Claude tier resolution
   const model = profile ? profile.model_id : getModelId(modelTier, getActiveProvider());
   const systemPrompt = spec.system_prompt;
@@ -215,11 +220,18 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     const names = input.agents.map(a => a.name);
     const parentRunId = agent.currentRunId;
 
-    // Pre-spawn cost estimation
-    const cfgTier = loadConfig().default_tier;
+    // Pre-spawn cost estimation. Apply the same tier gate here as the
+    // per-agent resolution in runSpawn, AND honor the role's default
+    // model — otherwise Haiku-roled spawns (operator/collector) get
+    // estimated at Sonnet rates, which over-allocates against the
+    // session ceiling and blocks cheap batches.
+    const cfg = loadConfig();
+    const cfgTier = cfg.default_tier;
     const totalEstimate = input.agents.reduce((sum, spec) => {
-      const modelTier = (spec.model ?? (spec.role ? undefined : cfgTier) ?? 'sonnet') as ModelTier | undefined;
-      const resolvedModel = MODEL_MAP[modelTier ?? 'sonnet'] ?? MODEL_MAP['sonnet'];
+      const gated = applyTierGate(spec.model as ModelTier | undefined, cfg.account_tier);
+      const roleDefault = spec.role ? getRole(spec.role)?.model : undefined;
+      const modelTier = (gated ?? roleDefault ?? cfgTier ?? 'sonnet') as ModelTier;
+      const resolvedModel = MODEL_MAP[modelTier] ?? MODEL_MAP['sonnet'];
       const iters = spec.max_turns ?? 20;
       return sum + estimateSpawnCost(resolvedModel, iters);
     }, 0);
