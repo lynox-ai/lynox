@@ -20,13 +20,20 @@ export function prepareForSpeech(input: string): string {
   if (!input) return '';
   let text = input;
 
-  // Arrows first — before anything else can mangle them. " dann " ("then")
-  // gives TTS natural sequence prosody and is unambiguous in both DE and EN.
-  // A bare comma collapses chains like "A → B → C" into "A, B, C" which
-  // sounds abrupt on small models. ASCII forms (`<->`, `->`, `<-`) are
-  // ordered longest-first so `<->` isn't partially eaten by `<-`.
-  text = text.replace(/\s*(?:→|←|↔|⇒|⇐|⇔)\s*/g, ' dann ');
-  text = text.replace(/\s*(?:<->|<=>|->|<-|=>|<=)\s*/g, ' dann ');
+  // Detect language context ONCE — the arrow-connector choice below and
+  // the sentence-initial "Die" fix at the end both depend on it, and
+  // scanning twice would duplicate work.
+  const deContext = hasGermanMarkers(text);
+
+  // Arrows — language-dependent connector. In German a comma (`A, B`)
+  // reads abrupt on small voices, so DE chains get " dann " (≈ /daːn/,
+  // "then"). English would pronounce "dann" as /dæn/ (the name "Dan"),
+  // which is worse than the plain comma — so EN falls back to ", ".
+  // ASCII forms (`<->`, `<=>`, `->`, `<-`, `=>`, `<=`) ordered longest
+  // first so `<->` isn't partially eaten by `<-`.
+  const arrowConnector = deContext ? ' dann ' : ', ';
+  text = text.replace(/\s*(?:→|←|↔|⇒|⇐|⇔)\s*/g, arrowConnector);
+  text = text.replace(/\s*(?:<->|<=>|->|<-|=>|<=)\s*/g, arrowConnector);
 
   // Less-than + digit (e.g. "<4h", "<100ms") — strip the "<" so TTS reads
   // the quantity naturally instead of choking on the bracket. We lose the
@@ -74,30 +81,39 @@ export function prepareForSpeech(input: string): string {
   text = text.replace(/\.{2,}/g, '.');
   text = text.replace(/([,.;:!?]){2,}/g, '$1');
 
-  text = tweakGermanPronunciation(text);
+  if (deContext) text = tweakGermanPronunciation(text);
 
   return text.trim();
 }
 
 /**
+ * Cheap language heuristic: true if the text shows unambiguous German
+ * signals. Used to gate every rule that could misbehave on English or
+ * mixed content — an "arrow → dann" collapse in EN would make the voice
+ * say "Dan", and a "Die → Dee" rewrite on an English movie title would
+ * just be wrong.
+ *
+ * Stopword list intentionally excludes "die"/"das" — those are the tokens
+ * we may transform, and counting them as DE evidence would let English
+ * sentences containing them trigger the rewrite.
+ */
+function hasGermanMarkers(text: string): boolean {
+  return (
+    /[äöüÄÖÜß]/.test(text) ||
+    /\b(?:der|und|ist|nicht|eine?|mit|für|auch|werden|sind|nach|sehr|oder)\b/i.test(text)
+  );
+}
+
+/**
  * Tiny pronunciation adjustments for DE text being read by an EN voice
- * (Voxtral's TTS catalog is EN-only as of Phase 0). Only fires when the
- * text shows German markers (umlauts or common DE stopwords). Today this
- * only rewrites sentence-initial "Die" → "Dee" — the EN voice otherwise
- * reads "Die" as /daɪ/ (as in "to die"). "Dee" reads as /diː/ which is
- * close to the DE /diː/ pronunciation of "Die". Extend cautiously: every
- * rule added here reshapes the visible spoken text and can misfire on
- * mixed-language content.
+ * (Voxtral's TTS catalog is EN-only as of Phase 0). Caller must already
+ * have verified DE context via `hasGermanMarkers`. Today this only rewrites
+ * sentence-initial "Die" → "Dee" — the EN voice otherwise reads "Die" as
+ * /daɪ/ (as in "to die"). "Dee" reads as /diː/, close to the DE /diː/
+ * pronunciation. Extend cautiously: every rule added here reshapes the
+ * visible spoken text and can misfire on mixed-language content.
  */
 function tweakGermanPronunciation(text: string): string {
-  // Stopword list intentionally excludes "die"/"das" — they're the very tokens
-  // we may be asked to transform, and treating them as DE evidence would cause
-  // mixed or EN content that happens to contain them to be mangled.
-  const hasGermanMarkers =
-    /[äöüÄÖÜß]/.test(text) ||
-    /\b(?:der|und|ist|nicht|eine?|mit|für|auch|werden|sind|nach|sehr|oder)\b/i.test(text);
-  if (!hasGermanMarkers) return text;
-
   // Replace "Die" only at sentence boundaries (start of text or after
   // terminal punctuation), so mid-sentence "die" doesn't accidentally
   // match and the English "Die Hard" never mutates.
