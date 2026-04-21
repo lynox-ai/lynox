@@ -310,7 +310,14 @@
 							const title = String(inp?.['title'] ?? 'Artifact');
 							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
 							if (artifactType === 'markdown') {
-								result.push({ type: 'text', text: `**${title}**\n\n${content}` });
+								// Inline markdown + small footer chip so the user can
+								// tell this was persisted (vs. regular prose) and click
+								// through to the gallery. The `artifact-saved-chip` is
+								// styled in app.css, links to /app/artifacts.
+								result.push({
+									type: 'text',
+									text: `**${title}**\n\n${content}\n\n<a href="/app/artifacts" class="artifact-saved-chip">${t('artifacts.saved_chip')} · ${title}</a>`,
+								});
 							} else {
 								result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
 							}

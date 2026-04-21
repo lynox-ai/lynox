@@ -221,14 +221,17 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     const parentRunId = agent.currentRunId;
 
     // Pre-spawn cost estimation. Apply the same tier gate here as the
-    // per-agent resolution in runSpawn — otherwise the estimate budgets
-    // for Opus while the actual run drops to Sonnet, over-allocating.
+    // per-agent resolution in runSpawn, AND honor the role's default
+    // model — otherwise Haiku-roled spawns (operator/collector) get
+    // estimated at Sonnet rates, which over-allocates against the
+    // session ceiling and blocks cheap batches.
     const cfg = loadConfig();
     const cfgTier = cfg.default_tier;
     const totalEstimate = input.agents.reduce((sum, spec) => {
       const gated = applyTierGate(spec.model as ModelTier | undefined, cfg.account_tier);
-      const modelTier = (gated ?? (spec.role ? undefined : cfgTier) ?? 'sonnet') as ModelTier | undefined;
-      const resolvedModel = MODEL_MAP[modelTier ?? 'sonnet'] ?? MODEL_MAP['sonnet'];
+      const roleDefault = spec.role ? getRole(spec.role)?.model : undefined;
+      const modelTier = (gated ?? roleDefault ?? cfgTier ?? 'sonnet') as ModelTier;
+      const resolvedModel = MODEL_MAP[modelTier] ?? MODEL_MAP['sonnet'];
       const iters = spec.max_turns ?? 20;
       return sum + estimateSpawnCost(resolvedModel, iters);
     }, 0);
