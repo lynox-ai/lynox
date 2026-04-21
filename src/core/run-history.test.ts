@@ -1173,5 +1173,59 @@ describe('RunHistory', () => {
       h.close();
     });
   });
+
+  // === v28 — voice/LLM split (Usage Dashboard Phase 0) ===
+
+  describe('kind + units (v28)', () => {
+    it('defaults kind to null and units to 0 for legacy LLM rows', () => {
+      const h = createHistory();
+      const id = h.insertRun({ taskText: 'Chat', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6' });
+      const run = h.getRun(id);
+      expect(run!.kind).toBeNull();
+      expect(run!.units).toBe(0);
+      h.close();
+    });
+
+    it('stores kind=voice_tts with character count in units', () => {
+      const h = createHistory();
+      const id = h.insertRun({
+        taskText: 'Read this aloud.',
+        modelTier: 'voice',
+        modelId: 'voxtral-mini-tts-latest',
+        kind: 'voice_tts',
+        units: 16,
+      });
+      const run = h.getRun(id);
+      expect(run!.kind).toBe('voice_tts');
+      expect(run!.units).toBe(16);
+      expect(run!.model_id).toBe('voxtral-mini-tts-latest');
+      h.close();
+    });
+
+    it('stores kind=voice_stt with seconds placeholder in units', () => {
+      const h = createHistory();
+      const id = h.insertRun({
+        taskText: 'transcribed text',
+        modelTier: 'voice',
+        modelId: 'voxtral-mini-transcribe',
+        kind: 'voice_stt',
+        units: 0,
+      });
+      const run = h.getRun(id);
+      expect(run!.kind).toBe('voice_stt');
+      expect(run!.units).toBe(0);
+      h.close();
+    });
+
+    it('kind index exists so per-kind aggregation is fast', () => {
+      const h = createHistory();
+      const idxRows = (h as unknown as { db: import('better-sqlite3').Database }).db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='runs'`)
+        .all() as Array<{ name: string }>;
+      const names = idxRows.map(r => r.name);
+      expect(names).toContain('idx_runs_kind');
+      h.close();
+    });
+  });
 });
 

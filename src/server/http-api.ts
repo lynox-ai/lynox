@@ -1973,7 +1973,28 @@ export class LynoxHTTPApi {
         // TTS usage shares a ceiling with LLM runs + spawns. Mistral doesn't
         // surface usage headers — $0.016/1 000 chars is the documented rate,
         // applied after text-prep has stripped Markdown noise.
-        recordSessionCost(meta.characters * SPEAK_USD_PER_CHAR);
+        const costUsd = meta.characters * SPEAK_USD_PER_CHAR;
+        recordSessionCost(costUsd);
+        // Persist as a RunRecord so the Usage Dashboard can show voice TTS
+        // cost as its own line item. See prd/usage-dashboard.md. Best-effort:
+        // history failure must not break audio streaming to the client.
+        try {
+          const history = engine.getRunHistory();
+          if (history) {
+            const runId = history.insertRun({
+              taskText: text,
+              modelTier: 'voice',
+              modelId: meta.model,
+              kind: 'voice_tts',
+              units: meta.characters,
+            });
+            history.updateRun(runId, {
+              costUsd,
+              durationMs: meta.latencyMs,
+              status: 'completed',
+            });
+          }
+        } catch { /* history is best-effort, don't fail the request */ }
         res.write(`data: ${JSON.stringify({
           done: true,
           characters: meta.characters,
@@ -2022,6 +2043,7 @@ export class LynoxHTTPApi {
         Connection: 'keep-alive',
       });
 
+      const sttStartMs = Date.now();
       const text = await transcribeWithStream(buffer, filename, (segment) => {
         if (!segment) {
           res.write(`data: ${JSON.stringify({ status: 'transcribing' })}\n\n`);
@@ -2034,6 +2056,28 @@ export class LynoxHTTPApi {
       });
 
       if (text) {
+        // Persist as a RunRecord so the Usage Dashboard can show voice STT
+        // as its own line item. See prd/usage-dashboard.md.
+        // TODO(phase-0.5): wire seconds of audio from provider response into
+        // `units` once transcribeWithStream surfaces duration; set to 0 now
+        // so the row at least reflects that a voice_stt call occurred.
+        try {
+          const history = engine.getRunHistory();
+          if (history) {
+            const runId = history.insertRun({
+              sessionId: sessionId ?? '',
+              taskText: text,
+              modelTier: 'voice',
+              modelId: 'voxtral-mini-transcribe',
+              kind: 'voice_stt',
+              units: 0,
+            });
+            history.updateRun(runId, {
+              durationMs: Date.now() - sttStartMs,
+              status: 'completed',
+            });
+          }
+        } catch { /* history is best-effort, don't fail the request */ }
         res.write(`data: ${JSON.stringify({ done: true, text })}\n\n`);
       } else {
         res.write(`data: ${JSON.stringify({ error: 'Transcription failed' })}\n\n`);

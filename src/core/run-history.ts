@@ -41,6 +41,15 @@ export interface RunRecord {
   spawn_parent_id: string | null;
   spawn_depth: number;
   context_id: string;
+  // Phase 0 of prd/usage-dashboard.md. Lets the dashboard split voice cost
+  // from chat cost without re-purposing model_id. Null on pre-v28 rows =
+  // treated as 'llm' by aggregation for back-compat.
+  kind: 'llm' | 'voice_stt' | 'voice_tts' | null;
+  // Generic usage counter whose meaning depends on `kind`:
+  //   'llm'        → total tokens (in + out); historically 0, read tokens_in/out instead
+  //   'voice_stt'  → seconds of input audio (0 until providers surface duration; see TODO in http-api)
+  //   'voice_tts'  → characters of synthesized text
+  units: number;
   created_at: string;
 }
 
@@ -585,6 +594,18 @@ const MIGRATIONS: string[] = [
    ALTER TABLE pending_prompts ADD COLUMN partial_answers_json TEXT;
    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_prompts_session_unique
      ON pending_prompts(session_id) WHERE status = 'pending';`,
+
+  // v28: Voice usage separation for the Usage Dashboard (Phase 0 of
+  // prd/usage-dashboard.md). `kind` distinguishes LLM runs from voice
+  // STT/TTS runs so the dashboard can show voice cost as its own line
+  // item instead of folding it into chat cost. `units` is a generic
+  // unit counter interpreted per-kind (chars for TTS, seconds for STT,
+  // tokens for LLM via existing columns). Both are nullable / default 0
+  // so every pre-v28 row reads as an LLM run without a migration backfill.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (28);
+   ALTER TABLE runs ADD COLUMN kind TEXT;
+   ALTER TABLE runs ADD COLUMN units INTEGER NOT NULL DEFAULT 0;
+   CREATE INDEX IF NOT EXISTS idx_runs_kind ON runs(kind);`,
 ];
 
 export class RunHistory {
@@ -707,11 +728,13 @@ export class RunHistory {
     contextId?: string | undefined;
     tenantId?: string | undefined;
     roleId?: string | undefined;
+    kind?: 'llm' | 'voice_stt' | 'voice_tts' | undefined;
+    units?: number | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, run_type, batch_parent_id, spawn_parent_id, spawn_depth, context_id, status, tenant_id, archetype_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+      INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, run_type, batch_parent_id, spawn_parent_id, spawn_depth, context_id, status, tenant_id, archetype_id, kind, units)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)
     `).run(
       id,
       params.sessionId ?? '',
@@ -727,6 +750,8 @@ export class RunHistory {
       params.contextId ?? '',
       params.tenantId ?? null,
       params.roleId ?? '',
+      params.kind ?? null,
+      params.units ?? 0,
     );
     return id;
   }
