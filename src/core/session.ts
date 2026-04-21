@@ -384,10 +384,19 @@ export class Session {
 
     const usageBefore = { ...this.usage };
 
-    // Knowledge Graph retrieval (mandatory)
-    // Skip for multimodal — KG retrieval operates on text queries only
+    // Knowledge Graph retrieval
+    // Skip for multimodal — KG retrieval operates on text queries only.
+    // Skip for short clarifications (1-2 words, ≤ 20 chars) — a follow-up
+    // like "bexio" or "yes please" has no semantic specificity, so top-K
+    // retrieval surfaces whatever has the weakest match in memory
+    // (typically stale status/learnings) and the LLM anchors to that.
+    // The 2026-04-21 drift incident was exactly this cascade. Prior-turn
+    // context stays visible to the LLM via conversation history; no extra
+    // grounding is needed for a clarification.
     const knowledgeLayer = this.engine.getKnowledgeLayer();
-    if (knowledgeLayer && !isMultimodal) {
+    const { isShortClarification } = await import('./short-input-heuristic.js');
+    const skipShortInputRetrieval = typeof task === 'string' && isShortClarification(task);
+    if (knowledgeLayer && !isMultimodal && !skipShortInputRetrieval) {
       try {
         const result = await knowledgeLayer.retrieve(task, this.engine.getActiveScopes(), {
           topK: 8,
@@ -400,6 +409,10 @@ export class Session {
       } catch {
         this.agent.setKnowledgeContext('');
       }
+    } else if (skipShortInputRetrieval) {
+      // Clear any prior turn's retrieved context so stale memory can't
+      // bleed forward as still-relevant grounding.
+      this.agent.setKnowledgeContext('');
     }
 
     try {
