@@ -341,13 +341,13 @@
 	const isUpToDate = $derived(latestVersion && currentVersion && latestVersion === currentVersion);
 
 	// ── Tab state ──────────────────────────────────────────────────────────────
-	type Tab = 'ai' | 'provider' | 'budget' | 'system';
+	type Tab = 'ai' | 'provider' | 'compliance' | 'budget' | 'system';
 
 	function getInitialTab(): Tab {
 		if (typeof window === 'undefined') return 'ai';
 		const params = new URLSearchParams(window.location.search);
 		const tab = params.get('tab');
-		if (tab === 'provider' || tab === 'budget' || tab === 'system') return tab;
+		if (tab === 'provider' || tab === 'compliance' || tab === 'budget' || tab === 'system') return tab;
 		return 'ai';
 	}
 
@@ -385,6 +385,7 @@
 		[
 			{ id: 'ai' as Tab, label: t('config.tab_ai') },
 			{ id: 'provider' as Tab, label: t('config.tab_provider') },
+			{ id: 'compliance' as Tab, label: t('config.tab_compliance') },
 			...(!isManagedEu ? [{ id: 'budget' as Tab, label: t('config.tab_budget') }] : []),
 			{ id: 'system' as Tab, label: t('config.tab_system') },
 		]
@@ -499,43 +500,7 @@
 					<div class={cardClass}>
 						<p class="text-sm font-medium">{t('config.provider')}</p>
 						<p class="text-xs text-text-muted mt-1">{t('config.managed_eu_provider_info')}</p>
-					</div>
-
-					<div class={cardClass}>
-						<p class="text-sm font-medium mb-1">{t('config.llm_mode')}</p>
-						<p class="text-xs text-text-muted mb-3">{t('config.llm_mode_desc')}</p>
-
-						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors mb-2">
-							<input
-								type="radio"
-								name="llm-mode"
-								value="standard"
-								checked={(config.llm_mode ?? 'standard') === 'standard'}
-								onchange={() => { config.llm_mode = 'standard'; }}
-								class="mt-1 accent-accent shrink-0"
-							/>
-							<div class="flex-1 min-w-0">
-								<p class="text-sm font-medium">{t('config.llm_mode_standard')}</p>
-								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_standard_desc')}</p>
-							</div>
-						</label>
-
-						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors">
-							<input
-								type="radio"
-								name="llm-mode"
-								value="eu-sovereign"
-								checked={config.llm_mode === 'eu-sovereign'}
-								onchange={() => { config.llm_mode = 'eu-sovereign'; }}
-								class="mt-1 accent-accent shrink-0"
-							/>
-							<div class="flex-1 min-w-0">
-								<p class="text-sm font-medium">{t('config.llm_mode_eu_sovereign')}</p>
-								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_eu_sovereign_desc')}</p>
-							</div>
-						</label>
-
-						<p class="text-xs text-text-muted mt-3 italic">{t('config.llm_mode_restart_required')}</p>
+						<p class="text-xs text-text-muted mt-2">→ <button type="button" onclick={() => setTab('compliance')} class="text-accent-text hover:underline">{t('config.see_compliance_for_llm_mode')}</button></p>
 					</div>
 				{:else}
 					<div class={cardClass}>
@@ -644,6 +609,118 @@
 						</button>
 					</div>
 				{/if}
+			</div>
+
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		<!-- TAB: Compliance & Privacy                                        -->
+		<!-- Phase 0 skeleton — see pro/docs/internal/prd/settings-compliance-overhaul.md -->
+		<!-- Today's gating rules preserved. Capability-based gating = Phase 1. -->
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		{:else if activeTab === 'compliance'}
+			<div class="space-y-4">
+				<p class="text-xs text-text-muted">{t('config.compliance_intro')}</p>
+
+				<!-- ── Data Residency Panel (read-only, always visible) ───────── -->
+				<p class={sectionClass}>{t('config.residency_title')}</p>
+				<div class={cardClass}>
+					<dl class="space-y-2 text-sm">
+						<div class="flex items-start justify-between gap-4">
+							<dt class="text-text-muted shrink-0">{t('config.residency_llm')}</dt>
+							<dd class="text-right">
+								{#if isManagedTier && config.llm_mode === 'eu-sovereign'}
+									Mistral — Paris (EU)
+								{:else if isManagedTier}
+									Anthropic — US (DPA + GDPR)
+								{:else if config.provider === 'anthropic' || !config.provider}
+									Anthropic — US (DPA + GDPR)
+								{:else if config.provider === 'vertex'}
+									Google Vertex — {config.gcp_region ?? '—'}
+								{:else if config.provider === 'openai'}
+									{config.api_base_url ?? 'custom endpoint'}
+								{:else}
+									{config.api_base_url ?? '—'}
+								{/if}
+							</dd>
+						</div>
+						<div class="flex items-start justify-between gap-4">
+							<dt class="text-text-muted shrink-0">{t('config.residency_voice_in')}</dt>
+							<dd class="text-right text-text-muted">{t('config.residency_voice_in_value')}</dd>
+						</div>
+						<div class="flex items-start justify-between gap-4">
+							<dt class="text-text-muted shrink-0">{t('config.residency_voice_out')}</dt>
+							<dd class="text-right text-text-muted">{t('config.residency_voice_out_value')}</dd>
+						</div>
+						<div class="flex items-start justify-between gap-4">
+							<dt class="text-text-muted shrink-0">{t('config.residency_storage')}</dt>
+							<dd class="text-right text-text-muted">
+								{#if isManagedTier}
+									Hetzner — Germany
+								{:else}
+									{t('config.residency_storage_local')}
+								{/if}
+							</dd>
+						</div>
+					</dl>
+				</div>
+
+				<!-- ── LLM Mode (moved from Provider tab) ─────────────────────── -->
+				{#if isManagedTier}
+					<p class={sectionClass}>{t('config.llm_mode')}</p>
+					<div class={cardClass}>
+						<p class="text-xs text-text-muted mb-3">{t('config.llm_mode_desc')}</p>
+
+						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors mb-2">
+							<input
+								type="radio"
+								name="llm-mode"
+								value="standard"
+								checked={(config.llm_mode ?? 'standard') === 'standard'}
+								onchange={() => { config.llm_mode = 'standard'; }}
+								class="mt-1 accent-accent shrink-0"
+							/>
+							<div class="flex-1 min-w-0">
+								<p class="text-sm font-medium">{t('config.llm_mode_standard')}</p>
+								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_standard_desc')}</p>
+							</div>
+						</label>
+
+						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors">
+							<input
+								type="radio"
+								name="llm-mode"
+								value="eu-sovereign"
+								checked={config.llm_mode === 'eu-sovereign'}
+								onchange={() => { config.llm_mode = 'eu-sovereign'; }}
+								class="mt-1 accent-accent shrink-0"
+							/>
+							<div class="flex-1 min-w-0">
+								<p class="text-sm font-medium">{t('config.llm_mode_eu_sovereign')}</p>
+								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_eu_sovereign_desc')}</p>
+							</div>
+						</label>
+
+						<p class="text-xs text-text-muted mt-3 italic">{t('config.llm_mode_restart_required')}</p>
+					</div>
+				{/if}
+
+				<!-- ── Voice (Phase 2 placeholder) ────────────────────────────── -->
+				<p class={sectionClass}>{t('config.voice_title')}</p>
+				<div class={cardClass}>
+					<p class="text-sm font-medium mb-1">{t('config.voice_stt_label')}</p>
+					<p class="text-xs text-text-muted mb-2">{t('config.voice_stt_current_env')}</p>
+					<p class="text-xs text-text-muted italic">{t('config.voice_picker_coming')}</p>
+				</div>
+				<div class={cardClass}>
+					<p class="text-sm font-medium mb-1">{t('config.voice_tts_label')}</p>
+					<p class="text-xs text-text-muted mb-2">{t('config.voice_tts_current_default')}</p>
+					<p class="text-xs text-text-muted italic">{t('config.voice_picker_coming')}</p>
+				</div>
+
+				<!-- ── Error Reporting (Phase 4 — will move here from System) ── -->
+				<p class={sectionClass}>{t('config.error_reporting_title')}</p>
+				<div class={cardClass}>
+					<p class="text-xs text-text-muted italic">{t('config.error_reporting_moving_soon')}</p>
+				</div>
 			</div>
 
 		<!-- ═══════════════════════════════════════════════════════════════════ -->
