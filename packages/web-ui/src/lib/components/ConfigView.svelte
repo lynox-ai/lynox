@@ -818,11 +818,24 @@
 					{/if}
 				</div>
 
-				<!-- ── Error Reporting (Phase 4 — will move here from System) ── -->
+				<!-- ── Error Reporting (Bugsink) — moved here from System in Phase 4. -->
+				<!-- On managed tiers Bugsink is always active per DPIA; on self-host -->
+				<!-- it's opt-in via LYNOX_BUGSINK_DSN. -->
 				<p class={sectionClass}>{t('config.error_reporting_title')}</p>
-				<div class={cardClass}>
-					<p class="text-xs text-text-muted italic">{t('config.error_reporting_moving_soon')}</p>
-				</div>
+				{#if managed}
+					<div class={cardClass}>
+						<p class="text-sm font-medium">{t('config.bugsink')}</p>
+						<p class="text-xs text-text-muted mt-1">{t('config.bugsink_managed_always_on')}</p>
+					</div>
+				{:else}
+					<div class="{cardClass} flex items-center justify-between">
+						<div>
+							<p class="text-sm font-medium">{t('config.bugsink')}</p>
+							<p class="text-xs text-text-muted mt-1">{t('config.bugsink_desc')}</p>
+						</div>
+						<button onclick={toggleBugsink} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {bugsinkEnabled ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {bugsinkEnabled ? 'translate-x-4' : ''}"></span></button>
+					</div>
+				{/if}
 			</div>
 
 		<!-- ═══════════════════════════════════════════════════════════════════ -->
@@ -943,16 +956,7 @@
 						{/if}
 					</div>
 
-					<!-- Privacy -->
-					<p class={sectionClass}>{t('config.privacy')}</p>
-
-					<div class="{cardClass} flex items-center justify-between">
-						<div>
-							<p class="text-sm font-medium">{t('config.bugsink')}</p>
-							<p class="text-xs text-text-muted mt-1">{t('config.bugsink_desc')}</p>
-						</div>
-						<button onclick={toggleBugsink} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {bugsinkEnabled ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {bugsinkEnabled ? 'translate-x-4' : ''}"></span></button>
-					</div>
+					<!-- Privacy (Bugsink) moved to Compliance tab in Phase 4. -->
 				{:else}
 					<p class={sectionClass}>{t('config.security')}</p>
 					<div class={cardClass}>

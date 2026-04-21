@@ -488,6 +488,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'usage.unit_seconds': { de: 'Sekunden', en: 'seconds' },
 	'usage.load_failed': { de: 'Verbrauch konnte nicht geladen werden.', en: 'Failed to load usage.' },
 	'usage.edit_limits_title': { de: 'Limits bearbeiten', en: 'Edit limits' },
+	'usage.toast_80_pct': { de: '80 % deines Monatsbudgets verbraucht — Verlauf unter Budget & Nutzung.', en: '80% of this month\'s budget used — see Budget & Usage.' },
+	'usage.toast_95_pct': { de: '95 % verbraucht — Credit-Pack erwägen bevor das Limit greift.', en: '95% used — consider adding a credit pack before you hit the ceiling.' },
 	'config.managed_eu_provider_info': { de: 'Das LLM wird von lynox bereitgestellt. Standard: Claude Sonnet 4.6 (Anthropic, US, GDPR-DPA). Optional: EU-Sovereign-Modus mit Mistral Large 3 in Paris.', en: 'The LLM is provided by lynox. Default: Claude Sonnet 4.6 (Anthropic, US, GDPR DPA). Optional: EU Sovereign mode with Mistral Large 3 in Paris.' },
 	'config.managed_eu_model_locked': { de: 'Das Modell wird von lynox verwaltet und ist im Managed-Tarif nicht änderbar.', en: 'The model is managed by lynox and cannot be changed on Managed plans.' },
 
@@ -522,7 +524,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.voice_unavailable': { de: 'nicht verfügbar', en: 'unavailable' },
 	'config.voice_env_override_hint': { de: 'Gesteuert per Environment-Variable:', en: 'Controlled by environment variable:' },
 	'config.error_reporting_title': { de: 'Fehlerberichte', en: 'Error reporting' },
-	'config.error_reporting_moving_soon': { de: 'Bugsink-Umschalter zieht in Phase 4 hierher um (derzeit im System-Tab).', en: 'Bugsink toggle moves here in Phase 4 (currently in the System tab).' },
+	'config.bugsink_managed_always_on': { de: 'Bei Managed-Instanzen sind Fehlerberichte grundsätzlich aktiv (Hetzner, Deutschland, PII entfernt). Siehe DPIA für Details.', en: 'Error reports are always active on Managed instances (Hetzner, Germany, PII scrubbed). See the DPIA for details.' },
 
 	'config.provider': { de: 'LLM Provider', en: 'LLM Provider' },
 	'config.provider_desc': { de: 'Wohin werden KI-Anfragen gesendet? Daten bleiben immer lokal — nur die Inferenz nutzt den Provider.', en: 'Where are AI requests sent? Your data stays local — only inference uses the provider.' },

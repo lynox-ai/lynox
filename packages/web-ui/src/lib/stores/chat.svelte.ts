@@ -771,6 +771,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'done':
+			// Budget threshold check — usage dashboard Phase 4. Dynamic import
+			// keeps the alerts code out of the initial chat-store bundle for
+			// cases where the user never completes a run. Fire-and-forget:
+			// the alert is supplemental and must never interact with the run
+			// lifecycle on failure.
+			import('./usage-alerts.svelte.js')
+				.then(m => m.checkUsageThreshold())
+				.catch(() => { /* ignore — alerting is best-effort */ });
 			break;
 		case 'retry': {
 			const attempt = data['attempt'] as number;
