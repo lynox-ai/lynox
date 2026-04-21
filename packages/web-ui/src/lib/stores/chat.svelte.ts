@@ -631,7 +631,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg._toolSinceText = true;
 			streamingActivity = 'tool';
 			streamingToolName = toolName;
-			if (toolName !== 'ask_user' && toolName !== 'ask_secret') {
+			// Skip sidebar update for tools whose dedicated stream event carries
+			// richer live state. spawn_agent emits a separate 'spawn' event a
+			// few ticks later with running/done counts; letting the tool_call
+			// path set tool+spawn_agent first causes a visible flash to the
+			// generic tool card before the spawn view takes over.
+			if (toolName !== 'ask_user' && toolName !== 'ask_secret' && toolName !== 'spawn_agent') {
 				setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			}
 			break;
@@ -686,7 +691,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (!msg.spawn) break;
 			msg.spawn.elapsedS = Number(data['elapsedS'] ?? 0);
 			msg.spawn.running = (data['running'] as string[] | undefined) ?? msg.spawn.running;
-			msg.spawn.lastToolBySub = (data['lastToolBySub'] as Record<string, string> | undefined) ?? {};
+			msg.spawn.lastToolBySub = (data['lastToolBySub'] as Record<string, string> | undefined) ?? msg.spawn.lastToolBySub;
 			// Keep the Context-panel in sync; done list carries over since
 			// progress events don't re-emit it.
 			setContext({

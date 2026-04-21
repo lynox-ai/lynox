@@ -57,6 +57,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'spawn.done': { de: 'fertig', en: 'done' },
 	'spawn.running': { de: 'Laufend', en: 'Running' },
 	'spawn.completed': { de: 'Abgeschlossen', en: 'Completed' },
+	'spawn.status_ok': { de: 'erfolgreich', en: 'succeeded' },
+	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
 
 	// Nav (extended)
 	'nav.contacts': { de: 'Kontakte', en: 'Contacts' },

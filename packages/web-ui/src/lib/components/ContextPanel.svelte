@@ -77,7 +77,7 @@
 				{@const done = ctx.spawnDone ?? []}
 				{@const lastTool = ctx.spawnLastTool ?? {}}
 				{@const elapsed = ctx.spawnElapsedS ?? 0}
-				<div class="flex items-center gap-2 text-xs text-text-muted">
+				<div class="flex items-center gap-2 text-xs text-text-muted" role="status" aria-live="polite">
 					<span class="font-mono">{elapsed}s</span>
 					{#if running.length > 0}
 						<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
@@ -97,7 +97,7 @@
 						<div class="px-3 py-1.5 border-b border-border bg-bg-muted">
 							<span class="text-[10px] font-mono uppercase tracking-widest text-warning">{t('spawn.running')}</span>
 						</div>
-						<ul class="divide-y divide-border">
+						<ul class="divide-y divide-border" aria-live="polite">
 							{#each running as subName}
 								<li class="px-3 py-2 flex items-center gap-2">
 									<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse shrink-0" aria-hidden="true"></span>
@@ -120,7 +120,7 @@
 						<ul class="divide-y divide-border">
 							{#each done as d}
 								<li class="px-3 py-2 flex items-center gap-2">
-									<span class={d.ok ? 'text-success' : 'text-danger'} aria-hidden="true">{d.ok ? '✓' : '✗'}</span>
+									<span class={d.ok ? 'text-success' : 'text-danger'} aria-label={d.ok ? t('spawn.status_ok') : t('spawn.status_fail')}>{d.ok ? '✓' : '✗'}</span>
 									<span class="text-xs font-mono text-text-muted truncate flex-1">{d.name}</span>
 									<span class="text-[10px] font-mono text-text-subtle shrink-0">{d.elapsedS}s</span>
 								</li>
