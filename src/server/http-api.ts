@@ -1800,6 +1800,42 @@ export class LynoxHTTPApi {
         label = `${monthFmt(start)} – ${monthFmt(now)}`;
       }
 
+      // Phase 3: for managed tiers, re-fetch the control-plane view FIRST so
+      // we can align the local aggregation window to the Stripe billing
+      // period (otherwise `used_cents` from the control plane and the sum of
+      // `daily` from the local DB report different windows and the numbers
+      // don't reconcile in the UI). On non-managed or when the CP is
+      // unreachable we fall through with the calendar-month / rolling window
+      // computed above.
+      const config = readUserConfig();
+      const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
+      const isManagedTier = tier === 'managed' || tier === 'managed_pro' || tier === 'eu';
+
+      interface CpSummary {
+        managed: boolean;
+        tier?: string;
+        budget_cents?: number;
+        used_cents?: number;
+        balance_cents?: number;
+        period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;
+      }
+      let cpSummary: CpSummary | null = null;
+      if (isManagedTier && period === 'current') {
+        const { fetchControlPlaneUsageSummary } = await import('../core/managed-usage-summary.js');
+        cpSummary = await fetchControlPlaneUsageSummary();
+        if (cpSummary?.managed && cpSummary.period) {
+          // Use the Stripe period for the local aggregation so daily + by_model
+          // cover the same window the control plane is reporting against.
+          startIso = cpSummary.period.start_iso;
+          endIso = cpSummary.period.end_iso;
+          source = 'calendar-month'; // 'stripe-billing' isn't a summary.source; we reuse calendar-month semantics
+          const periodStart = new Date(startIso);
+          const periodEnd = new Date(endIso);
+          const lastDay = new Date(periodEnd.getTime() - 86_400_000);
+          label = `${monthFmt(periodStart)} – ${monthFmt(lastDay)}`;
+        }
+      }
+
       const cacheKey = `${period}:${startIso}`;
       const cached = this._usageSummaryCache.get(cacheKey);
       const nowMs = Date.now();
@@ -1811,21 +1847,28 @@ export class LynoxHTTPApi {
         this._usageSummaryCache.set(cacheKey, { summary, expiresAt: nowMs + USAGE_SUMMARY_TTL_MS });
       }
 
-      // Tier-appropriate budget. Self-Host + Hosted (BYOK) expose their
-      // configured monthly ceiling. Managed/Managed-Pro return 0 until the
-      // Phase 3 control-plane proxy lands — the UI should then pull the
-      // included-credit meter from a separate endpoint.
-      const config = readUserConfig();
-      const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
-      const budgetCents = tier === 'managed' || tier === 'managed_pro' || tier === 'eu'
-        ? 0
-        : typeof config.max_monthly_cost_usd === 'number'
+      // Tier-appropriate budget + used resolution:
+      //   - Managed w/ CP reachable → use CP's budget + used (authoritative)
+      //   - Managed w/o CP          → fall through to 0 (UI renders "included
+      //                                credit view coming in a later release")
+      //   - Self-Host / Hosted      → config.max_monthly_cost_usd
+      let budgetCents: number;
+      let overriddenUsedCents: number | undefined;
+      if (cpSummary?.managed) {
+        budgetCents = cpSummary.budget_cents ?? 0;
+        overriddenUsedCents = cpSummary.used_cents;
+      } else if (isManagedTier) {
+        budgetCents = 0;
+      } else {
+        budgetCents = typeof config.max_monthly_cost_usd === 'number'
           ? Math.round(config.max_monthly_cost_usd * 100)
           : 0;
+      }
 
       jsonResponse(res, 200, {
         tier,
         ...summary,
+        used_cents: overriddenUsedCents ?? summary.used_cents,
         budget_cents: budgetCents,
       });
     });
