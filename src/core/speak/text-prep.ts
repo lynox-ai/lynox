@@ -50,11 +50,30 @@ export function prepareForSpeech(input: string): string {
 
   text = text.replace(/https?:\/\/\S+/g, ' ');
 
-  // Slash between letter-runs (e.g. "Wachstum/SLA", "EU/US") — convert to
-  // ", " so TTS treats them as a list. Letter required on the LEFT to
-  // leave paths (src/foo), fractions (1/2), and dates (04/21) untouched.
-  // Must run AFTER URL stripping or it would eat slashes inside URLs.
+  // Price/rate-per-unit expansion. "39/mo" reads as "thirty-nine slash mo"
+  // on Voxtral — expand to the natural phrasing a human would say. Language-
+  // aware: "pro Monat" in DE context, "per month" otherwise. Handles the
+  // English (mo/yr/d/h), German (Monat/Jahr/Tag/Stunde), and long-form
+  // (month/year/day/hour) variants. Ordered longest-first so "/month" is
+  // not partially eaten by "/mo". Runs BEFORE the generic slash rule so
+  // the unit abbreviations get the expanded form instead of just ", ".
+  const perMonth = deContext ? ' pro Monat' : ' per month';
+  const perYear  = deContext ? ' pro Jahr'  : ' per year';
+  const perDay   = deContext ? ' pro Tag'   : ' per day';
+  const perHour  = deContext ? ' pro Stunde': ' per hour';
+  text = text.replace(/(\d)\s*\/\s*(?:month|Monat|mo)\b/gi, `$1${perMonth}`);
+  text = text.replace(/(\d)\s*\/\s*(?:year|Jahr|yr)\b/gi, `$1${perYear}`);
+  text = text.replace(/(\d)\s*\/\s*(?:day|Tag|d)\b/gi, `$1${perDay}`);
+  text = text.replace(/(\d)\s*\/\s*(?:hour|Stunde|h)\b/gi, `$1${perHour}`);
+
+  // Generic slash between word-tokens (e.g. "Wachstum/SLA", "EU/US",
+  // "customer/invoice") — convert to ", " so TTS treats them as a list.
+  // Two passes: letter on the left (letter-first cases), and digit on the
+  // left with letter on the right ("Q2/March"). Digit/digit is intentionally
+  // NOT matched so dates (04/21), fractions (1/2), and version ranges
+  // (3.9/3.10) pass through unchanged. URLs stripped earlier.
   text = text.replace(/(\p{L})\s*\/\s*([\p{L}\p{N}])/gu, '$1, $2');
+  text = text.replace(/(\p{N})\s*\/\s*(\p{L})/gu, '$1, $2');
 
   text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
 
