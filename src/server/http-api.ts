@@ -1982,24 +1982,61 @@ export class LynoxHTTPApi {
     });
 
     // ── Voice info (combined STT + TTS capabilities for the Web UI) ──
-    // Drives the privacy hint + auto-speak toggle visibility. Prefer this
-    // over /api/transcribe/info for new callers — the old path stays for
+    // Drives the privacy hint + auto-speak toggle visibility + the
+    // Settings → Compliance voice pickers. Prefer this over the legacy
+    // /api/transcribe/info for new callers — the old path stays for
     // back-compat with existing clients.
     this.staticRoutes.set('GET /api/voice/info', async (_req, res) => {
       const [transcribeMod, speakMod] = await Promise.all([
         import('../core/transcribe.js'),
         import('../core/speak.js'),
       ]);
+      const { readUserConfig } = await import('../core/config.js');
       const sttProvider = transcribeMod.getActiveTranscribeProvider();
       const ttsProvider = speakMod.getActiveSpeakProvider();
+      const userConfig = readUserConfig();
+
+      // Provider lists for the Settings picker. `available` reflects whether
+      // the prerequisite (API key / local binary) is present; disabled options
+      // still appear so users see which choices exist on upgrade.
+      const sttProviders = [
+        { id: 'auto',    name: 'Auto',                            available: true },
+        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: transcribeMod.mistralVoxtralProvider.isAvailable },
+        { id: 'whisper', name: 'whisper.cpp (local)',             available: transcribeMod.whisperCppProvider.isAvailable },
+      ];
+      const ttsProviders = [
+        { id: 'auto',    name: 'Auto',                            available: true },
+        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: speakMod.mistralVoxtralTtsProvider.isAvailable },
+      ];
+
+      // Env-var overrides — when set, the Settings selector should display
+      // disabled with "controlled by env" hint so the user isn't confused
+      // why their picker choice doesn't stick after restart.
+      const sttEnvOverride = process.env['LYNOX_TRANSCRIBE_PROVIDER'] ? 'LYNOX_TRANSCRIBE_PROVIDER' : null;
+      const ttsEnvOverride = process.env['LYNOX_TTS_PROVIDER'] ? 'LYNOX_TTS_PROVIDER' : null;
+
+      // Voice catalog is async — fetch Mistral live (1h cache) or fall back.
+      // Wrapped in try/catch as a belt + suspenders; listMistralVoices itself
+      // already handles its own errors but we never want /voice/info to 5xx.
+      let voices: Awaited<ReturnType<typeof speakMod.listMistralVoices>> = [];
+      try { voices = await speakMod.listMistralVoices(); } catch { /* keep empty */ }
+
       jsonResponse(res, 200, {
         stt: {
           available: transcribeMod.hasTranscribeProvider(),
           provider: sttProvider?.name ?? null,
+          providers: sttProviders,
+          config_value: userConfig.transcription_provider ?? null,
+          env_override: sttEnvOverride,
         },
         tts: {
           available: speakMod.hasSpeakProvider(),
           provider: ttsProvider?.name ?? null,
+          providers: ttsProviders,
+          voices,
+          config_value: userConfig.tts_provider ?? null,
+          config_voice: userConfig.tts_voice ?? null,
+          env_override: ttsEnvOverride,
         },
       });
     });
@@ -2026,7 +2063,13 @@ export class LynoxHTTPApi {
       }
       const b = body as Record<string, unknown> | null;
       const text = b && typeof b['text'] === 'string' ? b['text'] : '';
-      const voice = b && typeof b['voice'] === 'string' ? b['voice'] : undefined;
+      // Voice resolution: request body → user config `tts_voice` → provider default.
+      // The picker in Settings → Compliance writes config; ad-hoc callers can still
+      // override per-request by passing `voice` in the body.
+      const { readUserConfig } = await import('../core/config.js');
+      const voiceFromRequest = b && typeof b['voice'] === 'string' ? b['voice'] : undefined;
+      const voiceFromConfig = readUserConfig().tts_voice;
+      const voice = voiceFromRequest ?? (typeof voiceFromConfig === 'string' && voiceFromConfig.length > 0 ? voiceFromConfig : undefined);
       const model = b && typeof b['model'] === 'string' ? b['model'] : undefined;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0

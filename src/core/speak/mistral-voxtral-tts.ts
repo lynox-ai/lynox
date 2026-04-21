@@ -38,6 +38,88 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-latest';
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
 const API_URL = 'https://api.mistral.ai/v1/audio/speech';
+const VOICES_URL = 'https://api.mistral.ai/v1/audio/voices';
+
+/**
+ * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
+ * call is unreachable. Reflects the 10× EN catalog documented as of 2026-04-16;
+ * safe to stay out-of-date because the live fetch overwrites this in the UI the
+ * moment Mistral is reachable. `de_*` slugs will appear automatically once the
+ * catalog ships them — do not add hardcoded DE entries here.
+ */
+const FALLBACK_VOICES: ReadonlyArray<VoiceInfo> = [
+  { id: 'en_paul_neutral',    language: 'en', description: 'Paul — neutral' },
+  { id: 'en_alex_neutral',    language: 'en', description: 'Alex — neutral' },
+  { id: 'en_mary_neutral',    language: 'en', description: 'Mary — neutral' },
+  { id: 'en_john_neutral',    language: 'en', description: 'John — neutral' },
+  { id: 'en_sara_neutral',    language: 'en', description: 'Sara — neutral' },
+];
+
+export interface VoiceInfo {
+  id: string;
+  language?: string;
+  description?: string;
+}
+
+let _voicesCache: { voices: VoiceInfo[]; expiresAt: number } | null = null;
+const VOICES_TTL_MS = 60 * 60_000; // 1 hour
+
+/**
+ * Fetch the Mistral Voxtral voice catalog for the Settings → Compliance
+ * picker. Returns the cached list inside the 1h TTL; on first call or after
+ * expiry, queries `/v1/audio/voices` with a 2s timeout. On any failure
+ * (no key, network error, unexpected shape) returns the hardcoded
+ * FALLBACK_VOICES so the UI is never voice-pickerless.
+ */
+export async function listMistralVoices(): Promise<VoiceInfo[]> {
+  const now = Date.now();
+  if (_voicesCache && _voicesCache.expiresAt > now) return _voicesCache.voices;
+  const apiKey = process.env['MISTRAL_API_KEY'];
+  if (!apiKey) return [...FALLBACK_VOICES];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    let voices: VoiceInfo[];
+    try {
+      const response = await fetch(VOICES_URL, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body: unknown = await response.json();
+      // Accept either `{ data: [...] }` (OpenAI-style) or `{ voices: [...] }` or a bare array.
+      // Each item may expose `id` or `voice` for the slug, plus optional language / description.
+      const raw: unknown[] = Array.isArray(body)
+        ? body
+        : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['data'])
+          ? (body as { data: unknown[] }).data
+          : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['voices'])
+            ? (body as { voices: unknown[] }).voices
+            : [];
+      voices = raw.flatMap((entry): VoiceInfo[] => {
+        if (!entry || typeof entry !== 'object') return [];
+        const e = entry as Record<string, unknown>;
+        const id = typeof e['id'] === 'string' ? e['id'] : typeof e['voice'] === 'string' ? e['voice'] : undefined;
+        if (!id) return [];
+        const language = typeof e['language'] === 'string' ? e['language'] : id.split('_')[0];
+        const description = typeof e['description'] === 'string' ? e['description']
+          : typeof e['display_name'] === 'string' ? e['display_name']
+          : undefined;
+        return [language !== undefined ? { id, language, ...(description ? { description } : {}) } : { id, ...(description ? { description } : {}) }];
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (voices.length === 0) voices = [...FALLBACK_VOICES];
+    _voicesCache = { voices, expiresAt: now + VOICES_TTL_MS };
+    return voices;
+  } catch {
+    // Cache the fallback briefly too (60s) so a flapping network doesn't spam Mistral every request.
+    _voicesCache = { voices: [...FALLBACK_VOICES], expiresAt: now + 60_000 };
+    return [...FALLBACK_VOICES];
+  }
+}
 
 export function hasMistralVoxtralTts(): boolean {
   return !!process.env['MISTRAL_API_KEY'];

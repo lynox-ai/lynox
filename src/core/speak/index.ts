@@ -45,9 +45,11 @@ export {
   speakMistralVoxtral,
   speakMistralVoxtralStream,
   hasMistralVoxtralTts,
+  listMistralVoices,
   VOXTRAL_TTS_MODEL,
   DEFAULT_VOICE,
 } from './mistral-voxtral-tts.js';
+export type { VoiceInfo } from './mistral-voxtral-tts.js';
 export { prepareForSpeech } from './text-prep.js';
 
 type ProviderChoice = 'mistral' | 'auto';

@@ -29,6 +29,9 @@
 		managed?: string; // 'starter' (Hosted/BYOK) | 'managed' | 'managed_pro' | 'eu' (legacy) | undefined (self-hosted)
 		llm_mode?: 'standard' | 'eu-sovereign'; // LLM routing toggle: Anthropic Claude vs Mistral Large 3
 		capabilities?: Capabilities;
+		transcription_provider?: 'mistral' | 'whisper' | 'auto';
+		tts_provider?: 'mistral' | 'auto';
+		tts_voice?: string;
 		[key: string]: unknown;
 	}
 
@@ -38,6 +41,36 @@
 	// tier check from users who have the prerequisite in env or vault.
 	interface Capabilities {
 		mistral_available?: boolean;
+	}
+
+	// /api/voice/info response (Compliance Phase 2). Populates the Settings
+	// voice pickers with live provider availability + the Mistral voice catalog.
+	interface VoiceInfo {
+		stt: {
+			available: boolean;
+			provider: string | null;
+			providers: Array<{ id: string; name: string; available: boolean }>;
+			config_value: 'mistral' | 'whisper' | 'auto' | null;
+			env_override: string | null;
+		};
+		tts: {
+			available: boolean;
+			provider: string | null;
+			providers: Array<{ id: string; name: string; available: boolean }>;
+			voices: Array<{ id: string; language?: string; description?: string }>;
+			config_value: 'mistral' | 'auto' | null;
+			config_voice: string | null;
+			env_override: string | null;
+		};
+	}
+	let voiceInfo = $state<VoiceInfo | null>(null);
+
+	async function loadVoiceInfo() {
+		try {
+			const res = await fetch(`${getApiBase()}/voice/info`);
+			if (!res.ok) return;
+			voiceInfo = (await res.json()) as VoiceInfo;
+		} catch { /* best-effort — picker falls back to placeholder */ }
 	}
 
 	// ── Config state ───────────────────────────────────────────────────────────
@@ -417,6 +450,7 @@
 		loadBugsinkStatus();
 		loadCurrentVersion();
 		loadSecrets();
+		loadVoiceInfo();
 	});
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
@@ -722,17 +756,66 @@
 					</div>
 				{/if}
 
-				<!-- ── Voice (Phase 2 placeholder) ────────────────────────────── -->
+				<!-- ── Voice (STT + TTS pickers, wired in Phase 2) ─────────────── -->
 				<p class={sectionClass}>{t('config.voice_title')}</p>
+
+				<!-- STT (speech-to-text) -->
 				<div class={cardClass}>
-					<p class="text-sm font-medium mb-1">{t('config.voice_stt_label')}</p>
-					<p class="text-xs text-text-muted mb-2">{t('config.voice_stt_current_env')}</p>
-					<p class="text-xs text-text-muted italic">{t('config.voice_picker_coming')}</p>
+					<label for="stt-provider" class="block text-sm font-medium mb-1">{t('config.voice_stt_label')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.voice_stt_privacy')}</p>
+					{#if voiceInfo?.stt.env_override}
+						<select id="stt-provider" disabled class="{inputClass} opacity-60 cursor-not-allowed">
+							<option>{voiceInfo.stt.provider ?? '—'}</option>
+						</select>
+						<p class="text-xs text-text-muted mt-2 italic">{t('config.voice_env_override_hint')} <code class="font-mono">{voiceInfo.stt.env_override}</code></p>
+					{:else}
+						<select id="stt-provider"
+							bind:value={config.transcription_provider}
+							class={inputClass}>
+							{#each voiceInfo?.stt.providers ?? [] as p}
+								<option value={p.id} disabled={!p.available}>
+									{p.name}{p.available ? '' : ' — ' + t('config.voice_unavailable')}
+								</option>
+							{/each}
+						</select>
+					{/if}
 				</div>
+
+				<!-- TTS (text-to-speech) -->
 				<div class={cardClass}>
-					<p class="text-sm font-medium mb-1">{t('config.voice_tts_label')}</p>
-					<p class="text-xs text-text-muted mb-2">{t('config.voice_tts_current_default')}</p>
-					<p class="text-xs text-text-muted italic">{t('config.voice_picker_coming')}</p>
+					<label for="tts-provider" class="block text-sm font-medium mb-1">{t('config.voice_tts_provider_label')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.voice_tts_privacy')}</p>
+					{#if voiceInfo?.tts.env_override}
+						<select id="tts-provider" disabled class="{inputClass} opacity-60 cursor-not-allowed">
+							<option>{voiceInfo.tts.provider ?? '—'}</option>
+						</select>
+						<p class="text-xs text-text-muted mt-2 italic">{t('config.voice_env_override_hint')} <code class="font-mono">{voiceInfo.tts.env_override}</code></p>
+					{:else}
+						<select id="tts-provider"
+							bind:value={config.tts_provider}
+							class={inputClass}>
+							{#each voiceInfo?.tts.providers ?? [] as p}
+								<option value={p.id} disabled={!p.available}>
+									{p.name}{p.available ? '' : ' — ' + t('config.voice_unavailable')}
+								</option>
+							{/each}
+						</select>
+					{/if}
+
+					{#if voiceInfo && voiceInfo.tts.voices.length > 0}
+						<label for="tts-voice" class="block text-sm font-medium mt-4 mb-1">{t('config.voice_tts_voice_label')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.voice_tts_voice_desc')}</p>
+						<select id="tts-voice"
+							bind:value={config.tts_voice}
+							class={inputClass}>
+							<option value="">{t('config.voice_tts_voice_default')}</option>
+							{#each voiceInfo.tts.voices as v}
+								<option value={v.id}>
+									{v.id}{v.description ? ` — ${v.description}` : ''}{v.language ? ` (${v.language})` : ''}
+								</option>
+							{/each}
+						</select>
+					{/if}
 				</div>
 
 				<!-- ── Error Reporting (Phase 4 — will move here from System) ── -->
