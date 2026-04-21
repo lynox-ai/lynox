@@ -20,12 +20,18 @@ export function prepareForSpeech(input: string): string {
   if (!input) return '';
   let text = input;
 
-  // Arrows first — before anything else can mangle them. A comma gives the
-  // TTS engine a natural prosody pause without guessing a language-specific
-  // connector ("to" vs. "zu" vs. "à"). ASCII forms (`<->`, `->`, `<-`) are
+  // Arrows first — before anything else can mangle them. " dann " ("then")
+  // gives TTS natural sequence prosody and is unambiguous in both DE and EN.
+  // A bare comma collapses chains like "A → B → C" into "A, B, C" which
+  // sounds abrupt on small models. ASCII forms (`<->`, `->`, `<-`) are
   // ordered longest-first so `<->` isn't partially eaten by `<-`.
-  text = text.replace(/\s*(?:→|←|↔|⇒|⇐|⇔)\s*/g, ', ');
-  text = text.replace(/\s*(?:<->|->|<-)\s*/g, ', ');
+  text = text.replace(/\s*(?:→|←|↔|⇒|⇐|⇔)\s*/g, ' dann ');
+  text = text.replace(/\s*(?:<->|<=>|->|<-|=>|<=)\s*/g, ' dann ');
+
+  // Less-than + digit (e.g. "<4h", "<100ms") — strip the "<" so TTS reads
+  // the quantity naturally instead of choking on the bracket. We lose the
+  // "less than" nuance, but preserving a readable quantity is more important.
+  text = text.replace(/<(\s?\d)/g, '$1');
 
   text = text.replace(/```[\s\S]*?```/g, '. ');
   text = text.replace(/`([^`]*)`/g, '$1');
@@ -36,6 +42,12 @@ export function prepareForSpeech(input: string): string {
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
 
   text = text.replace(/https?:\/\/\S+/g, ' ');
+
+  // Slash between letter-runs (e.g. "Wachstum/SLA", "EU/US") — convert to
+  // ", " so TTS treats them as a list. Letter required on the LEFT to
+  // leave paths (src/foo), fractions (1/2), and dates (04/21) untouched.
+  // Must run AFTER URL stripping or it would eat slashes inside URLs.
+  text = text.replace(/(\p{L})\s*\/\s*([\p{L}\p{N}])/gu, '$1, $2');
 
   text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
 
@@ -62,7 +74,34 @@ export function prepareForSpeech(input: string): string {
   text = text.replace(/\.{2,}/g, '.');
   text = text.replace(/([,.;:!?]){2,}/g, '$1');
 
+  text = tweakGermanPronunciation(text);
+
   return text.trim();
+}
+
+/**
+ * Tiny pronunciation adjustments for DE text being read by an EN voice
+ * (Voxtral's TTS catalog is EN-only as of Phase 0). Only fires when the
+ * text shows German markers (umlauts or common DE stopwords). Today this
+ * only rewrites sentence-initial "Die" → "Dee" — the EN voice otherwise
+ * reads "Die" as /daɪ/ (as in "to die"). "Dee" reads as /diː/ which is
+ * close to the DE /diː/ pronunciation of "Die". Extend cautiously: every
+ * rule added here reshapes the visible spoken text and can misfire on
+ * mixed-language content.
+ */
+function tweakGermanPronunciation(text: string): string {
+  // Stopword list intentionally excludes "die"/"das" — they're the very tokens
+  // we may be asked to transform, and treating them as DE evidence would cause
+  // mixed or EN content that happens to contain them to be mangled.
+  const hasGermanMarkers =
+    /[äöüÄÖÜß]/.test(text) ||
+    /\b(?:der|und|ist|nicht|eine?|mit|für|auch|werden|sind|nach|sehr|oder)\b/i.test(text);
+  if (!hasGermanMarkers) return text;
+
+  // Replace "Die" only at sentence boundaries (start of text or after
+  // terminal punctuation), so mid-sentence "die" doesn't accidentally
+  // match and the English "Die Hard" never mutates.
+  return text.replace(/(^|[.!?]\s+)Die\b/g, '$1Dee');
 }
 
 /**
