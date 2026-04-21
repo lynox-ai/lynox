@@ -3,6 +3,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
+	import UsageDashboard from './UsageDashboard.svelte';
 
 	interface Config {
 		provider?: string;
@@ -400,7 +401,10 @@
 			{ id: 'ai' as Tab, label: t('config.tab_ai') },
 			{ id: 'provider' as Tab, label: t('config.tab_provider') },
 			{ id: 'compliance' as Tab, label: t('config.tab_compliance') },
-			...(!isManagedEu ? [{ id: 'budget' as Tab, label: t('config.tab_budget') }] : []),
+			// Budget & Usage is always visible — the dashboard inside renders
+			// regardless of tier, limits-editing inside the tab still gates on
+			// !managed so Managed customers don't see inactive inputs.
+			{ id: 'budget' as Tab, label: t('config.tab_budget') },
 			{ id: 'system' as Tab, label: t('config.tab_system') },
 		]
 	);
@@ -742,27 +746,36 @@
 		<!-- TAB: Budget                                                       -->
 		<!-- ═══════════════════════════════════════════════════════════════════ -->
 		{:else if activeTab === 'budget'}
-			<div class="space-y-4">
-				<div class={cardClass}>
-					<label for="monthly-limit" class="block text-sm font-medium mb-1">{t('config.monthly_limit')}</label>
-					<p class="text-xs text-text-muted mb-2">{t('config.monthly_limit_desc')}</p>
-					<input id="monthly-limit" type="number" step="1" min="0" placeholder="—"
-						bind:value={config.max_monthly_cost_usd} class="{inputClass} font-mono" />
-				</div>
+			<div class="space-y-6">
+				<!-- Usage Dashboard (Phase 2, visible on all tiers) -->
+				<UsageDashboard />
 
+				<!-- Limits section — only meaningful where the user controls their
+				     own ceiling (Self-Host, Hosted/BYOK). On Managed the budget is
+				     tier-based and set by the control plane. -->
 				{#if !managed}
-					<div class={cardClass}>
-						<label for="daily-limit" class="block text-sm font-medium mb-1">{t('config.daily_limit')}</label>
-						<p class="text-xs text-text-muted mb-2">{t('config.daily_limit_desc')}</p>
-						<input id="daily-limit" type="number" step="0.5" min="0" placeholder="—"
-							bind:value={config.max_daily_cost_usd} class="{inputClass} font-mono" />
-					</div>
-
-					<div class={cardClass}>
-						<label for="session-limit" class="block text-sm font-medium mb-1">{t('config.session_limit')}</label>
-						<p class="text-xs text-text-muted mb-2">{t('config.session_limit_desc')}</p>
-						<input id="session-limit" type="number" step="0.5" min="0" placeholder="5.00"
-							bind:value={config.max_session_cost_usd} class="{inputClass} font-mono" />
+					<div>
+						<p class={sectionClass}>{t('usage.edit_limits_title')}</p>
+						<div class="space-y-4">
+							<div class={cardClass}>
+								<label for="monthly-limit" class="block text-sm font-medium mb-1">{t('config.monthly_limit')}</label>
+								<p class="text-xs text-text-muted mb-2">{t('config.monthly_limit_desc')}</p>
+								<input id="monthly-limit" type="number" step="1" min="0" placeholder="—"
+									bind:value={config.max_monthly_cost_usd} class="{inputClass} font-mono" />
+							</div>
+							<div class={cardClass}>
+								<label for="daily-limit" class="block text-sm font-medium mb-1">{t('config.daily_limit')}</label>
+								<p class="text-xs text-text-muted mb-2">{t('config.daily_limit_desc')}</p>
+								<input id="daily-limit" type="number" step="0.5" min="0" placeholder="—"
+									bind:value={config.max_daily_cost_usd} class="{inputClass} font-mono" />
+							</div>
+							<div class={cardClass}>
+								<label for="session-limit" class="block text-sm font-medium mb-1">{t('config.session_limit')}</label>
+								<p class="text-xs text-text-muted mb-2">{t('config.session_limit_desc')}</p>
+								<input id="session-limit" type="number" step="0.5" min="0" placeholder="5.00"
+									bind:value={config.max_session_cost_usd} class="{inputClass} font-mono" />
+							</div>
+						</div>
 					</div>
 				{/if}
 			</div>
