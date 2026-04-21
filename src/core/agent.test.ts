@@ -408,6 +408,61 @@ describe('Agent', () => {
       const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
       expect(results[0]!.content).toContain('Tool not found: nonexistent');
       expect(results[0]!.is_error).toBe(true);
+      // Non-retryable prefix steers the model away from "let me try again with haiku"
+      expect(results[0]!.content).toContain('[NON_RETRYABLE');
+    });
+
+    it('annotates non-retryable config errors with a clear prefix', async () => {
+      const roleErrorTool = makeTool(
+        'spawn_agent',
+        vi.fn().mockRejectedValue(
+          new Error('Unknown role "analyst". Available roles: researcher, creator, operator, collector.'),
+        ),
+      );
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_spawn', name: 'spawn_agent', input: { agents: [] } }]))
+        .mockResolvedValueOnce(endTurnResponse('OK'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [roleErrorTool],
+      });
+      await agent.send('Spawn analyst');
+
+      const messages = agent.getMessages();
+      const toolResultsMsg = messages[2];
+      const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
+      expect(results[0]!.is_error).toBe(true);
+      expect(results[0]!.content).toContain('[NON_RETRYABLE config error');
+      expect(results[0]!.content).toContain('do not retry with a different model');
+      expect(results[0]!.content).toContain('Unknown role "analyst"');
+    });
+
+    it('leaves unfamiliar errors untouched (no false-positive annotation)', async () => {
+      const transientTool = makeTool(
+        'http_request',
+        vi.fn().mockRejectedValue(new Error('fetch failed: ECONNRESET')),
+      );
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_http', name: 'http_request', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('OK'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [transientTool],
+      });
+      await agent.send('Fetch');
+
+      const messages = agent.getMessages();
+      const toolResultsMsg = messages[2];
+      const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
+      // Transient network errors may legitimately retry — do NOT prefix.
+      expect(results[0]!.content).not.toContain('[NON_RETRYABLE');
+      expect(results[0]!.content).toContain('ECONNRESET');
     });
 
     it('isDangerous + promptUser: y allows execution', async () => {
