@@ -1,0 +1,4441 @@
+{
+  "version": 1,
+  "description": "Sonnet-generated + Sonnet-labeled corpus. Two-phase generation, review 10% manually.",
+  "generated_at": "2026-04-21T13:26:27.711Z",
+  "total_cases": 265,
+  "cases": [
+    {
+      "id": "gen-business-comms-001",
+      "category": "business-comms",
+      "text": "Follow-up call with Marieke Brandt (Soventa GmbH) scheduled for Thursday 14:00 — she wants revised pricing before EOW.",
+      "expected_entities": [
+        {
+          "canonical_name": "Marieke Brandt",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Soventa GmbH",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Marieke Brandt",
+          "predicate": "works_for",
+          "object": "Soventa GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-002",
+      "category": "business-comms",
+      "text": "Termin mit Jonas Kellner von Brinkhaus & Partner verschoben auf 12. März, 10 Uhr. Angebot liegt noch aus.",
+      "expected_entities": [
+        {
+          "canonical_name": "Jonas Kellner",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Brinkhaus & Partner",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Jonas Kellner",
+          "predicate": "works_for",
+          "object": "Brinkhaus & Partner"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-003",
+      "category": "business-comms",
+      "text": "CRM NOTE – Acct: Delford Industries | Contact: Phil Harmon | Stage: Proposal Sent | Next action: follow up 2025-07-01",
+      "expected_entities": [
+        {
+          "canonical_name": "Delford Industries",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Phil Harmon",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Phil Harmon",
+          "predicate": "works_for",
+          "object": "Delford Industries"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-004",
+      "category": "business-comms",
+      "text": "Sandra Voigt hat bestätigt, dass das Budget für Q3 freigegeben wurde. Nächster Schritt: SOW finalisieren.",
+      "expected_entities": [
+        {
+          "canonical_name": "Sandra Voigt",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-005",
+      "category": "business-comms",
+      "text": "Checked in with Tom Ackerley at Nexbridge Solutions — he's looping in procurement this week. Deal size ~€84k.",
+      "expected_entities": [
+        {
+          "canonical_name": "Tom Ackerley",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Nexbridge Solutions",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Tom Ackerley",
+          "predicate": "works_for",
+          "object": "Nexbridge Solutions"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-006",
+      "category": "business-comms",
+      "text": "Besprechungsprotokoll 28.06. – Teilnehmer: R. Ohlsen, C. Tran, M. Faber. Thema: Rollout-Planung Phase 2. Nächste Schritte bis 15. Juli.",
+      "expected_entities": [
+        {
+          "canonical_name": "R. Ohlsen",
+          "type": "person"
+        },
+        {
+          "canonical_name": "C. Tran",
+          "type": "person"
+        },
+        {
+          "canonical_name": "M. Faber",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-007",
+      "category": "business-comms",
+      "text": "Hi Luisa, just circling back on the Valderra contract — legal still reviewing clause 8.3, expect sign-off by Friday.",
+      "expected_entities": [
+        {
+          "canonical_name": "Luisa",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Valderra",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Luisa",
+          "predicate": "related_to",
+          "object": "Valderra"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-008",
+      "category": "business-comms",
+      "text": "Kai Bremer (Ostfeld AG) – Interesse an Enterprise-Lizenz bekundet. Demo-Termin für KW 28 anfragen.",
+      "expected_entities": [
+        {
+          "canonical_name": "Kai Bremer",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Ostfeld AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Kai Bremer",
+          "predicate": "works_for",
+          "object": "Ostfeld AG"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-009",
+      "category": "business-comms",
+      "text": "From: d.shaw@pellinorgroup.com — David confirmed budget approved, waiting on final sign-off from CFO Sarah Munk.",
+      "expected_entities": [
+        {
+          "canonical_name": "pellinorgroup.com",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "David Shaw",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Sarah Munk",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "David Shaw",
+          "predicate": "works_for",
+          "object": "pellinorgroup.com"
+        },
+        {
+          "subject": "Sarah Munk",
+          "predicate": "works_for",
+          "object": "pellinorgroup.com"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-010",
+      "category": "business-comms",
+      "text": "Projekt Falcon: Kickoff mit Client-Team (Renata Cruz, Ben Vogler) erfolgreich. Go-live weiterhin für 1. September geplant.",
+      "expected_entities": [
+        {
+          "canonical_name": "Falcon",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Renata Cruz",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Ben Vogler",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Renata Cruz",
+          "predicate": "part_of",
+          "object": "Falcon"
+        },
+        {
+          "subject": "Ben Vogler",
+          "predicate": "part_of",
+          "object": "Falcon"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-011",
+      "category": "business-comms",
+      "text": "Follow-up call with Marcus Dreher (Voltana AG) scheduled for Thu 14:00 — re: Q3 pricing renewal.",
+      "expected_entities": [
+        {
+          "canonical_name": "Marcus Dreher",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Voltana AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Marcus Dreher",
+          "predicate": "works_for",
+          "object": "Voltana AG"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-012",
+      "category": "business-comms",
+      "text": "Termin mit Frau Schreiber von Lindqvist Solutions bestätigt: 09.07., 10:30 Uhr, Büro München.",
+      "expected_entities": [
+        {
+          "canonical_name": "Schreiber",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Lindqvist Solutions",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "München",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Schreiber",
+          "predicate": "works_for",
+          "object": "Lindqvist Solutions"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-013",
+      "category": "business-comms",
+      "text": "CRM update: Elliot Marsh moved to stage 4 – Proposal Sent. Deal value $84,000. Close date TBD.",
+      "expected_entities": [
+        {
+          "canonical_name": "Elliot Marsh",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-014",
+      "category": "business-comms",
+      "text": "Angebot wurde an Thomas Winkler (CFO, Bremer & Haas GmbH) am 3. Juli verschickt. Antwort ausstehend.",
+      "expected_entities": [
+        {
+          "canonical_name": "Thomas Winkler",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Bremer & Haas GmbH",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Thomas Winkler",
+          "predicate": "works_for",
+          "object": "Bremer & Haas GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-015",
+      "category": "business-comms",
+      "text": "Action item from sync: Sarah Novik to send revised SLA draft to Optivex by EOD Friday.",
+      "expected_entities": [
+        {
+          "canonical_name": "Sarah Novik",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Optivex",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Sarah Novik",
+          "predicate": "related_to",
+          "object": "Optivex"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-016",
+      "category": "business-comms",
+      "text": "Rückruf von Herrn Castillo, Vertrieb bei Nortek Industrial – interessiert an 12-Monats-Vertrag, Volumen ca. 200 Einheiten.",
+      "expected_entities": [
+        {
+          "canonical_name": "Castillo",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Nortek Industrial",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Castillo",
+          "predicate": "works_for",
+          "object": "Nortek Industrial"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-017",
+      "category": "business-comms",
+      "text": "Deal flagged at risk — no response from Brightfield Corp contact J. Paulsen in 18 days. Ping scheduled.",
+      "expected_entities": [
+        {
+          "canonical_name": "Brightfield Corp",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "J. Paulsen",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "J. Paulsen",
+          "predicate": "works_for",
+          "object": "Brightfield Corp"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-018",
+      "category": "business-comms",
+      "text": "Meeting notes 11.07.: Discussed onboarding timeline with Lena Fuchs, IT lead at Solvera GmbH. Go-live pushed to Aug.",
+      "expected_entities": [
+        {
+          "canonical_name": "Lena Fuchs",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Solvera GmbH",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Lena Fuchs",
+          "predicate": "works_for",
+          "object": "Solvera GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-019",
+      "category": "business-comms",
+      "text": "CRM-Notiz: Petra Holmgren hat Demo positiv bewertet. Nächster Schritt: Angebot bis 15.07. einreichen.",
+      "expected_entities": [
+        {
+          "canonical_name": "Petra Holmgren",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-020",
+      "category": "business-comms",
+      "text": "Intro call done — Ryan Okafor, procurement lead at Tessalink Ltd. Budget confirmed ~£60k. Warm handoff to AE.",
+      "expected_entities": [
+        {
+          "canonical_name": "Ryan Okafor",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Tessalink Ltd",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Ryan Okafor",
+          "predicate": "works_for",
+          "object": "Tessalink Ltd"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-021",
+      "category": "business-comms",
+      "text": "Follow-up call with Marieke Huisman (Deltatec) scheduled for Thursday 14:00 — confirm Q3 pricing before EOD.",
+      "expected_entities": [
+        {
+          "canonical_name": "Marieke Huisman",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Deltatec",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Marieke Huisman",
+          "predicate": "works_for",
+          "object": "Deltatec"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-022",
+      "category": "business-comms",
+      "text": "Angebot von Solvera GmbH liegt vor. Tobias Renner wartet auf Freigabe durch Legal, ETA diese Woche.",
+      "expected_entities": [
+        {
+          "canonical_name": "Solvera GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Tobias Renner",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Tobias Renner",
+          "predicate": "works_for",
+          "object": "Solvera GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-023",
+      "category": "business-comms",
+      "text": "Deal stage updated: Northbridge Solutions → Proposal Sent. Contact: J. Calloway, procurement lead.",
+      "expected_entities": [
+        {
+          "canonical_name": "Northbridge Solutions",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "J. Calloway",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "J. Calloway",
+          "predicate": "works_for",
+          "object": "Northbridge Solutions"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-024",
+      "category": "business-comms",
+      "text": "Besprechung 12.09. — Teilnehmer: K. Hartmann, P. Voß, extern: Frau Osei (Cinova AG). Thema: Rollout Q4.",
+      "expected_entities": [
+        {
+          "canonical_name": "K. Hartmann",
+          "type": "person"
+        },
+        {
+          "canonical_name": "P. Voß",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Osei",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Cinova AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Osei",
+          "predicate": "works_for",
+          "object": "Cinova AG"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-025",
+      "category": "business-comms",
+      "text": "Hi Stefan, just circling back on the Fenmore contract — any update from your side on the revised SLA terms?",
+      "expected_entities": [
+        {
+          "canonical_name": "Stefan",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Fenmore",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Stefan",
+          "predicate": "works_for",
+          "object": "Fenmore"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-026",
+      "category": "business-comms",
+      "text": "CRM Note – Lukas Baier / Arcteon GmbH: Interesse an Enterprise-Paket bestätigt, Budget ~80k, Entscheidung Q1.",
+      "expected_entities": [
+        {
+          "canonical_name": "Lukas Baier",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Arcteon GmbH",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Lukas Baier",
+          "predicate": "works_for",
+          "object": "Arcteon GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-027",
+      "category": "business-comms",
+      "text": "Meeting summary: Agreed to extend pilot with Vantrel Corp by 6 weeks. Sarah Okonkwo to send amended SOW.",
+      "expected_entities": [
+        {
+          "canonical_name": "Vantrel Corp",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Sarah Okonkwo",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Sarah Okonkwo",
+          "predicate": "works_for",
+          "object": "Vantrel Corp"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-028",
+      "category": "business-comms",
+      "text": "Nächster Schritt: Demo-Termin mit Patrick Seidel (Lumex Technologies) vereinbaren, bevorzugt KW 42.",
+      "expected_entities": [
+        {
+          "canonical_name": "Patrick Seidel",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Lumex Technologies",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Patrick Seidel",
+          "predicate": "works_for",
+          "object": "Lumex Technologies"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-029",
+      "category": "business-comms",
+      "text": "Fwd: Re: Partnership proposal — Ben, I've looped in our legal team. Expect comments by Friday COB.",
+      "expected_entities": [
+        {
+          "canonical_name": "Ben",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-030",
+      "category": "business-comms",
+      "text": "Kundengespräch 04.10. — Miriam Czajka unzufrieden mit Support-Reaktionszeiten. Ticket #4821 eskaliert.",
+      "expected_entities": [
+        {
+          "canonical_name": "Miriam Czajka",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-031",
+      "category": "business-comms",
+      "text": "Follow-up call with Marcus Hendriks @ Voltera GmbH — confirmed Q3 budget approved, moving to contract stage.",
+      "expected_entities": [
+        {
+          "canonical_name": "Marcus Hendriks",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Voltera GmbH",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Marcus Hendriks",
+          "predicate": "works_for",
+          "object": "Voltera GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-032",
+      "category": "business-comms",
+      "text": "Betreff: Angebot #2291 — Sandra, kannst du das überarbeitete PDF bis Donnerstag an Kellner & Brandt schicken?",
+      "expected_entities": [
+        {
+          "canonical_name": "Sandra",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Kellner & Brandt",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Sandra",
+          "predicate": "related_to",
+          "object": "Kellner & Brandt"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-033",
+      "category": "business-comms",
+      "text": "CRM update: Priya Nair (Softbridge Inc.) — demo completed 14.06, requested security whitepaper, next step: procurement intro.",
+      "expected_entities": [
+        {
+          "canonical_name": "Priya Nair",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Softbridge Inc.",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Priya Nair",
+          "predicate": "works_for",
+          "object": "Softbridge Inc."
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-034",
+      "category": "business-comms",
+      "text": "Besprechungsnotiz 11.07 — Teilnehmer: T. Wollmann, R. Osei, K. Pfister. Thema: Rollout Phase 2, Zieldatum 1. September.",
+      "expected_entities": [
+        {
+          "canonical_name": "T. Wollmann",
+          "type": "person"
+        },
+        {
+          "canonical_name": "R. Osei",
+          "type": "person"
+        },
+        {
+          "canonical_name": "K. Pfister",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-035",
+      "category": "business-comms",
+      "text": "Hi Jonas, just a heads-up — Lena from Arctus Solutions said they're pushing the signing to late August due to internal restructuring.",
+      "expected_entities": [
+        {
+          "canonical_name": "Jonas",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Lena",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Arctus Solutions",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Lena",
+          "predicate": "works_for",
+          "object": "Arctus Solutions"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-036",
+      "category": "business-comms",
+      "text": "Neuer Lead: Firma Dragomir Logistik, Kontakt: Biljana Vuković, Tel. +49 711 4920-88, Interesse an Fleet-Modul.",
+      "expected_entities": [
+        {
+          "canonical_name": "Dragomir Logistik",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Biljana Vuković",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Biljana Vuković",
+          "predicate": "works_for",
+          "object": "Dragomir Logistik"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-037",
+      "category": "business-comms",
+      "text": "Meeting w/ David Albrecht (CFO, Meridian Partners) — discussed volume discount, he wants revised pricing by EOD Friday.",
+      "expected_entities": [
+        {
+          "canonical_name": "David Albrecht",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Meridian Partners",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "David Albrecht",
+          "predicate": "works_for",
+          "object": "Meridian Partners"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-038",
+      "category": "business-comms",
+      "text": "CRM-Notiz: Opportunity »Wartungsvertrag Erweiterung« — Wahrscheinlichkeit 70 %, Abschluss erwartet Q4, Ansprechpartner: G. Tamboli.",
+      "expected_entities": [
+        {
+          "canonical_name": "G. Tamboli",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-039",
+      "category": "business-comms",
+      "text": "Fwd: RE: Teststellung — Das Team von Havelock & Sörensen hat die Testphase verlängert, neues Enddatum ist der 30. Juli.",
+      "expected_entities": [
+        {
+          "canonical_name": "Havelock & Sörensen",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-040",
+      "category": "business-comms",
+      "text": "Called Fatima Okonkwo re: renewal — she confirmed 2-year extension, legal is reviewing redlines, expects sign-off next week.",
+      "expected_entities": [
+        {
+          "canonical_name": "Fatima Okonkwo",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-041",
+      "category": "business-comms",
+      "text": "Follow-up call with Marcus Deininger (Volante GmbH) scheduled for Thu 14:00 — still waiting on procurement sign-off.",
+      "expected_entities": [
+        {
+          "canonical_name": "Marcus Deininger",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Volante GmbH",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Marcus Deininger",
+          "predicate": "works_for",
+          "object": "Volante GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-042",
+      "category": "business-comms",
+      "text": "Kunde Hartmann AG hat Angebot 2024-087 abgelehnt. Grund: Budget gefroren bis Q1. Wiedervorlage Januar.",
+      "expected_entities": [
+        {
+          "canonical_name": "Hartmann AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-043",
+      "category": "business-comms",
+      "text": "Deal stage moved to Proposal Sent. Contact: Sara Okonkwo, VP Ops at Meridian Freight. Last touch: 3 days ago.",
+      "expected_entities": [
+        {
+          "canonical_name": "Sara Okonkwo",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Meridian Freight",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Sara Okonkwo",
+          "predicate": "works_for",
+          "object": "Meridian Freight"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-044",
+      "category": "business-comms",
+      "text": "Nächste Schritte laut Meeting vom 09.07: Technikteam einbeziehen, Demo-Termin mit Frau Völker abstimmen.",
+      "expected_entities": [
+        {
+          "canonical_name": "Völker",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-045",
+      "category": "business-comms",
+      "text": "RE: Contract renewal — Lena, please confirm whether Albrecht & Söhne wants the 24- or 36-month term before EOD Friday.",
+      "expected_entities": [
+        {
+          "canonical_name": "Lena",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Albrecht & Söhne",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Lena",
+          "predicate": "works_for",
+          "object": "Albrecht & Söhne"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-046",
+      "category": "business-comms",
+      "text": "CRM Note — Tobias Renner (Castellan Partners): expressed interest in enterprise tier, needs CFO approval. Follow up w/ deck.",
+      "expected_entities": [
+        {
+          "canonical_name": "Tobias Renner",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Castellan Partners",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Tobias Renner",
+          "predicate": "works_for",
+          "object": "Castellan Partners"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-047",
+      "category": "business-comms",
+      "text": "Betreff: Projektstatus Retarus-Integration — stehen noch aus: API-Doku und Abnahmeprotokoll. Deadline: 22.07.",
+      "expected_entities": [
+        {
+          "canonical_name": "Retarus",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-048",
+      "category": "business-comms",
+      "text": "Quick sync with Jamie Forsythe confirmed budget approved. Pushing Northwick deal to Closed Won. Value: €84,500.",
+      "expected_entities": [
+        {
+          "canonical_name": "Jamie Forsythe",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Northwick",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Jamie Forsythe",
+          "predicate": "related_to",
+          "object": "Northwick"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-049",
+      "category": "business-comms",
+      "text": "Gesprächsnotiz 11.07 — Frau Stein von BayernLogistik möchte Pilotphase auf 60 Tage verlängern. Konditionen prüfen.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stein",
+          "type": "person"
+        },
+        {
+          "canonical_name": "BayernLogistik",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Stein",
+          "predicate": "works_for",
+          "object": "BayernLogistik"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-050",
+      "category": "business-comms",
+      "text": "Reminder: NDA not yet countersigned by Dumont & Vreeland. Escalate to legal if no response by Wednesday noon.",
+      "expected_entities": [
+        {
+          "canonical_name": "Dumont & Vreeland",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-051",
+      "category": "business-comms",
+      "text": "Follow-up call with Markus Breitner (Voltena GmbH) scheduled for Thu 14:00 — he needs revised pricing before board sign-off.",
+      "expected_entities": [
+        {
+          "canonical_name": "Markus Breitner",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Voltena GmbH",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Markus Breitner",
+          "predicate": "works_for",
+          "object": "Voltena GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-052",
+      "category": "business-comms",
+      "text": "Petra Volkmann hat Angebot abgelehnt. Grund: internes Budget eingefroren bis Q3. Wiedervorlage Juli.",
+      "expected_entities": [
+        {
+          "canonical_name": "Petra Volkmann",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-053",
+      "category": "business-comms",
+      "text": "CRM update: Okonkwo, Daniel @ Halford Logistics — deal moved to stage 4 (contract review). Est. close 30 Jun.",
+      "expected_entities": [
+        {
+          "canonical_name": "Daniel Okonkwo",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Halford Logistics",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Daniel Okonkwo",
+          "predicate": "works_for",
+          "object": "Halford Logistics"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-054",
+      "category": "business-comms",
+      "text": "Meeting recap 09.05 — Anwesende: S. Langer, R. Hoffmann, T. Cruz. Nächste Schritte: Demo-Termin KW22 bestätigen.",
+      "expected_entities": [
+        {
+          "canonical_name": "S. Langer",
+          "type": "person"
+        },
+        {
+          "canonical_name": "R. Hoffmann",
+          "type": "person"
+        },
+        {
+          "canonical_name": "T. Cruz",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-055",
+      "category": "business-comms",
+      "text": "Sarah Müller confirmed PO for 3-year SaaS license. Total value €148k. Procurement contact: j.baier@novatex.de",
+      "expected_entities": [
+        {
+          "canonical_name": "Sarah Müller",
+          "type": "person"
+        },
+        {
+          "canonical_name": "novatex.de",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Sarah Müller",
+          "predicate": "works_for",
+          "object": "novatex.de"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-056",
+      "category": "business-comms",
+      "text": "Internes Update: Kein Feedback von Rheinhold & Partner seit 3 Wochen. Eskalation an Key Account Manager.",
+      "expected_entities": [
+        {
+          "canonical_name": "Rheinhold & Partner",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-business-comms-057",
+      "category": "business-comms",
+      "text": "Left voicemail for James Whitfield at Crestline Partners — following up on Q2 proposal sent 28 Apr. Awaiting callback.",
+      "expected_entities": [
+        {
+          "canonical_name": "James Whitfield",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Crestline Partners",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "James Whitfield",
+          "predicate": "works_for",
+          "object": "Crestline Partners"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-058",
+      "category": "business-comms",
+      "text": "CRM-Notiz: Claudia Ferreira (Brückner AG) bevorzugt Kommunikation per E-Mail. Kein Interesse an Telefon-Demos.",
+      "expected_entities": [
+        {
+          "canonical_name": "Claudia Ferreira",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Brückner AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Claudia Ferreira",
+          "predicate": "works_for",
+          "object": "Brückner AG"
+        },
+        {
+          "subject": "Claudia Ferreira",
+          "predicate": "prefers",
+          "object": "E-Mail"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-059",
+      "category": "business-comms",
+      "text": "Intro call done. Ben Hartley, VP Ops @ Stratum Medical — strong interest in supply chain module, no budget confirmed yet.",
+      "expected_entities": [
+        {
+          "canonical_name": "Ben Hartley",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Stratum Medical",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Ben Hartley",
+          "predicate": "works_for",
+          "object": "Stratum Medical"
+        }
+      ]
+    },
+    {
+      "id": "gen-business-comms-060",
+      "category": "business-comms",
+      "text": "Angebot v2 an info@gessler-gruppe.de verschickt. Änderungen: Zahlungsziel 60 Tage, Rabatt 8% auf Jahrespaket.",
+      "expected_entities": [
+        {
+          "canonical_name": "gessler-gruppe.de",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-001",
+      "category": "product-tech",
+      "text": "Das Projekt Silverline läuft seit Q3 auf Hetzner Cloud und skaliert bisher problemlos.",
+      "expected_entities": [
+        {
+          "canonical_name": "Silverline",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Hetzner Cloud",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Silverline",
+          "predicate": "uses",
+          "object": "Hetzner Cloud"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-002",
+      "category": "product-tech",
+      "text": "We're migrating the checkout flow to SvelteKit — Stripe integration is already done.",
+      "expected_entities": [
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "SvelteKit",
+          "predicate": "related_to",
+          "object": "Stripe"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-003",
+      "category": "product-tech",
+      "text": "Postgres 16 wurde auf allen Staging-Instanzen erfolgreich eingespielt.",
+      "expected_entities": [
+        {
+          "canonical_name": "Postgres 16",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-004",
+      "category": "product-tech",
+      "text": "The Docker images for Project Orion need to be rebuilt before the Friday release window.",
+      "expected_entities": [
+        {
+          "canonical_name": "Docker",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Project Orion",
+          "type": "project"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Project Orion",
+          "predicate": "uses",
+          "object": "Docker"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-005",
+      "category": "product-tech",
+      "text": "Cloudflare Pages deployment für das neue Kundenportal ist heute Nacht geplant.",
+      "expected_entities": [
+        {
+          "canonical_name": "Cloudflare Pages",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-006",
+      "category": "product-tech",
+      "text": "Astro hat sich für den neuen Marketing-Hub als deutlich performanter erwiesen als der alte Next.js-Stack.",
+      "expected_entities": [
+        {
+          "canonical_name": "Astro",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Next.js",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-007",
+      "category": "product-tech",
+      "text": "Please confirm whether the Stripe webhook signing secret has been rotated in the prod environment.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-008",
+      "category": "product-tech",
+      "text": "Projekt Hafenkante: Backend läuft auf Docker Compose, Datenbank ist Postgres mit Read-Replica auf Hetzner.",
+      "expected_entities": [
+        {
+          "canonical_name": "Hafenkante",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Docker Compose",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Postgres",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Hetzner",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Hafenkante",
+          "predicate": "uses",
+          "object": "Docker Compose"
+        },
+        {
+          "subject": "Hafenkante",
+          "predicate": "uses",
+          "object": "Postgres"
+        },
+        {
+          "subject": "Hafenkante",
+          "predicate": "uses",
+          "object": "Hetzner"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-009",
+      "category": "product-tech",
+      "text": "The Astro-based docs site is live on Cloudflare Pages — build times dropped from 4 min to 38 sec.",
+      "expected_entities": [
+        {
+          "canonical_name": "Astro",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Cloudflare Pages",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Cloudflare Pages",
+          "predicate": "related_to",
+          "object": "Astro"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-010",
+      "category": "product-tech",
+      "text": "SvelteKit-Frontend und FastAPI-Backend werden im Rahmen von Projekt Nordlicht bis Ende des Monats zusammengeführt.",
+      "expected_entities": [
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "FastAPI",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Projekt Nordlicht",
+          "type": "project"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Projekt Nordlicht",
+          "predicate": "uses",
+          "object": "SvelteKit"
+        },
+        {
+          "subject": "Projekt Nordlicht",
+          "predicate": "uses",
+          "object": "FastAPI"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-011",
+      "category": "product-tech",
+      "text": "Das Projekt Helios läuft seit Q3 auf Hetzner Cloud und hat bisher keine Ausfälle gehabt.",
+      "expected_entities": [
+        {
+          "canonical_name": "Helios",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Hetzner Cloud",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Helios",
+          "predicate": "uses",
+          "object": "Hetzner Cloud"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-012",
+      "category": "product-tech",
+      "text": "We're migrating the checkout flow to Stripe before the Black Friday release.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Black Friday",
+          "type": "concept"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "checkout flow",
+          "predicate": "uses",
+          "object": "Stripe"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-013",
+      "category": "product-tech",
+      "text": "SvelteKit frontend is deployed via Cloudflare Pages — build times are under 30s.",
+      "expected_entities": [
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Cloudflare Pages",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "SvelteKit",
+          "predicate": "uses",
+          "object": "Cloudflare Pages"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-014",
+      "category": "product-tech",
+      "text": "Die Datenbank wurde von MySQL auf Postgres migriert, Rollback-Skripte liegen bereit.",
+      "expected_entities": [
+        {
+          "canonical_name": "MySQL",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Postgres",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-015",
+      "category": "product-tech",
+      "text": "Project Fenix braucht noch einen finalen Review bevor wir den Docker-Container in Prod schieben.",
+      "expected_entities": [
+        {
+          "canonical_name": "Fenix",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Docker",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Fenix",
+          "predicate": "uses",
+          "object": "Docker"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-016",
+      "category": "product-tech",
+      "text": "Astro wird für die neue Marketingseite eingesetzt, SSR ist dabei nicht notwendig.",
+      "expected_entities": [
+        {
+          "canonical_name": "Astro",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Astro",
+          "predicate": "related_to",
+          "object": "Marketingseite"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-017",
+      "category": "product-tech",
+      "text": "The internal tool Vault-Bridge handles all credential rotation across our Docker Swarm nodes.",
+      "expected_entities": [
+        {
+          "canonical_name": "Vault-Bridge",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Docker Swarm",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Vault-Bridge",
+          "predicate": "uses",
+          "object": "Docker Swarm"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-018",
+      "category": "product-tech",
+      "text": "Stripe Webhooks müssen noch in die Staging-Umgebung eingespielt und getestet werden.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Stripe Webhooks",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Stripe Webhooks",
+          "predicate": "created_by",
+          "object": "Stripe"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-019",
+      "category": "product-tech",
+      "text": "We containerized the legacy reporting service last sprint — it's now running cleanly in Docker.",
+      "expected_entities": [
+        {
+          "canonical_name": "Docker",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-020",
+      "category": "product-tech",
+      "text": "Projekt Auriga nutzt SvelteKit mit einem Postgres-Backend, Hosting läuft über Hetzner Cloud.",
+      "expected_entities": [
+        {
+          "canonical_name": "Auriga",
+          "type": "project"
+        },
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Postgres",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Hetzner Cloud",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Auriga",
+          "predicate": "uses",
+          "object": "SvelteKit"
+        },
+        {
+          "subject": "Auriga",
+          "predicate": "uses",
+          "object": "Postgres"
+        },
+        {
+          "subject": "Auriga",
+          "predicate": "uses",
+          "object": "Hetzner Cloud"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-021",
+      "category": "product-tech",
+      "text": "Das Projekt Lighthouse läuft seit Q3 auf Hetzner Cloud und wir sind sehr zufrieden mit der Stabilität.",
+      "expected_entities": [
+        {
+          "canonical_name": "Lighthouse",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Hetzner Cloud",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Lighthouse",
+          "predicate": "uses",
+          "object": "Hetzner Cloud"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-022",
+      "category": "product-tech",
+      "text": "Bitte stell sicher, dass der Stripe-Webhook vor dem nächsten Release getestet wird.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-023",
+      "category": "product-tech",
+      "text": "We're migrating the customer portal from Next.js to SvelteKit — target date is end of March.",
+      "expected_entities": [
+        {
+          "canonical_name": "Next.js",
+          "type": "product"
+        },
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Next.js",
+          "predicate": "related_to",
+          "object": "SvelteKit"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-024",
+      "category": "product-tech",
+      "text": "Die Postgres-Datenbank auf dem Produktionsserver braucht dringend ein Index-Review.",
+      "expected_entities": [
+        {
+          "canonical_name": "Postgres",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-025",
+      "category": "product-tech",
+      "text": "Cloudflare Pages deployment for Project Atlas went live without issues this morning.",
+      "expected_entities": [
+        {
+          "canonical_name": "Cloudflare Pages",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Project Atlas",
+          "type": "project"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Project Atlas",
+          "predicate": "uses",
+          "object": "Cloudflare Pages"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-026",
+      "category": "product-tech",
+      "text": "Unser Docker-Setup für die Staging-Umgebung wurde gestern von Leon refactored.",
+      "expected_entities": [
+        {
+          "canonical_name": "Docker",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Leon",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Leon",
+          "predicate": "uses",
+          "object": "Docker"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-027",
+      "category": "product-tech",
+      "text": "The Astro-based marketing site is now fully integrated with our CMS and ready for review.",
+      "expected_entities": [
+        {
+          "canonical_name": "Astro",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-028",
+      "category": "product-tech",
+      "text": "Projekt Meridian: Backend läuft stabil, aber die Anbindung an Stripe muss noch finalisiert werden.",
+      "expected_entities": [
+        {
+          "canonical_name": "Meridian",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Meridian",
+          "predicate": "depends_on",
+          "object": "Stripe"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-029",
+      "category": "product-tech",
+      "text": "We need to pin the Node version in the Dockerfile before the Hetzner Cloud instance is reprovisioned.",
+      "expected_entities": [
+        {
+          "canonical_name": "Node",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Dockerfile",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Hetzner Cloud",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Dockerfile",
+          "predicate": "uses",
+          "object": "Node"
+        },
+        {
+          "subject": "Dockerfile",
+          "predicate": "related_to",
+          "object": "Hetzner Cloud"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-030",
+      "category": "product-tech",
+      "text": "SvelteKit und Cloudflare Pages harmonieren gut — das Deployment dauert unter 90 Sekunden.",
+      "expected_entities": [
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Cloudflare Pages",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "SvelteKit",
+          "predicate": "related_to",
+          "object": "Cloudflare Pages"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-031",
+      "category": "product-tech",
+      "text": "Das Projekt Falcon läuft seit Q3 auf Hetzner Cloud und ist stabil.",
+      "expected_entities": [
+        {
+          "canonical_name": "Falcon",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Hetzner Cloud",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Falcon",
+          "predicate": "uses",
+          "object": "Hetzner Cloud"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-032",
+      "category": "product-tech",
+      "text": "We're migrating the auth service to SvelteKit — Postgres stays as the primary DB.",
+      "expected_entities": [
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Postgres",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "auth service",
+          "predicate": "uses",
+          "object": "SvelteKit"
+        },
+        {
+          "subject": "auth service",
+          "predicate": "uses",
+          "object": "Postgres"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-033",
+      "category": "product-tech",
+      "text": "Stripe-Integration für Project Nighthawk ist abgeschlossen, Staging läuft durch.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Project Nighthawk",
+          "type": "project"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Project Nighthawk",
+          "predicate": "uses",
+          "object": "Stripe"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-034",
+      "category": "product-tech",
+      "text": "Docker Compose setup for the data pipeline is checked in under /infra.",
+      "expected_entities": [
+        {
+          "canonical_name": "Docker Compose",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-035",
+      "category": "product-tech",
+      "text": "Die neue Landingpage wird über Cloudflare Pages deployt, kein eigener Server nötig.",
+      "expected_entities": [
+        {
+          "canonical_name": "Cloudflare Pages",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-036",
+      "category": "product-tech",
+      "text": "Astro replaced our old CMS frontend — build times dropped from 4 min to 38 sec.",
+      "expected_entities": [
+        {
+          "canonical_name": "Astro",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-037",
+      "category": "product-tech",
+      "text": "Für Project Atlas nutzen wir weiterhin Hetzner Cloud VPS mit Ubuntu 22.04.",
+      "expected_entities": [
+        {
+          "canonical_name": "Project Atlas",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Hetzner Cloud",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Ubuntu 22.04",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Project Atlas",
+          "predicate": "uses",
+          "object": "Hetzner Cloud"
+        },
+        {
+          "subject": "Project Atlas",
+          "predicate": "uses",
+          "object": "Ubuntu 22.04"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-038",
+      "category": "product-tech",
+      "text": "The Stripe webhook handler needs a retry queue — currently dropping ~2% of events.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-039",
+      "category": "product-tech",
+      "text": "SvelteKit und Postgres laufen lokal über Docker, CI deployt direkt auf Cloudflare Pages.",
+      "expected_entities": [
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Postgres",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Docker",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Cloudflare Pages",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "SvelteKit",
+          "predicate": "uses",
+          "object": "Docker"
+        },
+        {
+          "subject": "Postgres",
+          "predicate": "uses",
+          "object": "Docker"
+        },
+        {
+          "subject": "Cloudflare Pages",
+          "predicate": "related_to",
+          "object": "SvelteKit"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-040",
+      "category": "product-tech",
+      "text": "Project Ember braucht noch ein Sign-off vom Security-Team bevor wir auf Prod gehen.",
+      "expected_entities": [
+        {
+          "canonical_name": "Ember",
+          "type": "project"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-041",
+      "category": "product-tech",
+      "text": "Das Projekt Meridian läuft seit Q3 auf Hetzner Cloud und wir hatten bislang null Ausfälle.",
+      "expected_entities": [
+        {
+          "canonical_name": "Meridian",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Hetzner Cloud",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Meridian",
+          "predicate": "uses",
+          "object": "Hetzner Cloud"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-042",
+      "category": "product-tech",
+      "text": "SvelteKit hat sich für Project Lighthouse als deutlich performanter erwiesen als unser alter Next.js-Stack.",
+      "expected_entities": [
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Project Lighthouse",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Next.js",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Project Lighthouse",
+          "predicate": "uses",
+          "object": "SvelteKit"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-043",
+      "category": "product-tech",
+      "text": "Stripe-Integration für das Checkout-Modul ist fertig, PR liegt zur Review bereit.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-044",
+      "category": "product-tech",
+      "text": "Wir deployen alle neuen Services über Docker Compose, das vereinfacht das Onboarding erheblich.",
+      "expected_entities": [
+        {
+          "canonical_name": "Docker Compose",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-045",
+      "category": "product-tech",
+      "text": "Cloudflare Pages übernimmt jetzt das Hosting für die Marketingseite – Build-Zeiten unter 30 Sekunden.",
+      "expected_entities": [
+        {
+          "canonical_name": "Cloudflare Pages",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-046",
+      "category": "product-tech",
+      "text": "Die Astro-Migration von Projekt Falkenberg ist für Sprint 14 eingeplant, Kapazitäten sind reserviert.",
+      "expected_entities": [
+        {
+          "canonical_name": "Astro",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Falkenberg",
+          "type": "project"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Falkenberg",
+          "predicate": "uses",
+          "object": "Astro"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-047",
+      "category": "product-tech",
+      "text": "Postgres 16 läuft seit dem Upgrade stabil, Connection Pooling via PgBouncer hat die Last deutlich reduziert.",
+      "expected_entities": [
+        {
+          "canonical_name": "Postgres 16",
+          "type": "product"
+        },
+        {
+          "canonical_name": "PgBouncer",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Postgres 16",
+          "predicate": "related_to",
+          "object": "PgBouncer"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-048",
+      "category": "product-tech",
+      "text": "Für das interne Tool Argus setzen wir auf SvelteKit + Postgres, Deployment läuft über unsere Hetzner-Instanz.",
+      "expected_entities": [
+        {
+          "canonical_name": "Argus",
+          "type": "project"
+        },
+        {
+          "canonical_name": "SvelteKit",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Postgres",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Hetzner",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Argus",
+          "predicate": "uses",
+          "object": "SvelteKit"
+        },
+        {
+          "subject": "Argus",
+          "predicate": "uses",
+          "object": "Postgres"
+        },
+        {
+          "subject": "Argus",
+          "predicate": "uses",
+          "object": "Hetzner"
+        }
+      ]
+    },
+    {
+      "id": "gen-product-tech-049",
+      "category": "product-tech",
+      "text": "Das Docker-Image für den Reporting-Service ist jetzt unter 180 MB – bitte beim nächsten Release so beibehalten.",
+      "expected_entities": [
+        {
+          "canonical_name": "Docker",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-product-tech-050",
+      "category": "product-tech",
+      "text": "Stripe Webhooks für Project Amber müssen noch in der Staging-Umgebung validiert werden, bevor wir live gehen.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Stripe Webhooks",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Project Amber",
+          "type": "project"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Project Amber",
+          "predicate": "uses",
+          "object": "Stripe Webhooks"
+        }
+      ]
+    },
+    {
+      "id": "gen-price-trap-001",
+      "category": "price-trap",
+      "text": "Unser Pro-Tarif kostet CHF 49 pro Monat und beinhaltet unbegrenzten API-Zugriff.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-002",
+      "category": "price-trap",
+      "text": "Upgrade to the Business plan at $199/yr and unlock priority support.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-003",
+      "category": "price-trap",
+      "text": "Das monatliche Budget für Salesforce wurde auf EUR 1.200 erhöht.",
+      "expected_entities": [
+        {
+          "canonical_name": "Salesforce",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-004",
+      "category": "price-trap",
+      "text": "Current usage puts you in the Growth tier at $0.08 per 1,000 requests.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-005",
+      "category": "price-trap",
+      "text": "Die Lizenzkosten für Adobe Creative Cloud betragen CHF 84.99/Monat pro Nutzer.",
+      "expected_entities": [
+        {
+          "canonical_name": "Adobe Creative Cloud",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Adobe",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Adobe Creative Cloud",
+          "predicate": "created_by",
+          "object": "Adobe"
+        }
+      ]
+    },
+    {
+      "id": "gen-price-trap-006",
+      "category": "price-trap",
+      "text": "Your Stripe invoice for March totals $4,320.00 — payment due in 14 days.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stripe",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-007",
+      "category": "price-trap",
+      "text": "Für das HubSpot-Paket sind im Q3 insgesamt EUR 6.000 eingeplant.",
+      "expected_entities": [
+        {
+          "canonical_name": "HubSpot",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-008",
+      "category": "price-trap",
+      "text": "The Starter plan at $29/mo covers up to 5 seats; additional seats are $8 each.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-009",
+      "category": "price-trap",
+      "text": "Bitte beachten Sie: Die nächste Abbuchung von CHF 299 erfolgt am 1. Juli.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-010",
+      "category": "price-trap",
+      "text": "Annual billing for Notion saves you $60 compared to the monthly rate.",
+      "expected_entities": [
+        {
+          "canonical_name": "Notion",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-011",
+      "category": "price-trap",
+      "text": "Unser Pro-Tarif kostet CHF 49/Monat und beinhaltet unbegrenzte Nutzer.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-012",
+      "category": "price-trap",
+      "text": "Upgrade to the Growth plan at $199/yr and unlock priority support.",
+      "expected_entities": [
+        {
+          "canonical_name": "Growth",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-013",
+      "category": "price-trap",
+      "text": "Das verfügbare Marketingbudget beträgt EUR 1.000 für Q3.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-014",
+      "category": "price-trap",
+      "text": "Your current usage exceeds the Free tier — please upgrade to Standard at $29/mo.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-015",
+      "category": "price-trap",
+      "text": "Die Rechnung über CHF 340.00 wurde am 3. Juni fällig gestellt.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-016",
+      "category": "price-trap",
+      "text": "We're moving all legacy accounts to the new $99/month Business plan in July.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-017",
+      "category": "price-trap",
+      "text": "Bitte beachten Sie: Der Starter-Plan wird ab August auf EUR 19/Monat angehoben.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-018",
+      "category": "price-trap",
+      "text": "Annual billing saves you 20% — that's $479/yr instead of $49/mo.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-019",
+      "category": "price-trap",
+      "text": "Ihr Konto wurde mit CHF 128.50 für den Zeitraum Mai–Juni belastet.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-020",
+      "category": "price-trap",
+      "text": "The Enterprise tier starts at $1,500/month with a minimum 12-month commitment.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-021",
+      "category": "price-trap",
+      "text": "Unser Pro-Tarif kostet CHF 49/mo und beinhaltet unbegrenzten API-Zugriff.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-022",
+      "category": "price-trap",
+      "text": "Upgrade to the Business plan at $199/yr and unlock priority support.",
+      "expected_entities": [
+        {
+          "canonical_name": "Business",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-023",
+      "category": "price-trap",
+      "text": "Das monatliche Budget für Google Ads wurde auf EUR 1.000 festgelegt.",
+      "expected_entities": [
+        {
+          "canonical_name": "Google Ads",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-024",
+      "category": "price-trap",
+      "text": "Current billing amount: $340.00 — due on the 1st of next month.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-025",
+      "category": "price-trap",
+      "text": "Shopify Advanced läuft bei uns auf CHF 299/mo, inklusive aller Transaktionsgebühren.",
+      "expected_entities": [
+        {
+          "canonical_name": "Shopify Advanced",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-026",
+      "category": "price-trap",
+      "text": "Your usage this month has exceeded the Starter tier — moving to Growth at $79/mo.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-027",
+      "category": "price-trap",
+      "text": "Wir haben das Jahresabo von Salesforce auf EUR 12.400 verlängert.",
+      "expected_entities": [
+        {
+          "canonical_name": "Salesforce",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-028",
+      "category": "price-trap",
+      "text": "The Slack Pro subscription renews at $87.50/mo starting next billing cycle.",
+      "expected_entities": [
+        {
+          "canonical_name": "Slack Pro",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-029",
+      "category": "price-trap",
+      "text": "AWS-Kosten für Q3: EUR 4.218,76 — hauptsächlich EC2 und S3-Speicher.",
+      "expected_entities": [
+        {
+          "canonical_name": "AWS",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "EC2",
+          "type": "product"
+        },
+        {
+          "canonical_name": "S3",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "EC2",
+          "predicate": "created_by",
+          "object": "AWS"
+        },
+        {
+          "subject": "S3",
+          "predicate": "created_by",
+          "object": "AWS"
+        }
+      ]
+    },
+    {
+      "id": "gen-price-trap-030",
+      "category": "price-trap",
+      "text": "HubSpot Marketing Hub Professional wird ab Januar auf $800/mo erhöht.",
+      "expected_entities": [
+        {
+          "canonical_name": "HubSpot",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "HubSpot Marketing Hub Professional",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "HubSpot Marketing Hub Professional",
+          "predicate": "created_by",
+          "object": "HubSpot"
+        }
+      ]
+    },
+    {
+      "id": "gen-price-trap-031",
+      "category": "price-trap",
+      "text": "Unser Starter-Plan kostet CHF 49/mo und beinhaltet 10 Benutzer.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-032",
+      "category": "price-trap",
+      "text": "Upgrade to the Pro tier at $199/yr — unlimited projects included.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-033",
+      "category": "price-trap",
+      "text": "Das monatliche Budget für Google Ads wurde auf EUR 1 000 erhöht.",
+      "expected_entities": [
+        {
+          "canonical_name": "Google Ads",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-034",
+      "category": "price-trap",
+      "text": "Your current usage exceeds the free tier; next billing: $84.00.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-price-trap-035",
+      "category": "price-trap",
+      "text": "Bitte buchen Sie das Professional-Paket für CHF 299/Monat bis Freitag.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-001",
+      "category": "generic-noun-trap",
+      "text": "Das Dashboard zeigt den aktuellen Status der Pipeline und alle offenen Deliverables.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-002",
+      "category": "generic-noun-trap",
+      "text": "We need to align the roadmap with the new sprint goals before end of week.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-003",
+      "category": "generic-noun-trap",
+      "text": "Der Workflow wurde angepasst, damit das Reporting-Tool die Funnel-Daten korrekt aggregiert.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-004",
+      "category": "generic-noun-trap",
+      "text": "Please update the timeline in Confluence so the team can track each deliverable.",
+      "expected_entities": [
+        {
+          "canonical_name": "Confluence",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-005",
+      "category": "generic-noun-trap",
+      "text": "Im nächsten Sprint fokussieren wir uns auf die oberen Stufen des Funnels.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-006",
+      "category": "generic-noun-trap",
+      "text": "The report generated from the dashboard flagged three bottlenecks in the workflow.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-007",
+      "category": "generic-noun-trap",
+      "text": "Bitte den Roadmap-Status im Weekly kurz zusammenfassen — Pipeline und offene Sprints inklusive.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-008",
+      "category": "generic-noun-trap",
+      "text": "All deliverables from Q2 must be logged in the pipeline before the stakeholder review.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-009",
+      "category": "generic-noun-trap",
+      "text": "Das Tool liefert automatisch einen Report, sobald ein Workflow-Schritt abgeschlossen ist.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-010",
+      "category": "generic-noun-trap",
+      "text": "We're two sprints behind on the roadmap; let's revisit the timeline in Monday's stand-up.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-011",
+      "category": "generic-noun-trap",
+      "text": "Das Dashboard zeigt den aktuellen Status aller laufenden Pipelines im Überblick.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-012",
+      "category": "generic-noun-trap",
+      "text": "We need to align the roadmap with the new sprint goals before end of quarter.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-013",
+      "category": "generic-noun-trap",
+      "text": "Der Funnel hat letzte Woche deutlich an Conversion verloren — bitte Report erstellen.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-014",
+      "category": "generic-noun-trap",
+      "text": "Deliverables for the next milestone must be logged in the workflow by Friday.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-015",
+      "category": "generic-noun-trap",
+      "text": "Bitte das Timeline-Update im nächsten Standup mit dem gesamten Team besprechen.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-016",
+      "category": "generic-noun-trap",
+      "text": "The tools currently integrated into our pipeline don't support the new reporting format.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-017",
+      "category": "generic-noun-trap",
+      "text": "Wir müssen den Sprint neu priorisieren, damit die Deliverables rechtzeitig fertig sind.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-018",
+      "category": "generic-noun-trap",
+      "text": "Please update the funnel metrics in the dashboard before the Salesforce sync runs.",
+      "expected_entities": [
+        {
+          "canonical_name": "Salesforce",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-019",
+      "category": "generic-noun-trap",
+      "text": "Das Roadmap-Review ergab drei offene Deliverables, die noch keinem Owner zugewiesen sind.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-020",
+      "category": "generic-noun-trap",
+      "text": "Every workflow change needs to be reflected in the report sent to stakeholders on Monday.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-021",
+      "category": "generic-noun-trap",
+      "text": "Bitte das Dashboard bis Ende des Sprints aktualisieren.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-022",
+      "category": "generic-noun-trap",
+      "text": "The deliverable is blocked — we need to revisit the pipeline before Thursday.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-023",
+      "category": "generic-noun-trap",
+      "text": "Roadmap review verschiebt sich auf nächste Woche, Timeline bleibt aber stabil.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-024",
+      "category": "generic-noun-trap",
+      "text": "Can you pull the report from the funnel and add it to the shared workflow?",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-025",
+      "category": "generic-noun-trap",
+      "text": "Das Tool greift auf den bestehenden Workflow zu und generiert automatisch einen Report.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-026",
+      "category": "generic-noun-trap",
+      "text": "All sprint deliverables must be logged in Jira before the standup.",
+      "expected_entities": [
+        {
+          "canonical_name": "Jira",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-027",
+      "category": "generic-noun-trap",
+      "text": "Wir brauchen eine klare Roadmap, bevor wir den nächsten Funnel aufsetzen können.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-028",
+      "category": "generic-noun-trap",
+      "text": "The dashboard shows a gap in the pipeline — escalate to the team lead immediately.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-029",
+      "category": "generic-noun-trap",
+      "text": "Bitte alle offenen Deliverables in das Roadmap-Dokument übertragen und Timeline prüfen.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-030",
+      "category": "generic-noun-trap",
+      "text": "Update the workflow, align the sprint goals, and push the report to the stakeholder dashboard.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-031",
+      "category": "generic-noun-trap",
+      "text": "Bitte das Dashboard bis Freitag aktualisieren — der Report geht direkt in die Pipeline für Q3.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-032",
+      "category": "generic-noun-trap",
+      "text": "The sprint deliverables are blocked; we need to realign the roadmap before syncing the workflow with Salesforce.",
+      "expected_entities": [
+        {
+          "canonical_name": "Salesforce",
+          "type": "product"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-033",
+      "category": "generic-noun-trap",
+      "text": "Kannst du das Funnel-Update im nächsten Standup präsentieren? Die Timeline verschiebt sich sonst weiter.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-034",
+      "category": "generic-noun-trap",
+      "text": "Cross-functional tools and the reporting dashboard should reflect the new workflow by end of sprint.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-generic-noun-trap-035",
+      "category": "generic-noun-trap",
+      "text": "Der Roadmap-Review ist Teil des nächsten Deliverable-Zyklus — bitte alle offenen Pipeline-Items vorher schließen.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-001",
+      "category": "enum-status-trap",
+      "text": "Deal stage updated: Qualified → Proposal Sent — assigned to Markus Freiberg",
+      "expected_entities": [
+        {
+          "canonical_name": "Markus Freiberg",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-002",
+      "category": "enum-status-trap",
+      "text": "Angebot #4471 bewegt sich von draft nach review, wartet auf Freigabe durch Sandra Hohlweg",
+      "expected_entities": [
+        {
+          "canonical_name": "Sandra Hohlweg",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-003",
+      "category": "enum-status-trap",
+      "text": "Pipeline: New Lead → Contacted → Qualified → Closed Won",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-004",
+      "category": "enum-status-trap",
+      "text": "Status: open | Stage: Negotiation | Owner: T. Brandt | Region: DACH",
+      "expected_entities": [
+        {
+          "canonical_name": "T. Brandt",
+          "type": "person"
+        },
+        {
+          "canonical_name": "DACH",
+          "type": "location"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-005",
+      "category": "enum-status-trap",
+      "text": "Opportunity mit Bosch AG: stage = Proposal, probability 65%, close date 31.03.2025",
+      "expected_entities": [
+        {
+          "canonical_name": "Bosch AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-006",
+      "category": "enum-status-trap",
+      "text": "workflow_state: draft → review → approved → archived",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-007",
+      "category": "enum-status-trap",
+      "text": "Lead-Status bei Siemens-Kontakt auf 'qualified' gesetzt, Folgeaktion fällig",
+      "expected_entities": [
+        {
+          "canonical_name": "Siemens",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-008",
+      "category": "enum-status-trap",
+      "text": "CRM enum values: open, in_progress, on_hold, closed_lost, closed_won",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-009",
+      "category": "enum-status-trap",
+      "text": "Deal: Infineon – MSA in Prüfung, aktueller Stage: Legal Review, nächster: Signed",
+      "expected_entities": [
+        {
+          "canonical_name": "Infineon",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-010",
+      "category": "enum-status-trap",
+      "text": "Ticket #8823 moved from Backlog to In Review — awaiting sign-off from procurement team",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-011",
+      "category": "enum-status-trap",
+      "text": "Deal moved to stage: Qualified – follow-up call scheduled with Markus Reiter",
+      "expected_entities": [
+        {
+          "canonical_name": "Markus Reiter",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-012",
+      "category": "enum-status-trap",
+      "text": "Status: draft → review → approved | Freigabe durch Vertriebsleitung ausstehend",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-013",
+      "category": "enum-status-trap",
+      "text": "Pipeline: Prospecting › Needs Analysis › Proposal Sent › Closed Won",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-014",
+      "category": "enum-status-trap",
+      "text": "Angebot #4471 – aktueller Status: In Review, Entscheidung durch Sandra Koch erwartet",
+      "expected_entities": [
+        {
+          "canonical_name": "Sandra Koch",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-015",
+      "category": "enum-status-trap",
+      "text": "lead_status = OPEN | assigned_to: t.hoffmann@brexler-gmbh.de",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-016",
+      "category": "enum-status-trap",
+      "text": "Stage: Closed Lost – Reason: Budget nicht genehmigt (Q3 Review, Kunde: Voigt AG)",
+      "expected_entities": [
+        {
+          "canonical_name": "Voigt AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-017",
+      "category": "enum-status-trap",
+      "text": "workflow_state: archived | last_modified: 2024-11-02 | owner: Patrick Seidel",
+      "expected_entities": [
+        {
+          "canonical_name": "Patrick Seidel",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-018",
+      "category": "enum-status-trap",
+      "text": "Opportunity bei Henkel verschoben: Proposal → Negotiation → Contract Review",
+      "expected_entities": [
+        {
+          "canonical_name": "Henkel",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-019",
+      "category": "enum-status-trap",
+      "text": "Status ENUM: open / in_progress / on_hold / closed_won / closed_lost",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-020",
+      "category": "enum-status-trap",
+      "text": "Deal #8823 – Stufe: Qualifiziert | Nächster Schritt: Demo-Termin mit L. Brenner buchen",
+      "expected_entities": [
+        {
+          "canonical_name": "L. Brenner",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-021",
+      "category": "enum-status-trap",
+      "text": "Deal Status: open → in negotiation → closed_won | Assigned: Sarah Müller",
+      "expected_entities": [
+        {
+          "canonical_name": "Sarah Müller",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-022",
+      "category": "enum-status-trap",
+      "text": "Angebot wurde von draft auf review gesetzt – bitte Freigabe durch Vertriebsleitung",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-023",
+      "category": "enum-status-trap",
+      "text": "Pipeline Stage: Qualified Lead · Owner: T. Hoffmann · Next Action: Demo scheduled",
+      "expected_entities": [
+        {
+          "canonical_name": "T. Hoffmann",
+          "type": "person"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-024",
+      "category": "enum-status-trap",
+      "text": "Auftrag #4872 – Status gewechselt von approved zu archived (Stornierung bestätigt)",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-enum-status-trap-025",
+      "category": "enum-status-trap",
+      "text": "stage=closed_lost | reason=price | account=Bosch AG | closed by: M. Berger",
+      "expected_entities": [
+        {
+          "canonical_name": "Bosch AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "M. Berger",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "M. Berger",
+          "predicate": "manages",
+          "object": "Bosch AG"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-001",
+      "category": "multilingual-names",
+      "text": "Herr Markus Brenner wird die Niederlassung in Nürnberg ab dem 1. März leiten.",
+      "expected_entities": [
+        {
+          "canonical_name": "Markus Brenner",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Nürnberg",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Markus Brenner",
+          "predicate": "located_in",
+          "object": "Nürnberg"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-002",
+      "category": "multilingual-names",
+      "text": "Frau Dr. Sabine Hofer, Leiterin der Rechtsabteilung, ist ab sofort in Wien erreichbar.",
+      "expected_entities": [
+        {
+          "canonical_name": "Sabine Hofer",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Wien",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Sabine Hofer",
+          "predicate": "located_in",
+          "object": "Wien"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-003",
+      "category": "multilingual-names",
+      "text": "Die Müller & Söhne GmbH hat ihren Hauptsitz nach Zürich verlegt.",
+      "expected_entities": [
+        {
+          "canonical_name": "Müller & Söhne GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Zürich",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Müller & Söhne GmbH",
+          "predicate": "located_in",
+          "object": "Zürich"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-004",
+      "category": "multilingual-names",
+      "text": "Bitte senden Sie die Unterlagen direkt an Herrn Thomas Weidmann in unserer Berliner Filiale.",
+      "expected_entities": [
+        {
+          "canonical_name": "Thomas Weidmann",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Berlin",
+          "type": "location"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-multilingual-names-005",
+      "category": "multilingual-names",
+      "text": "Frau Claudia Ziegler von der Alpentrans AG bestätigt den Liefertermin für den 14. April.",
+      "expected_entities": [
+        {
+          "canonical_name": "Claudia Ziegler",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Alpentrans AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Claudia Ziegler",
+          "predicate": "works_for",
+          "object": "Alpentrans AG"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-006",
+      "category": "multilingual-names",
+      "text": "Dr. Stefan Kurz übernimmt mit sofortiger Wirkung die Geschäftsführung der Berner Holding GmbH.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stefan Kurz",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Berner Holding GmbH",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Stefan Kurz",
+          "predicate": "works_for",
+          "object": "Berner Holding GmbH"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-007",
+      "category": "multilingual-names",
+      "text": "Die Kooperation zwischen der Rheinwerk AG und Herrn Prof. Klaus Obermayer wurde heute in Wien unterzeichnet.",
+      "expected_entities": [
+        {
+          "canonical_name": "Rheinwerk AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Klaus Obermayer",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Wien",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Klaus Obermayer",
+          "predicate": "works_for",
+          "object": "Rheinwerk AG"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-008",
+      "category": "multilingual-names",
+      "text": "Frau Ingrid Bachmann steht Ihnen für Rückfragen zur Filiale Zürich-Nord gerne zur Verfügung.",
+      "expected_entities": [
+        {
+          "canonical_name": "Ingrid Bachmann",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Zürich-Nord",
+          "type": "location"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-multilingual-names-009",
+      "category": "multilingual-names",
+      "text": "Herr Florian Gschwend, Vertriebsleiter der Alpensoft GmbH, meldet sich morgen aus Bern.",
+      "expected_entities": [
+        {
+          "canonical_name": "Florian Gschwend",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Alpensoft GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Bern",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Florian Gschwend",
+          "predicate": "works_for",
+          "object": "Alpensoft GmbH"
+        },
+        {
+          "subject": "Florian Gschwend",
+          "predicate": "located_in",
+          "object": "Bern"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-010",
+      "category": "multilingual-names",
+      "text": "Die Jahreshauptversammlung der Dachstein Industrie AG findet am 22. Mai in Wien statt.",
+      "expected_entities": [
+        {
+          "canonical_name": "Dachstein Industrie AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Wien",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Dachstein Industrie AG",
+          "predicate": "located_in",
+          "object": "Wien"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-011",
+      "category": "multilingual-names",
+      "text": "Herr Dr. Markus Feinberg von der Alpentech AG in Zürich hat den Vertrag heute unterzeichnet.",
+      "expected_entities": [
+        {
+          "canonical_name": "Markus Feinberg",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Alpentech AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Zürich",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Markus Feinberg",
+          "predicate": "works_for",
+          "object": "Alpentech AG"
+        },
+        {
+          "subject": "Alpentech AG",
+          "predicate": "located_in",
+          "object": "Zürich"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-012",
+      "category": "multilingual-names",
+      "text": "Frau Sabine Kurz, Geschäftsführerin der LogiForm GmbH, ist ab Montag in Berlin erreichbar.",
+      "expected_entities": [
+        {
+          "canonical_name": "Sabine Kurz",
+          "type": "person"
+        },
+        {
+          "canonical_name": "LogiForm GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Berlin",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Sabine Kurz",
+          "predicate": "works_for",
+          "object": "LogiForm GmbH"
+        },
+        {
+          "subject": "Sabine Kurz",
+          "predicate": "located_in",
+          "object": "Berlin"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-013",
+      "category": "multilingual-names",
+      "text": "Bitte leiten Sie die Unterlagen an Dr. Stefan Brandt, Bern, weiter.",
+      "expected_entities": [
+        {
+          "canonical_name": "Stefan Brandt",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Bern",
+          "type": "location"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-multilingual-names-014",
+      "category": "multilingual-names",
+      "text": "Die Hauptversammlung der Vogtland AG findet am 14. März in Nürnberg statt.",
+      "expected_entities": [
+        {
+          "canonical_name": "Vogtland AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Nürnberg",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Vogtland AG",
+          "predicate": "located_in",
+          "object": "Nürnberg"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-015",
+      "category": "multilingual-names",
+      "text": "Frau Dr. Anneliese Wörner aus Wien übernimmt die Projektleitung ab dem ersten Quartal.",
+      "expected_entities": [
+        {
+          "canonical_name": "Anneliese Wörner",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Wien",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Anneliese Wörner",
+          "predicate": "located_in",
+          "object": "Wien"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-016",
+      "category": "multilingual-names",
+      "text": "Herr Tobias Grünwald hat die Bestellung bei der Hausmann & Söhne GmbH in Zürich aufgegeben.",
+      "expected_entities": [
+        {
+          "canonical_name": "Tobias Grünwald",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Hausmann & Söhne GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Zürich",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Hausmann & Söhne GmbH",
+          "predicate": "located_in",
+          "object": "Zürich"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-017",
+      "category": "multilingual-names",
+      "text": "Dr. Petra Salzmann, Vorstand der ClearPath AG, bestätigt das Meeting in Wien für Donnerstag.",
+      "expected_entities": [
+        {
+          "canonical_name": "Petra Salzmann",
+          "type": "person"
+        },
+        {
+          "canonical_name": "ClearPath AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Wien",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Petra Salzmann",
+          "predicate": "works_for",
+          "object": "ClearPath AG"
+        },
+        {
+          "subject": "Petra Salzmann",
+          "predicate": "located_in",
+          "object": "Wien"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-018",
+      "category": "multilingual-names",
+      "text": "Herr Andreas Feichtner von der Meridian Bau GmbH meldet sich aus dem Büro in Nürnberg.",
+      "expected_entities": [
+        {
+          "canonical_name": "Andreas Feichtner",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Meridian Bau GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Nürnberg",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Andreas Feichtner",
+          "predicate": "works_for",
+          "object": "Meridian Bau GmbH"
+        },
+        {
+          "subject": "Meridian Bau GmbH",
+          "predicate": "located_in",
+          "object": "Nürnberg"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-019",
+      "category": "multilingual-names",
+      "text": "Die Rechnungsstellung erfolgt über die Kundenakte von Frau Monika Steyr, Bern, ref. 2024-881.",
+      "expected_entities": [
+        {
+          "canonical_name": "Monika Steyr",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Bern",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Monika Steyr",
+          "predicate": "located_in",
+          "object": "Bern"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-020",
+      "category": "multilingual-names",
+      "text": "Herr Prof. Dr. Ulrich Hammerschmidt, Aufsichtsrat der Nordstern AG, reist morgen nach Berlin.",
+      "expected_entities": [
+        {
+          "canonical_name": "Ulrich Hammerschmidt",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Nordstern AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Berlin",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Ulrich Hammerschmidt",
+          "predicate": "works_for",
+          "object": "Nordstern AG"
+        },
+        {
+          "subject": "Ulrich Hammerschmidt",
+          "predicate": "located_in",
+          "object": "Berlin"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-021",
+      "category": "multilingual-names",
+      "text": "Frau Dr. Sabine Keller hat die Unterlagen für die Holzmann AG in Zürich fristgerecht eingereicht.",
+      "expected_entities": [
+        {
+          "canonical_name": "Sabine Keller",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Holzmann AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Zürich",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Holzmann AG",
+          "predicate": "located_in",
+          "object": "Zürich"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-022",
+      "category": "multilingual-names",
+      "text": "Herr Marcus Brandt von der Rheintec GmbH, Nürnberg, bestätigt den Liefertermin für KW 42.",
+      "expected_entities": [
+        {
+          "canonical_name": "Marcus Brandt",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Rheintec GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Nürnberg",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Marcus Brandt",
+          "predicate": "works_for",
+          "object": "Rheintec GmbH"
+        },
+        {
+          "subject": "Rheintec GmbH",
+          "predicate": "located_in",
+          "object": "Nürnberg"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-023",
+      "category": "multilingual-names",
+      "text": "Die Vorstandssitzung der Alpenfinanz AG findet am Dienstag in Wien statt — Herr Dr. Thomas Gruber wird moderieren.",
+      "expected_entities": [
+        {
+          "canonical_name": "Alpenfinanz AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Wien",
+          "type": "location"
+        },
+        {
+          "canonical_name": "Thomas Gruber",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Thomas Gruber",
+          "predicate": "works_for",
+          "object": "Alpenfinanz AG"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-024",
+      "category": "multilingual-names",
+      "text": "Frau Petra Vogt, Prokuristin der Sonnberg GmbH in Bern, hat das Angebot geprüft und freigegeben.",
+      "expected_entities": [
+        {
+          "canonical_name": "Petra Vogt",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Sonnberg GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Bern",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Petra Vogt",
+          "predicate": "works_for",
+          "object": "Sonnberg GmbH"
+        },
+        {
+          "subject": "Sonnberg GmbH",
+          "predicate": "located_in",
+          "object": "Bern"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-025",
+      "category": "multilingual-names",
+      "text": "Dr. Andreas Huber (Schreiber & Partner GmbH, Berlin) erbittet eine Rückmeldung bis spätestens Freitag, 17:00 Uhr.",
+      "expected_entities": [
+        {
+          "canonical_name": "Andreas Huber",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Schreiber & Partner GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Berlin",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Andreas Huber",
+          "predicate": "works_for",
+          "object": "Schreiber & Partner GmbH"
+        },
+        {
+          "subject": "Schreiber & Partner GmbH",
+          "predicate": "located_in",
+          "object": "Berlin"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-026",
+      "category": "multilingual-names",
+      "text": "Herr Florian Maier aus der Wiener Niederlassung der Bergkraft AG übernimmt ab sofort die Projektleitung.",
+      "expected_entities": [
+        {
+          "canonical_name": "Florian Maier",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Bergkraft AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Wien",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Florian Maier",
+          "predicate": "works_for",
+          "object": "Bergkraft AG"
+        },
+        {
+          "subject": "Bergkraft AG",
+          "predicate": "located_in",
+          "object": "Wien"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-027",
+      "category": "multilingual-names",
+      "text": "Frau Christine Haas, Steuerberaterin bei der Zentraltreuhand GmbH Zürich, wurde als externe Prüferin bestellt.",
+      "expected_entities": [
+        {
+          "canonical_name": "Christine Haas",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Zentraltreuhand GmbH Zürich",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Zürich",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Christine Haas",
+          "predicate": "works_for",
+          "object": "Zentraltreuhand GmbH Zürich"
+        },
+        {
+          "subject": "Zentraltreuhand GmbH Zürich",
+          "predicate": "located_in",
+          "object": "Zürich"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-028",
+      "category": "multilingual-names",
+      "text": "Sehr geehrter Herr Dr. Rolf Zimmermann, anbei erhalten Sie die revidierte Fassung des Rahmenvertrags der Mitte AG.",
+      "expected_entities": [
+        {
+          "canonical_name": "Rolf Zimmermann",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Mitte AG",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-multilingual-names-029",
+      "category": "multilingual-names",
+      "text": "Die Konferenz zwischen der Veltner GmbH (Nürnberg) und Herrn Stefan Baum (Österreich Logistik AG, Wien) ist bestätigt.",
+      "expected_entities": [
+        {
+          "canonical_name": "Veltner GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Nürnberg",
+          "type": "location"
+        },
+        {
+          "canonical_name": "Stefan Baum",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Österreich Logistik AG",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Wien",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Veltner GmbH",
+          "predicate": "located_in",
+          "object": "Nürnberg"
+        },
+        {
+          "subject": "Stefan Baum",
+          "predicate": "works_for",
+          "object": "Österreich Logistik AG"
+        },
+        {
+          "subject": "Österreich Logistik AG",
+          "predicate": "located_in",
+          "object": "Wien"
+        }
+      ]
+    },
+    {
+      "id": "gen-multilingual-names-030",
+      "category": "multilingual-names",
+      "text": "Frau Dr. Isabel Frei, Geschäftsführerin der Nordlicht GmbH in Berlin, unterzeichnete die Kooperationsvereinbarung heute Morgen.",
+      "expected_entities": [
+        {
+          "canonical_name": "Isabel Frei",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Nordlicht GmbH",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Berlin",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Isabel Frei",
+          "predicate": "works_for",
+          "object": "Nordlicht GmbH"
+        },
+        {
+          "subject": "Nordlicht GmbH",
+          "predicate": "located_in",
+          "object": "Berlin"
+        }
+      ]
+    },
+    {
+      "id": "gen-empty-conversational-001",
+      "category": "empty-conversational",
+      "text": "let me think about it and get back to you",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-002",
+      "category": "empty-conversational",
+      "text": "Ich muss das nochmal in Ruhe durchdenken.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-003",
+      "category": "empty-conversational",
+      "text": "good idea, but let's revisit this next week",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-004",
+      "category": "empty-conversational",
+      "text": "Können wir das auf später verschieben?",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-005",
+      "category": "empty-conversational",
+      "text": "we should probably loop in a few more people before deciding",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-006",
+      "category": "empty-conversational",
+      "text": "Das klingt vielversprechend — lass uns das weiterverfolgen.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-007",
+      "category": "empty-conversational",
+      "text": "not sure yet, I'll have a clearer picture by end of week",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-008",
+      "category": "empty-conversational",
+      "text": "Guter Punkt, das sollten wir besprechen.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-009",
+      "category": "empty-conversational",
+      "text": "let's table this for now and circle back",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-010",
+      "category": "empty-conversational",
+      "text": "Ich bin noch unentschlossen, aber die Richtung stimmt.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-011",
+      "category": "empty-conversational",
+      "text": "let me think about it and get back to you",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-012",
+      "category": "empty-conversational",
+      "text": "Das besprechen wir am besten in der nächsten Runde.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-013",
+      "category": "empty-conversational",
+      "text": "good idea, but we should probably align on this first",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-014",
+      "category": "empty-conversational",
+      "text": "Ich bin noch nicht sicher, ob der Zeitplan realistisch ist.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-015",
+      "category": "empty-conversational",
+      "text": "we'll need to revisit this once we have more clarity",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-016",
+      "category": "empty-conversational",
+      "text": "Das klingt grundsätzlich sinnvoll — lass uns das weiterverfolgen.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-017",
+      "category": "empty-conversational",
+      "text": "maybe worth a quick call to iron out the details",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-018",
+      "category": "empty-conversational",
+      "text": "Ich würde das gerne nochmal intern abstimmen, bevor wir entscheiden.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-019",
+      "category": "empty-conversational",
+      "text": "let's not rush this — there are still a few open questions",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-empty-conversational-020",
+      "category": "empty-conversational",
+      "text": "Guter Punkt, darüber sollten wir nochmal nachdenken.",
+      "expected_entities": [],
+      "expected_relations": []
+    },
+    {
+      "id": "gen-clean-rich-001",
+      "category": "clean-rich",
+      "text": "Priya Nambiar from Deloitte Singapore confirmed the Q3 audit findings with Marcus Webb at Celestra Holdings.",
+      "expected_entities": [
+        {
+          "canonical_name": "Priya Nambiar",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Deloitte Singapore",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Marcus Webb",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Celestra Holdings",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Priya Nambiar",
+          "predicate": "works_for",
+          "object": "Deloitte Singapore"
+        },
+        {
+          "subject": "Marcus Webb",
+          "predicate": "works_for",
+          "object": "Celestra Holdings"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-002",
+      "category": "clean-rich",
+      "text": "NovaBridge Capital's Jakarta office is co-leading the Series B alongside Thornfield Ventures and Reid Okafor.",
+      "expected_entities": [
+        {
+          "canonical_name": "NovaBridge Capital",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Jakarta",
+          "type": "location"
+        },
+        {
+          "canonical_name": "Thornfield Ventures",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Reid Okafor",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "NovaBridge Capital",
+          "predicate": "located_in",
+          "object": "Jakarta"
+        },
+        {
+          "subject": "Reid Okafor",
+          "predicate": "works_for",
+          "object": "Thornfield Ventures"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-003",
+      "category": "clean-rich",
+      "text": "Lena Hartmann presented the Orion Platform migration roadmap to the CTO council at Vantex Systems in Zurich.",
+      "expected_entities": [
+        {
+          "canonical_name": "Lena Hartmann",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Orion Platform",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Vantex Systems",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Zurich",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Lena Hartmann",
+          "predicate": "works_for",
+          "object": "Vantex Systems"
+        },
+        {
+          "subject": "Vantex Systems",
+          "predicate": "located_in",
+          "object": "Zurich"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-004",
+      "category": "clean-rich",
+      "text": "BlackRock's Dublin team flagged the Meridian Fixed Income Fund exposure ahead of Sandrine Collet's risk review.",
+      "expected_entities": [
+        {
+          "canonical_name": "BlackRock",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Dublin",
+          "type": "location"
+        },
+        {
+          "canonical_name": "Meridian Fixed Income Fund",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Sandrine Collet",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Sandrine Collet",
+          "predicate": "works_for",
+          "object": "BlackRock"
+        },
+        {
+          "subject": "Meridian Fixed Income Fund",
+          "predicate": "managed_by",
+          "object": "BlackRock"
+        },
+        {
+          "subject": "BlackRock",
+          "predicate": "located_in",
+          "object": "Dublin"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-005",
+      "category": "clean-rich",
+      "text": "The Polestar 4 rollout in Southeast Asia is being coordinated through Volvo Cars' regional hub in Kuala Lumpur.",
+      "expected_entities": [
+        {
+          "canonical_name": "Polestar 4",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Volvo Cars",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Southeast Asia",
+          "type": "location"
+        },
+        {
+          "canonical_name": "Kuala Lumpur",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Polestar 4",
+          "predicate": "related_to",
+          "object": "Volvo Cars"
+        },
+        {
+          "subject": "Volvo Cars",
+          "predicate": "located_in",
+          "object": "Kuala Lumpur"
+        },
+        {
+          "subject": "Kuala Lumpur",
+          "predicate": "located_in",
+          "object": "Southeast Asia"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-006",
+      "category": "clean-rich",
+      "text": "Garrett Finch and the procurement leads at Sysco Denver finalized terms with Alderton Food Logistics last Tuesday.",
+      "expected_entities": [
+        {
+          "canonical_name": "Garrett Finch",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Sysco Denver",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Alderton Food Logistics",
+          "type": "organization"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Garrett Finch",
+          "predicate": "works_for",
+          "object": "Sysco Denver"
+        },
+        {
+          "subject": "Sysco Denver",
+          "predicate": "related_to",
+          "object": "Alderton Food Logistics"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-007",
+      "category": "clean-rich",
+      "text": "Horizon Analytics acquired the DataSift pipeline tool from Benchmark Software following talks led by Yusuf Altan.",
+      "expected_entities": [
+        {
+          "canonical_name": "Horizon Analytics",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "DataSift",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Benchmark Software",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Yusuf Altan",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "DataSift",
+          "predicate": "created_by",
+          "object": "Benchmark Software"
+        },
+        {
+          "subject": "Horizon Analytics",
+          "predicate": "owns",
+          "object": "DataSift"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-008",
+      "category": "clean-rich",
+      "text": "Marisol Vega-Cruz at BBVA México is overseeing integration of the Cobro Inmediato API into the Pago Express product.",
+      "expected_entities": [
+        {
+          "canonical_name": "Marisol Vega-Cruz",
+          "type": "person"
+        },
+        {
+          "canonical_name": "BBVA México",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Cobro Inmediato API",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Pago Express",
+          "type": "product"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Marisol Vega-Cruz",
+          "predicate": "works_for",
+          "object": "BBVA México"
+        },
+        {
+          "subject": "Marisol Vega-Cruz",
+          "predicate": "manages",
+          "object": "Pago Express"
+        },
+        {
+          "subject": "Pago Express",
+          "predicate": "uses",
+          "object": "Cobro Inmediato API"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-009",
+      "category": "clean-rich",
+      "text": "The Shanghai facility upgrade for BASF's Ultrason polymer line was greenlit by Tobias Grünberg in Munich.",
+      "expected_entities": [
+        {
+          "canonical_name": "Shanghai",
+          "type": "location"
+        },
+        {
+          "canonical_name": "BASF",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Ultrason",
+          "type": "product"
+        },
+        {
+          "canonical_name": "Tobias Grünberg",
+          "type": "person"
+        },
+        {
+          "canonical_name": "Munich",
+          "type": "location"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Ultrason",
+          "predicate": "created_by",
+          "object": "BASF"
+        },
+        {
+          "subject": "Tobias Grünberg",
+          "predicate": "works_for",
+          "object": "BASF"
+        },
+        {
+          "subject": "Tobias Grünberg",
+          "predicate": "located_in",
+          "object": "Munich"
+        },
+        {
+          "subject": "Ultrason",
+          "predicate": "part_of",
+          "object": "BASF"
+        },
+        {
+          "subject": "BASF",
+          "predicate": "located_in",
+          "object": "Shanghai"
+        }
+      ]
+    },
+    {
+      "id": "gen-clean-rich-010",
+      "category": "clean-rich",
+      "text": "Kestrel Aerospace and Northrop Grumman are jointly bidding on the DARPA LiftShield contract, per Diana Chu's statement.",
+      "expected_entities": [
+        {
+          "canonical_name": "Kestrel Aerospace",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "Northrop Grumman",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "DARPA",
+          "type": "organization"
+        },
+        {
+          "canonical_name": "LiftShield",
+          "type": "project"
+        },
+        {
+          "canonical_name": "Diana Chu",
+          "type": "person"
+        }
+      ],
+      "expected_relations": [
+        {
+          "subject": "Kestrel Aerospace",
+          "predicate": "related_to",
+          "object": "LiftShield"
+        },
+        {
+          "subject": "Northrop Grumman",
+          "predicate": "related_to",
+          "object": "LiftShield"
+        },
+        {
+          "subject": "LiftShield",
+          "predicate": "managed_by",
+          "object": "DARPA"
+        }
+      ]
+    }
+  ]
+}
