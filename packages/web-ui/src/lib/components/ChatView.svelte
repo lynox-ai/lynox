@@ -1389,6 +1389,41 @@
 									</svg>
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
 								</div>
+								{#if gBlock.toolName === 'spawn_agent' && msg.spawn}
+									{@const sp = msg.spawn}
+									{@const elapsed = Math.max(sp.elapsedS, Math.floor((Date.now() - sp.startedAt) / 1000))}
+									<div class="ml-3 mt-1 mb-1 text-[11px] font-mono text-text-subtle/80 border-l-2 border-warning/30 pl-3 py-1">
+										<div class="flex items-center gap-2 text-text-subtle">
+											<span>{elapsed}s</span>
+											{#if sp.running.length > 0}
+												<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
+												<span>{sp.running.length} aktiv</span>
+											{:else}
+												<span>fertig</span>
+											{/if}
+											{#if elapsed >= 120 && sp.running.length > 0}
+												<span class="text-warning">ungewöhnlich lang</span>
+											{/if}
+										</div>
+										{#each sp.running as subName}
+											<div class="flex items-center gap-2 mt-0.5">
+												<span class="text-text-subtle/60">-&gt;</span>
+												<span class="text-text">{subName}</span>
+												{#if sp.lastToolBySub[subName]}
+													<span class="text-text-subtle/60">·</span>
+													<span class="text-text-subtle/70">{sp.lastToolBySub[subName]}</span>
+												{/if}
+											</div>
+										{/each}
+										{#each sp.done as d}
+											<div class="flex items-center gap-2 mt-0.5">
+												<span class={d.ok ? 'text-success' : 'text-danger'}>{d.ok ? '✓' : '✗'}</span>
+												<span class="text-text-subtle/80">{d.name}</span>
+												<span class="text-text-subtle/50">{d.elapsedS}s</span>
+											</div>
+										{/each}
+									</div>
+								{/if}
 							{:else if gBlock.type === 'text' && gBlock.text}
 								{@const hasArtifact = gBlock.text.includes('```html') && (gBlock.text.includes('<!DOCTYPE') || gBlock.text.includes('<html'))}
 								<div class="relative group/copy">

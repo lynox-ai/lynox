@@ -230,15 +230,91 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       await agent.onStream({ type: 'spawn', agents: names, estimatedCostUSD: totalEstimate, agent: agent.name });
     }
 
+    // Sub-agent progress state — visible to the UI via forwarded events.
+    // Without this, parent's stream only sees spawn start + aggregated result
+    // and the UI sits on "Arbeitet…" for minutes with no evidence of progress.
+    const running = new Set(names);
+    const lastToolBySub: Record<string, string> = {};
+    const spawnStart = Date.now();
+
+    const parentStream = agent.onStream;
+    const makeChildStream = (subName: string): StreamHandler | null => {
+      if (!parentStream) return null;
+      return (event) => {
+        // Forward only high-signal, low-frequency events. Text and thinking
+        // token streams from children would flood the parent UI.
+        if (event.type === 'tool_call') {
+          lastToolBySub[subName] = event.name;
+          return parentStream({ ...event, subAgent: subName });
+        }
+        if (event.type === 'tool_result') {
+          return parentStream({ ...event, subAgent: subName });
+        }
+        if (event.type === 'error') {
+          return parentStream(event);
+        }
+        // Swallow the rest — keeps the stream manageable.
+        return undefined;
+      };
+    };
+
+    // Heartbeat: while any child is running, emit a spawn_progress event every
+    // 5s so the UI can show elapsed time + last tool per sub-agent + soft
+    // timeout warning. Cleared in finally below.
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    if (parentStream) {
+      heartbeat = setInterval(() => {
+        if (running.size === 0) return;
+        const elapsedS = Math.floor((Date.now() - spawnStart) / 1000);
+        void parentStream({
+          type: 'spawn_progress',
+          elapsedS,
+          running: [...running],
+          lastToolBySub: { ...lastToolBySub },
+          agent: agent.name,
+        });
+      }, 5000);
+    }
+
     const results = await Promise.allSettled(
       input.agents.map(spec => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), SPAWN_TIMEOUT);
+        const childStart = Date.now();
 
-        return executeThinker(spec, agent, null, childDepth)
+        return executeThinker(spec, agent, makeChildStream(spec.name), childDepth)
+          .then(
+            (value) => {
+              running.delete(spec.name);
+              if (parentStream) {
+                void parentStream({
+                  type: 'spawn_child_done',
+                  subAgent: spec.name,
+                  ok: true,
+                  elapsedS: Math.floor((Date.now() - childStart) / 1000),
+                  agent: agent.name,
+                });
+              }
+              return value;
+            },
+            (err: unknown) => {
+              running.delete(spec.name);
+              if (parentStream) {
+                void parentStream({
+                  type: 'spawn_child_done',
+                  subAgent: spec.name,
+                  ok: false,
+                  elapsedS: Math.floor((Date.now() - childStart) / 1000),
+                  agent: agent.name,
+                });
+              }
+              throw err;
+            },
+          )
           .finally(() => clearTimeout(timeout));
       }),
     );
+    if (heartbeat) clearInterval(heartbeat);
 
     // Cost already reserved in checkSessionBudget() above — no separate recordSessionCost needed
 
