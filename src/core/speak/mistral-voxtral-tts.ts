@@ -38,7 +38,10 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-latest';
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
 const API_URL = 'https://api.mistral.ai/v1/audio/speech';
-const VOICES_URL = 'https://api.mistral.ai/v1/audio/voices';
+// Default page_size is 10 (≈3 pages for the current 30-voice catalog).
+// Request 100 to get all voices in one call — keeps the picker simple at
+// the cost of one slightly larger response, which is still < 30 KB.
+const VOICES_URL = 'https://api.mistral.ai/v1/audio/voices?page_size=100';
 
 /**
  * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
@@ -88,22 +91,44 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body: unknown = await response.json();
-      // Accept either `{ data: [...] }` (OpenAI-style) or `{ voices: [...] }` or a bare array.
-      // Each item may expose `id` or `voice` for the slug, plus optional language / description.
+      // Mistral's actual response shape (probed 2026-04-21):
+      //   { items: [{ slug, name, languages: [...], gender, age, tags, id, ... }], total, page, ... }
+      // `slug` is the synthesis-friendly voice selector ('en_paul_neutral').
+      // `id` is a provider UUID and not usable as a voice parameter.
+      // Other containers (`data` / `voices` / bare array) accepted too so the
+      // parser survives an API shape change without another code round-trip.
       const raw: unknown[] = Array.isArray(body)
         ? body
-        : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['data'])
-          ? (body as { data: unknown[] }).data
-          : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['voices'])
-            ? (body as { voices: unknown[] }).voices
-            : [];
+        : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['items'])
+          ? (body as { items: unknown[] }).items
+          : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['data'])
+            ? (body as { data: unknown[] }).data
+            : body && typeof body === 'object' && Array.isArray((body as Record<string, unknown>)['voices'])
+              ? (body as { voices: unknown[] }).voices
+              : [];
       voices = raw.flatMap((entry): VoiceInfo[] => {
         if (!entry || typeof entry !== 'object') return [];
         const e = entry as Record<string, unknown>;
-        const id = typeof e['id'] === 'string' ? e['id'] : typeof e['voice'] === 'string' ? e['voice'] : undefined;
+        // Prefer `slug` (Mistral's synthesis selector). Fall back to `voice`
+        // or `id` for other provider shapes. Note: Mistral's `id` field is
+        // a UUID — accept it last, since using it as voice param would fail.
+        const id = typeof e['slug'] === 'string' ? e['slug']
+          : typeof e['voice'] === 'string' ? e['voice']
+          : typeof e['id'] === 'string' ? e['id']
+          : undefined;
         if (!id) return [];
-        const language = typeof e['language'] === 'string' ? e['language'] : id.split('_')[0];
-        const description = typeof e['description'] === 'string' ? e['description']
+        // `languages` is an array (['en_us']); take the first and normalize
+        // 'en_us' → 'en' for the UI. Single-string `language` is accepted
+        // as a fallback for alternative shapes.
+        const languages = Array.isArray(e['languages']) ? e['languages'] as unknown[] : null;
+        const rawLang = languages && typeof languages[0] === 'string' ? languages[0] as string
+          : typeof e['language'] === 'string' ? e['language']
+          : id.split('_')[0];
+        const language = rawLang ? rawLang.split('_')[0] : undefined;
+        // `name` is the human-readable label ('Paul - Neutral'). `description`
+        // / `display_name` accepted for non-Mistral shapes.
+        const description = typeof e['name'] === 'string' ? e['name']
+          : typeof e['description'] === 'string' ? e['description']
           : typeof e['display_name'] === 'string' ? e['display_name']
           : undefined;
         return [language !== undefined ? { id, language, ...(description ? { description } : {}) } : { id, ...(description ? { description } : {}) }];

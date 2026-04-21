@@ -210,5 +210,37 @@ describe('speak facade — text-prep pipeline', () => {
       expect(voices[0]).toHaveProperty('id');
       expect(voices.find(v => v.id === 'en_paul_neutral')).toBeDefined();
     });
+
+    it('parses Mistral live shape (items + slug + languages array)', async () => {
+      stubMistralKey(true);
+      // Real Mistral response shape probed against the live API 2026-04-21.
+      // Deliberately minimal fixture — just the fields we parse — so if
+      // Mistral adds new fields the test doesn't need updating.
+      const liveResponse = {
+        items: [
+          { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'] },
+          { slug: 'gb_oliver_neutral', name: 'Oliver - Neutral', languages: ['en_gb'] },
+          { slug: 'fr_aurelie', name: 'Aurélie', languages: ['fr_fr'] },
+        ],
+        total: 3, page: 1, page_size: 10, total_pages: 1,
+      };
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify(liveResponse), { status: 200, headers: { 'content-type': 'application/json' } }),
+      );
+      try {
+        // Bust the module-scoped voices cache from any previous test.
+        await vi.resetModules();
+        const fresh = await import('./index.js');
+        const voices = await fresh.listMistralVoices();
+        expect(voices.length).toBe(3);
+        expect(voices[0]!.id).toBe('en_paul_neutral');  // slug, not UUID
+        expect(voices[0]!.language).toBe('en');          // first of languages[], normalized
+        expect(voices[0]!.description).toBe('Paul - Neutral'); // from `name`
+        expect(voices[2]!.id).toBe('fr_aurelie');
+        expect(voices[2]!.language).toBe('fr');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
   });
 });
