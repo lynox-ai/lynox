@@ -106,4 +106,103 @@ describe('prepareForSpeech', () => {
     expect(prepareForSpeech('**')).toBe('**');
     expect(prepareForSpeech('- ')).toBe('');
   });
+
+  // Markdown tables render visually but read like pipe-and-dash noise when
+  // passed to a TTS engine verbatim. Two-column tables are typically
+  // Key→Value layouts and read naturally as "key: value." sentences; wider
+  // tables fall back to comma-joined rows.
+  describe('markdown tables', () => {
+    it('flattens a 2-column key/value table into "key: value." sentences', () => {
+      const md = [
+        '| Szenario | Was ich tue |',
+        '|---|---|',
+        '| Neues Lead | Kontakt anlegen |',
+        '| Sammelrechnung | Positionen bündeln |',
+      ].join('\n');
+      const out = prepareForSpeech(md);
+      expect(out).not.toContain('|');
+      expect(out).not.toMatch(/-{3,}/);
+      expect(out).toContain('Neues Lead: Kontakt anlegen');
+      expect(out).toContain('Sammelrechnung: Positionen bündeln');
+    });
+
+    it('flattens an N>2-column table as comma-joined rows', () => {
+      const md = [
+        '| Tier | Preis | Limit |',
+        '|---|---|---|',
+        '| Starter | 39 | 5 Tasks |',
+        '| Pro | 149 | unlimited |',
+      ].join('\n');
+      const out = prepareForSpeech(md);
+      expect(out).not.toContain('|');
+      expect(out).toContain('Tier, Preis, Limit');
+      expect(out).toContain('Starter, 39, 5 Tasks');
+      expect(out).toContain('Pro, 149, unlimited');
+    });
+
+    it('handles tables with no surrounding outer pipes', () => {
+      const md = [
+        'Heute:',
+        '',
+        'Task | Owner',
+        '---|---',
+        'Deploy | Rafael',
+        'Review | Anna',
+      ].join('\n');
+      const out = prepareForSpeech(md);
+      expect(out).not.toContain('|');
+      expect(out).toContain('Deploy: Rafael');
+      expect(out).toContain('Review: Anna');
+    });
+
+    it('keeps prose lines before and after a table intact', () => {
+      const md = [
+        'Vor der Tabelle.',
+        '',
+        '| A | B |',
+        '|---|---|',
+        '| 1 | 2 |',
+        '',
+        'Nach der Tabelle.',
+      ].join('\n');
+      const out = prepareForSpeech(md);
+      expect(out).toMatch(/Vor der Tabelle\./);
+      expect(out).toMatch(/Nach der Tabelle\.?$/);
+      expect(out).toContain('1: 2');
+    });
+  });
+
+  describe('horizontal rules', () => {
+    it('drops --- lines', () => {
+      expect(prepareForSpeech('Before\n\n---\n\nAfter')).toBe('Before. After');
+    });
+
+    it('drops *** lines', () => {
+      expect(prepareForSpeech('Before\n\n***\n\nAfter')).toBe('Before. After');
+    });
+
+    it('drops ___ lines', () => {
+      expect(prepareForSpeech('Before\n\n___\n\nAfter')).toBe('Before. After');
+    });
+  });
+
+  describe('arrow symbols', () => {
+    it('replaces Unicode arrow → with a comma so prosody pauses', () => {
+      expect(prepareForSpeech('Lead → Kontakt')).toBe('Lead, Kontakt');
+    });
+
+    it('replaces ASCII arrow -> the same way', () => {
+      expect(prepareForSpeech('Lead -> Kontakt')).toBe('Lead, Kontakt');
+    });
+
+    it('replaces Unicode ← and ASCII <- with a comma', () => {
+      expect(prepareForSpeech('Kontakt ← Lead')).toBe('Kontakt, Lead');
+      expect(prepareForSpeech('Kontakt <- Lead')).toBe('Kontakt, Lead');
+    });
+
+    it('replaces ↔ and <-> the same way', () => {
+      expect(prepareForSpeech('A ↔ B')).toBe('A, B');
+      expect(prepareForSpeech('A <-> B')).toBe('A, B');
+    });
+  });
 });
