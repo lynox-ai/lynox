@@ -58,7 +58,10 @@ async function executeThinker(
   // Load role if specified
   const resolved = spec.role ? getRole(spec.role) : undefined;
   if (spec.role && !resolved) {
-    throw new Error(`Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}.`);
+    throw new Error(
+      `Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}. ` +
+      `If none of these fit, omit the "role" field and set model/effort/tools directly.`,
+    );
   }
 
   // 4-tier resolution: spec fields > role defaults > user config > global default
@@ -165,7 +168,7 @@ async function executeThinker(
 export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
   definition: {
     name: 'spawn_agent',
-    description: 'Delegate tasks to specialist roles working in parallel. Choose a role via "role" (researcher, analyst, executor, operator, strategist, creator, collector, communicator) to auto-configure capabilities.',
+    description: 'Delegate tasks to specialist roles working in parallel. Choose a role via "role" (researcher, creator, operator, collector) to auto-configure model, effort, and allowed tools. If no role fits your task, omit "role" and configure model/effort/tools directly instead of picking a close-but-wrong role name — unrecognised roles error out.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -178,7 +181,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
             properties: {
               name: { type: 'string' },
               task: { type: 'string' },
-              role: { type: 'string', description: 'Role ID (e.g. researcher, creator, operator, collector). Configures model, tools, and capabilities.' },
+              role: { type: 'string', enum: ['researcher', 'creator', 'operator', 'collector'], description: 'Role ID. Configures model, tools, and capabilities. Must be one of the four built-ins; omit the field entirely for a custom role.' },
               context: { type: 'string', description: 'Additional context prepended to the task.' },
               isolated_memory: { type: 'boolean', description: 'If true, agent has no access to parent memory.' },
               system_prompt: { type: 'string' },
