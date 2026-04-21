@@ -187,22 +187,93 @@ describe('prepareForSpeech', () => {
   });
 
   describe('arrow symbols', () => {
-    it('replaces Unicode arrow → with a comma so prosody pauses', () => {
-      expect(prepareForSpeech('Lead → Kontakt')).toBe('Lead, Kontakt');
+    it('replaces Unicode arrow → with " dann " for natural sequence prosody', () => {
+      expect(prepareForSpeech('Lead → Kontakt')).toBe('Lead dann Kontakt');
     });
 
     it('replaces ASCII arrow -> the same way', () => {
-      expect(prepareForSpeech('Lead -> Kontakt')).toBe('Lead, Kontakt');
+      expect(prepareForSpeech('Lead -> Kontakt')).toBe('Lead dann Kontakt');
     });
 
-    it('replaces Unicode ← and ASCII <- with a comma', () => {
-      expect(prepareForSpeech('Kontakt ← Lead')).toBe('Kontakt, Lead');
-      expect(prepareForSpeech('Kontakt <- Lead')).toBe('Kontakt, Lead');
+    it('replaces Unicode ← and ASCII <- with "dann"', () => {
+      expect(prepareForSpeech('Kontakt ← Lead')).toBe('Kontakt dann Lead');
+      expect(prepareForSpeech('Kontakt <- Lead')).toBe('Kontakt dann Lead');
     });
 
     it('replaces ↔ and <-> the same way', () => {
-      expect(prepareForSpeech('A ↔ B')).toBe('A, B');
-      expect(prepareForSpeech('A <-> B')).toBe('A, B');
+      expect(prepareForSpeech('A ↔ B')).toBe('A dann B');
+      expect(prepareForSpeech('A <-> B')).toBe('A dann B');
+    });
+
+    it('chains multiple arrows into readable sequence', () => {
+      expect(prepareForSpeech('Starter → Managed → Managed Pro')).toBe(
+        'Starter dann Managed dann Managed Pro',
+      );
+    });
+  });
+
+  describe('less-than + digit', () => {
+    it('strips leading < before a number so TTS reads the quantity', () => {
+      expect(prepareForSpeech('Response <4h')).toBe('Response 4h');
+    });
+
+    it('handles <N with spacing variants', () => {
+      expect(prepareForSpeech('latency < 100ms')).toBe('latency 100ms');
+    });
+
+    it('leaves < untouched when NOT followed by a digit', () => {
+      // "<tag>" gets stripped by the HTML-tag rule (not the less-than rule)
+      expect(prepareForSpeech('use <tag> carefully')).toBe('use carefully');
+    });
+  });
+
+  describe('German "Die" pronunciation guard', () => {
+    it('rewrites sentence-initial Die to Dee when DE markers present', () => {
+      expect(prepareForSpeech('Die Timeline zeigt alles. Wichtig ist das.')).toBe(
+        'Dee Timeline zeigt alles. Wichtig ist das.',
+      );
+    });
+
+    it('rewrites Die after . in a DE paragraph', () => {
+      expect(prepareForSpeech('Das ist so. Die nächste Phase kommt.')).toBe(
+        'Das ist so. Dee nächste Phase kommt.',
+      );
+    });
+
+    it('leaves English "Die" untouched (no German markers)', () => {
+      expect(prepareForSpeech('Die Hard is a classic movie.')).toBe(
+        'Die Hard is a classic movie.',
+      );
+    });
+
+    it('does not mutate mid-sentence lowercase die', () => {
+      expect(prepareForSpeech('Ich mag die Timeline.')).toBe('Ich mag die Timeline.');
+    });
+
+    it('fires when text has umlauts even without DE stopwords', () => {
+      expect(prepareForSpeech('Die Prüfung läuft.')).toBe('Dee Prüfung läuft.');
+    });
+  });
+
+  describe('slash between word-tokens', () => {
+    it('converts letter/letter to ", " (list separator)', () => {
+      expect(prepareForSpeech('Wachstum/SLA nötig')).toBe('Wachstum, SLA nötig');
+    });
+
+    it('converts multi-letter/multi-letter with spaces', () => {
+      expect(prepareForSpeech('EU / US Region')).toBe('EU, US Region');
+    });
+
+    it('leaves date patterns alone (digit/digit)', () => {
+      expect(prepareForSpeech('Termin am 04/21 um 14:00')).toBe('Termin am 04/21 um 14:00');
+    });
+
+    it('leaves fractions alone (digit/digit)', () => {
+      expect(prepareForSpeech('1/2 der Kunden')).toBe('1/2 der Kunden');
+    });
+
+    it('combines with less-than stripping', () => {
+      expect(prepareForSpeech('Multi-Region/<4h Response')).toBe('Multi-Region, 4h Response');
     });
   });
 });
