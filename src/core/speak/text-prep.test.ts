@@ -187,27 +187,50 @@ describe('prepareForSpeech', () => {
   });
 
   describe('arrow symbols', () => {
-    it('replaces Unicode arrow → with " dann " for natural sequence prosody', () => {
-      expect(prepareForSpeech('Lead → Kontakt')).toBe('Lead dann Kontakt');
+    // EN-neutral default: comma. Applies to neutral/unmarked text and
+    // to explicitly English content. Prevents the Voxtral EN voice from
+    // reading a German "dann" as /dæn/ (the name "Dan").
+    it('uses ", " for neutral/EN text (Unicode →)', () => {
+      expect(prepareForSpeech('Lead → Contact')).toBe('Lead, Contact');
     });
 
-    it('replaces ASCII arrow -> the same way', () => {
-      expect(prepareForSpeech('Lead -> Kontakt')).toBe('Lead dann Kontakt');
+    it('uses ", " for neutral/EN text (ASCII ->)', () => {
+      expect(prepareForSpeech('Lead -> Contact')).toBe('Lead, Contact');
     });
 
-    it('replaces Unicode ← and ASCII <- with "dann"', () => {
-      expect(prepareForSpeech('Kontakt ← Lead')).toBe('Kontakt dann Lead');
-      expect(prepareForSpeech('Kontakt <- Lead')).toBe('Kontakt dann Lead');
+    it('uses ", " for ← and <- in EN text', () => {
+      expect(prepareForSpeech('Contact ← Lead')).toBe('Contact, Lead');
+      expect(prepareForSpeech('Contact <- Lead')).toBe('Contact, Lead');
     });
 
-    it('replaces ↔ and <-> the same way', () => {
-      expect(prepareForSpeech('A ↔ B')).toBe('A dann B');
-      expect(prepareForSpeech('A <-> B')).toBe('A dann B');
+    it('uses ", " for ↔ and <-> in EN text', () => {
+      expect(prepareForSpeech('A ↔ B')).toBe('A, B');
+      expect(prepareForSpeech('A <-> B')).toBe('A, B');
     });
 
-    it('chains multiple arrows into readable sequence', () => {
-      expect(prepareForSpeech('Starter → Managed → Managed Pro')).toBe(
-        'Starter dann Managed dann Managed Pro',
+    it('uses ", " for EN arrow chain — "dann" would sound like "Dan"', () => {
+      expect(prepareForSpeech('Starter -> Managed -> Pro: pick one.')).toBe(
+        'Starter, Managed, Pro: pick one.',
+      );
+    });
+
+    // DE-detected path: " dann " is a real connector the EN voice renders
+    // as /daːn/ in German context. Triggered by umlauts or DE stopwords.
+    it('uses " dann " when DE markers present (umlaut)', () => {
+      expect(prepareForSpeech('Für die Prüfung: Lead → Kontakt')).toBe(
+        'Für die Prüfung: Lead dann Kontakt',
+      );
+    });
+
+    it('uses " dann " for chains in DE context', () => {
+      expect(prepareForSpeech('Das ist nicht leicht: Starter → Managed → Pro')).toBe(
+        'Das ist nicht leicht: Starter dann Managed dann Pro',
+      );
+    });
+
+    it('uses " dann " for ASCII arrows in DE context', () => {
+      expect(prepareForSpeech('Nach dem Build ist es bereit: A -> B')).toBe(
+        'Nach dem Build ist es bereit: A dann B',
       );
     });
   });
