@@ -63,11 +63,26 @@
 		return '⬡';
 	}
 
+	function mimeFor(type: string): string {
+		if (type === 'html') return 'text/html';
+		if (type === 'svg') return 'image/svg+xml';
+		if (type === 'markdown') return 'text/markdown';
+		return 'text/plain'; // mermaid + unknown
+	}
+
+	function extensionFor(type: string): string {
+		if (type === 'html') return 'html';
+		if (type === 'svg') return 'svg';
+		if (type === 'markdown') return 'md';
+		if (type === 'mermaid') return 'mmd';
+		return 'txt';
+	}
+
 	function exportArtifact(a: Artifact) {
-		const blob = new Blob([a.content], { type: a.type === 'html' ? 'text/html' : 'text/plain' });
+		const blob = new Blob([a.content], { type: mimeFor(a.type) });
 		const link = document.createElement('a');
 		link.href = URL.createObjectURL(blob);
-		link.download = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${a.type === 'html' ? 'html' : a.type === 'svg' ? 'svg' : 'txt'}`;
+		link.download = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${extensionFor(a.type)}`;
 		link.click();
 		URL.revokeObjectURL(link.href);
 	}
