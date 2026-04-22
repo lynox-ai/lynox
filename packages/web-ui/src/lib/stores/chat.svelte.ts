@@ -310,6 +310,39 @@ function emitCompletedTextBlock(content: string, key: string): void {
 let sessionModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
+// Hosting tier of this instance. `null` = not yet probed; any non-null
+// string = probe completed. Values mirror LYNOX_MANAGED_MODE: 'managed',
+// 'managed_pro', 'eu' = instance-supplied LLM; 'starter', 'hosted', '' =
+// customer-supplied LLM (BYOK / self-hosted).
+let managedTier = $state<string | null>(null);
+let managedProbePromise: Promise<void> | null = null;
+
+function probeManagedTier(): Promise<void> {
+	if (managedProbePromise) return managedProbePromise;
+	managedProbePromise = (async () => {
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/status`);
+			if (res.ok) {
+				const data = (await res.json()) as { managed?: string | null };
+				managedTier = typeof data.managed === 'string' ? data.managed : '';
+			} else {
+				managedTier = '';
+			}
+		} catch {
+			managedTier = '';
+		}
+	})();
+	return managedProbePromise;
+}
+
+/** True iff the instance supplies the LLM credentials (managed tiers).
+ *  Unknown / not-yet-probed also returns true so error copy defaults to
+ *  the neutral branch (conservative: avoids showing BYOK hints to a
+ *  managed user during the probe race — see feedback_managed_ui_race_default_null). */
+function isInstanceSuppliedLlm(): boolean {
+	if (managedTier === null) return true;
+	return managedTier === 'managed' || managedTier === 'managed_pro' || managedTier === 'eu';
+}
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
@@ -348,6 +381,10 @@ if (typeof window !== 'undefined') {
 
 async function ensureSession(): Promise<string> {
 	if (sessionId) return sessionId;
+	// Fire the hosting-tier probe alongside session creation — by the time
+	// any LLM error surfaces, the tier is known and error copy branches
+	// correctly.
+	void probeManagedTier();
 	const res = await fetch(`${getApiBase()}/sessions`, { method: 'POST' });
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
@@ -406,7 +443,7 @@ function mapApiError(status: number, detail: string): string {
 		return t('chat.error_auth');
 	}
 	if (lower.includes('insufficient_quota') || lower.includes('billing') || lower.includes('credit'))
-		return t('chat.error_insufficient_quota');
+		return isInstanceSuppliedLlm() ? t('chat.error_llm_unavailable') : t('chat.error_insufficient_quota');
 	if (lower.includes('content_policy') || lower.includes('content policy') || lower.includes('safety'))
 		return t('chat.error_content_policy');
 	if (lower.includes('model_not_found') || lower.includes('model not found') || lower.includes('not available'))
