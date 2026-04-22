@@ -27,14 +27,14 @@ export interface ModelProfile {
 }
 
 export const MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'claude-opus-4-6',
+  'opus':   'claude-opus-4-7',
   'sonnet': 'claude-sonnet-4-6',
   'haiku':  'claude-haiku-4-5-20251001',
 };
 
 /** Vertex AI Claude model identifiers (Google Cloud). */
 export const VERTEX_MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'claude-opus-4-6',
+  'opus':   'claude-opus-4-7',
   'sonnet': 'claude-sonnet-4-6',
   'haiku':  'claude-haiku-4-5',
 };
@@ -69,6 +69,7 @@ export function normalizeModelId(model: string): string {
 export const CHARS_PER_TOKEN = 3.5;
 
 const _CONTEXT_WINDOW: Record<string, number> = {
+  'claude-opus-4-7':         1_000_000,
   'claude-opus-4-6':         1_000_000,
   'claude-sonnet-4-6':         200_000,
   'claude-haiku-4-5-20251001': 200_000,
@@ -79,6 +80,7 @@ const _CONTEXT_WINDOW: Record<string, number> = {
 };
 
 const _DEFAULT_MAX_TOKENS: Record<string, number> = {
+  'claude-opus-4-7':         32_000,
   'claude-opus-4-6':         32_000,
   'claude-sonnet-4-6':       16_000,
   'claude-haiku-4-5-20251001': 8_192,
@@ -89,6 +91,7 @@ const _DEFAULT_MAX_TOKENS: Record<string, number> = {
 };
 
 const _MAX_CONTINUATIONS: Record<string, number> = {
+  'claude-opus-4-7':           20,
   'claude-opus-4-6':           20,
   'claude-sonnet-4-6':         10,
   'claude-haiku-4-5-20251001':  5,
@@ -127,7 +130,7 @@ export type ThinkingMode =
 
 export type ThinkingHint = ThinkingMode['type'];
 
-export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 // === Step Hints (LLM-driven per-step configuration) ===
 
