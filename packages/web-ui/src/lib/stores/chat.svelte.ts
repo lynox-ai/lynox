@@ -217,7 +217,17 @@ function loadPersistedChat(): { messages: ChatMessage[]; sessionId: string | nul
 
 /** Read messages for a specific thread; empty array if absent. */
 function loadPersistedThread(threadId: string): ChatMessage[] {
-	return readPersistedRoot().threads[threadId] ?? [];
+	return dropEmptyUserMessages(readPersistedRoot().threads[threadId] ?? []);
+}
+
+/**
+ * Drop `role: 'user'` messages whose content is empty/whitespace. These are
+ * agent-synthesized tool_result replies (e.g. the user's answer to an
+ * ask_user prompt) — they survive server persistence as blank user rows and
+ * would otherwise render as empty user bubbles after a thread switch.
+ */
+function dropEmptyUserMessages(list: ChatMessage[]): ChatMessage[] {
+	return list.filter(m => m.role !== 'user' || m.content.trim().length > 0);
 }
 
 /**
@@ -1396,11 +1406,13 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}
 		if (msgRes.ok) {
 			const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
-			const serverMessages: ChatMessage[] = msgData.messages.map((m) => ({
-				role: m.role as 'user' | 'assistant',
-				content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
-				toolCalls: extractToolCalls(m.content),
-			}));
+			const serverMessages: ChatMessage[] = dropEmptyUserMessages(
+				msgData.messages.map((m) => ({
+					role: m.role as 'user' | 'assistant',
+					content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
+					toolCalls: extractToolCalls(m.content),
+				})),
+			);
 			// Server is authoritative once it returns, BUT: a mid-persist
 			// window can return fewer messages than the local snapshot
 			// (classic case: user sent a turn, navigated to /app/artifacts
