@@ -313,7 +313,7 @@ let contextBudget = $state<ContextBudget | null>(null);
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
-let retryStatus = $state<{ attempt: number; maxAttempts: number } | null>(null);
+let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry' | 'busy' } | null>(null);
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
 // Offline detection + auto-retry on reconnect
@@ -494,7 +494,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 
 	// Provider error (502/503) — retry once after 2s (Vertex AI cold start)
 	if ((res.status === 502 || res.status === 503) && !retried) {
-		retryStatus = { attempt: 1, maxAttempts: 1 };
+		retryStatus = { attempt: 1, maxAttempts: 1, reason: 'retry' };
 		await new Promise(r => setTimeout(r, 2000));
 		retryStatus = null;
 		retried = true;
@@ -503,6 +503,30 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(payload)
 		});
+	}
+
+	// Session still running a previous turn (common on mobile PWA: iOS Safari
+	// pauses JS when backgrounded → SSE drops → client thinks idle → user resends
+	// → server says 409). Show the message as queued, not failed, and poll until
+	// the previous run completes.
+	if (res.status === 409) {
+		if (messages[userMsgIdx]) {
+			messages[userMsgIdx]!.queued = true;
+			messages[userMsgIdx]!.failed = false;
+		}
+		const POLL_MS = 3000;
+		const MAX_POLLS = 120; // 6 min — long enough to cover heavy research runs
+		for (let attempt = 1; attempt <= MAX_POLLS && res.status === 409; attempt++) {
+			retryStatus = { attempt, maxAttempts: MAX_POLLS, reason: 'busy' };
+			await new Promise(r => setTimeout(r, POLL_MS));
+			res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+		}
+		retryStatus = null;
+		if (messages[userMsgIdx]) messages[userMsgIdx]!.queued = false;
 	}
 
 	if (!res.ok || !res.body) {
