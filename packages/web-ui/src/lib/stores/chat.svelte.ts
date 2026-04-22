@@ -1395,12 +1395,25 @@ export async function resumeThread(threadId: string): Promise<void> {
 			return;
 		}
 		if (msgRes.ok) {
-			const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
-			const serverMessages: ChatMessage[] = msgData.messages.map((m) => ({
-				role: m.role as 'user' | 'assistant',
-				content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
-				toolCalls: extractToolCalls(m.content),
-			}));
+			// Server returns RenderedMessage[] — already shaped for the UI
+			// (tool_result carriers merged into preceding tool_use, safety
+			// wrappers stripped, blocks[] interleaved). Map 1:1.
+			interface ServerRenderedMessage {
+				role: string;
+				content: string;
+				blocks?: ContentBlock[];
+				toolCalls?: ToolCallInfo[];
+			}
+			const msgData = (await msgRes.json()) as { messages: ServerRenderedMessage[] };
+			const serverMessages: ChatMessage[] = msgData.messages.map((m) => {
+				const cm: ChatMessage = {
+					role: m.role === 'assistant' ? 'assistant' : 'user',
+					content: m.content ?? '',
+				};
+				if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
+				if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
+				return cm;
+			});
 			// Server is authoritative once it returns, BUT: a mid-persist
 			// window can return fewer messages than the local snapshot
 			// (classic case: user sent a turn, navigated to /app/artifacts
@@ -1427,22 +1440,3 @@ export async function resumeThread(threadId: string): Promise<void> {
 	}
 }
 
-function extractContentText(content: unknown): string {
-	if (typeof content === 'string') return content;
-	if (!Array.isArray(content)) return '';
-	return (content as Array<Record<string, unknown>>)
-		.filter((b) => b['type'] === 'text')
-		.map((b) => String(b['text'] ?? ''))
-		.join('');
-}
-
-function extractToolCalls(content: unknown): ToolCallInfo[] {
-	if (!Array.isArray(content)) return [];
-	return (content as Array<Record<string, unknown>>)
-		.filter((b) => b['type'] === 'tool_use')
-		.map((b) => ({
-			name: String(b['name'] ?? ''),
-			input: b['input'],
-			status: 'done' as const,
-		}));
-}
