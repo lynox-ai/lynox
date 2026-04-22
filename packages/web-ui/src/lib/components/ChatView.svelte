@@ -1858,6 +1858,29 @@
 		</div>
 	{/if}
 
+	<!-- Context-usage banner (only renders at ≥60 %, silent below) -->
+	{#if ctxBudget && ctxBudget.usagePercent >= 60}
+		{@const pct = ctxBudget.usagePercent}
+		{@const critical = pct >= 75}
+		<div
+			class="border-t {critical ? 'border-danger/30 bg-danger/10 text-danger' : 'border-warning/30 bg-warning/10 text-warning'} px-4 py-1.5 text-xs"
+			role="status"
+			aria-live="polite"
+		>
+			<div class="max-w-3xl mx-auto flex items-center gap-2">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3l-6.93-12a2 2 0 00-3.48 0l-6.93 12a2 2 0 001.74 3z" />
+				</svg>
+				<span class="font-mono tabular-nums">{t('status.context')}: {pct}%</span>
+				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">·</span>
+				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">{formatK(ctxBudget.totalTokens)} / {formatK(ctxBudget.maxTokens)} {t('chat.context_tokens')}</span>
+				{#if critical}
+					<span class="opacity-80 ml-auto">— {t('chat.context_auto_compact_imminent')}</span>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
 	<!-- Input -->
 	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
 		<!-- Pending files -->
