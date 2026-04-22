@@ -297,6 +297,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_rate_limit': { de: 'Zu viele Anfragen. Warte kurz und versuche es dann nochmal.', en: 'Too many requests. Wait a moment and try again.' },
 	'chat.error_overloaded': { de: 'Der KI-Dienst ist gerade überlastet. Versuche es in ein paar Minuten nochmal.', en: 'The AI service is currently overloaded. Try again in a few minutes.' },
 	'chat.error_insufficient_quota': { de: 'Dein API-Guthaben ist aufgebraucht. [Guthaben aufladen](https://console.anthropic.com/settings/billing)', en: 'Your API credits are exhausted. [Top up credits](https://console.anthropic.com/settings/billing)' },
+	'chat.error_llm_unavailable': { de: 'Der Sprachdienst ist gerade nicht erreichbar. Bitte in wenigen Minuten erneut versuchen.', en: 'Language service is temporarily unavailable. Please try again in a few minutes.' },
 	'chat.error_invalid_request': { de: 'Ungültige Anfrage. Die Nachricht konnte nicht verarbeitet werden.', en: 'Invalid request. The message could not be processed.' },
 	'chat.error_content_policy': { de: 'Die Anfrage wurde aufgrund der Inhaltsrichtlinie abgelehnt. Bitte formuliere deine Nachricht um.', en: 'The request was rejected due to content policy. Please rephrase your message.' },
 	'chat.error_model_unavailable': { de: 'Das gewählte KI-Modell ist nicht verfügbar. Prüfe die [Einstellungen](/app/settings).', en: 'The selected AI model is not available. Check your [settings](/app/settings).' },
