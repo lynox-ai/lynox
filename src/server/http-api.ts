@@ -20,6 +20,7 @@ import { loadConfig } from '../core/config.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
+import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -1462,12 +1463,10 @@ export class LynoxHTTPApi {
       const fromSeq = Math.max(parseInt(url.searchParams.get('fromSeq') ?? '0', 10) || 0, 0);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '10000', 10) || 10000, 1), 50000);
       const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
-      const messages = records.map(r => ({
-        seq: r.seq,
-        role: r.role,
-        content: JSON.parse(r.content_json) as unknown,
-        created_at: r.created_at,
-      }));
+      // Apply render projection: merge tool-result carriers into preceding
+      // tool-use blocks, strip safety wrappers for display, flatten into the
+      // UI-ready shape that mirrors the client's ChatMessage.
+      const messages = projectMessages(records);
       jsonResponse(res, 200, { messages });
     }));
 
