@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.3.2 — 2026-04-22
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.1 (delete this block before saving):
+
+Core:
+- fix: chat resume preserves user turns; artifact chip static; md export (#127)
+
+Pro:
+- feat(managed): per-instance update endpoint for canary rollouts (#79)
+- chore(release): v1.3.1 (#78)
+-->
 ## 1.3.1 — 2026-04-22
 
 ### Added
