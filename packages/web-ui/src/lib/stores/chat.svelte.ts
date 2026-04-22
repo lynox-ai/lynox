@@ -220,6 +220,21 @@ function loadPersistedThread(threadId: string): ChatMessage[] {
 	return readPersistedRoot().threads[threadId] ?? [];
 }
 
+/**
+ * Remove a thread's persisted snapshot. Called by threads.svelte.ts on
+ * archive/delete so a later resumeThread() for the same id can't
+ * falsely "resurrect" stale local messages after the server already
+ * forgot the thread.
+ */
+export function dropPersistedThread(threadId: string): void {
+	const root = readPersistedRoot();
+	if (threadId in root.threads) {
+		delete root.threads[threadId];
+		if (root.sessionId === threadId) root.sessionId = null;
+		writePersistedRoot(root);
+	}
+}
+
 let _persistTimer: ReturnType<typeof setTimeout> | null = null;
 
 function persistChat(): void {
@@ -1369,6 +1384,16 @@ export async function resumeThread(threadId: string): Promise<void> {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
+		// Server says "thread doesn't exist" — authoritative empty. Drop
+		// the local snapshot so a later resume can't false-resurrect it
+		// (happens when a thread was deleted elsewhere or on another device).
+		if (msgRes.status === 404) {
+			messages = [];
+			dropPersistedThread(threadId);
+			sessionId = null;
+			chatError = t('chat.error_connection');
+			return;
+		}
 		if (msgRes.ok) {
 			const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
 			const serverMessages: ChatMessage[] = msgData.messages.map((m) => ({
