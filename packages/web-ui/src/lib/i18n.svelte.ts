@@ -81,6 +81,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.artifacts.gallery': { de: 'Galerie', en: 'Gallery' },
 	'hub.artifacts.files': { de: 'Dateien', en: 'Files' },
 	'hub.activity.dashboard': { de: 'Dashboard', en: 'Dashboard' },
+	'hub.activity.usage': { de: 'Verbrauch', en: 'Usage' },
 	'hub.activity.history': { de: 'History', en: 'History' },
 	'hub.activity.tasks': { de: 'Tasks', en: 'Tasks' },
 	'hub.activity.total_runs': { de: 'Runs gesamt', en: 'Total runs' },
