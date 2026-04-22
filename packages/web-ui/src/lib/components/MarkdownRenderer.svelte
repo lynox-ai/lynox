@@ -110,7 +110,32 @@
 
 	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
+	/** Detect whether an artifact fence body is explicitly typed as markdown. */
+	function isMarkdownArtifact(code: string): boolean {
+		return /<!--\s*type:\s*markdown\s*-->/i.test(code);
+	}
+
+	/** Build a markdown-typed artifact: same chrome as the iframe variant
+	 *  (container + toolbar + label) but body is rendered markdown, not an
+	 *  iframe. Expanded by default because markdown carries no script risk
+	 *  and hiding prose behind a "Click to open" toggle hurts readability. */
+	function buildMarkdownArtifact(code: string): string {
+		const { title, clean } = extractTitle(code);
+		const body = clean.replace(/<!--\s*type:\s*markdown\s*-->\s*/i, '').trim();
+		const displayTitle = title || 'Artifact';
+		const safeTitle = escapeHtml(displayTitle);
+		const rendered = DOMPurify.sanitize(marked.parse(body, { async: false }) as string);
+		return `<div class="artifact-container artifact-md">
+			<div class="artifact-toolbar">
+				<span class="artifact-label">Markdown</span>
+				<span class="artifact-md-title">${safeTitle}</span>
+			</div>
+			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
+		</div>`;
+	}
+
 	function buildArtifact(code: string): string {
+		if (isMarkdownArtifact(code)) return buildMarkdownArtifact(code);
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
 		const overflowFix = `<style>html,body{overflow-x:hidden!important;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
@@ -453,11 +478,20 @@
 				|| (lang === 'html' && (code.includes('&lt;!DOCTYPE') || code.includes('&lt;html')));
 			return isRich && !richCache.has(code);
 		});
-		// While streaming, keep artifacts as syntax-highlighted code (no iframe)
-		if (uncached.length === 0 || streaming) return;
+		// While streaming, keep iframe artifacts as syntax-highlighted code
+		// to avoid flash. Markdown artifacts render live — no iframe, no flash.
+		const workset = streaming
+			? uncached.filter(m => (m[1] ?? '') === 'artifact' && isMarkdownArtifact(decodeEntities(m[2] ?? '')))
+			: uncached;
+		if (workset.length === 0) return;
+
+		// Markdown artifacts render fast, without a debounce — the user
+		// expects them to appear live during streaming. Iframe artifacts
+		// keep the 400 ms debounce to coalesce late fence closings.
+		const delay = workset.every(m => (m[1] ?? '') === 'artifact' && isMarkdownArtifact(decodeEntities(m[2] ?? ''))) ? 0 : 400;
 
 		const timer = setTimeout(async () => {
-			for (const match of uncached) {
+			for (const match of workset) {
 				const lang = match[1] ?? 'text';
 				const raw = match[2] ?? '';
 				const code = decodeEntities(raw);
@@ -469,7 +503,7 @@
 			if (baseHtml === html) {
 				highlightedHtml = await processBlocks(html, matches);
 			}
-		}, 400);
+		}, delay);
 
 		return () => clearTimeout(timer);
 	});
@@ -699,6 +733,36 @@
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 		margin-right: auto;
+	}
+
+	/* Markdown artifacts: same container chrome as iframe artifacts but
+	   body is inline rendered markdown. Expanded by default — prose is
+	   meant to be read inline, not gated behind a toggle. */
+	div :global(.artifact-md) {
+		background: var(--color-bg-subtle);
+	}
+	div :global(.artifact-md .artifact-toolbar) {
+		border-bottom: 1px solid var(--color-border);
+	}
+	/* Reset the label's margin-right:auto inside .artifact-md so the
+	   "Markdown" badge sits next to the title on the left. */
+	div :global(.artifact-md .artifact-label) {
+		margin-right: 0;
+	}
+	div :global(.artifact-md-title) {
+		font-size: 0.75rem;
+		color: var(--color-text);
+		font-weight: 500;
+		margin-right: auto;
+	}
+	div :global(.artifact-md-body) {
+		padding: 0.75rem 1rem;
+	}
+	div :global(.artifact-md-body > :first-child) {
+		margin-top: 0;
+	}
+	div :global(.artifact-md-body > :last-child) {
+		margin-bottom: 0;
 	}
 
 	/* Small chip shown under inline markdown-type artifacts so the user
