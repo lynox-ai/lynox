@@ -230,6 +230,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.today': { de: 'heute', en: 'today' },
 	'status.runs': { de: 'Runs', en: 'runs' },
 	'status.context': { de: 'Kontext', en: 'Context' },
+	'chat.context_tokens': { de: 'Tokens', en: 'tokens' },
+	'chat.context_auto_compact_imminent': { de: 'Auto-Komprimierung steht an', en: 'auto-compaction imminent' },
 	'status.panel_title': { de: 'Systemstatus', en: 'System Status' },
 	'status.connected': { de: 'Verbunden', en: 'Connected' },
 	'status.disconnected': { de: 'Nicht verbunden', en: 'Disconnected' },
