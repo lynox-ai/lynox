@@ -74,4 +74,8 @@ export const LynoxUserConfigSchema = z.object({
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),
   transcription_provider:  z.enum(['mistral', 'whisper', 'auto']).optional(),
   tts_provider:            z.enum(['mistral', 'auto']).optional(),
+  // Mistral Voxtral voice slug (e.g. 'en_paul_neutral'). Free-form string so
+  // the catalog can grow without a schema bump. Validation against the live
+  // voices list happens at request time inside the TTS provider.
+  tts_voice:               z.string().min(1).max(64).optional(),
 }).passthrough(); // allow unknown keys for forward compat

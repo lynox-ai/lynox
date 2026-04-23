@@ -34,11 +34,13 @@
 		getPendingChangeset,
 		getChangesetLoading,
 		submitChangesetReview,
+		getSessionId,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
 		type ToolCallInfo,
 	} from '../stores/chat.svelte.js';
+	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
@@ -297,14 +299,28 @@
 				if (!tc) continue;
 				if (HIDDEN_TOOLS.has(tc.name)) continue;
 
-				// Special: artifact_save → render inline if not already in text
+				// Special: artifact_save → render inline if not already in text.
+				// All artifact types route through the ```artifact fence so they
+				// share container chrome (toolbar + label). MarkdownRenderer
+				// dispatches by detecting a `<!-- type: markdown -->` marker in
+				// the fence body: markdown-typed content renders as inline prose
+				// inside the container (no iframe — content is trusted prose);
+				// HTML/SVG/Mermaid wrap into a sandboxed iframe via buildArtifact.
 				if (tc.name === 'artifact_save') {
 					if (!hasInlineArtifact) {
 						const inp = tc.input as Record<string, unknown> | undefined;
 						const content = String(inp?.['content'] ?? '');
 						if (content) {
 							const title = String(inp?.['title'] ?? 'Artifact');
-							result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
+							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
+							if (artifactType === 'markdown') {
+								result.push({
+									type: 'text',
+									text: `\`\`\`artifact\n<!-- title: ${title} -->\n<!-- type: markdown -->\n${content}\n\`\`\``,
+								});
+							} else {
+								result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
+							}
 						}
 					}
 					continue;
@@ -1014,6 +1030,17 @@
 		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
 	);
 
+	// Per-session artifact shelf. Populated from the shared artifacts store,
+	// filtered to the current thread. Kick a load on mount and again when the
+	// session changes so the shelf is ready without needing a prior visit to
+	// /app/artifacts.
+	const currentSessionId = $derived(getSessionId());
+	const sessionArtifacts = $derived(getSessionArtifacts(currentSessionId));
+	let artifactShelfExpanded = $state(false);
+	$effect(() => {
+		if (currentSessionId) void loadArtifacts();
+	});
+
 	// Auto-focus textarea and clear leftover input when chat is empty (new chat or initial load)
 	function focusInput() {
 		if (messages.length === 0 && !isStreaming && textareaEl) {
@@ -1389,6 +1416,41 @@
 									</svg>
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
 								</div>
+								{#if gBlock.toolName === 'spawn_agent' && msg.spawn}
+									{@const sp = msg.spawn}
+									{@const elapsed = Math.max(sp.elapsedS, Math.floor((Date.now() - sp.startedAt) / 1000))}
+									<div class="ml-3 mt-1 mb-1 text-[11px] font-mono text-text-subtle/80 border-l-2 border-warning/30 pl-3 py-1">
+										<div class="flex items-center gap-2 text-text-subtle">
+											<span>{elapsed}s</span>
+											{#if sp.running.length > 0}
+												<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
+												<span>{sp.running.length} aktiv</span>
+											{:else}
+												<span>fertig</span>
+											{/if}
+											{#if elapsed >= 120 && sp.running.length > 0}
+												<span class="text-warning">ungewöhnlich lang</span>
+											{/if}
+										</div>
+										{#each sp.running as subName}
+											<div class="flex items-center gap-2 mt-0.5">
+												<span class="text-text-subtle/60">-&gt;</span>
+												<span class="text-text">{subName}</span>
+												{#if sp.lastToolBySub[subName]}
+													<span class="text-text-subtle/60">·</span>
+													<span class="text-text-subtle/70">{sp.lastToolBySub[subName]}</span>
+												{/if}
+											</div>
+										{/each}
+										{#each sp.done as d}
+											<div class="flex items-center gap-2 mt-0.5">
+												<span class={d.ok ? 'text-success' : 'text-danger'}>{d.ok ? '✓' : '✗'}</span>
+												<span class="text-text-subtle/80">{d.name}</span>
+												<span class="text-text-subtle/50">{d.elapsedS}s</span>
+											</div>
+										{/each}
+									</div>
+								{/if}
 							{:else if gBlock.type === 'text' && gBlock.text}
 								{@const hasArtifact = gBlock.text.includes('```html') && (gBlock.text.includes('<!DOCTYPE') || gBlock.text.includes('<html'))}
 								<div class="relative group/copy">
@@ -1801,6 +1863,62 @@
 						<button onclick={handleSecretSave} disabled={!secretValue.trim()} class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed">{t('chat.secret_save')}</button>
 						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
 					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Per-session artifact shelf — silent unless artifacts exist in this thread -->
+	{#if sessionArtifacts.length > 0}
+		<div class="border-t border-border bg-bg-subtle px-4 py-1.5 text-xs">
+			<div class="max-w-3xl mx-auto">
+				<button
+					type="button"
+					onclick={() => { artifactShelfExpanded = !artifactShelfExpanded; }}
+					class="flex items-center gap-2 text-text-subtle hover:text-text transition-colors w-full text-left"
+					aria-expanded={artifactShelfExpanded}
+				>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 transition-transform {artifactShelfExpanded ? 'rotate-90' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+					</svg>
+					<span class="font-mono tabular-nums">{sessionArtifacts.length} · {t('artifacts.title')}</span>
+				</button>
+				{#if artifactShelfExpanded}
+					<div class="mt-2 flex flex-wrap gap-1.5 pb-1">
+						{#each sessionArtifacts as a}
+							<a
+								href="/app/artifacts?focus={encodeURIComponent(a.id)}"
+								class="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg px-2.5 py-1 text-[11px] text-text-muted hover:text-text hover:border-accent/40 transition-all max-w-[20rem]"
+								title={a.title}
+							>
+								<span class="uppercase tracking-wider text-accent-text text-[9px] font-medium shrink-0">{a.type}</span>
+								<span class="truncate">{a.title}</span>
+							</a>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Context-usage banner (only renders at ≥60 %, silent below) -->
+	{#if ctxBudget && ctxBudget.usagePercent >= 60}
+		{@const pct = ctxBudget.usagePercent}
+		{@const critical = pct >= 75}
+		<div
+			class="border-t {critical ? 'border-danger/30 bg-danger/10 text-danger' : 'border-warning/30 bg-warning/10 text-warning'} px-4 py-1.5 text-xs"
+			role="status"
+			aria-live="polite"
+		>
+			<div class="max-w-3xl mx-auto flex items-center gap-2">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3l-6.93-12a2 2 0 00-3.48 0l-6.93 12a2 2 0 001.74 3z" />
+				</svg>
+				<span class="font-mono tabular-nums">{t('status.context')}: {pct}%</span>
+				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">·</span>
+				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">{formatK(ctxBudget.totalTokens)} / {formatK(ctxBudget.maxTokens)} {t('chat.context_tokens')}</span>
+				{#if critical}
+					<span class="opacity-80 ml-auto">— {t('chat.context_auto_compact_imminent')}</span>
 				{/if}
 			</div>
 		</div>

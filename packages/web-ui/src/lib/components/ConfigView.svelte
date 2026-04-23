@@ -3,6 +3,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
+	import UsageDashboard from './UsageDashboard.svelte';
 
 	interface Config {
 		provider?: string;
@@ -26,8 +27,50 @@
 		search_provider?: string;
 		update_check?: boolean;
 		managed?: string; // 'starter' (Hosted/BYOK) | 'managed' | 'managed_pro' | 'eu' (legacy) | undefined (self-hosted)
-		llm_mode?: 'standard' | 'eu-sovereign'; // managed-instance toggle: Anthropic Claude vs Mistral Large 3
+		llm_mode?: 'standard' | 'eu-sovereign'; // LLM routing toggle: Anthropic Claude vs Mistral Large 3
+		capabilities?: Capabilities;
+		transcription_provider?: 'mistral' | 'whisper' | 'auto';
+		tts_provider?: 'mistral' | 'auto';
+		tts_voice?: string;
 		[key: string]: unknown;
+	}
+
+	// Capability probe from GET /api/config — reflects what this instance *can*
+	// do right now, regardless of tier. Drives capability-based gating so a
+	// working feature (e.g. llm_mode eu-sovereign) stops being hidden by a
+	// tier check from users who have the prerequisite in env or vault.
+	interface Capabilities {
+		mistral_available?: boolean;
+	}
+
+	// /api/voice/info response (Compliance Phase 2). Populates the Settings
+	// voice pickers with live provider availability + the Mistral voice catalog.
+	interface VoiceInfo {
+		stt: {
+			available: boolean;
+			provider: string | null;
+			providers: Array<{ id: string; name: string; available: boolean }>;
+			config_value: 'mistral' | 'whisper' | 'auto' | null;
+			env_override: string | null;
+		};
+		tts: {
+			available: boolean;
+			provider: string | null;
+			providers: Array<{ id: string; name: string; available: boolean }>;
+			voices: Array<{ id: string; language?: string; description?: string }>;
+			config_value: 'mistral' | 'auto' | null;
+			config_voice: string | null;
+			env_override: string | null;
+		};
+	}
+	let voiceInfo = $state<VoiceInfo | null>(null);
+
+	async function loadVoiceInfo() {
+		try {
+			const res = await fetch(`${getApiBase()}/voice/info`);
+			if (!res.ok) return;
+			voiceInfo = (await res.json()) as VoiceInfo;
+		} catch { /* best-effort — picker falls back to placeholder */ }
 	}
 
 	// ── Config state ───────────────────────────────────────────────────────────
@@ -341,13 +384,13 @@
 	const isUpToDate = $derived(latestVersion && currentVersion && latestVersion === currentVersion);
 
 	// ── Tab state ──────────────────────────────────────────────────────────────
-	type Tab = 'ai' | 'provider' | 'budget' | 'system';
+	type Tab = 'ai' | 'provider' | 'compliance' | 'budget' | 'system';
 
 	function getInitialTab(): Tab {
 		if (typeof window === 'undefined') return 'ai';
 		const params = new URLSearchParams(window.location.search);
 		const tab = params.get('tab');
-		if (tab === 'provider' || tab === 'budget' || tab === 'system') return tab;
+		if (tab === 'provider' || tab === 'compliance' || tab === 'budget' || tab === 'system') return tab;
 		return 'ai';
 	}
 
@@ -373,6 +416,11 @@
 	const isNonDirect = $derived(config.provider === 'custom' || config.provider === 'vertex' || config.provider === 'openai');
 	const showEffortThinking = $derived(isAnthropicDirect || managed);
 
+	// Capability-based gating (see prd/settings-compliance-overhaul.md §3).
+	// `mistralAvailable` is the shown/hidden signal for the llm_mode toggle —
+	// anyone with a Mistral key (managed-provided OR BYOK) can switch modes.
+	const mistralAvailable = $derived(config.capabilities?.mistral_available === true);
+
 	// Update default key name when provider changes
 	$effect(() => {
 		const defaultKey = providerKeyDefaults[config.provider ?? 'anthropic'] ?? 'ANTHROPIC_API_KEY';
@@ -385,7 +433,11 @@
 		[
 			{ id: 'ai' as Tab, label: t('config.tab_ai') },
 			{ id: 'provider' as Tab, label: t('config.tab_provider') },
-			...(!isManagedEu ? [{ id: 'budget' as Tab, label: t('config.tab_budget') }] : []),
+			{ id: 'compliance' as Tab, label: t('config.tab_compliance') },
+			// Budget & Usage is always visible — the dashboard inside renders
+			// regardless of tier, limits-editing inside the tab still gates on
+			// !managed so Managed customers don't see inactive inputs.
+			{ id: 'budget' as Tab, label: t('config.tab_budget') },
 			{ id: 'system' as Tab, label: t('config.tab_system') },
 		]
 	);
@@ -398,6 +450,7 @@
 		loadBugsinkStatus();
 		loadCurrentVersion();
 		loadSecrets();
+		loadVoiceInfo();
 	});
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
@@ -499,43 +552,7 @@
 					<div class={cardClass}>
 						<p class="text-sm font-medium">{t('config.provider')}</p>
 						<p class="text-xs text-text-muted mt-1">{t('config.managed_eu_provider_info')}</p>
-					</div>
-
-					<div class={cardClass}>
-						<p class="text-sm font-medium mb-1">{t('config.llm_mode')}</p>
-						<p class="text-xs text-text-muted mb-3">{t('config.llm_mode_desc')}</p>
-
-						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors mb-2">
-							<input
-								type="radio"
-								name="llm-mode"
-								value="standard"
-								checked={(config.llm_mode ?? 'standard') === 'standard'}
-								onchange={() => { config.llm_mode = 'standard'; }}
-								class="mt-1 accent-accent shrink-0"
-							/>
-							<div class="flex-1 min-w-0">
-								<p class="text-sm font-medium">{t('config.llm_mode_standard')}</p>
-								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_standard_desc')}</p>
-							</div>
-						</label>
-
-						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors">
-							<input
-								type="radio"
-								name="llm-mode"
-								value="eu-sovereign"
-								checked={config.llm_mode === 'eu-sovereign'}
-								onchange={() => { config.llm_mode = 'eu-sovereign'; }}
-								class="mt-1 accent-accent shrink-0"
-							/>
-							<div class="flex-1 min-w-0">
-								<p class="text-sm font-medium">{t('config.llm_mode_eu_sovereign')}</p>
-								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_eu_sovereign_desc')}</p>
-							</div>
-						</label>
-
-						<p class="text-xs text-text-muted mt-3 italic">{t('config.llm_mode_restart_required')}</p>
+						<p class="text-xs text-text-muted mt-2">→ <button type="button" onclick={() => setTab('compliance')} class="text-accent-text hover:underline">{t('config.see_compliance_for_llm_mode')}</button></p>
 					</div>
 				{:else}
 					<div class={cardClass}>
@@ -647,30 +664,214 @@
 			</div>
 
 		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		<!-- TAB: Compliance & Privacy                                        -->
+		<!-- Phase 0 skeleton — see pro/docs/internal/prd/settings-compliance-overhaul.md -->
+		<!-- Today's gating rules preserved. Capability-based gating = Phase 1. -->
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
+		{:else if activeTab === 'compliance'}
+			<div class="space-y-4">
+				<p class="text-xs text-text-muted">{t('config.compliance_intro')}</p>
+
+				<!-- ── Data Residency Panel (read-only, always visible) ───────── -->
+				<p class={sectionClass}>{t('config.residency_title')}</p>
+				<div class={cardClass}>
+					<dl class="space-y-2 text-sm">
+						<div class="flex items-start justify-between gap-4">
+							<dt class="text-text-muted shrink-0">{t('config.residency_llm')}</dt>
+							<dd class="text-right">
+								{#if mistralAvailable && config.llm_mode === 'eu-sovereign'}
+									Mistral — Paris (EU)
+								{:else if isManagedTier}
+									Anthropic — US (DPA + GDPR)
+								{:else if config.provider === 'anthropic' || !config.provider}
+									Anthropic — US (DPA + GDPR)
+								{:else if config.provider === 'vertex'}
+									Google Vertex — {config.gcp_region ?? '—'}
+								{:else if config.provider === 'openai'}
+									{config.api_base_url ?? 'custom endpoint'}
+								{:else}
+									{config.api_base_url ?? '—'}
+								{/if}
+							</dd>
+						</div>
+						<div class="flex items-start justify-between gap-4">
+							<dt class="text-text-muted shrink-0">{t('config.residency_voice_in')}</dt>
+							<dd class="text-right text-text-muted">{t('config.residency_voice_in_value')}</dd>
+						</div>
+						<div class="flex items-start justify-between gap-4">
+							<dt class="text-text-muted shrink-0">{t('config.residency_voice_out')}</dt>
+							<dd class="text-right text-text-muted">{t('config.residency_voice_out_value')}</dd>
+						</div>
+						<div class="flex items-start justify-between gap-4">
+							<dt class="text-text-muted shrink-0">{t('config.residency_storage')}</dt>
+							<dd class="text-right text-text-muted">
+								{#if isManagedTier}
+									Hetzner — Germany
+								{:else}
+									{t('config.residency_storage_local')}
+								{/if}
+							</dd>
+						</div>
+					</dl>
+				</div>
+
+				<!-- ── LLM Mode (moved from Provider tab) ─────────────────────── -->
+				<!-- Capability-gated: anyone with a Mistral key (managed or BYOK) can switch. -->
+				{#if mistralAvailable}
+					<p class={sectionClass}>{t('config.llm_mode')}</p>
+					<div class={cardClass}>
+						<p class="text-xs text-text-muted mb-3">{t('config.llm_mode_desc')}</p>
+
+						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors mb-2">
+							<input
+								type="radio"
+								name="llm-mode"
+								value="standard"
+								checked={(config.llm_mode ?? 'standard') === 'standard'}
+								onchange={() => { config.llm_mode = 'standard'; }}
+								class="mt-1 accent-accent shrink-0"
+							/>
+							<div class="flex-1 min-w-0">
+								<p class="text-sm font-medium">{t('config.llm_mode_standard')}</p>
+								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_standard_desc')}</p>
+							</div>
+						</label>
+
+						<label class="flex items-start gap-3 p-3 rounded-[var(--radius-md)] border border-border bg-bg cursor-pointer hover:border-accent transition-colors">
+							<input
+								type="radio"
+								name="llm-mode"
+								value="eu-sovereign"
+								checked={config.llm_mode === 'eu-sovereign'}
+								onchange={() => { config.llm_mode = 'eu-sovereign'; }}
+								class="mt-1 accent-accent shrink-0"
+							/>
+							<div class="flex-1 min-w-0">
+								<p class="text-sm font-medium">{t('config.llm_mode_eu_sovereign')}</p>
+								<p class="text-xs text-text-muted mt-0.5">{t('config.llm_mode_eu_sovereign_desc')}</p>
+							</div>
+						</label>
+
+						<p class="text-xs text-text-muted mt-3 italic">{t('config.llm_mode_restart_required')}</p>
+					</div>
+				{/if}
+
+				<!-- ── Voice (STT + TTS pickers, wired in Phase 2) ─────────────── -->
+				<p class={sectionClass}>{t('config.voice_title')}</p>
+
+				<!-- STT (speech-to-text) -->
+				<div class={cardClass}>
+					<label for="stt-provider" class="block text-sm font-medium mb-1">{t('config.voice_stt_label')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.voice_stt_privacy')}</p>
+					{#if voiceInfo?.stt.env_override}
+						<select id="stt-provider" disabled class="{inputClass} opacity-60 cursor-not-allowed">
+							<option>{voiceInfo.stt.provider ?? '—'}</option>
+						</select>
+						<p class="text-xs text-text-muted mt-2 italic">{t('config.voice_env_override_hint')} <code class="font-mono">{voiceInfo.stt.env_override}</code></p>
+					{:else}
+						<select id="stt-provider"
+							bind:value={config.transcription_provider}
+							class={inputClass}>
+							{#each voiceInfo?.stt.providers ?? [] as p}
+								<option value={p.id} disabled={!p.available}>
+									{p.name}{p.available ? '' : ' — ' + t('config.voice_unavailable')}
+								</option>
+							{/each}
+						</select>
+					{/if}
+				</div>
+
+				<!-- TTS (text-to-speech) -->
+				<div class={cardClass}>
+					<label for="tts-provider" class="block text-sm font-medium mb-1">{t('config.voice_tts_provider_label')}</label>
+					<p class="text-xs text-text-muted mb-2">{t('config.voice_tts_privacy')}</p>
+					{#if voiceInfo?.tts.env_override}
+						<select id="tts-provider" disabled class="{inputClass} opacity-60 cursor-not-allowed">
+							<option>{voiceInfo.tts.provider ?? '—'}</option>
+						</select>
+						<p class="text-xs text-text-muted mt-2 italic">{t('config.voice_env_override_hint')} <code class="font-mono">{voiceInfo.tts.env_override}</code></p>
+					{:else}
+						<select id="tts-provider"
+							bind:value={config.tts_provider}
+							class={inputClass}>
+							{#each voiceInfo?.tts.providers ?? [] as p}
+								<option value={p.id} disabled={!p.available}>
+									{p.name}{p.available ? '' : ' — ' + t('config.voice_unavailable')}
+								</option>
+							{/each}
+						</select>
+					{/if}
+
+					{#if voiceInfo && voiceInfo.tts.voices.length > 0}
+						<label for="tts-voice" class="block text-sm font-medium mt-4 mb-1">{t('config.voice_tts_voice_label')}</label>
+						<p class="text-xs text-text-muted mb-2">{t('config.voice_tts_voice_desc')}</p>
+						<select id="tts-voice"
+							bind:value={config.tts_voice}
+							class={inputClass}>
+							<option value="">{t('config.voice_tts_voice_default')}</option>
+							{#each voiceInfo.tts.voices as v}
+								<option value={v.id}>
+									{v.id}{v.description ? ` — ${v.description}` : ''}{v.language ? ` (${v.language})` : ''}
+								</option>
+							{/each}
+						</select>
+					{/if}
+				</div>
+
+				<!-- ── Error Reporting (Bugsink) — moved here from System in Phase 4. -->
+				<!-- On managed tiers Bugsink is always active per DPIA; on self-host -->
+				<!-- it's opt-in via LYNOX_BUGSINK_DSN. -->
+				<p class={sectionClass}>{t('config.error_reporting_title')}</p>
+				{#if managed}
+					<div class={cardClass}>
+						<p class="text-sm font-medium">{t('config.bugsink')}</p>
+						<p class="text-xs text-text-muted mt-1">{t('config.bugsink_managed_always_on')}</p>
+					</div>
+				{:else}
+					<div class="{cardClass} flex items-center justify-between">
+						<div>
+							<p class="text-sm font-medium">{t('config.bugsink')}</p>
+							<p class="text-xs text-text-muted mt-1">{t('config.bugsink_desc')}</p>
+						</div>
+						<button onclick={toggleBugsink} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {bugsinkEnabled ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {bugsinkEnabled ? 'translate-x-4' : ''}"></span></button>
+					</div>
+				{/if}
+			</div>
+
+		<!-- ═══════════════════════════════════════════════════════════════════ -->
 		<!-- TAB: Budget                                                       -->
 		<!-- ═══════════════════════════════════════════════════════════════════ -->
 		{:else if activeTab === 'budget'}
-			<div class="space-y-4">
-				<div class={cardClass}>
-					<label for="monthly-limit" class="block text-sm font-medium mb-1">{t('config.monthly_limit')}</label>
-					<p class="text-xs text-text-muted mb-2">{t('config.monthly_limit_desc')}</p>
-					<input id="monthly-limit" type="number" step="1" min="0" placeholder="—"
-						bind:value={config.max_monthly_cost_usd} class="{inputClass} font-mono" />
-				</div>
+			<div class="space-y-6">
+				<!-- Usage Dashboard (Phase 2, visible on all tiers) -->
+				<UsageDashboard />
 
+				<!-- Limits section — only meaningful where the user controls their
+				     own ceiling (Self-Host, Hosted/BYOK). On Managed the budget is
+				     tier-based and set by the control plane. -->
 				{#if !managed}
-					<div class={cardClass}>
-						<label for="daily-limit" class="block text-sm font-medium mb-1">{t('config.daily_limit')}</label>
-						<p class="text-xs text-text-muted mb-2">{t('config.daily_limit_desc')}</p>
-						<input id="daily-limit" type="number" step="0.5" min="0" placeholder="—"
-							bind:value={config.max_daily_cost_usd} class="{inputClass} font-mono" />
-					</div>
-
-					<div class={cardClass}>
-						<label for="session-limit" class="block text-sm font-medium mb-1">{t('config.session_limit')}</label>
-						<p class="text-xs text-text-muted mb-2">{t('config.session_limit_desc')}</p>
-						<input id="session-limit" type="number" step="0.5" min="0" placeholder="5.00"
-							bind:value={config.max_session_cost_usd} class="{inputClass} font-mono" />
+					<div>
+						<p class={sectionClass}>{t('usage.edit_limits_title')}</p>
+						<div class="space-y-4">
+							<div class={cardClass}>
+								<label for="monthly-limit" class="block text-sm font-medium mb-1">{t('config.monthly_limit')}</label>
+								<p class="text-xs text-text-muted mb-2">{t('config.monthly_limit_desc')}</p>
+								<input id="monthly-limit" type="number" step="1" min="0" placeholder="—"
+									bind:value={config.max_monthly_cost_usd} class="{inputClass} font-mono" />
+							</div>
+							<div class={cardClass}>
+								<label for="daily-limit" class="block text-sm font-medium mb-1">{t('config.daily_limit')}</label>
+								<p class="text-xs text-text-muted mb-2">{t('config.daily_limit_desc')}</p>
+								<input id="daily-limit" type="number" step="0.5" min="0" placeholder="—"
+									bind:value={config.max_daily_cost_usd} class="{inputClass} font-mono" />
+							</div>
+							<div class={cardClass}>
+								<label for="session-limit" class="block text-sm font-medium mb-1">{t('config.session_limit')}</label>
+								<p class="text-xs text-text-muted mb-2">{t('config.session_limit_desc')}</p>
+								<input id="session-limit" type="number" step="0.5" min="0" placeholder="5.00"
+									bind:value={config.max_session_cost_usd} class="{inputClass} font-mono" />
+							</div>
+						</div>
 					</div>
 				{/if}
 			</div>
@@ -755,16 +956,7 @@
 						{/if}
 					</div>
 
-					<!-- Privacy -->
-					<p class={sectionClass}>{t('config.privacy')}</p>
-
-					<div class="{cardClass} flex items-center justify-between">
-						<div>
-							<p class="text-sm font-medium">{t('config.bugsink')}</p>
-							<p class="text-xs text-text-muted mt-1">{t('config.bugsink_desc')}</p>
-						</div>
-						<button onclick={toggleBugsink} class="relative w-10 h-6 rounded-full transition-colors shrink-0 {bugsinkEnabled ? 'bg-accent' : 'bg-border'}" aria-label="Toggle"><span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {bugsinkEnabled ? 'translate-x-4' : ''}"></span></button>
-					</div>
+					<!-- Privacy (Bugsink) moved to Compliance tab in Phase 4. -->
 				{:else}
 					<p class={sectionClass}>{t('config.security')}</p>
 					<div class={cardClass}>

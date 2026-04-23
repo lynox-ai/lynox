@@ -257,8 +257,8 @@
 	<!-- Context Window -->
 	{#if getContextBudget()}
 		{@const pct = getContextBudget()?.usagePercent ?? 0}
-		{@const color = pct >= 80 ? 'bg-danger' : pct >= 50 ? 'bg-warning' : 'bg-accent'}
-		{@const textColor = pct >= 80 ? 'text-danger' : pct >= 50 ? 'text-warning' : 'text-text-subtle'}
+		{@const color = pct >= 75 ? 'bg-danger' : pct >= 60 ? 'bg-warning' : 'bg-accent'}
+		{@const textColor = pct >= 75 ? 'text-danger' : pct >= 60 ? 'text-warning' : 'text-text-subtle'}
 		<span class="text-border">|</span>
 		<div class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="{getContextBudget()?.totalTokens ?? 0} / {getContextBudget()?.maxTokens ?? 0} tokens{getSessionModel() ? ` · ${getSessionModel()}` : ''}">
 			<div class="w-16 h-1 rounded-full bg-border overflow-hidden">

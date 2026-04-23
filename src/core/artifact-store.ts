@@ -12,7 +12,7 @@ import { getLynoxDir } from './config.js';
 
 const SAFE_ID = /^[a-f0-9-]{8}$/;
 
-export type ArtifactType = 'html' | 'mermaid' | 'svg';
+export type ArtifactType = 'html' | 'mermaid' | 'svg' | 'markdown';
 
 export interface ArtifactMeta {
   id: string;

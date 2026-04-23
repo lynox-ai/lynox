@@ -1173,5 +1173,199 @@ describe('RunHistory', () => {
       h.close();
     });
   });
+
+  // === v28 — voice/LLM split (Usage Dashboard Phase 0) ===
+
+  describe('kind + units (v28)', () => {
+    it('defaults kind to null and units to 0 for legacy LLM rows', () => {
+      const h = createHistory();
+      const id = h.insertRun({ taskText: 'Chat', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6' });
+      const run = h.getRun(id);
+      expect(run!.kind).toBeNull();
+      expect(run!.units).toBe(0);
+      h.close();
+    });
+
+    it('stores kind=voice_tts with character count in units', () => {
+      const h = createHistory();
+      const id = h.insertRun({
+        taskText: 'Read this aloud.',
+        modelTier: 'voice',
+        modelId: 'voxtral-mini-tts-latest',
+        kind: 'voice_tts',
+        units: 16,
+      });
+      const run = h.getRun(id);
+      expect(run!.kind).toBe('voice_tts');
+      expect(run!.units).toBe(16);
+      expect(run!.model_id).toBe('voxtral-mini-tts-latest');
+      h.close();
+    });
+
+    it('stores kind=voice_stt with seconds placeholder in units', () => {
+      const h = createHistory();
+      const id = h.insertRun({
+        taskText: 'transcribed text',
+        modelTier: 'voice',
+        modelId: 'voxtral-mini-transcribe',
+        kind: 'voice_stt',
+        units: 0,
+      });
+      const run = h.getRun(id);
+      expect(run!.kind).toBe('voice_stt');
+      expect(run!.units).toBe(0);
+      h.close();
+    });
+
+    it('kind index exists so per-kind aggregation is fast', () => {
+      const h = createHistory();
+      const idxRows = (h as unknown as { db: import('better-sqlite3').Database }).db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='runs'`)
+        .all() as Array<{ name: string }>;
+      const names = idxRows.map(r => r.name);
+      expect(names).toContain('idx_runs_kind');
+      h.close();
+    });
+  });
+
+  // === Usage Dashboard Phase 1 — getUsageSummary ===
+
+  describe('getUsageSummary', () => {
+    // Insert a completed run with a caller-controlled created_at so we can
+    // test period windows deterministically without sleep()ing.
+    function insertAt(h: RunHistory, createdAt: string, params: Parameters<RunHistory['insertRun']>[0], done: Parameters<RunHistory['updateRun']>[1]) {
+      const id = h.insertRun(params);
+      h.updateRun(id, done);
+      (h as unknown as { db: import('better-sqlite3').Database }).db
+        .prepare('UPDATE runs SET created_at = ? WHERE id = ?')
+        .run(createdAt, id);
+      return id;
+    }
+
+    it('aggregates by_model, by_kind and used_cents within the window', () => {
+      const h = createHistory();
+      // Two LLM runs + one voice_tts run, all inside the window.
+      insertAt(h, '2026-04-10T12:00:00.000Z', {
+        taskText: 'A', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { tokensIn: 100, tokensOut: 50, costUsd: 0.10, status: 'completed' });
+      insertAt(h, '2026-04-11T12:00:00.000Z', {
+        taskText: 'B', modelTier: 'haiku', modelId: 'claude-haiku-4-5',
+      }, { tokensIn: 200, tokensOut: 30, costUsd: 0.02, status: 'completed' });
+      insertAt(h, '2026-04-12T12:00:00.000Z', {
+        taskText: 'Speak', modelTier: 'voice', modelId: 'voxtral-mini-tts-latest',
+        kind: 'voice_tts', units: 200,
+      }, { costUsd: 0.0032, status: 'completed' });
+
+      const s = h.getUsageSummary({
+        startIso: '2026-04-01T00:00:00.000Z',
+        endIso:   '2026-05-01T00:00:00.000Z',
+        source: 'calendar-month',
+        label: 'Apr 1 – Apr 30',
+      });
+
+      expect(s.used_cents).toBe(Math.round((0.10 + 0.02 + 0.0032) * 100));
+      expect(s.by_model.map(m => m.model_id).sort()).toEqual([
+        'claude-haiku-4-5', 'claude-sonnet-4-6', 'voxtral-mini-tts-latest',
+      ]);
+      const byKind = Object.fromEntries(s.by_kind.map(k => [k.kind, k]));
+      expect(byKind['llm']!.run_count).toBe(2);
+      expect(byKind['llm']!.unit_count).toBe(100 + 50 + 200 + 30);
+      expect(byKind['llm']!.unit_label).toBe('tokens');
+      expect(byKind['voice_tts']!.run_count).toBe(1);
+      expect(byKind['voice_tts']!.unit_count).toBe(200);
+      expect(byKind['voice_tts']!.unit_label).toBe('characters');
+      h.close();
+    });
+
+    it('legacy rows with kind=null count as llm', () => {
+      const h = createHistory();
+      insertAt(h, '2026-04-05T00:00:00.000Z', {
+        taskText: 'old', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { tokensIn: 10, tokensOut: 5, costUsd: 0.01, status: 'completed' });
+
+      const s = h.getUsageSummary({
+        startIso: '2026-04-01T00:00:00.000Z',
+        endIso:   '2026-05-01T00:00:00.000Z',
+        source: 'calendar-month',
+        label: 'Apr',
+      });
+
+      expect(s.by_kind.length).toBe(1);
+      expect(s.by_kind[0]!.kind).toBe('llm');
+      expect(s.by_kind[0]!.unit_count).toBe(15);
+      h.close();
+    });
+
+    it('window excludes rows outside [start, end)', () => {
+      const h = createHistory();
+      insertAt(h, '2026-03-31T23:59:59.000Z', {
+        taskText: 'pre',  modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { costUsd: 0.99, status: 'completed' });
+      insertAt(h, '2026-04-15T12:00:00.000Z', {
+        taskText: 'in',   modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { costUsd: 0.10, status: 'completed' });
+      insertAt(h, '2026-05-01T00:00:00.000Z', {
+        taskText: 'post', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { costUsd: 0.99, status: 'completed' });
+
+      const s = h.getUsageSummary({
+        startIso: '2026-04-01T00:00:00.000Z',
+        endIso:   '2026-05-01T00:00:00.000Z',
+        source: 'calendar-month',
+        label: 'Apr',
+      });
+
+      expect(s.used_cents).toBe(10);
+      h.close();
+    });
+
+    it('zero-fills daily entries so the UI sparkline has no gaps', () => {
+      const h = createHistory();
+      insertAt(h, '2026-04-10T12:00:00.000Z', {
+        taskText: 'x', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { costUsd: 0.05, status: 'completed' });
+
+      const s = h.getUsageSummary({
+        startIso: '2026-04-08T00:00:00.000Z',
+        endIso:   '2026-04-15T00:00:00.000Z',
+        source: 'rolling',
+        label: '7d',
+      });
+
+      expect(s.daily.length).toBe(7);
+      const apr10 = s.daily.find(d => d.date === '2026-04-10');
+      expect(apr10!.cost_cents).toBe(5);
+      const apr09 = s.daily.find(d => d.date === '2026-04-09');
+      expect(apr09!.cost_cents).toBe(0);
+      h.close();
+    });
+
+    it('skips running + failed rows from aggregates', () => {
+      const h = createHistory();
+      // completed — counts
+      insertAt(h, '2026-04-10T12:00:00.000Z', {
+        taskText: 'ok', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { costUsd: 0.10, status: 'completed' });
+      // running — excluded
+      insertAt(h, '2026-04-11T12:00:00.000Z', {
+        taskText: 'live', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { costUsd: 0.99 });
+      // failed — excluded
+      insertAt(h, '2026-04-12T12:00:00.000Z', {
+        taskText: 'bad', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { costUsd: 0.99, status: 'failed' });
+
+      const s = h.getUsageSummary({
+        startIso: '2026-04-01T00:00:00.000Z',
+        endIso:   '2026-05-01T00:00:00.000Z',
+        source: 'calendar-month',
+        label: 'Apr',
+      });
+
+      expect(s.used_cents).toBe(10);
+      expect(s.by_kind.reduce((n, k) => n + k.run_count, 0)).toBe(1);
+      h.close();
+    });
+  });
 });
 

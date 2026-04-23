@@ -20,6 +20,7 @@ import { loadConfig } from '../core/config.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
+import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -95,6 +96,8 @@ const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in S
 const SPEAK_MAX_TEXT_CHARS = 10_000;
 /** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
 const SPEAK_USD_PER_CHAR = 0.016 / 1000;
+/** Usage Dashboard summary cache: 30 s per (period, windowStart). Long enough to dedupe tab re-opens, short enough to feel live. */
+const USAGE_SUMMARY_TTL_MS = 30_000;
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
@@ -199,6 +202,11 @@ export class LynoxHTTPApi {
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
   private healthCache: { data: Record<string, unknown>; expiresAt: number } | null = null;
+  // 30 s TTL per (period, windowStart) key. Usage Dashboard typically re-opens
+  // the tab with the same window multiple times in quick succession — this
+  // keeps repeated SQLite scans off the hot path without stale-data risk, since
+  // the period window itself rolls forward and evicts old entries.
+  private readonly _usageSummaryCache = new Map<string, { summary: import('../core/run-history.js').UsageSummary; expiresAt: number }>();
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
   private _googleOAuthState: string | undefined;
   private _googleRedirectUri: string | undefined;
@@ -1455,12 +1463,10 @@ export class LynoxHTTPApi {
       const fromSeq = Math.max(parseInt(url.searchParams.get('fromSeq') ?? '0', 10) || 0, 0);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '10000', 10) || 10000, 1), 50000);
       const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
-      const messages = records.map(r => ({
-        seq: r.seq,
-        role: r.role,
-        content: JSON.parse(r.content_json) as unknown,
-        created_at: r.created_at,
-      }));
+      // Apply render projection: merge tool-result carriers into preceding
+      // tool-use blocks, strip safety wrappers for display, flatten into the
+      // UI-ready shape that mirrors the client's ChatMessage.
+      const messages = projectMessages(records);
       jsonResponse(res, 200, { messages });
     }));
 
@@ -1643,6 +1649,15 @@ export class LynoxHTTPApi {
       if (process.env['LYNOX_MANAGED_MODE']) {
         redacted['managed'] = process.env['LYNOX_MANAGED_MODE'];
       }
+      // Capability probe: what this instance *can* do, independent of tier.
+      // Drives capability-based gating in the Web UI so working features stop
+      // being hidden by tier checks (see prd/settings-compliance-overhaul.md).
+      const secretStore = engine.getSecretStore();
+      const secretNames = secretStore ? new Set(secretStore.listNames()) : new Set<string>();
+      const mistralAvailable = secretNames.has('MISTRAL_API_KEY') || !!process.env['MISTRAL_API_KEY'];
+      redacted['capabilities'] = {
+        mistral_available: mistralAvailable,
+      };
       jsonResponse(res, 200, redacted);
     });
 
@@ -1738,6 +1753,123 @@ export class LynoxHTTPApi {
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const data = history.getCostByDay(days);
       jsonResponse(res, 200, data);
+    });
+
+    // ── Usage Summary (Usage Dashboard Phase 1) ──
+    // Aggregates the local RunHistory into the shape the Web UI's
+    // Usage Dashboard renders. Managed tiers currently get the same
+    // local-only view; the control-plane included-credit integration
+    // is Phase 3. 30-second instance-scoped TTL cache so repeated tab
+    // opens don't re-hammer SQLite for the same window.
+    this.staticRoutes.set('GET /api/usage/summary', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const { readUserConfig } = await import('../core/config.js');
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const rawPeriod = url.searchParams.get('period') ?? 'current';
+      const period = rawPeriod === 'prev' || rawPeriod === '7d' || rawPeriod === '30d' ? rawPeriod : 'current';
+
+      const now = new Date();
+      let startIso: string;
+      let endIso: string;
+      let source: 'calendar-month' | 'rolling';
+      let label: string;
+      const monthFmt = (d: Date) => d.toLocaleString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+      if (period === 'current') {
+        const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+        startIso = start.toISOString();
+        endIso = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+        source = 'calendar-month';
+        label = `${monthFmt(start)} – ${monthFmt(now)}`;
+      } else if (period === 'prev') {
+        const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+        const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+        startIso = start.toISOString();
+        endIso = end.toISOString();
+        source = 'calendar-month';
+        const lastDay = new Date(end.getTime() - 86_400_000);
+        label = `${monthFmt(start)} – ${monthFmt(lastDay)}`;
+      } else {
+        const days = period === '7d' ? 7 : 30;
+        const start = new Date(now.getTime() - days * 86_400_000);
+        startIso = start.toISOString();
+        endIso = now.toISOString();
+        source = 'rolling';
+        label = `${monthFmt(start)} – ${monthFmt(now)}`;
+      }
+
+      // Phase 3: for managed tiers, re-fetch the control-plane view FIRST so
+      // we can align the local aggregation window to the Stripe billing
+      // period (otherwise `used_cents` from the control plane and the sum of
+      // `daily` from the local DB report different windows and the numbers
+      // don't reconcile in the UI). On non-managed or when the CP is
+      // unreachable we fall through with the calendar-month / rolling window
+      // computed above.
+      const config = readUserConfig();
+      const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
+      const isManagedTier = tier === 'managed' || tier === 'managed_pro' || tier === 'eu';
+
+      interface CpSummary {
+        managed: boolean;
+        tier?: string;
+        budget_cents?: number;
+        used_cents?: number;
+        balance_cents?: number;
+        period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;
+      }
+      let cpSummary: CpSummary | null = null;
+      if (isManagedTier && period === 'current') {
+        const { fetchControlPlaneUsageSummary } = await import('../core/managed-usage-summary.js');
+        cpSummary = await fetchControlPlaneUsageSummary();
+        if (cpSummary?.managed && cpSummary.period) {
+          // Use the Stripe period for the local aggregation so daily + by_model
+          // cover the same window the control plane is reporting against.
+          startIso = cpSummary.period.start_iso;
+          endIso = cpSummary.period.end_iso;
+          source = 'calendar-month'; // 'stripe-billing' isn't a summary.source; we reuse calendar-month semantics
+          const periodStart = new Date(startIso);
+          const periodEnd = new Date(endIso);
+          const lastDay = new Date(periodEnd.getTime() - 86_400_000);
+          label = `${monthFmt(periodStart)} – ${monthFmt(lastDay)}`;
+        }
+      }
+
+      const cacheKey = `${period}:${startIso}`;
+      const cached = this._usageSummaryCache.get(cacheKey);
+      const nowMs = Date.now();
+      let summary;
+      if (cached && cached.expiresAt > nowMs) {
+        summary = cached.summary;
+      } else {
+        summary = history.getUsageSummary({ startIso, endIso, source, label });
+        this._usageSummaryCache.set(cacheKey, { summary, expiresAt: nowMs + USAGE_SUMMARY_TTL_MS });
+      }
+
+      // Tier-appropriate budget + used resolution:
+      //   - Managed w/ CP reachable → use CP's budget + used (authoritative)
+      //   - Managed w/o CP          → fall through to 0 (UI renders "included
+      //                                credit view coming in a later release")
+      //   - Self-Host / Hosted      → config.max_monthly_cost_usd
+      let budgetCents: number;
+      let overriddenUsedCents: number | undefined;
+      if (cpSummary?.managed) {
+        budgetCents = cpSummary.budget_cents ?? 0;
+        overriddenUsedCents = cpSummary.used_cents;
+      } else if (isManagedTier) {
+        budgetCents = 0;
+      } else {
+        budgetCents = typeof config.max_monthly_cost_usd === 'number'
+          ? Math.round(config.max_monthly_cost_usd * 100)
+          : 0;
+      }
+
+      jsonResponse(res, 200, {
+        tier,
+        ...summary,
+        used_cents: overriddenUsedCents ?? summary.used_cents,
+        budget_cents: budgetCents,
+      });
     });
 
     // ── Pipelines ──
@@ -1892,24 +2024,61 @@ export class LynoxHTTPApi {
     });
 
     // ── Voice info (combined STT + TTS capabilities for the Web UI) ──
-    // Drives the privacy hint + auto-speak toggle visibility. Prefer this
-    // over /api/transcribe/info for new callers — the old path stays for
+    // Drives the privacy hint + auto-speak toggle visibility + the
+    // Settings → Compliance voice pickers. Prefer this over the legacy
+    // /api/transcribe/info for new callers — the old path stays for
     // back-compat with existing clients.
     this.staticRoutes.set('GET /api/voice/info', async (_req, res) => {
       const [transcribeMod, speakMod] = await Promise.all([
         import('../core/transcribe.js'),
         import('../core/speak.js'),
       ]);
+      const { readUserConfig } = await import('../core/config.js');
       const sttProvider = transcribeMod.getActiveTranscribeProvider();
       const ttsProvider = speakMod.getActiveSpeakProvider();
+      const userConfig = readUserConfig();
+
+      // Provider lists for the Settings picker. `available` reflects whether
+      // the prerequisite (API key / local binary) is present; disabled options
+      // still appear so users see which choices exist on upgrade.
+      const sttProviders = [
+        { id: 'auto',    name: 'Auto',                            available: true },
+        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: transcribeMod.mistralVoxtralProvider.isAvailable },
+        { id: 'whisper', name: 'whisper.cpp (local)',             available: transcribeMod.whisperCppProvider.isAvailable },
+      ];
+      const ttsProviders = [
+        { id: 'auto',    name: 'Auto',                            available: true },
+        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: speakMod.mistralVoxtralTtsProvider.isAvailable },
+      ];
+
+      // Env-var overrides — when set, the Settings selector should display
+      // disabled with "controlled by env" hint so the user isn't confused
+      // why their picker choice doesn't stick after restart.
+      const sttEnvOverride = process.env['LYNOX_TRANSCRIBE_PROVIDER'] ? 'LYNOX_TRANSCRIBE_PROVIDER' : null;
+      const ttsEnvOverride = process.env['LYNOX_TTS_PROVIDER'] ? 'LYNOX_TTS_PROVIDER' : null;
+
+      // Voice catalog is async — fetch Mistral live (1h cache) or fall back.
+      // Wrapped in try/catch as a belt + suspenders; listMistralVoices itself
+      // already handles its own errors but we never want /voice/info to 5xx.
+      let voices: Awaited<ReturnType<typeof speakMod.listMistralVoices>> = [];
+      try { voices = await speakMod.listMistralVoices(); } catch { /* keep empty */ }
+
       jsonResponse(res, 200, {
         stt: {
           available: transcribeMod.hasTranscribeProvider(),
           provider: sttProvider?.name ?? null,
+          providers: sttProviders,
+          config_value: userConfig.transcription_provider ?? null,
+          env_override: sttEnvOverride,
         },
         tts: {
           available: speakMod.hasSpeakProvider(),
           provider: ttsProvider?.name ?? null,
+          providers: ttsProviders,
+          voices,
+          config_value: userConfig.tts_provider ?? null,
+          config_voice: userConfig.tts_voice ?? null,
+          env_override: ttsEnvOverride,
         },
       });
     });
@@ -1936,7 +2105,13 @@ export class LynoxHTTPApi {
       }
       const b = body as Record<string, unknown> | null;
       const text = b && typeof b['text'] === 'string' ? b['text'] : '';
-      const voice = b && typeof b['voice'] === 'string' ? b['voice'] : undefined;
+      // Voice resolution: request body → user config `tts_voice` → provider default.
+      // The picker in Settings → Compliance writes config; ad-hoc callers can still
+      // override per-request by passing `voice` in the body.
+      const { readUserConfig } = await import('../core/config.js');
+      const voiceFromRequest = b && typeof b['voice'] === 'string' ? b['voice'] : undefined;
+      const voiceFromConfig = readUserConfig().tts_voice;
+      const voice = voiceFromRequest ?? (typeof voiceFromConfig === 'string' && voiceFromConfig.length > 0 ? voiceFromConfig : undefined);
       const model = b && typeof b['model'] === 'string' ? b['model'] : undefined;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
@@ -1973,7 +2148,28 @@ export class LynoxHTTPApi {
         // TTS usage shares a ceiling with LLM runs + spawns. Mistral doesn't
         // surface usage headers — $0.016/1 000 chars is the documented rate,
         // applied after text-prep has stripped Markdown noise.
-        recordSessionCost(meta.characters * SPEAK_USD_PER_CHAR);
+        const costUsd = meta.characters * SPEAK_USD_PER_CHAR;
+        recordSessionCost(costUsd);
+        // Persist as a RunRecord so the Usage Dashboard can show voice TTS
+        // cost as its own line item. See prd/usage-dashboard.md. Best-effort:
+        // history failure must not break audio streaming to the client.
+        try {
+          const history = engine.getRunHistory();
+          if (history) {
+            const runId = history.insertRun({
+              taskText: text,
+              modelTier: 'voice',
+              modelId: meta.model,
+              kind: 'voice_tts',
+              units: meta.characters,
+            });
+            history.updateRun(runId, {
+              costUsd,
+              durationMs: meta.latencyMs,
+              status: 'completed',
+            });
+          }
+        } catch { /* history is best-effort, don't fail the request */ }
         res.write(`data: ${JSON.stringify({
           done: true,
           characters: meta.characters,
@@ -2022,6 +2218,16 @@ export class LynoxHTTPApi {
         Connection: 'keep-alive',
       });
 
+      const sttStartMs = Date.now();
+      // Run ffprobe in parallel with the transcription request — the Usage
+      // Dashboard wants seconds-of-audio as the `units` value, but we don't
+      // want to block the user's transcription waiting for a ~20 ms probe.
+      // Provider-agnostic: one path for whisper + Mistral + future providers.
+      const durationPromise = (async () => {
+        const { getAudioDurationSec } = await import('../core/audio-duration.js');
+        return getAudioDurationSec(buffer, filename);
+      })();
+
       const text = await transcribeWithStream(buffer, filename, (segment) => {
         if (!segment) {
           res.write(`data: ${JSON.stringify({ status: 'transcribing' })}\n\n`);
@@ -2034,6 +2240,29 @@ export class LynoxHTTPApi {
       });
 
       if (text) {
+        // Persist as a RunRecord so the Usage Dashboard can show voice STT
+        // as its own line item. See prd/usage-dashboard.md.
+        // ffprobe gives seconds of audio for cost attribution; null on
+        // failure → `units: 0` (same as pre-0.5 behavior; dashboard shows
+        // run count but no duration).
+        const durationSec = await durationPromise;
+        try {
+          const history = engine.getRunHistory();
+          if (history) {
+            const runId = history.insertRun({
+              sessionId: sessionId ?? '',
+              taskText: text,
+              modelTier: 'voice',
+              modelId: 'voxtral-mini-transcribe',
+              kind: 'voice_stt',
+              units: durationSec !== null ? Math.round(durationSec) : 0,
+            });
+            history.updateRun(runId, {
+              durationMs: Date.now() - sttStartMs,
+              status: 'completed',
+            });
+          }
+        } catch { /* history is best-effort, don't fail the request */ }
         res.write(`data: ${JSON.stringify({ done: true, text })}\n\n`);
       } else {
         res.write(`data: ${JSON.stringify({ error: 'Transcription failed' })}\n\n`);

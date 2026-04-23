@@ -148,6 +148,15 @@ export interface LynoxUserConfig {
   default_tier?: ModelTier | undefined;
   /** Maximum allowed model tier. StepHints and pipeline steps requesting a higher tier are clamped. Managed hosting sets 'sonnet'. */
   max_tier?: ModelTier | undefined;
+  /**
+   * Account-level plan tier, independent of LLM model tier. Controls
+   * capability gating rather than model selection: e.g. the `researcher`
+   * role accepts an explicit `model: 'opus'` override only when
+   * `account_tier === 'pro'`; other tiers silently downgrade to Sonnet.
+   * Defaults to `'standard'` (Starter/Managed). Set to `'pro'` on
+   * Managed-Pro instances via env `LYNOX_ACCOUNT_TIER=pro` or config.
+   */
+  account_tier?: 'standard' | 'pro' | undefined;
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;
   max_session_cost_usd?: number | undefined;
@@ -258,6 +267,13 @@ export interface LynoxUserConfig {
    * Env var `LYNOX_TTS_PROVIDER` overrides this.
    */
   tts_provider?: 'mistral' | 'auto' | undefined;
+  /**
+   * TTS voice slug (e.g. 'en_paul_neutral'). When unset, the provider falls
+   * back to its DEFAULT_VOICE. The Web UI populates the picker from the live
+   * Mistral voices catalog (`GET /v1/audio/voices`) so new voices show up
+   * without a code change.
+   */
+  tts_voice?: string | undefined;
 }
 
 // === DataStore ===

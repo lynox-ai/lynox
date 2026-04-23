@@ -19,6 +19,10 @@ export class EntityResolver {
 
   /**
    * Resolve a name to an existing entity or create a new one.
+   *
+   * When `options.aliases` is passed, each alias is registered on the resolved
+   * or newly created entity (deduped) — used by the v2 extractor so variant
+   * forms seen in the text collapse into one graph node.
    */
   async resolve(
     name: string,
@@ -27,6 +31,7 @@ export class EntityResolver {
     options?: {
       description?: string | undefined;
       createIfMissing?: boolean | undefined;
+      aliases?: readonly string[] | undefined;
     },
   ): Promise<EntityRecord | null> {
     const normalized = name.trim();
@@ -37,31 +42,45 @@ export class EntityResolver {
     // 1. Exact canonical match (case-insensitive, scope-filtered)
     const exactMatch = this.db.findEntityByCanonicalName(normalized, scopeTypes);
     if (exactMatch) {
+      this._registerAliases(exactMatch.id, options?.aliases);
       this.db.incrementEntityMentions(exactMatch.id);
-      return toEntityRecord(exactMatch);
+      return toEntityRecord(this.db.getEntity(exactMatch.id) ?? exactMatch);
     }
 
     // 2. Alias match
     const aliasMatch = this.db.findEntityByAlias(normalized);
     if (aliasMatch) {
+      this._registerAliases(aliasMatch.id, options?.aliases);
       this.db.incrementEntityMentions(aliasMatch.id);
-      return toEntityRecord(aliasMatch);
+      return toEntityRecord(this.db.getEntity(aliasMatch.id) ?? aliasMatch);
     }
 
     // 3. Canonical match without scope filter (fallback)
     const anyMatch = this.db.findEntityByCanonicalName(normalized);
     if (anyMatch) {
       this.db.addEntityAlias(anyMatch.id, normalized);
+      this._registerAliases(anyMatch.id, options?.aliases);
       this.db.incrementEntityMentions(anyMatch.id);
-      return toEntityRecord(anyMatch);
+      return toEntityRecord(this.db.getEntity(anyMatch.id) ?? anyMatch);
     }
 
     // 4. Create new entity if allowed
     if (options?.createIfMissing !== false) {
-      return this._createEntity(normalized, entityType, scopes, options?.description);
+      const created = await this._createEntity(normalized, entityType, scopes, options?.description);
+      this._registerAliases(created.id, options?.aliases);
+      return created;
     }
 
     return null;
+  }
+
+  /** Register additional aliases on an entity, skipping the canonical name and duplicates. */
+  private _registerAliases(entityId: string, aliases: readonly string[] | undefined): void {
+    if (!aliases || aliases.length === 0) return;
+    for (const raw of aliases) {
+      const trimmed = raw.trim();
+      if (trimmed.length >= 2) this.db.addEntityAlias(entityId, trimmed);
+    }
   }
 
   /**

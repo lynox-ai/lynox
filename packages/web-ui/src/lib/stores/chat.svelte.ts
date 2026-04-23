@@ -73,6 +73,8 @@ export interface ChatMessage {
 	/** Ordered blocks for interleaved rendering (text ↔ tool calls) */
 	blocks?: ContentBlock[];
 	pipeline?: PipelineInfo;
+	/** Sub-agent delegation progress (set when spawn_agent fires). */
+	spawn?: SpawnProgress;
 	thinking?: string;
 	usage?: UsageInfo;
 	queued?: boolean;
@@ -82,6 +84,21 @@ export interface ChatMessage {
 	followUps?: FollowUpSuggestion[];
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
+}
+
+export interface SpawnProgress {
+	/** All sub-agents spawned in this delegation. */
+	agents: string[];
+	/** Sub-agents currently running. */
+	running: string[];
+	/** Sub-agents that have completed, with outcome. */
+	done: Array<{ name: string; ok: boolean; elapsedS: number }>;
+	/** Last-seen tool name per sub-agent. */
+	lastToolBySub: Record<string, string>;
+	/** Seconds since the delegation started. */
+	elapsedS: number;
+	/** Client timestamp when the spawn started (for fallback elapsed if no heartbeat). */
+	startedAt: number;
 }
 
 export interface ToolCallInfo {
@@ -142,17 +159,80 @@ interface QueuedMessage {
 	files?: FileAttachment[];
 }
 
-// Restore from localStorage
-function loadPersistedChat(): { messages: ChatMessage[]; sessionId: string | null } {
-	if (typeof localStorage === 'undefined') return { messages: [], sessionId: null };
+/**
+ * Local persistence model — per-thread.
+ *
+ * One localStorage key `lynox-chat` holds `{ sessionId, threads }` where
+ * `threads[threadId]` is that thread's last-known message list. Per-thread
+ * storage exists because the previous single-blob model wiped user-turns
+ * any time `resumeThread` cleared `messages = []` before the server fetch
+ * returned: a mid-flight SSE run hadn't yet persisted the user turn
+ * server-side, and the local clear erased the only remaining copy.
+ *
+ * With the per-thread split:
+ *   - resumeThread hydrates from local first (no flash, no loss).
+ *   - server fetch is still authoritative once it returns; but if the
+ *     server returned FEWER messages than local has, we treat that as
+ *     "server mid-persist" and keep local — protects in-flight user turns.
+ */
+interface PersistedChat {
+	sessionId: string | null;
+	threads: Record<string, ChatMessage[]>;
+}
+
+function readPersistedRoot(): PersistedChat {
+	if (typeof localStorage === 'undefined') return { sessionId: null, threads: {} };
 	try {
 		const saved = localStorage.getItem('lynox-chat');
-		if (saved) {
-			const data = JSON.parse(saved) as { messages?: ChatMessage[]; sessionId?: string };
-			return { messages: data.messages ?? [], sessionId: data.sessionId ?? null };
+		if (!saved) return { sessionId: null, threads: {} };
+		const raw = JSON.parse(saved) as Partial<PersistedChat> & { messages?: ChatMessage[] };
+		// Migration: old single-blob format { messages, sessionId } → put
+		// those messages under threads[sessionId].
+		if (Array.isArray(raw.messages) && !raw.threads) {
+			const sid = typeof raw.sessionId === 'string' ? raw.sessionId : null;
+			return {
+				sessionId: sid,
+				threads: sid ? { [sid]: raw.messages } : {},
+			};
 		}
+		return {
+			sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : null,
+			threads: raw.threads ?? {},
+		};
 	} catch { /* corrupt data */ }
-	return { messages: [], sessionId: null };
+	return { sessionId: null, threads: {} };
+}
+
+function writePersistedRoot(root: PersistedChat): void {
+	if (typeof localStorage === 'undefined') return;
+	try { localStorage.setItem('lynox-chat', JSON.stringify(root)); }
+	catch { /* quota exceeded */ }
+}
+
+function loadPersistedChat(): { messages: ChatMessage[]; sessionId: string | null } {
+	const root = readPersistedRoot();
+	const msgs = root.sessionId ? root.threads[root.sessionId] ?? [] : [];
+	return { messages: msgs, sessionId: root.sessionId };
+}
+
+/** Read messages for a specific thread; empty array if absent. */
+function loadPersistedThread(threadId: string): ChatMessage[] {
+	return readPersistedRoot().threads[threadId] ?? [];
+}
+
+/**
+ * Remove a thread's persisted snapshot. Called by threads.svelte.ts on
+ * archive/delete so a later resumeThread() for the same id can't
+ * falsely "resurrect" stale local messages after the server already
+ * forgot the thread.
+ */
+export function dropPersistedThread(threadId: string): void {
+	const root = readPersistedRoot();
+	if (threadId in root.threads) {
+		delete root.threads[threadId];
+		if (root.sessionId === threadId) root.sessionId = null;
+		writePersistedRoot(root);
+	}
 }
 
 let _persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -163,9 +243,7 @@ function persistChat(): void {
 	if (_persistTimer) clearTimeout(_persistTimer);
 	_persistTimer = setTimeout(() => {
 		_persistTimer = null;
-		try {
-			localStorage.setItem('lynox-chat', JSON.stringify({ messages, sessionId }));
-		} catch { /* quota exceeded */ }
+		persistChatNow();
 	}, 500);
 }
 
@@ -176,9 +254,12 @@ function persistChatNow(): void {
 		_persistTimer = null;
 	}
 	if (typeof localStorage === 'undefined') return;
-	try {
-		localStorage.setItem('lynox-chat', JSON.stringify({ messages, sessionId }));
-	} catch { /* quota exceeded */ }
+	const root = readPersistedRoot();
+	root.sessionId = sessionId;
+	if (sessionId) {
+		root.threads[sessionId] = messages;
+	}
+	writePersistedRoot(root);
 }
 
 export interface ContextBudget {
@@ -229,6 +310,39 @@ function emitCompletedTextBlock(content: string, key: string): void {
 let sessionModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
+// Hosting tier of this instance. `null` = not yet probed; any non-null
+// string = probe completed. Values mirror LYNOX_MANAGED_MODE: 'managed',
+// 'managed_pro', 'eu' = instance-supplied LLM; 'starter', 'hosted', '' =
+// customer-supplied LLM (BYOK / self-hosted).
+let managedTier = $state<string | null>(null);
+let managedProbePromise: Promise<void> | null = null;
+
+function probeManagedTier(): Promise<void> {
+	if (managedProbePromise) return managedProbePromise;
+	managedProbePromise = (async () => {
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/status`);
+			if (res.ok) {
+				const data = (await res.json()) as { managed?: string | null };
+				managedTier = typeof data.managed === 'string' ? data.managed : '';
+			} else {
+				managedTier = '';
+			}
+		} catch {
+			managedTier = '';
+		}
+	})();
+	return managedProbePromise;
+}
+
+/** True iff the instance supplies the LLM credentials (managed tiers).
+ *  Unknown / not-yet-probed also returns true so error copy defaults to
+ *  the neutral branch (conservative: avoids showing BYOK hints to a
+ *  managed user during the probe race — see feedback_managed_ui_race_default_null). */
+function isInstanceSuppliedLlm(): boolean {
+	if (managedTier === null) return true;
+	return managedTier === 'managed' || managedTier === 'managed_pro' || managedTier === 'eu';
+}
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
@@ -267,12 +381,34 @@ if (typeof window !== 'undefined') {
 
 async function ensureSession(): Promise<string> {
 	if (sessionId) return sessionId;
+	// Fire the hosting-tier probe alongside session creation — by the time
+	// any LLM error surfaces, the tier is known and error copy branches
+	// correctly.
+	void probeManagedTier();
 	const res = await fetch(`${getApiBase()}/sessions`, { method: 'POST' });
+	if (res.status === 401) throw new SessionExpiredError();
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
 	if (data.model) sessionModel = data.model;
 	if (data.contextWindow) contextWindow = data.contextWindow;
 	return sessionId;
+}
+
+class SessionExpiredError extends Error {
+	constructor() { super('session_expired'); this.name = 'SessionExpiredError'; }
+}
+
+function handleSessionExpired(assistantIdx?: number, userMsgIdx?: number): void {
+	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
+	chatError = t('chat.error_session_expired');
+	if (assistantIdx !== undefined && messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+	if (userMsgIdx !== undefined && messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+	if (typeof window !== 'undefined') {
+		const next = encodeURIComponent(window.location.pathname + window.location.search);
+		setTimeout(() => { window.location.href = `/login?next=${next}`; }, 1800);
+	}
 }
 
 export interface FileAttachment {
@@ -325,7 +461,7 @@ function mapApiError(status: number, detail: string): string {
 		return t('chat.error_auth');
 	}
 	if (lower.includes('insufficient_quota') || lower.includes('billing') || lower.includes('credit'))
-		return t('chat.error_insufficient_quota');
+		return isInstanceSuppliedLlm() ? t('chat.error_llm_unavailable') : t('chat.error_insufficient_quota');
 	if (lower.includes('content_policy') || lower.includes('content policy') || lower.includes('safety'))
 		return t('chat.error_content_policy');
 	if (lower.includes('model_not_found') || lower.includes('model not found') || lower.includes('not available'))
@@ -352,7 +488,16 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	}
 
 	let retried = false;
-	let sid = await ensureSession();
+	let sid: string;
+	try {
+		sid = await ensureSession();
+	} catch (err) {
+		if (err instanceof SessionExpiredError) {
+			handleSessionExpired();
+			return;
+		}
+		throw err;
+	}
 
 	// Find and un-queue if this message was already added as queued
 	let userMsgIdx: number;
@@ -386,10 +531,19 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		body: JSON.stringify(payload)
 	});
 
-	// Session expired (e.g. after container restart) — recreate and retry
+	// Session record missing (e.g. after container restart) — recreate and retry.
+	// Distinct from 401 (cookie-level auth failure) which is handled below.
 	if (res.status === 404) {
 		sessionId = null;
-		sid = await ensureSession();
+		try {
+			sid = await ensureSession();
+		} catch (err) {
+			if (err instanceof SessionExpiredError) {
+				handleSessionExpired(assistantIdx, userMsgIdx);
+				return;
+			}
+			throw err;
+		}
 		res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -428,6 +582,14 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+		// HTTP 401 on /run means the lynox_session cookie is invalid or expired —
+		// not the LLM API key. Show the honest copy and bounce to /login so the
+		// user can re-authenticate instead of digging in Settings for a key that
+		// isn't the problem.
+		if (res.status === 401) {
+			handleSessionExpired(assistantIdx, userMsgIdx);
+			return;
+		}
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
 		chatError = mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
@@ -614,7 +776,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg._toolSinceText = true;
 			streamingActivity = 'tool';
 			streamingToolName = toolName;
-			if (toolName !== 'ask_user' && toolName !== 'ask_secret') {
+			// Skip sidebar update for tools whose dedicated stream event carries
+			// richer live state. spawn_agent emits a separate 'spawn' event a
+			// few ticks later with running/done counts; letting the tool_call
+			// path set tool+spawn_agent first causes a visible flash to the
+			// generic tool card before the spawn view takes over.
+			if (toolName !== 'ask_user' && toolName !== 'ask_secret' && toolName !== 'spawn_agent') {
 				setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			}
 			break;
@@ -636,6 +803,69 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				});
 				persistChat();
 			}
+			break;
+		}
+		case 'spawn': {
+			// Delegation started. Track progress so the UI can show which
+			// sub-agents are running, elapsed time, and last tool per sub.
+			const agents = (data['agents'] as string[] | undefined) ?? [];
+			msg.spawn = {
+				agents,
+				running: [...agents],
+				done: [],
+				lastToolBySub: {},
+				elapsedS: 0,
+				startedAt: Date.now(),
+			};
+			streamingActivity = 'tool';
+			streamingToolName = 'spawn_agent';
+			// Surface delegation in the Context panel so the sidebar shows
+			// live sub-agent state alongside the inline ChatView block.
+			setContext({
+				type: 'spawn',
+				title: 'spawn_agent',
+				spawnAgents: agents,
+				spawnRunning: [...agents],
+				spawnDone: [],
+				spawnLastTool: {},
+				spawnElapsedS: 0,
+			});
+			break;
+		}
+		case 'spawn_progress': {
+			if (!msg.spawn) break;
+			msg.spawn.elapsedS = Number(data['elapsedS'] ?? 0);
+			msg.spawn.running = (data['running'] as string[] | undefined) ?? msg.spawn.running;
+			msg.spawn.lastToolBySub = (data['lastToolBySub'] as Record<string, string> | undefined) ?? msg.spawn.lastToolBySub;
+			// Keep the Context-panel in sync; done list carries over since
+			// progress events don't re-emit it.
+			setContext({
+				type: 'spawn',
+				title: 'spawn_agent',
+				spawnAgents: msg.spawn.agents,
+				spawnRunning: [...msg.spawn.running],
+				spawnDone: [...msg.spawn.done],
+				spawnLastTool: { ...msg.spawn.lastToolBySub },
+				spawnElapsedS: msg.spawn.elapsedS,
+			});
+			break;
+		}
+		case 'spawn_child_done': {
+			if (!msg.spawn) break;
+			const sub = String(data['subAgent'] ?? '');
+			const ok = data['ok'] === true;
+			const elapsedS = Number(data['elapsedS'] ?? 0);
+			msg.spawn.running = msg.spawn.running.filter(a => a !== sub);
+			msg.spawn.done = [...msg.spawn.done, { name: sub, ok, elapsedS }];
+			setContext({
+				type: 'spawn',
+				title: 'spawn_agent',
+				spawnAgents: msg.spawn.agents,
+				spawnRunning: [...msg.spawn.running],
+				spawnDone: [...msg.spawn.done],
+				spawnLastTool: { ...msg.spawn.lastToolBySub },
+				spawnElapsedS: msg.spawn.elapsedS,
+			});
 			break;
 		}
 		case 'prompt':
@@ -771,6 +1001,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'done':
+			// Budget threshold check — usage dashboard Phase 4. Dynamic import
+			// keeps the alerts code out of the initial chat-store bundle for
+			// cases where the user never completes a run. Fire-and-forget:
+			// the alert is supplemental and must never interact with the run
+			// lifecycle on failure.
+			import('./usage-alerts.svelte.js')
+				.then(m => m.checkUsageThreshold())
+				.catch(() => { /* ignore — alerting is best-effort */ });
 			break;
 		case 'retry': {
 			const attempt = data['attempt'] as number;
@@ -1174,8 +1412,11 @@ export async function resumeThread(threadId: string): Promise<void> {
 	const controller = new AbortController();
 	_resumeController = controller;
 
-	// Clear state immediately so UI doesn't show stale data
-	messages = [];
+	// Hydrate from per-thread local persistence FIRST so the UI doesn't
+	// blink empty while the server fetch runs — and so we never end up
+	// with an empty chat if the fetch is slow/failing.
+	const localMessages = loadPersistedThread(threadId);
+	messages = localMessages;
 	sessionId = threadId;
 	chatError = null;
 	isStreaming = false;
@@ -1224,13 +1465,47 @@ export async function resumeThread(threadId: string): Promise<void> {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
+		// Server says "thread doesn't exist" — authoritative empty. Drop
+		// the local snapshot so a later resume can't false-resurrect it
+		// (happens when a thread was deleted elsewhere or on another device).
+		if (msgRes.status === 404) {
+			messages = [];
+			dropPersistedThread(threadId);
+			sessionId = null;
+			chatError = t('chat.error_connection');
+			return;
+		}
 		if (msgRes.ok) {
-			const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
-			messages = msgData.messages.map((m) => ({
-				role: m.role as 'user' | 'assistant',
-				content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
-				toolCalls: extractToolCalls(m.content),
-			}));
+			// Server returns RenderedMessage[] — already shaped for the UI
+			// (tool_result carriers merged into preceding tool_use, safety
+			// wrappers stripped, blocks[] interleaved). Map 1:1.
+			interface ServerRenderedMessage {
+				role: string;
+				content: string;
+				blocks?: ContentBlock[];
+				toolCalls?: ToolCallInfo[];
+			}
+			const msgData = (await msgRes.json()) as { messages: ServerRenderedMessage[] };
+			const serverMessages: ChatMessage[] = msgData.messages.map((m) => {
+				const cm: ChatMessage = {
+					role: m.role === 'assistant' ? 'assistant' : 'user',
+					content: m.content ?? '',
+				};
+				if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
+				if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
+				return cm;
+			});
+			// Server is authoritative once it returns, BUT: a mid-persist
+			// window can return fewer messages than the local snapshot
+			// (classic case: user sent a turn, navigated to /app/artifacts
+			// before the run finished, came back here). If the server has
+			// strictly fewer messages than what we already have locally,
+			// keep the local copy — it probably contains the in-flight
+			// user turn that the server hasn't persisted yet. Equal-or-more
+			// means the server caught up; use it.
+			if (serverMessages.length >= localMessages.length) {
+				messages = serverMessages;
+			}
 		}
 
 		persistChatNow();
@@ -1246,22 +1521,3 @@ export async function resumeThread(threadId: string): Promise<void> {
 	}
 }
 
-function extractContentText(content: unknown): string {
-	if (typeof content === 'string') return content;
-	if (!Array.isArray(content)) return '';
-	return (content as Array<Record<string, unknown>>)
-		.filter((b) => b['type'] === 'text')
-		.map((b) => String(b['text'] ?? ''))
-		.join('');
-}
-
-function extractToolCalls(content: unknown): ToolCallInfo[] {
-	if (!Array.isArray(content)) return [];
-	return (content as Array<Record<string, unknown>>)
-		.filter((b) => b['type'] === 'tool_use')
-		.map((b) => ({
-			name: String(b['name'] ?? ''),
-			input: b['input'],
-			status: 'done' as const,
-		}));
-}

@@ -1,4 +1,10 @@
-export type ContextType = 'tool' | 'entity' | 'file' | 'none';
+export type ContextType = 'tool' | 'entity' | 'file' | 'spawn' | 'none';
+
+export interface SpawnChildResult {
+	name: string;
+	ok: boolean;
+	elapsedS: number;
+}
 
 export interface ContextInfo {
 	type: ContextType;
@@ -7,6 +13,14 @@ export interface ContextInfo {
 	toolResult?: string;
 	filePath?: string;
 	title: string;
+	// Spawn-specific fields. Populated when type === 'spawn' so the sidebar
+	// can render the same sub-agent view ChatView shows inline — running/done
+	// counts, elapsed time, last tool per sub-agent.
+	spawnAgents?: string[];
+	spawnRunning?: string[];
+	spawnDone?: SpawnChildResult[];
+	spawnLastTool?: Record<string, string>;
+	spawnElapsedS?: number;
 }
 
 let activeContext = $state<ContextInfo | null>(null);

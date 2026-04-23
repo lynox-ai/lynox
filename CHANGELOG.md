@@ -1,5 +1,175 @@
 # Changelog
 
+## 1.3.2 — 2026-04-22
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.1 (delete this block before saving):
+
+Core:
+- fix: chat resume preserves user turns; artifact chip static; md export (#127)
+
+Pro:
+- feat(managed): per-instance update endpoint for canary rollouts (#79)
+- chore(release): v1.3.1 (#78)
+-->
+## 1.3.1 — 2026-04-22
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.0 (delete this block before saving):
+
+Core:
+- feat(agent): annotate non-retryable tool errors so the model stops grinding (#125)
+- feat: markdown artifact template + researcher-role Sonnet default (#124)
+- feat(web-ui): show live sub-agent delegation in Context sidebar (#123)
+- fix: voice TTS reads CHF, numbers-with-x, times, and #refs as noise (#122)
+- fix(spawn): advertise only the roles that actually exist (#121)
+- fix(voice): expand "N/mo" price patterns to natural phrasing (#120)
+- fix(voice): don't mangle English arrows with German "dann" (#119)
+- feat(spawn): stream sub-agent progress to the parent UI (#118)
+- fix(voice): handle slashes, <N, arrow prosody, and DE Die pronunciation (#117)
+- fix: voice TTS reads tables and arrow symbols as noise (#116)
+- fix: voice TTS playback accelerates and garbles on longer replies (#115)
+- fix: prevent agent context-drift on short followups (#114)
+- feat(kg): add v2 entity extractor behind LYNOX_KG_EXTRACTOR flag (#113)
+
+Pro:
+- fix(managed): refuse sync-env when secret preserve would leak sentinel (#77)
+- chore(ci): add one-shot admin-credit-grant workflow (#76)
+- feat(managed): add POST /admin/customers/:id/credit endpoint (#75)
+- feat(managed): add POST /admin/instances/:id/sync-env endpoint (#74)
+- feat(managed): enable KG extractor v2 by default on managed instances (#73)
+- chore(release): v1.3.0 (#72)
+-->
+## 1.3.0 — 2026-04-21
+
+Two themes ship together: a user-facing **Usage Dashboard** that
+answers "how much of my budget is left, and what burned it?" and
+a **Compliance & Privacy settings overhaul** that consolidates
+data-processing controls (LLM mode, voice providers, error
+reporting, data residency) into one tab and swaps tier-based
+visibility for capability-based visibility.
+
+### Added
+
+- **Usage Dashboard** in Settings → Budget & Usage. Tier badge,
+  period selector (this month / last month / 7 d / 30 d),
+  progress bar with 80 % amber / 95 % red thresholds, per-model
+  cost breakdown, and a daily-trend sparkline rendered as pure
+  inline SVG (no chart library).
+- **`GET /api/usage/summary?period=current|prev|7d|30d`** aggregates
+  RunHistory into a Dashboard-friendly shape: `used_cents`,
+  `by_model`, `by_kind`, `daily` (zero-filled). Instance-scoped
+  30 s TTL cache. Integer cents over the wire so JSON transport
+  has no float-rounding surprises.
+- **Managed-tier control-plane proxy**: `GET /api/usage/summary`
+  on managed tiers now calls the control plane's new
+  `/internal/usage/:instanceId/summary` endpoint and returns the
+  included-credit meter (e.g. "$X of $30 included") with the
+  Stripe billing period. Self-host + Hosted paths unchanged.
+- **Compliance & Privacy settings tab** consolidates LLM mode,
+  voice pickers, data residency read-out, and error reporting
+  in one place. Visible on every tier; individual sub-sections
+  gate on capability rather than tier.
+- **`capabilities.mistral_available`** on `GET /api/config`
+  reflects whether a Mistral key is present in env or vault.
+  The LLM-mode toggle (Standard / EU Sovereign) gates on this
+  instead of the managed-tier flag, so Self-Host and Hosted
+  users with a Mistral key can finally access EU Sovereign
+  from the UI.
+- **Voice provider pickers** for STT + TTS in Settings →
+  Compliance. Provider list + live voice catalog fetched from
+  Mistral's `/v1/audio/voices` endpoint (paginated, 30+ voices
+  today). `tts_voice` added to `LynoxUserConfig` so the picker
+  choice persists across restarts. Env-var overrides
+  (`LYNOX_TRANSCRIBE_PROVIDER` / `LYNOX_TTS_PROVIDER`) render
+  the selector disabled with a hint.
+- **`RunRecord.kind`** column splits `llm` / `voice_stt` /
+  `voice_tts` so the Dashboard can attribute voice cost
+  separately from chat cost. `units` column holds characters
+  for TTS, seconds for STT, tokens for LLM. Schema v28, nullable
+  / default-0 so pre-v28 rows read as `llm` without a backfill.
+- **`/api/speak`** + **`/api/transcribe`** now write RunRecord
+  rows with the right `kind`. STT uses `ffprobe` on the uploaded
+  clip to fill `units` with actual seconds of audio; runs in
+  parallel with transcription so it doesn't block user-facing
+  latency.
+- **Budget threshold toasts** fire in the Web UI at 80 % (info)
+  and 95 % (error) of the monthly budget. Deduped per Stripe
+  period via `localStorage`, rate-limited to one check per 30 s,
+  silent-skip when no budget is configured. Hooks off the chat
+  store's `done` event via dynamic import to keep alert code
+  out of the initial bundle.
+
+### Changed
+
+- **Bugsink toggle moves from Settings → System to Settings →
+  Compliance → Error Reporting.** On Managed it's info-only
+  ("always active per DPIA"); on Self-Host it stays the opt-in
+  toggle.
+- **Settings tab "Budget" renamed to "Budget & Nutzung" /
+  "Budget & Usage"** and is now visible on every tier. Limit
+  inputs inside the tab remain gated on `!managed`.
+- **Vault → env sync for `MISTRAL_API_KEY`** at engine init.
+  BYOK users who stored the key via the Settings UI were
+  previously silently broken — the secret was in vault but the
+  voice facades and `llm_mode=eu-sovereign` override read from
+  `process.env` directly. Now synced on init, env still wins
+  if set.
+- **Mistral voice-catalog parser** matches the live API response
+  shape: `items` container, `slug` as the voice selector (the
+  `id` field is a UUID unusable for synthesis), `languages[]`
+  array, `name` as the human label. Replaces the earlier
+  OpenAI-style assumption that returned the 5-voice fallback
+  every call.
+- **Mistral voice-catalog pagination**: Mistral caps `page_size`
+  at 10 regardless of query param. The parser now loops pages
+  1..N so the full 30-voice catalog reaches the UI.
+- **Managed-hosting compose file** bind-mounts SSH keys from
+  `/opt/lynox-managed/ssh-keys` on the host instead of a named
+  Docker volume. A named volume could come up empty after
+  `up --build`, sending the control plane into a crash loop
+  (2026-04-21 incident). Aligns with what
+  `docker-compose.staging.yml` was already doing.
+
+### Migration notes
+
+- **Schema v28** (RunHistory): `ALTER TABLE runs ADD COLUMN kind
+  TEXT; ALTER TABLE runs ADD COLUMN units INTEGER NOT NULL
+  DEFAULT 0`. Idempotent, back-compat — pre-v28 rows read as
+  `kind=null` which aggregates as `llm`.
+- **Managed control-plane compose**: the first rebuild after
+  this version bumps the SSH-keys mount to a bind-mount. Operators
+  must confirm `/opt/lynox-managed/ssh-keys/` on the host has
+  `id_ed25519` (0600, uid 1000) + `id_ed25519.pub` (0644, uid
+  1000) before the first `docker compose up -d --build managed`.
+  The old named volume `lynox-managed_ssh-keys` becomes orphaned
+  and can be removed with `docker volume rm` at leisure.
+- **Capability probe**: callers of `GET /api/config` will see a
+  new `capabilities` object in the response. Existing consumers
+  that iterate fields are unaffected; only new fields added.
+
 ## 1.2.2 — 2026-04-20
 
 ### Fixed

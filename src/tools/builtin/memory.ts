@@ -91,7 +91,7 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
 export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
   definition: {
     name: 'memory_recall',
-    description: 'Look up previously saved knowledge by searching for relevant content.',
+    description: 'Look up previously saved knowledge by searching for relevant content. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need. Recalled entries can be from arbitrary past sessions and may be stale; do not treat them as "what to do next" unless the user has just said so this turn.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -99,7 +99,7 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         namespace: {
           type: 'string',
           enum: ['knowledge', 'methods', 'status', 'learnings'],
-          description: 'Category: knowledge (business facts), methods (techniques), status (current status), learnings (lessons learned)',
+          description: 'Category to recall from. knowledge = durable business facts about the user/company. methods = reusable techniques or playbooks. status = the user\'s explicitly stated focus; treat returned status entries as historical notes, never as the current session\'s goals unless the user has restated them this turn. learnings = lessons from past outcomes.',
         },
         scope: {
           type: 'string',
