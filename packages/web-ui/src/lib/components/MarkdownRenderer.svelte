@@ -136,8 +136,8 @@
 			<div class="artifact-toolbar">
 				<span class="artifact-label">Markdown</span>
 				<span class="artifact-md-title">${safeTitle}</span>
-				<button class="artifact-btn" data-action="download-md" title="Als .md herunterladen">${ICON_DOWNLOAD}</button>
-				<button class="artifact-btn" data-action="print-pdf" title="Als PDF drucken">${ICON_PRINT}</button>
+				<button class="artifact-btn" data-action="download-md" title="Download as .md">${ICON_DOWNLOAD}</button>
+				<button class="artifact-btn" data-action="print-pdf" title="Print / Save as PDF">${ICON_PRINT}</button>
 			</div>
 			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
 		</div>`;
@@ -258,7 +258,7 @@
 
 	function handleMarkdownDownload(container: HTMLElement) {
 		const md = decodeDataMd(container);
-		if (!md) { addToast('Download fehlgeschlagen', 'error'); return; }
+		if (!md) { addToast('Download failed', 'error'); return; }
 		const title = container.dataset['title'] ?? 'artifact';
 		const filename = `${title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '')}.md`;
 		const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
@@ -276,7 +276,7 @@
 	 *  tables render natively. */
 	function handleMarkdownPrint(container: HTMLElement) {
 		const md = decodeDataMd(container);
-		if (!md) { addToast('PDF-Export fehlgeschlagen', 'error'); return; }
+		if (!md) { addToast('PDF export failed', 'error'); return; }
 		const title = container.dataset['title'] ?? 'Artifact';
 		const rendered = DOMPurify.sanitize(marked.parse(md, { async: false }) as string);
 		const html = buildPrintDocument(title, rendered);
@@ -284,7 +284,7 @@
 		const url = URL.createObjectURL(blob);
 		const win = window.open(url, '_blank');
 		if (!win) {
-			addToast('Popup blockiert — bitte Popups für diese Seite erlauben', 'error');
+			addToast('Popup blocked — allow popups for this site to print', 'error');
 			URL.revokeObjectURL(url);
 			return;
 		}
