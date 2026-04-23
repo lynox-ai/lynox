@@ -217,7 +217,17 @@ function loadPersistedChat(): { messages: ChatMessage[]; sessionId: string | nul
 
 /** Read messages for a specific thread; empty array if absent. */
 function loadPersistedThread(threadId: string): ChatMessage[] {
-	return readPersistedRoot().threads[threadId] ?? [];
+	return dropEmptyUserMessages(readPersistedRoot().threads[threadId] ?? []);
+}
+
+/**
+ * Drop `role: 'user'` messages whose content is empty/whitespace. These are
+ * agent-synthesized tool_result replies (e.g. the user's answer to an
+ * ask_user prompt) — they survive server persistence as blank user rows and
+ * would otherwise render as empty user bubbles after a thread switch.
+ */
+function dropEmptyUserMessages(list: ChatMessage[]): ChatMessage[] {
+	return list.filter(m => m.role !== 'user' || m.content.trim().length > 0);
 }
 
 /**
@@ -1478,7 +1488,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 		if (msgRes.ok) {
 			// Server returns RenderedMessage[] — already shaped for the UI
 			// (tool_result carriers merged into preceding tool_use, safety
-			// wrappers stripped, blocks[] interleaved). Map 1:1.
+			// wrappers stripped, blocks[] interleaved). Map 1:1, then strip
+			// agent-synthesized empty user bubbles so they don't render.
 			interface ServerRenderedMessage {
 				role: string;
 				content: string;
@@ -1486,15 +1497,17 @@ export async function resumeThread(threadId: string): Promise<void> {
 				toolCalls?: ToolCallInfo[];
 			}
 			const msgData = (await msgRes.json()) as { messages: ServerRenderedMessage[] };
-			const serverMessages: ChatMessage[] = msgData.messages.map((m) => {
-				const cm: ChatMessage = {
-					role: m.role === 'assistant' ? 'assistant' : 'user',
-					content: m.content ?? '',
-				};
-				if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
-				if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
-				return cm;
-			});
+			const serverMessages: ChatMessage[] = dropEmptyUserMessages(
+				msgData.messages.map((m) => {
+					const cm: ChatMessage = {
+						role: m.role === 'assistant' ? 'assistant' : 'user',
+						content: m.content ?? '',
+					};
+					if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
+					if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
+					return cm;
+				}),
+			);
 			// Server is authoritative once it returns, BUT: a mid-persist
 			// window can return fewer messages than the local snapshot
 			// (classic case: user sent a turn, navigated to /app/artifacts
