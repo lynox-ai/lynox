@@ -386,11 +386,29 @@ async function ensureSession(): Promise<string> {
 	// correctly.
 	void probeManagedTier();
 	const res = await fetch(`${getApiBase()}/sessions`, { method: 'POST' });
+	if (res.status === 401) throw new SessionExpiredError();
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
 	if (data.model) sessionModel = data.model;
 	if (data.contextWindow) contextWindow = data.contextWindow;
 	return sessionId;
+}
+
+class SessionExpiredError extends Error {
+	constructor() { super('session_expired'); this.name = 'SessionExpiredError'; }
+}
+
+function handleSessionExpired(assistantIdx?: number, userMsgIdx?: number): void {
+	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
+	chatError = t('chat.error_session_expired');
+	if (assistantIdx !== undefined && messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+	if (userMsgIdx !== undefined && messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+	if (typeof window !== 'undefined') {
+		const next = encodeURIComponent(window.location.pathname + window.location.search);
+		setTimeout(() => { window.location.href = `/login?next=${next}`; }, 1800);
+	}
 }
 
 export interface FileAttachment {
@@ -470,7 +488,16 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	}
 
 	let retried = false;
-	let sid = await ensureSession();
+	let sid: string;
+	try {
+		sid = await ensureSession();
+	} catch (err) {
+		if (err instanceof SessionExpiredError) {
+			handleSessionExpired();
+			return;
+		}
+		throw err;
+	}
 
 	// Find and un-queue if this message was already added as queued
 	let userMsgIdx: number;
@@ -504,10 +531,19 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		body: JSON.stringify(payload)
 	});
 
-	// Session expired (e.g. after container restart) — recreate and retry
+	// Session record missing (e.g. after container restart) — recreate and retry.
+	// Distinct from 401 (cookie-level auth failure) which is handled below.
 	if (res.status === 404) {
 		sessionId = null;
-		sid = await ensureSession();
+		try {
+			sid = await ensureSession();
+		} catch (err) {
+			if (err instanceof SessionExpiredError) {
+				handleSessionExpired(assistantIdx, userMsgIdx);
+				return;
+			}
+			throw err;
+		}
 		res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -546,6 +582,14 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+		// HTTP 401 on /run means the lynox_session cookie is invalid or expired —
+		// not the LLM API key. Show the honest copy and bounce to /login so the
+		// user can re-authenticate instead of digging in Settings for a key that
+		// isn't the problem.
+		if (res.status === 401) {
+			handleSessionExpired(assistantIdx, userMsgIdx);
+			return;
+		}
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
 		chatError = mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
