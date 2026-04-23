@@ -34,11 +34,13 @@
 		getPendingChangeset,
 		getChangesetLoading,
 		submitChangesetReview,
+		getSessionId,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
 		type ToolCallInfo,
 	} from '../stores/chat.svelte.js';
+	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
@@ -298,10 +300,12 @@
 				if (HIDDEN_TOOLS.has(tc.name)) continue;
 
 				// Special: artifact_save → render inline if not already in text.
-				// Markdown-typed artifacts render as plain markdown (no iframe):
-				// content is already prose-shaped, an iframe wrapper adds cost
-				// without visual benefit. HTML/SVG/Mermaid still wrap in the
-				// ```artifact fence MarkdownRenderer turns into a sandboxed iframe.
+				// All artifact types route through the ```artifact fence so they
+				// share container chrome (toolbar + label). MarkdownRenderer
+				// dispatches by detecting a `<!-- type: markdown -->` marker in
+				// the fence body: markdown-typed content renders as inline prose
+				// inside the container (no iframe — content is trusted prose);
+				// HTML/SVG/Mermaid wrap into a sandboxed iframe via buildArtifact.
 				if (tc.name === 'artifact_save') {
 					if (!hasInlineArtifact) {
 						const inp = tc.input as Record<string, unknown> | undefined;
@@ -310,14 +314,9 @@
 							const title = String(inp?.['title'] ?? 'Artifact');
 							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
 							if (artifactType === 'markdown') {
-								// Inline markdown + passive footer badge. The markdown is
-								// already rendered in chat, so the badge is just a
-								// "saved to gallery" indicator — NOT a click target.
-								// Making it a link broke the UX pattern (inline artifacts
-								// expand in place; link navigates away).
 								result.push({
 									type: 'text',
-									text: `**${title}**\n\n${content}\n\n<span class="artifact-saved-chip">${t('artifacts.saved_chip')} · ${title}</span>`,
+									text: `\`\`\`artifact\n<!-- title: ${title} -->\n<!-- type: markdown -->\n${content}\n\`\`\``,
 								});
 							} else {
 								result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
@@ -1030,6 +1029,17 @@
 	const pipelineRunning = $derived(
 		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
 	);
+
+	// Per-session artifact shelf. Populated from the shared artifacts store,
+	// filtered to the current thread. Kick a load on mount and again when the
+	// session changes so the shelf is ready without needing a prior visit to
+	// /app/artifacts.
+	const currentSessionId = $derived(getSessionId());
+	const sessionArtifacts = $derived(getSessionArtifacts(currentSessionId));
+	let artifactShelfExpanded = $state(false);
+	$effect(() => {
+		if (currentSessionId) void loadArtifacts();
+	});
 
 	// Auto-focus textarea and clear leftover input when chat is empty (new chat or initial load)
 	function focusInput() {
@@ -1853,6 +1863,62 @@
 						<button onclick={handleSecretSave} disabled={!secretValue.trim()} class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed">{t('chat.secret_save')}</button>
 						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
 					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Per-session artifact shelf — silent unless artifacts exist in this thread -->
+	{#if sessionArtifacts.length > 0}
+		<div class="border-t border-border bg-bg-subtle px-4 py-1.5 text-xs">
+			<div class="max-w-3xl mx-auto">
+				<button
+					type="button"
+					onclick={() => { artifactShelfExpanded = !artifactShelfExpanded; }}
+					class="flex items-center gap-2 text-text-subtle hover:text-text transition-colors w-full text-left"
+					aria-expanded={artifactShelfExpanded}
+				>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 transition-transform {artifactShelfExpanded ? 'rotate-90' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+					</svg>
+					<span class="font-mono tabular-nums">{sessionArtifacts.length} · {t('artifacts.title')}</span>
+				</button>
+				{#if artifactShelfExpanded}
+					<div class="mt-2 flex flex-wrap gap-1.5 pb-1">
+						{#each sessionArtifacts as a}
+							<a
+								href="/app/artifacts?focus={encodeURIComponent(a.id)}"
+								class="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg px-2.5 py-1 text-[11px] text-text-muted hover:text-text hover:border-accent/40 transition-all max-w-[20rem]"
+								title={a.title}
+							>
+								<span class="uppercase tracking-wider text-accent-text text-[9px] font-medium shrink-0">{a.type}</span>
+								<span class="truncate">{a.title}</span>
+							</a>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Context-usage banner (only renders at ≥60 %, silent below) -->
+	{#if ctxBudget && ctxBudget.usagePercent >= 60}
+		{@const pct = ctxBudget.usagePercent}
+		{@const critical = pct >= 75}
+		<div
+			class="border-t {critical ? 'border-danger/30 bg-danger/10 text-danger' : 'border-warning/30 bg-warning/10 text-warning'} px-4 py-1.5 text-xs"
+			role="status"
+			aria-live="polite"
+		>
+			<div class="max-w-3xl mx-auto flex items-center gap-2">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3l-6.93-12a2 2 0 00-3.48 0l-6.93 12a2 2 0 001.74 3z" />
+				</svg>
+				<span class="font-mono tabular-nums">{t('status.context')}: {pct}%</span>
+				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">·</span>
+				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">{formatK(ctxBudget.totalTokens)} / {formatK(ctxBudget.maxTokens)} {t('chat.context_tokens')}</span>
+				{#if critical}
+					<span class="opacity-80 ml-auto">— {t('chat.context_auto_compact_imminent')}</span>
 				{/if}
 			</div>
 		</div>

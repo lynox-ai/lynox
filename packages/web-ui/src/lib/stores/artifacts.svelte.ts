@@ -1,6 +1,6 @@
 import { getApiBase } from '../config.svelte.js';
 
-export type ArtifactType = 'html' | 'mermaid' | 'svg';
+export type ArtifactType = 'html' | 'mermaid' | 'svg' | 'markdown';
 
 export interface ArtifactMeta {
 	id: string;
@@ -79,4 +79,14 @@ export function getArtifacts() {
 }
 export function getIsLoadingArtifacts() {
 	return isLoading;
+}
+
+/** Artifacts created in a specific thread/session, newest first. Cheap filter
+ *  over the in-memory list already populated by `loadArtifacts()`. */
+export function getSessionArtifacts(threadId: string | null | undefined): ArtifactMeta[] {
+	if (!threadId) return [];
+	return artifacts
+		.filter((a) => a.threadId === threadId)
+		.slice()
+		.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
