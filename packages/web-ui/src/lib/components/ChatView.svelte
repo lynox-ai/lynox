@@ -35,6 +35,8 @@
 		getChangesetLoading,
 		submitChangesetReview,
 		getSessionId,
+		compactNow,
+		getIsCompacting,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
@@ -1016,6 +1018,16 @@
 	const ctxModel = $derived(getSessionModel());
 	const ctxBudget = $derived(getContextBudget());
 	const ctxWindow = $derived(getContextWindow());
+	const compacting = $derived(getIsCompacting());
+
+	async function handleCompactClick() {
+		const result = await compactNow();
+		if (result.ok) {
+			addToast(t('chat.compact_done'), 'success');
+		} else if (result.error && result.error !== 'already-compacting' && result.error !== 'streaming') {
+			addToast(t('chat.compact_failed'), 'error');
+		}
+	}
 
 	// Active pipeline from the latest message (for sticky progress bar)
 	const activePipeline = $derived(
@@ -1918,8 +1930,25 @@
 				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">·</span>
 				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">{formatK(ctxBudget.totalTokens)} / {formatK(ctxBudget.maxTokens)} {t('chat.context_tokens')}</span>
 				{#if critical}
-					<span class="opacity-80 ml-auto">— {t('chat.context_auto_compact_imminent')}</span>
+					<span class="opacity-80 hidden md:inline">— {t('chat.context_auto_compact_imminent')}</span>
 				{/if}
+				<!--
+					Manual-compact escape hatch. Auto-compact fires at 75% between
+					turns, but a single turn can push context from 60% → 90%+ when
+					a tool returns a massive payload (DataForSEO ranked_keywords
+					is the canonical case). Giving the user an explicit "compact
+					now" button lets them reclaim the window before the next
+					send, without waiting for the next turn boundary.
+				-->
+				<button
+					type="button"
+					onclick={handleCompactClick}
+					disabled={compacting || isStreaming}
+					class="ml-auto rounded-[var(--radius-sm)] border border-current/40 px-2 py-0.5 text-[11px] font-medium hover:bg-current/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+					title={isStreaming ? t('chat.context_auto_compact_imminent') : t('chat.compact_now')}
+				>
+					{compacting ? t('chat.compact_in_progress') : t('chat.compact_now')}
+				</button>
 			</div>
 		</div>
 	{/if}
