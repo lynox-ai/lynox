@@ -30,6 +30,7 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import { maskSecretPatterns } from './secret-store.js';
+import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -182,7 +183,10 @@ export class Agent implements IAgent {
   }
 
   loadMessages(messages: BetaMessageParam[]): void {
-    this.messages = messages;
+    // Rehydrated histories can have drifted tool_use/tool_result pairs
+    // (partial persist, rolled-back run). Anthropic 400s on unpaired blocks,
+    // so normalise at the single entry point for external history.
+    this.messages = sanitizeToolPairs(messages);
   }
 
   abort(): void {
