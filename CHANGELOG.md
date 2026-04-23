@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.3 — 2026-04-23
+
+### Added
+
+- **API Store: declarative response shaping + OpenAPI bootstrap** (#140). Profiles can now carry a `response_shape` that deterministically projects, reduces, and caps verbose JSON responses before they enter the LLM history — path-based whitelisting, reducers (`avg`/`peak`/`avg+peak`/`count`/`first_n`/`last_n`), and array/string/body caps. `api_setup` gains `bootstrap` (OpenAPI 3.x URL → draft profile) and `refine` (additive patch for guidelines/avoid/notes/endpoints/shape/rate_limit). Fully opt-in: hostnames without a profile or without `response_shape` behave identically to prior releases.
+- **Markdown artifact download + print-to-PDF** (#138). `.md` artifacts now carry a download button and a browser-side print-to-PDF action.
+- **Mobile/PWA polish** (#96). Settings page gets a version + legal footer, mobile-only items are hidden when the app is running as a PWA or on narrow viewports, and the stale-bundle toast gets a one-click "reload now" action.
+
+### Fixed
+
+- **Empty user bubbles on thread resume** (#129). Agent-synthesized user turns (e.g. tool_result carriers for `ask_user`) no longer render as blank grey bubbles when a thread is reloaded.
+- **409 queue instead of failed bubble** (#130). When iOS Safari backgrounds the PWA, SSE drops, and the next send hits the server's in-progress run, the bubble now shows as queued ("Agent arbeitet noch am vorherigen Schritt — deine Nachricht wartet…") and polls `/run` every 3s for up to 6 min before giving up. Stop and thread-switch cleanly cancel the poll loop via a shared `AbortController`.
+- **Orphan tool_use / tool_result sanitization on history load** (#135). Unpaired tool blocks are dropped so the model doesn't stall on malformed history.
+- **Abbreviation splitting in markdown** (#136). Strings like "z.B." no longer trigger a paragraph break.
+- **Session-expired copy on 401** (#137). 401 on `/run` now shows "session expired, please log in again" and bounces to `/login`, instead of the misleading "API key invalid".
+- **Entity detail panel closes on Escape** (#139). KG side panel now follows the same dismiss pattern as other overlays.
+
 ## 1.3.2 — 2026-04-22
 
 ### Added
