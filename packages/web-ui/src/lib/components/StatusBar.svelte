@@ -140,7 +140,10 @@
 		if (staleBundleNotified) return;
 		if (!BUILT_VERSION || BUILT_VERSION === engineV) return;
 		staleBundleNotified = true;
-		addToast(t('status.stale_bundle'), 'info', 30_000);
+		addToast(t('status.stale_bundle'), 'info', 30_000, {
+			label: t('status.stale_bundle_action'),
+			handler: () => { location.reload(); },
+		});
 	}
 
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
