@@ -121,17 +121,23 @@
 	/** Build a markdown-typed artifact: same chrome as the iframe variant
 	 *  (container + toolbar + label) but body is rendered markdown, not an
 	 *  iframe. Expanded by default because markdown carries no script risk
-	 *  and hiding prose behind a "Click to open" toggle hurts readability. */
+	 *  and hiding prose behind a "Click to open" toggle hurts readability.
+	 *  The raw markdown source is embedded as `data-md` so the toolbar
+	 *  buttons can produce a .md download and a print-to-PDF popup from the
+	 *  original text (not the rendered HTML). */
 	function buildMarkdownArtifact(code: string): string {
 		const { title, clean } = extractTitle(code);
 		const body = clean.replace(/<!--\s*type:\s*markdown\s*-->\s*/i, '').trim();
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
 		const rendered = DOMPurify.sanitize(marked.parse(body, { async: false }) as string);
-		return `<div class="artifact-container artifact-md">
+		const encodedMd = btoa(unescape(encodeURIComponent(body)));
+		return `<div class="artifact-container artifact-md" data-md="${encodedMd}" data-title="${safeTitle}">
 			<div class="artifact-toolbar">
 				<span class="artifact-label">Markdown</span>
 				<span class="artifact-md-title">${safeTitle}</span>
+				<button class="artifact-btn" data-action="download-md" title="Als .md herunterladen">${ICON_DOWNLOAD}</button>
+				<button class="artifact-btn" data-action="print-pdf" title="Als PDF drucken">${ICON_PRINT}</button>
 			</div>
 			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
 		</div>`;
@@ -177,6 +183,7 @@
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
 	const ICON_CLIPBOARD = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 3A1.5 1.5 0 017 1.5h2A1.5 1.5 0 0110.5 3M5.5 3H4a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1V4a1 1 0 00-1-1h-1.5M5.5 3h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_CLOSE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+	const ICON_PRINT = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 2.5h7v3.5M4.5 11.5H3A1.5 1.5 0 011.5 10V7A1.5 1.5 0 013 5.5h10A1.5 1.5 0 0114.5 7v3a1.5 1.5 0 01-1.5 1.5h-1.5M4.5 9.5h7V14h-7V9.5z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 	/** Injected into artifact iframes — posts height via postMessage for cross-origin resize */
 	const RESIZE_SCRIPT = '<script>(function(){function s(){parent.postMessage({type:"lynox-resize",h:document.documentElement.scrollHeight},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
@@ -237,7 +244,114 @@
 			else if (action === 'expand') handleArtifactExpand(container);
 			else if (action === 'close') handleArtifactExpand(container);
 			else if (action === 'export') handleArtifactExport(container);
+			else if (action === 'download-md') handleMarkdownDownload(container);
+			else if (action === 'print-pdf') handleMarkdownPrint(container);
 		}
+	}
+
+	function decodeDataMd(container: HTMLElement): string {
+		const encoded = container.dataset['md'] ?? '';
+		if (!encoded) return '';
+		try { return decodeURIComponent(escape(atob(encoded))); }
+		catch { return ''; }
+	}
+
+	function handleMarkdownDownload(container: HTMLElement) {
+		const md = decodeDataMd(container);
+		if (!md) { addToast('Download fehlgeschlagen', 'error'); return; }
+		const title = container.dataset['title'] ?? 'artifact';
+		const filename = `${title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '')}.md`;
+		const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+		const a = document.createElement('a');
+		a.href = URL.createObjectURL(blob);
+		a.download = filename || 'artifact.md';
+		a.click();
+		URL.revokeObjectURL(a.href);
+	}
+
+	/** Open the rendered markdown in a fresh popup with a print-friendly
+	 *  stylesheet, then auto-trigger the browser's print dialog. User picks
+	 *  "Save as PDF" (Desktop) or "Save to Files" (iOS Safari share sheet).
+	 *  Pure-browser flow — no dependency, PDF output has selectable text,
+	 *  tables render natively. */
+	function handleMarkdownPrint(container: HTMLElement) {
+		const md = decodeDataMd(container);
+		if (!md) { addToast('PDF-Export fehlgeschlagen', 'error'); return; }
+		const title = container.dataset['title'] ?? 'Artifact';
+		const rendered = DOMPurify.sanitize(marked.parse(md, { async: false }) as string);
+		const html = buildPrintDocument(title, rendered);
+		const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+		const url = URL.createObjectURL(blob);
+		const win = window.open(url, '_blank');
+		if (!win) {
+			addToast('Popup blockiert — bitte Popups für diese Seite erlauben', 'error');
+			URL.revokeObjectURL(url);
+			return;
+		}
+		// Popup owns its blob URL; revoke after a minute so memory doesn't leak
+		// even if the user closes the window without dismissing the print dialog.
+		setTimeout(() => URL.revokeObjectURL(url), 60_000);
+	}
+
+	function buildPrintDocument(title: string, renderedBody: string): string {
+		const safeTitle = escapeHtml(title);
+		return `<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${safeTitle}</title>
+<style>
+@page { margin: 2cm; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+	font-size: 11pt;
+	line-height: 1.55;
+	color: #1a1a1a;
+	background: #fff;
+	max-width: 18cm;
+	margin: 2rem auto;
+	padding: 0 1rem;
+}
+h1, h2, h3, h4, h5, h6 { color: #000; line-height: 1.25; margin: 1.5em 0 0.5em; }
+h1 { font-size: 1.9em; border-bottom: 2px solid #000; padding-bottom: 0.2em; }
+h2 { font-size: 1.4em; }
+h3 { font-size: 1.15em; }
+p { margin: 0.7em 0; }
+ul, ol { margin: 0.7em 0; padding-left: 1.6em; }
+li { margin: 0.2em 0; }
+a { color: #0057b0; text-decoration: underline; word-break: break-word; }
+pre, code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+code { background: #f3f3f5; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.92em; }
+pre { background: #f5f5f7; border: 1px solid #e6e6ea; border-radius: 4px; padding: 0.8em 1em; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.92em; }
+th, td { border: 1px solid #d0d0d6; padding: 0.4em 0.7em; text-align: left; vertical-align: top; }
+th { background: #f5f5f7; font-weight: 600; }
+blockquote { border-left: 3px solid #c0c0c8; padding: 0.1em 1em; color: #555; margin: 1em 0; }
+hr { border: none; border-top: 1px solid #d0d0d6; margin: 2em 0; }
+img { max-width: 100%; height: auto; }
+@media print {
+	body { max-width: none; margin: 0; padding: 0; }
+	a { color: #000; }
+	pre, table, blockquote, img { break-inside: avoid; }
+	h1, h2, h3 { break-after: avoid; }
+}
+</style>
+</head>
+<body>
+<h1>${safeTitle}</h1>
+${renderedBody}
+<script>
+window.addEventListener('load', function () {
+	setTimeout(function () { window.print(); }, 150);
+});
+window.addEventListener('afterprint', function () { window.close(); });
+<\/script>
+</body>
+</html>`;
 	}
 
 	function exportMermaidPng(btn: Element) {
