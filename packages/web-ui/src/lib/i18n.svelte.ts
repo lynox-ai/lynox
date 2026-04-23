@@ -293,6 +293,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Chat errors
 	'chat.error_start': { de: 'Etwas ist schiefgelaufen. Versuche es nochmal oder prüfe die [Einstellungen](/app/settings).', en: 'Something went wrong. Try again or check your [settings](/app/settings).' },
 	'chat.error_auth': { de: 'Dein API-Schlüssel ist ungültig oder abgelaufen. [Einstellungen öffnen](/app/settings)', en: 'Your API key is invalid or expired. [Open settings](/app/settings)' },
+	'chat.error_session_expired': { de: 'Deine Sitzung ist abgelaufen. Du wirst zum Login weitergeleitet…', en: 'Your session has expired. Redirecting to login…' },
 	'chat.error_connection': { de: 'Verbindung zum Server verloren. Prüfe deine Internetverbindung und versuche es nochmal.', en: 'Lost connection to the server. Check your internet and try again.' },
 	'chat.error_rate_limit': { de: 'Zu viele Anfragen. Warte kurz und versuche es dann nochmal.', en: 'Too many requests. Wait a moment and try again.' },
 	'chat.error_overloaded': { de: 'Der KI-Dienst ist gerade überlastet. Versuche es in ein paar Minuten nochmal.', en: 'The AI service is currently overloaded. Try again in a few minutes.' },
