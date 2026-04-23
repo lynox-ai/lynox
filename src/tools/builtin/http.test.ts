@@ -559,4 +559,84 @@ describe('httpRequestTool', () => {
       expect(result).toContain('HTTP 200');
     });
   });
+
+  describe('Response shaping via API profile', () => {
+    it('applies response_shape when the hostname has a profile', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'example',
+        name: 'Example',
+        base_url: 'https://api.example.com/v1',
+        description: 'Test API',
+        response_shape: {
+          kind: 'reduce',
+          include: ['items[].keyword', 'items[].search_volume'],
+        },
+      });
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: {
+          items: [
+            { keyword: 'alpha', search_volume: 100, cost: 1.5, noise: 'drop-me' },
+            { keyword: 'beta', search_volume: 200, cost: 2.5, noise: 'drop-me' },
+          ],
+        },
+      });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store } } as never;
+      const result = await handler({ url: 'https://api.example.com/v1/search' }, agent);
+
+      expect(result).toContain('keyword');
+      expect(result).toContain('alpha');
+      expect(result).not.toContain('drop-me');
+      expect(result).not.toContain('cost');
+    });
+
+    it('passthrough leaves the JSON body unchanged', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'example',
+        name: 'Example',
+        base_url: 'https://api.example.com/v1',
+        description: 'Test API',
+        response_shape: { kind: 'passthrough' },
+      });
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: { foo: 'bar', baz: [1, 2, 3] },
+      });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store } } as never;
+      const result = await handler({ url: 'https://api.example.com/v1/any' }, agent);
+
+      expect(result).toContain('"foo": "bar"');
+      expect(result).toContain('"baz"');
+    });
+
+    it('falls back to raw JSON when no profile is registered for the host', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: { a: 1, b: 2 },
+      });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store } } as never;
+      const result = await handler({ url: 'https://api.example.com/v1/x' }, agent);
+
+      expect(result).toContain('"a": 1');
+      expect(result).toContain('"b": 2');
+    });
+  });
 });
