@@ -189,4 +189,236 @@ describe('api_setup tool', () => {
       expect(result).toContain('Test API');
     });
   });
+
+  describe('bootstrap', () => {
+    const FAKE_OPENAPI = {
+      openapi: '3.0.1',
+      info: { title: 'Fake API', description: 'A fake API for testing.' },
+      servers: [{ url: 'https://api.fake.com/v1' }],
+      paths: {
+        '/users': {
+          get: { summary: 'List users' },
+          post: { summary: 'Create user' },
+        },
+        '/users/{id}': {
+          get: { summary: 'Get user by id' },
+          delete: { summary: 'Delete user' },
+        },
+      },
+      components: {
+        securitySchemes: {
+          bearerAuth: { type: 'http', scheme: 'bearer', description: 'Use a bearer token.' },
+        },
+      },
+    };
+
+    it('requires openapi_url', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler({ action: 'bootstrap' }, agent);
+      expect(result).toContain('openapi_url');
+    });
+
+    it('parses an OpenAPI 3.x spec into a draft profile', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: async () => JSON.stringify(FAKE_OPENAPI),
+      } as Response);
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+          agent,
+        );
+        expect(result).toContain('Bootstrapped draft profile');
+        expect(result).toContain('Fake API');
+        expect(result).toContain('api.fake.com/v1');
+        expect(result).toContain('auth: bearer');
+        expect(result).toContain('endpoints: 4');
+        // Draft JSON block present
+        expect(result).toContain('```json');
+        // Should not persist anything yet — file must not exist
+        const filePath = join(mockLynoxDir, 'apis', 'fake-api.json');
+        expect(existsSync(filePath)).toBe(false);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('rejects non-OpenAPI-3 specs', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: async () => JSON.stringify({ swagger: '2.0', info: { title: 'old' } }),
+      } as Response);
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/swagger.json' },
+          agent,
+        );
+        expect(result).toContain('unsupported spec version');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('reports a fetch failure', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        text: async () => '',
+      } as Response);
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/missing.json' },
+          agent,
+        );
+        expect(result).toContain('failed to fetch');
+        expect(result).toContain('404');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('refine', () => {
+    it('requires id and refine patch', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const noId = await apiSetupTool.handler({ action: 'refine', refine: { addNotes: ['x'] } }, agent);
+      expect(noId).toContain('id');
+      const noPatch = await apiSetupTool.handler({ action: 'refine', id: 'test-api' }, agent);
+      expect(noPatch).toContain('refine');
+    });
+
+    it('additively appends guidelines/avoid/notes', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+
+      const result = await apiSetupTool.handler(
+        {
+          action: 'refine',
+          id: 'test-api',
+          refine: {
+            addGuidelines: ['Always paginate with limit<=100'],
+            addAvoid: ['No nested filters'],
+            addNotes: ['Returns JSON:API envelope'],
+          },
+        },
+        agent,
+      );
+      expect(result).toContain('+1 guidelines');
+      expect(result).toContain('+1 avoid');
+      expect(result).toContain('+1 notes');
+
+      const saved = JSON.parse(
+        readFileSync(join(mockLynoxDir, 'apis', 'test-api.json'), 'utf-8'),
+      ) as ApiProfile;
+      expect(saved.guidelines).toContain('Always POST');
+      expect(saved.guidelines).toContain('Always paginate with limit<=100');
+      expect(saved.avoid?.length).toBe(2);
+    });
+
+    it('merges new endpoints by method+path key', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+
+      await apiSetupTool.handler(
+        {
+          action: 'refine',
+          id: 'test-api',
+          refine: {
+            addEndpoints: [
+              { method: 'POST', path: '/search', description: 'UPDATED search desc' },
+              { method: 'GET', path: '/items', description: 'List items' },
+            ],
+          },
+        },
+        agent,
+      );
+
+      const saved = JSON.parse(
+        readFileSync(join(mockLynoxDir, 'apis', 'test-api.json'), 'utf-8'),
+      ) as ApiProfile;
+      expect(saved.endpoints?.length).toBe(2);
+      expect(saved.endpoints?.find(e => e.method === 'POST' && e.path === '/search')?.description).toBe(
+        'UPDATED search desc',
+      );
+      expect(saved.endpoints?.find(e => e.path === '/items')).toBeDefined();
+    });
+
+    it('sets response_shape and round-trips it', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+
+      await apiSetupTool.handler(
+        {
+          action: 'refine',
+          id: 'test-api',
+          refine: {
+            response_shape: {
+              kind: 'reduce',
+              include: ['data[].id', 'data[].name'],
+              max_array_items: 5,
+            },
+          },
+        },
+        agent,
+      );
+
+      const saved = JSON.parse(
+        readFileSync(join(mockLynoxDir, 'apis', 'test-api.json'), 'utf-8'),
+      ) as ApiProfile;
+      expect(saved.response_shape?.kind).toBe('reduce');
+      expect(saved.response_shape?.max_array_items).toBe(5);
+      expect(saved.response_shape?.include).toEqual(['data[].id', 'data[].name']);
+    });
+
+    it('rejects invalid shape kind', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const result = await apiSetupTool.handler(
+        {
+          action: 'refine',
+          id: 'test-api',
+          refine: {
+            response_shape: { kind: 'project' as 'reduce' },
+          },
+        },
+        agent,
+      );
+      expect(result).toContain('Invalid response_shape.kind');
+    });
+
+    it('rejects invalid reducer', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const result = await apiSetupTool.handler(
+        {
+          action: 'refine',
+          id: 'test-api',
+          refine: {
+            response_shape: {
+              kind: 'reduce',
+              reduce: { 'items': 'median' as 'avg' },
+            },
+          },
+        },
+        agent,
+      );
+      expect(result).toContain('Invalid reducer');
+    });
+  });
 });

@@ -1,5 +1,8 @@
 import dns from 'node:dns/promises';
 import type { ToolEntry, NetworkPolicy } from '../../types/index.js';
+import { applyShape } from '../../core/api-shape.js';
+import { channels } from '../../core/observability.js';
+import type { ToolContext } from '../../core/tool-context.js';
 
 // === Network policy enforcement ===
 
@@ -331,6 +334,51 @@ function detectGetExfiltration(url: string): string | null {
   return null;
 }
 
+/**
+ * Apply the API profile's response_shape (if any) to a parsed JSON response.
+ * Falls back to standard JSON.stringify on any error; never throws.
+ */
+async function maybeShapeJson(json: unknown, url: string, toolContext: ToolContext | undefined): Promise<string> {
+  const defaultBody = JSON.stringify(json, null, 2);
+  if (!toolContext?.apiStore) return defaultBody;
+
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return defaultBody;
+  }
+
+  const profile = toolContext.apiStore.getByHostname(hostname);
+  const shape = profile?.response_shape;
+  if (!profile || !shape) return defaultBody;
+
+  const result = applyShape(json, shape);
+
+  if (result.error) {
+    if (channels.shapeError.hasSubscribers) {
+      channels.shapeError.publish({
+        profileId: profile.id,
+        hostname,
+        error: result.error,
+      });
+    }
+    return defaultBody;
+  }
+
+  if (channels.shapeApplied.hasSubscribers) {
+    channels.shapeApplied.publish({
+      profileId: profile.id,
+      hostname,
+      beforeChars: result.beforeChars,
+      afterChars: result.afterChars,
+      kind: shape.kind ?? 'reduce',
+    });
+  }
+
+  return result.shaped;
+}
+
 interface HttpRequestInput {
   url: string;
   method?: string | undefined;
@@ -492,7 +540,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (contentType.includes('json') && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
-          body = JSON.stringify(json, null, 2);
+          // Apply per-API response shaping if the profile defines one.
+          const shapedBody = await maybeShapeJson(json, input.url, toolContext);
+          body = shapedBody;
         } catch {
           body = text;
         }

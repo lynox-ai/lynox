@@ -25,6 +25,9 @@ export const channels = {
   knowledgeGraph:       channel('lynox:knowledge:graph'),
   knowledgeEntity:      channel('lynox:knowledge:entity'),
   dataStoreInsert:      channel('lynox:datastore:insert'),
+
+  shapeApplied:         channel('lynox:apishape:applied'),
+  shapeError:           channel('lynox:apishape:error'),
 };
 
 export function measureTool(name: string): { end(): number } {
