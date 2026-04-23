@@ -320,6 +320,39 @@ function emitCompletedTextBlock(content: string, key: string): void {
 let sessionModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
+// Hosting tier of this instance. `null` = not yet probed; any non-null
+// string = probe completed. Values mirror LYNOX_MANAGED_MODE: 'managed',
+// 'managed_pro', 'eu' = instance-supplied LLM; 'starter', 'hosted', '' =
+// customer-supplied LLM (BYOK / self-hosted).
+let managedTier = $state<string | null>(null);
+let managedProbePromise: Promise<void> | null = null;
+
+function probeManagedTier(): Promise<void> {
+	if (managedProbePromise) return managedProbePromise;
+	managedProbePromise = (async () => {
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/status`);
+			if (res.ok) {
+				const data = (await res.json()) as { managed?: string | null };
+				managedTier = typeof data.managed === 'string' ? data.managed : '';
+			} else {
+				managedTier = '';
+			}
+		} catch {
+			managedTier = '';
+		}
+	})();
+	return managedProbePromise;
+}
+
+/** True iff the instance supplies the LLM credentials (managed tiers).
+ *  Unknown / not-yet-probed also returns true so error copy defaults to
+ *  the neutral branch (conservative: avoids showing BYOK hints to a
+ *  managed user during the probe race — see feedback_managed_ui_race_default_null). */
+function isInstanceSuppliedLlm(): boolean {
+	if (managedTier === null) return true;
+	return managedTier === 'managed' || managedTier === 'managed_pro' || managedTier === 'eu';
+}
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
@@ -358,12 +391,34 @@ if (typeof window !== 'undefined') {
 
 async function ensureSession(): Promise<string> {
 	if (sessionId) return sessionId;
+	// Fire the hosting-tier probe alongside session creation — by the time
+	// any LLM error surfaces, the tier is known and error copy branches
+	// correctly.
+	void probeManagedTier();
 	const res = await fetch(`${getApiBase()}/sessions`, { method: 'POST' });
+	if (res.status === 401) throw new SessionExpiredError();
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
 	if (data.model) sessionModel = data.model;
 	if (data.contextWindow) contextWindow = data.contextWindow;
 	return sessionId;
+}
+
+class SessionExpiredError extends Error {
+	constructor() { super('session_expired'); this.name = 'SessionExpiredError'; }
+}
+
+function handleSessionExpired(assistantIdx?: number, userMsgIdx?: number): void {
+	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
+	chatError = t('chat.error_session_expired');
+	if (assistantIdx !== undefined && messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+	if (userMsgIdx !== undefined && messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+	if (typeof window !== 'undefined') {
+		const next = encodeURIComponent(window.location.pathname + window.location.search);
+		setTimeout(() => { window.location.href = `/login?next=${next}`; }, 1800);
+	}
 }
 
 export interface FileAttachment {
@@ -416,7 +471,7 @@ function mapApiError(status: number, detail: string): string {
 		return t('chat.error_auth');
 	}
 	if (lower.includes('insufficient_quota') || lower.includes('billing') || lower.includes('credit'))
-		return t('chat.error_insufficient_quota');
+		return isInstanceSuppliedLlm() ? t('chat.error_llm_unavailable') : t('chat.error_insufficient_quota');
 	if (lower.includes('content_policy') || lower.includes('content policy') || lower.includes('safety'))
 		return t('chat.error_content_policy');
 	if (lower.includes('model_not_found') || lower.includes('model not found') || lower.includes('not available'))
@@ -443,7 +498,16 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	}
 
 	let retried = false;
-	let sid = await ensureSession();
+	let sid: string;
+	try {
+		sid = await ensureSession();
+	} catch (err) {
+		if (err instanceof SessionExpiredError) {
+			handleSessionExpired();
+			return;
+		}
+		throw err;
+	}
 
 	// Find and un-queue if this message was already added as queued
 	let userMsgIdx: number;
@@ -477,10 +541,19 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		body: JSON.stringify(payload)
 	});
 
-	// Session expired (e.g. after container restart) — recreate and retry
+	// Session record missing (e.g. after container restart) — recreate and retry.
+	// Distinct from 401 (cookie-level auth failure) which is handled below.
 	if (res.status === 404) {
 		sessionId = null;
-		sid = await ensureSession();
+		try {
+			sid = await ensureSession();
+		} catch (err) {
+			if (err instanceof SessionExpiredError) {
+				handleSessionExpired(assistantIdx, userMsgIdx);
+				return;
+			}
+			throw err;
+		}
 		res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -519,6 +592,14 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+		// HTTP 401 on /run means the lynox_session cookie is invalid or expired —
+		// not the LLM API key. Show the honest copy and bounce to /login so the
+		// user can re-authenticate instead of digging in Settings for a key that
+		// isn't the problem.
+		if (res.status === 401) {
+			handleSessionExpired(assistantIdx, userMsgIdx);
+			return;
+		}
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
 		chatError = mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
@@ -1405,13 +1486,27 @@ export async function resumeThread(threadId: string): Promise<void> {
 			return;
 		}
 		if (msgRes.ok) {
-			const msgData = (await msgRes.json()) as { messages: Array<{ role: string; content: unknown }> };
+			// Server returns RenderedMessage[] — already shaped for the UI
+			// (tool_result carriers merged into preceding tool_use, safety
+			// wrappers stripped, blocks[] interleaved). Map 1:1, then strip
+			// agent-synthesized empty user bubbles so they don't render.
+			interface ServerRenderedMessage {
+				role: string;
+				content: string;
+				blocks?: ContentBlock[];
+				toolCalls?: ToolCallInfo[];
+			}
+			const msgData = (await msgRes.json()) as { messages: ServerRenderedMessage[] };
 			const serverMessages: ChatMessage[] = dropEmptyUserMessages(
-				msgData.messages.map((m) => ({
-					role: m.role as 'user' | 'assistant',
-					content: typeof m.content === 'string' ? m.content : extractContentText(m.content),
-					toolCalls: extractToolCalls(m.content),
-				})),
+				msgData.messages.map((m) => {
+					const cm: ChatMessage = {
+						role: m.role === 'assistant' ? 'assistant' : 'user',
+						content: m.content ?? '',
+					};
+					if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
+					if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
+					return cm;
+				}),
 			);
 			// Server is authoritative once it returns, BUT: a mid-persist
 			// window can return fewer messages than the local snapshot
@@ -1439,22 +1534,3 @@ export async function resumeThread(threadId: string): Promise<void> {
 	}
 }
 
-function extractContentText(content: unknown): string {
-	if (typeof content === 'string') return content;
-	if (!Array.isArray(content)) return '';
-	return (content as Array<Record<string, unknown>>)
-		.filter((b) => b['type'] === 'text')
-		.map((b) => String(b['text'] ?? ''))
-		.join('');
-}
-
-function extractToolCalls(content: unknown): ToolCallInfo[] {
-	if (!Array.isArray(content)) return [];
-	return (content as Array<Record<string, unknown>>)
-		.filter((b) => b['type'] === 'tool_use')
-		.map((b) => ({
-			name: String(b['name'] ?? ''),
-			input: b['input'],
-			status: 'done' as const,
-		}));
-}

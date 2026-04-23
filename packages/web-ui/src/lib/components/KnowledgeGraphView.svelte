@@ -32,6 +32,17 @@
 	const GRAPH_H = 600;
 	const NODE_R = 24;
 
+	// Escape closes the entity detail panel — matches the close button (line ~420).
+	// Mobile audit flagged this as the one missing keyboard shortcut after
+	// AppShell/MarkdownRenderer already got escape handlers.
+	$effect(() => {
+		function handleEscape(e: KeyboardEvent) {
+			if (e.key === 'Escape' && selected) selected = null;
+		}
+		window.addEventListener('keydown', handleEscape);
+		return () => window.removeEventListener('keydown', handleEscape);
+	});
+
 	async function loadEntities(append = false) {
 		if (append) { loadingMore = true; } else { loading = true; }
 		error = '';
