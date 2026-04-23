@@ -170,12 +170,16 @@ jobs:
   # `jq -n` to avoid any shell injection risk via a specially-crafted
   # tag string. PRO_DISPATCH_TOKEN should be a fine-grained PAT with
   # actions:write on lynox-ai/lynox-pro only, rotated ~every 90 days.
+  # The GitHub Release publication is the intentional gate — cut-release.sh
+  # only tags + publishes after a release PR is merged, so a release event
+  # always represents a deliberate human decision. A second
+  # `environment: production` reviewer gate here just blocked the dispatch on
+  # every release (v1.3.1–v1.3.3 all sat unapproved and the downstream
+  # release-web / release-control-plane workflows never ran). Removed to match
+  # the staging dispatch pattern, which fires on push to main without a gate.
   dispatch-pro-release:
     needs: [docker, npm]
     runs-on: ubuntu-latest
-    environment:
-      name: production
-      url: https://control.lynox.cloud
     steps:
       - name: Dispatch release to lynox-pro
         env:
