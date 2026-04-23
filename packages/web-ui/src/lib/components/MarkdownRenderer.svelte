@@ -28,13 +28,16 @@
 	// Fix missing line breaks between concatenated sentences (from streamed tool-call gaps).
 	// Pattern: period/exclamation/question followed directly by uppercase letter without space.
 	// Only applied outside code blocks to avoid breaking code content.
+	// The negative lookbehind skips abbreviations whose "word" before the period is ≤2 letters —
+	// catches z.B., Z.B., d.h., u.a., i.e., e.g., U.S., Dr.Smith, etc. A real sentence boundary
+	// almost always has a ≥3-letter word before the period.
 	function fixSentenceSpacing(md: string): string {
 		const parts = md.split(/(```[\s\S]*?```)/g);
 		return parts.map((part, i) => {
 			if (i % 2 !== 0) return part; // inside code block — skip
 			// Apply per-line, skip table rows (contain pipe) to avoid breaking tables
 			return part.split('\n').map(line =>
-				line.includes('|') ? line : line.replace(/([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2')
+				line.includes('|') ? line : line.replace(/(?<!\b[a-zäöüA-ZÄÖÜ]{1,2})([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2')
 			).join('\n');
 		}).join('');
 	}
