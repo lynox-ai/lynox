@@ -347,6 +347,10 @@ let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry' | 'busy' } | null>(null);
+// Controller for the 409 "busy" poll loop — shared so abortRun() and a
+// thread switch can cut it short without waiting for the 3s tick or the
+// 6 min cap to elapse. Kept at module scope alongside _resumeController.
+let _queuePollController: AbortController | null = null;
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
 // Offline detection + auto-retry on reconnect
@@ -589,16 +593,59 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		}
 		const POLL_MS = 3000;
 		const MAX_POLLS = 120; // 6 min — long enough to cover heavy research runs
-		for (let attempt = 1; attempt <= MAX_POLLS && res.status === 409; attempt++) {
-			retryStatus = { attempt, maxAttempts: MAX_POLLS, reason: 'busy' };
-			await new Promise(r => setTimeout(r, POLL_MS));
-			res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(payload)
-			});
+		_queuePollController = new AbortController();
+		const signal = _queuePollController.signal;
+		let bailedOut = false;
+		try {
+			for (let attempt = 1; attempt <= MAX_POLLS && res.status === 409; attempt++) {
+				// Stop / thread-switch: drop out of the loop without another fetch.
+				// `sessionId !== sid` catches navigation to a different thread; the
+				// messages[] reactive store has been reassigned to the other thread
+				// by then, so we must not mutate userMsgIdx after this point.
+				if (signal.aborted || sessionId !== sid) { bailedOut = true; break; }
+				retryStatus = { attempt, maxAttempts: MAX_POLLS, reason: 'busy' };
+				// Interruptible sleep — abort resolves immediately so stop feels instant.
+				await new Promise<void>((resolve) => {
+					const t = setTimeout(resolve, POLL_MS);
+					signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+				});
+				if (signal.aborted || sessionId !== sid) { bailedOut = true; break; }
+				try {
+					res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(payload),
+						signal,
+					});
+				} catch (err) {
+					if (signal.aborted) { bailedOut = true; break; }
+					throw err;
+				}
+			}
+		} finally {
+			retryStatus = null;
+			_queuePollController = null;
 		}
-		retryStatus = null;
+
+		if (bailedOut) {
+			// Only mutate the reactive messages[] if we're still on the same
+			// session — otherwise the store now belongs to a different thread
+			// and userMsgIdx would clobber someone else's message.
+			if (sessionId === sid) {
+				if (messages[userMsgIdx]) {
+					messages[userMsgIdx]!.queued = false;
+					messages[userMsgIdx]!.failed = true;
+				}
+				if (messages[assistantIdx] && !messages[assistantIdx]!.content) {
+					messages.splice(assistantIdx, 1);
+				}
+			}
+			isStreaming = false;
+			streamingActivity = 'idle';
+			streamingToolName = null;
+			return;
+		}
+
 		if (messages[userMsgIdx]) messages[userMsgIdx]!.queued = false;
 	}
 
@@ -1222,6 +1269,10 @@ export async function checkPendingPrompt(): Promise<void> {
 
 export async function abortRun(): Promise<void> {
 	if (!sessionId) return;
+	// Cancel the 409 "busy" poll first (synchronous) so the loop stops
+	// re-POSTing /run before the server /abort round-trip even begins.
+	_queuePollController?.abort();
+	_queuePollController = null;
 	await fetch(`${getApiBase()}/sessions/${sessionId}/abort`, { method: 'POST' });
 	isStreaming = false;
 	streamingActivity = 'idle';
