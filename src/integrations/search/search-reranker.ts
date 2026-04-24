@@ -5,7 +5,7 @@
  * low-relevance hits that slipped past the provider. Catches the residual
  * off-topic pattern where e.g. MDN WebGPU docs appear in a "pytrends"
  * search — the provider's lexical ranking can't tell that the result,
- * though about "limits", is irrelevant to the user's intent.
+ * though it is about "limits", is irrelevant to the user's intent.
  *
  * Opt-in via LYNOX_SEARCH_RERANK=true (default: off) so teams can roll
  * this out gradually and measure impact. Adds one Haiku call per search
