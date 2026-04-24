@@ -1933,9 +1933,22 @@ export class LynoxHTTPApi {
       const title = typeof b['title'] === 'string' ? b['title'] : undefined;
       const description = typeof b['description'] === 'string' ? b['description'] : undefined;
       const assignee = typeof b['assignee'] === 'string' ? b['assignee'] : undefined;
+      const scheduleCron = typeof b['scheduleCron'] === 'string' && b['scheduleCron'].length > 0 ? b['scheduleCron'] : undefined;
+      const runAt = typeof b['runAt'] === 'string' && b['runAt'].length > 0 ? b['runAt'] : undefined;
+      const dueDate = typeof b['dueDate'] === 'string' && b['dueDate'].length > 0 ? b['dueDate'] : undefined;
       if (!title) { errorResponse(res, 400, 'Missing required field: title'); return; }
-      const task = taskManager.create({ title, description: description ?? title, assignee });
-      jsonResponse(res, 201, task);
+      if (runAt && Number.isNaN(Date.parse(runAt))) {
+        errorResponse(res, 400, 'Invalid runAt: must be ISO 8601 datetime'); return;
+      }
+      try {
+        const baseParams = { title, description, assignee, dueDate };
+        const task = scheduleCron
+          ? taskManager.createScheduled({ ...baseParams, scheduleCron })
+          : taskManager.create({ ...baseParams, ...(runAt ? { nextRunAt: runAt } : {}) });
+        jsonResponse(res, 201, task);
+      } catch (e) {
+        errorResponse(res, 400, e instanceof Error ? e.message : 'Failed to create task');
+      }
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/tasks/:id', async (_req, res, params, body) => {
