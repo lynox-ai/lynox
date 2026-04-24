@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.4 — 2026-04-24
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.3 (delete this block before saving):
+
+Core:
+- feat(web-search): explicit query formulation guidance for the agent (#159)
+- feat(observability): engine-level attribution for web search (#158)
+- feat(kg): default to v2 extractor + admin cleanup endpoint (#150)
+- feat(tasks): flexible schedule + run_at, kill title duplication (#149)
+- fix(web-ui): expose voice controls on mobile/touch (#148)
+- fix(web-ui): clamp wide markdown content + iOS safe-area in StatusBar (#147)
+- fix(web-search): stop mapping topic "it" to SearXNG categories=it (#152)
+- feat(agent): strict JSON Schema validation at tool dispatch (#153)
+- feat(web-search): Haiku-based post-provider reranker (opt-in) (#157)
+- fix(task): guard against escaped JSON params inside description (#151)
+- fix(searxng): widen general engine pool for query reliability (#154)
+- chore(ci): collapse stale approval-gate comment block on dispatch-pro-release (#143)
+- chore(ci): drop production environment gate on dispatch-pro-release (#142)
+
+Pro:
+
+-->
 ## 1.3.3 — 2026-04-23
 
 ### Added
