@@ -20,6 +20,20 @@ describe('createWebSearchTool', () => {
     const tool = createWebSearchTool(mockProvider());
     expect(tool.definition.description).toContain('test');
   });
+
+  // Guards against accidental removal of the query-formulation guidance.
+  // These markers are what steers the agent away from noisy 10-word queries
+  // like "pytrends Google Trends unofficial API 2024 rate limits DACH Germany".
+  it('description includes query formulation guidance', () => {
+    const tool = createWebSearchTool(mockProvider());
+    const desc = tool.definition.description ?? '';
+    expect(desc).toMatch(/2-4 high-signal terms/i);
+    expect(desc).toMatch(/no year qualifiers/i);
+    expect(desc).toMatch(/no country\/region codes|no country codes/i);
+    expect(desc).toMatch(/reformulate/i);
+    // Positive + negative example present
+    expect(desc).toMatch(/good:.*bad:/is);
+  });
 });
 
 describe('search action', () => {
