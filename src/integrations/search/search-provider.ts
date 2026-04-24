@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { channels } from '../../core/observability.js';
+
 export interface SearchResult {
   title: string;
   url: string;
@@ -6,6 +9,37 @@ export interface SearchResult {
   publishedDate?: string | undefined;
   source?: string | undefined;
 }
+
+/**
+ * Event shape emitted on `channels.webSearch` once per provider call.
+ * Subscribers (e.g. engine-init.ts) can aggregate retrieval metrics.
+ *
+ * Privacy: the raw query is NEVER published — it can carry PII or
+ * confidential business intent and Bugsink's strip list does not yet
+ * cover a `query` field. We publish a short hash + length so subscribers
+ * can group repeated queries and correlate without seeing content.
+ */
+export interface WebSearchEvent {
+  provider: string;
+  /** sha256(query).slice(0, 16) — stable, opaque, no plaintext. */
+  queryHash: string;
+  /** Length of the query in characters. Useful for "are users sending one-word vs sentence-length queries?" without leaking content. */
+  queryLength: number;
+  resultCount: number;
+  /** Per-engine hit count. For Tavily, single synthetic key 'tavily'. */
+  engines: Record<string, number>;
+  /** SearXNG-only: engines that failed to respond for this query. */
+  unresponsiveEngines: string[];
+  durationMs: number;
+}
+
+/** Stable, opaque, GDPR-safe identifier for query grouping. Truncated for compactness. */
+function hashQuery(query: string): string {
+  return createHash('sha256').update(query).digest('hex').slice(0, 16);
+}
+
+/** Sentinel for results SearXNG returned without engine attribution. Picked to avoid colliding with any real engine module name. */
+const ENGINE_UNATTRIBUTED = '<unattributed>';
 
 export interface SearchOptions {
   maxResults?: number | undefined;
@@ -38,6 +72,7 @@ export class TavilyProvider implements SearchProvider {
   constructor(private readonly apiKey: string) {}
 
   async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
+    const start = Date.now();
     const maxResults = Math.min(opts?.maxResults ?? 5, 20);
     const body: Record<string, unknown> = {
       api_key: this.apiKey,
@@ -60,7 +95,7 @@ export class TavilyProvider implements SearchProvider {
     }
 
     const data = await response.json() as TavilyResponse;
-    return data.results.map((r): SearchResult => ({
+    const results = data.results.map((r): SearchResult => ({
       title: r.title,
       url: r.url,
       snippet: r.content,
@@ -68,6 +103,22 @@ export class TavilyProvider implements SearchProvider {
       publishedDate: r.published_date ?? undefined,
       source: 'tavily',
     }));
+
+    if (channels.webSearch.hasSubscribers) {
+      const event: WebSearchEvent = {
+        provider: this.name,
+        queryHash: hashQuery(query),
+        queryLength: query.length,
+        resultCount: results.length,
+        // Tavily doesn't attribute results to engines — use a synthetic bucket.
+        engines: results.length > 0 ? { tavily: results.length } : {},
+        unresponsiveEngines: [],
+        durationMs: Date.now() - start,
+      };
+      channels.webSearch.publish(event);
+    }
+
+    return results;
   }
 }
 
@@ -107,6 +158,7 @@ export class SearXNGProvider implements SearchProvider {
   }
 
   async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
+    const start = Date.now();
     const maxResults = Math.min(opts?.maxResults ?? 5, 20);
     const params = new URLSearchParams({
       q: query,
@@ -142,19 +194,37 @@ export class SearXNGProvider implements SearchProvider {
     }
 
     const data = await response.json() as SearXNGResponse;
-    if (data.unresponsive_engines && data.unresponsive_engines.length > 0) {
-      const names = data.unresponsive_engines
-        .map(e => Array.isArray(e) ? e[0] : String(e))
-        .join(', ');
-      console.warn(`[searxng] unresponsive engines for query "${query}": ${names}`);
-    }
-    return data.results.slice(0, maxResults).map((r): SearchResult => ({
+    const sliced = data.results.slice(0, maxResults);
+    const results = sliced.map((r): SearchResult => ({
       title: r.title,
       url: r.url,
       snippet: r.content,
       publishedDate: r.publishedDate ?? undefined,
       source: 'searxng',
     }));
+
+    const unresponsive = (data.unresponsive_engines ?? [])
+      .map(e => Array.isArray(e) ? e[0] : String(e));
+
+    if (channels.webSearch.hasSubscribers) {
+      const engineHits: Record<string, number> = {};
+      for (const r of sliced) {
+        const name = r.engine ?? ENGINE_UNATTRIBUTED;
+        engineHits[name] = (engineHits[name] ?? 0) + 1;
+      }
+      const event: WebSearchEvent = {
+        provider: this.name,
+        queryHash: hashQuery(query),
+        queryLength: query.length,
+        resultCount: results.length,
+        engines: engineHits,
+        unresponsiveEngines: unresponsive,
+        durationMs: Date.now() - start,
+      };
+      channels.webSearch.publish(event);
+    }
+
+    return results;
   }
 
   /** Check if the SearXNG instance is reachable. */
