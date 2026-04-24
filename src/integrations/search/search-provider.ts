@@ -83,6 +83,7 @@ interface SearXNGResult {
 
 interface SearXNGResponse {
   results: SearXNGResult[];
+  unresponsive_engines?: Array<[string, string]> | undefined;
 }
 
 /** Validate that a URL uses http/https and is not a cloud metadata endpoint. */
@@ -114,8 +115,17 @@ export class SearXNGProvider implements SearchProvider {
     });
     if (opts?.maxResults) params.set('number_of_results', String(maxResults));
     if (opts?.timeRange) params.set('time_range', opts.timeRange);
+    // Intentionally NO mapping for topic "it" or "general". Verified
+    // empirically against the lynox SearXNG config: forcing categories=it
+    // narrows queries to code-index engines (github/npm/pypi/stackoverflow)
+    // that lack full-text web indices, so research queries like "pytrends
+    // rate limits" return 0 results. Same query without the filter returns
+    // spot-on pypi.org/github hits via DuckDuckGo. Under default SearXNG
+    // settings, categories=it also pulls MDN/Docker Hub that pollute
+    // general-intent queries. Let general engines handle IT topics.
     const categoryMap: Record<string, string> = {
-      news: 'news', science: 'science', it: 'it',
+      news: 'news',
+      science: 'science',
     };
     if (opts?.topic && categoryMap[opts.topic]) {
       params.set('categories', categoryMap[opts.topic]!);
@@ -132,6 +142,12 @@ export class SearXNGProvider implements SearchProvider {
     }
 
     const data = await response.json() as SearXNGResponse;
+    if (data.unresponsive_engines && data.unresponsive_engines.length > 0) {
+      const names = data.unresponsive_engines
+        .map(e => Array.isArray(e) ? e[0] : String(e))
+        .join(', ');
+      console.warn(`[searxng] unresponsive engines for query "${query}": ${names}`);
+    }
     return data.results.slice(0, maxResults).map((r): SearchResult => ({
       title: r.title,
       url: r.url,
