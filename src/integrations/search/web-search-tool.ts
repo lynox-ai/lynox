@@ -2,6 +2,7 @@ import type { ToolEntry } from '../../types/index.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
 import { extractContent } from './content-extractor.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { rerankSearchResults } from './search-reranker.js';
 
 interface WebSearchInput {
   action: 'search' | 'read';
@@ -107,6 +108,12 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
             topic: input.topic,
             timeRange: input.time_range,
           });
+          // Rerank BEFORE enrichment: dropping low-relevance hits first
+          // avoids fetching full pages for results we're about to discard.
+          // No-op unless LYNOX_SEARCH_RERANK is enabled; falls through on
+          // any failure so original results remain accessible.
+          const reranked = await rerankSearchResults(input.query, results);
+          results = reranked.results;
           results = await enrichResults(results);
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
