@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { channels } from '../../core/observability.js';
 
 export interface SearchResult {
@@ -12,10 +13,18 @@ export interface SearchResult {
 /**
  * Event shape emitted on `channels.webSearch` once per provider call.
  * Subscribers (e.g. engine-init.ts) can aggregate retrieval metrics.
+ *
+ * Privacy: the raw query is NEVER published — it can carry PII or
+ * confidential business intent and Bugsink's strip list does not yet
+ * cover a `query` field. We publish a short hash + length so subscribers
+ * can group repeated queries and correlate without seeing content.
  */
 export interface WebSearchEvent {
   provider: string;
-  query: string;
+  /** sha256(query).slice(0, 16) — stable, opaque, no plaintext. */
+  queryHash: string;
+  /** Length of the query in characters. Useful for "are users sending one-word vs sentence-length queries?" without leaking content. */
+  queryLength: number;
   resultCount: number;
   /** Per-engine hit count. For Tavily, single synthetic key 'tavily'. */
   engines: Record<string, number>;
@@ -23,6 +32,14 @@ export interface WebSearchEvent {
   unresponsiveEngines: string[];
   durationMs: number;
 }
+
+/** Stable, opaque, GDPR-safe identifier for query grouping. Truncated for compactness. */
+function hashQuery(query: string): string {
+  return createHash('sha256').update(query).digest('hex').slice(0, 16);
+}
+
+/** Sentinel for results SearXNG returned without engine attribution. Picked to avoid colliding with any real engine module name. */
+const ENGINE_UNATTRIBUTED = '<unattributed>';
 
 export interface SearchOptions {
   maxResults?: number | undefined;
@@ -87,16 +104,19 @@ export class TavilyProvider implements SearchProvider {
       source: 'tavily',
     }));
 
-    const event: WebSearchEvent = {
-      provider: this.name,
-      query,
-      resultCount: results.length,
-      // Tavily doesn't attribute results to engines — use a synthetic bucket.
-      engines: results.length > 0 ? { tavily: results.length } : {},
-      unresponsiveEngines: [],
-      durationMs: Date.now() - start,
-    };
-    channels.webSearch.publish(event);
+    if (channels.webSearch.hasSubscribers) {
+      const event: WebSearchEvent = {
+        provider: this.name,
+        queryHash: hashQuery(query),
+        queryLength: query.length,
+        resultCount: results.length,
+        // Tavily doesn't attribute results to engines — use a synthetic bucket.
+        engines: results.length > 0 ? { tavily: results.length } : {},
+        unresponsiveEngines: [],
+        durationMs: Date.now() - start,
+      };
+      channels.webSearch.publish(event);
+    }
 
     return results;
   }
@@ -183,23 +203,26 @@ export class SearXNGProvider implements SearchProvider {
       source: 'searxng',
     }));
 
-    const engineHits: Record<string, number> = {};
-    for (const r of sliced) {
-      const name = r.engine || 'unknown';
-      engineHits[name] = (engineHits[name] ?? 0) + 1;
-    }
     const unresponsive = (data.unresponsive_engines ?? [])
       .map(e => Array.isArray(e) ? e[0] : String(e));
 
-    const event: WebSearchEvent = {
-      provider: this.name,
-      query,
-      resultCount: results.length,
-      engines: engineHits,
-      unresponsiveEngines: unresponsive,
-      durationMs: Date.now() - start,
-    };
-    channels.webSearch.publish(event);
+    if (channels.webSearch.hasSubscribers) {
+      const engineHits: Record<string, number> = {};
+      for (const r of sliced) {
+        const name = r.engine ?? ENGINE_UNATTRIBUTED;
+        engineHits[name] = (engineHits[name] ?? 0) + 1;
+      }
+      const event: WebSearchEvent = {
+        provider: this.name,
+        queryHash: hashQuery(query),
+        queryLength: query.length,
+        resultCount: results.length,
+        engines: engineHits,
+        unresponsiveEngines: unresponsive,
+        durationMs: Date.now() - start,
+      };
+      channels.webSearch.publish(event);
+    }
 
     return results;
   }

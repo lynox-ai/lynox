@@ -386,11 +386,76 @@ describe('SearXNGProvider', () => {
     expect(events).toHaveLength(1);
     const ev = events[0]!;
     expect(ev.provider).toBe('searxng');
-    expect(ev.query).toBe('test query');
+    expect(ev.queryHash).toMatch(/^[0-9a-f]{16}$/);
+    expect(ev.queryLength).toBe('test query'.length);
+    expect(ev).not.toHaveProperty('query'); // no plaintext leak
     expect(ev.resultCount).toBe(3);
     expect(ev.engines).toEqual({ google: 2, duckduckgo: 1 });
     expect(ev.unresponsiveEngines).toEqual(['bing', 'brave']);
     expect(ev.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('queryHash is deterministic for the same query and differs across queries', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [], unresponsive_engines: [] }),
+    });
+    const events: WebSearchEvent[] = [];
+    const onMessage = (msg: unknown): void => { events.push(msg as WebSearchEvent); };
+    channels.webSearch.subscribe(onMessage);
+    try {
+      const provider = new SearXNGProvider('http://localhost:8888');
+      await provider.search('alpha');
+      await provider.search('alpha');
+      await provider.search('beta');
+    } finally {
+      channels.webSearch.unsubscribe(onMessage);
+    }
+    expect(events).toHaveLength(3);
+    expect(events[0]!.queryHash).toBe(events[1]!.queryHash);
+    expect(events[0]!.queryHash).not.toBe(events[2]!.queryHash);
+  });
+
+  it('skips event publication entirely when no subscribers (cost-free observability)', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ title: 'r', url: 'https://a', content: 's', engine: 'google' }],
+        unresponsive_engines: [],
+      }),
+    });
+    // Spy on publish to confirm it isn't called when nobody subscribes.
+    const publishSpy = vi.spyOn(channels.webSearch, 'publish');
+    try {
+      const provider = new SearXNGProvider('http://localhost:8888');
+      await provider.search('whoever');
+    } finally {
+      publishSpy.mockRestore();
+    }
+    expect(publishSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses <unattributed> sentinel for results SearXNG returned without engine field', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [
+          { title: 'r1', url: 'https://a', content: 's' },          // no engine
+          { title: 'r2', url: 'https://b', content: 's', engine: 'google' },
+        ],
+        unresponsive_engines: [],
+      }),
+    });
+    const events: WebSearchEvent[] = [];
+    const onMessage = (msg: unknown): void => { events.push(msg as WebSearchEvent); };
+    channels.webSearch.subscribe(onMessage);
+    try {
+      const provider = new SearXNGProvider('http://localhost:8888');
+      await provider.search('q');
+    } finally {
+      channels.webSearch.unsubscribe(onMessage);
+    }
+    expect(events[0]!.engines).toEqual({ '<unattributed>': 1, google: 1 });
   });
 
   it('publishes webSearch event even when no results and no unresponsive engines', async () => {
@@ -437,6 +502,8 @@ describe('SearXNGProvider', () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.provider).toBe('tavily');
     expect(events[0]!.engines).toEqual({ tavily: 2 });
+    expect(events[0]!).not.toHaveProperty('query');
+    expect(events[0]!.queryLength).toBe(1);
   });
 
   it('handles network timeout gracefully in healthCheck', async () => {

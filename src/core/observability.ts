@@ -31,11 +31,20 @@ export const channels = {
 
   /**
    * Emitted once per web search provider call with engine-level attribution:
-   *   { provider, query, resultCount, engines: { name: hits }, unresponsiveEngines }
-   * Subscribers can audit retrieval quality over time (which engines are
-   * reliable? which queries need broader coverage?) without opening logs.
+   *   { provider, queryHash, queryLength, resultCount, engines, unresponsiveEngines, durationMs }
+   *
+   * Privacy: NEVER carries the raw query string. Subscribers see a 16-char
+   * sha256 prefix + length, enough to group repeat queries and correlate
+   * over time but not recover content. This deliberately differs from the
+   * other channels — most internal events ship business state; web-search
+   * queries can carry user PII or confidential intent.
+   *
+   * Throttling: emitted once per `web_search` tool call. Multi-user
+   * managed instances can fire many per second under load. Subscribers
+   * MUST aggregate or sample before forwarding to external systems
+   * (Bugsink, OTel, …) — there is no built-in rate limiter on the channel.
    */
-  webSearch:            channel('lynox:websearch'),
+  webSearch:            channel('lynox:websearch:call'),
 };
 
 export function measureTool(name: string): { end(): number } {
