@@ -95,7 +95,9 @@ function makeTool(name: string, handler?: ToolEntry['handler']): ToolEntry {
     definition: {
       name,
       description: `Test tool ${name}`,
-      input_schema: { type: 'object' as const, properties: {} },
+      // Test stubs accept arbitrary inputs — the validator runs strict by
+      // default for real tools but opts these out via additionalProperties.
+      input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
     },
     handler: handler ?? vi.fn().mockResolvedValue('tool result'),
   };
@@ -536,6 +538,73 @@ describe('Agent', () => {
       expect(results[0]!.content).toContain('Permission denied (non-interactive)');
       expect(results[0]!.is_error).toBe(true);
       expect(tool.handler).not.toHaveBeenCalled();
+    });
+
+    it('input validation: rejects unknown top-level key before handler runs', async () => {
+      const handler = vi.fn().mockResolvedValue('never called');
+      const strictTool: ToolEntry = {
+        definition: {
+          name: 'strict_tool',
+          description: 'Strict schema — no additionalProperties',
+          input_schema: {
+            type: 'object',
+            properties: { title: { type: 'string' } },
+            required: ['title'],
+          },
+        },
+        handler,
+      };
+
+      mockProcess
+        .mockResolvedValueOnce(
+          toolUseResponse([{ id: 'tu_v', name: 'strict_tool', input: { title: 'ok', bogus_key: 1 } }]),
+        )
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [strictTool] });
+      await agent.send('x');
+
+      expect(handler).not.toHaveBeenCalled();
+      const messages = agent.getMessages();
+      const toolResultsMsg = messages[2];
+      const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
+      expect(results[0]!.content).toContain('Input validation failed');
+      expect(results[0]!.content).toContain('bogus_key');
+      expect(results[0]!.is_error).toBe(true);
+    });
+
+    it('input validation: rejects missing required field', async () => {
+      const handler = vi.fn().mockResolvedValue('never called');
+      const strictTool: ToolEntry = {
+        definition: {
+          name: 'req_tool',
+          description: 'Schema with required title',
+          input_schema: {
+            type: 'object',
+            properties: { title: { type: 'string' } },
+            required: ['title'],
+          },
+        },
+        handler,
+      };
+
+      mockProcess
+        .mockResolvedValueOnce(
+          toolUseResponse([{ id: 'tu_r', name: 'req_tool', input: {} }]),
+        )
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [strictTool] });
+      await agent.send('x');
+
+      expect(handler).not.toHaveBeenCalled();
+      const messages = agent.getMessages();
+      const toolResultsMsg = messages[2];
+      const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
+      expect(results[0]!.content).toContain('Input validation failed');
+      expect(results[0]!.content).toContain('title');
+      expect(results[0]!.content).toContain('required');
+      expect(results[0]!.is_error).toBe(true);
     });
   });
 

@@ -31,6 +31,7 @@ import { detectInjectionAttempt } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
+import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -757,6 +758,20 @@ export class Agent implements IAgent {
         }
         processedInput = this.secretStore!.resolveSecretRefs(tc.input);
       }
+    }
+
+    // Schema-level input validation. Catches unknown keys, missing required
+    // fields, type mismatches, and enum violations before the handler runs.
+    // Returning the error as a tool_result lets the agent self-correct and
+    // retry the call with proper arguments on the next turn.
+    const validation = validateToolInput(tool.definition.input_schema, processedInput);
+    if (!validation.ok) {
+      return {
+        type: 'tool_result',
+        tool_use_id: tc.id,
+        content: `Input validation failed for tool "${tc.name}":\n${formatValidationErrors(validation.errors)}\n\nRetry with valid input matching the tool schema.`,
+        is_error: true,
+      };
     }
 
     const timer = measureTool(tc.name);

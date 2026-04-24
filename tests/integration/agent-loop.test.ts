@@ -87,7 +87,9 @@ function makeTool(name: string, handler?: ToolEntry['handler']): ToolEntry {
     definition: {
       name,
       description: `Test tool ${name}`,
-      input_schema: { type: 'object' as const, properties: {} },
+      // Test stubs accept arbitrary inputs — the validator runs strict by
+      // default for real tools but opts these out via additionalProperties.
+      input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
     },
     handler: handler ?? vi.fn().mockResolvedValue('tool result'),
   };
