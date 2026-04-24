@@ -28,6 +28,14 @@ export const channels = {
 
   shapeApplied:         channel('lynox:apishape:applied'),
   shapeError:           channel('lynox:apishape:error'),
+
+  /**
+   * Emitted once per web search provider call with engine-level attribution:
+   *   { provider, query, resultCount, engines: { name: hits }, unresponsiveEngines }
+   * Subscribers can audit retrieval quality over time (which engines are
+   * reliable? which queries need broader coverage?) without opening logs.
+   */
+  webSearch:            channel('lynox:websearch'),
 };
 
 export function measureTool(name: string): { end(): number } {

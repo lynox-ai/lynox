@@ -1,3 +1,5 @@
+import { channels } from '../../core/observability.js';
+
 export interface SearchResult {
   title: string;
   url: string;
@@ -5,6 +7,21 @@ export interface SearchResult {
   content?: string | undefined;
   publishedDate?: string | undefined;
   source?: string | undefined;
+}
+
+/**
+ * Event shape emitted on `channels.webSearch` once per provider call.
+ * Subscribers (e.g. engine-init.ts) can aggregate retrieval metrics.
+ */
+export interface WebSearchEvent {
+  provider: string;
+  query: string;
+  resultCount: number;
+  /** Per-engine hit count. For Tavily, single synthetic key 'tavily'. */
+  engines: Record<string, number>;
+  /** SearXNG-only: engines that failed to respond for this query. */
+  unresponsiveEngines: string[];
+  durationMs: number;
 }
 
 export interface SearchOptions {
@@ -38,6 +55,7 @@ export class TavilyProvider implements SearchProvider {
   constructor(private readonly apiKey: string) {}
 
   async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
+    const start = Date.now();
     const maxResults = Math.min(opts?.maxResults ?? 5, 20);
     const body: Record<string, unknown> = {
       api_key: this.apiKey,
@@ -60,7 +78,7 @@ export class TavilyProvider implements SearchProvider {
     }
 
     const data = await response.json() as TavilyResponse;
-    return data.results.map((r): SearchResult => ({
+    const results = data.results.map((r): SearchResult => ({
       title: r.title,
       url: r.url,
       snippet: r.content,
@@ -68,6 +86,19 @@ export class TavilyProvider implements SearchProvider {
       publishedDate: r.published_date ?? undefined,
       source: 'tavily',
     }));
+
+    const event: WebSearchEvent = {
+      provider: this.name,
+      query,
+      resultCount: results.length,
+      // Tavily doesn't attribute results to engines — use a synthetic bucket.
+      engines: results.length > 0 ? { tavily: results.length } : {},
+      unresponsiveEngines: [],
+      durationMs: Date.now() - start,
+    };
+    channels.webSearch.publish(event);
+
+    return results;
   }
 }
 
@@ -107,6 +138,7 @@ export class SearXNGProvider implements SearchProvider {
   }
 
   async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
+    const start = Date.now();
     const maxResults = Math.min(opts?.maxResults ?? 5, 20);
     const params = new URLSearchParams({
       q: query,
@@ -142,19 +174,34 @@ export class SearXNGProvider implements SearchProvider {
     }
 
     const data = await response.json() as SearXNGResponse;
-    if (data.unresponsive_engines && data.unresponsive_engines.length > 0) {
-      const names = data.unresponsive_engines
-        .map(e => Array.isArray(e) ? e[0] : String(e))
-        .join(', ');
-      console.warn(`[searxng] unresponsive engines for query "${query}": ${names}`);
-    }
-    return data.results.slice(0, maxResults).map((r): SearchResult => ({
+    const sliced = data.results.slice(0, maxResults);
+    const results = sliced.map((r): SearchResult => ({
       title: r.title,
       url: r.url,
       snippet: r.content,
       publishedDate: r.publishedDate ?? undefined,
       source: 'searxng',
     }));
+
+    const engineHits: Record<string, number> = {};
+    for (const r of sliced) {
+      const name = r.engine || 'unknown';
+      engineHits[name] = (engineHits[name] ?? 0) + 1;
+    }
+    const unresponsive = (data.unresponsive_engines ?? [])
+      .map(e => Array.isArray(e) ? e[0] : String(e));
+
+    const event: WebSearchEvent = {
+      provider: this.name,
+      query,
+      resultCount: results.length,
+      engines: engineHits,
+      unresponsiveEngines: unresponsive,
+      durationMs: Date.now() - start,
+    };
+    channels.webSearch.publish(event);
+
+    return results;
   }
 
   /** Check if the SearXNG instance is reachable. */
