@@ -5,10 +5,19 @@
 use_default_settings:
   engines:
     keep_only:
-      # General
+      # General — broadened beyond the Google/DDG/Bing trio because
+      # DuckDuckGo in particular rate-limits requests from fresh
+      # container IPs, producing silent zero-result responses. Adding
+      # independent crawlers (brave, mojeek) and EU-friendly engines
+      # (qwant, startpage) gives the aggregator a larger quorum so a
+      # single flaky upstream cannot kill a query.
       - google
       - duckduckgo
       - bing
+      - brave
+      - qwant
+      - startpage
+      - mojeek
       - wikipedia
       - wikidata
       - currency
