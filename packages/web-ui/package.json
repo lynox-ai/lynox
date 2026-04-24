@@ -45,7 +45,7 @@
     "svelte-check": "^4.2.1",
     "tailwindcss": "^4.1.8",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "vite": "^8.0.10"
   },
   "peerDependencies": {
     "@sveltejs/kit": "^2.0.0",
