@@ -2112,6 +2112,16 @@
 {/if}
 
 <style>
+	/* On touch devices (no hover capability), reveal hover-only action buttons
+	   like the per-message copy + speak controls. Without this, the
+	   `opacity-0 group-hover/copy:opacity-100` Tailwind pattern leaves them
+	   permanently invisible on iOS/Android because :hover never fires. */
+	@media (hover: none) {
+		:global(.opacity-0.group-hover\/copy\:opacity-100) {
+			opacity: 1;
+		}
+	}
+
 	@keyframes fadeUp {
 		from { opacity: 0; transform: translateY(12px); }
 		to { opacity: 1; transform: translateY(0); }
