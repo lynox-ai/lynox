@@ -45,6 +45,29 @@ function formatTaskLine(t: { id: string; title: string; priority: string; status
   return `[${t.priority.toUpperCase()}] ${t.id} ${t.title}${assign}${scope}${due} [${t.status}]`;
 }
 
+// Catches an LLM output failure mode where the model emits an escaped close-quote
+// mid-string, causing the intended next JSON keys to land inside `description`
+// (or `title`) as literal text (e.g. `...strategy.","schedule":"0 2 * * 4"`).
+// Strict schema validation can't catch this — the JSON parses fine, the string
+// just contains garbage.
+//
+// Pattern: close-quote + comma + open-quote + known task_create key + close-quote
+// + colon + value-start. Value-start covers strings (`"`), arrays (`[`),
+// numbers (`0-9`), and booleans (`t`/`f`) — `tags` smuggles as `","tags":[...]`
+// so the value-side has to be permissive. Specific enough on the key-side to
+// keep false positives away from legitimate prose. JSON keys are always
+// double-quoted in real payloads, so the single-quote branch was dead weight.
+const EMBEDDED_TASK_PARAMS_PATTERN =
+  /"\s*,\s*"(schedule|priority|assignee|due_date|parent_task_id|watch_url|watch_interval_minutes|pipeline_id|scope|tags|title)"\s*:\s*["[\dtf]/i;
+
+function detectEmbeddedParams(field: string, value: string | undefined): string | null {
+  if (!value) return null;
+  const match = value.match(EMBEDDED_TASK_PARAMS_PATTERN);
+  if (!match) return null;
+  const paramName = match[1];
+  return `Error: ${field} contains what looks like escaped JSON fragments of other task_create parameters (matched: "${paramName}"). These must be passed as separate top-level parameters, not embedded inside ${field}. Retry the call with schedule, priority, assignee, tags, etc. as their own fields.`;
+}
+
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   definition: {
     name: 'task_create',
@@ -72,6 +95,10 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   handler: async (input: TaskCreateInput, agent: IAgent): Promise<string> => {
     const managerRef = agent.toolContext.taskManager;
     if (!managerRef) return 'Error: Task manager not available.';
+
+    const embeddedErr = detectEmbeddedParams('description', input.description)
+      ?? detectEmbeddedParams('title', input.title);
+    if (embeddedErr) return embeddedErr;
 
     let scopeType = 'context';
     let scopeId = '';
