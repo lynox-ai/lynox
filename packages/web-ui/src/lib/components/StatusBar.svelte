@@ -181,7 +181,7 @@
 </script>
 
 <!-- Mobile: minimal engine indicator -->
-<div class="flex md:hidden items-center justify-center border-t border-border bg-bg-subtle h-7 px-2">
+<div class="flex md:hidden items-center justify-center border-t border-border bg-bg-subtle min-h-7 px-2 pb-[env(safe-area-inset-bottom)]">
 	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
@@ -194,7 +194,7 @@
 </div>
 
 <!-- Desktop: full status bar -->
-<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle h-8 px-1 overflow-x-auto scrollbar-none">
+<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle min-h-8 px-1 pb-[env(safe-area-inset-bottom)] overflow-x-auto scrollbar-none">
 	<!-- Engine Status (clickable) -->
 	<button onclick={togglePanel} class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
