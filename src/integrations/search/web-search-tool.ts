@@ -63,7 +63,25 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
   return {
     definition: {
       name: 'web_research',
-      description: `Search the web or read a URL. Provider: ${provider.name}. Use "search" with a specific query (not broad questions). Use "read" to extract full content from a URL. Use topic to narrow results: "news" for current events, "science" for papers/research. For general research (including code/libraries/APIs), omit topic — default general engines cover these better than any narrow filter. Top results include full page content.`,
+      description: `Search the web or read a URL. Provider: ${provider.name}.
+
+Action "search": query a public search engine. Query formulation matters more than most tools — this feeds Google/Bing/DDG, not a vector store.
+
+QUERY RULES:
+- Use 2-4 high-signal terms. Prefer nouns, proper names, product names.
+- NO year qualifiers ("2024", "2025") — use time_range if recency matters.
+- NO country/region codes ("DACH", "Germany", "EU") — engines treat these as noise.
+- NO stacked modifiers ("free tier pricing rate limits"). Pick ONE angle per query; run a follow-up search for the next angle.
+- If first results look off-topic or empty, REFORMULATE with fewer/different terms. Do not repeat the same bad query. For broad topics, start generic, then narrow in a follow-up.
+
+Examples:
+  Good: "pytrends github"                 Bad: "pytrends Google Trends unofficial API 2024 rate limits DACH Germany"
+  Good: "serpapi pricing"                 Bad: "SerpApi Google Trends API pricing free tier 2024"
+  Good: "reddit trending api"             Bad: "Reddit trends API free keyword popularity rising topics 2024"
+
+Action "read": extract full text from a specific URL.
+
+Use topic to narrow: "news" for current events, "science" for papers/research. For general research (code, libraries, APIs, company info), omit topic — default engines cover these better than any filter. Top results include full page content.`,
       eager_input_streaming: true,
       input_schema: {
         type: 'object' as const,
@@ -75,7 +93,7 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
           },
           query: {
             type: 'string',
-            description: 'Search query (required for action "search")',
+            description: 'Search query (required for action "search"). 2-4 high-signal terms; no year/country qualifiers; one angle per query. See tool description for examples.',
           },
           url: {
             type: 'string',
