@@ -45,7 +45,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly anthropicClient: Anthropic | undefined;
   private readonly patternEngine: PatternEngine | null;
   private readonly runHistory: RunHistory | null;
-  /** Tool-call extractor (Haiku + strict schema). Opt-in via LYNOX_KG_EXTRACTOR=v2. */
+  /** Tool-call extractor (Haiku + strict schema). Default since v1.3.4; opt-out via LYNOX_KG_EXTRACTOR=v1. */
   private readonly useV2Extractor: boolean;
 
   constructor(
@@ -64,7 +64,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.anthropicClient = anthropicClient;
     this.runHistory = runHistory ?? null;
     this.patternEngine = runHistory ? new PatternEngine(runHistory, this.db) : null;
-    this.useV2Extractor = process.env['LYNOX_KG_EXTRACTOR'] === 'v2';
+    this.useV2Extractor = process.env['LYNOX_KG_EXTRACTOR'] !== 'v1';
   }
 
   // === Lifecycle ===

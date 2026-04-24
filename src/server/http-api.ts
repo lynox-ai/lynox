@@ -86,6 +86,8 @@ function requiresAdmin(method: string, pathname: string): boolean {
   if (pathname.startsWith('/api/migration') && pathname !== '/api/migration/preview') return true;
   // WhatsApp credential mutations are admin-scope; read-only status stays user-scope.
   if ((method === 'POST' || method === 'DELETE') && pathname === '/api/whatsapp/credentials') return true;
+  // KG cleanup is destructive (deletes entities + their relations) — admin only.
+  if (method === 'POST' && pathname === '/api/kg/cleanup') return true;
   return false;
 }
 const RATE_WINDOW_MS = 60_000;
@@ -2916,6 +2918,20 @@ export class LynoxHTTPApi {
       if (!kg) { jsonResponse(res, 200, { entityCount: 0, relationCount: 0, memoryCount: 0, communityCount: 0 }); return; }
       const stats = await kg.stats();
       jsonResponse(res, 200, stats);
+    });
+
+    // Admin: purge legacy mis-extracted entities (stopwords + pricing fragments).
+    // Pre-v2 extractor wrote rows like "in" (person), "tools" (location),
+    // "39/mo" (project). v2 prevents new ones; this endpoint cleans the past.
+    // ?dryRun=true previews without deleting.
+    this.staticRoutes.set('POST /api/kg/cleanup', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!requireService(res, kg, 'Knowledge graph')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const dryRun = url.searchParams.get('dryRun') === 'true';
+      const { cleanupBadEntities } = await import('../core/kg-cleanup.js');
+      const result = cleanupBadEntities(kg.getDb(), { dryRun });
+      jsonResponse(res, 200, { dryRun, ...result });
     });
 
     // ── Mail (provider-agnostic IMAP/SMTP + app-password) ──
