@@ -82,6 +82,61 @@ describe('Task Tools', () => {
       const result = await taskCreateTool.handler({ title: 'No mgr' }, makeAgent());
       expect(result).toContain('Error');
     });
+
+    // Regression: reproduces the real failure from 2026-04-24 where an agent
+    // emitted an escaped close-quote mid-string, causing schedule/priority/
+    // assignee to land inside `description` as literal text. The task was
+    // created as a regular (unscheduled) task and never ran.
+    it('should reject description with embedded JSON param fragments', async () => {
+      const result = await taskCreateTool.handler(
+        {
+          title: 'Weekly Google Autocomplete Crawler — DACH Keywords',
+          description:
+            'Fetch Google Autocomplete suggestions across DE/AT/CH geos. Next actions: 1) Review top-rank shifts week-over-week, 2) Mine long-tail cluster combinations, 3) Feed into content strategy.","schedule":"0 2 * * 4","priority":"medium","assignee":"lynox"',
+        },
+        makeAgent(),
+      );
+      expect(result).toMatch(/Error/);
+      expect(result).toMatch(/description/i);
+      expect(result).toMatch(/schedule|priority|assignee/i);
+      expect(result).not.toContain('Task created');
+      expect(result).not.toContain('Scheduled task');
+    });
+
+    it('should not flag legitimate quoted prose in description', async () => {
+      const result = await taskCreateTool.handler(
+        {
+          title: 'Follow up',
+          description: 'Customer said, "This needs more work", so check in next week.',
+        },
+        makeAgent(),
+      );
+      expect(result).toContain('Task created');
+    });
+
+    it('should not flag unrelated JSON-like snippets in description', async () => {
+      const result = await taskCreateTool.handler(
+        {
+          title: 'Config review',
+          description: 'Verify settings "foo":"bar" and "baz":"qux" are applied.',
+        },
+        makeAgent(),
+      );
+      expect(result).toContain('Task created');
+    });
+
+    it('should still create real scheduled tasks via schedule parameter', async () => {
+      const result = await taskCreateTool.handler(
+        {
+          title: 'Real scheduled task',
+          description: 'Runs every Thursday at 02:00 UTC.',
+          schedule: '0 2 * * 4',
+        },
+        makeAgent(),
+      );
+      expect(result).toContain('Scheduled task created');
+      expect(result).toContain('next run:');
+    });
   });
 
   describe('task_update', () => {

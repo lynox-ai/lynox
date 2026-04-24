@@ -45,6 +45,24 @@ function formatTaskLine(t: { id: string; title: string; priority: string; status
   return `[${t.priority.toUpperCase()}] ${t.id} ${t.title}${assign}${scope}${due} [${t.status}]`;
 }
 
+// Catches an LLM output failure mode where the model emits an escaped close-quote
+// mid-string, causing the intended next JSON keys to land inside `description` as
+// literal text (e.g. `...strategy.","schedule":"0 2 * * 4"`). Strict schema
+// validation cannot catch this — the JSON is syntactically valid, the string just
+// contains garbage. The pattern requires close-quote + comma + open-quote + a known
+// task_create parameter name + close-quote + colon + open-quote, which is specific
+// enough to avoid false positives on legitimate quoted prose.
+const EMBEDDED_TASK_PARAMS_PATTERN =
+  /["']\s*,\s*["'](schedule|priority|assignee|due_date|parent_task_id|watch_url|watch_interval_minutes|pipeline_id|scope)["']\s*:\s*["']/i;
+
+function detectEmbeddedParams(description: string | undefined): string | null {
+  if (!description) return null;
+  const match = description.match(EMBEDDED_TASK_PARAMS_PATTERN);
+  if (!match) return null;
+  const paramName = match[1];
+  return `Error: description contains what looks like escaped JSON fragments of other task_create parameters (matched: "${paramName}"). These must be passed as separate top-level parameters, not embedded inside description. Retry the call with schedule, priority, assignee, etc. as their own fields.`;
+}
+
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   definition: {
     name: 'task_create',
@@ -72,6 +90,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   handler: async (input: TaskCreateInput, agent: IAgent): Promise<string> => {
     const managerRef = agent.toolContext.taskManager;
     if (!managerRef) return 'Error: Task manager not available.';
+
+    const embeddedErr = detectEmbeddedParams(input.description);
+    if (embeddedErr) return embeddedErr;
 
     let scopeType = 'context';
     let scopeId = '';
