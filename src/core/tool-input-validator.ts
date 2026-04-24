@@ -102,23 +102,34 @@ function validateObject(
     return;
   }
   const obj = value as Record<string, unknown>;
-  const props = (schema['properties'] as Record<string, SchemaNode> | undefined) ?? {};
+  const propsRaw = schema['properties'] as Record<string, SchemaNode> | undefined;
+  const props = propsRaw ?? {};
   const required = (schema['required'] as string[] | undefined) ?? [];
-  const allowAdditional = schema['additionalProperties'] === true;
+
+  // Free-form object idiom: `{ type: 'object' }` with no `properties` declared
+  // means "payload shape is data-driven, not enumerated" (e.g. http_request.headers,
+  // data_store_insert.records[*], run_pipeline.context). Strict-by-default for
+  // these would reject every real call. Caller can still force strict by setting
+  // `additionalProperties: false` explicitly.
+  const additional = schema['additionalProperties'];
+  const additionalExplicit = additional === true || additional === false;
+  const hasDeclaredProperties = propsRaw !== undefined && Object.keys(propsRaw).length > 0;
+  const allowAdditional = additionalExplicit ? additional === true : !hasDeclaredProperties;
 
   for (const req of required) {
-    if (!(req in obj)) {
+    if (!Object.hasOwn(obj, req)) {
       errors.push({ path: joinPath(path, req), message: 'required property missing' });
     }
   }
 
   for (const key of Object.keys(obj)) {
-    if (!(key in props)) {
+    if (!Object.hasOwn(props, key)) {
       if (!allowAdditional) {
-        const known = Object.keys(props).join(', ') || '(none)';
+        const known = Object.keys(props).join(', ');
+        const hint = known ? ` — known properties: ${known}` : ' — this object accepts no declared properties';
         errors.push({
           path: joinPath(path, key),
-          message: `unknown property — known properties: ${known}`,
+          message: `unknown property${hint}`,
         });
       }
       continue;
