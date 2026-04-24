@@ -62,7 +62,7 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
   return {
     definition: {
       name: 'web_research',
-      description: `Search the web or read a URL. Provider: ${provider.name}. Use "search" with a specific query (not broad questions). Use "read" to extract full content from a URL. Use topic to target results: "news" for current events, "science" for papers/research, "it" for code/packages. Top results include full page content.`,
+      description: `Search the web or read a URL. Provider: ${provider.name}. Use "search" with a specific query (not broad questions). Use "read" to extract full content from a URL. Use topic to narrow results: "news" for current events, "science" for papers/research. For general research (including code/libraries/APIs), omit topic — default general engines cover these better than any narrow filter. Top results include full page content.`,
       eager_input_streaming: true,
       input_schema: {
         type: 'object' as const,

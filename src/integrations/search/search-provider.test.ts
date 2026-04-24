@@ -314,7 +314,13 @@ describe('SearXNGProvider', () => {
     expect(url).toContain('categories=science');
   });
 
-  it('maps it topic to it category', async () => {
+  // Reverses 2026-04-24 finding: `topic: "it"` used to set categories=it,
+  // but that filters queries to dev-index engines (github/npm/pypi/
+  // stackoverflow) which lack full-text web indices — verified to return
+  // 0 results for research queries like "pytrends rate limits" against
+  // the real lynox SearXNG config. General engines handle IT queries
+  // better without any category filter.
+  it('does not set categories for it topic (empirically worse than general)', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({ results: [] }),
@@ -324,7 +330,7 @@ describe('SearXNGProvider', () => {
     await provider.search('typescript generics', { topic: 'it' });
 
     const url = mockFetch.mock.calls[0]![0] as string;
-    expect(url).toContain('categories=it');
+    expect(url).not.toContain('categories');
   });
 
   it('does not set categories for finance topic (no SearXNG equivalent)', async () => {
@@ -351,6 +357,39 @@ describe('SearXNGProvider', () => {
 
     const url = mockFetch.mock.calls[0]![0] as string;
     expect(url).not.toContain('categories');
+  });
+
+  it('warns when SearXNG reports unresponsive engines', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ title: 't', url: 'https://x', content: 's' }],
+        unresponsive_engines: [['google', 'timeout'], ['bing', 'HTTP error']],
+      }),
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('anything');
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const msg = warnSpy.mock.calls[0]![0] as string;
+    expect(msg).toContain('unresponsive engines');
+    expect(msg).toContain('google');
+    expect(msg).toContain('bing');
+  });
+
+  it('does not warn when unresponsive_engines is empty or missing', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [], unresponsive_engines: [] }),
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('anything');
+
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('handles network timeout gracefully in healthCheck', async () => {
