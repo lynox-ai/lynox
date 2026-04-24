@@ -9,7 +9,7 @@ interface WebSearchInput {
   query?: string | undefined;
   url?: string | undefined;
   max_results?: number | undefined;
-  topic?: 'general' | 'news' | 'finance' | undefined;
+  topic?: 'general' | 'news' | 'finance' | 'science' | undefined;
   time_range?: 'day' | 'week' | 'month' | 'year' | undefined;
 }
 
@@ -105,8 +105,8 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           },
           topic: {
             type: 'string',
-            enum: ['general', 'news', 'finance', 'science', 'it'],
-            description: 'Search topic category. Only used with action "search"',
+            enum: ['general', 'news', 'finance', 'science'],
+            description: 'Search topic category. Only used with action "search". Use "news" for current events, "science" for papers/research; omit for code/library/API queries (general engines outperform any filter there).',
           },
           time_range: {
             type: 'string',
