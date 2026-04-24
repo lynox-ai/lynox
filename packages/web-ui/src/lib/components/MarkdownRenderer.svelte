@@ -663,6 +663,7 @@ window.addEventListener('afterprint', function () { window.close(); });
 	div :global(pre) {
 		scrollbar-width: thin;
 		scrollbar-color: var(--color-border) transparent;
+		max-width: 100%;
 	}
 
 	/* Tables */
@@ -768,10 +769,12 @@ window.addEventListener('afterprint', function () { window.close(); });
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-md);
 		overflow-x: auto;
+		max-width: 100%;
 	}
 	div :global(.mermaid-diagram svg) {
 		max-width: 100%;
 		height: auto;
+		min-width: 0;
 	}
 	div :global(.diagram-actions) {
 		position: absolute;
