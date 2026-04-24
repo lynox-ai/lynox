@@ -10,6 +10,7 @@ interface TaskCreateInput {
   priority?: TaskPriority | undefined;
   assignee?: string | undefined;
   due_date?: string | undefined;
+  run_at?: string | undefined;
   scope?: string | undefined;
   tags?: string[] | undefined;
   parent_task_id?: string | undefined;
@@ -80,11 +81,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         description: { type: 'string', description: 'Task description' },
         priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'], description: 'Priority level. Default: medium' },
         assignee: { type: 'string', description: 'Who is responsible: "user" (the human), "lynox" (the agent), or a custom name. Default: unassigned.' },
-        due_date: { type: 'string', description: 'Due date in YYYY-MM-DD format' },
+        due_date: { type: 'string', description: 'Soft deadline (YYYY-MM-DD). Does NOT trigger execution. For one-shot future execution use run_at.' },
+        run_at: { type: 'string', description: 'ISO 8601 datetime for one-shot future execution (e.g. "2026-04-25T09:00:00"). Use this for "tomorrow at 9am", "in 2 hours", "next Monday morning". Without it, lynox-assignee tasks fire immediately. Mutually exclusive with schedule.' },
         scope: { type: 'string', description: 'Scope as "type:id" (e.g., "client:acme"). Default: current project scope.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tags for categorization' },
         parent_task_id: { type: 'string', description: 'Parent task ID for subtasks' },
-        schedule: { type: 'string', description: 'Cron schedule for recurring tasks. Standard cron (e.g. \'0 8 * * *\' for daily at 8am) or shorthand (\'30m\', \'1h\', \'6h\', \'1d\').' },
+        schedule: { type: 'string', description: 'Cron schedule for recurring tasks. Standard cron (e.g. \'0 8 * * *\' for daily at 8am) or shorthand (\'30m\', \'1h\', \'6h\', \'1d\'). For a one-shot future task use run_at instead.' },
         watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
         watch_interval_minutes: { type: 'number', description: 'How often to check the watched URL (in minutes). Default: 60.' },
         pipeline_id: { type: 'string', description: 'ID of a stored workflow/pipeline to execute on this schedule.' },
@@ -157,6 +159,14 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           watchIntervalMinutes: intervalMinutes,
         });
         return `Watch task created: ${formatTaskLine(task)} — watching ${input.watch_url} every ${String(intervalMinutes)}min`;
+      }
+
+      if (input.run_at) {
+        if (Number.isNaN(Date.parse(input.run_at))) {
+          return `Error: invalid run_at "${input.run_at}". Use ISO 8601 datetime (e.g. "2026-04-25T09:00:00").`;
+        }
+        const task = managerRef.create({ ...baseParams, nextRunAt: input.run_at });
+        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task)}`;
       }
 
       const task = managerRef.create(baseParams);

@@ -14,12 +14,27 @@
 		assignee?: string;
 	}
 
+	type Frequency = 'once' | 'hourly' | 'daily' | 'weekly' | 'monthly';
+
 	let tasks = $state<TaskRecord[]>([]);
 	let loading = $state(true);
 	let newTitle = $state('');
-	let newSchedule = $state('');
 	let newAssignee = $state('lynox');
+	let frequency = $state<Frequency>('once');
+	let timeStr = $state('09:00');
+	let dateStr = $state('');                 // YYYY-MM-DD for "once"
+	let weekdayStr = $state('1');             // 0-6 Sun..Sat (cron convention)
+	let dayOfMonthStr = $state('1');          // 1-31
 	let error = $state('');
+
+	// Default the once-date to tomorrow on first render so the form is usable immediately.
+	$effect(() => {
+		if (!dateStr) {
+			const t0 = new Date();
+			t0.setDate(t0.getDate() + 1);
+			dateStr = t0.toISOString().slice(0, 10);
+		}
+	});
 
 	async function loadTasks() {
 		loading = true;
@@ -35,23 +50,57 @@
 		loading = false;
 	}
 
+	// Convert a local "HH:MM" string into UTC {hh, mm} used by the cron parser
+	// (which iterates UTC). Anchored to today's date so DST matches when the
+	// task next fires; cross-midnight TZ shifts (e.g. APAC users) may pick a
+	// neighboring weekday — acceptable trade-off to keep the cron string flat.
+	function localTimeToUtcParts(hm: string): { hh: number; mm: number } {
+		const [h, m] = hm.split(':').map((n) => parseInt(n, 10));
+		const local = new Date();
+		local.setHours(h ?? 0, m ?? 0, 0, 0);
+		return { hh: local.getUTCHours(), mm: local.getUTCMinutes() };
+	}
+
+	function buildSchedulePayload(): { scheduleCron?: string; runAt?: string; error?: string } {
+		if (frequency === 'once') {
+			if (!dateStr || !timeStr) return { error: t('tasks.invalid_date') };
+			const local = new Date(`${dateStr}T${timeStr}:00`);
+			if (Number.isNaN(local.getTime()) || local.getTime() <= Date.now()) {
+				return { error: t('tasks.invalid_date') };
+			}
+			return { runAt: local.toISOString() };
+		}
+		if (frequency === 'hourly') return { scheduleCron: '0 * * * *' };
+		const { hh, mm } = localTimeToUtcParts(timeStr);
+		if (frequency === 'daily') return { scheduleCron: `${mm} ${hh} * * *` };
+		if (frequency === 'weekly') return { scheduleCron: `${mm} ${hh} * * ${weekdayStr}` };
+		if (frequency === 'monthly') return { scheduleCron: `${mm} ${hh} ${dayOfMonthStr} * *` };
+		return {};
+	}
+
 	async function createTask() {
 		if (!newTitle.trim()) return;
 		error = '';
+		const payload = buildSchedulePayload();
+		if (payload.error) { error = payload.error; return; }
 		try {
 			const res = await fetch(`${getApiBase()}/tasks`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					title: newTitle,
-					description: newTitle,
 					assignee: newAssignee || undefined,
-					scheduleCron: newSchedule || undefined
+					...(payload.scheduleCron ? { scheduleCron: payload.scheduleCron } : {}),
+					...(payload.runAt ? { runAt: payload.runAt } : {}),
 				})
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) {
+				const msg = await res.json().catch(() => null) as { error?: string } | null;
+				error = msg?.error ?? t('common.save_failed');
+				return;
+			}
 			newTitle = '';
-			newSchedule = '';
+			frequency = 'once';
 			await loadTasks();
 		} catch {
 			error = t('common.save_failed');
@@ -72,17 +121,29 @@
 		} catch { error = t('common.save_failed'); }
 	}
 
+	// Render a UTC cron in the user's local time so "0 7 * * *" (created locally
+	// as 09:00 in CEST) displays back as "Täglich um 09:00" instead of "07:00".
+	function utcHmToLocal(mmStr: string, hhStr: string): string {
+		const mm = parseInt(mmStr, 10);
+		const hh = parseInt(hhStr, 10);
+		if (Number.isNaN(mm) || Number.isNaN(hh)) return `${hhStr}:${mmStr.padStart(2, '0')}`;
+		const d = new Date();
+		d.setUTCHours(hh, mm, 0, 0);
+		const pad = (n: number) => n.toString().padStart(2, '0');
+		return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+	}
+
 	function cronToHuman(cron: string): string {
 		if (cron === '0 * * * *') return t('tasks.every_hour');
 		const m = cron.match(/^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/);
 		if (!m) return cron;
-		const hour = m[2];
+		const local = utcHmToLocal(m[1] ?? '0', m[2] ?? '0');
 		const day = m[3];
 		const weekday = m[4];
 		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
-		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${hour}:${m[1]?.padStart(2, '0')}`;
-		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${hour}:${m[1]?.padStart(2, '0')}`;
-		return `${t('tasks.daily_at')} ${hour}:${m[1]?.padStart(2, '0')}`;
+		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${local}`;
+		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${local}`;
+		return `${t('tasks.daily_at')} ${local}`;
 	}
 
 	const statusLabel: Record<string, string> = {
@@ -165,16 +226,70 @@
 				</select>
 			</div>
 			<div>
-				<label for="task-schedule" class="text-xs text-text-subtle mb-1 block">{t('tasks.repeat')}</label>
-				<select id="task-schedule" bind:value={newSchedule} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none">
-					<option value="">{t('tasks.once')}</option>
-					<option value="0 * * * *">{t('tasks.every_hour')}</option>
-					<option value="0 9 * * *">{t('tasks.preset_daily')}</option>
-					<option value="0 9 * * 1">{t('tasks.preset_weekly')}</option>
-					<option value="0 9 1 * *">{t('tasks.preset_monthly')}</option>
+				<label for="task-frequency" class="text-xs text-text-subtle mb-1 block">{t('tasks.repeat')}</label>
+				<select id="task-frequency" bind:value={frequency} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none">
+					<option value="once">{t('tasks.once')}</option>
+					<option value="hourly">{t('tasks.every_hour')}</option>
+					<option value="daily">{t('tasks.frequency_daily')}</option>
+					<option value="weekly">{t('tasks.frequency_weekly')}</option>
+					<option value="monthly">{t('tasks.frequency_monthly')}</option>
 				</select>
 			</div>
 		</div>
+
+		<!-- Conditional pickers driven by frequency -->
+		{#if frequency === 'once'}
+			<div class="grid grid-cols-2 gap-3">
+				<div>
+					<label for="task-date" class="text-xs text-text-subtle mb-1 block">{t('tasks.date_label')}</label>
+					<input id="task-date" type="date" bind:value={dateStr} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none" />
+				</div>
+				<div>
+					<label for="task-time-once" class="text-xs text-text-subtle mb-1 block">{t('tasks.time_label')}</label>
+					<input id="task-time-once" type="time" bind:value={timeStr} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none" />
+				</div>
+			</div>
+		{:else if frequency === 'daily'}
+			<div>
+				<label for="task-time-daily" class="text-xs text-text-subtle mb-1 block">{t('tasks.time_label')}</label>
+				<input id="task-time-daily" type="time" bind:value={timeStr} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none" />
+			</div>
+		{:else if frequency === 'weekly'}
+			<div class="grid grid-cols-2 gap-3">
+				<div>
+					<label for="task-weekday" class="text-xs text-text-subtle mb-1 block">{t('tasks.weekday_label')}</label>
+					<select id="task-weekday" bind:value={weekdayStr} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none">
+						<option value="1">{t('tasks.monday')}</option>
+						<option value="2">{t('tasks.tuesday')}</option>
+						<option value="3">{t('tasks.wednesday')}</option>
+						<option value="4">{t('tasks.thursday')}</option>
+						<option value="5">{t('tasks.friday')}</option>
+						<option value="6">{t('tasks.saturday')}</option>
+						<option value="0">{t('tasks.sunday')}</option>
+					</select>
+				</div>
+				<div>
+					<label for="task-time-weekly" class="text-xs text-text-subtle mb-1 block">{t('tasks.time_label')}</label>
+					<input id="task-time-weekly" type="time" bind:value={timeStr} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none" />
+				</div>
+			</div>
+		{:else if frequency === 'monthly'}
+			<div class="grid grid-cols-2 gap-3">
+				<div>
+					<label for="task-dom" class="text-xs text-text-subtle mb-1 block">{t('tasks.day_of_month_label')}</label>
+					<select id="task-dom" bind:value={dayOfMonthStr} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none">
+						{#each Array(31) as _, i}
+							<option value={String(i + 1)}>{i + 1}.</option>
+						{/each}
+					</select>
+				</div>
+				<div>
+					<label for="task-time-monthly" class="text-xs text-text-subtle mb-1 block">{t('tasks.time_label')}</label>
+					<input id="task-time-monthly" type="time" bind:value={timeStr} class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none" />
+				</div>
+			</div>
+		{/if}
+
 		<button
 			onclick={createTask}
 			disabled={!newTitle.trim()}

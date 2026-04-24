@@ -34,6 +34,7 @@ import {
   DATASTORE_PROMPT_SUFFIX,
   CRM_PROMPT_SUFFIX,
   DEVELOPER_PROMPT_SUFFIX,
+  currentDateContext,
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
@@ -353,9 +354,9 @@ export class Session {
       const langName = { de: 'German', en: 'English', fr: 'French', it: 'Italian', es: 'Spanish', nl: 'Dutch', pt: 'Portuguese', sv: 'Swedish' }[this.engine.config.language] ?? this.engine.config.language;
       basePrompt += `\n\n**Language override**: Respond in ${langName}. The user has explicitly set this preference.`;
     }
-    const effectivePrompt = this.agentOverrides.systemPromptSuffix
+    const effectivePrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
-      : basePrompt;
+      : basePrompt) + currentDateContext();
     const promptHash = hashPrompt(effectivePrompt);
 
     // Record run start
@@ -869,9 +870,9 @@ export class Session {
     if (userConfig.experience === 'developer') {
       basePrompt += DEVELOPER_PROMPT_SUFFIX;
     }
-    const systemPrompt = this.agentOverrides.systemPromptSuffix
+    const systemPrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
-      : basePrompt;
+      : basePrompt) + currentDateContext();
 
     // Apply hook-based tool filtering (for Pro extensions)
     let effectiveTools = tools;

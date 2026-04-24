@@ -194,6 +194,54 @@ describe('Task Tools', () => {
       );
       expect(result).toContain('Task created');
     });
+
+    it('should schedule a one-shot future task via run_at', async () => {
+      const future = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // +1h
+      const result = await taskCreateTool.handler(
+        { title: 'Tomorrow morning', assignee: 'lynox', run_at: future },
+        makeAgent(),
+      );
+      expect(result).toContain('Task scheduled for');
+      expect(result).toContain(future);
+      // Ensure the task did NOT auto-fire — nextRunAt should equal what we passed,
+      // not the creation timestamp.
+      const created = tm.list().find((t) => t.title === 'Tomorrow morning');
+      expect(created?.next_run_at).toBe(future);
+    });
+
+    it('should reject invalid run_at', async () => {
+      const result = await taskCreateTool.handler(
+        { title: 'Bad time', assignee: 'lynox', run_at: 'not-a-date' },
+        makeAgent(),
+      );
+      expect(result).toContain('Error');
+      expect(result).toContain('invalid run_at');
+    });
+
+    it('should still auto-fire lynox-assignee tasks with no schedule', async () => {
+      const before = Date.now();
+      await taskCreateTool.handler(
+        { title: 'Do it now', assignee: 'lynox' },
+        makeAgent(),
+      );
+      const created = tm.list().find((t) => t.title === 'Do it now');
+      expect(created?.next_run_at).toBeTruthy();
+      // Should be roughly "now" (within 5 seconds of when we called it)
+      const ts = new Date(created!.next_run_at!).getTime();
+      expect(ts).toBeGreaterThanOrEqual(before);
+      expect(ts).toBeLessThanOrEqual(Date.now() + 5000);
+    });
+
+    it('should create a recurring scheduled task via schedule', async () => {
+      const result = await taskCreateTool.handler(
+        { title: 'Daily check', assignee: 'lynox', schedule: '0 9 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain('Scheduled task created');
+      const created = tm.list().find((t) => t.title === 'Daily check');
+      expect(created?.schedule_cron).toBe('0 9 * * *');
+      expect(created?.next_run_at).toBeTruthy();
+    });
   });
 
   describe('task_update', () => {
