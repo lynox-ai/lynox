@@ -466,50 +466,66 @@
 	{/if}
 
 	<!-- Search & Filters -->
-	<div class="flex flex-wrap gap-2 mb-4">
+	<div class="mb-4 space-y-2">
 		<input
 			type="text"
 			placeholder={t('history.search')}
 			bind:value={searchQuery}
 			oninput={handleSearch}
-			class="flex-1 min-w-[200px] rounded-[var(--radius-md)] border border-border bg-bg px-3 py-1.5 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:border-accent"
+			class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-1.5 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:border-accent"
 		/>
-		<select
-			bind:value={filterStatus}
-			onchange={handleFilterChange}
-			class="rounded-[var(--radius-md)] border border-border bg-bg px-2 py-1.5 text-xs text-text-muted"
-		>
-			<option value="">{t('history.all_statuses')}</option>
-			<option value="completed">completed</option>
-			<option value="failed">failed</option>
-			<option value="running">running</option>
-		</select>
-		{#if availableModels.length > 1}
-			<select
-				bind:value={filterModel}
-				onchange={handleFilterChange}
-				class="rounded-[var(--radius-md)] border border-border bg-bg px-2 py-1.5 text-xs text-text-muted"
-			>
-				<option value="">{t('history.all_models')}</option>
-				{#each availableModels as model}
-					<option value={model}>{model}</option>
-				{/each}
-			</select>
-		{/if}
-		<input
-			type="date"
-			bind:value={filterDateFrom}
-			onchange={handleFilterChange}
-			title={t('history.from')}
-			class="rounded-[var(--radius-md)] border border-border bg-bg px-2 py-1.5 text-xs text-text-muted"
-		/>
-		<input
-			type="date"
-			bind:value={filterDateTo}
-			onchange={handleFilterChange}
-			title={t('history.to')}
-			class="rounded-[var(--radius-md)] border border-border bg-bg px-2 py-1.5 text-xs text-text-muted"
-		/>
+		<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+			<div class="flex flex-col gap-1 min-w-0">
+				<label for="history-filter-status" class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('history.filter_status')}</label>
+				<select
+					id="history-filter-status"
+					bind:value={filterStatus}
+					onchange={handleFilterChange}
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-2 py-1.5 text-xs text-text-muted focus:outline-none focus:border-accent"
+				>
+					<option value="">{t('history.all_statuses')}</option>
+					<option value="completed">completed</option>
+					<option value="failed">failed</option>
+					<option value="running">running</option>
+				</select>
+			</div>
+			{#if availableModels.length > 1}
+				<div class="flex flex-col gap-1 min-w-0">
+					<label for="history-filter-model" class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('history.filter_model')}</label>
+					<select
+						id="history-filter-model"
+						bind:value={filterModel}
+						onchange={handleFilterChange}
+						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-2 py-1.5 text-xs text-text-muted focus:outline-none focus:border-accent"
+					>
+						<option value="">{t('history.all_models')}</option>
+						{#each availableModels as model}
+							<option value={model}>{model}</option>
+						{/each}
+					</select>
+				</div>
+			{/if}
+			<div class="flex flex-col gap-1 min-w-0">
+				<label for="history-filter-from" class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('history.from')}</label>
+				<input
+					id="history-filter-from"
+					type="date"
+					bind:value={filterDateFrom}
+					onchange={handleFilterChange}
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-2 py-1.5 text-xs text-text-muted focus:outline-none focus:border-accent"
+				/>
+			</div>
+			<div class="flex flex-col gap-1 min-w-0">
+				<label for="history-filter-to" class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('history.to')}</label>
+				<input
+					id="history-filter-to"
+					type="date"
+					bind:value={filterDateTo}
+					onchange={handleFilterChange}
+					class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-2 py-1.5 text-xs text-text-muted focus:outline-none focus:border-accent"
+				/>
+			</div>
+		</div>
 	</div>
 
 	{#if error}
