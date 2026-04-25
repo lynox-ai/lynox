@@ -65,6 +65,12 @@
 	}
 	let voiceInfo = $state<VoiceInfo | null>(null);
 
+	// Voice quality tier — only `en_paul_neutral` reliably handles non-English
+	// text (DE/FR/IT/ES) on the current Mistral Voxtral catalog (2026-04-25).
+	// Every other voice is marked experimental in the picker so users don't
+	// silently get garbled audio on German chats.
+	const STABLE_VOICE_IDS: ReadonlySet<string> = new Set(['en_paul_neutral']);
+
 	async function loadVoiceInfo() {
 		try {
 			const res = await fetch(`${getApiBase()}/voice/info`);
@@ -818,10 +824,11 @@
 							<option value="">{t('config.voice_tts_voice_default')}</option>
 							{#each voiceInfo.tts.voices as v}
 								<option value={v.id}>
-									{v.id}{v.description ? ` — ${v.description}` : ''}{v.language ? ` (${v.language})` : ''}
+									{v.description ?? v.id}{v.language ? ` (${v.language})` : ''}{STABLE_VOICE_IDS.has(v.id) ? '' : ` — ${t('config.voice_tts_voice_experimental_suffix')}`}
 								</option>
 							{/each}
 						</select>
+						<p class="text-xs text-text-muted mt-2">{t('config.voice_tts_voice_non_en_hint')}</p>
 					{/if}
 				</div>
 
