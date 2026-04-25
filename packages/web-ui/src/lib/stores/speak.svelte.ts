@@ -38,6 +38,32 @@ import { addToast } from './toast.svelte.js';
 
 export type SpeakState = 'idle' | 'synthesizing' | 'playing';
 
+/**
+ * Discriminated error codes returned by `playSpeech` / `playSpeechQueued`.
+ * Callers translate these into user-facing strings via i18n so the toast
+ * shown to the user explains *what* went wrong (key missing? Mistral 5xx?
+ * browser blocked playback?) instead of a generic "Vorlesen fehlgeschlagen".
+ *
+ * - `unavailable` — server returned 503 (no MISTRAL_API_KEY on this engine).
+ * - `too_long`    — server returned 413 (text >SPEAK_MAX_TEXT_CHARS).
+ * - `http`        — any other 4xx/5xx; `status` carries the code for diagnostics.
+ * - `network`     — fetch threw (DNS, offline, CORS).
+ * - `stream`      — SSE parse error mid-stream.
+ * - `synth`       — server emitted `{ error: ... }` frame (Mistral synthesis failed).
+ * - `empty`       — stream completed without producing any decodable audio.
+ * - `blocked`     — Web Audio path failed and the blob fallback couldn't `play()`
+ *                   (typically: browser autoplay policy, no user gesture).
+ */
+export type SpeakError =
+  | { readonly code: 'unavailable' }
+  | { readonly code: 'too_long' }
+  | { readonly code: 'http'; readonly status: number }
+  | { readonly code: 'network' }
+  | { readonly code: 'stream' }
+  | { readonly code: 'synth' }
+  | { readonly code: 'empty' }
+  | { readonly code: 'blocked' };
+
 let state = $state<SpeakState>('idle');
 let activeKey = $state<string | null>(null);
 
@@ -110,7 +136,7 @@ export function stopSpeech(): void {
  * writing block-(N+1) under a tool call. Manual `playSpeech` (speaker
  * button) is unchanged: it interrupts whatever is playing.
  */
-export async function playSpeechQueued(text: string, key: string): Promise<string | null> {
+export async function playSpeechQueued(text: string, key: string): Promise<SpeakError | null> {
 	if (state === 'idle') {
 		return playSpeech(text, key);
 	}
@@ -136,9 +162,9 @@ function getAudioCtxCtor(): typeof AudioContext | null {
 /**
  * Start TTS for `text`. Playback begins as soon as audio data is decodable
  * (~100 ms after first chunk on Web Audio path). Returns null on success or
- * an error message the caller can surface.
+ * a `SpeakError` the caller surfaces via i18n.
  */
-export async function playSpeech(text: string, key: string): Promise<string | null> {
+export async function playSpeech(text: string, key: string): Promise<SpeakError | null> {
 	stopSpeech();
 	state = 'synthesizing';
 	activeKey = key;
@@ -157,12 +183,14 @@ export async function playSpeech(text: string, key: string): Promise<string | nu
 	} catch {
 		if (ctrl.signal.aborted) return null;
 		resetOnError();
-		return 'Network error';
+		return { code: 'network' };
 	}
 
 	if (!res.ok || !res.body) {
 		resetOnError();
-		return `HTTP ${res.status}`;
+		if (res.status === 503) return { code: 'unavailable' };
+		if (res.status === 413) return { code: 'too_long' };
+		return { code: 'http', status: res.status };
 	}
 
 	return getAudioCtxCtor()
@@ -170,7 +198,7 @@ export async function playSpeech(text: string, key: string): Promise<string | nu
 		: playViaBlob(res.body, ctrl);
 }
 
-async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<string | null> {
+async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<SpeakError | null> {
 	const Ctor = getAudioCtxCtor();
 	if (!Ctor) return playViaBlob(body, ctrl);
 
@@ -223,7 +251,7 @@ async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortCont
 	try {
 		for await (const frame of parseSseFrames(body)) {
 			if (ctrl.signal.aborted || audioContext !== ctx) return null;
-			if (frame.error) { resetOnError(); return frame.error; }
+			if (frame.error) { resetOnError(); return { code: 'synth' }; }
 			if (frame.chunk) {
 				const bytes = base64ToBytes(frame.chunk);
 				const combined: Uint8Array = pending ? concatBytes(pending, bytes) : bytes;
@@ -235,7 +263,7 @@ async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortCont
 	} catch {
 		if (ctrl.signal.aborted) return null;
 		resetOnError();
-		return 'Stream error';
+		return { code: 'stream' };
 	}
 
 	// Stream ended — flush any bytes the accumulator still holds.
@@ -251,7 +279,7 @@ async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortCont
 	const finalSource = lastSource as AudioBufferSourceNode | null;
 	if (!started || !finalSource) {
 		resetOnError();
-		return 'No audio received';
+		return { code: 'empty' };
 	}
 
 	// Last scheduled buffer: fire the end-of-playback hook when it finishes.
@@ -268,26 +296,26 @@ async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortCont
 	return null;
 }
 
-async function playViaBlob(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<string | null> {
+async function playViaBlob(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<SpeakError | null> {
 	const mp3Parts: Uint8Array[] = [];
-	let errorMsg: string | null = null;
+	let synthFailed = false;
 
 	try {
 		for await (const frame of parseSseFrames(body)) {
 			if (ctrl.signal.aborted) return null;
-			if (frame.error) { errorMsg = frame.error; break; }
+			if (frame.error) { synthFailed = true; break; }
 			if (frame.chunk) mp3Parts.push(base64ToBytes(frame.chunk));
 			if (frame.done) break;
 		}
 	} catch {
 		if (ctrl.signal.aborted) return null;
 		resetOnError();
-		return 'Stream error';
+		return { code: 'stream' };
 	}
 
 	if (ctrl.signal.aborted) return null;
-	if (errorMsg) { resetOnError(); return errorMsg; }
-	if (mp3Parts.length === 0) { resetOnError(); return 'No audio received'; }
+	if (synthFailed) { resetOnError(); return { code: 'synth' }; }
+	if (mp3Parts.length === 0) { resetOnError(); return { code: 'empty' }; }
 
 	const blob = new Blob(mp3Parts as BlobPart[], { type: 'audio/mpeg' });
 	const url = URL.createObjectURL(blob);
@@ -312,7 +340,7 @@ async function playViaBlob(body: ReadableStream<Uint8Array>, ctrl: AbortControll
 		await audio.play();
 	} catch {
 		resetOnError();
-		return 'Playback blocked';
+		return { code: 'blocked' };
 	}
 	return null;
 }
