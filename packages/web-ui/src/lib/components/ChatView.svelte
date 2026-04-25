@@ -52,7 +52,7 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { playSpeech, playSpeechQueued, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
+	import { playSpeech, playSpeechQueued, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
@@ -931,9 +931,25 @@
 		if (!block.content.trim()) return;
 		maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
 		void playSpeechQueued(block.content, block.key).then((err) => {
-			if (err) addToast(t('chat.speak_failed'), 'error');
+			if (err) addToast(formatSpeakError(err), 'error');
 		});
 	});
+
+	// Translate the SpeakError discriminator into a user-facing string. Lives
+	// here (not in the speak store) so the speak store stays free of i18n
+	// concerns and so the toast text stays in the same module as `addToast`.
+	function formatSpeakError(err: SpeakError): string {
+		switch (err.code) {
+			case 'unavailable': return t('chat.speak_failed_unavailable');
+			case 'too_long':    return t('chat.speak_failed_too_long');
+			case 'http':        return `${t('chat.speak_failed_http')} ${String(err.status)}`;
+			case 'network':     return t('chat.speak_failed_network');
+			case 'stream':      return t('chat.speak_failed_stream');
+			case 'synth':       return t('chat.speak_failed_synth');
+			case 'empty':       return t('chat.speak_failed_empty');
+			case 'blocked':     return t('chat.speak_failed_blocked');
+		}
+	}
 
 	// Double-tap the modifier key (⌘ on macOS, Ctrl on Win/Linux) to toggle
 	// voice recording — Raycast/Spotlight-style, zero collision with any
@@ -1179,7 +1195,7 @@
 				if (active) { stopSpeech(); return; }
 				maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
 				void playSpeech(msgContent, msgKey).then((err) => {
-					if (err) addToast(t('chat.speak_failed'), 'error');
+					if (err) addToast(formatSpeakError(err), 'error');
 				});
 			}}
 			class="text-text-subtle hover:text-text transition-all p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted {active ? 'opacity-100' : 'opacity-0 group-hover/copy:opacity-100 focus:opacity-100'}"
