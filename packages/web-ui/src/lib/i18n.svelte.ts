@@ -340,6 +340,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
 	'chat.skipped': { de: 'Übersprungen', en: 'Skipped' },
 	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
+	'chat.prompt_timeout_left': { de: 'Verbleibende Zeit', en: 'Time remaining' },
 	'chat.batch_mode': { de: 'Fragen beantworten', en: 'Answer questions' },
 	'chat.secret_consent': { de: 'Wird lokal verschlüsselt gespeichert und niemals an die KI gesendet.', en: 'Stored encrypted locally and never sent to AI.' },
 	'chat.secret_save': { de: 'Speichern', en: 'Save' },

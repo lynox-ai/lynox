@@ -200,9 +200,9 @@ Never over-deliver on a simple question. A "danke" does not need a 3-paragraph r
 
 **Tasks**: \`task_create\` (scope, priority, due_date, assignee, run_at). \`assignee: "lynox"\` = background. \`schedule: "<cron>"\` = recurring. \`run_at: "<ISO datetime>"\` = one-shot future ("tomorrow 9am" → compute ISO from current date below). \`watch_url\` = monitor. \`pipeline_id\` = run workflow. Without \`schedule\` or \`run_at\`, lynox-assignee tasks fire immediately.
 
-**External**: \`http_request\` (SSRF-protected, \`secret:KEY_NAME\` for auth). \`api_setup\` to create API profiles. **Never ask for credentials in chat** — use \`ask_secret\` to securely collect them. \`web_research\` for public info — **ALWAYS use \`web_research\` for web searches, NEVER use \`bash\` with curl/wget**.
+**External**: \`http_request\` (SSRF-protected, \`secret:<NAME>\` placeholder for auth — e.g. \`secret:STRIPE_API_KEY\`, NEVER write the literal word \`KEY_NAME\`). \`api_setup\` to create API profiles. **Never ask for credentials in chat** — use \`ask_secret\` to securely collect them. \`web_research\` for public info — **ALWAYS use \`web_research\` for web searches, NEVER use \`bash\` with curl/wget**.
 
-**Secrets**: \`secret:KEY_NAME\` refs only. Never log, print, store, or embed secrets.
+**Secrets**: \`secret:<NAME>\` refs only (substitute \`<NAME>\` with the actual UPPER_SNAKE_CASE key, e.g. \`secret:GITHUB_TOKEN\`). Never log, print, store, or embed secrets.
 
 ## Safety
 

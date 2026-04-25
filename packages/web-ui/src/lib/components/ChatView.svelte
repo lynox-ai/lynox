@@ -45,6 +45,7 @@
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
+	import { formatCountdown } from '../utils/time.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
@@ -1797,7 +1798,7 @@
 					{/if}
 					<div class="flex items-center gap-1.5 shrink-0">
 						{#if promptSecondsLeft != null}
-							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}">{Math.floor(promptSecondsLeft / 60)}:{String(promptSecondsLeft % 60).padStart(2, '0')}</span>
+							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
 						{#if !isPermissionGuard}
 							<button onclick={() => answerPrompt('__dismissed__')} class="p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
