@@ -128,7 +128,7 @@
 			{#each backups as backup}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
 					<div class="flex items-center justify-between">
-						<span class="text-sm font-mono">{new Date(backup.created_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US')}</span>
+						<span class="text-sm font-mono">{new Date(backup.created_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
 						<div class="flex items-center gap-2">
 							{#if backup.encrypted}
 								<span class="text-xs rounded-[var(--radius-sm)] bg-success/15 text-success px-1.5 py-0.5">{t('backups.encrypted')}</span>
