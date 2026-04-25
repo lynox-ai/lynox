@@ -5,6 +5,7 @@
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 
 	interface Props {
 		content: string;
@@ -25,22 +26,8 @@
 		return fenceCount % 2 !== 0 ? md + '\n```' : md;
 	}
 
-	// Fix missing line breaks between concatenated sentences (from streamed tool-call gaps).
-	// Pattern: period/exclamation/question followed directly by uppercase letter without space.
-	// Only applied outside code blocks to avoid breaking code content.
-	// The negative lookbehind skips abbreviations whose "word" before the period is ≤2 letters —
-	// catches z.B., Z.B., d.h., u.a., i.e., e.g., U.S., Dr.Smith, etc. A real sentence boundary
-	// almost always has a ≥3-letter word before the period.
-	function fixSentenceSpacing(md: string): string {
-		const parts = md.split(/(```[\s\S]*?```)/g);
-		return parts.map((part, i) => {
-			if (i % 2 !== 0) return part; // inside code block — skip
-			// Apply per-line, skip table rows (contain pipe) to avoid breaking tables
-			return part.split('\n').map(line =>
-				line.includes('|') ? line : line.replace(/(?<!\b[a-zäöüA-ZÄÖÜ]{1,2})([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2')
-			).join('\n');
-		}).join('');
-	}
+	// Pre-processing for raw markdown — see fixMarkdownPreprocessing in
+	// utils/markdown-preprocess.ts for the rules and the regression-test set.
 
 	// Wrap <table> elements in a scrollable container for wide tables.
 	function wrapTables(html: string): string {
@@ -48,7 +35,7 @@
 	}
 
 	const baseHtml = $derived(
-		wrapTables(DOMPurify.sanitize(marked.parse(closeOpenFences(fixSentenceSpacing(content)), { async: false }) as string))
+		wrapTables(DOMPurify.sanitize(marked.parse(closeOpenFences(fixMarkdownPreprocessing(content)), { async: false }) as string))
 	);
 
 	function decodeEntities(str: string): string {
@@ -97,6 +84,17 @@
 		return `<div class="mermaid-diagram">${btns}${svg}</div>`;
 	}
 
+	function buildMermaidError(code: string, message: string): string {
+		return `<div class="mermaid-error">
+			<div class="mermaid-error-header">
+				<span class="mermaid-error-icon">!</span>
+				<span class="mermaid-error-title">${escapeHtml(t('markdown.mermaid_error'))}</span>
+			</div>
+			<div class="mermaid-error-message">${escapeHtml(message)}</div>
+			<pre class="mermaid-error-source"><code>${escapeHtml(code)}</code></pre>
+		</div>`;
+	}
+
 	// ── Artifacts ────────────────────────────────────────────
 
 	function escapeHtml(str: string): string {
@@ -130,7 +128,7 @@
 		const body = clean.replace(/<!--\s*type:\s*markdown\s*-->\s*/i, '').trim();
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
-		const rendered = DOMPurify.sanitize(marked.parse(body, { async: false }) as string);
+		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
 		return `<div class="artifact-container artifact-md" data-md="${encodedMd}" data-title="${safeTitle}">
 			<div class="artifact-toolbar">
@@ -278,7 +276,7 @@
 		const md = decodeDataMd(container);
 		if (!md) { addToast('PDF export failed', 'error'); return; }
 		const title = container.dataset['title'] ?? 'Artifact';
-		const rendered = DOMPurify.sanitize(marked.parse(md, { async: false }) as string);
+		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(md), { async: false }) as string);
 		const html = buildPrintDocument(title, rendered);
 		const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
 		const url = URL.createObjectURL(blob);
@@ -615,7 +613,16 @@ window.addEventListener('afterprint', function () { window.close(); });
 				try {
 					if (lang === 'mermaid') richCache.set(raw, await renderMermaid(code));
 					else richCache.set(raw, buildArtifact(code)); // artifact + html full docs
-				} catch { /* keep shiki fallback */ }
+				} catch (err) {
+					// Failed mermaid would otherwise show a perma-placeholder
+					// because processBlocks falls back to placeholder for any
+					// uncached rich block. Cache an error block so the user
+					// sees what happened and can copy the source.
+					if (lang === 'mermaid') {
+						const message = err instanceof Error ? err.message : String(err);
+						richCache.set(raw, buildMermaidError(code, message));
+					}
+				}
 			}
 			if (baseHtml === html) {
 				highlightedHtml = await processBlocks(html, matches);
@@ -801,6 +808,50 @@ window.addEventListener('afterprint', function () { window.close(); });
 	div :global(.diagram-btn:hover) {
 		color: var(--color-text);
 		background: var(--color-bg-subtle);
+	}
+
+	/* ── Mermaid render error ───────────────────────────── */
+	div :global(.mermaid-error) {
+		margin: 1rem 0;
+		padding: 0.75rem 1rem;
+		border: 1px solid var(--color-danger, #ef4444);
+		border-radius: var(--radius-md);
+		background: color-mix(in srgb, var(--color-danger, #ef4444) 8%, transparent);
+		font-size: 0.8125rem;
+	}
+	div :global(.mermaid-error-header) {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		color: var(--color-danger, #ef4444);
+		font-weight: 600;
+		margin-bottom: 0.375rem;
+	}
+	div :global(.mermaid-error-icon) {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.125rem;
+		height: 1.125rem;
+		border-radius: 50%;
+		background: var(--color-danger, #ef4444);
+		color: #fff;
+		font-size: 0.6875rem;
+		line-height: 1;
+	}
+	div :global(.mermaid-error-message) {
+		color: var(--color-text-muted);
+		margin-bottom: 0.5rem;
+		word-break: break-word;
+	}
+	div :global(.mermaid-error-source) {
+		margin: 0;
+		padding: 0.5rem 0.75rem;
+		background: var(--color-bg-muted);
+		border-radius: var(--radius-sm, 4px);
+		font-size: 0.75rem;
+		max-height: 240px;
+		overflow: auto;
 	}
 
 	/* ── Artifact placeholder during streaming ─────────── */
