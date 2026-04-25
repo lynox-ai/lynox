@@ -482,6 +482,11 @@ export class LynoxHTTPApi {
       if (secret && !useTls) {
         process.stderr.write(`⚠ Warning: HTTP API exposed without TLS (LYNOX_ALLOW_PLAIN_HTTP=true). Use a reverse proxy.\n`);
       }
+      // Fire-and-forget Mistral account health check. Surfaces 401 (key
+      // invalid), 402 (no credits), 429 (rate-limited) into stderr +
+      // Bugsink so operators see the problem in the logs instead of
+      // first hearing about it via a "Vorlesen fehlgeschlagen" report.
+      void import('../core/mistral-health-check.js').then(({ reportMistralAccountHealth }) => reportMistralAccountHealth());
     });
 
     // Rate limit GC
