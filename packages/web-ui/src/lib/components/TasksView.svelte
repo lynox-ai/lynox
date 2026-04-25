@@ -174,7 +174,7 @@
 		<div class="space-y-2 mb-6">
 			{#each tasks as task}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 group">
-					<div class="flex items-center justify-between gap-3">
+					<div class="flex items-start justify-between gap-3">
 						<div class="flex-1 min-w-0">
 							<p class="text-sm font-medium line-clamp-2 break-words">{task.title}</p>
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
@@ -196,11 +196,11 @@
 								{/if}
 							</div>
 						</div>
-						<div class="flex items-center gap-2 shrink-0">
+						<div class="flex items-center gap-2 shrink-0 mt-0.5">
 							{#if task.status !== 'completed' && task.status !== 'done'}
-								<button onclick={() => markDone(task.id)} class="opacity-0 group-hover:opacity-100 rounded-[var(--radius-sm)] border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] text-success hover:bg-success/20 transition-all">{t('tasks.done')}</button>
+								<button onclick={() => markDone(task.id)} class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] text-success hover:bg-success/20 transition-opacity">{t('tasks.done')}</button>
 							{/if}
-							<button onclick={() => deleteTask(task.id)} class="opacity-0 group-hover:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-all">{t('tasks.delete')}</button>
+							<button onclick={() => deleteTask(task.id)} class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity">{t('tasks.delete')}</button>
 							<span class="text-xs rounded-full px-2.5 py-0.5 {statusColor[task.status] ?? 'bg-bg-muted text-text-muted'}">{statusLabel[task.status] ?? task.status}</span>
 						</div>
 					</div>
@@ -294,12 +294,17 @@
 			</div>
 		{/if}
 
-		<button
-			onclick={createTask}
-			disabled={!newTitle.trim()}
-			class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-50"
-		>
-			{t('tasks.create')}
-		</button>
+		<div class="flex items-center gap-3 flex-wrap">
+			<button
+				onclick={createTask}
+				disabled={!newTitle.trim()}
+				class="rounded-[var(--radius-sm)] px-4 py-2 text-sm font-medium transition-colors enabled:bg-accent enabled:text-text enabled:hover:opacity-90 disabled:bg-bg-muted disabled:text-text-subtle disabled:cursor-not-allowed"
+			>
+				{t('tasks.create')}
+			</button>
+			{#if !newTitle.trim()}
+				<span class="text-xs text-text-subtle">{t('tasks.title_required_hint')}</span>
+			{/if}
+		</div>
 	</div>
 </div>
