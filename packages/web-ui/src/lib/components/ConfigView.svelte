@@ -466,11 +466,11 @@
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else}
 		<!-- Tab Bar -->
-		<div class="flex gap-1 border-b border-border mb-6">
+		<div class="flex gap-1 border-b border-border mb-6 overflow-x-auto -mx-1 px-1 scrollbar-thin">
 			{#each tabs as tab}
 				<button
 					onclick={() => setTab(tab.id)}
-					class="px-4 py-2 text-sm transition-colors relative {activeTab === tab.id ? 'text-text font-medium' : 'text-text-muted hover:text-text'}"
+					class="shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm transition-colors relative {activeTab === tab.id ? 'text-text font-medium' : 'text-text-muted hover:text-text'}"
 				>
 					{tab.label}
 					{#if activeTab === tab.id}

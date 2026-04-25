@@ -176,7 +176,7 @@
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 group">
 					<div class="flex items-center justify-between gap-3">
 						<div class="flex-1 min-w-0">
-							<p class="text-sm font-medium truncate">{task.title}</p>
+							<p class="text-sm font-medium line-clamp-2 break-words">{task.title}</p>
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if task.schedule_cron}
 									<span class="flex items-center gap-1">
@@ -184,8 +184,12 @@
 										{cronToHuman(task.schedule_cron)}
 									</span>
 								{/if}
-								{#if task.next_run_at}
-									<span>{t('tasks.next_run')}: {new Date(task.next_run_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { dateStyle: 'short', timeStyle: 'short' })}</span>
+								{#if task.status === 'completed' || task.status === 'done'}
+									{#if task.last_run_at ?? task.next_run_at}
+										<span>{t('tasks.last_run')}: {new Date((task.last_run_at ?? task.next_run_at)!).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+									{/if}
+								{:else if task.next_run_at}
+									<span>{t('tasks.next_run')}: {new Date(task.next_run_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
 								{/if}
 								{#if task.assignee}
 									<span class="text-accent-text">@{task.assignee}</span>

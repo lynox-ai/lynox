@@ -580,7 +580,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.experience': { de: 'Erfahrungslevel', en: 'Experience Level' },
 	'config.experience_desc': { de: 'Bestimmt den Kommunikationsstil: Business = einfache Anleitungen, Developer = CLI-Befehle & Config-Details', en: 'Controls communication style: Business = simple instructions, Developer = CLI commands & config details' },
 	'config.experience_business': { de: 'Business (Standard)', en: 'Business (default)' },
-	'config.experience_developer': { de: 'Developer (experimentell)', en: 'Developer (experimental)' },
+	'config.experience_developer': { de: 'Entwickler (experimentell)', en: 'Developer (experimental)' },
 
 	// Budget
 	'config.budget': { de: 'Kostenlimits', en: 'Cost Limits' },
@@ -687,6 +687,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.description_placeholder': { de: 'Was soll gemacht werden?', en: 'What should be done?' },
 	'tasks.create': { de: 'Erstellen', en: 'Create' },
 	'tasks.next_run': { de: 'Nächster Lauf', en: 'Next run' },
+	'tasks.last_run': { de: 'Letzter Lauf', en: 'Last run' },
 	'tasks.repeat': { de: 'Wiederholung', en: 'Repeat' },
 	'tasks.once': { de: 'Einmalig', en: 'Once' },
 	'tasks.every_hour': { de: 'Stündlich', en: 'Every hour' },
