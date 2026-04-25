@@ -910,6 +910,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tool.plan_created': { de: 'Plan erstellt', en: 'Plan created' },
 	'tool.data_queried': { de: 'Daten abgefragt', en: 'Data queried' },
 	'tool.artifact_creating': { de: 'Artifact wird erstellt...', en: 'Creating artifact...' },
+	'markdown.mermaid_error': { de: 'Mermaid-Diagramm konnte nicht gerendert werden', en: 'Mermaid diagram could not be rendered' },
 	'tool.command': { de: 'Befehl', en: 'Command' },
 	'tool.api_request': { de: 'API-Anfrage', en: 'API request' },
 	'tool.web_search': { de: 'Web-Recherche', en: 'Web search' },
