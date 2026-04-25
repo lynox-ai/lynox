@@ -1664,18 +1664,29 @@ export class LynoxHTTPApi {
     });
 
     this.staticRoutes.set('PUT /api/config', async (_req, res, _params, body) => {
-      const { readUserConfig, saveUserConfig, reloadConfig } = await import('../core/config.js');
+      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       const parsed = LynoxUserConfigSchema.safeParse(body);
       if (!parsed.success) {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
-      // Managed mode: block provider/credential changes (lynox provides the LLM)
-      // Starter (BYOK) mode: provider changes are allowed (customer brings own key)
+      // Managed mode: block provider/credential changes (lynox provides the LLM).
+      // Starter (BYOK) mode: provider changes are allowed (customer brings own key).
+      // Compare incoming values against the *effective* env-merged config — the
+      // Web UI re-sends every field on every save (including locked ones it
+      // received from GET), so a no-op write of `provider` or `default_tier`
+      // would otherwise look like an attempted change and block unrelated
+      // updates (e.g. flipping experience level).
       if (process.env['LYNOX_MANAGED_MODE'] === 'managed' || process.env['LYNOX_MANAGED_MODE'] === 'managed_pro' || process.env['LYNOX_MANAGED_MODE'] === 'eu') {
         const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'gcp_project_id', 'gcp_region', 'openai_model_id', 'default_tier'];
-        const attempted = LOCKED_FIELDS.filter(f => f in (parsed.data as Record<string, unknown>));
+        const effective = loadConfig() as Record<string, unknown>;
+        const update = parsed.data as Record<string, unknown>;
+        const attempted = LOCKED_FIELDS.filter((f) => {
+          if (!(f in update)) return false;
+          // No-op write (same value as effective config) → allow.
+          return JSON.stringify(update[f]) !== JSON.stringify(effective[f]);
+        });
         if (attempted.length > 0) {
           errorResponse(res, 403, `Managed EU instance: cannot change ${attempted.join(', ')}`);
           return;

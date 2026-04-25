@@ -115,7 +115,14 @@
 				body: JSON.stringify(payload)
 			});
 			if (!res.ok) {
-				const detail = await res.text().catch(() => '');
+				// Server replies with `{ "error": "..." }` JSON — extract that
+				// instead of dumping the whole response body in the toast.
+				const raw = await res.text().catch(() => '');
+				let detail = '';
+				try {
+					const parsedErr = raw ? (JSON.parse(raw) as { error?: string }) : null;
+					if (parsedErr?.error && typeof parsedErr.error === 'string') detail = parsedErr.error;
+				} catch { /* not JSON — fall through to generic message */ }
 				error = detail ? `${t('common.save_failed')}: ${detail}` : t('common.save_failed');
 				saving = false;
 				return;
