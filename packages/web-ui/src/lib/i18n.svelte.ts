@@ -569,7 +569,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.model_haiku': { de: 'Haiku — schnell & günstig', en: 'Haiku — fast & affordable' },
 	'config.model_sonnet': { de: 'Sonnet — balanciert (empfohlen)', en: 'Sonnet — balanced (recommended)' },
 	'config.model_opus': { de: 'Opus — stärkstes Modell', en: 'Opus — most capable' },
-	'config.model_managed_suffix': { de: ' (nicht verfügbar)', en: ' (not available)' },
+	'config.managed_eu_model_managed_label': { de: 'verwaltet', en: 'managed' },
 	'config.effort': { de: 'Gründlichkeit', en: 'Thoroughness' },
 	'config.effort_desc': { de: 'Wie ausführlich der Agent Aufgaben bearbeitet. Höhere Stufen brauchen mehr Zeit und Tokens.', en: 'How thoroughly the agent works on tasks. Higher levels use more time and tokens.' },
 	'config.effort_low': { de: 'Schnell — kurze Antworten', en: 'Quick — short answers' },
