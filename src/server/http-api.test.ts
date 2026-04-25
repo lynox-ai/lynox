@@ -429,6 +429,43 @@ describe('LynoxHTTPApi', () => {
       });
       expect(res.status).toBe(200);
     });
+
+    it('PUT in managed mode rejects locked-field changes', async () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ default_tier: 'haiku' }), // mock effective is 'opus'
+        });
+        expect(res.status).toBe(403);
+        const body = await res.json() as { error: string };
+        expect(body.error).toContain('default_tier');
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
+    it('PUT in managed mode allows no-op locked-field re-send (regression v1.3.5)', async () => {
+      // Web UI re-sends every field on every save. A no-op write of `default_tier`
+      // (same value as effective config) must NOT block unrelated updates like
+      // changing `experience` from 'business' to 'developer'.
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ default_tier: 'opus', experience: 'developer' }), // mock effective is 'opus'
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
   });
 
   describe('history', () => {

@@ -766,7 +766,11 @@
 
 		// Single-question path: requires pendingPermission.
 		if (!pendingPermission) return;
-		answeredPrompts = [...answeredPrompts, { question: pendingPermission.question, answer }];
+		// Keep only the last answer — back-to-back prompts during one run
+		// were stacking the entire decision history above the active prompt
+		// and pushing the chat off-screen. Users only need the last answer
+		// to reconsider via the "edit" button below.
+		answeredPrompts = [{ question: pendingPermission.question, answer }];
 		selectedOptions = [];
 		promptAnswer = '';
 		replyPermission(answer);
