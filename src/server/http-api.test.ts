@@ -24,6 +24,18 @@ const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
 const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'completed' });
+const mockGoogleIsAuthenticated = vi.fn().mockReturnValue(false);
+const mockGoogleStartRedirectAuth = vi.fn().mockReturnValue({ authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state', state: 'test-state' });
+const mockGoogleExchangeRedirectCode = vi.fn().mockResolvedValue(undefined);
+const mockGoogleAuth = {
+  isAuthenticated: mockGoogleIsAuthenticated,
+  startRedirectAuth: mockGoogleStartRedirectAuth,
+  exchangeRedirectCode: mockGoogleExchangeRedirectCode,
+  getAccountInfo: vi.fn().mockReturnValue({}),
+  startDeviceFlow: vi.fn(),
+  getScopes: vi.fn().mockReturnValue([]),
+  getTokenExpiry: vi.fn().mockReturnValue(null),
+};
 
 const mockSessionInstance = {
   run: mockSessionRun,
@@ -76,6 +88,8 @@ vi.mock('../core/engine.js', () => ({
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     this.getPromptStore = vi.fn().mockReturnValue(null);
+    this.getGoogleAuth = vi.fn().mockReturnValue(mockGoogleAuth);
+    this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = vi.fn().mockResolvedValue(undefined);
     this.getUserConfig = vi.fn().mockReturnValue({});
     return this;
@@ -609,6 +623,111 @@ describe('LynoxHTTPApi', () => {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
       }
+    });
+  });
+
+  describe('Google OAuth callback', () => {
+    beforeEach(() => {
+      mockGoogleIsAuthenticated.mockReturnValue(false);
+      mockGoogleStartRedirectAuth.mockReturnValue({
+        authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state',
+        state: 'test-state',
+      });
+      mockGoogleExchangeRedirectCode.mockResolvedValue(undefined);
+      vi.stubEnv('ORIGIN', 'https://test.example.com');
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+      vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+    });
+
+    it('successful exchange renders meta-refresh (not inline script — engine API CSP blocks it)', async () => {
+      // Prime singleton state by invoking the auth-start endpoint
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({ scopeMode: 'read' }),
+      });
+      expect(startRes.status).toBe(200);
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid-code&state=test-state`);
+      expect(cbRes.status).toBe(200);
+      expect(cbRes.headers.get('content-type')).toContain('text/html');
+
+      const body = await cbRes.text();
+      expect(body).toContain('meta http-equiv="refresh"');
+      expect(body).toContain('https://test.example.com/app/settings/integrations');
+      // CSP `default-src 'none'` blocks inline scripts — must not regress
+      expect(body).not.toContain('<script>');
+      expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledWith('valid-code', expect.stringContaining('/api/google/callback'));
+    });
+
+    it('reload after success — state mismatch but already authenticated → renders success, no re-exchange', async () => {
+      // Simulate the "user reloads the callback URL after success" case:
+      // state slot already cleared by the earlier successful exchange.
+      mockGoogleIsAuthenticated.mockReturnValue(true);
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=stale-code&state=stale-state`);
+      expect(cbRes.status).toBe(200);
+
+      const body = await cbRes.text();
+      expect(body).toContain('meta http-equiv="refresh"');
+      expect(body).toContain('/app/settings/integrations');
+      // Idempotent — must NOT re-exchange the (already-spent) code
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('CSRF — state mismatch and not authenticated → 400 error', async () => {
+      mockGoogleIsAuthenticated.mockReturnValue(false);
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=any&state=wrong`);
+      expect(cbRes.status).toBe(400);
+
+      const body = await cbRes.text();
+      expect(body).toContain('Invalid callback');
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('Google error param (e.g. ?error=access_denied) → 400 with error surfaced', async () => {
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?error=access_denied`);
+      expect(cbRes.status).toBe(400);
+
+      const body = await cbRes.text();
+      expect(body).toContain('access_denied');
+      expect(body).toContain('You can close this tab');
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('Google error param is HTML-escaped (XSS guard)', async () => {
+      // Google never sends this in practice, but the handler must escape
+      // anything that arrives in the error querystring.
+      const malicious = '<script>alert(1)</script>';
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?error=${encodeURIComponent(malicious)}`);
+      expect(cbRes.status).toBe(400);
+
+      const body = await cbRes.text();
+      expect(body).not.toContain('<script>alert(1)</script>');
+      expect(body).toContain('&lt;script&gt;');
+    });
+
+    it('exchange failure → 500 with sanitized error message', async () => {
+      // Prime state so the request passes the state check and hits the try/catch
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      expect(startRes.status).toBe(200);
+
+      mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error('token endpoint unreachable'));
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`);
+      expect(cbRes.status).toBe(500);
+
+      const body = await cbRes.text();
+      expect(body).toContain('token endpoint unreachable');
+      expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledTimes(1);
     });
   });
 
