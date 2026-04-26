@@ -689,6 +689,46 @@ describe('LynoxHTTPApi', () => {
       expect(body).toContain('Invalid callback');
       expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
     });
+
+    it('Google error param (e.g. ?error=access_denied) → 400 with error surfaced', async () => {
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?error=access_denied`);
+      expect(cbRes.status).toBe(400);
+
+      const body = await cbRes.text();
+      expect(body).toContain('access_denied');
+      expect(body).toContain('You can close this tab');
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('Google error param is HTML-escaped (XSS guard)', async () => {
+      // Google never sends this in practice, but the handler must escape
+      // anything that arrives in the error querystring.
+      const malicious = '<script>alert(1)</script>';
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?error=${encodeURIComponent(malicious)}`);
+      expect(cbRes.status).toBe(400);
+
+      const body = await cbRes.text();
+      expect(body).not.toContain('<script>alert(1)</script>');
+      expect(body).toContain('&lt;script&gt;');
+    });
+
+    it('exchange failure → 500 with sanitized error message', async () => {
+      // Prime state so the request passes the state check and hits the try/catch
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      expect(startRes.status).toBe(200);
+
+      mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error('token endpoint unreachable'));
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`);
+      expect(cbRes.status).toBe(500);
+
+      const body = await cbRes.text();
+      expect(body).toContain('token endpoint unreachable');
+      expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('rate limiting', () => {
