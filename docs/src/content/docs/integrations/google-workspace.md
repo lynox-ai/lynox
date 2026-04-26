@@ -23,6 +23,12 @@ This setup applies to **all deployments** — self-hosted, Docker, and managed h
 
 If you already have a project, select it instead.
 
+:::caution
+**"You don't have permission `resourcemanager.projects.create`"** — your Google account is part of a Workspace organization but lacks the **Project Creator** role on it. Either:
+- Pick **"No organization"** in the project-creation dropdown (works without extra rights), or
+- Ask your Workspace Super Admin to grant you the **Project Creator** role at https://console.cloud.google.com/iam-admin/iam (select your org at the top, then **Grant access** → add your email → role *Project Creator*).
+:::
+
 ### 2. Enable APIs
 
 1. In the sidebar, go to **APIs & Services** → **Library**
@@ -45,12 +51,21 @@ You can copy each API name and paste it directly into the Library search bar.
 1. In the sidebar, go to **OAuth consent screen**
 2. If you see "Google Auth Platform not configured yet", click **Get Started**
 3. **App information** — Enter an app name (e.g. "lynox") and select your email as support email → **Next**
-4. **Audience** — Select **External** → **Next**
+4. **Audience** — pick the right user type (see below) → **Next**
 5. **Contact information** — Enter your email → **Next**
 6. **Finish** → Click **Create**
 
+#### Internal vs. External — pick the right one
+
+| User type | Pick when… | Tradeoffs |
+|---|---|---|
+| **Internal** *(recommended if available)* | You have a **Google Workspace** account and only Workspace users will connect | No Google verification ever, refresh tokens never expire, no test-user list |
+| **External** | You use a **personal `@gmail.com`** account, or want non-Workspace users to connect | App starts in "Testing" mode: max 100 test users, **refresh tokens expire after 7 days** until you go through Google verification (CASA for Gmail/Drive scopes) |
+
+"Internal" only appears if your account belongs to a Workspace organization. If you don't see it, pick "External".
+
 :::note
-Your app starts in "Testing" mode. This is fine — you just need to add yourself as a test user. Go to **OAuth consent screen** → **Test users** → **Add users** → enter your Google email.
+**External only** — your app starts in "Testing" mode. Add yourself as a test user: **OAuth consent screen** → **Test users** → **Add users** → enter your Google email. Internal apps skip this step.
 :::
 
 ### 4. Create OAuth credentials
