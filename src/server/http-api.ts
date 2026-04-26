@@ -2824,7 +2824,26 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // Render the post-callback redirect page. Uses meta-refresh (not inline JS,
+      // which the engine API CSP `default-src 'none'` blocks; not a 302, which would
+      // continue the cross-site redirect chain Google → callback → settings where
+      // SameSite=Strict session cookies wouldn't be sent). Meta-refresh from this
+      // same-origin page navigates with cookies intact.
+      const sendSuccessRedirect = (): void => {
+        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/integrations`;
+        const escaped = target.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${escaped}"><title>Connected</title></head><body><p>Google connected. Returning to settings…</p><p><a href="${escaped}">Click here if not redirected.</a></p></body></html>`);
+      };
+
       if (!code || !state || state !== this._googleOAuthState) {
+        // Idempotency: if the user reloads the callback URL after a successful
+        // exchange, the state slot is already cleared but the engine is already
+        // authenticated. Render the same success page instead of a confusing error.
+        if (code && state && google.isAuthenticated()) {
+          sendSuccessRedirect();
+          return;
+        }
         res.writeHead(400, { 'Content-Type': 'text/html' });
         res.end('<html><body><h1>Error</h1><p>Invalid callback — missing code or state mismatch.</p></body></html>');
         return;
@@ -2834,12 +2853,7 @@ export class LynoxHTTPApi {
         await google.exchangeRedirectCode(code, this._googleRedirectUri ?? '');
         this._googleOAuthState = undefined;
         this._googleRedirectUri = undefined;
-        // Navigate back via JS — a 302 would continue the cross-site redirect chain
-        // (Google → callback → settings), so the sameSite:strict session cookie still
-        // wouldn't be sent. A JS navigation starts a fresh same-site context.
-        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/integrations`;
-        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>window.location.replace(${JSON.stringify(target)})</script></body></html>`);
+        sendSuccessRedirect();
       } catch (err: unknown) {
         const msg = (err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
