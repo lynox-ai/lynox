@@ -15,6 +15,17 @@ export interface MailAddress {
 //
 // Standard IMAP system flags use the backslash prefix (e.g. '\\Seen').
 // Custom keywords (e.g. '$lynox-processed') are passed through as-is.
+//
+// Provider asymmetry (do not assume cross-provider symmetry):
+//
+// - `\\Answered` is IMAP-only. The Gmail provider never emits it because
+//   Gmail tracks reply state at thread level — no per-message label
+//   maps to it, and deriving it would cost a thread round-trip per
+//   envelope with ambiguous results on multi-participant threads. Code
+//   that filters or branches on `\\Answered` will see different results
+//   on Gmail vs. IMAP accounts.
+// - `\\Recent` is an IMAP-session concept and is not produced by either
+//   provider in lynox.
 export type MailFlag =
   | '\\Seen'
   | '\\Answered'

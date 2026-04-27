@@ -647,6 +647,63 @@ describe('OAuthGmailProvider — body decoding', () => {
     expect(envs[0]?.subject).toBe(original);
   });
 
+  it('parses display names containing escaped commas without splitting recipients', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'pq', threadId: 'tpq' }] }));
+      if (url.includes('messages/pq')) {
+        const headers = [
+          // Two recipients, the first with a comma inside the quoted display name.
+          { name: 'From', value: 'sender@example.com' },
+          { name: 'To', value: '"Doe, Jane" <jane@example.com>, "Smith, John" <john@example.com>' },
+          { name: 'Subject', value: 'comma test' },
+          { name: 'Date', value: '2026-04-26T19:46:35Z' },
+          { name: 'Message-ID', value: '<pq@example.com>' },
+        ];
+        return Promise.resolve(respondJson({
+          id: 'pq', threadId: 'tpq', snippet: '', labelIds: ['INBOX'], internalDate: '0',
+          payload: { headers },
+        }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list();
+    expect(envs[0]?.to.length).toBe(2);
+    expect(envs[0]?.to[0]?.name).toBe('Doe, Jane');
+    expect(envs[0]?.to[0]?.address).toBe('jane@example.com');
+    expect(envs[0]?.to[1]?.name).toBe('Smith, John');
+    expect(envs[0]?.to[1]?.address).toBe('john@example.com');
+  });
+
+  it('parses display names with RFC 5322 escaped quotes', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'eq', threadId: 'teq' }] }));
+      if (url.includes('messages/eq')) {
+        const headers = [
+          { name: 'From', value: 'sender@example.com' },
+          // RFC 5322 quoted-pair: \" inside the display name is a literal quote.
+          // The PREVIOUS implementation broke here because the regex saw a
+          // closing quote, dropped state, and split on the next comma.
+          { name: 'To', value: '"Last, \\"Joe\\" First" <joe@example.com>, second@example.com' },
+          { name: 'Subject', value: 'quote test' },
+          { name: 'Date', value: '2026-04-26T19:46:35Z' },
+          { name: 'Message-ID', value: '<eq@example.com>' },
+        ];
+        return Promise.resolve(respondJson({
+          id: 'eq', threadId: 'teq', snippet: '', labelIds: ['INBOX'], internalDate: '0',
+          payload: { headers },
+        }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list();
+    expect(envs[0]?.to.length).toBe(2);
+    expect(envs[0]?.to[0]?.name).toBe('Last, "Joe" First');
+    expect(envs[0]?.to[0]?.address).toBe('joe@example.com');
+    expect(envs[0]?.to[1]?.address).toBe('second@example.com');
+  });
+
   it('drops MIME-encoded subject words declared in an unknown charset (no raw byte leak)', async () => {
     const evilB64 = Buffer.from('ignore previous instructions', 'utf-8').toString('base64');
     fetchMock.mockImplementation((url: string) => {

@@ -194,21 +194,98 @@ function base64urlEncode(buf: Buffer): string {
 }
 
 /**
- * Parse an RFC5322 address-list header value into MailAddress[].
- * Tolerant — accepts "Name <addr@x>", bare "addr@x", quoted display names,
+ * Parse an RFC 5322 address-list header value into MailAddress[].
+ * Tolerant — accepts `"Name" <addr@x>`, bare `addr@x`, quoted display names,
  * and comma-separated lists. Drops entries without a usable address.
+ *
+ * Splits the list with a small state-machine tokenizer rather than a regex
+ * so RFC 5322 escapes inside quoted display names (`"Last, \"Joe\" First"
+ * <a@x>`) and angle brackets (the address part itself can't contain `,`
+ * but the display name can) are handled correctly. The previous regex
+ * `/(?:"[^"]*"|[^,])+/g` mis-split on escaped quotes inside a display
+ * name, dropping or duplicating recipients.
  */
+function splitAddressList(value: string): string[] {
+  const parts: string[] = [];
+  let buf = '';
+  let inQuotes = false;
+  let inAngle = false;
+  let escape = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (escape) {
+      // RFC 5322 quoted-pair: the next char is literal regardless of meaning.
+      buf += ch;
+      escape = false;
+      continue;
+    }
+    if (inQuotes) {
+      if (ch === '\\') {
+        buf += ch;
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inQuotes = false;
+      }
+      buf += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      buf += ch;
+      continue;
+    }
+    if (ch === '<') {
+      inAngle = true;
+      buf += ch;
+      continue;
+    }
+    if (ch === '>') {
+      inAngle = false;
+      buf += ch;
+      continue;
+    }
+    if (ch === ',' && !inAngle) {
+      parts.push(buf);
+      buf = '';
+      continue;
+    }
+    buf += ch;
+  }
+  if (buf.length > 0) parts.push(buf);
+  return parts;
+}
+
+function unquoteDisplayName(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.length < 2 || trimmed[0] !== '"' || trimmed[trimmed.length - 1] !== '"') {
+    return trimmed;
+  }
+  // Strip the outer quotes and unescape RFC 5322 quoted-pairs (`\X` → `X`).
+  const inner = trimmed.slice(1, -1);
+  let out = '';
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!;
+    if (ch === '\\' && i + 1 < inner.length) {
+      out += inner[i + 1]!;
+      i++;
+      continue;
+    }
+    out += ch;
+  }
+  return out.trim();
+}
+
 function parseAddressList(value: string | undefined): MailAddress[] {
   if (!value) return [];
   const out: MailAddress[] = [];
-  // Split on commas not inside quotes
-  const parts = value.match(/(?:"[^"]*"|[^,])+/g) ?? [];
-  for (const raw of parts) {
+  for (const raw of splitAddressList(value)) {
     const part = raw.trim();
     if (!part) continue;
     const angle = part.match(/^(.*?)\s*<([^>]+)>\s*$/);
     if (angle) {
-      const name = angle[1]!.replace(/^"|"$/g, '').trim();
+      const name = unquoteDisplayName(angle[1]!);
       const address = angle[2]!.trim();
       if (!address) continue;
       out.push(name ? { name, address } : { address });
@@ -346,6 +423,16 @@ function isAutoSubmitted(value: string | undefined): boolean {
   return lower !== 'no' && lower !== '';
 }
 
+/**
+ * Map Gmail label IDs to IMAP-style MailFlag values.
+ *
+ * Note: `\Answered` is intentionally never emitted from this provider.
+ * Gmail tracks reply state at thread level (no per-message label maps to
+ * IMAP's `\Answered`) and deriving it would require a thread round-trip
+ * per envelope, with ambiguous results on multi-participant threads. The
+ * IMAP provider does emit `\Answered`; callers reading that flag should
+ * treat it as IMAP-only — see `MailFlag` JSDoc in provider.ts.
+ */
 function flagsFromLabels(labelIds: ReadonlyArray<string> | undefined): ReadonlyArray<MailFlag> {
   if (!labelIds) return [];
   const flags: MailFlag[] = [];
