@@ -155,7 +155,8 @@ const MIGRATIONS: string[] = [
      clicks INTEGER,
      cost_micros INTEGER,
      conversions REAL,
-     conv_value REAL
+     conv_value REAL,
+     observed_at TEXT NOT NULL
    );
    CREATE INDEX IF NOT EXISTS idx_camp_perf_run ON ads_campaign_performance(source_run_id, ads_account_id, date);
    CREATE INDEX IF NOT EXISTS idx_camp_perf_campaign ON ads_campaign_performance(source_run_id, campaign_id, date);
