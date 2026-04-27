@@ -737,6 +737,17 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_blueprint_run ON ads_blueprint_entities(run_id, entity_type);
    CREATE INDEX IF NOT EXISTS idx_blueprint_kind ON ads_blueprint_entities(run_id, kind);
    CREATE INDEX IF NOT EXISTS idx_blueprint_account ON ads_blueprint_entities(ads_account_id, entity_type);`,
+
+  // Migration v4: track blueprint-row source so an `ads_blueprint_run`
+  // re-run can wipe its own deterministic rows without trampling the
+  // agent's qualitative additions (asset proposals, audience signals,
+  // PMAX SPLIT/MERGE proposals validated through the safeguards).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (4);
+
+   ALTER TABLE ads_blueprint_entities
+     ADD COLUMN source TEXT NOT NULL DEFAULT 'deterministic'
+     CHECK (source IN ('deterministic', 'agent'));
+   CREATE INDEX IF NOT EXISTS idx_blueprint_source ON ads_blueprint_entities(run_id, source);`,
 ];
 
 export interface CustomerProfileRow {
@@ -814,6 +825,7 @@ export type AdsFindingSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
 export type AdsFindingSource = 'deterministic' | 'agent';
 
 export type AdsBlueprintEntityKind = 'KEEP' | 'RENAME' | 'NEW' | 'PAUSE' | 'SPLIT' | 'MERGE';
+export type AdsBlueprintSource = 'deterministic' | 'agent';
 
 export interface AdsBlueprintEntityRow {
   blueprint_id: number;
@@ -828,6 +840,7 @@ export interface AdsBlueprintEntityRow {
   rationale: string;
   naming_valid: number;
   naming_errors_json: string;
+  source: AdsBlueprintSource;
   created_at: string;
 }
 
@@ -843,6 +856,7 @@ export interface InsertBlueprintEntityInput {
   rationale?: string | undefined;
   namingValid?: boolean | undefined;
   namingErrors?: readonly string[] | undefined;
+  source?: AdsBlueprintSource | undefined;
 }
 
 export interface AdsFindingRow {
@@ -1278,16 +1292,49 @@ export class AdsDataStore {
       INSERT INTO ads_blueprint_entities (
         run_id, ads_account_id, entity_type, kind,
         external_id, previous_external_id, payload_json,
-        confidence, rationale, naming_valid, naming_errors_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        confidence, rationale, naming_valid, naming_errors_json, source, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.runId, input.adsAccountId, input.entityType, input.kind,
       input.externalId, input.previousExternalId ?? null, payload,
       input.confidence, input.rationale ?? '',
-      input.namingValid === false ? 0 : 1, errors, now,
+      input.namingValid === false ? 0 : 1, errors,
+      input.source ?? 'deterministic', now,
     );
     return this.db.prepare('SELECT * FROM ads_blueprint_entities WHERE blueprint_id = ?')
       .get(Number(result.lastInsertRowid)) as AdsBlueprintEntityRow;
+  }
+
+  /**
+   * Atomically clear blueprint rows of one source for a run, plus the
+   * matching ads_run_decisions rows. Used by `runBlueprint` to wipe its
+   * own deterministic output before re-writing on a re-run, leaving
+   * agent-source rows (asset proposals, validated PMAX SPLIT/MERGE)
+   * intact.
+   */
+  clearBlueprintEntities(runId: number, source: AdsBlueprintSource): { entitiesDeleted: number; decisionsDeleted: number } {
+    return this.transaction(() => {
+      const pairs = this.db.prepare(`
+        SELECT entity_type, external_id FROM ads_blueprint_entities
+        WHERE run_id = ? AND source = ?
+      `).all(runId, source) as Array<{ entity_type: string; external_id: string }>;
+
+      let decisionsDeleted = 0;
+      if (pairs.length > 0) {
+        const decStmt = this.db.prepare(`
+          DELETE FROM ads_run_decisions
+          WHERE run_id = ? AND entity_type = ? AND entity_external_id = ?
+        `);
+        for (const p of pairs) {
+          const r = decStmt.run(runId, p.entity_type, p.external_id);
+          decisionsDeleted += Number(r.changes);
+        }
+      }
+      const result = this.db.prepare(`
+        DELETE FROM ads_blueprint_entities WHERE run_id = ? AND source = ?
+      `).run(runId, source);
+      return { entitiesDeleted: Number(result.changes), decisionsDeleted };
+    });
   }
 
   listBlueprintEntities(

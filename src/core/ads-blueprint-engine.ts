@@ -134,6 +134,12 @@ export function runBlueprint(
   // Low-strength asset groups — surfaced in markdown ──────────────────
   const lowStrengthAssetGroups = findLowStrengthAssetGroups(store, run);
 
+  // Re-run safety: clear our own deterministic output (and the matching
+  // ads_run_decisions rows) before writing fresh ones. Agent-source
+  // additions (asset proposals, audience signals, validated PMAX
+  // SPLIT/MERGE) are preserved.
+  store.clearBlueprintEntities(run.run_id, 'deterministic');
+
   // Persist decisions + blueprint entities + record naming violations ─
   const persistedEntityIds: number[] = [];
   const namingViolations: BlueprintResult['namingViolations'] = [];
