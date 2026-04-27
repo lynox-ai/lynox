@@ -443,7 +443,7 @@ describe('spawn_agent tool', () => {
     const cg = agentCall['costGuard'] as { maxBudgetUSD: number; maxIterations: number };
     expect(cg).toBeDefined();
     expect(cg.maxBudgetUSD).toBe(5);
-    expect(cg.maxIterations).toBe(20);
+    expect(cg.maxIterations).toBe(10);
   });
 
   it('uses explicit max_budget_usd from spec', async () => {
@@ -473,6 +473,38 @@ describe('spawn_agent tool', () => {
     expect(spawnEvent).toBeDefined();
     const event = spawnEvent![0] as { estimatedCostUSD?: number };
     expect(event.estimatedCostUSD).toBeGreaterThan(0);
+  });
+
+  it('estimate for 3 default-Sonnet researchers stays well under typical session ceiling', async () => {
+    // Regression for rafael.lynox.cloud 2026-04-26: 3 sonnet researchers
+    // with default settings was estimated at $15.12 (worst-case maxOutput ×
+    // max_turns=20), tripping the session ceiling on every legitimate
+    // 3-researcher pattern. Real cost was <$2. After the OUTPUT_FILL_RATIO
+    // (0.3) + DEFAULT_SPAWN_MAX_TURNS (10) tightening, the estimate must
+    // be in the low single dollars.
+    const onStream = vi.fn() as StreamHandler;
+    const agent = makeAgent({ onStream });
+    await spawnAgentTool.handler(
+      {
+        agents: [
+          { name: 'product-pricing', task: 'Research lindy.ai pricing' },
+          { name: 'content-seo', task: 'Research lindy.ai content' },
+          { name: 'business', task: 'Research lindy.ai funding/news' },
+        ],
+      },
+      agent,
+    );
+
+    const spawnEvent = (onStream as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => (c[0] as { type: string }).type === 'spawn',
+    );
+    const event = spawnEvent![0] as { estimatedCostUSD?: number };
+    // Pre-fix estimate was $15.12. New floor (3 × 10 turns × (4K × $3/M +
+    // 16K × 0.3 × $15/M)) = $2.52. Allow generous headroom either side so
+    // the assertion catches a regression but doesn't break on minor pricing
+    // tweaks.
+    expect(event.estimatedCostUSD).toBeGreaterThan(1);
+    expect(event.estimatedCostUSD).toBeLessThan(5);
   });
 
   // === Session spawn cost ceiling ===
