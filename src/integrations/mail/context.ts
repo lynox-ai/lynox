@@ -325,12 +325,17 @@ export class MailContext {
    * / removeAccount whenever the registry shape changes.
    *
    * Rules:
-   *   1. If a row is marked is_default=1 AND its provider is registered →
-   *      promote it.
-   *   2. Else if the registry has any providers → pick the first registered
-   *      one and persist (covers fresh installs and stale defaults whose
-   *      provider failed to register, e.g. revoked OAuth).
-   *   3. Else → clear the default to null.
+   *   1. Persisted default exists AND its provider is registered → promote.
+   *   2. Persisted default exists but its provider failed to register
+   *      (e.g. revoked OAuth, expired IMAP creds) → preserve the persisted
+   *      choice. The DB row stays marked is_default=1 so when the account
+   *      is reconnected it snaps back. The in-memory registry already
+   *      holds *some* default from registry.add() seeding, which keeps
+   *      tools functional; callers can compare stateDb.defaultAccountId()
+   *      with registry.default() to detect the mismatch.
+   *   3. No persisted default has ever been set → fresh-install fallback:
+   *      pick the first registered provider and persist the choice.
+   *   4. No persisted default and nothing registered → leave both null.
    */
   private _reconcileDefault(): void {
     const persistedId = this.stateDb.defaultAccountId();
@@ -340,10 +345,11 @@ export class MailContext {
       this.registry.setDefault(persistedId);
       return;
     }
-    if (registered.length === 0) {
-      this.stateDb.setDefaultAccount(null);
+    if (persistedId) {
+      // Case 2: do not overwrite the user's choice.
       return;
     }
+    if (registered.length === 0) return;
     const fallback = registered[0]!;
     this.stateDb.setDefaultAccount(fallback);
     this.registry.setDefault(fallback);
@@ -352,6 +358,11 @@ export class MailContext {
   /**
    * Set `id` as the default account. Updates both the persisted flag and
    * the in-memory registry. Throws MailError when the id is not registered.
+   *
+   * Concurrency: this is per-user UI state, not transactional. Two tabs
+   * issuing set-default at the same time both succeed and the later writer
+   * wins — accepted semantics. Callers that care about strict ordering
+   * should fence at a higher layer.
    */
   setDefault(id: string): void {
     if (!this.registry.get(id)) {

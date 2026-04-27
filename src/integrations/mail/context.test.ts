@@ -247,6 +247,47 @@ describe('MailContext — testAccount', () => {
   });
 });
 
+describe('MailContext — default reconciliation', () => {
+  it('preserves the persisted default when its provider fails to register on init', async () => {
+    // First boot: add Gmail (becomes default) and iCloud, close.
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+    await ctx.close();
+
+    // Simulate revoked Gmail credentials by removing them from the vault
+    // while the persisted account row + is_default flag remain in the DB.
+    backend.delete('MAIL_ACCOUNT_RAFAEL_GMAIL');
+
+    // Second boot: a fresh context against the same stateDb + backend.
+    const ctx2 = new MailContext(stateDb, backend);
+    await ctx2.init();
+
+    // Persisted choice survives: Gmail still flagged as default in the DB.
+    // The in-memory registry only carries iCloud (the registered survivor).
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+    expect(ctx2.registry.list()).toEqual(['rafael-icloud']);
+
+    await ctx2.close();
+  });
+
+  it('promotes the persisted default and never picks a fallback when its provider does register', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+    ctx.setDefault('rafael-icloud');
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+    await ctx.close();
+
+    const ctx2 = new MailContext(stateDb, backend);
+    await ctx2.init();
+
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+    expect(ctx2.registry.default()).toBe('rafael-icloud');
+
+    await ctx2.close();
+  });
+});
+
 describe('MailContext — listAccounts (safe view)', () => {
   it('excludes credentials and marks the default account', async () => {
     await ctx.addAccount(INPUT_GMAIL);
