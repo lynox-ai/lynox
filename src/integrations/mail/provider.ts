@@ -294,6 +294,12 @@ export interface MailAccountConfig {
    * When unset, the agent uses the default persona derived from `type`.
    */
   personaPrompt?: string | undefined;
+  /**
+   * True iff this mailbox is the user's chosen default. Persisted across
+   * restarts so the default no longer flips when providers happen to
+   * register in a different order. Updated via `MailContext.setDefault()`.
+   */
+  isDefault?: boolean | undefined;
 }
 
 export type MailPresetSlug =

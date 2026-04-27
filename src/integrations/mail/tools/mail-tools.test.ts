@@ -91,6 +91,9 @@ beforeEach(() => {
   provider = new FakeProvider('rafael-gmail');
   registry = new InMemoryMailRegistry();
   registry.add(provider);
+  // PR3: registry.add no longer auto-defaults — tests pick the default
+  // explicitly here so resolveProvider falls back to the right account.
+  registry.setDefault(provider.accountId);
 });
 
 // ── mail_search ────────────────────────────────────────────────────────────
@@ -302,8 +305,10 @@ describe('mail_reply tool', () => {
   it('reply_all unions To+Cc minus our own address (accountId-as-email heuristic)', async () => {
     // Use an account whose id IS the email address so the dedup heuristic kicks in
     const myProvider = new FakeProvider('user@example.com');
+    // PR3: registry.add no longer auto-defaults — must set explicitly
     const myRegistry = new InMemoryMailRegistry();
     myRegistry.add(myProvider);
+    myRegistry.setDefault(myProvider.accountId);
 
     const orig: MailEnvelope = {
       ...envelope(5, { messageId: '<o@x>', from: 'alice@example.com', subject: 'Q' }),
@@ -644,6 +649,7 @@ describe('mail_reply — smart reply-from', () => {
     const ctx = makeStubContext([personalCfg]);
     const reg = new InMemoryMailRegistry();
     reg.add(p);
+    reg.setDefault(p.accountId);
 
     p.fetch.mockResolvedValue({
       envelope: {

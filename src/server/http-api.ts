@@ -3163,6 +3163,22 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     }));
 
+    // Set the default mailbox. Persists `is_default=1` on the target row and
+    // updates the in-memory registry so subsequent tool calls fall back to
+    // this account when none is explicitly named.
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/mail/accounts/:id/default', async (_req, res, params) => {
+      const ctx = engine.getMailContext();
+      if (!requireService(res, ctx, 'Mail integration')) return;
+      try {
+        ctx!.setDefault(params['id']!);
+        jsonResponse(res, 200, { ok: true, accounts: ctx!.listAccounts() });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const status = msg.includes('not registered') ? 404 : 400;
+        errorResponse(res, status, msg);
+      }
+    }));
+
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!kg) { jsonResponse(res, 200, { entities: [] }); return; }

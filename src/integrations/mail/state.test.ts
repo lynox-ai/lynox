@@ -304,7 +304,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(5);
+    expect(row.v).toBe(6);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -338,5 +338,67 @@ describe('MailStateDb — schema migration', () => {
     const oauth = db.getAccount('gmail-oauth');
     expect(oauth?.authType).toBe('oauth_google');
     expect(oauth?.oauthProviderKey).toBe('GOOGLE_OAUTH_TOKENS');
+  });
+
+  it('v6 migration: defaults is_default=0 for existing rows and round-trips isDefault', () => {
+    db.upsertAccount({
+      id: 'a', displayName: 'a', address: 'a@x.com', preset: 'gmail',
+      imap: { host: 'i', port: 993, secure: true },
+      smtp: { host: 's', port: 465, secure: true },
+      authType: 'imap', type: 'personal',
+    });
+    expect(db.getAccount('a')?.isDefault).toBe(false);
+
+    db.upsertAccount({
+      id: 'b', displayName: 'b', address: 'b@x.com', preset: 'gmail',
+      imap: { host: 'i', port: 993, secure: true },
+      smtp: { host: 's', port: 465, secure: true },
+      authType: 'imap', type: 'personal',
+      isDefault: true,
+    });
+    expect(db.getAccount('b')?.isDefault).toBe(true);
+    expect(db.defaultAccountId()).toBe('b');
+  });
+});
+
+describe('MailStateDb — setDefaultAccount', () => {
+  beforeEach(() => {
+    db.upsertAccount({
+      id: 'a', displayName: 'a', address: 'a@x.com', preset: 'gmail',
+      imap: { host: 'i', port: 993, secure: true },
+      smtp: { host: 's', port: 465, secure: true },
+      authType: 'imap', type: 'personal',
+    });
+    db.upsertAccount({
+      id: 'b', displayName: 'b', address: 'b@x.com', preset: 'gmail',
+      imap: { host: 'i', port: 993, secure: true },
+      smtp: { host: 's', port: 465, secure: true },
+      authType: 'imap', type: 'personal',
+    });
+  });
+
+  it('sets one row to is_default=1 and clears the rest in a single transaction', () => {
+    expect(db.setDefaultAccount('a')).toBe(true);
+    expect(db.defaultAccountId()).toBe('a');
+
+    expect(db.setDefaultAccount('b')).toBe(true);
+    expect(db.defaultAccountId()).toBe('b');
+    // Invariant: at most one row holds the flag
+    expect(db.getAccount('a')?.isDefault).toBe(false);
+    expect(db.getAccount('b')?.isDefault).toBe(true);
+  });
+
+  it('returns false for an unknown id but still clears existing default', () => {
+    db.setDefaultAccount('a');
+    expect(db.setDefaultAccount('missing')).toBe(false);
+    // Important: the SET-to-zero step ran, so the previous default is gone.
+    // This is intentional — callers should treat false as "no default now".
+    expect(db.defaultAccountId()).toBe(null);
+  });
+
+  it('passing null clears the default entirely', () => {
+    db.setDefaultAccount('a');
+    expect(db.setDefaultAccount(null)).toBe(true);
+    expect(db.defaultAccountId()).toBe(null);
   });
 });
