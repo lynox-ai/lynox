@@ -1117,6 +1117,20 @@ export class AdsDataStore {
     `).run(now, props?.emittedCsvHash ?? null, props?.tokenCostMicros ?? null, runId);
   }
 
+  /** Stamp the canonical-blueprint hash onto an already-SUCCESS run (called by P4 emit). */
+  setEmittedCsvHash(runId: number, hash: string): void {
+    this.db.prepare('UPDATE ads_audit_runs SET emitted_csv_hash = ? WHERE run_id = ?')
+      .run(hash, runId);
+  }
+
+  /** Record a customer's Editor import timestamp — drives the 14d Smart-Bidding-Guard. */
+  setLastMajorImportAt(adsAccountId: string, iso: string): void {
+    this.db.prepare(`
+      UPDATE ads_accounts SET last_major_import_at = ?, updated_at = ?
+      WHERE ads_account_id = ?
+    `).run(iso, new Date().toISOString(), adsAccountId);
+  }
+
   failAuditRun(runId: number, errorMessage: string): void {
     const now = new Date().toISOString();
     this.db.prepare(`
