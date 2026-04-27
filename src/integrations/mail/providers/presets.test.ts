@@ -48,7 +48,7 @@ describe('buildPresetAccount', () => {
     expect(account.preset).toBe('gmail');
     expect(account.imap.host).toBe('imap.gmail.com');
     expect(account.smtp.host).toBe('smtp.gmail.com');
-    expect(account.auth).toBe('app-password');
+    expect(account.authType).toBe('imap');
     expect(account.id).toBe('rafael-gmail');
   });
 });

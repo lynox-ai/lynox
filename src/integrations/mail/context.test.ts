@@ -82,7 +82,7 @@ const GMAIL_ACCOUNT: MailAccountConfig = {
   preset: 'gmail',
   imap: { host: 'imap.gmail.com', port: 993, secure: true },
   smtp: { host: 'smtp.gmail.com', port: 465, secure: true },
-  auth: 'app-password',
+  authType: 'imap',
   type: 'personal',
 };
 
@@ -93,7 +93,7 @@ const ICLOUD_ACCOUNT: MailAccountConfig = {
   preset: 'icloud',
   imap: { host: 'imap.mail.me.com', port: 993, secure: true },
   smtp: { host: 'smtp.mail.me.com', port: 587, secure: false },
-  auth: 'app-password',
+  authType: 'imap',
   type: 'personal',
 };
 

@@ -304,12 +304,39 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(4);
+    expect(row.v).toBe(5);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
     db.close();
     db = new MailStateDb({ path: ':memory:' });
     expect(db.countForAccount('any')).toBe(0);
+  });
+
+  it('v5 migration: backfills auth_type=imap on existing rows and accepts new oauth_provider_key', () => {
+    db.upsertAccount({
+      id: 'imap-1', displayName: 'imap', address: 'x@x.com', preset: 'gmail',
+      imap: { host: 'i', port: 993, secure: true },
+      smtp: { host: 's', port: 465, secure: true },
+      authType: 'imap', type: 'personal',
+    });
+    const stored = db.getAccount('imap-1');
+    expect(stored?.authType).toBe('imap');
+    expect(stored?.oauthProviderKey).toBeUndefined();
+
+    // Forward-compatible: a row written with authType='oauth_google' round-trips
+    db.upsertAccount({
+      id: 'gmail-oauth', displayName: 'gmail', address: 'g@x.com', preset: 'gmail',
+      // IMAP fields still required by the v5 schema (NOT NULL relaxed in PR2);
+      // pass placeholders so the row is writeable.
+      imap: { host: '', port: 0, secure: true },
+      smtp: { host: '', port: 0, secure: true },
+      authType: 'oauth_google',
+      oauthProviderKey: 'GOOGLE_OAUTH_TOKENS',
+      type: 'business',
+    });
+    const oauth = db.getAccount('gmail-oauth');
+    expect(oauth?.authType).toBe('oauth_google');
+    expect(oauth?.oauthProviderKey).toBe('GOOGLE_OAUTH_TOKENS');
   });
 });

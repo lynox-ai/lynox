@@ -82,7 +82,7 @@ function makeCtx(accounts: ReadonlyArray<{ id: string; address: string; type: Ma
     id: a.id, displayName: a.id, address: a.address, preset: 'custom' as const,
     imap: { host: HOST, port: IMAPS_PORT, secure: true },
     smtp: { host: HOST, port: SMTPS_PORT, secure: true },
-    auth: 'app-password' as const,
+    authType: 'imap' as const,
     type: a.type,
   }]));
   const byId = new Map(accounts.map(a => [a.id, byAddress.get(a.address.toLowerCase())!]));
