@@ -671,8 +671,8 @@ describe('MailContext — persisted default flag', () => {
       try {
         await ctxBoot.init();
         // OAuth row was the first to exist → claims default
-        expect(ctxBoot.registry.default()).toBe('gmail-rafael-brandfusion-ch');
-        expect(stateDb.defaultAccountId()).toBe('gmail-rafael-brandfusion-ch');
+        expect(ctxBoot.registry.default()).toBe('gmail-rafael-brandfusion.ch');
+        expect(stateDb.defaultAccountId()).toBe('gmail-rafael-brandfusion.ch');
       } finally {
         await ctxBoot.close();
       }
