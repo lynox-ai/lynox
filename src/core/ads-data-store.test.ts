@@ -266,3 +266,260 @@ describe('AdsDataStore', () => {
     });
   });
 });
+
+describe('AdsDataStore — bulk inserts and latest-state', () => {
+  let tempDir: string;
+  let store: AdsDataStore;
+  let runId: number;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'lynox-ads-test-'));
+    store = new AdsDataStore(join(tempDir, 'ads-optimizer.db'));
+    store.upsertCustomerProfile({ customerId: 'aquanatura', clientName: 'Aquanatura' });
+    store.upsertAdsAccount({
+      adsAccountId: 'a1', customerId: 'aquanatura', accountLabel: 'A1',
+      currencyCode: 'CHF',
+    });
+    runId = store.createAuditRun({ adsAccountId: 'a1', mode: 'OPTIMIZE' }).run_id;
+  });
+
+  afterEach(async () => {
+    store.close();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  describe('campaign inserts', () => {
+    it('insertCampaignsBatch persists all KPI fields including micros', () => {
+      const inserted = store.insertCampaignsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [
+          {
+            campaignId: '18132985374',
+            campaignName: 'PMax | Wasserfilter',
+            status: 'ENABLED',
+            channelType: 'PERFORMANCE_MAX',
+            optScore: 0.958,
+            budgetMicros: 34_000_000,
+            impressions: 42988,
+            clicks: 517,
+            costMicros: 794_300_396,
+            conversions: 26.95,
+            convValue: 5582.24,
+            ctr: 0.0120,
+            avgCpc: 1_536_364,
+            searchIs: 0.181,
+            budgetLostIs: 0.0055,
+            rankLostIs: 0.813,
+          },
+          {
+            campaignId: '18138702677',
+            campaignName: 'PMax | Gesamtsortiment',
+            status: 'ENABLED',
+            channelType: 'PERFORMANCE_MAX',
+            costMicros: 1_208_067_924,
+            conversions: 79.56,
+            convValue: 8922.93,
+          },
+        ],
+      });
+      expect(inserted).toBe(2);
+
+      const rows = store.getSnapshotRows<{ campaign_id: string; campaign_name: string; cost_micros: number }>(
+        'ads_campaigns', 'a1', { runId },
+      );
+      expect(rows).toHaveLength(2);
+      expect(rows.find(r => r.campaign_id === '18132985374')?.cost_micros).toBe(794_300_396);
+
+      // getLatestSpend reads only successful runs.
+      store.completeAuditRun(runId);
+      const total = store.getLatestSpend('a1');
+      // Spend = (794_300_396 + 1_208_067_924) / 1_000_000 ≈ 2002.37 CHF
+      expect(total).toBeCloseTo(2002.37, 2);
+    });
+
+    it('insertCampaignsBatch with empty rows returns 0', () => {
+      expect(store.insertCampaignsBatch({ runId, adsAccountId: 'a1', rows: [] })).toBe(0);
+    });
+
+    it('all rows share the same observed_at timestamp', () => {
+      const ts = '2026-04-27T10:00:00.000Z';
+      store.insertCampaignsBatch({
+        runId, adsAccountId: 'a1', observedAt: ts,
+        rows: [
+          { campaignId: 'c1', campaignName: 'C1' },
+          { campaignId: 'c2', campaignName: 'C2' },
+        ],
+      });
+      const rows = store.getSnapshotRows<{ observed_at: string }>('ads_campaigns', 'a1', { runId });
+      expect(rows.map(r => r.observed_at)).toEqual([ts, ts]);
+    });
+  });
+
+  describe('rsa ads serialize JSON arrays', () => {
+    it('headlines and descriptions are stored as JSON', () => {
+      store.insertRsaAdsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [{
+          campaignName: 'Search | Wasserfilter',
+          adGroupName: 'AG_Brand',
+          adId: 'rsa-1',
+          headlines: ['Nachhaltige Wasserfilter', 'Filter-Systeme', 'Hydratation'],
+          descriptions: ['Beschreibung A', 'Beschreibung B'],
+          finalUrl: 'https://aquanatura.ch',
+          adStrength: 'POOR',
+        }],
+      });
+      const rows = store.getSnapshotRows<{ headlines: string; descriptions: string; ad_strength: string }>(
+        'ads_rsa_ads', 'a1', { runId },
+      );
+      expect(rows[0]?.ad_strength).toBe('POOR');
+      expect(JSON.parse(rows[0]!.headlines)).toEqual(['Nachhaltige Wasserfilter', 'Filter-Systeme', 'Hydratation']);
+      expect(JSON.parse(rows[0]!.descriptions)).toEqual(['Beschreibung A', 'Beschreibung B']);
+    });
+  });
+
+  describe('boolean coercion', () => {
+    it('insertConversionActionsBatch maps booleans to 0/1 and undefined to null', () => {
+      store.insertConversionActionsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [
+          { convActionId: 'c1', name: 'Purchase', primaryForGoal: true, inConversionsMetric: false },
+          { convActionId: 'c2', name: 'Lead' /* booleans omitted */ },
+        ],
+      });
+      const rows = store.getSnapshotRows<{ conv_action_id: string; primary_for_goal: number | null; in_conversions_metric: number | null }>(
+        'ads_conversion_actions', 'a1', { runId },
+      );
+      const c1 = rows.find(r => r.conv_action_id === 'c1');
+      const c2 = rows.find(r => r.conv_action_id === 'c2');
+      expect(c1?.primary_for_goal).toBe(1);
+      expect(c1?.in_conversions_metric).toBe(0);
+      expect(c2?.primary_for_goal).toBeNull();
+      expect(c2?.in_conversions_metric).toBeNull();
+    });
+
+    it('insertCampaignTargetingBatch defaults isNegative to 0', () => {
+      store.insertCampaignTargetingBatch({
+        runId, adsAccountId: 'a1',
+        rows: [
+          { criterionType: 'LOCATION', isNegative: false },
+          { criterionType: 'KEYWORD', isNegative: true, keywordText: 'free' },
+          { criterionType: 'LANGUAGE' /* omitted */ },
+        ],
+      });
+      const rows = store.getSnapshotRows<{ criterion_type: string; is_negative: number }>(
+        'ads_campaign_targeting', 'a1', { runId },
+      );
+      expect(rows.find(r => r.criterion_type === 'LOCATION')?.is_negative).toBe(0);
+      expect(rows.find(r => r.criterion_type === 'KEYWORD')?.is_negative).toBe(1);
+      expect(rows.find(r => r.criterion_type === 'LANGUAGE')?.is_negative).toBe(0);
+    });
+  });
+
+  describe('search terms + GA4 + GSC', () => {
+    it('three-way mix coexists in the same run', () => {
+      store.insertSearchTermsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [
+          { searchTerm: 'wasserfilter kaufen', impressions: 5000, clicks: 200, costMicros: 80_000_000, conversions: 10, convValue: 1500 },
+          { searchTerm: 'kostenlose wasserfilter', impressions: 100, clicks: 5, costMicros: 200_000, conversions: 0, convValue: 0 },
+        ],
+      });
+      store.insertGa4ObservationsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [
+          { date: '2026-04-01', sessionSource: 'google', sessionMedium: 'cpc', sessions: 1200, conversions: 18 },
+          { date: '2026-04-01', sessionSource: 'google', sessionMedium: 'organic', sessions: 800, conversions: 5 },
+        ],
+      });
+      store.insertGscObservationsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [
+          { dateMonth: '2026-04', query: 'wasseraufbereitung schweiz', clicks: 120, impressions: 4500, position: 6.2 },
+        ],
+      });
+
+      expect(store.countSnapshotRows('ads_search_terms', 'a1', runId)).toBe(2);
+      expect(store.countSnapshotRows('ga4_observations', 'a1', runId)).toBe(2);
+      expect(store.countSnapshotRows('gsc_observations', 'a1', runId)).toBe(1);
+    });
+  });
+
+  describe('latest-state readers default to latest successful run', () => {
+    it('older successful run is returned over a newer FAILED run', () => {
+      store.insertCampaignsBatch({ runId, adsAccountId: 'a1', rows: [{ campaignId: 'c1', campaignName: 'OldRun', costMicros: 100_000_000 }] });
+      store.completeAuditRun(runId);
+
+      // Start a new run, populate, then FAIL it
+      const failRun = store.createAuditRun({ adsAccountId: 'a1', mode: 'OPTIMIZE' }).run_id;
+      store.insertCampaignsBatch({ runId: failRun, adsAccountId: 'a1', rows: [{ campaignId: 'c1', campaignName: 'BadRun', costMicros: 999_999_999 }] });
+      store.failAuditRun(failRun, 'simulated failure');
+
+      // Latest-state queries should pick the SUCCESS run, not the FAILED one
+      const rows = store.getSnapshotRows<{ campaign_name: string }>('ads_campaigns', 'a1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.campaign_name).toBe('OldRun');
+    });
+
+    it('returns empty when the account has no successful run', () => {
+      store.failAuditRun(runId, 'never finished');
+      expect(store.getSnapshotRows('ads_campaigns', 'a1')).toEqual([]);
+      expect(store.countSnapshotRows('ads_campaigns', 'a1')).toBe(0);
+    });
+
+    it('explicit runId overrides the latest-successful default', () => {
+      store.insertCampaignsBatch({ runId, adsAccountId: 'a1', rows: [{ campaignId: 'c1', campaignName: 'RunningRun' }] });
+      // RUNNING run is not "latest successful", but an explicit runId wins
+      const rows = store.getSnapshotRows<{ campaign_name: string }>('ads_campaigns', 'a1', { runId });
+      expect(rows[0]?.campaign_name).toBe('RunningRun');
+    });
+  });
+
+  describe('queryView', () => {
+    it('view_audit_kpis aggregates spend / conv / roas / ctr', () => {
+      store.insertCampaignsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [
+          { campaignId: 'c1', campaignName: 'C1', impressions: 10000, clicks: 500, costMicros: 100_000_000, conversions: 10, convValue: 1500 },
+          { campaignId: 'c2', campaignName: 'C2', impressions: 20000, clicks: 800, costMicros: 200_000_000, conversions: 20, convValue: 3000 },
+        ],
+      });
+      store.completeAuditRun(runId);
+
+      const rows = store.queryView('view_audit_kpis', 'a1');
+      expect(rows).toHaveLength(1);
+      const k = rows[0]!;
+      expect(k['spend']).toBe(300);
+      expect(k['conversions']).toBe(30);
+      expect(k['conv_value']).toBe(4500);
+      expect(k['roas']).toBe(15);
+      expect(k['cpa']).toBe(10);
+      expect(k['ctr']).toBeCloseTo(0.04333, 4);
+    });
+
+    it('rejects unknown view names', () => {
+      expect(() => store.queryView('view_does_not_exist', 'a1'))
+        .toThrow(/Unknown view "view_does_not_exist"/);
+    });
+
+    it('view_blueprint_negative_candidates flags terms disjunct from PMAX', () => {
+      store.insertSearchTermsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [
+          { searchTerm: 'wasserfilter shop', costMicros: 5_000_000, conversions: 2 },
+          { searchTerm: 'kefir kaufen', costMicros: 1_000_000, conversions: 0 },
+        ],
+      });
+      store.insertPmaxSearchTermsBatch({
+        runId, adsAccountId: 'a1',
+        rows: [{ searchCategory: 'wasserfilter shop' }],
+      });
+      store.completeAuditRun(runId);
+
+      const rows = store.queryView('view_blueprint_negative_candidates', 'a1');
+      const terms = new Map(rows.map(r => [r['search_term'] as string, r['pmax_disjunct'] as number]));
+      expect(terms.get('wasserfilter shop')).toBe(0); // overlap with PMAX → not disjunct
+      expect(terms.get('kefir kaufen')).toBe(1);       // no overlap → disjunct
+    });
+  });
+});

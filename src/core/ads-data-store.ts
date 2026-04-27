@@ -18,6 +18,31 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { getLynoxDir } from './config.js';
+import type {
+  CampaignSnapshot,
+  CampaignPerformanceSnapshot,
+  AdGroupSnapshot,
+  KeywordSnapshot,
+  RsaAdSnapshot,
+  AssetGroupSnapshot,
+  AssetGroupAssetSnapshot,
+  AssetSnapshot,
+  ListingGroupSnapshot,
+  ShoppingProductSnapshot,
+  ConversionActionSnapshot,
+  CampaignTargetingSnapshot,
+  SearchTermSnapshot,
+  PmaxSearchTermSnapshot,
+  PmaxPlacementSnapshot,
+  LandingPageSnapshot,
+  AdAssetRatingSnapshot,
+  AudienceSignalSnapshot,
+  DevicePerformanceSnapshot,
+  GeoPerformanceSnapshot,
+  ChangeHistorySnapshot,
+  Ga4ObservationSnapshot,
+  GscObservationSnapshot,
+} from './ads-snapshot-types.js';
 
 const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (1);
@@ -1052,4 +1077,413 @@ export class AdsDataStore {
       ORDER BY entity_type, entity_external_id
     `).all(...params) as AdsRunDecisionRow[];
   }
+
+  // ── Snapshot Bulk Inserts ────────────────────────────────────
+  // All inserts are append-only: every row carries source_run_id and observed_at.
+  // The caller is expected to call createAuditRun() first and pass the resulting
+  // run_id. Inserts are wrapped in a transaction for atomicity.
+
+  private _insertSnapshot<T>(
+    tableName: string,
+    columns: readonly string[],
+    runId: number,
+    adsAccountId: string,
+    rows: readonly T[],
+    rowMapper: (row: T) => readonly SqlValue[],
+    observedAt?: string | undefined,
+  ): number {
+    if (rows.length === 0) return 0;
+    const ts = observedAt ?? new Date().toISOString();
+    const allCols = ['source_run_id', 'ads_account_id', ...columns, 'observed_at'];
+    const placeholders = allCols.map(() => '?').join(', ');
+    // Table name is hard-coded by the caller (this class only) — no user input.
+    const colList = allCols.map(c => `"${c}"`).join(', ');
+    const sql = `INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders})`;
+    const stmt = this.db.prepare(sql);
+    return this.transaction(() => {
+      let count = 0;
+      for (const row of rows) {
+        const params: SqlValue[] = [runId, adsAccountId, ...rowMapper(row), ts];
+        stmt.run(...params);
+        count++;
+      }
+      return count;
+    });
+  }
+
+  insertCampaignsBatch(input: SnapshotBatchInput<CampaignSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_campaigns',
+      ['campaign_id', 'campaign_name', 'status', 'channel_type', 'opt_score',
+        'budget_micros', 'impressions', 'clicks', 'cost_micros', 'conversions',
+        'conv_value', 'ctr', 'avg_cpc', 'search_is', 'search_top_is',
+        'search_abs_top_is', 'budget_lost_is', 'rank_lost_is'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignId, r.campaignName, r.status ?? null, r.channelType ?? null, r.optScore ?? null,
+        r.budgetMicros ?? null, r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null,
+        r.convValue ?? null, r.ctr ?? null, r.avgCpc ?? null, r.searchIs ?? null, r.searchTopIs ?? null,
+        r.searchAbsTopIs ?? null, r.budgetLostIs ?? null, r.rankLostIs ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertCampaignPerformanceBatch(input: SnapshotBatchInput<CampaignPerformanceSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_campaign_performance',
+      ['date', 'campaign_id', 'campaign_name', 'channel_type',
+        'impressions', 'clicks', 'cost_micros', 'conversions', 'conv_value'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.date, r.campaignId, r.campaignName ?? null, r.channelType ?? null,
+        r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null, r.convValue ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertAdGroupsBatch(input: SnapshotBatchInput<AdGroupSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_ad_groups',
+      ['campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'status',
+        'impressions', 'clicks', 'cost_micros', 'conversions', 'conv_value', 'ctr', 'avg_cpc'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignId ?? null, r.campaignName, r.adGroupId ?? null, r.adGroupName, r.status ?? null,
+        r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null, r.convValue ?? null, r.ctr ?? null, r.avgCpc ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertKeywordsBatch(input: SnapshotBatchInput<KeywordSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_keywords',
+      ['campaign_name', 'ad_group_name', 'keyword', 'match_type', 'status', 'quality_score',
+        'impressions', 'clicks', 'cost_micros', 'conversions', 'conv_value', 'ctr', 'avg_cpc', 'search_is'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName, r.adGroupName, r.keyword, r.matchType ?? null, r.status ?? null, r.qualityScore ?? null,
+        r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null, r.convValue ?? null, r.ctr ?? null, r.avgCpc ?? null, r.searchIs ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertRsaAdsBatch(input: SnapshotBatchInput<RsaAdSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_rsa_ads',
+      ['campaign_name', 'ad_group_name', 'ad_id', 'headlines', 'descriptions',
+        'final_url', 'status', 'ad_strength',
+        'impressions', 'clicks', 'cost_micros', 'conversions', 'ctr'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName, r.adGroupName, r.adId,
+        JSON.stringify(r.headlines ?? []), JSON.stringify(r.descriptions ?? []),
+        r.finalUrl ?? null, r.status ?? null, r.adStrength ?? null,
+        r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null, r.ctr ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertAssetGroupsBatch(input: SnapshotBatchInput<AssetGroupSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_asset_groups',
+      ['campaign_id', 'campaign_name', 'asset_group_id', 'asset_group_name',
+        'status', 'ad_strength', 'impressions', 'clicks', 'cost_micros', 'conversions', 'conv_value'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignId ?? null, r.campaignName ?? null, r.assetGroupId, r.assetGroupName,
+        r.status ?? null, r.adStrength ?? null, r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null, r.convValue ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertAssetGroupAssetsBatch(input: SnapshotBatchInput<AssetGroupAssetSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_asset_group_assets',
+      ['campaign_name', 'asset_group_name', 'field_type', 'asset_status',
+        'asset_id', 'asset_name', 'asset_type', 'text_content', 'image_url'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName ?? null, r.assetGroupName, r.fieldType, r.assetStatus ?? null,
+        r.assetId ?? null, r.assetName ?? null, r.assetType ?? null, r.textContent ?? null, r.imageUrl ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertAssetsBatch(input: SnapshotBatchInput<AssetSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_assets',
+      ['asset_id', 'name', 'type', 'sitelink_text', 'sitelink_desc1',
+        'sitelink_desc2', 'callout_text', 'snippet_header', 'snippet_values'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.assetId, r.name ?? null, r.type, r.sitelinkText ?? null, r.sitelinkDesc1 ?? null,
+        r.sitelinkDesc2 ?? null, r.calloutText ?? null, r.snippetHeader ?? null, r.snippetValues ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertListingGroupsBatch(input: SnapshotBatchInput<ListingGroupSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_listing_groups',
+      ['campaign_name', 'asset_group_name', 'filter_id', 'filter_type',
+        'brand', 'category_id', 'product_type', 'custom_attribute'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName ?? null, r.assetGroupName ?? null, r.filterId ?? null, r.filterType ?? null,
+        r.brand ?? null, r.categoryId ?? null, r.productType ?? null, r.customAttribute ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertShoppingProductsBatch(input: SnapshotBatchInput<ShoppingProductSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_shopping_products',
+      ['campaign_name', 'item_id', 'title', 'brand', 'status',
+        'channel', 'language', 'issues', 'impressions', 'clicks', 'cost_micros'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName ?? null, r.itemId ?? null, r.title ?? null, r.brand ?? null, r.status ?? null,
+        r.channel ?? null, r.language ?? null, r.issues ?? null, r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertConversionActionsBatch(input: SnapshotBatchInput<ConversionActionSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_conversion_actions',
+      ['conv_action_id', 'name', 'type', 'category', 'status',
+        'primary_for_goal', 'counting_type', 'attribution_model', 'default_value', 'in_conversions_metric'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.convActionId, r.name ?? null, r.type ?? null, r.category ?? null, r.status ?? null,
+        r.primaryForGoal === undefined ? null : (r.primaryForGoal ? 1 : 0),
+        r.countingType ?? null, r.attributionModel ?? null, r.defaultValue ?? null,
+        r.inConversionsMetric === undefined ? null : (r.inConversionsMetric ? 1 : 0)],
+      input.observedAt,
+    );
+  }
+
+  insertCampaignTargetingBatch(input: SnapshotBatchInput<CampaignTargetingSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_campaign_targeting',
+      ['campaign_id', 'campaign_name', 'criterion_type', 'is_negative', 'status',
+        'bid_modifier', 'geo_target', 'language', 'keyword_text', 'match_type'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignId ?? null, r.campaignName ?? null, r.criterionType,
+        r.isNegative === undefined ? 0 : (r.isNegative ? 1 : 0), r.status ?? null,
+        r.bidModifier ?? null, r.geoTarget ?? null, r.language ?? null, r.keywordText ?? null, r.matchType ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertSearchTermsBatch(input: SnapshotBatchInput<SearchTermSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_search_terms',
+      ['campaign_name', 'channel_type', 'ad_group_name', 'search_term', 'term_status',
+        'impressions', 'clicks', 'cost_micros', 'conversions', 'conv_value', 'ctr'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName ?? null, r.channelType ?? null, r.adGroupName ?? null, r.searchTerm, r.termStatus ?? null,
+        r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null, r.convValue ?? null, r.ctr ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertPmaxSearchTermsBatch(input: SnapshotBatchInput<PmaxSearchTermSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_pmax_search_terms',
+      ['campaign_id', 'campaign_name', 'search_category', 'insight_id'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignId ?? null, r.campaignName ?? null, r.searchCategory ?? null, r.insightId ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertPmaxPlacementsBatch(input: SnapshotBatchInput<PmaxPlacementSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_pmax_placements',
+      ['campaign_id', 'campaign_name', 'placement', 'placement_type', 'target_url'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignId ?? null, r.campaignName ?? null, r.placement ?? null, r.placementType ?? null, r.targetUrl ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertLandingPagesBatch(input: SnapshotBatchInput<LandingPageSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_landing_pages',
+      ['campaign_name', 'landing_page_url', 'impressions', 'clicks',
+        'cost_micros', 'conversions', 'conv_value', 'avg_cpc'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName ?? null, r.landingPageUrl, r.impressions ?? null, r.clicks ?? null,
+        r.costMicros ?? null, r.conversions ?? null, r.convValue ?? null, r.avgCpc ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertAdAssetRatingsBatch(input: SnapshotBatchInput<AdAssetRatingSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_ad_asset_ratings',
+      ['campaign_name', 'ad_group_name', 'field_type', 'performance_label', 'enabled',
+        'text_content', 'impressions', 'clicks', 'cost_micros', 'conversions'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName ?? null, r.adGroupName ?? null, r.fieldType, r.performanceLabel ?? null,
+        r.enabled === undefined ? 1 : (r.enabled ? 1 : 0),
+        r.textContent ?? null, r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertAudienceSignalsBatch(input: SnapshotBatchInput<AudienceSignalSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_audience_signals',
+      ['campaign_name', 'asset_group_name', 'signal_type', 'signal_label'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignName ?? null, r.assetGroupName ?? null, r.signalType ?? null, r.signalLabel ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertDevicePerformanceBatch(input: SnapshotBatchInput<DevicePerformanceSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_device_performance',
+      ['campaign_id', 'campaign_name', 'channel_type', 'device',
+        'impressions', 'clicks', 'cost_micros', 'conversions', 'conv_value', 'ctr'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignId ?? null, r.campaignName ?? null, r.channelType ?? null, r.device,
+        r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null, r.convValue ?? null, r.ctr ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertGeoPerformanceBatch(input: SnapshotBatchInput<GeoPerformanceSnapshot>): number {
+    return this._insertSnapshot(
+      'ads_geo_performance',
+      ['campaign_id', 'campaign_name', 'country_id', 'location_type', 'geo_target_region',
+        'impressions', 'clicks', 'cost_micros', 'conversions', 'conv_value'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.campaignId ?? null, r.campaignName ?? null, r.countryId ?? null, r.locationType ?? null, r.geoTargetRegion ?? null,
+        r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null, r.convValue ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertChangeHistoryBatch(input: SnapshotBatchInput<ChangeHistorySnapshot>): number {
+    return this._insertSnapshot(
+      'ads_change_history',
+      ['change_date', 'resource_type', 'operation', 'changed_fields',
+        'user_email', 'client_type', 'campaign_name'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.changeDate, r.resourceType ?? null, r.operation ?? null, r.changedFields ?? null,
+        r.userEmail ?? null, r.clientType ?? null, r.campaignName ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertGa4ObservationsBatch(input: SnapshotBatchInput<Ga4ObservationSnapshot>): number {
+    return this._insertSnapshot(
+      'ga4_observations',
+      ['date', 'session_source', 'session_medium', 'sessions', 'total_users',
+        'new_users', 'bounce_rate', 'avg_session_duration', 'conversions', 'event_count'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.date, r.sessionSource ?? null, r.sessionMedium ?? null, r.sessions ?? null, r.totalUsers ?? null,
+        r.newUsers ?? null, r.bounceRate ?? null, r.avgSessionDuration ?? null, r.conversions ?? null, r.eventCount ?? null],
+      input.observedAt,
+    );
+  }
+
+  insertGscObservationsBatch(input: SnapshotBatchInput<GscObservationSnapshot>): number {
+    return this._insertSnapshot(
+      'gsc_observations',
+      ['date_month', 'query', 'page', 'country', 'device',
+        'clicks', 'impressions', 'ctr', 'position'],
+      input.runId, input.adsAccountId, input.rows,
+      r => [r.dateMonth, r.query ?? null, r.page ?? null, r.country ?? null, r.device ?? null,
+        r.clicks ?? null, r.impressions ?? null, r.ctr ?? null, r.position ?? null],
+      input.observedAt,
+    );
+  }
+
+  // ── Latest-State Readers ──────────────────────────────────────
+  // Convenience wrappers around: SELECT * FROM <table> WHERE source_run_id =
+  // (latest successful run for this account). Used by audit-tool consumers.
+
+  private _resolveRunId(adsAccountId: string, runId?: number | undefined): number | null {
+    if (runId !== undefined) return runId;
+    return this.getLatestSuccessfulAuditRun(adsAccountId)?.run_id ?? null;
+  }
+
+  /** Generic latest-snapshot read. Returns rows matching source_run_id of the
+   *  given run (defaults to latest successful run for the account). */
+  getSnapshotRows<T>(table: string, adsAccountId: string, opts?: { runId?: number | undefined; limit?: number | undefined } | undefined): T[] {
+    const resolvedRunId = this._resolveRunId(adsAccountId, opts?.runId);
+    if (resolvedRunId === null) return [];
+    const limit = opts?.limit !== undefined ? Math.max(1, Math.min(opts.limit, 5000)) : null;
+    const limitClause = limit ? ` LIMIT ${limit}` : '';
+    return this.db.prepare(`
+      SELECT * FROM "${table}" WHERE source_run_id = ? AND ads_account_id = ?${limitClause}
+    `).all(resolvedRunId, adsAccountId) as T[];
+  }
+
+  countSnapshotRows(table: string, adsAccountId: string, runId?: number | undefined): number {
+    const resolvedRunId = this._resolveRunId(adsAccountId, runId);
+    if (resolvedRunId === null) return 0;
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as cnt FROM "${table}" WHERE source_run_id = ? AND ads_account_id = ?
+    `).get(resolvedRunId, adsAccountId) as { cnt: number };
+    return row.cnt;
+  }
+
+  /** Total cost (CHF) for all campaigns in the latest run — sanity check helper. */
+  getLatestSpend(adsAccountId: string): number {
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(cost_micros), 0) as total FROM ads_campaigns
+      WHERE source_run_id = (
+        SELECT run_id FROM ads_audit_runs
+        WHERE ads_account_id = ? AND status = 'SUCCESS'
+        ORDER BY finished_at DESC, run_id DESC LIMIT 1
+      ) AND ads_account_id = ?
+    `).get(adsAccountId, adsAccountId) as { total: number };
+    return row.total / 1_000_000;
+  }
+
+  /** Run a parameterized aggregation view against a specific run scope.
+   *  Returns view rows filtered to the given run_id and account. */
+  queryView(
+    viewName: string,
+    adsAccountId: string,
+    opts?: { runId?: number | undefined; limit?: number | undefined; orderBy?: string | undefined } | undefined,
+  ): Array<Record<string, unknown>> {
+    // Whitelist: only views from this module's schema may be queried.
+    // Validated before run resolution so misuse always throws, not silent-empty.
+    if (!ALLOWED_VIEW_NAMES.has(viewName)) {
+      throw new Error(`Unknown view "${viewName}". Allowed: ${[...ALLOWED_VIEW_NAMES].join(', ')}`);
+    }
+    const resolvedRunId = this._resolveRunId(adsAccountId, opts?.runId);
+    if (resolvedRunId === null) return [];
+    const limit = opts?.limit !== undefined ? Math.max(1, Math.min(opts.limit, 5000)) : 500;
+    const orderClause = opts?.orderBy && /^[a-z_][a-z0-9_]*( (ASC|DESC))?$/i.test(opts.orderBy)
+      ? ` ORDER BY ${opts.orderBy}`
+      : '';
+    return this.db.prepare(`
+      SELECT * FROM "${viewName}"
+      WHERE source_run_id = ? AND ads_account_id = ?${orderClause}
+      LIMIT ${limit}
+    `).all(resolvedRunId, adsAccountId) as Array<Record<string, unknown>>;
+  }
 }
+
+// ── Module-level helpers (after class so the SqlValue type is visible) ──
+
+type SqlValue = string | number | bigint | Buffer | null;
+
+export interface SnapshotBatchInput<T> {
+  runId: number;
+  adsAccountId: string;
+  rows: readonly T[];
+  observedAt?: string | undefined;
+}
+
+const ALLOWED_VIEW_NAMES: ReadonlySet<string> = new Set([
+  'view_audit_kpis',
+  'view_audit_campaign_summary',
+  'view_audit_device_split',
+  'view_audit_geo_top10',
+  'view_audit_top_search_terms',
+  'view_audit_pmax_categories',
+  'view_audit_low_performers',
+  'view_audit_disapproved_products',
+  'view_audit_change_history_summary',
+  'view_blueprint_negative_candidates',
+  'view_blueprint_organic_overlap',
+  'view_blueprint_ga4_conversion_delta',
+  'view_blueprint_landing_page_perf',
+]);
