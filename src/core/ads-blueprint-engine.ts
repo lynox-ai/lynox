@@ -28,7 +28,6 @@ import type {
   AdsBlueprintEntityKind,
   CustomerProfileRow,
   InsertBlueprintEntityInput,
-  InsertRunDecisionInput,
   AdsDecision,
   AdsDecisionEntityType,
 } from './ads-data-store.js';

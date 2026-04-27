@@ -631,6 +631,8 @@ export class Engine {
         this.registry.register(createAdsAuditRunTool(this._adsDataStore) as ToolEntry);
         const { createAdsFindingAddTool } = await import('../tools/builtin/ads-finding-add.js');
         this.registry.register(createAdsFindingAddTool(this._adsDataStore) as ToolEntry);
+        const { createAdsBlueprintRunTool } = await import('../tools/builtin/ads-blueprint-run.js');
+        this.registry.register(createAdsBlueprintRunTool(this._adsDataStore) as ToolEntry);
         if (this._googleAuth) {
           const { createAdsDataPullTool } = await import('../tools/builtin/ads-data-pull.js');
           this.registry.register(createAdsDataPullTool(this._googleAuth, this._adsDataStore) as ToolEntry);
