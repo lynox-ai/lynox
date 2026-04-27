@@ -99,6 +99,18 @@ const MIGRATIONS: string[] = [
 
    ALTER TABLE mail_accounts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'imap';
    ALTER TABLE mail_accounts ADD COLUMN oauth_provider_key TEXT;`,
+
+  // v6: Persisted default mailbox. Before this migration, the default lived
+  // in InMemoryMailRegistry and was clobbered on every restart by whichever
+  // provider was registered first (created_at order). With multiple
+  // mailboxes (OAuth-Gmail + IMAP), that flipped the user's default
+  // unpredictably — the visible symptom of the unification bug.
+  //
+  // Application-level invariant: at most one row has is_default=1.
+  // setDefaultAccount() enforces this in a single transaction.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
+
+   ALTER TABLE mail_accounts ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export interface MailStateDbOptions {
@@ -132,6 +144,7 @@ interface AccountRow {
   persona_prompt: string | null;
   auth_type: string;
   oauth_provider_key: string | null;
+  is_default: number;
   created_at: string;
   updated_at: string;
 }
@@ -227,6 +240,7 @@ function rowToAccount(row: AccountRow): MailAccountConfig {
     oauthProviderKey: row.oauth_provider_key ?? undefined,
     type,
     personaPrompt: row.persona_prompt ?? undefined,
+    isDefault: row.is_default === 1,
   };
 }
 
@@ -391,8 +405,8 @@ export class MailStateDb {
   upsertAccount(account: MailAccountConfig): void {
     this.db
       .prepare(
-        `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, auth_type, oauth_provider_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, auth_type, oauth_provider_key, is_default, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
          ON CONFLICT(id) DO UPDATE SET
            display_name = excluded.display_name,
            address = excluded.address,
@@ -424,7 +438,40 @@ export class MailStateDb {
         account.personaPrompt ?? null,
         account.authType,
         account.oauthProviderKey ?? null,
+        account.isDefault ? 1 : 0,
       );
+  }
+
+  /**
+   * Mark `id` as the only default account in a single transaction. Pass null
+   * to clear the default entirely (e.g. when the last account is removed).
+   * Returns true when the row exists and was set; false otherwise.
+   *
+   * Existence is checked BEFORE clearing the previous default so a typo on
+   * `setDefaultAccount('missing')` no longer wipes out the user's current
+   * choice. Either the targeted row exists and we promote it, or nothing
+   * changes.
+   */
+  setDefaultAccount(id: string | null): boolean {
+    const txn = this.db.transaction((targetId: string | null) => {
+      if (targetId !== null) {
+        const exists = this.db.prepare('SELECT 1 FROM mail_accounts WHERE id = ?').get(targetId);
+        if (!exists) return false;
+      }
+      this.db.prepare('UPDATE mail_accounts SET is_default = 0').run();
+      if (targetId === null) return true;
+      this.db.prepare('UPDATE mail_accounts SET is_default = 1 WHERE id = ?').run(targetId);
+      return true;
+    });
+    return txn(id);
+  }
+
+  /** Return the id of the currently-default account, or null if none. */
+  defaultAccountId(): string | null {
+    const row = this.db
+      .prepare<[], { id: string }>('SELECT id FROM mail_accounts WHERE is_default = 1 LIMIT 1')
+      .get();
+    return row?.id ?? null;
   }
 
   /** Remove an account row (without touching dedup state — caller decides). */

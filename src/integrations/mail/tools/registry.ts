@@ -84,16 +84,23 @@ export class InMemoryMailRegistry implements MutableMailRegistry {
   private readonly providers = new Map<string, MailProvider>();
   private defaultId: string | null = null;
 
+  /**
+   * Register a provider. Does NOT auto-assign default — the caller (MailContext)
+   * is responsible for default selection because that decision needs to consult
+   * the persisted `is_default` column. Auto-defaulting in registration order
+   * was the bug behind "DEFAULT-Badge wandert auf das letzte Konto".
+   */
   add(provider: MailProvider): void {
     this.providers.set(provider.accountId, provider);
-    if (this.defaultId === null) this.defaultId = provider.accountId;
   }
 
   remove(accountId: string): void {
     this.providers.delete(accountId);
+    // Clear the in-memory default when its provider is gone. The caller must
+    // call setDefault() with a replacement (and persist it) — we no longer
+    // silently promote a sibling because that hides the missing-default case.
     if (this.defaultId === accountId) {
-      const next = this.providers.keys().next();
-      this.defaultId = next.done ? null : next.value;
+      this.defaultId = null;
     }
   }
 
