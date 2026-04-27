@@ -383,3 +383,134 @@ describe('MailContext — MailError surface', () => {
     expect(() => { throw new MailError(result.code as 'not_found', result.error ?? ''); }).toThrow(MailError);
   });
 });
+
+// ── OAuth-Gmail boot migration (PR2) ─────────────────────────────────────
+//
+// When MailContext is constructed with an authenticated GoogleAuth, init()
+// auto-creates a placeholder mail_accounts row so users who connected Gmail
+// via OAuth before the unification refactor see their mailbox without
+// re-authorizing. Idempotent — the second init() must not insert again.
+
+describe('MailContext — OAuth-Gmail boot migration', () => {
+  const realFetch = globalThis.fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it('inserts an oauth_google row + registers OAuthGmailProvider on first init', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'rafael@brandfusion.ch' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('test-token'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctxWithAuth = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctxWithAuth.init();
+      const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0]?.address).toBe('rafael@brandfusion.ch');
+      expect(accounts[0]?.id).toBe('gmail-rafael-brandfusion-ch');
+      expect(accounts[0]?.preset).toBe('gmail');
+      expect(ctxWithAuth.registry.list()).toContain('gmail-rafael-brandfusion-ch');
+    } finally {
+      await ctxWithAuth.close();
+    }
+  });
+
+  it('is idempotent — second engine boot does not insert a duplicate row', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'rafael@brandfusion.ch' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx1 = new MailContext(stateDb, backend, undefined, {}, auth);
+    await ctx1.init();
+    await ctx1.close();
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
+      expect(accounts).toHaveLength(1);
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('skips migration when GoogleAuth is not authenticated', async () => {
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(false),
+      getAccessToken: vi.fn(),
+      hasScope: vi.fn(),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toHaveLength(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('coexists with IMAP accounts in the same registry', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'rafael@brandfusion.ch' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    // Pre-seed an IMAP row + creds so init() registers both
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+
+    const ctxBoth = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctxBoth.init();
+      // Both providers present
+      expect(ctxBoth.registry.list()).toContain('rafael-gmail');             // IMAP
+      expect(ctxBoth.registry.list()).toContain('gmail-rafael-brandfusion-ch'); // OAuth
+    } finally {
+      await ctxBoth.close();
+    }
+  });
+
+  it('survives a profile-fetch failure — migration retries on next boot', async () => {
+    fetchMock.mockResolvedValue(new Response('server error', { status: 500 }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      // No row created — but no crash either
+      expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toHaveLength(0);
+    } finally {
+      await ctx2.close();
+    }
+  });
+});
