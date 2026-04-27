@@ -65,6 +65,16 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
         }
 
+        // Block credential exfiltration via reply body — same defense as
+        // mail_send. The reply path is in fact the more likely place for
+        // a leak: an agent quoting an inbound mail's "API key:" line back
+        // to the sender as part of a reply confirmation.
+        const { detectSecretInContent } = await import('../../../tools/builtin/http.js');
+        const secretMatch = detectSecretInContent(input.body);
+        if (secretMatch) {
+          return `mail_reply blocked: body appears to contain a ${secretMatch}. Sending secrets via email is not allowed — strip the credential and retry.`;
+        }
+
         // For the initial fetch, resolve the requested reading account (or default).
         // The sending account may differ — smart reply-from derives it below.
         const readProvider = resolveProvider(registry, input.account);
