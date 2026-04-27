@@ -242,6 +242,46 @@ export interface SecretResult {
 }
 
 /**
+ * Auto-generate and persist the engine HTTP API bearer secret if none is
+ * configured. Mirrors `_ensureVaultKey`'s pattern — env > persisted file >
+ * generate-and-persist. Called from `LynoxHTTPApi.start()` for the Web UI
+ * mode (where the server binds to 0.0.0.0); API-only mode keeps its
+ * localhost-only fallback and never auto-generates.
+ *
+ * Priority: LYNOX_HTTP_SECRET env > ~/.lynox/http-secret file > auto-generate.
+ */
+export function ensureHttpSecret(): void {
+  if (process.env['LYNOX_HTTP_SECRET']) return;
+
+  const lynoxDir = getLynoxDir();
+  const secretFilePath = join(lynoxDir, 'http-secret');
+
+  if (existsSync(secretFilePath)) {
+    try {
+      const value = readFileSync(secretFilePath, 'utf-8').trim();
+      if (value) {
+        process.env['LYNOX_HTTP_SECRET'] = value;
+        return;
+      }
+    } catch { /* fall through to regeneration */ }
+  }
+
+  const value = randomBytes(32).toString('hex');
+  try {
+    writeFileSync(secretFilePath, value + '\n', { mode: FILE_MODE_PRIVATE });
+    process.env['LYNOX_HTTP_SECRET'] = value;
+    process.stderr.write(`Generated engine HTTP secret → ${secretFilePath}\n`);
+  } catch {
+    // Filesystem write failed — fall back to a process-lifetime secret so
+    // auth still gates the API. Restart will mint a new value, breaking
+    // any persisted bearer clients, which is acceptable in the headless
+    // ephemeral case where this branch fires.
+    process.env['LYNOX_HTTP_SECRET'] = value;
+    process.stderr.write('⚠ Could not persist engine HTTP secret. Auth is enforced for this process only.\n');
+  }
+}
+
+/**
  * Auto-generate and persist a vault key if none is configured.
  * New users get a working vault out of the box.
  *
