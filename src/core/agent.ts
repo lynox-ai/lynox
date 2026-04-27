@@ -824,7 +824,6 @@ export class Agent implements IAgent {
       const cause = err instanceof Error ? err : new Error(String(err));
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);
-      const toolError = new Error(`Tool ${tc.name} failed: ${message}`, { cause });
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
