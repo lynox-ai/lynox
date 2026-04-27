@@ -140,7 +140,9 @@ For advanced use, scopes can also be set via config:
 
 ### Gmail
 
-- *"What's in my inbox today?"*
+Once you've connected Google, your Gmail mailbox automatically appears in **Settings → Integrations → Mail** alongside any IMAP/SMTP accounts. The same mail tools (`mail_triage`, `mail_search`, `mail_read`, `mail_send`, `mail_reply`) work across all mailboxes — there is no separate Gmail tool.
+
+- *"What's in my inbox today?"* (spans Gmail + IMAP if you have both)
 - *"Find emails from [contact] about [topic]"*
 - *"Draft a reply to the last email from [name]"*
 - *"Send a follow-up to [contact]"* (requires write scope)
