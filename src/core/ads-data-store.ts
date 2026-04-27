@@ -691,6 +691,26 @@ const MIGRATIONS: string[] = [
             AND g.ads_account_id = lp.ads_account_id
             AND g.page = lp.landing_page_url) AS organic_clicks
      FROM ads_landing_pages lp;`,
+
+  // Migration v2: ads_findings — qualitative + deterministic audit insights, run-keyed
+  // for cross-run diff. Mirrored as KG facts for semantic pattern-detection in later cycles.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+
+   CREATE TABLE IF NOT EXISTS ads_findings (
+     finding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+     run_id INTEGER NOT NULL REFERENCES ads_audit_runs(run_id),
+     ads_account_id TEXT NOT NULL,
+     area TEXT NOT NULL,
+     severity TEXT NOT NULL CHECK (severity IN ('LOW', 'MEDIUM', 'HIGH')),
+     source TEXT NOT NULL CHECK (source IN ('deterministic', 'agent')),
+     text TEXT NOT NULL,
+     confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+     evidence_json TEXT NOT NULL DEFAULT '{}',
+     kg_memory_id TEXT,
+     created_at TEXT NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS idx_findings_run ON ads_findings(run_id, severity);
+   CREATE INDEX IF NOT EXISTS idx_findings_area ON ads_findings(ads_account_id, area);`,
 ];
 
 export interface CustomerProfileRow {
@@ -762,6 +782,35 @@ export interface AdsRunDecisionRow {
   rationale: string;
   smart_bidding_guard_passed: number;
   created_at: string;
+}
+
+export type AdsFindingSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
+export type AdsFindingSource = 'deterministic' | 'agent';
+
+export interface AdsFindingRow {
+  finding_id: number;
+  run_id: number;
+  ads_account_id: string;
+  area: string;
+  severity: AdsFindingSeverity;
+  source: AdsFindingSource;
+  text: string;
+  confidence: number;
+  evidence_json: string;
+  kg_memory_id: string | null;
+  created_at: string;
+}
+
+export interface InsertFindingInput {
+  runId: number;
+  adsAccountId: string;
+  area: string;
+  severity: AdsFindingSeverity;
+  source: AdsFindingSource;
+  text: string;
+  confidence: number;
+  evidence?: Record<string, unknown> | undefined;
+  kgMemoryId?: string | undefined;
 }
 
 export interface UpsertCustomerProfileInput {
@@ -1077,6 +1126,67 @@ export class AdsDataStore {
       SELECT * FROM ads_run_decisions WHERE ${clauses.join(' AND ')}
       ORDER BY entity_type, entity_external_id
     `).all(...params) as AdsRunDecisionRow[];
+  }
+
+  // ── Findings ─────────────────────────────────────────────────
+  // Hybrid storage: structured row here for cross-run diff + queryability,
+  // optional kg_memory_id back-reference when the same finding is also
+  // mirrored to KG via knowledgeLayer.store() for semantic pattern detection.
+
+  insertFinding(input: InsertFindingInput): AdsFindingRow {
+    const now = new Date().toISOString();
+    const evidence = JSON.stringify(input.evidence ?? {});
+    const result = this.db.prepare(`
+      INSERT INTO ads_findings (
+        run_id, ads_account_id, area, severity, source, text,
+        confidence, evidence_json, kg_memory_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.runId, input.adsAccountId, input.area, input.severity,
+      input.source, input.text, input.confidence, evidence,
+      input.kgMemoryId ?? null, now,
+    );
+    return this.db.prepare('SELECT * FROM ads_findings WHERE finding_id = ?')
+      .get(Number(result.lastInsertRowid)) as AdsFindingRow;
+  }
+
+  setFindingKgMemoryId(findingId: number, kgMemoryId: string): void {
+    this.db.prepare('UPDATE ads_findings SET kg_memory_id = ? WHERE finding_id = ?')
+      .run(kgMemoryId, findingId);
+  }
+
+  listFindings(
+    runId: number,
+    opts?: { severity?: AdsFindingSeverity | undefined; area?: string | undefined; source?: AdsFindingSource | undefined } | undefined,
+  ): AdsFindingRow[] {
+    const clauses: string[] = ['run_id = ?'];
+    const params: unknown[] = [runId];
+    if (opts?.severity) { clauses.push('severity = ?'); params.push(opts.severity); }
+    if (opts?.area) { clauses.push('area = ?'); params.push(opts.area); }
+    if (opts?.source) { clauses.push('source = ?'); params.push(opts.source); }
+    return this.db.prepare(`
+      SELECT * FROM ads_findings WHERE ${clauses.join(' AND ')}
+      ORDER BY
+        CASE severity WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END,
+        finding_id ASC
+    `).all(...params) as AdsFindingRow[];
+  }
+
+  countFindings(runId: number): { high: number; medium: number; low: number; total: number } {
+    const row = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN severity = 'HIGH'   THEN 1 ELSE 0 END) AS high,
+        SUM(CASE WHEN severity = 'MEDIUM' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN severity = 'LOW'    THEN 1 ELSE 0 END) AS low,
+        COUNT(*) AS total
+      FROM ads_findings WHERE run_id = ?
+    `).get(runId) as { high: number | null; medium: number | null; low: number | null; total: number };
+    return {
+      high: row.high ?? 0,
+      medium: row.medium ?? 0,
+      low: row.low ?? 0,
+      total: row.total,
+    };
   }
 
   // ── Snapshot Bulk Inserts ────────────────────────────────────
