@@ -422,9 +422,9 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
       expect(accounts).toHaveLength(1);
       expect(accounts[0]?.address).toBe('rafael@brandfusion.ch');
-      expect(accounts[0]?.id).toBe('gmail-rafael-brandfusion-ch');
+      expect(accounts[0]?.id).toBe('gmail-rafael-brandfusion.ch');
       expect(accounts[0]?.preset).toBe('gmail');
-      expect(ctxWithAuth.registry.list()).toContain('gmail-rafael-brandfusion-ch');
+      expect(ctxWithAuth.registry.list()).toContain('gmail-rafael-brandfusion.ch');
     } finally {
       await ctxWithAuth.close();
     }
@@ -490,7 +490,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       await ctxBoth.init();
       // Both providers present
       expect(ctxBoth.registry.list()).toContain('rafael-gmail');             // IMAP
-      expect(ctxBoth.registry.list()).toContain('gmail-rafael-brandfusion-ch'); // OAuth
+      expect(ctxBoth.registry.list()).toContain('gmail-rafael-brandfusion.ch'); // OAuth
     } finally {
       await ctxBoth.close();
     }
@@ -509,6 +509,65 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       await ctx2.init();
       // No row created — but no crash either
       expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toHaveLength(0);
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('replaces a stale row when the user reconnected with a different Google account', async () => {
+    // Pre-seed a row from a previous OAuth identity
+    stateDb.upsertAccount({
+      id: 'gmail-old-rafael-brandfusion-ch',
+      displayName: 'old-rafael@brandfusion.ch',
+      address: 'old-rafael@brandfusion.ch',
+      preset: 'gmail',
+      imap: { host: '', port: 0, secure: true },
+      smtp: { host: '', port: 0, secure: true },
+      authType: 'oauth_google',
+      oauthProviderKey: 'GOOGLE_OAUTH_TOKENS',
+      type: 'personal',
+    });
+    // Live profile now reports a different mailbox
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'new-rafael@brandfusion.ch' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0]?.address).toBe('new-rafael@brandfusion.ch');
+      // Stale id is gone
+      expect(stateDb.getAccount('gmail-old-rafael-brandfusion-ch')).toBe(null);
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('preserves email special chars in slug so plus/dot variants do not collide', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'rafael+spam@brandfusion.ch' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
+      expect(accounts).toHaveLength(1);
+      // The `+` is preserved so `rafael+spam@x` and `rafael.spam@x` get distinct ids
+      // (`@` still collapses to `-` since it isn't a typical id char).
+      expect(accounts[0]?.id).toBe('gmail-rafael+spam-brandfusion.ch');
     } finally {
       await ctx2.close();
     }

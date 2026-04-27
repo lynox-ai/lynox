@@ -268,7 +268,87 @@ describe('OAuthGmailProvider — send', () => {
     expect(decoded).toContain('Cc: cc@example.com');
     expect(decoded).toContain('Subject: Hello');
     expect(decoded).toContain('Body content');
+    // Date header is present so receivers don't have to backfill on bounce
+    expect(decoded).toMatch(/Date: \w{3}, \d{2} \w{3} \d{4}/);
   });
+
+  it('strips CRLF from headers — defeats SMTP injection via subject', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'rafael@lynox.ai' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    await provider.send({
+      to: [{ address: 'bob@example.com' }],
+      subject: 'Hello\r\nBcc: attacker@evil.com',
+      text: 'body',
+    });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
+    // The CRLF must be collapsed so the smuggled Bcc never lands on its own line
+    expect(decoded).not.toMatch(/^Bcc: attacker@evil\.com/m);
+    expect(decoded).toContain('Subject: Hello Bcc: attacker@evil.com');
+  });
+
+  it('strips CRLF from display name and escapes embedded quotes', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'rafael@lynox.ai' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    await provider.send({
+      to: [{ name: 'Bob "the Hacker"\r\nX-Injected: yes', address: 'bob@example.com' }],
+      subject: 'Hi',
+      text: 'body',
+    });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
+    expect(decoded).not.toMatch(/^X-Injected:/m);
+    expect(decoded).toContain('"Bob \\"the Hacker\\" X-Injected: yes" <bob@example.com>');
+  });
+});
+
+describe('OAuthGmailProvider — UID map LRU', () => {
+  it('reuses the same uid when a Gmail id reappears in a later list', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'stable-1', threadId: 't1' }] }));
+      if (url.includes('messages/stable-1')) return Promise.resolve(respondJson(metadataMessage('stable-1', { threadId: 't1', subject: 'A' })));
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const first = await provider.list();
+    const second = await provider.list();
+    expect(first[0]?.uid).toBe(second[0]?.uid);
+  });
+
+  it('evicts the oldest entry when the LRU cap is reached', async () => {
+    let counter = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) {
+        const id = `m-${String(counter++)}`;
+        return Promise.resolve(respondJson({ messages: [{ id, threadId: `t-${id}` }] }));
+      }
+      const idMatch = url.match(/messages\/([^?]+)/);
+      const id = idMatch?.[1] ?? 'unknown';
+      return Promise.resolve(respondJson(metadataMessage(id, { threadId: `t-${id}` })));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    let firstUid: number | undefined;
+    for (let i = 0; i < 10_002; i++) {
+      const envs = await provider.list();
+      if (i === 0) firstUid = envs[0]?.uid;
+    }
+    // The first uid should now be evicted — fetch must report not_found
+    const err = await provider.fetch({ uid: firstUid! }).catch(e => e as MailError);
+    expect(err).toBeInstanceOf(MailError);
+    expect(err.code).toBe('not_found');
+  }, 30_000);
 });
 
 describe('OAuthGmailProvider — error mapping', () => {
