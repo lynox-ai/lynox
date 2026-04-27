@@ -215,6 +215,7 @@ export class GoogleAuth {
   private readonly configuredScopes: readonly string[] | undefined;
   private tokenData: TokenData | null = null;
   private serviceAccountKey: ServiceAccountKey | null = null;
+  private refreshInFlight: Promise<void> | null = null;
 
   constructor(options: GoogleAuthOptions) {
     this.clientId = options.clientId;
@@ -615,7 +616,19 @@ export class GoogleAuth {
     });
   }
 
+  // Concurrent callers that hit the refresh window all share a single network
+  // round-trip. Without this guard, N parallel getAccessToken() calls during
+  // an expiry window fire N parallel refresh POSTs to Google, racing to set
+  // tokenData and risking rate-limit responses on the refresh endpoint.
   private async _refreshToken(): Promise<void> {
+    if (this.refreshInFlight) return this.refreshInFlight;
+    this.refreshInFlight = this._doRefresh().finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+
+  private async _doRefresh(): Promise<void> {
     if (!this.tokenData?.refresh_token) {
       throw new Error('No refresh token available. Re-connect your Google account in Settings → Integrations.');
     }
