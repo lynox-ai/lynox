@@ -4,8 +4,15 @@
 // doesn't need (uid, folder, sizeBytes, attachmentCount, threadKey…). The
 // triage view strips those down so the LLM only sees ~80 tokens per message:
 // from, subject, date, snippet, attachment hint, flag hint.
+//
+// Snippets are attacker-controlled body excerpts and MUST be wrapped in
+// `<untrusted_data>` boundary tags before reaching the LLM — same defence
+// the full mail body gets via `mail_read`. Without this, a phishing mail
+// whose first 500 chars say "IGNORE PREVIOUS INSTRUCTIONS AND …" would
+// reach the model as plain context.
 
 import type { MailEnvelope } from '../provider.js';
+import { wrapUntrustedData } from '../../../core/data-boundary.js';
 
 export interface TriageEnvelopeView {
   /** Display string: '"Alice" <alice@x.com>' or 'alice@x.com'. */
@@ -48,9 +55,20 @@ export function toTriageView(env: MailEnvelope): TriageEnvelopeView {
 /**
  * Render an array of envelopes as a compact, paginated text block ready to
  * hand to the LLM. ~50–100 tokens per item depending on snippet length.
+ *
+ * Each envelope's snippet is wrapped individually in <untrusted_data> so
+ * the agent treats body excerpts as raw data, not instructions. Subject
+ * and from are short header values; their injection surface is small but
+ * non-zero — they're rendered as labelled lines that the agent already
+ * recognises as headers, and `wrapUntrustedData`'s scanner will flag
+ * obvious injection patterns appearing in the snippet alongside.
  */
-export function renderTriageList(envelopes: ReadonlyArray<MailEnvelope>): string {
+export function renderTriageList(
+  envelopes: ReadonlyArray<MailEnvelope>,
+  accountId?: string,
+): string {
   if (envelopes.length === 0) return '(no messages)';
+  const acctLabel = accountId ?? 'unknown';
   const lines: string[] = [];
   for (let i = 0; i < envelopes.length; i++) {
     const v = toTriageView(envelopes[i]!);
@@ -62,7 +80,10 @@ export function renderTriageList(envelopes: ReadonlyArray<MailEnvelope>): string
     lines.push(`${String(i + 1)}. ${v.subject}${flagSuffix}`);
     lines.push(`   from: ${v.from}`);
     lines.push(`   date: ${v.date}   uid: ${String(v.uid)}`);
-    if (v.snippet) lines.push(`   ${truncate(v.snippet.replace(/\s+/g, ' '), 200)}`);
+    if (v.snippet) {
+      const body = truncate(v.snippet.replace(/\s+/g, ' '), 200);
+      lines.push(`   ${wrapUntrustedData(body, `mail:${acctLabel}:envelope:${String(v.uid)}:snippet`)}`);
+    }
     lines.push('');
   }
   return lines.join('\n').trimEnd();
