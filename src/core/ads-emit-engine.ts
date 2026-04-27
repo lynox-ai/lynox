@@ -299,12 +299,13 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
     const name = stringField(payload, 'campaign_name');
     if (!name) continue;
     const bucket = ensureBucket(name);
+    const budget = budgetFromPayload(payload);
     bucket.rows.push(buildCampaignRow({
       campaignName: name,
       campaignType: campaignTypeFromPayload(payload),
-      ...(numberField(payload, 'budget_chf') !== null ? { budget: numberField(payload, 'budget_chf')! } : {}),
+      ...(budget !== null ? { budget } : {}),
       ...(numberField(payload, 'target_roas') !== null ? { targetRoas: numberField(payload, 'target_roas')! } : {}),
-      ...(numberField(payload, 'target_cpa') !== null ? { targetCpa: numberField(payload, 'target_cpa')! } : {}),
+      ...(numberField(payload, 'target_cpa_chf') !== null ? { targetCpa: numberField(payload, 'target_cpa_chf')! } : {}),
       ...(stringField(payload, 'status') !== null ? { status: editorStatus(stringField(payload, 'status')!) } : { status: 'Paused' }),
     }));
     bucket.campaignCount++;
@@ -522,6 +523,14 @@ function campaignTypeFromPayload(p: Record<string, unknown>): 'Search' | 'Displa
   if (v === 'SHOPPING') return 'Shopping';
   if (v === 'VIDEO') return 'Video';
   return 'Search';
+}
+
+function budgetFromPayload(p: Record<string, unknown>): number | null {
+  // Snapshot stores micros (Google convention: 1 unit = 1_000_000). Some
+  // blueprint payloads emit budget_chf directly. Accept either.
+  const micros = numberField(p, 'budget_micros');
+  if (micros !== null) return Math.round((micros / 1_000_000) * 100) / 100;
+  return numberField(p, 'budget_chf');
 }
 
 function editorStatus(s: string): 'Paused' | 'Enabled' | 'Removed' {

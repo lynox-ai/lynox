@@ -128,6 +128,45 @@ describe('runEmit', () => {
     const result = runEmit(store, ACCOUNT, { workspaceDir });
     expect(result.perFileRowCounts.map(p => p.file)).toEqual(result.filesWritten);
   });
+
+  it('PMAX end-to-end: campaign + asset_groups round-trip into editor CSV', async () => {
+    seedCustomerAndAccount(store);
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    store.insertCampaignsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'pmax-1',
+        campaignName: 'PMAX-Drills-DE',
+        status: 'ENABLED',
+        channelType: 'PERFORMANCE_MAX',
+        budgetMicros: 30_000_000, // 30 CHF / day
+      }],
+    });
+    store.insertAssetGroupsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { assetGroupId: 'ag-power', assetGroupName: 'Power-Drills', campaignName: 'PMAX-Drills-DE', adStrength: 'EXCELLENT' },
+        { assetGroupId: 'ag-cordless', assetGroupName: 'Cordless-Drills', campaignName: 'PMAX-Drills-DE', adStrength: 'GOOD' },
+      ],
+    });
+    runBlueprint(store, ACCOUNT);
+
+    const result = runEmit(store, ACCOUNT, { workspaceDir });
+    expect(result.validation.canEmit).toBe(true);
+    expect(result.totals.assetGroups).toBe(2);
+    expect(result.totals.campaigns).toBe(1);
+
+    const pmaxFile = result.filesWritten.find(f => f.endsWith('pmax-drills-de.csv'));
+    expect(pmaxFile).toBeDefined();
+    const text = decodeUtf16LeBytes(await readFile(pmaxFile!));
+    expect(text).toMatch(/PMAX-Drills-DE/);
+    expect(text).toMatch(/Performance Max/);
+    expect(text).toMatch(/Power-Drills/);
+    expect(text).toMatch(/Cordless-Drills/);
+    // Header order: 1st column=Campaign so the budget converted correctly to 30 CHF.
+    expect(text).toMatch(/30(\.0+)?\b/);
+  });
 });
 
 // ── Fixtures ──────────────────────────────────────────────────────────
