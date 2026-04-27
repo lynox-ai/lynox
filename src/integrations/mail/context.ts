@@ -308,8 +308,57 @@ export class MailContext {
       }
     }
 
+    // Restore the persisted default. If the DB has a row marked is_default=1
+    // and that provider registered successfully, promote it. Otherwise, fall
+    // back to the first registered provider (matches pre-v6 first-wins
+    // semantics for fresh installs) and persist the choice so subsequent
+    // boots stay stable.
+    this._reconcileDefault();
+
     // Start the followup check loop — one timer for all accounts
     this.watcher.startFollowupCheck(() => this.checkDueFollowups().then(() => { /* void */ }));
+  }
+
+  /**
+   * Sync the in-memory registry default with the persisted is_default flag.
+   * Called from init() after providers are registered, and from addAccount
+   * / removeAccount whenever the registry shape changes.
+   *
+   * Rules:
+   *   1. If a row is marked is_default=1 AND its provider is registered →
+   *      promote it.
+   *   2. Else if the registry has any providers → pick the first registered
+   *      one and persist (covers fresh installs and stale defaults whose
+   *      provider failed to register, e.g. revoked OAuth).
+   *   3. Else → clear the default to null.
+   */
+  private _reconcileDefault(): void {
+    const persistedId = this.stateDb.defaultAccountId();
+    const registered = this.registry.list();
+
+    if (persistedId && registered.includes(persistedId)) {
+      this.registry.setDefault(persistedId);
+      return;
+    }
+    if (registered.length === 0) {
+      this.stateDb.setDefaultAccount(null);
+      return;
+    }
+    const fallback = registered[0]!;
+    this.stateDb.setDefaultAccount(fallback);
+    this.registry.setDefault(fallback);
+  }
+
+  /**
+   * Set `id` as the default account. Updates both the persisted flag and
+   * the in-memory registry. Throws MailError when the id is not registered.
+   */
+  setDefault(id: string): void {
+    if (!this.registry.get(id)) {
+      throw new MailError('not_found', `Cannot set default — account "${id}" is not registered`);
+    }
+    this.stateDb.setDefaultAccount(id);
+    this.registry.setDefault(id);
   }
 
   /**
@@ -367,18 +416,28 @@ export class MailContext {
 
     const slug = this._slugForEmail(email);
     const id = `gmail-${slug}`;
+
+    // If no row currently holds the default flag, take it. This is the
+    // explicit fix for the "DEFAULT badge wandert" bug: users who connected
+    // OAuth-Gmail BEFORE the unification refactor never had a row to mark
+    // default. When that row is now created by this migration, we reclaim
+    // the default for the OAuth account ahead of any later-added IMAP.
+    const claimDefault = this.stateDb.defaultAccountId() === null;
+
     this.stateDb.upsertAccount({
       id,
       displayName: email,
       address: email,
       preset: 'gmail',
       // v5 schema still requires non-null IMAP fields; placeholders are
-      // unused by OAuthGmailProvider.
+      // unused by OAuthGmailProvider. A future PR can relax the NOT NULL
+      // constraint via a table rebuild.
       imap: { host: '', port: 0, secure: true },
       smtp: { host: '', port: 0, secure: true },
       authType: 'oauth_google',
       oauthProviderKey: 'GOOGLE_OAUTH_TOKENS',
       type: 'personal',
+      isDefault: claimDefault,
     });
   }
 
@@ -429,6 +488,12 @@ export class MailContext {
     const provider = new ImapSmtpProvider(input.config, this.credStore.buildResolver(input.config.id));
     this.registry.add(provider);
     await this.watcher.attach(provider);
+
+    // Reconcile so the first-added account becomes default automatically,
+    // but a later add does NOT overwrite the user's existing choice. The
+    // bug we're fixing: previously registry.add() always defaulted-when-
+    // null, which silently demoted whichever account was registered first.
+    this._reconcileDefault();
   }
 
   /**
@@ -444,7 +509,13 @@ export class MailContext {
     }
     this.credStore.delete(accountId);
     this.stateDb.forgetAccount(accountId);
-    return this.stateDb.deleteAccount(accountId);
+    const removed = this.stateDb.deleteAccount(accountId);
+
+    // If the removed account was the default, fall back to whichever
+    // account remains registered (or clear it). Persisted is_default is
+    // updated alongside the in-memory registry.
+    this._reconcileDefault();
+    return removed;
   }
 
   /**

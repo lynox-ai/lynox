@@ -22,21 +22,27 @@ describe('InMemoryMailRegistry', () => {
     expect(r.get('nope')).toBe(null);
   });
 
-  it('add() registers a provider and sets the first as default', () => {
+  it('add() registers a provider but does NOT auto-assign default', () => {
+    // PR3: default selection moved to MailContext._reconcileDefault() so it
+    // can consult the persisted is_default flag. add() registering its first
+    // provider as default was the bug behind "DEFAULT badge wandert".
     const r = new InMemoryMailRegistry();
     r.add(fakeProvider('a'));
     r.add(fakeProvider('b'));
     expect(r.list()).toEqual(['a', 'b']);
-    expect(r.default()).toBe('a');
+    expect(r.default()).toBe(null);
   });
 
-  it('remove() drops the provider and rotates default if needed', () => {
+  it('remove() clears default when the removed provider was default; does not auto-rotate', () => {
     const r = new InMemoryMailRegistry();
     r.add(fakeProvider('a'));
     r.add(fakeProvider('b'));
+    r.setDefault('a');
     r.remove('a');
     expect(r.list()).toEqual(['b']);
-    expect(r.default()).toBe('b');
+    // Caller (MailContext) is responsible for picking a replacement —
+    // registry no longer silently promotes a sibling.
+    expect(r.default()).toBe(null);
   });
 
   it('setDefault() requires a registered provider', () => {
@@ -67,6 +73,7 @@ describe('resolveProvider', () => {
   it('falls back to the default when no account is requested', () => {
     const r = new InMemoryMailRegistry();
     r.add(fakeProvider('a'));
+    r.setDefault('a');
     expect(resolveProvider(r, undefined).accountId).toBe('a');
   });
 
