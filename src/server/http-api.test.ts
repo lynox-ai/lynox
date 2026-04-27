@@ -215,6 +215,50 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    it('rejects /api/mail/* without auth (regression lock for sprint S2)', async () => {
+      // Mail routes share the global auth gate — these assertions lock that
+      // wiring in so a future refactor cannot accidentally exempt them.
+      const get = await fetch(`${baseUrl}/api/mail/accounts`);
+      expect(get.status).toBe(401);
+
+      const post = await fetch(`${baseUrl}/api/mail/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(post.status).toBe(401);
+
+      const presets = await fetch(`${baseUrl}/api/mail/presets`);
+      expect(presets.status).toBe(401);
+
+      const del = await fetch(`${baseUrl}/api/mail/accounts/some-id`, { method: 'DELETE' });
+      expect(del.status).toBe(401);
+
+      const setDefault = await fetch(`${baseUrl}/api/mail/accounts/some-id/default`, { method: 'POST' });
+      expect(setDefault.status).toBe(401);
+
+      const test = await fetch(`${baseUrl}/api/mail/accounts/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(test.status).toBe(401);
+
+      const auto = await fetch(`${baseUrl}/api/mail/autodiscover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(auto.status).toBe(401);
+    });
+
+    it('rejects /api/mail/* with the wrong bearer token', async () => {
+      const res = await fetch(`${baseUrl}/api/mail/accounts`, {
+        headers: { Authorization: 'Bearer wrong-token' },
+      });
+      expect(res.status).toBe(401);
+    });
+
     it('lets public WhatsApp paths through without bearer token', async () => {
       // Meta hits the webhook unauthenticated (it carries its own HMAC signature).
       // The pre-login UI hits /status to decide whether to render WA surfaces.

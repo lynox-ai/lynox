@@ -381,6 +381,15 @@ export class LynoxHTTPApi {
   }
 
   async start(port: number): Promise<void> {
+    // Web UI mode binds to 0.0.0.0 — without a secret, the engine API would
+    // be reachable unauthenticated from any container network neighbour.
+    // Auto-generate one (persisted to ~/.lynox/http-secret) so the bearer
+    // path always gates the API. API-only mode falls through to its
+    // localhost bind without a secret as before.
+    if (this.webUiHandler && !process.env['LYNOX_HTTP_SECRET']) {
+      const { ensureHttpSecret } = await import('../core/engine-init.js');
+      ensureHttpSecret();
+    }
     const secret = process.env['LYNOX_HTTP_SECRET'];
 
     const trustProxy = process.env['LYNOX_TRUST_PROXY'] === 'true';
