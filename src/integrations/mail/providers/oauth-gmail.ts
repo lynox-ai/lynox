@@ -41,6 +41,7 @@ import {
   type MailWatchHandler,
   type MailWatchOptions,
 } from '../provider.js';
+import { decodeBytes, bodyQuarantinePlaceholder } from './charset.js';
 
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -124,15 +125,16 @@ function header(headers: ReadonlyArray<{ name: string; value: string }> | undefi
  * lands in the agent context as opaque base64, AND the boundary scanner
  * can't see through the encoding to detect injection-shaped content.
  *
- * Coverage: UTF-8 + ISO-8859-1 (Buffer-supported). Other charsets fall
- * back to UTF-8 decoding which is best-effort but never throws.
+ * Coverage: UTF-8 / ISO-8859-1 / ASCII via native Buffer codecs; the rest
+ * via iconv-lite (Big5, Shift_JIS, GB2312, EUC-JP, ISO-2022-JP, …). An
+ * unknown charset returns the empty string rather than the raw bytes —
+ * the same defensive default as a malformed encoded-word.
  */
 function decodeMimeWords(value: string): string {
   return value.replace(
     /=\?([\w-]+)\?([BbQq])\?([^?]+)\?=(?:\s+(?==\?))?/g,
     (_match, charset: string, encoding: string, payload: string) => {
       try {
-        const cs = charset.toLowerCase();
         const enc = encoding.toUpperCase();
         let bytes: Buffer;
         if (enc === 'B') {
@@ -142,12 +144,8 @@ function decodeMimeWords(value: string): string {
           const expanded = payload.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_m, h: string) => String.fromCharCode(Number.parseInt(h, 16)));
           bytes = Buffer.from(expanded, 'binary');
         }
-        const codec: BufferEncoding = cs === 'iso-8859-1' || cs === 'latin1'
-          ? 'latin1'
-          : cs === 'us-ascii' || cs === 'ascii'
-          ? 'ascii'
-          : 'utf-8';
-        return bytes.toString(codec);
+        const result = decodeBytes(bytes, charset);
+        return result.text ?? '';
       } catch {
         return ''; // never let a malformed encoded-word leak its raw payload
       }
@@ -159,22 +157,18 @@ function decodeMimeWords(value: string): string {
  * RFC 2045 quoted-printable decoding for body parts. `=20` → space, `=3D`
  * → `=`, soft line breaks (`=\r\n` or `=\n`) join lines, every other `=XX`
  * is a hex byte. Used when a Gmail payload reports
- * Content-Transfer-Encoding: quoted-printable.
+ * Content-Transfer-Encoding: quoted-printable. Returns the raw decoded
+ * Buffer; charset interpretation happens in `decodePartBody` so unknown-
+ * charset bodies can be quarantined uniformly across all transfer
+ * encodings.
  */
-function decodeQuotedPrintable(input: string, charset: string): string {
+function decodeQuotedPrintableBytes(input: string): Buffer {
   const cleaned = input
     // Soft line breaks (must come first so we don't try to interpret `=\r` as a hex escape)
     .replace(/=\r?\n/g, '')
     // Hex escapes
     .replace(/=([0-9A-Fa-f]{2})/g, (_m, h: string) => String.fromCharCode(Number.parseInt(h, 16)));
-
-  const cs = (charset || 'utf-8').toLowerCase();
-  const codec: BufferEncoding = cs === 'iso-8859-1' || cs === 'latin1'
-    ? 'latin1'
-    : cs === 'us-ascii' || cs === 'ascii'
-    ? 'ascii'
-    : 'utf-8';
-  return Buffer.from(cleaned, 'binary').toString(codec);
+  return Buffer.from(cleaned, 'binary');
 }
 
 /** Lookup the charset declared on a part's Content-Type header, or undefined. */
@@ -301,23 +295,25 @@ function decodePartBody(part: GmailPayload | undefined): string {
   const tx = partTransferEncoding(part);
   // Gmail wraps everything in base64url at the API boundary, so the inner
   // string here is the post-base64url payload — i.e. either raw text or
-  // QP/base64-of-the-original. We base64url-decode once unconditionally.
+  // QP/base64-of-the-original. We base64url-decode once unconditionally,
+  // then collapse the transfer encoding to a Buffer of charset-interpreted
+  // bytes. Charset interpretation runs through the single decode chokepoint
+  // so unknown charsets are quarantined uniformly instead of silently
+  // best-effort UTF-8 decoded.
   const raw = base64urlDecode(part.body.data);
+  let bytes: Buffer;
   if (tx === 'quoted-printable') {
-    return decodeQuotedPrintable(raw.toString('binary'), charset);
+    bytes = decodeQuotedPrintableBytes(raw.toString('binary'));
+  } else {
+    // 'base64' (rare — Gmail's API already decodes once), 7bit, 8bit, binary,
+    // unspecified — the post-base64url bytes ARE the payload.
+    bytes = raw;
   }
-  if (tx === 'base64') {
-    // Gmail typically delivers already-decoded text via base64url, so a
-    // declared 'base64' transfer encoding is rare. If it does appear,
-    // treat the post-base64url bytes as the actual payload.
-    const codec: BufferEncoding = charset.toLowerCase() === 'iso-8859-1' ? 'latin1' : 'utf-8';
-    return raw.toString(codec);
+  const result = decodeBytes(bytes, charset);
+  if (result.text === null) {
+    return bodyQuarantinePlaceholder(result.charset, bytes.length);
   }
-  // 7bit / 8bit / binary / unspecified — just decode bytes as the charset.
-  const codec: BufferEncoding = charset.toLowerCase() === 'iso-8859-1' || charset.toLowerCase() === 'latin1'
-    ? 'latin1'
-    : 'utf-8';
-  return raw.toString(codec);
+  return result.text;
 }
 
 function extractText(payload: GmailPayload | undefined): string {

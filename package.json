@@ -78,6 +78,7 @@
     "@sentry/node": "^10.46.0",
     "better-sqlite3": "^12.6.2",
     "email-reply-parser": "^1.7.0",
+    "iconv-lite": "^0.7.2",
     "imapflow": "^1.0.181",
     "linkedom": "^0.18.12",
     "nodemailer": "^7.0.10",
