@@ -16,6 +16,26 @@ const MAX_SPAWN_DEPTH = 5;
 const SPAWN_EXCLUDED = new Set(['spawn_agent']);
 const DEFAULT_SPAWN_BUDGET_USD = 5;
 
+/**
+ * Default iteration cap for a child agent, used both as the cost-guard cap
+ * (executeThinker) and as the per-spawn estimator multiplier (handler).
+ * Researchers historically finish in 4–8 turns; the previous 20-turn default
+ * inflated the upfront estimate enough to trip the session ceiling on every
+ * legitimate 3-researcher pattern. Single source of truth so estimate ↔
+ * actual cap can never drift.
+ */
+const DEFAULT_SPAWN_MAX_TURNS = 10;
+
+/**
+ * Fraction of a model's hard maxOutput we expect each turn to actually emit
+ * when estimating spawn cost. The naive worst-case (×1.0) treats every turn
+ * as filling the entire output cap (e.g. 16K for Sonnet) which is ~5–10×
+ * over real usage and was the dominant factor blocking spawn_agent in
+ * production. 0.3 is the empirical p90 ceiling — overshoots get caught by
+ * the per-spawn cost guard during the run.
+ */
+const OUTPUT_FILL_RATIO = 0.3;
+
 /** Reset the session spawn cost counter (for testing). */
 export function resetSessionSpawnCost(): void {
   resetSessionCost();
@@ -32,16 +52,29 @@ export function abortSpawnedAgents(): void {
 }
 
 /**
- * Estimate the maximum cost for a single spawn agent.
- * Conservative: assumes each iteration uses ~4K input + model's default max output tokens.
+ * Estimate the cost for a single spawn agent. Used by `checkSessionBudget`
+ * before any child runs so we can refuse a fan-out that would blow the
+ * session ceiling.
+ *
+ * Modelled on realistic-but-conservative usage:
+ *   input  ≈ 4K tokens / turn  (static prompt + tools dominate; cache makes
+ *           this even cheaper after turn 1, not modelled here — the saving
+ *           is small relative to output anyway)
+ *   output ≈ {@link OUTPUT_FILL_RATIO} × model.maxOutput per turn
+ *
+ * Output-side worst-case (×1.0) was the source of the rafael.lynox.cloud
+ * spawn-block: 3 sonnet researchers × 20 turns × 16K maxOutput × $15/M =
+ * $14.40 estimated, hit the $15 ceiling, refused the spawn. Real cost was
+ * <$2. Pre-spend reservation in `checkSessionBudget` is the right shape;
+ * the multiplier was just way off.
  */
 function estimateSpawnCost(model: string, maxIterations: number): number {
   const pricing = getPricing(model);
-  const maxOutput = getDefaultMaxTokens(model);
-  const avgInput = 4000; // conservative per-turn input estimate
+  const expectedOutput = getDefaultMaxTokens(model) * OUTPUT_FILL_RATIO;
+  const avgInput = 4000;
   return maxIterations * (
     (avgInput / 1_000_000) * pricing.input +
-    (maxOutput / 1_000_000) * pricing.output
+    (expectedOutput / 1_000_000) * pricing.output
   );
 }
 
@@ -132,7 +165,7 @@ async function executeThinker(
   const budgetUSD = spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
   const costGuard: CostGuardConfig = {
     maxBudgetUSD: budgetUSD,
-    maxIterations: maxIterations ?? 20,
+    maxIterations: maxIterations ?? DEFAULT_SPAWN_MAX_TURNS,
   };
 
   const childAgent = new Agent({
@@ -232,7 +265,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       const roleDefault = spec.role ? getRole(spec.role)?.model : undefined;
       const modelTier = (gated ?? roleDefault ?? cfgTier ?? 'sonnet') as ModelTier;
       const resolvedModel = MODEL_MAP[modelTier] ?? MODEL_MAP['sonnet'];
-      const iters = spec.max_turns ?? 20;
+      const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
       return sum + estimateSpawnCost(resolvedModel, iters);
     }, 0);
 
