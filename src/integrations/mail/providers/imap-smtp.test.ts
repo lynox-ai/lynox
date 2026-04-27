@@ -79,7 +79,7 @@ const ACCOUNT: MailAccountConfig = {
   preset: 'custom',
   imap: { host: 'imap.example.com', port: 993, secure: true },
   smtp: { host: 'smtp.example.com', port: 465, secure: true },
-  auth: 'app-password',
+  authType: 'imap',
   type: 'personal',
 };
 

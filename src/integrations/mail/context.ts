@@ -27,6 +27,7 @@ import {
   personaFor,
   type MailAccountConfig,
   type MailAccountType,
+  type MailAuthType,
   type MailEnvelope,
   type MailProvider,
   type MailSendInput,
@@ -61,6 +62,8 @@ export interface MailAccountView {
   isDefault: boolean;
   /** Semantic role — drives tone, auto-reply policy, and receive-only block. */
   type: MailAccountType;
+  /** Auth/transport flavor — UI uses this to pick the right edit form. */
+  authType: MailAuthType;
   /** Resolved persona (custom override or type default). */
   persona: string;
   /** True if this type is hard-blocked from sending. */
@@ -383,6 +386,7 @@ export class MailContext {
       hasCredentials: this.credStore.has(account.id),
       isDefault: account.id === defaultId,
       type: account.type,
+      authType: account.authType,
       persona: personaFor(account),
       receiveOnly: isReceiveOnlyType(account.type),
     }));

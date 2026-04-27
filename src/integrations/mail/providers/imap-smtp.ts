@@ -12,6 +12,7 @@ import {
   type MailAccountConfig,
   type MailAddress,
   type MailAttachmentMeta,
+  type MailAuthType,
   type MailEnvelope,
   type MailFetchOptions,
   type MailFlag,
@@ -284,6 +285,7 @@ function wrapImapError(err: unknown, fallback: string): MailError {
 
 export class ImapSmtpProvider implements MailProvider {
   readonly accountId: string;
+  readonly authType: MailAuthType = 'imap';
 
   private readonly account: MailAccountConfig;
   private readonly resolveCredentials: CredentialsResolver;
