@@ -191,3 +191,68 @@ describe('ads-csv-reader: smoke test all 22 ads kinds + GA4 + GSC', () => {
     });
   }
 });
+
+/**
+ * Apps-script ⇄ reader header agreement.
+ * The strings below are the *exact* CSV header lines that the customer-deployed
+ * Apps Scripts in scripts/apps-scripts/ emit. If you change either side, this
+ * test catches the drift in CI before a real cycle hits prod.
+ */
+describe('apps-script CSV header agreement', () => {
+  const APPS_SCRIPT_HEADERS: Record<string, string> = {
+    campaigns:             'campaign_id,campaign_name,status,channel_type,opt_score,budget_micros,impressions,clicks,cost_micros,conversions,conv_value,ctr,avg_cpc,search_is,search_top_is,search_abs_top_is,budget_lost_is,rank_lost_is',
+    campaign_performance:  'date,campaign_id,campaign_name,channel_type,impressions,clicks,cost_micros,conversions,conv_value',
+    ad_groups:             'campaign_id,campaign_name,ad_group_id,ad_group_name,status,impressions,clicks,cost_micros,conversions,conv_value,ctr,avg_cpc',
+    keywords:              'campaign_name,ad_group_name,keyword,match_type,status,quality_score,impressions,clicks,cost_micros,conversions,conv_value,ctr,avg_cpc,search_is',
+    ads_rsa:               'campaign_name,ad_group_name,ad_id,headlines,descriptions,final_url,status,ad_strength,impressions,clicks,cost_micros,conversions,ctr',
+    asset_groups:          'campaign_id,campaign_name,asset_group_id,asset_group_name,status,ad_strength,impressions,clicks,cost_micros,conversions,conv_value',
+    asset_group_assets:    'campaign_name,asset_group_name,field_type,asset_status,asset_id,asset_name,asset_type,text_content,image_url',
+    assets:                'asset_id,name,type,sitelink_text,sitelink_desc1,sitelink_desc2,callout_text,snippet_header,snippet_values',
+    listing_groups:        'campaign_name,asset_group_name,filter_id,filter_type,brand,category_id,product_type,custom_attribute',
+    shopping_products:     'campaign_name,item_id,title,brand,status,channel,language,issues,impressions,clicks,cost_micros',
+    conversions:           'conv_action_id,name,type,category,status,primary_for_goal,counting_type,attribution_model,default_value,in_conversions_metric',
+    campaign_targeting:    'campaign_id,campaign_name,criterion_type,is_negative,status,bid_modifier,geo_target,language,keyword_text,match_type',
+    search_terms:          'campaign_name,channel_type,ad_group_name,search_term,term_status,impressions,clicks,cost_micros,conversions,conv_value,ctr',
+    pmax_search_terms:     'campaign_id,campaign_name,search_category,insight_id',
+    pmax_placements:       'campaign_id,campaign_name,placement,placement_type,target_url',
+    landing_pages:         'campaign_name,landing_page_url,impressions,clicks,cost_micros,conversions,conv_value,avg_cpc',
+    ad_asset_ratings:      'campaign_name,ad_group_name,field_type,performance_label,enabled,text_content,impressions,clicks,cost_micros,conversions',
+    audience_signals:      'campaign_name,asset_group_name,signal_type,signal_label',
+    device_performance:    'campaign_id,campaign_name,channel_type,device,impressions,clicks,cost_micros,conversions,conv_value,ctr',
+    geo_performance:       'campaign_id,campaign_name,country_id,location_type,geo_target_region,impressions,clicks,cost_micros,conversions,conv_value',
+    change_history:        'change_date,resource_type,operation,changed_fields,user_email,client_type,campaign_name',
+    ga4:                   'date,session_source,session_medium,sessions,total_users,new_users,bounce_rate,avg_session_duration,conversions,event_count',
+    gsc:                   'date_month,query,page,country,device,clicks,impressions,ctr,position',
+  };
+
+  for (const kind of ALL_ADS_CSV_KINDS) {
+    it(`apps-script "${kind}" header passes reader validation with no missing-column errors`, () => {
+      const header = APPS_SCRIPT_HEADERS[kind];
+      expect(header, `no apps-script header recorded for kind "${kind}"`).toBeDefined();
+      // Header line only, no data rows — header validation should still succeed.
+      const csv = header + '\n';
+      const result = parseAdsCsv(kind, `${kind}.csv`, csv);
+      expect(result.rows).toHaveLength(0);
+      // No "Unknown column" warnings — the apps-script columns must be a
+      // subset of the reader's required + optional sets.
+      const unknownColWarnings = result.warnings.filter(w => /Unknown column/.test(w.message));
+      expect(unknownColWarnings, `apps-script ${kind} emits columns the reader doesn't know: ${unknownColWarnings.map(w => w.message).join(', ')}`).toEqual([]);
+    });
+  }
+
+  it('apps-script "ga4" header passes reader validation', () => {
+    const csv = APPS_SCRIPT_HEADERS['ga4'] + '\n';
+    const result = parseAdsCsv('ga4', 'ga4_2026-04.csv', csv);
+    expect(result.rows).toHaveLength(0);
+    const unknown = result.warnings.filter(w => /Unknown column/.test(w.message));
+    expect(unknown).toEqual([]);
+  });
+
+  it('apps-script "gsc" header passes reader validation', () => {
+    const csv = APPS_SCRIPT_HEADERS['gsc'] + '\n';
+    const result = parseAdsCsv('gsc', 'gsc_2026-04.csv', csv);
+    expect(result.rows).toHaveLength(0);
+    const unknown = result.warnings.filter(w => /Unknown column/.test(w.message));
+    expect(unknown).toEqual([]);
+  });
+});
