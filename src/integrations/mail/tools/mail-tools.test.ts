@@ -481,7 +481,7 @@ function businessAccount(id: string, address: string): MailAccountConfig {
     id, displayName: id, address, preset: 'custom',
     imap: { host: 'i', port: 993, secure: true },
     smtp: { host: 's', port: 465, secure: true },
-    auth: 'app-password',
+    authType: 'imap',
     type: 'business',
   };
 }
@@ -491,7 +491,7 @@ function receiveOnlyAccount(id: string, address: string, type: 'info' | 'abuse' 
     id, displayName: id, address, preset: 'custom',
     imap: { host: 'i', port: 993, secure: true },
     smtp: { host: 's', port: 465, secure: true },
-    auth: 'app-password',
+    authType: 'imap',
     type,
   };
 }

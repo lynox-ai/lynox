@@ -148,7 +148,7 @@ export function buildPresetAccount(slug: Exclude<MailPresetSlug, 'custom'>, inpu
     preset: slug,
     imap: preset.imap,
     smtp: preset.smtp,
-    auth: 'app-password',
+    authType: 'imap',
     type: input.type ?? 'personal',
     personaPrompt: input.personaPrompt,
   };
@@ -170,7 +170,7 @@ export function buildCustomAccount(input: CustomAccountInput): MailAccountConfig
     preset: 'custom',
     imap: input.imap,
     smtp: input.smtp,
-    auth: 'app-password',
+    authType: 'imap',
     type: input.type ?? 'personal',
     personaPrompt: input.personaPrompt,
   };

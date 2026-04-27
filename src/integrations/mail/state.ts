@@ -12,8 +12,8 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { getLynoxDir } from '../../core/config.js';
 import { ensureDirSync } from '../../core/atomic-write.js';
-import type { MailAccountConfig, MailAccountType, MailEnvelope, MailPresetSlug } from './provider.js';
-import { isValidAccountType } from './provider.js';
+import type { MailAccountConfig, MailAccountType, MailAuthType, MailEnvelope, MailPresetSlug } from './provider.js';
+import { isValidAccountType, isValidAuthType } from './provider.js';
 
 function defaultDbPath(): string {
   return join(getLynoxDir(), 'mail-state.db');
@@ -87,6 +87,18 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_followups_account ON mail_followups(account_id);
    CREATE INDEX IF NOT EXISTS idx_followups_thread ON mail_followups(thread_key);
    CREATE INDEX IF NOT EXISTS idx_followups_status_reminder ON mail_followups(status, reminder_at);`,
+
+  // v5: Multi-auth-type foundation. Adds auth_type so OAuth-based mailboxes
+  // (Gmail OAuth, Microsoft OAuth in Phase 1b+) can coexist with IMAP/SMTP
+  // accounts in the same registry. Existing rows backfill to 'imap'.
+  //
+  // The IMAP-specific columns stay NOT NULL in this migration — relaxing
+  // them requires a full table rebuild and will land alongside the first
+  // OAuth provider implementation (PR2).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (5);
+
+   ALTER TABLE mail_accounts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'imap';
+   ALTER TABLE mail_accounts ADD COLUMN oauth_provider_key TEXT;`,
 ];
 
 export interface MailStateDbOptions {
@@ -118,6 +130,8 @@ interface AccountRow {
   smtp_secure: number;
   type: string;
   persona_prompt: string | null;
+  auth_type: string;
+  oauth_provider_key: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -199,6 +213,9 @@ function rowToFollowup(row: FollowupRow): MailFollowup {
 
 function rowToAccount(row: AccountRow): MailAccountConfig {
   const type: MailAccountType = isValidAccountType(row.type) ? row.type : 'personal';
+  // Older rows (pre-v5) backfill to 'imap' via the migration default; guard
+  // against any unexpected value just in case a hand-edited DB exists.
+  const authType: MailAuthType = isValidAuthType(row.auth_type) ? row.auth_type : 'imap';
   return {
     id: row.id,
     displayName: row.display_name,
@@ -206,7 +223,8 @@ function rowToAccount(row: AccountRow): MailAccountConfig {
     preset: row.preset as MailPresetSlug,
     imap: { host: row.imap_host, port: row.imap_port, secure: row.imap_secure === 1 },
     smtp: { host: row.smtp_host, port: row.smtp_port, secure: row.smtp_secure === 1 },
-    auth: 'app-password',
+    authType,
+    oauthProviderKey: row.oauth_provider_key ?? undefined,
     type,
     personaPrompt: row.persona_prompt ?? undefined,
   };
@@ -373,8 +391,8 @@ export class MailStateDb {
   upsertAccount(account: MailAccountConfig): void {
     this.db
       .prepare(
-        `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, auth_type, oauth_provider_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
          ON CONFLICT(id) DO UPDATE SET
            display_name = excluded.display_name,
            address = excluded.address,
@@ -387,6 +405,8 @@ export class MailStateDb {
            smtp_secure = excluded.smtp_secure,
            type = excluded.type,
            persona_prompt = excluded.persona_prompt,
+           auth_type = excluded.auth_type,
+           oauth_provider_key = excluded.oauth_provider_key,
            updated_at = datetime('now')`,
       )
       .run(
@@ -402,6 +422,8 @@ export class MailStateDb {
         account.smtp.secure ? 1 : 0,
         account.type,
         account.personaPrompt ?? null,
+        account.authType,
+        account.oauthProviderKey ?? null,
       );
   }
 
