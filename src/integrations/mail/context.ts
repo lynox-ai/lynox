@@ -18,9 +18,11 @@
 // backed by its registry. Engine registers them on its own ToolRegistry.
 
 import type { ToolEntry } from '../../types/index.js';
+import type { GoogleAuth } from '../google/google-auth.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
 import { MailCredentialStore } from './auth/app-password.js';
 import { ImapSmtpProvider } from './providers/imap-smtp.js';
+import { OAuthGmailProvider } from './providers/oauth-gmail.js';
 import {
   MailError,
   isReceiveOnlyType,
@@ -201,6 +203,14 @@ export class MailContext {
   readonly registry: InMemoryMailRegistry;
   readonly watcher: MailWatcher;
   readonly hooks: MailHooks;
+  /**
+   * Optional GoogleAuth instance — when set, OAuth-Gmail accounts become
+   * first-class members of the registry alongside IMAP/SMTP. The boot
+   * migration in init() also auto-creates a row for the existing OAuth
+   * connection so users who connected Gmail via OAuth before this refactor
+   * see their mailbox without re-authorizing.
+   */
+  readonly googleAuth: GoogleAuth | null;
 
   private handler: MailWatcherHandler;
   private initialized = false;
@@ -210,11 +220,13 @@ export class MailContext {
     credBackend: MailCredentialBackend,
     handler: MailWatcherHandler = DEFAULT_HANDLER,
     hooks: MailHooks = {},
+    googleAuth: GoogleAuth | null = null,
   ) {
     this.stateDb = stateDb;
     this.credStore = new MailCredentialStore(credBackend);
     this.registry = new InMemoryMailRegistry();
     this.hooks = hooks;
+    this.googleAuth = googleAuth;
 
     // Wrap the user handler so that every inbound envelope also fires
     // onInboundMail hooks AND resolves any matching follow-ups.
@@ -270,19 +282,25 @@ export class MailContext {
    * Load all configured accounts from the state DB, instantiate their
    * providers, populate the registry, and attach them to the watcher.
    * Idempotent — repeated calls are a no-op after first init.
+   *
+   * Boot migration: if `googleAuth` is set and authenticated, ensures a
+   * matching `oauth_google` row exists in `mail_accounts` so users who
+   * connected Gmail via OAuth before the unification refactor still see
+   * their mailbox. Idempotent — re-runs are no-ops once the row exists.
    */
   async init(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
 
+    // Boot migration must run BEFORE the provider loop so the new row is
+    // picked up in the same init() pass.
+    await this._migrateOAuthGmailRow();
+
     const accounts = this.stateDb.listAccounts();
     for (const account of accounts) {
       try {
-        // Credentials may be missing if the DB row survived a vault rotation.
-        // We still register the provider so the agent sees the account — it
-        // just fails auth_failed on use until the user re-enters the password.
-        if (!this.credStore.has(account.id)) continue;
-        const provider = new ImapSmtpProvider(account, this.credStore.buildResolver(account.id));
+        const provider = await this._buildProvider(account);
+        if (!provider) continue;
         this.registry.add(provider);
         await this.watcher.attach(provider);
       } catch {
@@ -292,6 +310,103 @@ export class MailContext {
 
     // Start the followup check loop — one timer for all accounts
     this.watcher.startFollowupCheck(() => this.checkDueFollowups().then(() => { /* void */ }));
+  }
+
+  /**
+   * Instantiate the right provider for a configured account. Returns null
+   * when prerequisites are missing (e.g. IMAP creds missing from vault, or
+   * GoogleAuth absent for an oauth_google row) — the caller skips that
+   * account but continues with the rest.
+   */
+  private async _buildProvider(account: MailAccountConfig): Promise<MailProvider | null> {
+    if (account.authType === 'oauth_google') {
+      if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return null;
+      return new OAuthGmailProvider(account, this.googleAuth);
+    }
+    if (account.authType === 'imap') {
+      // Credentials may be missing if the DB row survived a vault rotation.
+      // Skip silently — the user re-enters the password and we re-init.
+      if (!this.credStore.has(account.id)) return null;
+      return new ImapSmtpProvider(account, this.credStore.buildResolver(account.id));
+    }
+    // Unknown auth type — defensively skip rather than throw
+    return null;
+  }
+
+  /**
+   * Insert a placeholder `oauth_google` row for the user's primary Gmail
+   * mailbox if Google OAuth is authenticated and no such row exists yet.
+   * The row stores empty-string IMAP placeholders because the v5 schema
+   * still requires them as NOT NULL — relaxing those is out of scope for
+   * this PR.
+   *
+   * The user's email is fetched from the Gmail profile endpoint. Failures
+   * here are non-fatal — we just skip the migration and let the next init
+   * try again.
+   */
+  private async _migrateOAuthGmailRow(): Promise<void> {
+    if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return;
+
+    // Fetch the *current* Google account email up front. Doing this before
+    // the early-return lets us detect a disconnect→reconnect-with-different-
+    // account scenario: if an oauth_google row exists but its address no
+    // longer matches the live Google profile, the user re-linked to a new
+    // mailbox and we drop+recreate the row.
+    const email = await this._fetchGoogleProfileEmail();
+    if (!email) return; // profile fetch failed; next init retries
+
+    const existing = this.stateDb.listAccounts().find(a => a.authType === 'oauth_google');
+    if (existing) {
+      if (existing.address.toLowerCase() === email.toLowerCase()) return;
+      // Mailbox identity changed — drop the stale row before creating the new
+      // one. Forget dedup state too so the new mailbox doesn't silently
+      // suppress messages that look identical to old ones.
+      this.stateDb.forgetAccount(existing.id);
+      this.stateDb.deleteAccount(existing.id);
+    }
+
+    const slug = this._slugForEmail(email);
+    const id = `gmail-${slug}`;
+    this.stateDb.upsertAccount({
+      id,
+      displayName: email,
+      address: email,
+      preset: 'gmail',
+      // v5 schema still requires non-null IMAP fields; placeholders are
+      // unused by OAuthGmailProvider.
+      imap: { host: '', port: 0, secure: true },
+      smtp: { host: '', port: 0, secure: true },
+      authType: 'oauth_google',
+      oauthProviderKey: 'GOOGLE_OAUTH_TOKENS',
+      type: 'personal',
+    });
+  }
+
+  /** Returns the live Google profile email, or null on transient failure. */
+  private async _fetchGoogleProfileEmail(): Promise<string | null> {
+    if (!this.googleAuth) return null;
+    try {
+      const token = await this.googleAuth.getAccessToken();
+      const res = await globalThis.fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return null;
+      const profile = await res.json() as { emailAddress?: string };
+      return profile.emailAddress ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Build a stable slug from an email address. Preserves `+`, `.`, and `_`
+   * inside the local-part so `user@x` and `user+spam@x` and `user.x@y`
+   * never collide and silently overwrite each other in the mail_accounts
+   * table.
+   */
+  private _slugForEmail(email: string): string {
+    return email.toLowerCase().replace(/[^a-z0-9+._-]+/g, '-').replace(/^-+|-+$/g, '');
   }
 
   /**

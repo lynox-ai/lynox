@@ -568,17 +568,21 @@ export class Engine {
       }
     }
 
-    // Provider-agnostic Mail integration (IMAP/SMTP + app-password).
+    // Provider-agnostic Mail integration (IMAP/SMTP + OAuth-Gmail).
     // Always initialised when a vault is available — the state DB is cheap
     // and supports zero accounts. Tools are registered when the context has
     // a vault to bind credentials to. reloadMail() is the runtime path for
     // account add/remove after startup.
+    //
+    // googleAuth is passed through so OAuth-Gmail accounts coexist with IMAP
+    // in the same registry. MailContext.init() runs a boot migration that
+    // creates a Gmail row when the user has an existing OAuth connection.
     try {
       const { MailContext } = await import('../integrations/mail/context.js');
       const { MailStateDb } = await import('../integrations/mail/state.js');
       if (this.secretVault) {
         const stateDb = new MailStateDb();
-        const mailCtx = new MailContext(stateDb, this.secretVault);
+        const mailCtx = new MailContext(stateDb, this.secretVault, undefined, {}, this._googleAuth);
         await mailCtx.init();
         for (const tool of mailCtx.tools()) {
           this.registry.register(tool);

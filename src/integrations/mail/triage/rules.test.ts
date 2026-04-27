@@ -38,7 +38,7 @@ describe('prefilter — sender patterns', () => {
 
   it('keeps real human addresses', () => {
     expect(prefilter(env('alice@example.com')).category).toBe('unknown');
-    expect(prefilter(env('rafael@brandfusion.ch')).category).toBe('unknown');
+    expect(prefilter(env('user@example.com')).category).toBe('unknown');
   });
 
   it('flags newsletter subdomains as noise', () => {
@@ -53,7 +53,7 @@ describe('prefilter — sender patterns', () => {
   });
 
   it('preserves legitimate mail.* provider addresses', () => {
-    expect(prefilter(env('rafael@mail.icloud.com')).category).toBe('unknown');
+    expect(prefilter(env('someone@mail.icloud.com')).category).toBe('unknown');
     expect(prefilter(env('user@mail.proton.me')).category).toBe('unknown');
   });
 });
