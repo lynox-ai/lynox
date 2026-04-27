@@ -21,11 +21,11 @@ describe('AdsDataStore', () => {
   describe('schema migration', () => {
     it('creates the database file and applies v1 schema', () => {
       const profile = store.upsertCustomerProfile({
-        customerId: 'aquanatura',
-        clientName: 'Aquanatura',
+        customerId: 'acme-shop',
+        clientName: 'Acme Shop',
       });
-      expect(profile.customer_id).toBe('aquanatura');
-      expect(profile.client_name).toBe('Aquanatura');
+      expect(profile.customer_id).toBe('acme-shop');
+      expect(profile.client_name).toBe('Acme Shop');
       // JSON columns default to empty arrays/object
       expect(profile.languages).toBe('[]');
       expect(profile.tracking_notes).toBe('{}');
@@ -47,20 +47,20 @@ describe('AdsDataStore', () => {
   describe('customer profile', () => {
     it('upsert serializes list/object fields as JSON', () => {
       const profile = store.upsertCustomerProfile({
-        customerId: 'aquanatura',
-        clientName: 'Aquanatura',
+        customerId: 'acme-shop',
+        clientName: 'Acme Shop',
         languages: ['de'],
-        ownBrands: ['aquanatura', 'aquanature'],
-        competitors: ['aquaquell'],
-        pmaxOwnedHeadTerms: ['wasserfilter', 'kefir'],
+        ownBrands: ['acme-shop', 'acme-house'],
+        competitors: ['competitor-co'],
+        pmaxOwnedHeadTerms: ['widgets', 'gizmo'],
         trackingNotes: { ga4_linked: true },
         targetRoas: 5.0,
         monthlyBudgetChf: 2700,
       });
 
       expect(JSON.parse(profile.languages)).toEqual(['de']);
-      expect(JSON.parse(profile.own_brands)).toEqual(['aquanatura', 'aquanature']);
-      expect(JSON.parse(profile.pmax_owned_head_terms)).toEqual(['wasserfilter', 'kefir']);
+      expect(JSON.parse(profile.own_brands)).toEqual(['acme-shop', 'acme-house']);
+      expect(JSON.parse(profile.pmax_owned_head_terms)).toEqual(['widgets', 'gizmo']);
       expect(JSON.parse(profile.tracking_notes)).toEqual({ ga4_linked: true });
       expect(profile.target_roas).toBe(5.0);
       expect(profile.monthly_budget_chf).toBe(2700);
@@ -82,14 +82,14 @@ describe('AdsDataStore', () => {
 
   describe('ads account', () => {
     beforeEach(() => {
-      store.upsertCustomerProfile({ customerId: 'aquanatura', clientName: 'Aquanatura' });
+      store.upsertCustomerProfile({ customerId: 'acme-shop', clientName: 'Acme Shop' });
     });
 
     it('upserts and reads back', () => {
       const acc = store.upsertAdsAccount({
         adsAccountId: '123-456-7890',
-        customerId: 'aquanatura',
-        accountLabel: 'Aquanatura Main',
+        customerId: 'acme-shop',
+        accountLabel: 'Acme Shop Main',
         currencyCode: 'CHF',
         timezone: 'Europe/Zurich',
         mode: 'OPTIMIZE',
@@ -102,7 +102,7 @@ describe('AdsDataStore', () => {
 
     it('defaults mode to BOOTSTRAP', () => {
       const acc = store.upsertAdsAccount({
-        adsAccountId: 'a1', customerId: 'aquanatura', accountLabel: 'A1',
+        adsAccountId: 'a1', customerId: 'acme-shop', accountLabel: 'A1',
       });
       expect(acc.mode).toBe('BOOTSTRAP');
     });
@@ -114,14 +114,14 @@ describe('AdsDataStore', () => {
     });
 
     it('lists accounts for a customer', () => {
-      store.upsertAdsAccount({ adsAccountId: 'a1', customerId: 'aquanatura', accountLabel: 'B' });
-      store.upsertAdsAccount({ adsAccountId: 'a2', customerId: 'aquanatura', accountLabel: 'A' });
-      const list = store.listAdsAccountsForCustomer('aquanatura');
+      store.upsertAdsAccount({ adsAccountId: 'a1', customerId: 'acme-shop', accountLabel: 'B' });
+      store.upsertAdsAccount({ adsAccountId: 'a2', customerId: 'acme-shop', accountLabel: 'A' });
+      const list = store.listAdsAccountsForCustomer('acme-shop');
       expect(list.map(a => a.account_label)).toEqual(['A', 'B']);
     });
 
     it('recordMajorImport updates the timestamp', () => {
-      store.upsertAdsAccount({ adsAccountId: 'a1', customerId: 'aquanatura', accountLabel: 'A' });
+      store.upsertAdsAccount({ adsAccountId: 'a1', customerId: 'acme-shop', accountLabel: 'A' });
       expect(store.getAdsAccount('a1')?.last_major_import_at).toBeNull();
       store.recordMajorImport('a1', '2026-04-27T10:00:00.000Z');
       expect(store.getAdsAccount('a1')?.last_major_import_at).toBe('2026-04-27T10:00:00.000Z');
@@ -130,8 +130,8 @@ describe('AdsDataStore', () => {
 
   describe('audit run lifecycle', () => {
     beforeEach(() => {
-      store.upsertCustomerProfile({ customerId: 'aquanatura', clientName: 'Aquanatura' });
-      store.upsertAdsAccount({ adsAccountId: 'a1', customerId: 'aquanatura', accountLabel: 'A1' });
+      store.upsertCustomerProfile({ customerId: 'acme-shop', clientName: 'Acme Shop' });
+      store.upsertAdsAccount({ adsAccountId: 'a1', customerId: 'acme-shop', accountLabel: 'A1' });
     });
 
     it('creates a RUNNING run, completes it, and records the chain', () => {
@@ -187,8 +187,8 @@ describe('AdsDataStore', () => {
     let runId: number;
 
     beforeEach(() => {
-      store.upsertCustomerProfile({ customerId: 'aquanatura', clientName: 'Aquanatura' });
-      store.upsertAdsAccount({ adsAccountId: 'a1', customerId: 'aquanatura', accountLabel: 'A1' });
+      store.upsertCustomerProfile({ customerId: 'acme-shop', clientName: 'Acme Shop' });
+      store.upsertAdsAccount({ adsAccountId: 'a1', customerId: 'acme-shop', accountLabel: 'A1' });
       runId = store.createAuditRun({ adsAccountId: 'a1', mode: 'OPTIMIZE' }).run_id;
     });
 
@@ -275,9 +275,9 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'lynox-ads-test-'));
     store = new AdsDataStore(join(tempDir, 'ads-optimizer.db'));
-    store.upsertCustomerProfile({ customerId: 'aquanatura', clientName: 'Aquanatura' });
+    store.upsertCustomerProfile({ customerId: 'acme-shop', clientName: 'Acme Shop' });
     store.upsertAdsAccount({
-      adsAccountId: 'a1', customerId: 'aquanatura', accountLabel: 'A1',
+      adsAccountId: 'a1', customerId: 'acme-shop', accountLabel: 'A1',
       currencyCode: 'CHF',
     });
     runId = store.createAuditRun({ adsAccountId: 'a1', mode: 'OPTIMIZE' }).run_id;
@@ -295,7 +295,7 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
         rows: [
           {
             campaignId: '18132985374',
-            campaignName: 'PMax | Wasserfilter',
+            campaignName: 'PMax | Widgets',
             status: 'ENABLED',
             channelType: 'PERFORMANCE_MAX',
             optScore: 0.958,
@@ -313,7 +313,7 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
           },
           {
             campaignId: '18138702677',
-            campaignName: 'PMax | Gesamtsortiment',
+            campaignName: 'PMax | Catalog',
             status: 'ENABLED',
             channelType: 'PERFORMANCE_MAX',
             costMicros: 1_208_067_924,
@@ -360,12 +360,12 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
       store.insertRsaAdsBatch({
         runId, adsAccountId: 'a1',
         rows: [{
-          campaignName: 'Search | Wasserfilter',
+          campaignName: 'Search | Widgets',
           adGroupName: 'AG_Brand',
           adId: 'rsa-1',
-          headlines: ['Nachhaltige Wasserfilter', 'Filter-Systeme', 'Hydratation'],
+          headlines: ['Sustainable Widgets', 'Widget Systems', 'Hydration'],
           descriptions: ['Beschreibung A', 'Beschreibung B'],
-          finalUrl: 'https://aquanatura.ch',
+          finalUrl: 'https://acme-shop.example',
           adStrength: 'POOR',
         }],
       });
@@ -373,7 +373,7 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
         'ads_rsa_ads', 'a1', { runId },
       );
       expect(rows[0]?.ad_strength).toBe('POOR');
-      expect(JSON.parse(rows[0]!.headlines)).toEqual(['Nachhaltige Wasserfilter', 'Filter-Systeme', 'Hydratation']);
+      expect(JSON.parse(rows[0]!.headlines)).toEqual(['Sustainable Widgets', 'Widget Systems', 'Hydration']);
       expect(JSON.parse(rows[0]!.descriptions)).toEqual(['Beschreibung A', 'Beschreibung B']);
     });
   });
@@ -421,8 +421,8 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
       store.insertSearchTermsBatch({
         runId, adsAccountId: 'a1',
         rows: [
-          { searchTerm: 'wasserfilter kaufen', impressions: 5000, clicks: 200, costMicros: 80_000_000, conversions: 10, convValue: 1500 },
-          { searchTerm: 'kostenlose wasserfilter', impressions: 100, clicks: 5, costMicros: 200_000, conversions: 0, convValue: 0 },
+          { searchTerm: 'widget kaufen', impressions: 5000, clicks: 200, costMicros: 80_000_000, conversions: 10, convValue: 1500 },
+          { searchTerm: 'kostenlose widgets', impressions: 100, clicks: 5, costMicros: 200_000, conversions: 0, convValue: 0 },
         ],
       });
       store.insertGa4ObservationsBatch({
@@ -435,7 +435,7 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
       store.insertGscObservationsBatch({
         runId, adsAccountId: 'a1',
         rows: [
-          { dateMonth: '2026-04', query: 'wasseraufbereitung schweiz', clicks: 120, impressions: 4500, position: 6.2 },
+          { dateMonth: '2026-04', query: 'gadget care zone', clicks: 120, impressions: 4500, position: 6.2 },
         ],
       });
 
@@ -506,20 +506,20 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
       store.insertSearchTermsBatch({
         runId, adsAccountId: 'a1',
         rows: [
-          { searchTerm: 'wasserfilter shop', costMicros: 5_000_000, conversions: 2 },
-          { searchTerm: 'kefir kaufen', costMicros: 1_000_000, conversions: 0 },
+          { searchTerm: 'widget shop', costMicros: 5_000_000, conversions: 2 },
+          { searchTerm: 'gizmo kaufen', costMicros: 1_000_000, conversions: 0 },
         ],
       });
       store.insertPmaxSearchTermsBatch({
         runId, adsAccountId: 'a1',
-        rows: [{ searchCategory: 'wasserfilter shop' }],
+        rows: [{ searchCategory: 'widget shop' }],
       });
       store.completeAuditRun(runId);
 
       const rows = store.queryView('view_blueprint_negative_candidates', 'a1');
       const terms = new Map(rows.map(r => [r['search_term'] as string, r['pmax_disjunct'] as number]));
-      expect(terms.get('wasserfilter shop')).toBe(0); // overlap with PMAX → not disjunct
-      expect(terms.get('kefir kaufen')).toBe(1);       // no overlap → disjunct
+      expect(terms.get('widget shop')).toBe(0); // overlap with PMAX → not disjunct
+      expect(terms.get('gizmo kaufen')).toBe(1);       // no overlap → disjunct
     });
   });
 });

@@ -88,7 +88,7 @@ CSVs in `<drive-root>/<account>/ads/` plus a `LASTRUN.txt` heartbeat.
 3. At the top of the file, set:
    ```js
    var DRIVE_ROOT_FOLDER_ID = 'paste-the-folder-id-here';
-   var ACCOUNT_LABEL = 'aquanatura';   // your customer label
+   var ACCOUNT_LABEL = 'acme-shop';   // your customer label
    ```
 4. Click **Authorize** and grant Drive write permission to the script
 5. Click **Run** once manually. First run can take several minutes for

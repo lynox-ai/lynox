@@ -1,5 +1,5 @@
 /**
- * End-to-end ads_data_pull against the real Aquanatura archive snapshot.
+ * End-to-end ads_data_pull against an external archive snapshot fixture.
  *
  * No HTTP, no OAuth: a DiskDriveReader simulates Google Drive by mapping
  * folder IDs to filesystem paths. The 21 archived ads CSVs are copied into a
@@ -7,10 +7,13 @@
  * then walks the same code path as the prod tool (parse → bulk-insert →
  * mark missing → complete run) but with on-disk fixtures.
  *
- * If the archive path is not present (CI, foreign workstations) the whole
- * suite is skipped — the unit-level tests in src/core/ads-csv-reader.test.ts
- * and src/tools/builtin/ads-data-pull.test.ts still cover behaviour with
- * synthetic data.
+ * The archive path is supplied via the LYNOX_ADS_TEST_FIXTURE_PATH environment
+ * variable and points to a directory containing the 21 ads CSVs (and
+ * optionally a campaigns.csv used as the existence probe). Real-customer
+ * data lives outside this repository — set the env var locally to run this
+ * suite. CI without the env var skips the whole suite; the unit-level tests
+ * in src/core/ads-csv-reader.test.ts and src/tools/builtin/ads-data-pull.test.ts
+ * still cover behaviour with synthetic data.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
@@ -22,8 +25,10 @@ import { tmpdir } from 'node:os';
 import { AdsDataStore } from '../../src/core/ads-data-store.js';
 import { runAdsDataPull, type IDriveReader } from '../../src/tools/builtin/ads-data-pull.js';
 
-const ARCHIVE_PATH = '/Users/rafaelburlet/projects/_archive/agent-zero/agent-zero/usr/projects/google_ads_aquanatura/DATA/incoming';
-const ARCHIVE_AVAILABLE = existsSync(ARCHIVE_PATH) && existsSync(join(ARCHIVE_PATH, 'campaigns.csv'));
+const ARCHIVE_PATH = process.env['LYNOX_ADS_TEST_FIXTURE_PATH'];
+const ARCHIVE_AVAILABLE = !!ARCHIVE_PATH
+  && existsSync(ARCHIVE_PATH)
+  && existsSync(join(ARCHIVE_PATH, 'campaigns.csv'));
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
@@ -63,7 +68,7 @@ class DiskDriveReader implements IDriveReader {
   }
 }
 
-describe.skipIf(!ARCHIVE_AVAILABLE)('end-to-end ads_data_pull against the Aquanatura archive snapshot', () => {
+describe.skipIf(!ARCHIVE_AVAILABLE)('end-to-end ads_data_pull against an archive snapshot fixture', () => {
   let tempDir: string;
   let driveRoot: string;
   let store: AdsDataStore;
@@ -90,11 +95,11 @@ describe.skipIf(!ARCHIVE_AVAILABLE)('end-to-end ads_data_pull against the Aquana
     // The reader will mark those kinds as no rows but should not error.
 
     store = new AdsDataStore(join(tempDir, 'ads-optimizer.db'));
-    store.upsertCustomerProfile({ customerId: 'aquanatura', clientName: 'Aquanatura' });
+    store.upsertCustomerProfile({ customerId: 'acme-shop', clientName: 'Acme Shop' });
     store.upsertAdsAccount({
       adsAccountId: '123-456-7890',
-      customerId: 'aquanatura',
-      accountLabel: 'Aquanatura',
+      customerId: 'acme-shop',
+      accountLabel: 'Acme Shop',
       currencyCode: 'CHF',
       timezone: 'Europe/Zurich',
     });

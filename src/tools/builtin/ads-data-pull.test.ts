@@ -54,9 +54,9 @@ describe('runAdsDataPull — happy path', () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'lynox-ads-pull-'));
     store = new AdsDataStore(join(tempDir, 'ads-optimizer.db'));
-    store.upsertCustomerProfile({ customerId: 'aquanatura', clientName: 'Aquanatura' });
+    store.upsertCustomerProfile({ customerId: 'acme-shop', clientName: 'Acme Shop' });
     store.upsertAdsAccount({
-      adsAccountId: '123-456-7890', customerId: 'aquanatura', accountLabel: 'A1',
+      adsAccountId: '123-456-7890', customerId: 'acme-shop', accountLabel: 'A1',
     });
     drive = new FakeDrive();
   });
@@ -80,7 +80,7 @@ describe('runAdsDataPull — happy path', () => {
         '18133,Y,200000000,5\n'),
       makeFile('st', 'search_terms.csv',
         'search_term,impressions,clicks,cost_micros\n' +
-        'wasserfilter,1000,50,10000000\n'),
+        'widgets,1000,50,10000000\n'),
     ]);
     drive.setFolder('ga4-folder', [
       makeFile('g4', 'ga4_2026-04.csv',
@@ -90,7 +90,7 @@ describe('runAdsDataPull — happy path', () => {
     drive.setFolder('gsc-folder', [
       makeFile('gs', 'gsc_2026-04.csv',
         'date_month,query,clicks,impressions,position\n' +
-        '2026-04,wasseraufbereitung,120,4500,6.2\n'),
+        '2026-04,gadget care,120,4500,6.2\n'),
     ]);
 
     const result = await runAdsDataPull(

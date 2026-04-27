@@ -34,14 +34,14 @@ describe('ads-csv-reader: value coercion', () => {
     expect(r.rows[0]?.avgCpc).toBeUndefined();
   });
 
-  it('parses real-shaped Aquanatura keyword row from the archive fixture', () => {
+  it('parses a real-shaped keyword row matching the archive snapshot', () => {
     const csv = 'campaign_name,ad_group_name,keyword,match_type,status,quality_score,impressions,clicks,cost_micros,conversions,conv_value,ctr,avg_cpc,search_is\n' +
-      '"Plai-Ad text ideas-1691069714939","Search Ad Group","wasseraufbereitung",EXACT,ENABLED,,0,0,0,0,0,undefined,undefined,\n';
+      '"Legacy Search Campaign","Search Ad Group","gadget care",EXACT,ENABLED,,0,0,0,0,0,undefined,undefined,\n';
     const r = parseAdsCsv('keywords', 'keywords.csv', csv);
     expect(r.rows[0]).toMatchObject({
-      campaignName: 'Plai-Ad text ideas-1691069714939',
+      campaignName: 'Legacy Search Campaign',
       adGroupName: 'Search Ad Group',
-      keyword: 'wasseraufbereitung',
+      keyword: 'gadget care',
       matchType: 'EXACT',
       status: 'ENABLED',
       impressions: 0,
@@ -69,14 +69,14 @@ describe('ads-csv-reader: value coercion', () => {
 });
 
 describe('ads-csv-reader: campaign mapping', () => {
-  it('parses a real-shaped Aquanatura PMAX campaign row', () => {
+  it('parses a real-shaped PMAX campaign row', () => {
     const csv = 'campaign_id,campaign_name,status,channel_type,opt_score,budget_micros,impressions,clicks,cost_micros,conversions,conv_value,ctr,avg_cpc,search_is,search_top_is,search_abs_top_is,budget_lost_is,rank_lost_is\n' +
-      '18132985374,"PMax | Wasserfilter",ENABLED,PERFORMANCE_MAX,0.958134688801621,34000000,42988,517,794300396,26.954508,5582.236962,0.012026612077789151,1536364.4023210832,0.18105894253781057,,,0.005514297698058277,0.8134267597641311\n';
+      '18132985374,"PMax | Widgets",ENABLED,PERFORMANCE_MAX,0.958134688801621,34000000,42988,517,794300396,26.954508,5582.236962,0.012026612077789151,1536364.4023210832,0.18105894253781057,,,0.005514297698058277,0.8134267597641311\n';
     const r = parseAdsCsv('campaigns', 'campaigns.csv', csv);
     expect(r.rows).toHaveLength(1);
     const c = r.rows[0]!;
     expect(c.campaignId).toBe('18132985374');
-    expect(c.campaignName).toBe('PMax | Wasserfilter');
+    expect(c.campaignName).toBe('PMax | Widgets');
     expect(c.status).toBe('ENABLED');
     expect(c.channelType).toBe('PERFORMANCE_MAX');
     expect(c.optScore).toBeCloseTo(0.9581, 4);
@@ -93,9 +93,9 @@ describe('ads-csv-reader: campaign mapping', () => {
 describe('ads-csv-reader: rsa headlines/descriptions list parsing', () => {
   it('splits pipe-separated headlines into a string array', () => {
     const csv = 'campaign_name,ad_group_name,ad_id,headlines,descriptions,final_url,status,ad_strength\n' +
-      '"camp","ag","rsa-1","Nachhaltige Wasserfilter | Filter-Systeme | Hydratation","Beschreibung A | Beschreibung B","https://x.ch",ENABLED,POOR\n';
+      '"camp","ag","rsa-1","Sustainable Widgets | Widget Systems | Hydration","Beschreibung A | Beschreibung B","https://x.ch",ENABLED,POOR\n';
     const r = parseAdsCsv('ads_rsa', 'ads_rsa.csv', csv);
-    expect(r.rows[0]?.headlines).toEqual(['Nachhaltige Wasserfilter', 'Filter-Systeme', 'Hydratation']);
+    expect(r.rows[0]?.headlines).toEqual(['Sustainable Widgets', 'Widget Systems', 'Hydration']);
     expect(r.rows[0]?.descriptions).toEqual(['Beschreibung A', 'Beschreibung B']);
     expect(r.rows[0]?.adStrength).toBe('POOR');
   });
@@ -112,9 +112,9 @@ describe('ads-csv-reader: rsa headlines/descriptions list parsing', () => {
 describe('ads-csv-reader: search_terms with quoted commas', () => {
   it('preserves commas inside quoted cells', () => {
     const csv = 'search_term,campaign_name,impressions,clicks,cost_micros\n' +
-      '"wasserfilter, kefir",camp,100,5,1000000\n';
+      '"widgets, gizmos",camp,100,5,1000000\n';
     const r = parseAdsCsv('search_terms', 'search_terms.csv', csv);
-    expect(r.rows[0]?.searchTerm).toBe('wasserfilter, kefir');
+    expect(r.rows[0]?.searchTerm).toBe('widgets, gizmos');
     expect(r.rows[0]?.impressions).toBe(100);
   });
 });
@@ -149,9 +149,9 @@ describe('ads-csv-reader: GA4 + GSC observations', () => {
 
   it('parses GSC monthly export', () => {
     const csv = 'date_month,query,page,country,device,clicks,impressions,ctr,position\n' +
-      '2026-04,wasseraufbereitung schweiz,https://x.ch/lp,che,DESKTOP,120,4500,0.0267,6.2\n';
+      '2026-04,gadget care zone,https://x.ch/lp,che,DESKTOP,120,4500,0.0267,6.2\n';
     const r = parseAdsCsv('gsc', 'gsc_2026-04.csv', csv);
-    expect(r.rows[0]?.query).toBe('wasseraufbereitung schweiz');
+    expect(r.rows[0]?.query).toBe('gadget care zone');
     expect(r.rows[0]?.position).toBeCloseTo(6.2, 1);
   });
 });

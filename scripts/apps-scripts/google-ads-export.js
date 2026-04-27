@@ -33,7 +33,7 @@
 
 // ─── Configuration ───────────────────────────────────────────
 var DRIVE_ROOT_FOLDER_ID = 'YOUR_DRIVE_ROOT_FOLDER_ID';
-var ACCOUNT_LABEL = 'YOUR_ACCOUNT_LABEL';   // e.g. 'aquanatura'
+var ACCOUNT_LABEL = 'YOUR_ACCOUNT_LABEL';   // e.g. 'acme-shop'
 var DATE_RANGE = 'LAST_30_DAYS';            // GAQL date filter
 var SEARCH_TERMS_LIMIT = 5000;
 var PRODUCTS_LIMIT = 1000;
