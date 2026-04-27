@@ -265,17 +265,36 @@ function metadataHeaders(): string[] {
   return ['From', 'To', 'Cc', 'Subject', 'Date', 'Message-ID', 'In-Reply-To', 'References', 'Reply-To', 'Auto-Submitted'];
 }
 
+/**
+ * Strip CR/LF (and tab) from a header value to defeat header injection.
+ * Without this, a subject like `Foo\r\nBcc: attacker@x` would inject an
+ * extra Bcc header. RFC 5322 forbids these chars in unfolded headers.
+ */
+function sanitizeHeaderValue(value: string): string {
+  return value.replace(/[\r\n\t]+/g, ' ').trim();
+}
+
 function buildRfc2822(input: MailSendInput, fromAddress: string): string {
   const lines: string[] = [];
-  const formatAddr = (a: MailAddress): string => (a.name ? `"${a.name}" <${a.address}>` : a.address);
-  lines.push(`From: ${fromAddress}`);
+  // Display names get quotes escaped + CRLF stripped so a malicious display
+  // name can't terminate its own quoted string and inject a header.
+  const formatAddr = (a: MailAddress): string => {
+    const address = sanitizeHeaderValue(a.address);
+    if (!a.name) return address;
+    const safeName = sanitizeHeaderValue(a.name).replace(/"/g, '\\"');
+    return `"${safeName}" <${address}>`;
+  };
+  lines.push(`From: ${sanitizeHeaderValue(fromAddress)}`);
   lines.push(`To: ${input.to.map(formatAddr).join(', ')}`);
   if (input.cc?.length) lines.push(`Cc: ${input.cc.map(formatAddr).join(', ')}`);
   if (input.bcc?.length) lines.push(`Bcc: ${input.bcc.map(formatAddr).join(', ')}`);
   if (input.replyTo) lines.push(`Reply-To: ${formatAddr(input.replyTo)}`);
-  lines.push(`Subject: ${input.subject}`);
-  if (input.inReplyTo) lines.push(`In-Reply-To: ${input.inReplyTo}`);
-  if (input.references) lines.push(`References: ${input.references}`);
+  lines.push(`Subject: ${sanitizeHeaderValue(input.subject)}`);
+  // Date is needed for proper threading on receiving servers — Gmail backfills
+  // when omitted but that loses precision when the message is forwarded.
+  lines.push(`Date: ${new Date().toUTCString()}`);
+  if (input.inReplyTo) lines.push(`In-Reply-To: ${sanitizeHeaderValue(input.inReplyTo)}`);
+  if (input.references) lines.push(`References: ${sanitizeHeaderValue(input.references)}`);
   lines.push('MIME-Version: 1.0');
   if (input.html) {
     // Multipart alternative, very minimal
@@ -314,10 +333,25 @@ export class OAuthGmailProvider implements MailProvider {
   readonly accountId: string;
   readonly authType: MailAuthType = 'oauth_google';
 
+  /**
+   * LRU cap on the synthetic UID map. At 50 messages per watcher tick × 720
+   * ticks per day this would otherwise grow ~1.1 MB/day forever; bounded
+   * size keeps the long-running watcher predictable. Old entries that fall
+   * off only break `mail_read({uid:N})` for stale uids — re-running
+   * `mail_triage` reassigns and the new uid stays valid for that round-trip.
+   */
+  private static readonly MAX_UID_MAP_SIZE = 10_000;
+
   private readonly googleAuth: GoogleAuth;
 
-  /** Synthetic uid → real Gmail message ID. Filled by list/search, read by fetch. */
-  private readonly uidMap = new Map<number, string>();
+  /**
+   * Two synced maps — `uidToGmailId` is the read path used by `fetch`,
+   * `gmailIdToUid` lets `assignUid` reuse an existing uid in O(1) instead of
+   * the O(n) scan it used to do. Both grow together and shrink together
+   * during eviction.
+   */
+  private readonly uidToGmailId = new Map<number, string>();
+  private readonly gmailIdToUid = new Map<string, number>();
   private nextUid = 1;
   private readonly watchers = new Set<NodeJS.Timeout>();
   private closed = false;
@@ -363,7 +397,7 @@ export class OAuthGmailProvider implements MailProvider {
 
   async fetch(opts: MailFetchOptions): Promise<MailMessage> {
     if (this.closed) throw new MailError('connection_failed', 'Provider closed');
-    const gmailId = this.uidMap.get(opts.uid);
+    const gmailId = this.uidToGmailId.get(opts.uid);
     if (!gmailId) {
       throw new MailError('not_found', `Gmail uid=${String(opts.uid)} not in current session map. Re-run mail_triage or mail_search to refresh.`);
     }
@@ -439,7 +473,8 @@ export class OAuthGmailProvider implements MailProvider {
     this.closed = true;
     for (const timer of this.watchers) clearInterval(timer);
     this.watchers.clear();
-    this.uidMap.clear();
+    this.uidToGmailId.clear();
+    this.gmailIdToUid.clear();
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -471,13 +506,28 @@ export class OAuthGmailProvider implements MailProvider {
     return envelopes;
   }
 
+  /**
+   * O(1) reuse via the reverse map. When the LRU cap is hit we evict the
+   * oldest entry from BOTH maps in lockstep — JS Map iteration is insertion-
+   * ordered, so `.keys().next()` is the oldest. No effect on dedup, which
+   * uses the Message-ID header in MailStateDb, not these uids.
+   */
   private assignUid(gmailId: string): number {
-    // Reuse if already mapped (e.g. same message returned by list and search)
-    for (const [uid, id] of this.uidMap) {
-      if (id === gmailId) return uid;
+    const existing = this.gmailIdToUid.get(gmailId);
+    if (existing !== undefined) return existing;
+
+    if (this.uidToGmailId.size >= OAuthGmailProvider.MAX_UID_MAP_SIZE) {
+      const oldestUid = this.uidToGmailId.keys().next().value;
+      if (oldestUid !== undefined) {
+        const oldestGmailId = this.uidToGmailId.get(oldestUid);
+        this.uidToGmailId.delete(oldestUid);
+        if (oldestGmailId !== undefined) this.gmailIdToUid.delete(oldestGmailId);
+      }
     }
+
     const uid = this.nextUid++;
-    this.uidMap.set(uid, gmailId);
+    this.uidToGmailId.set(uid, gmailId);
+    this.gmailIdToUid.set(gmailId, uid);
     return uid;
   }
 

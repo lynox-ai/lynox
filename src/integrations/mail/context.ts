@@ -346,27 +346,26 @@ export class MailContext {
    */
   private async _migrateOAuthGmailRow(): Promise<void> {
     if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return;
-    // Already migrated?
-    for (const acc of this.stateDb.listAccounts()) {
-      if (acc.authType === 'oauth_google') return;
+
+    // Fetch the *current* Google account email up front. Doing this before
+    // the early-return lets us detect a disconnect→reconnect-with-different-
+    // account scenario: if an oauth_google row exists but its address no
+    // longer matches the live Google profile, the user re-linked to a new
+    // mailbox and we drop+recreate the row.
+    const email = await this._fetchGoogleProfileEmail();
+    if (!email) return; // profile fetch failed; next init retries
+
+    const existing = this.stateDb.listAccounts().find(a => a.authType === 'oauth_google');
+    if (existing) {
+      if (existing.address.toLowerCase() === email.toLowerCase()) return;
+      // Mailbox identity changed — drop the stale row before creating the new
+      // one. Forget dedup state too so the new mailbox doesn't silently
+      // suppress messages that look identical to old ones.
+      this.stateDb.forgetAccount(existing.id);
+      this.stateDb.deleteAccount(existing.id);
     }
 
-    let email: string;
-    try {
-      const token = await this.googleAuth.getAccessToken();
-      const res = await globalThis.fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!res.ok) return; // give up silently — next init retries
-      const profile = await res.json() as { emailAddress?: string };
-      if (!profile.emailAddress) return;
-      email = profile.emailAddress;
-    } catch {
-      return;
-    }
-
-    const slug = email.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const slug = this._slugForEmail(email);
     const id = `gmail-${slug}`;
     this.stateDb.upsertAccount({
       id,
@@ -374,13 +373,40 @@ export class MailContext {
       address: email,
       preset: 'gmail',
       // v5 schema still requires non-null IMAP fields; placeholders are
-      // unused by OAuthGmailProvider. PR3 relaxes the NOT NULL constraint.
+      // unused by OAuthGmailProvider.
       imap: { host: '', port: 0, secure: true },
       smtp: { host: '', port: 0, secure: true },
       authType: 'oauth_google',
       oauthProviderKey: 'GOOGLE_OAUTH_TOKENS',
       type: 'personal',
     });
+  }
+
+  /** Returns the live Google profile email, or null on transient failure. */
+  private async _fetchGoogleProfileEmail(): Promise<string | null> {
+    if (!this.googleAuth) return null;
+    try {
+      const token = await this.googleAuth.getAccessToken();
+      const res = await globalThis.fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return null;
+      const profile = await res.json() as { emailAddress?: string };
+      return profile.emailAddress ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Build a stable slug from an email address. Preserves `+`, `.`, and `_`
+   * inside the local-part so `rafael@x` and `rafael+spam@x` and `rafael.x@y`
+   * never collide and silently overwrite each other in the mail_accounts
+   * table.
+   */
+  private _slugForEmail(email: string): string {
+    return email.toLowerCase().replace(/[^a-z0-9+._-]+/g, '-').replace(/^-+|-+$/g, '');
   }
 
   /**
