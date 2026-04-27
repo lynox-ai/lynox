@@ -446,13 +446,22 @@ export class MailStateDb {
    * Mark `id` as the only default account in a single transaction. Pass null
    * to clear the default entirely (e.g. when the last account is removed).
    * Returns true when the row exists and was set; false otherwise.
+   *
+   * Existence is checked BEFORE clearing the previous default so a typo on
+   * `setDefaultAccount('missing')` no longer wipes out the user's current
+   * choice. Either the targeted row exists and we promote it, or nothing
+   * changes.
    */
   setDefaultAccount(id: string | null): boolean {
     const txn = this.db.transaction((targetId: string | null) => {
+      if (targetId !== null) {
+        const exists = this.db.prepare('SELECT 1 FROM mail_accounts WHERE id = ?').get(targetId);
+        if (!exists) return false;
+      }
       this.db.prepare('UPDATE mail_accounts SET is_default = 0').run();
       if (targetId === null) return true;
-      const result = this.db.prepare('UPDATE mail_accounts SET is_default = 1 WHERE id = ?').run(targetId);
-      return result.changes > 0;
+      this.db.prepare('UPDATE mail_accounts SET is_default = 1 WHERE id = ?').run(targetId);
+      return true;
     });
     return txn(id);
   }

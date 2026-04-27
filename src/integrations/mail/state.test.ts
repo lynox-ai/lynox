@@ -388,12 +388,12 @@ describe('MailStateDb — setDefaultAccount', () => {
     expect(db.getAccount('b')?.isDefault).toBe(true);
   });
 
-  it('returns false for an unknown id but still clears existing default', () => {
+  it('returns false for an unknown id and leaves the existing default intact', () => {
     db.setDefaultAccount('a');
     expect(db.setDefaultAccount('missing')).toBe(false);
-    // Important: the SET-to-zero step ran, so the previous default is gone.
-    // This is intentional — callers should treat false as "no default now".
-    expect(db.defaultAccountId()).toBe(null);
+    // Existence is checked BEFORE clearing the previous default — typos no
+    // longer silently demote whichever account was default before.
+    expect(db.defaultAccountId()).toBe('a');
   });
 
   it('passing null clears the default entirely', () => {
