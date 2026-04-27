@@ -170,6 +170,74 @@ describe('OAuthGmailProvider — list', () => {
     const envs = await provider.list();
     expect(envs[0]?.flags).not.toContain('\\Seen');
   });
+
+  it('preserves input order regardless of per-message fetch completion order', async () => {
+    // m3 resolves first (fastest), m1 last (slowest). Concurrent fetch must
+    // still return envelopes in input order m1, m2, m3.
+    const delays: Record<string, number> = { m1: 30, m2: 15, m3: 0 };
+    fetchMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('?labelIds')) {
+        return Promise.resolve(respondJson({ messages: [
+          { id: 'm1', threadId: 't1' },
+          { id: 'm2', threadId: 't2' },
+          { id: 'm3', threadId: 't3' },
+        ]}));
+      }
+      const m = u.match(/messages\/(m[123])\?/);
+      if (m) {
+        const id = m[1]!;
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(respondJson(metadataMessage(id, { subject: `subject-${id}` }))), delays[id]);
+        });
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list();
+    expect(envs).toHaveLength(3);
+    expect(envs[0]?.subject).toBe('subject-m1');
+    expect(envs[1]?.subject).toBe('subject-m2');
+    expect(envs[2]?.subject).toBe('subject-m3');
+  });
+
+  it('caps concurrent message-metadata fetches at the configured limit', async () => {
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const REF_COUNT = 30;
+
+    fetchMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('?labelIds')) {
+        return Promise.resolve(respondJson({
+          messages: Array.from({ length: REF_COUNT }, (_, i) => ({ id: `mc${String(i)}`, threadId: `tc${String(i)}` })),
+        }));
+      }
+      const m = u.match(/messages\/(mc\d+)\?/);
+      if (m) {
+        const id = m[1]!;
+        inFlight++;
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => {
+            inFlight--;
+            resolve(respondJson(metadataMessage(id)));
+          }, 5);
+        });
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list({ limit: REF_COUNT });
+
+    expect(envs).toHaveLength(REF_COUNT);
+    // Cap is 8 (ENVELOPE_FETCH_CONCURRENCY in oauth-gmail.ts).
+    expect(peakInFlight).toBeLessThanOrEqual(8);
+    // Some parallelism — not strictly serial.
+    expect(peakInFlight).toBeGreaterThan(1);
+  });
 });
 
 describe('OAuthGmailProvider — fetch', () => {

@@ -49,6 +49,11 @@ const DEFAULT_SEARCH_LIMIT = 50;
 const DEFAULT_WATCH_INTERVAL_MS = 120_000;
 const DEFAULT_WATCH_MAX_PER_TICK = 50;
 const SNIPPET_CHARS = 500;
+// Cap on parallel `messages.get` round-trips per envelopesFor call. Eight
+// keeps us well under Gmail's per-user QPS budget (250 quota units/sec, ×5
+// units per messages.get) while turning the previous N×RTT serial loop
+// into ⌈N/8⌉×RTT.
+const ENVELOPE_FETCH_CONCURRENCY = 8;
 
 // Gmail label that maps to IMAP's INBOX. Other folder names pass through —
 // the agent can use Gmail label IDs directly when it needs custom labels.
@@ -599,17 +604,33 @@ export class OAuthGmailProvider implements MailProvider {
 
   private async envelopesFor(refs: ReadonlyArray<{ id: string; threadId: string }>, folder: string): Promise<MailEnvelope[]> {
     const headerParam = metadataHeaders().map(h => `metadataHeaders=${encodeURIComponent(h)}`).join('&');
-    const envelopes: MailEnvelope[] = [];
-    for (const ref of refs) {
+
+    const fetchOne = async (ref: { id: string; threadId: string }): Promise<MailEnvelope | null> => {
       try {
         const msg = await this.gmailGet<GmailMessage>(`messages/${ref.id}?format=metadata&${headerParam}`);
         const uid = this.assignUid(msg.id);
-        envelopes.push(this.toEnvelope(msg, folder, uid));
+        return this.toEnvelope(msg, folder, uid);
       } catch {
-        // Skip messages we can't fetch — partial results are better than failing the whole call
+        // Partial results > failing the whole call. Per-ref errors swallowed.
+        return null;
       }
-    }
-    return envelopes;
+    };
+
+    // Indexed slots preserve input order regardless of completion order.
+    // A small worker pool pulls from `cursor` until refs are exhausted.
+    const results: Array<MailEnvelope | null> = new Array(refs.length).fill(null);
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const i = cursor++;
+        if (i >= refs.length) return;
+        results[i] = await fetchOne(refs[i]!);
+      }
+    };
+    const workerCount = Math.min(ENVELOPE_FETCH_CONCURRENCY, refs.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    return results.filter((env): env is MailEnvelope => env !== null);
   }
 
   /**
