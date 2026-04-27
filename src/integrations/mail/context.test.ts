@@ -78,7 +78,7 @@ vi.mock('nodemailer', () => {
 const GMAIL_ACCOUNT: MailAccountConfig = {
   id: 'rafael-gmail',
   displayName: 'Rafael',
-  address: 'rafael@gmail.com',
+  address: 'user@gmail.com',
   preset: 'gmail',
   imap: { host: 'imap.gmail.com', port: 993, secure: true },
   smtp: { host: 'smtp.gmail.com', port: 465, secure: true },
@@ -89,7 +89,7 @@ const GMAIL_ACCOUNT: MailAccountConfig = {
 const ICLOUD_ACCOUNT: MailAccountConfig = {
   id: 'rafael-icloud',
   displayName: 'iCloud',
-  address: 'rafael@icloud.com',
+  address: 'user@icloud.com',
   preset: 'icloud',
   imap: { host: 'imap.mail.me.com', port: 993, secure: true },
   smtp: { host: 'smtp.mail.me.com', port: 587, secure: false },
@@ -99,12 +99,12 @@ const ICLOUD_ACCOUNT: MailAccountConfig = {
 
 const INPUT_GMAIL: AddAccountInput = {
   config: GMAIL_ACCOUNT,
-  credentials: { user: 'rafael@gmail.com', pass: 'app-password-gmail' },
+  credentials: { user: 'user@gmail.com', pass: 'app-password-gmail' },
 };
 
 const INPUT_ICLOUD: AddAccountInput = {
   config: ICLOUD_ACCOUNT,
-  credentials: { user: 'rafael@icloud.com', pass: 'app-password-icloud' },
+  credentials: { user: 'user@icloud.com', pass: 'app-password-icloud' },
 };
 
 // ── Test fixtures ──────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ describe('MailContext — addAccount', () => {
     await ctx.addAccount({
       ...INPUT_GMAIL,
       config: { ...GMAIL_ACCOUNT, displayName: 'New Name' },
-      credentials: { user: 'rafael@gmail.com', pass: 'rotated-password' },
+      credentials: { user: 'user@gmail.com', pass: 'rotated-password' },
     });
 
     expect(spy).toHaveBeenCalledTimes(1);
@@ -301,7 +301,7 @@ describe('MailContext — MailHooks', () => {
       const envelopes = [{
         uid: 1, messageId: '<in@x>', folder: 'INBOX', threadKey: '<in@x>',
         inReplyTo: undefined, from: [{ address: 'sender@example.com' }],
-        to: [{ address: 'rafael@gmail.com' }], cc: [], replyTo: [],
+        to: [{ address: 'user@gmail.com' }], cc: [], replyTo: [],
         subject: 'Hi', date: new Date(), flags: [], snippet: '',
         hasAttachments: false, attachmentCount: 0, sizeBytes: 100,
         isAutoReply: false,
@@ -405,7 +405,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
   });
 
   it('inserts an oauth_google row + registers OAuthGmailProvider on first init', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'rafael@brandfusion.ch' }), {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user@example.com' }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
@@ -421,17 +421,17 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       await ctxWithAuth.init();
       const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
       expect(accounts).toHaveLength(1);
-      expect(accounts[0]?.address).toBe('rafael@brandfusion.ch');
-      expect(accounts[0]?.id).toBe('gmail-rafael-brandfusion.ch');
+      expect(accounts[0]?.address).toBe('user@example.com');
+      expect(accounts[0]?.id).toBe('gmail-user-example.com');
       expect(accounts[0]?.preset).toBe('gmail');
-      expect(ctxWithAuth.registry.list()).toContain('gmail-rafael-brandfusion.ch');
+      expect(ctxWithAuth.registry.list()).toContain('gmail-user-example.com');
     } finally {
       await ctxWithAuth.close();
     }
   });
 
   it('is idempotent — second engine boot does not insert a duplicate row', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'rafael@brandfusion.ch' }), {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user@example.com' }), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     }));
     const auth = {
@@ -472,7 +472,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
   });
 
   it('coexists with IMAP accounts in the same registry', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'rafael@brandfusion.ch' }), {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user@example.com' }), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     }));
     const auth = {
@@ -490,7 +490,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       await ctxBoth.init();
       // Both providers present
       expect(ctxBoth.registry.list()).toContain('rafael-gmail');             // IMAP
-      expect(ctxBoth.registry.list()).toContain('gmail-rafael-brandfusion.ch'); // OAuth
+      expect(ctxBoth.registry.list()).toContain('gmail-user-example.com'); // OAuth
     } finally {
       await ctxBoth.close();
     }
@@ -518,8 +518,8 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
     // Pre-seed a row from a previous OAuth identity
     stateDb.upsertAccount({
       id: 'gmail-old-rafael-brandfusion-ch',
-      displayName: 'old-rafael@brandfusion.ch',
-      address: 'old-rafael@brandfusion.ch',
+      displayName: 'old-user@example.com',
+      address: 'old-user@example.com',
       preset: 'gmail',
       imap: { host: '', port: 0, secure: true },
       smtp: { host: '', port: 0, secure: true },
@@ -528,7 +528,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       type: 'personal',
     });
     // Live profile now reports a different mailbox
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'new-rafael@brandfusion.ch' }), {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'new-user@example.com' }), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     }));
     const auth = {
@@ -542,7 +542,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       await ctx2.init();
       const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
       expect(accounts).toHaveLength(1);
-      expect(accounts[0]?.address).toBe('new-rafael@brandfusion.ch');
+      expect(accounts[0]?.address).toBe('new-user@example.com');
       // Stale id is gone
       expect(stateDb.getAccount('gmail-old-rafael-brandfusion-ch')).toBe(null);
     } finally {
@@ -551,7 +551,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
   });
 
   it('preserves email special chars in slug so plus/dot variants do not collide', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'rafael+spam@brandfusion.ch' }), {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user+spam@example.com' }), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     }));
     const auth = {
@@ -567,7 +567,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       expect(accounts).toHaveLength(1);
       // The `+` is preserved so `rafael+spam@x` and `rafael.spam@x` get distinct ids
       // (`@` still collapses to `-` since it isn't a typical id char).
-      expect(accounts[0]?.id).toBe('gmail-rafael+spam-brandfusion.ch');
+      expect(accounts[0]?.id).toBe('gmail-user+spam-example.com');
     } finally {
       await ctx2.close();
     }

@@ -9,7 +9,7 @@ function makeAccount(): MailAccountConfig {
   return {
     id: 'gmail-rafael',
     displayName: 'Rafael',
-    address: 'rafael@lynox.ai',
+    address: 'user@example.org',
     preset: 'gmail',
     imap: { host: '', port: 0, secure: true },
     smtp: { host: '', port: 0, secure: true },
@@ -61,7 +61,7 @@ function metadataMessage(id: string, opts: {
 function fullMessage(id: string, body: string, opts: { from?: string; subject?: string; html?: string; threadId?: string } = {}): Record<string, unknown> {
   const headers = [
     { name: 'From', value: opts.from ?? 'sender@example.com' },
-    { name: 'To', value: 'rafael@lynox.ai' },
+    { name: 'To', value: 'user@example.org' },
     { name: 'Subject', value: opts.subject ?? 'Subject' },
     { name: 'Message-ID', value: `<${id}@gmail.com>` },
   ];
@@ -242,7 +242,7 @@ describe('OAuthGmailProvider — send', () => {
 
   it('posts a base64url-encoded RFC2822 message and returns the Gmail id', async () => {
     fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'rafael@lynox.ai' }));
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
       if (init?.method === 'POST' && url.includes('messages/send')) {
         return Promise.resolve(respondJson({ id: 'sent-123', threadId: 'thread-x' }));
       }
@@ -263,7 +263,7 @@ describe('OAuthGmailProvider — send', () => {
     const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
     const body = JSON.parse((sendCall[1] as { body: string }).body) as { raw: string };
     const decoded = Buffer.from(body.raw, 'base64').toString('utf-8');
-    expect(decoded).toContain('From: rafael@lynox.ai');
+    expect(decoded).toContain('From: user@example.org');
     expect(decoded).toContain('To: bob@example.com');
     expect(decoded).toContain('Cc: cc@example.com');
     expect(decoded).toContain('Subject: Hello');
@@ -274,7 +274,7 @@ describe('OAuthGmailProvider — send', () => {
 
   it('strips CRLF from headers — defeats SMTP injection via subject', async () => {
     fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'rafael@lynox.ai' }));
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
       if (init?.method === 'POST' && url.includes('messages/send')) {
         return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
       }
@@ -295,7 +295,7 @@ describe('OAuthGmailProvider — send', () => {
 
   it('strips CRLF from display name and escapes embedded quotes', async () => {
     fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'rafael@lynox.ai' }));
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
       if (init?.method === 'POST' && url.includes('messages/send')) {
         return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
       }
