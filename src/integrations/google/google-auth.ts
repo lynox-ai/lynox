@@ -216,6 +216,8 @@ export class GoogleAuth {
   private tokenData: TokenData | null = null;
   private serviceAccountKey: ServiceAccountKey | null = null;
   private refreshInFlight: Promise<void> | null = null;
+  private serviceAccountTokenCache: { token: string; expires_at: number } | null = null;
+  private serviceAccountTokenInFlight: Promise<string> | null = null;
 
   constructor(options: GoogleAuthOptions) {
     this.clientId = options.clientId;
@@ -712,7 +714,30 @@ export class GoogleAuth {
     return parsed as ServiceAccountKey;
   }
 
+  // Service-account access tokens are valid for ~1 hour, but the previous
+  // implementation re-minted on every call (JWT sign + HTTPS round-trip per
+  // Google API request). Cache the token until just before its expires_at,
+  // and coalesce concurrent mints so N parallel callers share one round-trip.
+  // Kept as its own state separate from refreshInFlight / _doRefresh — the
+  // OAuth-user and SA paths have different lifetimes and identity, never
+  // collapse the two into one cache.
   private async _getServiceAccountToken(): Promise<string> {
+    if (
+      this.serviceAccountTokenCache &&
+      Date.now() < this.serviceAccountTokenCache.expires_at - TOKEN_REFRESH_BUFFER_MS
+    ) {
+      return this.serviceAccountTokenCache.token;
+    }
+    if (this.serviceAccountTokenInFlight) {
+      return this.serviceAccountTokenInFlight;
+    }
+    this.serviceAccountTokenInFlight = this._mintServiceAccountToken().finally(() => {
+      this.serviceAccountTokenInFlight = null;
+    });
+    return this.serviceAccountTokenInFlight;
+  }
+
+  private async _mintServiceAccountToken(): Promise<string> {
     if (!this.serviceAccountKeyPath) {
       throw new Error('No service account key path configured.');
     }
@@ -739,6 +764,10 @@ export class GoogleAuth {
     }
 
     const tokenData = validateTokenResponse(await response.json());
+    this.serviceAccountTokenCache = {
+      token: tokenData.access_token,
+      expires_at: tokenData.expires_at,
+    };
     return tokenData.access_token;
   }
 }
