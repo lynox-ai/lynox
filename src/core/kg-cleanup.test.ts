@@ -21,6 +21,20 @@ describe('kg-cleanup', () => {
       expect(isCleanupTarget('einzeltools')).toBe(true);
     });
 
+    it('rejects common nouns observed in production KG (v1.3.6)', () => {
+      // Captured from rafael.lynox.cloud Graph (Beta) on 2026-04-27.
+      expect(isCleanupTarget('when')).toBe(true);
+      expect(isCleanupTarget('notification')).toBe(true);
+      expect(isCleanupTarget('support')).toBe(true);
+      expect(isCleanupTarget('messages')).toBe(true);
+      expect(isCleanupTarget('creation')).toBe(true);
+      expect(isCleanupTarget('name')).toBe(true);
+      expect(isCleanupTarget('strict')).toBe(true);
+      // slash-pairs: at least one half is a generic noun
+      expect(isCleanupTarget('logging/monitoring')).toBe(true);
+      expect(isCleanupTarget('street/number')).toBe(true);
+    });
+
     it('rejects pricing fragments', () => {
       expect(isCleanupTarget('39/mo')).toBe(true);
       expect(isCleanupTarget('99/mo')).toBe(true);
@@ -30,6 +44,10 @@ describe('kg-cleanup', () => {
       expect(isCleanupTarget('EUR 49/month')).toBe(true);
       expect(isCleanupTarget('10/k')).toBe(true);
       expect(isCleanupTarget('5/hour')).toBe(true);
+      // digit-only ratios with k/m suffix (observed: "10/1k")
+      expect(isCleanupTarget('10/1k')).toBe(true);
+      expect(isCleanupTarget('5/100')).toBe(true);
+      expect(isCleanupTarget('1/2m')).toBe(true);
     });
 
     it('rejects slash enums where either half is generic', () => {

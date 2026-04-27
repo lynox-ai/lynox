@@ -8,6 +8,7 @@ import type {
 import type { EntityType, MemoryNamespace } from '../types/index.js';
 import { getBetasForProvider, getModelId } from '../types/index.js';
 import { getActiveProvider, isCustomProvider } from './llm-client.js';
+import { isCleanupTarget } from './kg-stopwords.js';
 
 /**
  * Entity extracted by the v2 tool-call pipeline.
@@ -352,6 +353,10 @@ function parseEntity(raw: unknown): ExtractedEntityV2 | null {
   if (canonicalName.length < 2) return null;
   if (!EXTRACTABLE_TYPE_SET.has(type)) return null;
   if (confidence < MIN_CONFIDENCE || confidence > 1) return null;
+  // Defense-in-depth: even at ≥0.8 confidence, drop generic nouns / pricing
+  // fragments. Same gate as the historical cleanup pass — keeps the prompt,
+  // the runtime filter, and the purge in lockstep.
+  if (isCleanupTarget(canonicalName)) return null;
 
   const aliases = aliasesRaw
     .filter((a): a is string => typeof a === 'string')
