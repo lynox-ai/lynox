@@ -27,6 +27,7 @@ import { setVaultApiKeyExists } from './config.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget } from './session-budget.js';
 import { configureHttpRateLimits, configureEnforceHttps } from '../tools/builtin/http.js';
+import { configureMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
 import { resolveActiveScopes } from './scope-resolver.js';
 import { createEmbeddingProvider } from './embedding.js';
 import type { EmbeddingProvider, OnnxModelId } from './embedding.js';
@@ -70,6 +71,18 @@ export function configureBudgetAndRateLimits(
     provider: runHistory,
     hourlyLimit: envInt('LYNOX_MAX_HTTP_REQUESTS_PER_HOUR') ?? userConfig.max_http_requests_per_hour,
     dailyLimit: envInt('LYNOX_MAX_HTTP_REQUESTS_PER_DAY') ?? userConfig.max_http_requests_per_day,
+  });
+  // Dedup window: ENV accepts 0 to disable (envInt() rejects non-positive).
+  const dedupEnv = process.env['LYNOX_MAIL_DEDUP_WINDOW_SEC'];
+  const dedupEnvNum = dedupEnv !== undefined ? parseInt(dedupEnv, 10) : NaN;
+  const dedupSec = Number.isFinite(dedupEnvNum) && dedupEnvNum >= 0
+    ? dedupEnvNum
+    : userConfig.mail_dedup_window_sec;
+  configureMailRateLimits({
+    provider: runHistory,
+    hourlyLimit: envInt('LYNOX_MAX_MAIL_SENDS_PER_HOUR') ?? userConfig.max_mail_sends_per_hour,
+    dailyLimit: envInt('LYNOX_MAX_MAIL_SENDS_PER_DAY') ?? userConfig.max_mail_sends_per_day,
+    dedupWindowMs: dedupSec !== undefined ? dedupSec * 1000 : undefined,
   });
   configureEnforceHttps(userConfig.enforce_https === true);
 }

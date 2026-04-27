@@ -806,7 +806,8 @@ export class Agent implements IAgent {
       }
 
       const duration = timer.end();
-      const rawInput = JSON.stringify(tc.input).slice(0, 2000);
+      const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
+      const rawInput = JSON.stringify(auditInput).slice(0, 2000);
       const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput });
 
@@ -824,7 +825,8 @@ export class Agent implements IAgent {
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);
       const toolError = new Error(`Tool ${tc.name} failed: ${message}`, { cause });
-      const rawErrInput = JSON.stringify(tc.input).slice(0, 2000);
+      const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
+      const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput });
 

@@ -16,6 +16,11 @@ import {
 } from '../provider.js';
 import type { MailContext } from '../context.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
+import {
+  checkMailRateLimit,
+  checkRecipientDedup,
+  recordMailSend,
+} from './rate-limit.js';
 
 interface MailReplyToolInput {
   account?: string | undefined;
@@ -55,6 +60,10 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
       },
     },
     requiresConfirmation: true,
+    redactInputForAudit: (input: MailReplyToolInput) => {
+      const { body: _body, ...rest } = input;
+      return { ...rest, body_chars: typeof input.body === 'string' ? input.body.length : 0 };
+    },
     handler: async (input: MailReplyToolInput, agent: IAgent): Promise<string> => {
       try {
         if (typeof input.uid !== 'number' || !Number.isFinite(input.uid)) {
@@ -64,6 +73,10 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         if (!agent.promptUser) {
           return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
         }
+
+        // Cross-session rate-limit check (see mail-send for rationale).
+        const rateBlock = checkMailRateLimit('mail_reply');
+        if (rateBlock) return rateBlock;
 
         // Block credential exfiltration via reply body — same defense as
         // mail_send. The reply path is in fact the more likely place for
@@ -162,6 +175,11 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           ? original.envelope.subject
           : `Re: ${original.envelope.subject || '(no subject)'}`;
 
+        // Per-recipient dedup window — block before showing the confirm
+        // prompt so a retry storm can't pile up approval requests.
+        const dedupBlock = checkRecipientDedup([...toAddrs, ...ccAddrs], subject);
+        if (dedupBlock) return dedupBlock;
+
         // Persona hint shown in the confirmation prompt so the user knows
         // what voice will be used. Phase 1 will inject this as a compose-time
         // system prompt; Phase 0.1 is just the advisory render.
@@ -193,6 +211,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         if (newReferences) sendInput.references = newReferences;
 
         const result = await sendProvider.send(sendInput);
+        recordMailSend([...toAddrs, ...ccAddrs], subject);
         return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
       } catch (err: unknown) {
         if (err instanceof MailError) return `mail_reply error (${err.code}): ${err.message}`;
