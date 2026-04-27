@@ -615,15 +615,18 @@ export class Engine {
       }
     }
 
-    // Ads Optimizer (BETA, beta-gated to brandfusion's own canary).
-    // Tool only registers when both the feature flag is on and Google OAuth is
-    // configured (the pipeline reads CSVs out of the customer's Drive).
-    // The store itself initialises whenever the flag is on so CLI/admin
-    // tooling can inspect prior runs even without an active Drive connection.
+    // Ads Optimizer (BETA, beta-gated to a single canary instance).
+    // Profile-setup tool registers whenever the flag is on (no Drive needed).
+    // The data-pull tool additionally requires Google OAuth because the
+    // pipeline reads CSVs out of the customer's Drive. The store itself
+    // initialises whenever the flag is on so CLI/admin tooling can inspect
+    // prior runs even without an active Drive connection.
     if (isFeatureEnabled('ads-optimizer')) {
       try {
         const { AdsDataStore } = await import('./ads-data-store.js');
         this._adsDataStore = new AdsDataStore();
+        const { createAdsCustomerProfileSetTool } = await import('../tools/builtin/ads-customer-profile-set.js');
+        this.registry.register(createAdsCustomerProfileSetTool(this._adsDataStore) as ToolEntry);
         if (this._googleAuth) {
           const { createAdsDataPullTool } = await import('../tools/builtin/ads-data-pull.js');
           this.registry.register(createAdsDataPullTool(this._googleAuth, this._adsDataStore) as ToolEntry);
