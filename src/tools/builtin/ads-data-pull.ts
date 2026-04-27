@@ -19,7 +19,6 @@ import {
   ALL_ADS_CSV_KINDS,
   ADS_FILENAME,
   type AdsCsvKind,
-  type ParseWarning,
 } from '../../core/ads-csv-reader.js';
 
 // ── Types ────────────────────────────────────────────────────────
