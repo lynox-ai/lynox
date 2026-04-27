@@ -522,4 +522,62 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
       expect(terms.get('gizmo kaufen')).toBe(1);       // no overlap → disjunct
     });
   });
+
+  describe('blueprint entities', () => {
+    it('inserts a NEW blueprint entity with payload', () => {
+      const row = store.insertBlueprintEntity({
+        runId, adsAccountId: 'a1', entityType: 'campaign',
+        kind: 'NEW', externalId: 'bp-c1',
+        payload: { campaign_name: 'DE-Search-Brand-Exact', budget_micros: 50_000_000 },
+        confidence: 0.92, rationale: 'Missing brand-search coverage',
+      });
+      expect(row.kind).toBe('NEW');
+      expect(JSON.parse(row.payload_json)).toMatchObject({ campaign_name: 'DE-Search-Brand-Exact' });
+      expect(row.naming_valid).toBe(1);
+    });
+
+    it('records RENAME with previous_external_id', () => {
+      store.insertBlueprintEntity({
+        runId, adsAccountId: 'a1', entityType: 'campaign',
+        kind: 'RENAME', externalId: 'new-id', previousExternalId: 'old-id',
+        confidence: 0.85, rationale: 'Brings name to convention pattern',
+      });
+      const all = store.listBlueprintEntities(runId);
+      expect(all[0]?.previous_external_id).toBe('old-id');
+    });
+
+    it('flags naming-pattern violations', () => {
+      store.insertBlueprintEntity({
+        runId, adsAccountId: 'a1', entityType: 'campaign',
+        kind: 'KEEP', externalId: 'c1', confidence: 1.0,
+        namingValid: false, namingErrors: ['LANG-token missing', 'CHANNEL out of order'],
+      });
+      const all = store.listBlueprintEntities(runId);
+      expect(all[0]?.naming_valid).toBe(0);
+      expect(JSON.parse(all[0]!.naming_errors_json)).toEqual(['LANG-token missing', 'CHANNEL out of order']);
+    });
+
+    it('lists with entityType + kind filters', () => {
+      store.insertBlueprintEntity({ runId, adsAccountId: 'a1', entityType: 'campaign', kind: 'KEEP', externalId: 'c1', confidence: 1 });
+      store.insertBlueprintEntity({ runId, adsAccountId: 'a1', entityType: 'campaign', kind: 'NEW', externalId: 'c2', confidence: 1 });
+      store.insertBlueprintEntity({ runId, adsAccountId: 'a1', entityType: 'keyword', kind: 'NEW', externalId: 'k1', confidence: 1 });
+
+      expect(store.listBlueprintEntities(runId, { entityType: 'campaign' })).toHaveLength(2);
+      expect(store.listBlueprintEntities(runId, { kind: 'NEW' })).toHaveLength(2);
+      expect(store.listBlueprintEntities(runId, { entityType: 'keyword', kind: 'NEW' })).toHaveLength(1);
+    });
+
+    it('counts entities by kind', () => {
+      store.insertBlueprintEntity({ runId, adsAccountId: 'a1', entityType: 'campaign', kind: 'KEEP', externalId: 'c1', confidence: 1 });
+      store.insertBlueprintEntity({ runId, adsAccountId: 'a1', entityType: 'campaign', kind: 'NEW', externalId: 'c2', confidence: 1 });
+      store.insertBlueprintEntity({ runId, adsAccountId: 'a1', entityType: 'asset_group', kind: 'SPLIT', externalId: 'ag1', confidence: 0.9 });
+
+      const counts = store.countBlueprintEntities(runId);
+      expect(counts.total).toBe(3);
+      expect(counts.KEEP).toBe(1);
+      expect(counts.NEW).toBe(1);
+      expect(counts.SPLIT).toBe(1);
+      expect(counts.PAUSE).toBe(0);
+    });
+  });
 });

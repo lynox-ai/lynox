@@ -711,6 +711,32 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX IF NOT EXISTS idx_findings_run ON ads_findings(run_id, severity);
    CREATE INDEX IF NOT EXISTS idx_findings_area ON ads_findings(ads_account_id, area);`,
+
+  // Migration v3: ads_blueprint_entities — proposed entity changes from the
+  // P3 Blueprint phase. Run-keyed; P4 Emit reads via run_id and renders the
+  // Editor-CSV. The companion ads_run_decisions table persists the
+  // KEEP/RENAME/PAUSE/NEW classification at history-preservation time;
+  // ads_blueprint_entities additionally carries the full entity payload.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (3);
+
+   CREATE TABLE IF NOT EXISTS ads_blueprint_entities (
+     blueprint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+     run_id INTEGER NOT NULL REFERENCES ads_audit_runs(run_id),
+     ads_account_id TEXT NOT NULL,
+     entity_type TEXT NOT NULL,
+     kind TEXT NOT NULL CHECK (kind IN ('KEEP', 'RENAME', 'NEW', 'PAUSE', 'SPLIT', 'MERGE')),
+     external_id TEXT NOT NULL,
+     previous_external_id TEXT,
+     payload_json TEXT NOT NULL DEFAULT '{}',
+     confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+     rationale TEXT NOT NULL DEFAULT '',
+     naming_valid INTEGER NOT NULL DEFAULT 1,
+     naming_errors_json TEXT NOT NULL DEFAULT '[]',
+     created_at TEXT NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS idx_blueprint_run ON ads_blueprint_entities(run_id, entity_type);
+   CREATE INDEX IF NOT EXISTS idx_blueprint_kind ON ads_blueprint_entities(run_id, kind);
+   CREATE INDEX IF NOT EXISTS idx_blueprint_account ON ads_blueprint_entities(ads_account_id, entity_type);`,
 ];
 
 export interface CustomerProfileRow {
@@ -786,6 +812,38 @@ export interface AdsRunDecisionRow {
 
 export type AdsFindingSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
 export type AdsFindingSource = 'deterministic' | 'agent';
+
+export type AdsBlueprintEntityKind = 'KEEP' | 'RENAME' | 'NEW' | 'PAUSE' | 'SPLIT' | 'MERGE';
+
+export interface AdsBlueprintEntityRow {
+  blueprint_id: number;
+  run_id: number;
+  ads_account_id: string;
+  entity_type: string;
+  kind: AdsBlueprintEntityKind;
+  external_id: string;
+  previous_external_id: string | null;
+  payload_json: string;
+  confidence: number;
+  rationale: string;
+  naming_valid: number;
+  naming_errors_json: string;
+  created_at: string;
+}
+
+export interface InsertBlueprintEntityInput {
+  runId: number;
+  adsAccountId: string;
+  entityType: string;
+  kind: AdsBlueprintEntityKind;
+  externalId: string;
+  previousExternalId?: string | undefined;
+  payload?: Record<string, unknown> | undefined;
+  confidence: number;
+  rationale?: string | undefined;
+  namingValid?: boolean | undefined;
+  namingErrors?: readonly string[] | undefined;
+}
 
 export interface AdsFindingRow {
   finding_id: number;
@@ -1186,6 +1244,69 @@ export class AdsDataStore {
       medium: row.medium ?? 0,
       low: row.low ?? 0,
       total: row.total,
+    };
+  }
+
+  // ── Blueprint Entities ───────────────────────────────────────
+  // P3 writes the proposed entity set here. P4 Emit reads it via run_id
+  // and converts it to per-campaign Editor-CSV files. Each blueprint row
+  // is paired with an ads_run_decisions row carrying the same
+  // KEEP/RENAME/PAUSE/NEW/SPLIT/MERGE classification — the run_decisions
+  // table is the canonical history-preservation log and contains no
+  // payload, while this table holds the full structured entity payload
+  // so emit can build a CSV without re-reading any snapshot.
+
+  insertBlueprintEntity(input: InsertBlueprintEntityInput): AdsBlueprintEntityRow {
+    const now = new Date().toISOString();
+    const payload = JSON.stringify(input.payload ?? {});
+    const errors = JSON.stringify(input.namingErrors ?? []);
+    const result = this.db.prepare(`
+      INSERT INTO ads_blueprint_entities (
+        run_id, ads_account_id, entity_type, kind,
+        external_id, previous_external_id, payload_json,
+        confidence, rationale, naming_valid, naming_errors_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.runId, input.adsAccountId, input.entityType, input.kind,
+      input.externalId, input.previousExternalId ?? null, payload,
+      input.confidence, input.rationale ?? '',
+      input.namingValid === false ? 0 : 1, errors, now,
+    );
+    return this.db.prepare('SELECT * FROM ads_blueprint_entities WHERE blueprint_id = ?')
+      .get(Number(result.lastInsertRowid)) as AdsBlueprintEntityRow;
+  }
+
+  listBlueprintEntities(
+    runId: number,
+    opts?: { entityType?: string | undefined; kind?: AdsBlueprintEntityKind | undefined } | undefined,
+  ): AdsBlueprintEntityRow[] {
+    const clauses: string[] = ['run_id = ?'];
+    const params: unknown[] = [runId];
+    if (opts?.entityType) { clauses.push('entity_type = ?'); params.push(opts.entityType); }
+    if (opts?.kind) { clauses.push('kind = ?'); params.push(opts.kind); }
+    return this.db.prepare(`
+      SELECT * FROM ads_blueprint_entities WHERE ${clauses.join(' AND ')}
+      ORDER BY entity_type, kind, blueprint_id ASC
+    `).all(...params) as AdsBlueprintEntityRow[];
+  }
+
+  countBlueprintEntities(runId: number): Record<AdsBlueprintEntityKind, number> & { total: number } {
+    const row = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN kind = 'KEEP'   THEN 1 ELSE 0 END) AS k_keep,
+        SUM(CASE WHEN kind = 'RENAME' THEN 1 ELSE 0 END) AS k_rename,
+        SUM(CASE WHEN kind = 'NEW'    THEN 1 ELSE 0 END) AS k_new,
+        SUM(CASE WHEN kind = 'PAUSE'  THEN 1 ELSE 0 END) AS k_pause,
+        SUM(CASE WHEN kind = 'SPLIT'  THEN 1 ELSE 0 END) AS k_split,
+        SUM(CASE WHEN kind = 'MERGE'  THEN 1 ELSE 0 END) AS k_merge,
+        COUNT(*) AS total
+      FROM ads_blueprint_entities WHERE run_id = ?
+    `).get(runId) as Record<string, number | null>;
+    return {
+      KEEP: row['k_keep'] ?? 0, RENAME: row['k_rename'] ?? 0,
+      NEW: row['k_new'] ?? 0, PAUSE: row['k_pause'] ?? 0,
+      SPLIT: row['k_split'] ?? 0, MERGE: row['k_merge'] ?? 0,
+      total: row['total'] ?? 0,
     };
   }
 
