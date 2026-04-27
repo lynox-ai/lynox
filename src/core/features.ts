@@ -11,13 +11,15 @@
 export type FeatureFlag =
   | 'plugins'
   | 'flat-file-memory'
-  | 'whatsapp-inbox';
+  | 'whatsapp-inbox'
+  | 'ads-optimizer';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'plugins': 'LYNOX_FEATURE_PLUGINS',
   'flat-file-memory': 'LYNOX_FEATURE_FLAT_FILE_MEMORY',
   'whatsapp-inbox': 'LYNOX_FEATURE_WHATSAPP_INBOX',
+  'ads-optimizer': 'LYNOX_FEATURE_ADS_OPTIMIZER',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -25,6 +27,9 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   'flat-file-memory': true,
   // Phase-0 BYOK pilot. Off by default — flip to `true` when the feature graduates.
   'whatsapp-inbox': false,
+  // Beta-gated on brandfusion's own canary (rafael.lynox.cloud) until validated.
+  // Activates ads_* tools, scheduled monthly cycles, and the customer-profile onboarding flow.
+  'ads-optimizer': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

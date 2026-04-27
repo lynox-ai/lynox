@@ -59,7 +59,18 @@ export interface IMemory {
 
 // === Knowledge Graph ===
 
-export type EntityType = 'person' | 'organization' | 'project' | 'product' | 'concept' | 'location' | 'collection';
+export type EntityType =
+  | 'person'
+  | 'organization'
+  | 'project'
+  | 'product'
+  | 'concept'
+  | 'location'
+  | 'collection'
+  // Ads Optimizer KG types (gated by 'ads-optimizer' feature flag).
+  // Strictly qualitative records — structured ad entities live in ads-optimizer.db.
+  | 'ads_finding'           // qualitative audit insight with confidence + rationale
+  | 'ads_run_provenance';   // cross-run reasoning link (previous decision → current outcome)
 
 /** Namespace-specific temporal decay half-lives in days. */
 export const NAMESPACE_HALF_LIFE: Record<MemoryNamespace, number> = {
