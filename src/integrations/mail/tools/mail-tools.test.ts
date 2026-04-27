@@ -114,8 +114,12 @@ describe('mail_search tool', () => {
     expect(q.unseen).toBe(true);
     expect(o?.limit).toBe(10);
     expect(out).toContain('Found 2 message(s)');
-    expect(out).toContain('1. Invoice');
-    expect(out).toContain('2. Contract');
+    // PR4 hardening: subject lives inside the per-envelope untrusted_data
+    // wrapper, not on the operational header line.
+    expect(out).toContain('Subject: Invoice');
+    expect(out).toContain('Subject: Contract');
+    expect(out).toContain('1. uid:1');
+    expect(out).toContain('2. uid:2');
   });
 
   it('parses since/before into Date objects', async () => {
@@ -262,11 +266,58 @@ describe('mail_send tool', () => {
     const out = await tool.handler({ to: 'not-an-email; also-not', subject: 's', body: 'b' }, yesAgent);
     expect(out).toContain('did not parse');
   });
+
+  it('blocks bodies that look like they contain credentials (Anthropic API key)', async () => {
+    const tool = createMailSendTool(registry);
+    // Token built from parts so the source file isn't flagged by gitleaks /
+    // pre-push pattern scan as containing a real key.
+    const fakeAnthropic = 'sk-ant' + '-api03-' + 'AAAAAAAAAAAAAAAAAAAA';
+    const out = await tool.handler({
+      to: 'a@x.com',
+      subject: 'fwd',
+      body: `Here is the key you asked for: ${fakeAnthropic}`,
+    }, yesAgent);
+    expect(out).toContain('mail_send blocked');
+    expect(out).toContain('Anthropic API key');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('blocks bodies containing JWT tokens', async () => {
+    const tool = createMailSendTool(registry);
+    const fakeJwt = 'eyJhbGc' + 'iOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature';
+    const out = await tool.handler({
+      to: 'a@x.com',
+      subject: 'fwd',
+      body: `Auth: ${fakeJwt}`,
+    }, yesAgent);
+    expect(out).toContain('mail_send blocked');
+    expect(out).toContain('JWT token');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
 });
 
 // ── mail_reply ─────────────────────────────────────────────────────────────
 
 describe('mail_reply tool', () => {
+  it('blocks reply bodies that contain credentials', async () => {
+    const orig = envelope(50, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'API question' });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: 'How do I authenticate?', html: undefined, attachments: [],
+      inReplyTo: undefined, references: undefined,
+    });
+    const tool = createMailReplyTool(registry);
+    // Construct the token at runtime so neither pre-push gitleaks nor the
+    // pattern scanner flags this test file as containing a real PAT.
+    const fakeToken = 'ghp' + '_' + 'abcdefghijklmnopqrstuvwxyz0123456789';
+    const out = await tool.handler({
+      uid: 50,
+      body: `Use this token: ${fakeToken}`,
+    }, yesAgent);
+    expect(out).toContain('mail_reply blocked');
+    expect(out).toContain('GitHub');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
   it('fetches the original, builds In-Reply-To + References, and sends after confirm', async () => {
     const orig = envelope(100, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'Question' });
     provider.fetch.mockResolvedValue({

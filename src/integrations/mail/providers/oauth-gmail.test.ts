@@ -373,6 +373,83 @@ describe('OAuthGmailProvider — error mapping', () => {
     const err = await provider.list().catch(e => e as MailError);
     expect(err.code).toBe('connection_failed');
   });
+
+  it('maps 403 insufficientPermissions to auth_failed', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 403, errors: [{ reason: 'insufficientPermissions', message: 'Insufficient Permission' }] },
+    }), { status: 403, headers: { 'Content-Type': 'application/json' } }));
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const err = await provider.list().catch(e => e as MailError);
+    expect(err.code).toBe('auth_failed');
+  });
+
+  it('maps 403 quotaExceeded to rate_limited (separate from missing-scope)', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 403, errors: [{ reason: 'userRateLimitExceeded', message: 'Quota exceeded' }] },
+    }), { status: 403, headers: { 'Content-Type': 'application/json' } }));
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const err = await provider.list().catch(e => e as MailError);
+    expect(err.code).toBe('rate_limited');
+  });
+});
+
+describe('OAuthGmailProvider — body decoding', () => {
+  it('decodes quoted-printable bodies according to declared charset', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'qp', threadId: 'tqp' }] }));
+      if (url.includes('messages/qp?format=metadata')) return Promise.resolve(respondJson(metadataMessage('qp', { threadId: 'tqp' })));
+      if (url.includes('messages/qp?format=full')) {
+        // body says "Grüße — €5" in quoted-printable + UTF-8
+        const qpEncoded = 'Gr=C3=BC=C3=9Fe =E2=80=94 =E2=82=AC5';
+        const partData = Buffer.from(qpEncoded).toString('base64url');
+        return Promise.resolve(respondJson({
+          id: 'qp', threadId: 'tqp', snippet: '', labelIds: ['INBOX'], internalDate: '0', sizeEstimate: 100,
+          payload: {
+            mimeType: 'multipart/alternative',
+            headers: [],
+            parts: [{
+              partId: '0',
+              mimeType: 'text/plain',
+              headers: [
+                { name: 'Content-Type', value: 'text/plain; charset="UTF-8"' },
+                { name: 'Content-Transfer-Encoding', value: 'quoted-printable' },
+              ],
+              body: { size: qpEncoded.length, data: partData },
+            }],
+          },
+        }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list();
+    const msg = await provider.fetch({ uid: envs[0]!.uid });
+    expect(msg.text).toBe('Grüße — €5');
+  });
+
+  it('decodes RFC 2047 MIME encoded-words in subject + from headers', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'mw', threadId: 'tmw' }] }));
+      if (url.includes('messages/mw')) {
+        const headers = [
+          { name: 'From', value: '=?UTF-8?B?VHLDpGdlcg==?= <a@example.com>' },  // "Träger" base64
+          { name: 'To', value: 'me@example.com' },
+          { name: 'Subject', value: '=?UTF-8?Q?Gr=C3=BC=C3=9Fe?=' },  // "Grüße" Q-encoded
+          { name: 'Date', value: '2026-04-26T19:46:35Z' },
+          { name: 'Message-ID', value: '<mw@example.com>' },
+        ];
+        return Promise.resolve(respondJson({
+          id: 'mw', threadId: 'tmw', snippet: '', labelIds: ['INBOX'], internalDate: '0',
+          payload: { headers },
+        }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list();
+    expect(envs[0]?.subject).toBe('Grüße');
+    expect(envs[0]?.from[0]?.name).toBe('Träger');
+  });
 });
 
 describe('OAuthGmailProvider — close', () => {

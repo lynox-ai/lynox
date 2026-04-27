@@ -92,6 +92,16 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
           return 'mail_send error: sending requires interactive user confirmation, which is not available in this mode.';
         }
 
+        // Block credential exfiltration via mail body. The deleted google_gmail
+        // tool had this; the unified mail_send needs it too. Without this, an
+        // agent that quotes a Bearer token or API key into a reply body would
+        // ship it cleartext over SMTP/Gmail with no recipient-side safeguard.
+        const { detectSecretInContent } = await import('../../../tools/builtin/http.js');
+        const secretMatch = detectSecretInContent(input.body);
+        if (secretMatch) {
+          return `mail_send blocked: body appears to contain a ${secretMatch}. Sending secrets via email is not allowed — strip the credential and retry.`;
+        }
+
         const provider = resolveProvider(registry, input.account);
 
         // Receive-only hard block — happens BEFORE any confirmation prompt.
