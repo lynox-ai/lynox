@@ -627,6 +627,10 @@ export class Engine {
         this._adsDataStore = new AdsDataStore();
         const { createAdsCustomerProfileSetTool } = await import('../tools/builtin/ads-customer-profile-set.js');
         this.registry.register(createAdsCustomerProfileSetTool(this._adsDataStore) as ToolEntry);
+        const { createAdsAuditRunTool } = await import('../tools/builtin/ads-audit-run.js');
+        this.registry.register(createAdsAuditRunTool(this._adsDataStore) as ToolEntry);
+        const { createAdsFindingAddTool } = await import('../tools/builtin/ads-finding-add.js');
+        this.registry.register(createAdsFindingAddTool(this._adsDataStore) as ToolEntry);
         if (this._googleAuth) {
           const { createAdsDataPullTool } = await import('../tools/builtin/ads-data-pull.js');
           this.registry.register(createAdsDataPullTool(this._googleAuth, this._adsDataStore) as ToolEntry);
