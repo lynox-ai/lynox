@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OAuthGmailProvider } from './oauth-gmail.js';
-import { MailError, type MailAccountConfig } from '../provider.js';
+import { MailError, type MailAccountConfig, type MailEnvelope } from '../provider.js';
 import type { GoogleAuth } from '../../google/google-auth.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -528,5 +528,94 @@ describe('OAuthGmailProvider — close', () => {
     await provider.close();
     const err = await provider.list().catch(e => e as MailError);
     expect(err.code).toBe('connection_failed');
+  });
+
+  it('aborts in-flight gmailGet so late resolutions cannot pollute the cleared uid map', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    // The mock never resolves on its own — only an abort can settle it.
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      capturedSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const listPromise = provider.list().catch((e: unknown) => e);
+
+    // Yield so the fetch is in-flight before we call close().
+    await new Promise((r) => setImmediate(r));
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal?.aborted).toBe(false);
+
+    await provider.close();
+
+    expect(capturedSignal?.aborted).toBe(true);
+    const result = await listPromise;
+    expect(result).toBeInstanceOf(MailError);
+  });
+});
+
+describe('OAuthGmailProvider — watch', () => {
+  it('queries with a 60-second SINCE overlap to absorb clock skew + Gmail index lag', async () => {
+    let capturedListUrl: string | undefined;
+    fetchMock.mockImplementation((url: string) => {
+      const s = String(url);
+      if (s.includes('/messages?') && !s.match(/\/messages\/[^?]+/)) {
+        capturedListUrl = s;
+        return Promise.resolve(respondJson({ messages: [] }));
+      }
+      return Promise.resolve(respondJson({}));
+    });
+
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const beforeSeconds = Math.floor(Date.now() / 1000);
+    const handle = await provider.watch({ intervalMs: 50, folder: 'INBOX' }, async () => {});
+
+    // One tick interval + slack
+    await new Promise((r) => setTimeout(r, 100));
+    await handle.stop();
+    await provider.close();
+
+    expect(capturedListUrl).toBeDefined();
+    const q = new URL(capturedListUrl!).searchParams.get('q') ?? '';
+    const m = q.match(/after:(\d+)/);
+    expect(m).toBeTruthy();
+    const afterSeconds = Number(m![1]);
+    // `since` should sit ~60s before "now" because of the overlap.
+    const lag = beforeSeconds - afterSeconds;
+    expect(lag).toBeGreaterThanOrEqual(59);
+    expect(lag).toBeLessThanOrEqual(63);
+  });
+
+  it('deduplicates the same Gmail message across two overlapping ticks', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      const s = String(url);
+      if (s.includes('/messages?') && !s.match(/\/messages\/[^?]+/)) {
+        return Promise.resolve(respondJson({ messages: [{ id: 'msg-overlap', threadId: 't-1' }] }));
+      }
+      if (s.match(/\/messages\/msg-overlap\?/)) {
+        return Promise.resolve(respondJson(metadataMessage('msg-overlap', { subject: 'overlap' })));
+      }
+      return Promise.resolve(respondJson({}));
+    });
+
+    const emitted: MailEnvelope[] = [];
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const handle = await provider.watch({ intervalMs: 50 }, async (ev) => {
+      if (ev.type === 'new') emitted.push(...ev.envelopes);
+    });
+
+    // Two intervals + slack
+    await new Promise((r) => setTimeout(r, 140));
+    await handle.stop();
+    await provider.close();
+
+    // Without dedup the same message would emit on every tick that hits the
+    // overlap. With dedup it should land in `emitted` exactly once.
+    expect(emitted.length).toBe(1);
+    expect(emitted[0]?.subject).toBe('overlap');
   });
 });

@@ -48,6 +48,14 @@ const DEFAULT_LIST_LIMIT = 50;
 const DEFAULT_SEARCH_LIMIT = 50;
 const DEFAULT_WATCH_INTERVAL_MS = 120_000;
 const DEFAULT_WATCH_MAX_PER_TICK = 50;
+// Re-query a 60-second overlap each tick. Gmail's index can lag the
+// server-side message arrival by a few seconds, and clock skew between
+// us and Google can also drop a message that's "before" our `since` from
+// our perspective but "after" it from the server's. The dedup map below
+// absorbs the duplicates this introduces.
+const WATCH_SINCE_OVERLAP_MS = 60_000;
+const WATCH_DEDUP_TTL_MS = 5 * 60_000;
+const WATCH_DEDUP_MAX = 1_000;
 const SNIPPET_CHARS = 500;
 // Cap on parallel `messages.get` round-trips per envelopesFor call. Eight
 // keeps us well under Gmail's per-user QPS budget (250 quota units/sec, ×5
@@ -466,6 +474,10 @@ export class OAuthGmailProvider implements MailProvider {
   private nextUid = 1;
   private readonly watchers = new Set<NodeJS.Timeout>();
   private closed = false;
+  // Fired by close() to cancel any in-flight Gmail fetches; without this,
+  // a fetch that resolves *after* close() can call assignUid on the just-
+  // cleared uid map and leave dangling entries on a closed provider.
+  private readonly aborter = new AbortController();
 
   constructor(account: MailAccountConfig, googleAuth: GoogleAuth) {
     this.accountId = account.id;
@@ -555,16 +567,47 @@ export class OAuthGmailProvider implements MailProvider {
     const intervalMs = opts.intervalMs ?? DEFAULT_WATCH_INTERVAL_MS;
     const maxPerTick = Math.min(opts.maxPerTick ?? DEFAULT_WATCH_MAX_PER_TICK, 100);
     let lastTick = new Date();
+    // Gmail-message-id → emit timestamp. Required because the SINCE_OVERLAP
+    // window will return the same message twice across two consecutive ticks
+    // until it falls out of the overlap. TTL-evicted on each tick to bound
+    // memory on long-running watchers.
+    const recentlyEmitted = new Map<string, number>();
 
     const tick = async (): Promise<void> => {
+      if (this.closed) return;
+      const since = new Date(lastTick.getTime() - WATCH_SINCE_OVERLAP_MS);
+      lastTick = new Date();
       try {
-        const since = new Date(lastTick);
-        lastTick = new Date();
         const fresh = await this.list({ folder: opts.folder, since, limit: maxPerTick });
-        if (fresh.length > 0) {
-          await handler({ type: 'new', envelopes: fresh });
+        if (this.closed) return;
+
+        const now = Date.now();
+        for (const [id, t] of recentlyEmitted) {
+          if (now - t > WATCH_DEDUP_TTL_MS) recentlyEmitted.delete(id);
+        }
+
+        const newOnly: MailEnvelope[] = [];
+        for (const env of fresh) {
+          const gmailId = this.uidToGmailId.get(env.uid);
+          if (gmailId && recentlyEmitted.has(gmailId)) continue;
+          if (gmailId) recentlyEmitted.set(gmailId, now);
+          newOnly.push(env);
+        }
+
+        while (recentlyEmitted.size > WATCH_DEDUP_MAX) {
+          const oldest = recentlyEmitted.keys().next().value;
+          if (oldest === undefined) break;
+          recentlyEmitted.delete(oldest);
+        }
+
+        if (newOnly.length > 0) {
+          await handler({ type: 'new', envelopes: newOnly });
         }
       } catch (err) {
+        if (this.closed) return;
+        // close() abort surfaces here as AbortError; suppress so the consumer
+        // doesn't see a spurious error event during shutdown.
+        if (err instanceof Error && err.name === 'AbortError') return;
         await handler({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) });
       }
     };
@@ -582,6 +625,7 @@ export class OAuthGmailProvider implements MailProvider {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.aborter.abort();
     for (const timer of this.watchers) clearInterval(timer);
     this.watchers.clear();
     this.uidToGmailId.clear();
@@ -715,7 +759,7 @@ export class OAuthGmailProvider implements MailProvider {
     const headers = await this.authHeaders();
     const res = await globalThis.fetch(`${GMAIL_BASE}/${path}`, {
       headers,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]),
     });
     return await this.parseResponse<T>(res, `GET ${path}`);
   }
@@ -726,7 +770,7 @@ export class OAuthGmailProvider implements MailProvider {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]),
     });
     return await this.parseResponse<T>(res, `POST ${path}`);
   }
