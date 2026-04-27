@@ -157,6 +157,7 @@ export class Engine {
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
   private _whatsappContext: import('../integrations/whatsapp/context.js').WhatsAppContext | null = null;
+  private _adsDataStore: import('./ads-data-store.js').AdsDataStore | null = null;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
@@ -614,6 +615,25 @@ export class Engine {
       }
     }
 
+    // Ads Optimizer (BETA, beta-gated to brandfusion's own canary).
+    // Tool only registers when both the feature flag is on and Google OAuth is
+    // configured (the pipeline reads CSVs out of the customer's Drive).
+    // The store itself initialises whenever the flag is on so CLI/admin
+    // tooling can inspect prior runs even without an active Drive connection.
+    if (isFeatureEnabled('ads-optimizer')) {
+      try {
+        const { AdsDataStore } = await import('./ads-data-store.js');
+        this._adsDataStore = new AdsDataStore();
+        if (this._googleAuth) {
+          const { createAdsDataPullTool } = await import('../tools/builtin/ads-data-pull.js');
+          this.registry.register(createAdsDataPullTool(this._googleAuth, this._adsDataStore) as ToolEntry);
+        }
+      } catch (err) {
+        process.stderr.write(`[lynox] Ads Optimizer init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        this._adsDataStore = null;
+      }
+    }
+
     // Pipeline tools registered conditionally
     this._pipelinesEnabled = false;
 
@@ -809,6 +829,7 @@ export class Engine {
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
   getWhatsAppContext(): import('../integrations/whatsapp/context.js').WhatsAppContext | null { return this._whatsappContext; }
+  getAdsDataStore(): import('./ads-data-store.js').AdsDataStore | null { return this._adsDataStore; }
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {
