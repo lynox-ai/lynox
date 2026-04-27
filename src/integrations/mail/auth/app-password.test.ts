@@ -35,11 +35,11 @@ describe('MailCredentialStore — save & resolve', () => {
     const backend = new FakeBackend();
     const store = new MailCredentialStore(backend);
 
-    store.save('rafael-gmail', { user: 'rafael@gmail.com', pass: 'abcd-efgh-ijkl-mnop' });
+    store.save('rafael-gmail', { user: 'user@gmail.com', pass: 'abcd-efgh-ijkl-mnop' });
     expect(store.has('rafael-gmail')).toBe(true);
 
     const creds = store.resolve('rafael-gmail');
-    expect(creds.user).toBe('rafael@gmail.com');
+    expect(creds.user).toBe('user@gmail.com');
     expect(creds.pass).toBe('abcd-efgh-ijkl-mnop');
   });
 

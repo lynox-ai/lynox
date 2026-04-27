@@ -301,13 +301,13 @@ describe('mail_reply tool', () => {
 
   it('reply_all unions To+Cc minus our own address (accountId-as-email heuristic)', async () => {
     // Use an account whose id IS the email address so the dedup heuristic kicks in
-    const myProvider = new FakeProvider('rafael@example.com');
+    const myProvider = new FakeProvider('user@example.com');
     const myRegistry = new InMemoryMailRegistry();
     myRegistry.add(myProvider);
 
     const orig: MailEnvelope = {
       ...envelope(5, { messageId: '<o@x>', from: 'alice@example.com', subject: 'Q' }),
-      to: [{ address: 'rafael@example.com' }, { address: 'colleague@example.com' }],
+      to: [{ address: 'user@example.com' }, { address: 'colleague@example.com' }],
       cc: [{ address: 'manager@example.com' }],
     };
     myProvider.fetch.mockResolvedValue({
@@ -324,7 +324,7 @@ describe('mail_reply tool', () => {
     expect(ccAddrs).toContain('colleague@example.com');
     expect(ccAddrs).toContain('manager@example.com');
     // Our own address is filtered out
-    expect(ccAddrs).not.toContain('rafael@example.com');
+    expect(ccAddrs).not.toContain('user@example.com');
   });
 
   it('rejects when the original has no sender and no override is given', async () => {
@@ -550,7 +550,7 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
   it('blocks mail_send from an info@ account without prompting', async () => {
     // The default registry fixture has a provider with id 'rafael-gmail' —
     // declare its config as receive-only so the hard block fires.
-    const cfg = receiveOnlyAccount('rafael-gmail', 'info@brandfusion.ch', 'info');
+    const cfg = receiveOnlyAccount('rafael-gmail', 'info@example.com', 'info');
     const ctx = makeStubContext([cfg]);
     const tool = createMailSendTool(registry, ctx);
     const promptSpy = vi.fn(async () => 'Yes');
@@ -563,7 +563,7 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
   });
 
   it('blocks mail_send from an abuse@ account — compliance channel', async () => {
-    const cfg = receiveOnlyAccount('rafael-gmail', 'abuse@brandfusion.ch', 'abuse');
+    const cfg = receiveOnlyAccount('rafael-gmail', 'abuse@example.com', 'abuse');
     const ctx = makeStubContext([cfg]);
     const tool = createMailSendTool(registry, ctx);
     const agent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
@@ -573,14 +573,14 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
   });
 
   it('blocks mail_reply when sending account would be receive-only', async () => {
-    const abuseCfg = receiveOnlyAccount('rafael-gmail', 'abuse@brandfusion.ch', 'abuse');
+    const abuseCfg = receiveOnlyAccount('rafael-gmail', 'abuse@example.com', 'abuse');
     const ctx = makeStubContext([abuseCfg]);
     // Provider read path: the original was received via 'rafael-gmail' (declared abuse),
     // and the reply-from derivation would pick the same — so the hard block kicks in.
     provider.fetch.mockResolvedValue({
       envelope: {
         ...envelope(1, { messageId: '<o@x>' }),
-        to: [{ address: 'abuse@brandfusion.ch' }],
+        to: [{ address: 'abuse@example.com' }],
       },
       text: 'Phishing report content',
       html: undefined,
@@ -602,10 +602,10 @@ describe('mail_reply — smart reply-from', () => {
     const personal = new FakeProvider('personal');
     const business = new FakeProvider('business');
     const personalCfg: MailAccountConfig = {
-      ...businessAccount('personal', 'rafael@gmail.com'),
+      ...businessAccount('personal', 'user@gmail.com'),
       type: 'personal',
     };
-    const businessCfg = businessAccount('business', 'rafael@brandfusion.ch');
+    const businessCfg = businessAccount('business', 'user@example.com');
     const ctx = makeStubContext([personalCfg, businessCfg]);
     const reg = new InMemoryMailRegistry();
     reg.add(personal);
@@ -616,7 +616,7 @@ describe('mail_reply — smart reply-from', () => {
       envelope: {
         ...envelope(42, { messageId: '<inbound@x>' }),
         to: [{ address: 'someone@example.com' }],
-        cc: [{ address: 'rafael@brandfusion.ch' }],
+        cc: [{ address: 'user@example.com' }],
       },
       text: 'hi',
       html: undefined,
@@ -638,7 +638,7 @@ describe('mail_reply — smart reply-from', () => {
   it('falls back to the read account when no recipient matches a registered account', async () => {
     const p = new FakeProvider('personal');
     const personalCfg: MailAccountConfig = {
-      ...businessAccount('personal', 'rafael@gmail.com'),
+      ...businessAccount('personal', 'user@gmail.com'),
       type: 'personal',
     };
     const ctx = makeStubContext([personalCfg]);
@@ -682,7 +682,7 @@ describe('mail_send — mass-send cross-field counting', () => {
 
 describe('receive-only types still allow read operations', () => {
   it('info@ account can be listed by mail_triage', async () => {
-    const infoCfg = receiveOnlyAccount('rafael-gmail', 'info@brandfusion.ch', 'info');
+    const infoCfg = receiveOnlyAccount('rafael-gmail', 'info@example.com', 'info');
     const ctx = makeStubContext([infoCfg]);
     provider.list.mockResolvedValue([
       envelope(1, { messageId: '<m@x>', from: 'client@example.com', subject: 'Question' }),

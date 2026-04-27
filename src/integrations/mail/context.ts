@@ -401,7 +401,7 @@ export class MailContext {
 
   /**
    * Build a stable slug from an email address. Preserves `+`, `.`, and `_`
-   * inside the local-part so `rafael@x` and `rafael+spam@x` and `rafael.x@y`
+   * inside the local-part so `user@x` and `user+spam@x` and `user.x@y`
    * never collide and silently overwrite each other in the mail_accounts
    * table.
    */

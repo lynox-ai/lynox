@@ -43,7 +43,7 @@ describe('buildPresetAccount', () => {
     const account = buildPresetAccount('gmail', {
       id: 'rafael-gmail',
       displayName: 'Rafael',
-      address: 'rafael@gmail.com',
+      address: 'user@gmail.com',
     });
     expect(account.preset).toBe('gmail');
     expect(account.imap.host).toBe('imap.gmail.com');
