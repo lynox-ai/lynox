@@ -33,9 +33,11 @@ import type {
   CustomerProfileRow,
 } from './ads-data-store.js';
 import {
-  buildAdGroupRow, buildCampaignSettingsRow, buildKeywordRow,
-  buildNegativeKeywordRow, encodeUtf16LeWithBom, renderCsvBody,
-  slugifyCampaignName, type CsvRowInput,
+  buildAdGroupRow, buildAssetGroupRow, buildAssetRow, buildAudienceSignalRow,
+  buildCampaignRow, buildCalloutRow, buildKeywordRow, buildListingGroupRow,
+  buildNegativeRow, buildRsaRow, buildSitelinkRow,
+  encodeUtf16LeWithBom, renderCsvBody, slugifyCampaignName,
+  type CsvRow, type AssetFieldType,
 } from './ads-csv-builder.js';
 import { validateBlueprint, type ValidationSummary } from './ads-emit-validators.js';
 
@@ -53,7 +55,11 @@ export interface EmitResult {
   /** Per-file row counts, useful for the markdown summary. */
   perFileRowCounts: Array<{ file: string; rowCount: number }>;
   /** Aggregated row totals across all files. */
-  totals: { campaigns: number; adGroups: number; keywords: number; negatives: number };
+  totals: {
+    campaigns: number; adGroups: number; keywords: number; rsas: number;
+    assetGroups: number; assets: number; audienceSignals: number;
+    listingGroups: number; sitelinks: number; callouts: number; negatives: number;
+  };
   /** Reason emit was blocked (hard validator errors), null when emit succeeded or was idempotent. */
   blockedReason: string | null;
 }
@@ -129,17 +135,24 @@ export function runEmit(
 
   const filesWritten: string[] = [];
   const perFileRowCounts: Array<{ file: string; rowCount: number }> = [];
-  const totals = { campaigns: 0, adGroups: 0, keywords: 0, negatives: 0 };
+  const totals = makeEmptyTotals();
 
   for (const f of planned) {
     const file = join(baseDir, f.fileName);
     writeFileSync(file, encodeUtf16LeWithBom(f.body));
     filesWritten.push(file);
     perFileRowCounts.push({ file, rowCount: f.rowCount });
-    totals.campaigns += f.campaignCount;
-    totals.adGroups += f.adGroupCount;
-    totals.keywords += f.keywordCount;
-    totals.negatives += f.negativeCount;
+    totals.campaigns += f.counts.campaignCount;
+    totals.adGroups += f.counts.adGroupCount;
+    totals.keywords += f.counts.keywordCount;
+    totals.rsas += f.counts.rsaCount;
+    totals.assetGroups += f.counts.assetGroupCount;
+    totals.assets += f.counts.assetCount;
+    totals.audienceSignals += f.counts.audienceSignalCount;
+    totals.listingGroups += f.counts.listingGroupCount;
+    totals.sitelinks += f.counts.sitelinkCount;
+    totals.callouts += f.counts.calloutCount;
+    totals.negatives += f.counts.negativeCount;
   }
 
   // 4. Stamp hash onto the run row.
@@ -149,19 +162,22 @@ export function runEmit(
     filesWritten, null, perFileRowCounts, totals);
 }
 
+interface BucketCounts {
+  campaignCount: number; adGroupCount: number; keywordCount: number;
+  rsaCount: number; assetGroupCount: number; assetCount: number;
+  audienceSignalCount: number; listingGroupCount: number;
+  sitelinkCount: number; calloutCount: number; negativeCount: number;
+}
+
 interface PlannedFile {
   fileName: string;
   body: string;
   rowCount: number;
-  campaignCount: number;
-  adGroupCount: number;
-  keywordCount: number;
-  negativeCount: number;
+  counts: BucketCounts;
 }
 
 function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
   const files: PlannedFile[] = [];
-  // Stable ordering: per-campaign by name, account-negatives last.
   const campaignNames = [...grouped.perCampaign.keys()].sort();
   for (const name of campaignNames) {
     const bucket = grouped.perCampaign.get(name)!;
@@ -169,10 +185,15 @@ function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
       fileName: `${slugifyCampaignName(name)}.csv`,
       body: renderCsvBody(bucket.rows),
       rowCount: bucket.rows.length,
-      campaignCount: bucket.campaignCount,
-      adGroupCount: bucket.adGroupCount,
-      keywordCount: bucket.keywordCount,
-      negativeCount: bucket.negativeCount,
+      counts: {
+        campaignCount: bucket.campaignCount, adGroupCount: bucket.adGroupCount,
+        keywordCount: bucket.keywordCount, rsaCount: bucket.rsaCount,
+        assetGroupCount: bucket.assetGroupCount, assetCount: bucket.assetCount,
+        audienceSignalCount: bucket.audienceSignalCount,
+        listingGroupCount: bucket.listingGroupCount,
+        sitelinkCount: bucket.sitelinkCount, calloutCount: bucket.calloutCount,
+        negativeCount: bucket.negativeCount,
+      },
     });
   }
   if (grouped.accountNegatives.length > 0) {
@@ -180,11 +201,26 @@ function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
       fileName: 'account-negatives.csv',
       body: renderCsvBody(grouped.accountNegatives),
       rowCount: grouped.accountNegatives.length,
-      campaignCount: 0, adGroupCount: 0, keywordCount: 0,
-      negativeCount: grouped.accountNegatives.length,
+      counts: { ...zeroBucketCounts(), negativeCount: grouped.accountNegatives.length },
     });
   }
   return files;
+}
+
+function zeroBucketCounts(): BucketCounts {
+  return {
+    campaignCount: 0, adGroupCount: 0, keywordCount: 0, rsaCount: 0,
+    assetGroupCount: 0, assetCount: 0, audienceSignalCount: 0,
+    listingGroupCount: 0, sitelinkCount: 0, calloutCount: 0, negativeCount: 0,
+  };
+}
+
+function makeEmptyTotals(): EmitResult['totals'] {
+  return {
+    campaigns: 0, adGroups: 0, keywords: 0, rsas: 0,
+    assetGroups: 0, assets: 0, audienceSignals: 0,
+    listingGroups: 0, sitelinks: 0, callouts: 0, negatives: 0,
+  };
 }
 
 function computeEmitHash(files: readonly PlannedFile[]): string {
@@ -209,8 +245,7 @@ function baseResult(
   validation: ValidationSummary, hash: string, idempotent: boolean,
   filesWritten: string[], blockedReason: string | null,
   perFileRowCounts: Array<{ file: string; rowCount: number }> = [],
-  totals: { campaigns: number; adGroups: number; keywords: number; negatives: number } =
-    { campaigns: 0, adGroups: 0, keywords: 0, negatives: 0 },
+  totals: EmitResult['totals'] = makeEmptyTotals(),
 ): EmitResult {
   return {
     account, customer, run, validation, hash, idempotent,
@@ -219,89 +254,222 @@ function baseResult(
 }
 
 interface CampaignBucket {
-  rows: CsvRowInput[];
+  rows: CsvRow[];
   campaignCount: number;
   adGroupCount: number;
   keywordCount: number;
+  rsaCount: number;
+  assetGroupCount: number;
+  assetCount: number;
+  audienceSignalCount: number;
+  listingGroupCount: number;
+  sitelinkCount: number;
+  calloutCount: number;
   negativeCount: number;
 }
 
 interface GroupedEmit {
   perCampaign: Map<string, CampaignBucket>;
-  accountNegatives: CsvRowInput[];
+  accountNegatives: CsvRow[];
+}
+
+function newBucket(): CampaignBucket {
+  return {
+    rows: [], campaignCount: 0, adGroupCount: 0, keywordCount: 0, rsaCount: 0,
+    assetGroupCount: 0, assetCount: 0, audienceSignalCount: 0,
+    listingGroupCount: 0, sitelinkCount: 0, calloutCount: 0, negativeCount: 0,
+  };
 }
 
 function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmit {
   const perCampaign = new Map<string, CampaignBucket>();
-  const accountNegatives: CsvRowInput[] = [];
+  const accountNegatives: CsvRow[] = [];
   const ensureBucket = (name: string): CampaignBucket => {
     let b = perCampaign.get(name);
     if (b) return b;
-    b = { rows: [], campaignCount: 0, adGroupCount: 0, keywordCount: 0, negativeCount: 0 };
+    b = newBucket();
     perCampaign.set(name, b);
     return b;
   };
 
-  // First pass: campaigns themselves so each bucket has its settings row.
+  // 1. Campaigns first so each bucket starts with the settings row.
   for (const e of entities) {
     if (e.entity_type !== 'campaign') continue;
     const payload = parsePayload(e.payload_json);
     const name = stringField(payload, 'campaign_name');
     if (!name) continue;
     const bucket = ensureBucket(name);
-    bucket.rows.push(buildCampaignSettingsRow({
+    bucket.rows.push(buildCampaignRow({
       campaignName: name,
-      ...(stringField(payload, 'status') !== null ? { status: stringField(payload, 'status')! } : {}),
+      campaignType: campaignTypeFromPayload(payload),
+      ...(numberField(payload, 'budget_chf') !== null ? { budget: numberField(payload, 'budget_chf')! } : {}),
+      ...(numberField(payload, 'target_roas') !== null ? { targetRoas: numberField(payload, 'target_roas')! } : {}),
+      ...(numberField(payload, 'target_cpa') !== null ? { targetCpa: numberField(payload, 'target_cpa')! } : {}),
+      ...(stringField(payload, 'status') !== null ? { status: editorStatus(stringField(payload, 'status')!) } : { status: 'Paused' }),
     }));
     bucket.campaignCount++;
   }
 
+  // 2. Sub-entities.
   for (const e of entities) {
     if (e.entity_type === 'campaign') continue;
     const payload = parsePayload(e.payload_json);
-    if (e.entity_type === 'ad_group') {
-      const campaign = stringField(payload, 'campaign_name');
-      const adGroup = stringField(payload, 'ad_group_name');
-      if (!campaign || !adGroup) continue;
-      const bucket = ensureBucket(campaign);
-      bucket.rows.push(buildAdGroupRow({
-        campaignName: campaign, adGroupName: adGroup,
-        status: 'Paused',
-        action: e.kind === 'KEEP' ? 'Edit' : 'Add',
-      }));
-      bucket.adGroupCount++;
-      continue;
-    }
-    if (e.entity_type === 'keyword') {
-      const campaign = stringField(payload, 'campaign_name');
-      const adGroup = stringField(payload, 'ad_group_name');
-      const keyword = stringField(payload, 'keyword');
-      if (!campaign || !adGroup || !keyword) continue;
-      const matchType = normaliseMatchType(stringField(payload, 'match_type'));
-      const bucket = ensureBucket(campaign);
-      bucket.rows.push(buildKeywordRow({
-        campaignName: campaign, adGroupName: adGroup,
-        keyword, matchType,
-        status: 'Paused',
-        action: e.kind === 'KEEP' ? 'Edit' : 'Add',
-      }));
-      bucket.keywordCount++;
-      continue;
-    }
-    if (e.entity_type === 'negative') {
-      const keyword = stringField(payload, 'keyword_text');
-      const matchType = normaliseMatchType(stringField(payload, 'match_type'));
-      const scope = stringField(payload, 'scope');
-      const scopeTarget = stringField(payload, 'scope_target');
-      if (!keyword) continue;
-      if (scope === 'account' || scopeTarget === null) {
-        accountNegatives.push(buildNegativeKeywordRow({ keyword, matchType }));
-      } else {
-        const bucket = ensureBucket(scopeTarget);
-        bucket.rows.push(buildNegativeKeywordRow({
-          campaignName: scopeTarget, keyword, matchType,
+
+    switch (e.entity_type) {
+      case 'ad_group': {
+        const campaign = stringField(payload, 'campaign_name');
+        const adGroup = stringField(payload, 'ad_group_name');
+        if (!campaign || !adGroup) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildAdGroupRow({
+          campaignName: campaign, adGroupName: adGroup,
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Enabled',
         }));
-        bucket.negativeCount++;
+        bucket.adGroupCount++;
+        break;
+      }
+      case 'keyword': {
+        const campaign = stringField(payload, 'campaign_name');
+        const adGroup = stringField(payload, 'ad_group_name');
+        const keyword = stringField(payload, 'keyword');
+        if (!campaign || !adGroup || !keyword) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildKeywordRow({
+          campaignName: campaign, adGroupName: adGroup,
+          keyword, matchType: normaliseMatchType(stringField(payload, 'match_type')),
+          ...(stringField(payload, 'final_url') !== null ? { finalUrl: stringField(payload, 'final_url')! } : {}),
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Enabled',
+        }));
+        bucket.keywordCount++;
+        break;
+      }
+      case 'rsa_ad': {
+        const campaign = stringField(payload, 'campaign_name');
+        const adGroup = stringField(payload, 'ad_group_name');
+        const headlines = stringArrayField(payload, 'headlines');
+        const descriptions = stringArrayField(payload, 'descriptions');
+        const finalUrl = stringField(payload, 'final_url');
+        if (!campaign || !adGroup || !finalUrl || headlines.length === 0) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildRsaRow({
+          campaignName: campaign, adGroupName: adGroup,
+          headlines, descriptions,
+          ...(stringField(payload, 'path1') !== null ? { path1: stringField(payload, 'path1')! } : {}),
+          ...(stringField(payload, 'path2') !== null ? { path2: stringField(payload, 'path2')! } : {}),
+          finalUrl,
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Enabled',
+        }));
+        bucket.rsaCount++;
+        break;
+      }
+      case 'asset_group': {
+        const campaign = stringField(payload, 'campaign_name');
+        const groupName = stringField(payload, 'asset_group_name');
+        if (!campaign || !groupName) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildAssetGroupRow({
+          campaignName: campaign, assetGroupName: groupName,
+          ...(stringField(payload, 'final_url') !== null ? { finalUrl: stringField(payload, 'final_url')! } : {}),
+          ...(stringField(payload, 'final_mobile_url') !== null ? { finalMobileUrl: stringField(payload, 'final_mobile_url')! } : {}),
+          ...(stringField(payload, 'path1') !== null ? { path1: stringField(payload, 'path1')! } : {}),
+          ...(stringField(payload, 'path2') !== null ? { path2: stringField(payload, 'path2')! } : {}),
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Paused',
+        }));
+        bucket.assetGroupCount++;
+        break;
+      }
+      case 'asset': {
+        const campaign = stringField(payload, 'campaign_name');
+        const groupName = stringField(payload, 'asset_group_name');
+        const fieldType = parseAssetFieldType(stringField(payload, 'field_type'));
+        if (!campaign || !groupName || !fieldType) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildAssetRow({
+          campaignName: campaign, assetGroupName: groupName,
+          fieldType,
+          ...(numberField(payload, 'index') !== null ? { index: numberField(payload, 'index')! } : {}),
+          ...(stringField(payload, 'text') !== null ? { text: stringField(payload, 'text')! } : {}),
+          ...(stringField(payload, 'video_id') !== null ? { videoId: stringField(payload, 'video_id')! } : {}),
+          ...(stringField(payload, 'asset_name') !== null ? { assetName: stringField(payload, 'asset_name')! } : {}),
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Enabled',
+        }));
+        bucket.assetCount++;
+        break;
+      }
+      case 'audience_signal': {
+        const campaign = stringField(payload, 'campaign_name');
+        const groupName = stringField(payload, 'asset_group_name');
+        const audienceName = stringField(payload, 'audience_name');
+        if (!campaign || !groupName || !audienceName) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildAudienceSignalRow({
+          campaignName: campaign, assetGroupName: groupName, audienceName,
+          ...(stringField(payload, 'interest_categories') !== null ? { interestCategories: stringField(payload, 'interest_categories')! } : {}),
+          ...(stringField(payload, 'custom_audience_segments') !== null ? { customAudienceSegments: stringField(payload, 'custom_audience_segments')! } : {}),
+          ...(stringField(payload, 'remarketing_segments') !== null ? { remarketingSegments: stringField(payload, 'remarketing_segments')! } : {}),
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Enabled',
+        }));
+        bucket.audienceSignalCount++;
+        break;
+      }
+      case 'listing_group': {
+        const campaign = stringField(payload, 'campaign_name');
+        const productGroup = stringField(payload, 'product_group');
+        if (!campaign || !productGroup) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildListingGroupRow({
+          campaignName: campaign, productGroup,
+          ...(stringField(payload, 'asset_group_name') !== null ? { assetGroupName: stringField(payload, 'asset_group_name')! } : {}),
+          ...(stringField(payload, 'product_group_type') !== null ? { productGroupType: stringField(payload, 'product_group_type')! } : {}),
+          ...(numberField(payload, 'bid_modifier') !== null ? { bidModifier: numberField(payload, 'bid_modifier')! } : {}),
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Enabled',
+        }));
+        bucket.listingGroupCount++;
+        break;
+      }
+      case 'sitelink': {
+        const campaign = stringField(payload, 'campaign_name');
+        const text = stringField(payload, 'text');
+        const url = stringField(payload, 'final_url');
+        if (!campaign || !text || !url) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildSitelinkRow({
+          campaignName: campaign, text, url,
+          ...(stringField(payload, 'desc1') !== null ? { desc1: stringField(payload, 'desc1')! } : {}),
+          ...(stringField(payload, 'desc2') !== null ? { desc2: stringField(payload, 'desc2')! } : {}),
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Enabled',
+        }));
+        bucket.sitelinkCount++;
+        break;
+      }
+      case 'callout': {
+        const campaign = stringField(payload, 'campaign_name');
+        const text = stringField(payload, 'text');
+        if (!campaign || !text) continue;
+        const bucket = ensureBucket(campaign);
+        bucket.rows.push(buildCalloutRow({
+          campaignName: campaign, text,
+          status: e.kind === 'PAUSE' ? 'Paused' : 'Enabled',
+        }));
+        bucket.calloutCount++;
+        break;
+      }
+      case 'negative': {
+        const keyword = stringField(payload, 'keyword_text');
+        const matchType = normaliseMatchType(stringField(payload, 'match_type'));
+        const scope = stringField(payload, 'scope');
+        const scopeTarget = stringField(payload, 'scope_target');
+        if (!keyword) continue;
+        if (scope === 'account' || scopeTarget === null) {
+          accountNegatives.push(buildNegativeRow({ keyword, matchType }));
+        } else {
+          const bucket = ensureBucket(scopeTarget);
+          bucket.rows.push(buildNegativeRow({
+            campaignName: scopeTarget, keyword, matchType,
+          }));
+          bucket.negativeCount++;
+        }
+        break;
       }
     }
   }
@@ -334,4 +502,42 @@ function parsePayload(s: string): Record<string, unknown> {
 function stringField(p: Record<string, unknown>, key: string): string | null {
   const v = p[key];
   return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function numberField(p: Record<string, unknown>, key: string): number | null {
+  const v = p[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+function stringArrayField(p: Record<string, unknown>, key: string): string[] {
+  const v = p[key];
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+function campaignTypeFromPayload(p: Record<string, unknown>): 'Search' | 'Display' | 'Shopping' | 'Performance Max' | 'Video' {
+  const raw = stringField(p, 'channel_type') ?? stringField(p, 'campaign_type') ?? '';
+  const v = raw.toUpperCase().replace(/[ _-]+/gu, '_');
+  if (v === 'PERFORMANCE_MAX' || v === 'PMAX') return 'Performance Max';
+  if (v === 'DISPLAY') return 'Display';
+  if (v === 'SHOPPING') return 'Shopping';
+  if (v === 'VIDEO') return 'Video';
+  return 'Search';
+}
+
+function editorStatus(s: string): 'Paused' | 'Enabled' | 'Removed' {
+  const v = s.toLowerCase();
+  if (v === 'enabled') return 'Enabled';
+  if (v === 'removed' || v === 'disabled') return 'Removed';
+  return 'Paused';
+}
+
+function parseAssetFieldType(s: string | null): AssetFieldType | null {
+  if (!s) return null;
+  const v = s.toUpperCase().replace(/[ -]+/gu, '_');
+  const allowed: AssetFieldType[] = [
+    'HEADLINE', 'LONG_HEADLINE', 'DESCRIPTION',
+    'BUSINESS_NAME', 'CALL_TO_ACTION',
+    'IMAGE', 'LOGO', 'VIDEO',
+  ];
+  return (allowed as readonly string[]).includes(v) ? (v as AssetFieldType) : null;
 }

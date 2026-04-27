@@ -118,7 +118,7 @@ describe('runEmit', () => {
     const bytes = await readFile(negFile!);
     // decode UTF-16 LE manually
     const text = decodeUtf16LeBytes(bytes);
-    expect(text).toMatch(/Negative keyword/);
+    expect(text).toMatch(/Campaign Negative/);
     expect(text).toMatch(/drills/i);
   });
 
