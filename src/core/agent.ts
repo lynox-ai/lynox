@@ -824,15 +824,20 @@ export class Agent implements IAgent {
       const cause = err instanceof Error ? err : new Error(String(err));
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);
-      const toolError = new Error(`Tool ${tc.name} failed: ${message}`, { cause });
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput });
 
       if (this.onStream) {
+        // Tool-level error: surface inline via tool_result (UI renders it red on
+        // the tool block) and let the agent loop see is_error: true to self-
+        // recover. Do NOT emit a separate `error` stream event — that's reserved
+        // for fatal agent-level failures (iteration limit, _callAPI throws) that
+        // terminate the run. Emitting it here triggers the UI's global toast
+        // even when the agent recovers, leaving "Etwas ist schiefgelaufen" stuck
+        // next to a still-streaming response.
         await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, isError: true });
-        await this.onStream({ type: 'error', message: toolError.message, agent: this.name });
       }
       return {
         type: 'tool_result',
