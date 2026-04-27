@@ -681,3 +681,111 @@ describe('MailContext — persisted default flag', () => {
     }
   });
 });
+
+// ── Persisted default flag (PR3) ─────────────────────────────────────────
+//
+// The DEFAULT badge no longer flips when providers register in different
+// order. is_default lives in mail_accounts; init() restores it; addAccount()
+// no longer silently demotes a previous default; setDefault() is the
+// explicit user-driven switch.
+
+describe('MailContext — persisted default flag', () => {
+  it('init() promotes the row marked is_default=1 in the DB', async () => {
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    stateDb.upsertAccount(ICLOUD_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+    backend.set('MAIL_ACCOUNT_RAFAEL_ICLOUD', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+
+    // Mark iCloud as the explicit default — even though gmail is older
+    stateDb.setDefaultAccount('rafael-icloud');
+
+    const ctx2 = new MailContext(stateDb, backend);
+    try {
+      await ctx2.init();
+      expect(ctx2.registry.default()).toBe('rafael-icloud');
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('init() falls back to first registered + persists when no default is set', async () => {
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    stateDb.upsertAccount(ICLOUD_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+    backend.set('MAIL_ACCOUNT_RAFAEL_ICLOUD', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+
+    const ctx2 = new MailContext(stateDb, backend);
+    try {
+      await ctx2.init();
+      // Gmail is older (registered first); becomes fallback default
+      expect(ctx2.registry.default()).toBe('rafael-gmail');
+      expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('addAccount() does not overwrite an existing default', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    expect(ctx.registry.default()).toBe('rafael-gmail');
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+
+    await ctx.addAccount(INPUT_ICLOUD);
+    // The first-added account stays default — this is the bug we're fixing.
+    expect(ctx.registry.default()).toBe('rafael-gmail');
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+  });
+
+  it('setDefault() updates DB + registry; throws for unknown id', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+
+    ctx.setDefault('rafael-icloud');
+    expect(ctx.registry.default()).toBe('rafael-icloud');
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+
+    expect(() => ctx.setDefault('missing')).toThrow(MailError);
+  });
+
+  it('removeAccount() promotes a sibling when removing the default', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+    ctx.setDefault('rafael-gmail');
+
+    await ctx.removeAccount('rafael-gmail');
+    // Fallback to the only remaining account, persisted
+    expect(ctx.registry.default()).toBe('rafael-icloud');
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+
+    await ctx.removeAccount('rafael-icloud');
+    expect(ctx.registry.default()).toBe(null);
+    expect(stateDb.defaultAccountId()).toBe(null);
+  });
+
+  it('OAuth boot migration claims the default when no other row holds it', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      emailAddress: 'rafael@brandfusion.ch',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch;
+
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    try {
+      const ctxBoot = new MailContext(stateDb, backend, undefined, {}, auth);
+      try {
+        await ctxBoot.init();
+        // OAuth row was the first to exist → claims default
+        expect(ctxBoot.registry.default()).toBe('gmail-rafael-brandfusion-ch');
+        expect(stateDb.defaultAccountId()).toBe('gmail-rafael-brandfusion-ch');
+      } finally {
+        await ctxBoot.close();
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
