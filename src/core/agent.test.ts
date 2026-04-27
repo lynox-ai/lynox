@@ -392,6 +392,35 @@ describe('Agent', () => {
       expect(toolResultEvents[0]!.result).toContain('boom');
     });
 
+    it('does NOT emit a fatal `error` stream event when a tool throws and the agent recovers', async () => {
+      // Regression for the rafael.lynox.cloud incident (2026-04-26): spawn_agent
+      // threw on the session cost ceiling, the agent fell back to direct
+      // web_research and finished the turn — but the UI showed a global
+      // "Etwas ist schiefgelaufen" toast because the engine emitted an
+      // `error` SSE on top of the inline tool_result. Tool-level errors must
+      // stay inline; only iteration-limit / _callAPI failures may emit `error`.
+      const failTool = makeTool('bad_tool', vi.fn().mockRejectedValue(new Error('cost ceiling')));
+      const onStream = vi.fn();
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_bad', name: 'bad_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Recovered'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [failTool],
+        onStream,
+      });
+      const result = await agent.send('Use it');
+
+      expect(result).toBe('Recovered');
+      const errorEvents = onStream.mock.calls
+        .map(c => c[0])
+        .filter(e => e.type === 'error');
+      expect(errorEvents).toEqual([]);
+    });
+
     it('tool not found: returns error result', async () => {
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_missing', name: 'nonexistent', input: {} }]))
