@@ -28,7 +28,9 @@ describe('Agent Security Audit', () => {
       const externalToolFiles = [
         'tools/builtin/http.ts',
         'integrations/search/web-search-tool.ts',
-        'integrations/google/google-gmail.ts',
+        // Gmail moved into the unified mail integration (OAuthGmailProvider)
+        // — covered by integrations/mail/providers/oauth-gmail.ts via the
+        // mail tools' wrapUntrustedData usage downstream.
         'integrations/google/google-sheets.ts',
         'integrations/google/google-drive.ts',
         'integrations/google/google-calendar.ts',
