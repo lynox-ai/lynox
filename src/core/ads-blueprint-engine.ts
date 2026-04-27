@@ -1,0 +1,403 @@
+/**
+ * Ads Optimizer — P3 Blueprint orchestrator.
+ *
+ * Composes the four P3 sub-modules over the latest successful audit
+ * run:
+ *
+ *   - History-Preservation matcher   (ads-history-match)
+ *   - Three-fold negative generator  (ads-negative-generator)
+ *   - Naming-convention enforcer     (ads-naming-convention)
+ *   - PMAX low-strength surface      (ads-pmax-restructure)
+ *
+ * Mode-gate:
+ *   - BOOTSTRAP — every current snapshot entity becomes a KEEP decision
+ *     (no rename/pause logic), additive negatives are still produced,
+ *     and PMAX restructure proposals are skipped entirely.
+ *   - OPTIMIZE — full history-preservation per entity type plus
+ *     negative generation; restructure SAFEGUARD evaluation is
+ *     available for the agent-driven path (V2) but the orchestrator
+ *     does not auto-generate splits/merges in V1.
+ *
+ * Pure read/compute over the SQLite snapshot. No KG / HTTP / LLM
+ * calls. The tool wrapper handles the markdown report and KG mirror.
+ */
+import type {
+  AdsDataStore,
+  AdsAccountRow,
+  AdsAuditRunRow,
+  AdsBlueprintEntityKind,
+  CustomerProfileRow,
+  InsertBlueprintEntityInput,
+  InsertRunDecisionInput,
+  AdsDecision,
+  AdsDecisionEntityType,
+} from './ads-data-store.js';
+import { matchHistory, type MatchableEntity, type HistoryMatchDecision } from './ads-history-match.js';
+import { generateNegatives, type NegativeProposal } from './ads-negative-generator.js';
+import {
+  parseTemplate, validateName,
+  type NamingValidationContext, type ParsedTemplate, type NamingValidationResult,
+} from './ads-naming-convention.js';
+import { findLowStrengthAssetGroups, type LowStrengthAssetGroup } from './ads-pmax-restructure.js';
+
+// Entity types we run history-preservation against. RSA ads + asset-groups
+// + keywords cover the entities P4 emits to per-campaign Editor-CSVs.
+const HISTORY_TRACKED_ENTITY_TYPES = ['campaign', 'ad_group', 'keyword', 'asset_group'] as const;
+
+export interface BlueprintResult {
+  account: AdsAccountRow;
+  customer: CustomerProfileRow | null;
+  run: AdsAuditRunRow;
+  previousRun: AdsAuditRunRow | null;
+  mode: 'BOOTSTRAP' | 'OPTIMIZE';
+  /** Per entity type: history-match summary (empty for additive-only modes). */
+  historyByType: Map<string, HistoryMatchDecision[]>;
+  /** Negative-keyword proposals from all three sources. */
+  negatives: NegativeProposal[];
+  /** Asset-groups flagged for additive attention (low ad strength). */
+  lowStrengthAssetGroups: LowStrengthAssetGroup[];
+  /** Persisted blueprint_id values, in insertion order. */
+  persistedEntityIds: number[];
+  /** Counts of persisted entities by kind. */
+  counts: Record<AdsBlueprintEntityKind, number> & { total: number };
+  /** Names that fail the customer's naming-convention template. */
+  namingViolations: Array<{ entityType: string; externalId: string; name: string; errors: string[] }>;
+}
+
+export interface RunBlueprintOptions {
+  /** Inject "now" for deterministic tests. */
+  now?: Date | undefined;
+  /** Override waste-spend threshold for cross_campaign negatives (CHF). */
+  wasteSpendThreshold?: number | undefined;
+}
+
+export class BlueprintPreconditionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BlueprintPreconditionError';
+  }
+}
+
+// ── Public entry point ────────────────────────────────────────────────
+
+export function runBlueprint(
+  store: AdsDataStore,
+  adsAccountId: string,
+  opts?: RunBlueprintOptions | undefined,
+): BlueprintResult {
+  const account = store.getAdsAccount(adsAccountId);
+  if (!account) {
+    throw new BlueprintPreconditionError(
+      `Unknown ads_account_id "${adsAccountId}". Run ads_data_pull and ads_audit_run first.`,
+    );
+  }
+  const run = store.getLatestSuccessfulAuditRun(adsAccountId);
+  if (!run) {
+    throw new BlueprintPreconditionError(
+      `No successful audit run for "${adsAccountId}". Run ads_audit_run first.`,
+    );
+  }
+  const customer = store.getCustomerProfile(account.customer_id);
+  if (!customer) {
+    throw new BlueprintPreconditionError(
+      `Customer profile missing for "${account.customer_id}". Run ads_customer_profile_set first — ` +
+      `Blueprint depends on naming convention, brands, competitors, pmax-owned head terms.`,
+    );
+  }
+  const previousRun = run.previous_run_id !== null
+    ? store.getAuditRun(run.previous_run_id)
+    : null;
+
+  const mode = pickMode(run, previousRun);
+  const namingTemplate = customer.naming_convention_pattern
+    ? parseTemplate(customer.naming_convention_pattern)
+    : null;
+  const namingContext: NamingValidationContext = {
+    languages: parseJsonArray(customer.languages),
+    ownBrands: parseJsonArray(customer.own_brands),
+  };
+
+  // History-preservation per tracked entity type ─────────────────────
+  const historyByType = new Map<string, HistoryMatchDecision[]>();
+  for (const entityType of HISTORY_TRACKED_ENTITY_TYPES) {
+    if (mode === 'BOOTSTRAP') {
+      historyByType.set(entityType, allKeepFromCurrent(store, run, entityType));
+    } else {
+      historyByType.set(entityType, fullHistoryMatch(store, run, previousRun, entityType));
+    }
+  }
+
+  // Negatives — additive in all modes ─────────────────────────────────
+  const negatives = generateNegatives(store, adsAccountId, run.run_id, customer, {
+    ...(opts?.wasteSpendThreshold !== undefined ? { wasteSpendThreshold: opts.wasteSpendThreshold } : {}),
+  });
+
+  // Low-strength asset groups — surfaced in markdown ──────────────────
+  const lowStrengthAssetGroups = findLowStrengthAssetGroups(store, run);
+
+  // Persist decisions + blueprint entities + record naming violations ─
+  const persistedEntityIds: number[] = [];
+  const namingViolations: BlueprintResult['namingViolations'] = [];
+
+  for (const [entityType, decisions] of historyByType) {
+    for (const d of decisions) {
+      const naming = checkNamingForDecision(d, entityType, namingTemplate, namingContext);
+      if (!naming.valid) {
+        namingViolations.push({
+          entityType,
+          externalId: d.externalId,
+          name: extractName(d) ?? d.externalId,
+          errors: naming.errors,
+        });
+      }
+      const blueprintInput: InsertBlueprintEntityInput = {
+        runId: run.run_id,
+        adsAccountId,
+        entityType,
+        kind: d.kind,
+        externalId: d.externalId,
+        previousExternalId: d.previousExternalId ?? undefined,
+        confidence: d.confidence,
+        rationale: d.rationale,
+        payload: d.payload ?? {},
+        namingValid: naming.valid,
+        namingErrors: naming.errors,
+      };
+      const row = store.insertBlueprintEntity(blueprintInput);
+      persistedEntityIds.push(row.blueprint_id);
+      // Mirror to ads_run_decisions (canonical history-preservation log).
+      store.insertRunDecision({
+        runId: run.run_id,
+        entityType: toDecisionEntityType(entityType),
+        entityExternalId: d.externalId,
+        decision: toDecisionKind(d.kind),
+        previousExternalId: d.previousExternalId ?? undefined,
+        confidence: d.confidence,
+        rationale: d.rationale,
+      });
+    }
+  }
+
+  // Negatives → NEW entities, type='negative'.
+  for (const n of negatives) {
+    const blueprintInput: InsertBlueprintEntityInput = {
+      runId: run.run_id,
+      adsAccountId,
+      entityType: 'negative',
+      kind: 'NEW',
+      externalId: n.externalId,
+      confidence: n.confidence,
+      rationale: n.rationale,
+      payload: {
+        keyword_text: n.keywordText,
+        match_type: n.matchType,
+        scope: n.scope,
+        scope_target: n.scopeTarget,
+        source: n.source,
+        ...(n.evidence ? { evidence: n.evidence } : {}),
+      },
+      // Negatives are not subject to the customer's naming convention.
+      namingValid: true,
+      namingErrors: [],
+    };
+    const row = store.insertBlueprintEntity(blueprintInput);
+    persistedEntityIds.push(row.blueprint_id);
+    store.insertRunDecision({
+      runId: run.run_id,
+      entityType: 'negative',
+      entityExternalId: n.externalId,
+      decision: 'NEW',
+      confidence: n.confidence,
+      rationale: n.rationale,
+    });
+  }
+
+  const counts = store.countBlueprintEntities(run.run_id);
+
+  return {
+    account, customer, run, previousRun, mode,
+    historyByType, negatives, lowStrengthAssetGroups,
+    persistedEntityIds, counts, namingViolations,
+  };
+}
+
+// ── Mode picking ──────────────────────────────────────────────────────
+
+function pickMode(run: AdsAuditRunRow, previousRun: AdsAuditRunRow | null): 'BOOTSTRAP' | 'OPTIMIZE' {
+  // Run.mode is the audit-engine's authoritative judgement; we honor it.
+  // Without a previous successful run we always BOOTSTRAP regardless.
+  if (!previousRun) return 'BOOTSTRAP';
+  return run.mode;
+}
+
+// ── Snapshot loading per entity type ──────────────────────────────────
+
+function loadEntities(
+  store: AdsDataStore, run: AdsAuditRunRow, entityType: string,
+): MatchableEntity[] {
+  switch (entityType) {
+    case 'campaign': {
+      const rows = store.getSnapshotRows<{
+        campaign_id: string; campaign_name: string; status: string | null;
+        budget_micros: number | null; channel_type: string | null;
+      }>('ads_campaigns', run.ads_account_id, { runId: run.run_id });
+      return rows.map(r => ({
+        externalId: r.campaign_id,
+        name: r.campaign_name,
+        ...(r.status !== null ? { status: r.status } : {}),
+        payload: {
+          campaign_name: r.campaign_name,
+          ...(r.budget_micros !== null ? { budget_micros: r.budget_micros } : {}),
+          ...(r.channel_type !== null ? { channel_type: r.channel_type } : {}),
+        },
+      }));
+    }
+    case 'ad_group': {
+      const rows = store.getSnapshotRows<{
+        ad_group_id: string | null; ad_group_name: string; campaign_name: string | null;
+        status: string | null;
+      }>('ads_ad_groups', run.ads_account_id, { runId: run.run_id });
+      return rows.map(r => ({
+        externalId: r.ad_group_id ?? `${r.campaign_name ?? ''}::${r.ad_group_name}`,
+        name: r.ad_group_name,
+        ...(r.status !== null ? { status: r.status } : {}),
+        payload: {
+          ad_group_name: r.ad_group_name,
+          ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
+        },
+      }));
+    }
+    case 'keyword': {
+      const rows = store.getSnapshotRows<{
+        keyword: string; match_type: string | null; campaign_name: string | null;
+        ad_group_name: string | null; status: string | null;
+      }>('ads_keywords', run.ads_account_id, { runId: run.run_id });
+      return rows.map(r => {
+        // Keywords have no stable Google ID in the export — synthesise from
+        // (campaign, ad_group, keyword, match_type) which is unique within
+        // an account.
+        const id = `${r.campaign_name ?? ''}::${r.ad_group_name ?? ''}::${r.keyword}::${r.match_type ?? ''}`;
+        return {
+          externalId: id,
+          name: r.keyword,
+          ...(r.status !== null ? { status: r.status } : {}),
+          payload: {
+            keyword: r.keyword,
+            ...(r.match_type !== null ? { match_type: r.match_type } : {}),
+            ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
+            ...(r.ad_group_name !== null ? { ad_group_name: r.ad_group_name } : {}),
+          },
+        };
+      });
+    }
+    case 'asset_group': {
+      const rows = store.getSnapshotRows<{
+        asset_group_id: string; asset_group_name: string;
+        campaign_name: string | null; status: string | null;
+      }>('ads_asset_groups', run.ads_account_id, { runId: run.run_id });
+      return rows.map(r => ({
+        externalId: r.asset_group_id,
+        name: r.asset_group_name,
+        ...(r.status !== null ? { status: r.status } : {}),
+        payload: {
+          asset_group_name: r.asset_group_name,
+          ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
+        },
+      }));
+    }
+    default:
+      return [];
+  }
+}
+
+function fullHistoryMatch(
+  store: AdsDataStore, run: AdsAuditRunRow, previousRun: AdsAuditRunRow | null, entityType: string,
+): HistoryMatchDecision[] {
+  const current = loadEntities(store, run, entityType);
+  if (!previousRun) return current.map(toKeepDecision);
+  const previous = loadEntities(store, previousRun, entityType);
+  return matchHistory(previous, current).decisions;
+}
+
+function allKeepFromCurrent(
+  store: AdsDataStore, run: AdsAuditRunRow, entityType: string,
+): HistoryMatchDecision[] {
+  return loadEntities(store, run, entityType).map(toKeepDecision);
+}
+
+function toKeepDecision(e: MatchableEntity): HistoryMatchDecision {
+  return {
+    kind: 'KEEP',
+    externalId: e.externalId,
+    previousExternalId: null,
+    confidence: 1,
+    rationale: 'BOOTSTRAP-Mode: alle aktuellen Entities werden ohne Restructure übernommen.',
+    ...(e.payload !== undefined ? { payload: e.payload } : {}),
+  };
+}
+
+// ── Naming-convention check ──────────────────────────────────────────
+
+function checkNamingForDecision(
+  d: HistoryMatchDecision, entityType: string,
+  template: ParsedTemplate | null, context: NamingValidationContext,
+): NamingValidationResult {
+  if (template === null) return { valid: true, errors: [] };
+  // Naming convention applies primarily to campaigns/ad_groups/asset_groups.
+  // Keywords have their own structure (the keyword text itself), so we skip.
+  if (entityType === 'keyword') return { valid: true, errors: [] };
+  const name = extractName(d);
+  if (!name) return { valid: true, errors: [] };
+  return validateName(name, template, context);
+}
+
+function extractName(d: HistoryMatchDecision): string | undefined {
+  const p = d.payload as Record<string, unknown> | undefined;
+  if (!p) return undefined;
+  for (const key of ['campaign_name', 'ad_group_name', 'asset_group_name', 'keyword']) {
+    const v = p[key];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return undefined;
+}
+
+// ── Decision/blueprint kind translations ──────────────────────────────
+
+function toDecisionKind(kind: AdsBlueprintEntityKind): AdsDecision {
+  // The two enums are intentionally aligned; the cast surfaces drift if
+  // either side ever extends.
+  return kind as AdsDecision;
+}
+
+function toDecisionEntityType(entityType: string): AdsDecisionEntityType {
+  // ads_run_decisions enum is closed; map cleanly or fall back to the
+  // closest sibling. Kept defensive even though all callers here pass
+  // values from HISTORY_TRACKED_ENTITY_TYPES.
+  switch (entityType) {
+    case 'campaign':
+    case 'ad_group':
+    case 'keyword':
+    case 'rsa_ad':
+    case 'asset_group':
+    case 'asset':
+    case 'listing_group':
+    case 'sitelink':
+    case 'callout':
+    case 'snippet':
+    case 'negative':
+      return entityType;
+    default:
+      return 'campaign';
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+function parseJsonArray(s: string): string[] {
+  try {
+    const v = JSON.parse(s);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
