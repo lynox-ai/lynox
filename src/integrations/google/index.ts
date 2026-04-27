@@ -1,6 +1,8 @@
 export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES } from './google-auth.js';
 export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult } from './google-auth.js';
-export { createGmailTool } from './google-gmail.js';
+// Gmail no longer ships as a standalone tool — it surfaces via the unified
+// mail tools (mail_triage, mail_search, mail_read, mail_send, mail_reply)
+// once the Gmail OAuth row appears in the mail registry. See OAuthGmailProvider.
 export { createSheetsTool } from './google-sheets.js';
 export { createDriveTool } from './google-drive.js';
 export { createCalendarTool } from './google-calendar.js';
@@ -9,7 +11,6 @@ export { docsToMarkdown, markdownToHtml } from './google-docs-format.js';
 
 import type { ToolEntry } from '../../types/index.js';
 import { GoogleAuth } from './google-auth.js';
-import { createGmailTool } from './google-gmail.js';
 import { createSheetsTool } from './google-sheets.js';
 import { createDriveTool } from './google-drive.js';
 import { createCalendarTool } from './google-calendar.js';
@@ -38,8 +39,10 @@ export function createGoogleTools(options: GoogleToolsOptions): { tools: ToolEnt
   });
 
   // Cast needed: ToolEntry<SpecificInput> → ToolEntry (contravariant handler)
+  // Gmail intentionally absent: agents reach Gmail through the unified mail
+  // tools registered by MailContext (which uses OAuthGmailProvider against
+  // the same GoogleAuth instance — no second OAuth flow).
   const tools: ToolEntry[] = [
-    createGmailTool(auth) as ToolEntry,
     createSheetsTool(auth) as ToolEntry,
     createDriveTool(auth) as ToolEntry,
     createCalendarTool(auth) as ToolEntry,

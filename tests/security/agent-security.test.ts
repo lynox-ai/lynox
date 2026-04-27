@@ -28,7 +28,12 @@ describe('Agent Security Audit', () => {
       const externalToolFiles = [
         'tools/builtin/http.ts',
         'integrations/search/web-search-tool.ts',
-        'integrations/google/google-gmail.ts',
+        // mail_read wraps full body in <untrusted_data>; mail_triage and
+        // mail_search render envelope summaries via renderTriageList in
+        // triage/envelope.ts which wraps each attacker-controlled snippet
+        // the same way. Both files imported below.
+        'integrations/mail/tools/mail-read.ts',
+        'integrations/mail/triage/envelope.ts',
         'integrations/google/google-sheets.ts',
         'integrations/google/google-drive.ts',
         'integrations/google/google-calendar.ts',

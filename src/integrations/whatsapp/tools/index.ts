@@ -121,7 +121,7 @@ async function handleSendMessage(ctx: WhatsAppContext, input: WhatsAppToolInput,
   if (!toPhone) return 'Error: pass either thread_id or to.';
 
   // Block the LLM from leaking credentials into an outbound WhatsApp message.
-  // Mirrors the Gmail tool's secret-scan in google-gmail.ts.
+  // Same secret-scan layer used by the mail tools before SMTP/Gmail send.
   const { detectSecretInContent } = await import('../../../tools/builtin/http.js');
   const secretMatch = detectSecretInContent(body);
   if (secretMatch) {

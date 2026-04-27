@@ -128,7 +128,7 @@ export function renderFanoutResult(
     if (envelopes.length > 0) {
       lines.push(`Found ${String(envelopes.length)} message(s):`);
       lines.push('');
-      lines.push(renderTriageList(envelopes));
+      lines.push(renderTriageList(envelopes, tagged[0]?.accountId));
     }
     if (errors.length > 0) {
       lines.push('');
@@ -153,7 +153,7 @@ export function renderFanoutResult(
   const lines: string[] = [header, ''];
   for (const [accountId, envelopes] of byAccount.entries()) {
     lines.push(`### ${accountId} (${String(envelopes.length)})`);
-    lines.push(renderTriageList(envelopes));
+    lines.push(renderTriageList(envelopes, accountId));
     lines.push('');
   }
   if (errors.length > 0) {

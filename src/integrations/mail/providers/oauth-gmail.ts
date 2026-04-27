@@ -99,9 +99,82 @@ function header(headers: ReadonlyArray<{ name: string; value: string }> | undefi
   if (!headers) return undefined;
   const lower = name.toLowerCase();
   for (const h of headers) {
-    if (h.name.toLowerCase() === lower) return h.value;
+    if (h.name.toLowerCase() === lower) return decodeMimeWords(h.value);
   }
   return undefined;
+}
+
+/**
+ * Decode RFC 2047 MIME encoded-words like `=?UTF-8?B?...?=` and `=?UTF-8?Q?...?=`
+ * that appear in Subject / From / To headers when the original contained
+ * non-ASCII characters. Without this, `Subject: =?UTF-8?B?w7xtbGF1dHM=?=`
+ * lands in the agent context as opaque base64, AND the boundary scanner
+ * can't see through the encoding to detect injection-shaped content.
+ *
+ * Coverage: UTF-8 + ISO-8859-1 (Buffer-supported). Other charsets fall
+ * back to UTF-8 decoding which is best-effort but never throws.
+ */
+function decodeMimeWords(value: string): string {
+  return value.replace(
+    /=\?([\w-]+)\?([BbQq])\?([^?]+)\?=(?:\s+(?==\?))?/g,
+    (_match, charset: string, encoding: string, payload: string) => {
+      try {
+        const cs = charset.toLowerCase();
+        const enc = encoding.toUpperCase();
+        let bytes: Buffer;
+        if (enc === 'B') {
+          bytes = Buffer.from(payload, 'base64');
+        } else {
+          // Q-encoding: `_` → space, `=XX` → byte
+          const expanded = payload.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_m, h: string) => String.fromCharCode(Number.parseInt(h, 16)));
+          bytes = Buffer.from(expanded, 'binary');
+        }
+        const codec: BufferEncoding = cs === 'iso-8859-1' || cs === 'latin1'
+          ? 'latin1'
+          : cs === 'us-ascii' || cs === 'ascii'
+          ? 'ascii'
+          : 'utf-8';
+        return bytes.toString(codec);
+      } catch {
+        return ''; // never let a malformed encoded-word leak its raw payload
+      }
+    },
+  );
+}
+
+/**
+ * RFC 2045 quoted-printable decoding for body parts. `=20` → space, `=3D`
+ * → `=`, soft line breaks (`=\r\n` or `=\n`) join lines, every other `=XX`
+ * is a hex byte. Used when a Gmail payload reports
+ * Content-Transfer-Encoding: quoted-printable.
+ */
+function decodeQuotedPrintable(input: string, charset: string): string {
+  const cleaned = input
+    // Soft line breaks (must come first so we don't try to interpret `=\r` as a hex escape)
+    .replace(/=\r?\n/g, '')
+    // Hex escapes
+    .replace(/=([0-9A-Fa-f]{2})/g, (_m, h: string) => String.fromCharCode(Number.parseInt(h, 16)));
+
+  const cs = (charset || 'utf-8').toLowerCase();
+  const codec: BufferEncoding = cs === 'iso-8859-1' || cs === 'latin1'
+    ? 'latin1'
+    : cs === 'us-ascii' || cs === 'ascii'
+    ? 'ascii'
+    : 'utf-8';
+  return Buffer.from(cleaned, 'binary').toString(codec);
+}
+
+/** Lookup the charset declared on a part's Content-Type header, or undefined. */
+function partCharset(payload: GmailPayload | undefined): string | undefined {
+  const ct = header(payload?.headers, 'Content-Type');
+  if (!ct) return undefined;
+  const m = ct.match(/charset\s*=\s*"?([^";\s]+)"?/i);
+  return m?.[1];
+}
+
+/** Lookup Content-Transfer-Encoding (e.g. 'quoted-printable', 'base64', '7bit'). */
+function partTransferEncoding(payload: GmailPayload | undefined): string {
+  return (header(payload?.headers, 'Content-Transfer-Encoding') ?? '7bit').toLowerCase();
 }
 
 function base64urlDecode(data: string): Buffer {
@@ -201,18 +274,51 @@ function collectAttachments(payload: GmailPayload | undefined): MailAttachmentMe
   return out;
 }
 
+/**
+ * Decode a Gmail body part's `body.data` honouring its Content-Transfer-
+ * Encoding and declared charset. Gmail's `format=full` API delivers the
+ * payload bytes pre-decoded from base64url, but the bytes themselves may
+ * still be quoted-printable or in a non-UTF-8 charset — the previous
+ * implementation assumed UTF-8 + base64-only and silently produced
+ * garbled body text for anything German/legacy.
+ */
+function decodePartBody(part: GmailPayload | undefined): string {
+  if (!part?.body?.data) return '';
+  const charset = partCharset(part) ?? 'utf-8';
+  const tx = partTransferEncoding(part);
+  // Gmail wraps everything in base64url at the API boundary, so the inner
+  // string here is the post-base64url payload — i.e. either raw text or
+  // QP/base64-of-the-original. We base64url-decode once unconditionally.
+  const raw = base64urlDecode(part.body.data);
+  if (tx === 'quoted-printable') {
+    return decodeQuotedPrintable(raw.toString('binary'), charset);
+  }
+  if (tx === 'base64') {
+    // Gmail typically delivers already-decoded text via base64url, so a
+    // declared 'base64' transfer encoding is rare. If it does appear,
+    // treat the post-base64url bytes as the actual payload.
+    const codec: BufferEncoding = charset.toLowerCase() === 'iso-8859-1' ? 'latin1' : 'utf-8';
+    return raw.toString(codec);
+  }
+  // 7bit / 8bit / binary / unspecified — just decode bytes as the charset.
+  const codec: BufferEncoding = charset.toLowerCase() === 'iso-8859-1' || charset.toLowerCase() === 'latin1'
+    ? 'latin1'
+    : 'utf-8';
+  return raw.toString(codec);
+}
+
 function extractText(payload: GmailPayload | undefined): string {
   if (!payload) return '';
   // Prefer text/plain
   const plain = findPart(payload, 'text/plain');
-  if (plain?.body?.data) return base64urlDecode(plain.body.data).toString('utf-8');
+  if (plain?.body?.data) return decodePartBody(plain);
   // Fall back to text/html → strip tags
   const html = findPart(payload, 'text/html');
-  if (html?.body?.data) return htmlToText(base64urlDecode(html.body.data).toString('utf-8'));
+  if (html?.body?.data) return htmlToText(decodePartBody(html));
   // Single-part with inline body
   if (payload.body?.data) {
-    if (payload.mimeType === 'text/html') return htmlToText(base64urlDecode(payload.body.data).toString('utf-8'));
-    return base64urlDecode(payload.body.data).toString('utf-8');
+    if (payload.mimeType === 'text/html') return htmlToText(decodePartBody(payload));
+    return decodePartBody(payload);
   }
   return '';
 }
@@ -570,7 +676,7 @@ export class OAuthGmailProvider implements MailProvider {
 
   private extractHtml(payload: GmailPayload | undefined): string | undefined {
     const html = findPart(payload, 'text/html');
-    if (html?.body?.data) return base64urlDecode(html.body.data).toString('utf-8');
+    if (html?.body?.data) return decodePartBody(html);
     return undefined;
   }
 
@@ -613,7 +719,20 @@ export class OAuthGmailProvider implements MailProvider {
       throw new MailError('auth_failed', `Gmail ${label}: 401 — token rejected. Re-authorize in Settings → Integrations → Google.`);
     }
     if (res.status === 403) {
-      throw new MailError('auth_failed', `Gmail ${label}: 403 — missing scope or quota exceeded. ${bodyText.slice(0, 200)}`);
+      // Gmail uses 403 for both insufficient-scope AND quota-exceeded. The
+      // remediation is wildly different (re-authorize vs. wait it out), so
+      // we split based on the structured `error.errors[0].reason` field.
+      const reason = parseGmailErrorReason(bodyText);
+      const isQuota = reason !== null && (
+        reason === 'quotaexceeded' ||
+        reason === 'userratelimitexceeded' ||
+        reason === 'ratelimitexceeded' ||
+        reason === 'dailylimitexceeded'
+      );
+      if (isQuota) {
+        throw new MailError('rate_limited', `Gmail ${label}: 403 ${reason} — quota or rate limit exceeded; back off and retry.`);
+      }
+      throw new MailError('auth_failed', `Gmail ${label}: 403${reason ? ` ${reason}` : ''} — missing scope. Grant write access in Settings → Integrations → Google.`);
     }
     if (res.status === 404) {
       throw new MailError('not_found', `Gmail ${label}: 404 not found`);
@@ -622,5 +741,22 @@ export class OAuthGmailProvider implements MailProvider {
       throw new MailError('rate_limited', `Gmail ${label}: 429 rate limited`);
     }
     throw new MailError('connection_failed', `Gmail ${label}: HTTP ${String(res.status)} ${bodyText.slice(0, 200)}`);
+  }
+}
+
+/**
+ * Pull `error.errors[0].reason` (lowercased) out of a Gmail API error body.
+ * Returns null when the body isn't JSON, or doesn't carry the reason.
+ * Standard shape:
+ *   {"error":{"code":403,"errors":[{"reason":"insufficientPermissions",...}]}}
+ */
+function parseGmailErrorReason(body: string): string | null {
+  if (!body) return null;
+  try {
+    const parsed = JSON.parse(body) as { error?: { errors?: Array<{ reason?: string }> } };
+    const reason = parsed?.error?.errors?.[0]?.reason;
+    return typeof reason === 'string' ? reason.toLowerCase() : null;
+  } catch {
+    return null;
   }
 }
