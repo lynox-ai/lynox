@@ -86,8 +86,93 @@ describe('GoogleAuth', () => {
   });
 
   describe('getAccessToken', () => {
+    function makeVaultWithExpiredTokens() {
+      const store = new Map<string, string>();
+      store.set('GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'old-token-aaaaaaaa',
+        refresh_token: 'refresh-token-bbbbbbbb',
+        expires_at: Date.now() - 1000,
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      }));
+      return {
+        get: vi.fn((key: string) => store.get(key) ?? null),
+        set: vi.fn((key: string, value: string) => { store.set(key, value); }),
+        delete: vi.fn((key: string) => store.delete(key)),
+      };
+    }
+
     it('throws when not authenticated', async () => {
       await expect(auth.getAccessToken()).rejects.toThrow('Not authenticated');
+    });
+
+    it('coalesces concurrent refresh calls into a single network request', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+
+      let resolveResponse: (value: Response) => void = () => {};
+      const responsePromise = new Promise<Response>((resolve) => {
+        resolveResponse = resolve;
+      });
+      mockFetch.mockReturnValue(responsePromise);
+
+      const callers = Array.from({ length: 50 }, () => vaultAuth.getAccessToken());
+      await new Promise((r) => setImmediate(r));
+
+      resolveResponse(
+        new Response(
+          JSON.stringify({
+            access_token: 'new-token-cccccccc',
+            expires_in: 3600,
+            scope: 'https://www.googleapis.com/auth/gmail.readonly',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+
+      const tokens = await Promise.all(callers);
+
+      expect(tokens.every((t) => t === 'new-token-cccccccc')).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears in-flight guard so a later refresh can proceed', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            access_token: 'first-refresh-dddddddd',
+            expires_in: 1,
+            scope: 'https://www.googleapis.com/auth/gmail.readonly',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      const t1 = await vaultAuth.getAccessToken();
+      expect(t1).toBe('first-refresh-dddddddd');
+
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            access_token: 'second-refresh-eeeeeeee',
+            expires_in: 3600,
+            scope: 'https://www.googleapis.com/auth/gmail.readonly',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      const t2 = await vaultAuth.getAccessToken();
+      expect(t2).toBe('second-refresh-eeeeeeee');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
   });
 
