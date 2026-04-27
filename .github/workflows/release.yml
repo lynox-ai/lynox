@@ -159,6 +159,9 @@ jobs:
   dispatch-pro-release:
     needs: [docker, npm]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
     steps:
       - name: Dispatch release to lynox-pro
         env:
@@ -179,3 +182,40 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             https://api.github.com/repos/lynox-ai/lynox-pro/dispatches \
             -d "$PAYLOAD"
+
+      # Record a GitHub Deployment for visual tracking on the Deployments page.
+      # PR #142 (2026-04-23) removed `environment: production` from this job to
+      # drop a manual reviewer gate that was blocking releases for hours; the
+      # side effect was that GH stopped creating Deployment objects, so the
+      # Deployments page froze at v1.3.3. This restores the visual record
+      # without re-introducing a blocking gate — the deployment is created and
+      # immediately marked `success` after the cross-repo dispatch succeeds.
+      # RELEASE_TAG is read via env: (not interpolated into the script) — same
+      # safe pattern as the dispatch step above.
+      - name: Record GitHub Deployment (production)
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const dep = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: tag,
+              environment: 'production',
+              required_contexts: [],
+              auto_merge: false,
+              production_environment: true,
+              description: `Engine ${tag} dispatched to lynox-pro`,
+            });
+            if (typeof dep.data.id !== 'number') {
+              throw new Error(`Unexpected createDeployment response: ${JSON.stringify(dep.data)}`);
+            }
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: dep.data.id,
+              state: 'success',
+              description: 'Cross-repo dispatch to lynox-pro succeeded',
+            });
