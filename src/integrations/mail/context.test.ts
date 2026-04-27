@@ -657,7 +657,7 @@ describe('MailContext — persisted default flag', () => {
   it('OAuth boot migration claims the default when no other row holds it', async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      emailAddress: 'rafael@brandfusion.ch',
+      emailAddress: 'user@example.com',
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch;
 
     const auth = {
@@ -762,30 +762,4 @@ describe('MailContext — persisted default flag', () => {
     expect(stateDb.defaultAccountId()).toBe(null);
   });
 
-  it('OAuth boot migration claims the default when no other row holds it', async () => {
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      emailAddress: 'rafael@brandfusion.ch',
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch;
-
-    const auth = {
-      isAuthenticated: vi.fn().mockReturnValue(true),
-      getAccessToken: vi.fn().mockResolvedValue('t'),
-      hasScope: vi.fn().mockReturnValue(true),
-    } as unknown as import('../google/google-auth.js').GoogleAuth;
-
-    try {
-      const ctxBoot = new MailContext(stateDb, backend, undefined, {}, auth);
-      try {
-        await ctxBoot.init();
-        // OAuth row was the first to exist → claims default
-        expect(ctxBoot.registry.default()).toBe('gmail-rafael-brandfusion-ch');
-        expect(stateDb.defaultAccountId()).toBe('gmail-rafael-brandfusion-ch');
-      } finally {
-        await ctxBoot.close();
-      }
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-  });
 });

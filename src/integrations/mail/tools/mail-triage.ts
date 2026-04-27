@@ -127,7 +127,7 @@ export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTria
           lines.push('');
           if (r.survivors.length > 0) {
             lines.push('Survivors:');
-            lines.push(renderTriageList(r.survivors));
+            lines.push(renderTriageList(r.survivors, r.accountId));
           }
           if (r.noise > 0 && input.include_noise !== true) {
             lines.push('');
@@ -143,7 +143,7 @@ export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTria
             const header = `### ${r.accountId} — ${String(r.survivors.length)} survivor(s), ${String(r.noise)} noise, ${String(r.threadCount)} thread(s)`;
             lines.push(header);
             if (r.survivors.length > 0) {
-              lines.push(renderTriageList(r.survivors));
+              lines.push(renderTriageList(r.survivors, r.accountId));
             } else {
               lines.push('(nothing new)');
             }
