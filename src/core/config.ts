@@ -67,6 +67,7 @@ export function loadConfig(): LynoxUserConfig {
     'changeset_review', 'greeting', 'context_name',
     'max_daily_cost_usd', 'max_monthly_cost_usd',
     'max_http_requests_per_hour', 'max_http_requests_per_day',
+    'max_mail_sends_per_hour', 'max_mail_sends_per_day', 'mail_dedup_window_sec',
     'memory_extraction',
     'memory_half_life_days',
     'pipeline_context_limit', 'pipeline_step_result_limit',

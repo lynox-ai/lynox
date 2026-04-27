@@ -21,6 +21,14 @@ export interface ToolEntry<TInput = unknown> {
    * generic "sends external mail" warning.
    */
   requiresConfirmation?: boolean | undefined;
+  /**
+   * Optional redactor for the tool input before it is captured in the
+   * audit trail (channels.toolEnd → run_tool_calls.input_json). Tools
+   * that handle sensitive payloads (e.g. mail bodies) return an
+   * audit-safe shape with the sensitive fields removed/replaced.
+   * Returning the input unchanged is equivalent to omitting the hook.
+   */
+  redactInputForAudit?: ((input: TInput) => unknown) | undefined;
 }
 
 // === 4.3 Stream Event Union ===
