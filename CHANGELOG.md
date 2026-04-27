@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.3.6 — 2026-04-27
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.4 (delete this block before saving):
+
+Core:
+- chore(mail): remove google_gmail tool + security hardening (PR4/4 reopen) (#180)
+- fix(mail): persist default mailbox + UI toggle (PR3/4 reopen) (#179)
+- feat(mail): OAuth-Gmail as first-class provider + boot migration (PR2/4 reopen) (#178)
+- feat(mail): add auth_type foundation for multi-provider mailboxes (#174)
+- docs(google-workspace): clarify project permission + Internal vs External (#172)
+- fix(google-oauth): callback works under engine API CSP, idempotent on reload (#173)
+- feat(mistral): startup health check surfaces 401/402/429 to stderr + Bugsink (#171)
+- fix(ui): replace disabled-Modell-dropdown with info card on Managed EU (#170)
+- fix(voice): diagnostic TTS error toasts (replace generic "Vorlesen fehlgeschlagen") (#169)
+- fix(voice): mark non-Paul voices experimental + add non-EN hint (#168)
+- fix(prompts,config): stop answered-prompt stack + spurious 403 on save (#167)
+- fix(prompts): permission timeout overflow + KEY_NAME placeholder (#166)
+- fix(markdown): heading edge-cases + visible mermaid render errors (#165)
+- fix(ui): v1.3.5 moderate polish bundle (#164)
+- fix(ui): v1.3.5 trivial polish bundle (#162)
+
+Pro:
+- chore: update google_gmail references to unified mail tools (#84)
+- chore(release): v1.3.4 (#83)
+-->
 ## 1.3.4 — 2026-04-24
 
 ### Added
