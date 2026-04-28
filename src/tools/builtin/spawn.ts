@@ -16,6 +16,15 @@ const MAX_SPAWN_DEPTH = 5;
 const SPAWN_EXCLUDED = new Set(['spawn_agent']);
 const DEFAULT_SPAWN_BUDGET_USD = 5;
 
+// Hard caps on caller-supplied values. The schema below advertises these
+// bounds to the LLM, but the handler re-validates because tool-input schemas
+// are not enforced — without the runtime check, a negative max_turns flips
+// the estimator output negative and would *credit* the session-budget
+// counter on `checkSessionBudget`.
+const MAX_SPAWN_AGENTS = 10;
+const MAX_SPAWN_TURNS = 50;
+const MAX_SPAWN_BUDGET_USD = 50;
+
 /**
  * Default iteration cap for a child agent, used both as the cost-guard cap
  * (executeThinker) and as the per-spawn estimator multiplier (handler).
@@ -72,7 +81,12 @@ function estimateSpawnCost(model: string, maxIterations: number): number {
   const pricing = getPricing(model);
   const expectedOutput = getDefaultMaxTokens(model) * OUTPUT_FILL_RATIO;
   const avgInput = 4000;
-  return maxIterations * (
+  // Defensive clamp: a negative or NaN value here would make the estimate
+  // negative and credit the session-budget counter on `checkSessionBudget`.
+  const iters = Number.isFinite(maxIterations) && maxIterations > 0
+    ? Math.floor(maxIterations)
+    : 1;
+  return iters * (
     (avgInput / 1_000_000) * pricing.input +
     (expectedOutput / 1_000_000) * pricing.output
   );
@@ -80,6 +94,33 @@ function estimateSpawnCost(model: string, maxIterations: number): number {
 
 interface SpawnAgentInput {
   agents: SpawnSpec[];
+}
+
+function validateSpawnInput(input: SpawnAgentInput): void {
+  if (!Array.isArray(input.agents) || input.agents.length === 0) {
+    throw new Error('spawn_agent requires at least one agent in `agents`.');
+  }
+  if (input.agents.length > MAX_SPAWN_AGENTS) {
+    throw new Error(
+      `spawn_agent accepts at most ${MAX_SPAWN_AGENTS} agents per call (got ${input.agents.length}).`,
+    );
+  }
+  for (const spec of input.agents) {
+    if (spec.max_turns !== undefined) {
+      if (!Number.isFinite(spec.max_turns) || !Number.isInteger(spec.max_turns) || spec.max_turns < 1 || spec.max_turns > MAX_SPAWN_TURNS) {
+        throw new Error(
+          `spawn_agent "${spec.name}": max_turns must be an integer in [1, ${MAX_SPAWN_TURNS}] (got ${String(spec.max_turns)}).`,
+        );
+      }
+    }
+    if (spec.max_budget_usd !== undefined) {
+      if (!Number.isFinite(spec.max_budget_usd) || spec.max_budget_usd < 0 || spec.max_budget_usd > MAX_SPAWN_BUDGET_USD) {
+        throw new Error(
+          `spawn_agent "${spec.name}": max_budget_usd must be a number in [0, ${MAX_SPAWN_BUDGET_USD}] (got ${String(spec.max_budget_usd)}).`,
+        );
+      }
+    }
+  }
 }
 
 async function executeThinker(
@@ -214,6 +255,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         agents: {
           type: 'array',
           description: 'Array of agent specifications to spawn',
+          minItems: 1,
+          maxItems: MAX_SPAWN_AGENTS,
           items: {
             type: 'object',
             properties: {
@@ -228,8 +271,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
               max_tokens: { type: 'number' },
               tools: { type: 'array', items: { type: 'string' } },
-              max_turns: { type: 'number' },
-              max_budget_usd: { type: 'number' },
+              max_turns: { type: 'integer', minimum: 1, maximum: MAX_SPAWN_TURNS },
+              max_budget_usd: { type: 'number', minimum: 0, maximum: MAX_SPAWN_BUDGET_USD },
               profile: { type: 'string', description: 'Named model profile for non-Claude provider (e.g. "mistral-eu", "gemini-research"). Configured in config.json.' },
             },
             required: ['name', 'task'],
@@ -249,6 +292,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         `Max spawn depth (${MAX_SPAWN_DEPTH}) exceeded. Current depth: ${parentDepth}. Cannot spawn deeper.`,
       );
     }
+
+    validateSpawnInput(input);
 
     const names = input.agents.map(a => a.name);
     const parentRunId = agent.currentRunId;
