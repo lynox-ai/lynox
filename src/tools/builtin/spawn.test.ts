@@ -476,12 +476,6 @@ describe('spawn_agent tool', () => {
   });
 
   it('estimate for 3 default-Sonnet researchers stays well under typical session ceiling', async () => {
-    // Regression for rafael.lynox.cloud 2026-04-26: 3 sonnet researchers
-    // with default settings was estimated at $15.12 (worst-case maxOutput ×
-    // max_turns=20), tripping the session ceiling on every legitimate
-    // 3-researcher pattern. Real cost was <$2. After the OUTPUT_FILL_RATIO
-    // (0.3) + DEFAULT_SPAWN_MAX_TURNS (10) tightening, the estimate must
-    // be in the low single dollars.
     const onStream = vi.fn() as StreamHandler;
     const agent = makeAgent({ onStream });
     await spawnAgentTool.handler(
@@ -498,13 +492,12 @@ describe('spawn_agent tool', () => {
     const spawnEvent = (onStream as ReturnType<typeof vi.fn>).mock.calls.find(
       (c: unknown[]) => (c[0] as { type: string }).type === 'spawn',
     );
+    expect(spawnEvent).toBeDefined();
     const event = spawnEvent![0] as { estimatedCostUSD?: number };
-    // Pre-fix estimate was $15.12. New floor (3 × 10 turns × (4K × $3/M +
-    // 16K × 0.3 × $15/M)) = $2.52. Allow generous headroom either side so
-    // the assertion catches a regression but doesn't break on minor pricing
-    // tweaks.
-    expect(event.estimatedCostUSD).toBeGreaterThan(1);
-    expect(event.estimatedCostUSD).toBeLessThan(5);
+    // 3 sonnet × 10 turns × ((4K/1M × $3) + (16K × 0.3 / 1M × $15)) ≈ $2.52.
+    // Tight band catches estimator regressions; pricing tweaks bump the literal.
+    expect(event.estimatedCostUSD).toBeGreaterThan(2);
+    expect(event.estimatedCostUSD).toBeLessThan(3.5);
   });
 
   // === Session spawn cost ceiling ===
@@ -650,6 +643,106 @@ describe('spawn_agent tool', () => {
       ).rejects.toThrow(/max_turns must be an integer/);
     });
 
+    it('rejects empty name', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler({ agents: [{ name: '', task: 'Think' }] }, agent),
+      ).rejects.toThrow(/name must be a non-empty string/);
+    });
+
+    it('rejects name longer than 64 chars', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'x'.repeat(65), task: 'Think' }] },
+          agent,
+        ),
+      ).rejects.toThrow(/name must be a non-empty string/);
+    });
+
+    it('rejects name with control characters (log injection vector)', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'evil\nINFO: spoofed', task: 'Think' }] },
+          agent,
+        ),
+      ).rejects.toThrow(/control characters/);
+    });
+
+    it('rejects empty task', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler({ agents: [{ name: 'w', task: '' }] }, agent),
+      ).rejects.toThrow(/task must be a non-empty string/);
+    });
+
+    it('rejects oversized task (> 16K chars)', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'w', task: 'x'.repeat(16_385) }] },
+          agent,
+        ),
+      ).rejects.toThrow(/task must be a non-empty string/);
+    });
+
+    it('error message includes the offending agent name', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'researcher-1', task: 'Think', max_turns: 999 }] },
+          agent,
+        ),
+      ).rejects.toThrow(/"researcher-1"/);
+    });
+  });
+
+  describe('input validation — boundary success', () => {
+    it('exactly 10 agents succeeds', async () => {
+      const agent = makeAgent();
+      const agents = Array.from({ length: 10 }, (_, i) => ({
+        name: `b${i}`,
+        task: 'Think',
+      }));
+      const result = await spawnAgentTool.handler({ agents }, agent);
+      expect(result).toContain('## b0');
+      expect(result).toContain('## b9');
+    });
+
+    it('max_turns at the lower bound (1) succeeds', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const agent = makeAgent();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'min', task: 'Think', max_turns: 1 }] },
+        agent,
+      );
+      const cg = (vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['costGuard'] as { maxIterations: number };
+      expect(cg.maxIterations).toBe(1);
+    });
+
+    it('max_turns at the upper bound (50) succeeds', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const agent = makeAgent();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'max', task: 'Think', max_turns: 50 }] },
+        agent,
+      );
+      const cg = (vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['costGuard'] as { maxIterations: number };
+      expect(cg.maxIterations).toBe(50);
+    });
+
+    it('max_budget_usd at the bounds (0 and 50) succeeds', async () => {
+      const agent = makeAgent();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'zero', task: 'Think', max_budget_usd: 0 }] },
+        agent,
+      );
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'cap', task: 'Think', max_budget_usd: 50 }] },
+        agent,
+      );
+    });
   });
 
   describe('context escaping', () => {
