@@ -30,7 +30,7 @@ const MAX_SPAWN_TASK_LENGTH = 16_384;
 const DEFAULT_SPAWN_MAX_TURNS = 10;
 
 /** Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the per-spawn cost guard. */
-const OUTPUT_FILL_RATIO = 0.3;
+const SPAWN_OUTPUT_FILL_RATIO = 0.3;
 
 /** Reset the session spawn cost counter (for testing). */
 export function resetSessionSpawnCost(): void {
@@ -51,11 +51,11 @@ export function abortSpawnedAgents(): void {
  * Estimate the cost for a single spawn agent so `checkSessionBudget` can
  * refuse a fan-out that would blow the session ceiling. Models input as
  * ~4K tokens/turn (cache reduces this further after turn 1, not modelled)
- * and output as {@link OUTPUT_FILL_RATIO} × `model.maxOutput` per turn.
+ * and output as {@link SPAWN_OUTPUT_FILL_RATIO} × `model.maxOutput` per turn.
  */
 function estimateSpawnCost(model: string, maxIterations: number): number {
   const pricing = getPricing(model);
-  const expectedOutput = getDefaultMaxTokens(model) * OUTPUT_FILL_RATIO;
+  const expectedOutput = getDefaultMaxTokens(model) * SPAWN_OUTPUT_FILL_RATIO;
   const avgInput = 4000;
   // Defensive floor: a negative or NaN multiplier here would return a negative
   // estimate, which would credit the session-budget counter.
@@ -266,7 +266,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
               max_tokens: { type: 'number' },
               tools: { type: 'array', items: { type: 'string' } },
-              max_turns: { type: 'integer', minimum: 1, maximum: MAX_SPAWN_TURNS },
+              max_turns: { type: 'number', minimum: 1, maximum: MAX_SPAWN_TURNS },
               max_budget_usd: { type: 'number', minimum: 0, maximum: MAX_SPAWN_BUDGET_USD },
               profile: { type: 'string', description: 'Named model profile for non-Claude provider (e.g. "mistral-eu", "gemini-research"). Configured in config.json.' },
             },
