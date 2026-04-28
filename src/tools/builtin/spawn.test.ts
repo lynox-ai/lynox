@@ -522,8 +522,8 @@ describe('spawn_agent tool', () => {
 
     it('over ceiling throws with message', async () => {
       const agent = makeAgent();
-      // Spawn many expensive agents to exceed the $50 ceiling
-      const agents = Array.from({ length: 200 }, (_, i) => ({
+      // 10 opus × 50 turns × $0.26/turn ≈ $130, well over $50 session ceiling
+      const agents = Array.from({ length: 10 }, (_, i) => ({
         name: `agent-${i}`,
         task: 'Think hard',
         model: 'opus' as const,
@@ -541,8 +541,8 @@ describe('spawn_agent tool', () => {
         { agents: [{ name: 'w1', task: 'Think' }] },
         agent,
       );
-      // Second call with many expensive agents should eventually exceed ceiling
-      const agents = Array.from({ length: 200 }, (_, i) => ({
+      // Second call exceeds ceiling on its own; cumulative just adds to that
+      const agents = Array.from({ length: 10 }, (_, i) => ({
         name: `w${i}`,
         task: 'Think more',
         model: 'opus' as const,
@@ -569,6 +569,87 @@ describe('spawn_agent tool', () => {
       );
       expect(result).toContain('## w2');
     });
+  });
+
+  describe('input validation', () => {
+    it('rejects empty agents array', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler({ agents: [] }, agent),
+      ).rejects.toThrow(/at least one agent/);
+    });
+
+    it('rejects more than 10 agents per call', async () => {
+      const agent = makeAgent();
+      const agents = Array.from({ length: 11 }, (_, i) => ({
+        name: `a${i}`,
+        task: 'Think',
+      }));
+      await expect(
+        spawnAgentTool.handler({ agents }, agent),
+      ).rejects.toThrow(/at most 10 agents/);
+    });
+
+    it('rejects negative max_turns', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'w', task: 'Think', max_turns: -5 }] },
+          agent,
+        ),
+      ).rejects.toThrow(/max_turns must be an integer/);
+    });
+
+    it('rejects max_turns above 50', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'w', task: 'Think', max_turns: 51 }] },
+          agent,
+        ),
+      ).rejects.toThrow(/max_turns must be an integer/);
+    });
+
+    it('rejects fractional max_turns', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'w', task: 'Think', max_turns: 1.5 }] },
+          agent,
+        ),
+      ).rejects.toThrow(/max_turns must be an integer/);
+    });
+
+    it('rejects negative max_budget_usd', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'w', task: 'Think', max_budget_usd: -1 }] },
+          agent,
+        ),
+      ).rejects.toThrow(/max_budget_usd must be a number/);
+    });
+
+    it('rejects max_budget_usd above 50', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'w', task: 'Think', max_budget_usd: 51 }] },
+          agent,
+        ),
+      ).rejects.toThrow(/max_budget_usd must be a number/);
+    });
+
+    it('rejects NaN max_turns (would otherwise return NaN estimate)', async () => {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'w', task: 'Think', max_turns: NaN }] },
+          agent,
+        ),
+      ).rejects.toThrow(/max_turns must be an integer/);
+    });
+
   });
 
   describe('context escaping', () => {
