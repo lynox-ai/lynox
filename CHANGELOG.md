@@ -4,44 +4,35 @@
 
 ### Added
 
-<!-- new features -->
+- **Spawn input validation** — `spawn_agent` now hard-caps caller-supplied values: max 10 agents per call, `max_turns` 1–50 (integer), `max_budget_usd` 0–50, `name` 1–64 chars (no control characters), `task` 1–16 K. JSON-schema mirrors the runtime checks; `additionalProperties: false` on the top level. Defensive floor in `estimateSpawnCost` so a malformed `max_turns` cannot return a negative estimate that would credit the session-budget counter (#198, #201).
+- **Canary build CI** — Pushes to `feat/**`, `fix/**`, or `canary/**` publish two docker tags (`branch-<slug>` and `sha-<short>`) without ever touching a running instance. Pairs with managed-side canary pinning (lynox-pro #87) so a single instance can be held on a pre-release branch image while the fleet stays on `:latest` (#203).
+- **GreenMail adversarial mailbox fixtures** — broadens mail integration coverage for malformed/edge-case messages (#192).
 
 ### Changed
 
-<!-- existing features touched -->
+- **Realistic spawn cost estimate** — `estimateSpawnCost` now models output as `OUTPUT_FILL_RATIO (0.3) × model.maxOutput` per turn (was naive worst-case ×1.0), and the default per-spawn iteration cap drops from 20 to 10. A typical 3-Sonnet-researcher fan-out estimates ≈ $2.52 instead of $15+, so legitimate patterns no longer trip the session ceiling (#197).
+- **Mail tool hardening** — per-tool rate limits + per-recipient dedup in send paths (#188); persisted default mailbox is preserved when its provider fails to load (#187); Gmail OAuth watcher tightens cursor + provider lifecycle (#185); body decoder accepts more charsets (#189); address-list parser hardened with documented flag semantics (#191).
+- **Google Workspace auth** — service-account token cache (#184) + coalesced concurrent refreshes (#182) — fewer round-trips on bursty access patterns.
+- **Engine HTTP secret always set** — startup now ensures `LYNOX_HTTP_SECRET` is materialised before any handler comes up, eliminating the rare "secret missing" failure mode (#190).
+- **Recoverable tool errors stay inline** — a tool error that the agent can retry no longer fires the global toast; it lives where it happened, in the chat thread (#195).
+- **Spawn estimator + iteration cap as named constants** — `SPAWN_OUTPUT_FILL_RATIO`, `DEFAULT_SPAWN_MAX_TURNS`, single source of truth so the upfront estimator and runtime cap can never drift (#197, #202).
 
 ### Fixed
 
-<!-- bug fixes -->
+- **KG entity misclassification** — single-source-of-truth stopwords + a v2 post-filter at extraction time reject generic nouns and price expressions that the v1 regex+free-text pipeline was persisting; eval on 300 cases at 97.7 % precision / 94.6 % recall (#193).
+- **Gmail envelope batching** — fewer Gmail API calls on first-page render via metadata batch fetch (#186).
+- **GitHub Deployments tracking restored** — `release.yml` records a Deployment object after the pro-dispatch succeeds; the Deployments page froze at v1.3.3 after #142 dropped the production environment gate, this puts the visual record back without re-introducing a blocking reviewer step (#196).
 
-<!-- Reference — raw commits since v1.3.6 (delete this block before saving):
+### Internal
 
-Core:
-- ci: build canary docker image on feat/fix/canary branch push (#203)
-- chore(spawn): rename OUTPUT_FILL_RATIO + align max_turns schema type (#202)
-- chore(spawn): trim incident JSDocs, tighten test bounds, finish security trio (#201)
-- fix(spawn): bound caller-supplied input + clamp negative estimate (#198)
-- fix(spawn): realistic cost estimate so legitimate fan-outs aren't blocked (#197)
-- ci(release): record GitHub Deployment object after pro-dispatch (#196)
-- fix(agent): keep recoverable tool errors inline; no global toast (#195)
-- fix(kg): unify stopwords + reject common nouns at v2 extraction (#193)
-- tests: add GreenMail adversarial mailbox fixtures (#192)
-- mail: harden address-list parser + document flag-semantics (#191)
-- http: ensure auth secret is always set (#190)
-- mail: extend charset support in OAuth Gmail body decoder (#189)
-- mail: add per-tool rate limits and per-recipient dedup (#188)
-- fix(mail): preserve persisted default when its provider fails to load (#187)
-- perf(mail): batch Gmail envelope metadata fetches (#186)
-- fix(mail): tighten OAuth Gmail watcher cursor and provider lifecycle (#185)
-- perf(google-auth): cache service-account tokens (#184)
-- perf(google-auth): coalesce concurrent token refreshes (#182)
-- chore: ignore local bench-models results (#183)
+- Spawn JSDocs trimmed (no incident anecdotes); 3-researcher estimate test tightened to a narrow band around the documented expectation; `OUTPUT_FILL_RATIO` renamed `SPAWN_OUTPUT_FILL_RATIO` for prefix consistency (#201, #202).
+- `.gitignore`: bench-models results excluded (#183).
 
-Pro:
-- feat(managed): canary pinning + rollout skip (#87)
-- chore(deps): bump pnpm/action-setup from 4 to 6 (#17)
-- chore(release): v1.3.6 (#85)
--->
+### lynox-pro
+
+- **Per-instance canary pinning** — `pinned_tag` column on managed instances; fleet rollout (`startRollout`) skips pinned instances and records the skipped set on the rollout row for audit; new `PATCH /admin/instances/:id/pinned-tag` endpoint to set or clear the pin; `updateOne` refuses to deploy when the new tag would diverge from an existing pin, forcing the operator to update the pin first. End-to-end-validated on staging control plane (lynox-pro #87).
+- `pnpm/action-setup` bumped 4 → 6 to fix transient CI (lynox-pro #17).
+
 ## 1.3.6 — 2026-04-27
 
 ### Added
