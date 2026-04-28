@@ -16,33 +16,20 @@ const MAX_SPAWN_DEPTH = 5;
 const SPAWN_EXCLUDED = new Set(['spawn_agent']);
 const DEFAULT_SPAWN_BUDGET_USD = 5;
 
-// Hard caps on caller-supplied values. The schema below advertises these
-// bounds to the LLM, but the handler re-validates because tool-input schemas
-// are not enforced — without the runtime check, a negative max_turns flips
-// the estimator output negative and would *credit* the session-budget
-// counter on `checkSessionBudget`.
+// Hard caps on caller-supplied values. Tool-input schemas aren't enforced
+// at runtime, so the handler re-validates — without these caps a negative
+// `max_turns` would flip the estimate negative and credit the session-budget
+// counter via `checkSessionBudget`.
 const MAX_SPAWN_AGENTS = 10;
 const MAX_SPAWN_TURNS = 50;
 const MAX_SPAWN_BUDGET_USD = 50;
+const MAX_SPAWN_NAME_LENGTH = 64;
+const MAX_SPAWN_TASK_LENGTH = 16_384;
 
-/**
- * Default iteration cap for a child agent, used both as the cost-guard cap
- * (executeThinker) and as the per-spawn estimator multiplier (handler).
- * Researchers historically finish in 4–8 turns; the previous 20-turn default
- * inflated the upfront estimate enough to trip the session ceiling on every
- * legitimate 3-researcher pattern. Single source of truth so estimate ↔
- * actual cap can never drift.
- */
+/** Used as both estimator multiplier and runtime cap so the two can't drift. */
 const DEFAULT_SPAWN_MAX_TURNS = 10;
 
-/**
- * Fraction of a model's hard maxOutput we expect each turn to actually emit
- * when estimating spawn cost. The naive worst-case (×1.0) treats every turn
- * as filling the entire output cap (e.g. 16K for Sonnet) which is ~5–10×
- * over real usage and was the dominant factor blocking spawn_agent in
- * production. 0.3 is the empirical p90 ceiling — overshoots get caught by
- * the per-spawn cost guard during the run.
- */
+/** Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the per-spawn cost guard. */
 const OUTPUT_FILL_RATIO = 0.3;
 
 /** Reset the session spawn cost counter (for testing). */
@@ -61,28 +48,17 @@ export function abortSpawnedAgents(): void {
 }
 
 /**
- * Estimate the cost for a single spawn agent. Used by `checkSessionBudget`
- * before any child runs so we can refuse a fan-out that would blow the
- * session ceiling.
- *
- * Modelled on realistic-but-conservative usage:
- *   input  ≈ 4K tokens / turn  (static prompt + tools dominate; cache makes
- *           this even cheaper after turn 1, not modelled here — the saving
- *           is small relative to output anyway)
- *   output ≈ {@link OUTPUT_FILL_RATIO} × model.maxOutput per turn
- *
- * Output-side worst-case (×1.0) was the source of the rafael.lynox.cloud
- * spawn-block: 3 sonnet researchers × 20 turns × 16K maxOutput × $15/M =
- * $14.40 estimated, hit the $15 ceiling, refused the spawn. Real cost was
- * <$2. Pre-spend reservation in `checkSessionBudget` is the right shape;
- * the multiplier was just way off.
+ * Estimate the cost for a single spawn agent so `checkSessionBudget` can
+ * refuse a fan-out that would blow the session ceiling. Models input as
+ * ~4K tokens/turn (cache reduces this further after turn 1, not modelled)
+ * and output as {@link OUTPUT_FILL_RATIO} × `model.maxOutput` per turn.
  */
 function estimateSpawnCost(model: string, maxIterations: number): number {
   const pricing = getPricing(model);
   const expectedOutput = getDefaultMaxTokens(model) * OUTPUT_FILL_RATIO;
   const avgInput = 4000;
-  // Defensive clamp: a negative or NaN value here would make the estimate
-  // negative and credit the session-budget counter on `checkSessionBudget`.
+  // Defensive floor: a negative or NaN multiplier here would return a negative
+  // estimate, which would credit the session-budget counter.
   const iters = Number.isFinite(maxIterations) && maxIterations > 0
     ? Math.floor(maxIterations)
     : 1;
@@ -96,6 +72,11 @@ interface SpawnAgentInput {
   agents: SpawnSpec[];
 }
 
+// Control characters (incl. CR/LF) that could be used to spoof log lines or
+// break terminal rendering when `name` is echoed in error messages, channel
+// events, or the `## ${name}` markdown header.
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+
 function validateSpawnInput(input: SpawnAgentInput): void {
   if (!Array.isArray(input.agents) || input.agents.length === 0) {
     throw new Error('spawn_agent requires at least one agent in `agents`.');
@@ -106,17 +87,30 @@ function validateSpawnInput(input: SpawnAgentInput): void {
     );
   }
   for (const spec of input.agents) {
+    if (typeof spec.name !== 'string' || spec.name.length === 0 || spec.name.length > MAX_SPAWN_NAME_LENGTH) {
+      throw new Error(
+        `spawn_agent: name must be a non-empty string up to ${MAX_SPAWN_NAME_LENGTH} chars.`,
+      );
+    }
+    if (CONTROL_CHARS.test(spec.name)) {
+      throw new Error('spawn_agent: name must not contain control characters.');
+    }
+    if (typeof spec.task !== 'string' || spec.task.length === 0 || spec.task.length > MAX_SPAWN_TASK_LENGTH) {
+      throw new Error(
+        `spawn_agent "${spec.name}": task must be a non-empty string up to ${MAX_SPAWN_TASK_LENGTH} chars.`,
+      );
+    }
     if (spec.max_turns !== undefined) {
-      if (!Number.isFinite(spec.max_turns) || !Number.isInteger(spec.max_turns) || spec.max_turns < 1 || spec.max_turns > MAX_SPAWN_TURNS) {
+      if (!Number.isInteger(spec.max_turns) || spec.max_turns < 1 || spec.max_turns > MAX_SPAWN_TURNS) {
         throw new Error(
-          `spawn_agent "${spec.name}": max_turns must be an integer in [1, ${MAX_SPAWN_TURNS}] (got ${String(spec.max_turns)}).`,
+          `spawn_agent "${spec.name}": max_turns must be an integer in [1, ${MAX_SPAWN_TURNS}] (got ${spec.max_turns}).`,
         );
       }
     }
     if (spec.max_budget_usd !== undefined) {
       if (!Number.isFinite(spec.max_budget_usd) || spec.max_budget_usd < 0 || spec.max_budget_usd > MAX_SPAWN_BUDGET_USD) {
         throw new Error(
-          `spawn_agent "${spec.name}": max_budget_usd must be a number in [0, ${MAX_SPAWN_BUDGET_USD}] (got ${String(spec.max_budget_usd)}).`,
+          `spawn_agent "${spec.name}": max_budget_usd must be a number in [0, ${MAX_SPAWN_BUDGET_USD}] (got ${spec.max_budget_usd}).`,
         );
       }
     }
@@ -251,6 +245,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
+      additionalProperties: false,
       properties: {
         agents: {
           type: 'array',
@@ -260,8 +255,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           items: {
             type: 'object',
             properties: {
-              name: { type: 'string' },
-              task: { type: 'string' },
+              name: { type: 'string', minLength: 1, maxLength: MAX_SPAWN_NAME_LENGTH },
+              task: { type: 'string', minLength: 1, maxLength: MAX_SPAWN_TASK_LENGTH },
               role: { type: 'string', enum: ['researcher', 'creator', 'operator', 'collector'], description: 'Role ID. Configures model, tools, and capabilities. Must be one of the four built-ins; omit the field entirely for a custom role.' },
               context: { type: 'string', description: 'Additional context prepended to the task.' },
               isolated_memory: { type: 'boolean', description: 'If true, agent has no access to parent memory.' },
