@@ -377,7 +377,9 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
           ...(stringField(payload, 'final_mobile_url') !== null ? { finalMobileUrl: stringField(payload, 'final_mobile_url')! } : {}),
           ...(stringField(payload, 'path1') !== null ? { path1: stringField(payload, 'path1')! } : {}),
           ...(stringField(payload, 'path2') !== null ? { path2: stringField(payload, 'path2')! } : {}),
-          status: e.kind === 'PAUSE' ? 'Paused' : 'Paused',
+          // Asset-groups always emit Paused — Editor import never auto-enables a
+          // PMAX restructure, the customer flips it on after manual review.
+          status: 'Paused',
         }));
         bucket.assetGroupCount++;
         break;

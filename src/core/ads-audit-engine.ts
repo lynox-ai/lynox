@@ -382,8 +382,8 @@ function verifyPerformance(
     const currStats = currId ? aggregateWindow(store, run, currId, currWindow) : zeroStats();
     const prevStats = prevId ? aggregateWindow(store, previousRun, prevId, prevWindow) : zeroStats();
 
-    const prevWilson = wilsonScoreInterval(roundConv(prevStats.conversions), prevStats.clicks);
-    const currWilson = wilsonScoreInterval(roundConv(currStats.conversions), currStats.clicks);
+    const prevWilson = wilsonScoreInterval(roundConv(prevStats.conversions, prevStats.clicks), prevStats.clicks);
+    const currWilson = wilsonScoreInterval(roundConv(currStats.conversions, currStats.clicks), currStats.clicks);
     const classification = classifyWilsonDelta(prevWilson, currWilson);
     counts[classification]++;
 
@@ -512,11 +512,11 @@ function directionDelta(kind: VerificationKind, prev: WindowStats, curr: WindowS
   return (c - p) / p;
 }
 
-function roundConv(c: number): number {
-  // conversions in Ads are floats (fractional attribution). Wilson needs
-  // integer successes — round half-up but cap at clicks (callers ensure
-  // we don't exceed clicks in practice).
-  return Math.max(0, Math.round(c));
+function roundConv(c: number, clicks: number): number {
+  // Conversions in Ads are floats (fractional attribution) and can exceed
+  // clicks (view-through, cross-device). Wilson needs integer successes
+  // ≤ trials, so round half-up and cap at clicks.
+  return Math.min(clicks, Math.max(0, Math.round(c)));
 }
 
 // ── Internals: Deterministic finding generator ────────────────────────

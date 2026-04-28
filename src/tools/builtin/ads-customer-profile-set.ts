@@ -154,7 +154,7 @@ export function createAdsCustomerProfileSetTool(store: AdsDataStore): ToolEntry<
           },
           naming_convention_pattern: {
             type: 'string',
-            description: 'Campaign-name pattern. Pipe-delimited slots, e.g. "CH | <Channel> | <Intent> | <Theme> | <Lang> | v1". The Blueprint engine validates new campaign names against this.',
+            description: 'Campaign-name token template using {TOKEN} placeholders, e.g. "{LANG}-{CHANNEL}-{THEME}-{MATCHTYPE}" or "{LANG}-{BRAND}-{REGION}-{THEME}". Standard tokens (validated against vocabularies / customer profile): LANG (2-letter ISO, must match customer languages), CHANNEL (Search|Display|Shopping|PMAX|Video|Demand|App), MATCHTYPE (Exact|Phrase|Broad), BRAND (must match own_brands), REGION, THEME (free-form). Token names must be ALL_CAPS. The Blueprint engine validates every campaign / ad-group / asset-group name against this pattern; mismatches block emit until corrected.',
           },
           tracking_notes: {
             type: 'object',

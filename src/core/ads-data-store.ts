@@ -1350,6 +1350,20 @@ export class AdsDataStore {
     });
   }
 
+  /**
+   * Delete a single agent-source blueprint entity for a run, scoped by
+   * entity-type + external-id. Used by `ads_blueprint_entity_propose` to
+   * make re-calls idempotent — deterministic-source rows are never touched
+   * (those are managed via `clearBlueprintEntities`).
+   */
+  deleteAgentBlueprintEntity(runId: number, entityType: string, externalId: string): number {
+    const result = this.db.prepare(`
+      DELETE FROM ads_blueprint_entities
+      WHERE run_id = ? AND entity_type = ? AND external_id = ? AND source = 'agent'
+    `).run(runId, entityType, externalId);
+    return Number(result.changes);
+  }
+
   listBlueprintEntities(
     runId: number,
     opts?: { entityType?: string | undefined; kind?: AdsBlueprintEntityKind | undefined } | undefined,
@@ -1712,6 +1726,9 @@ export class AdsDataStore {
   /** Generic latest-snapshot read. Returns rows matching source_run_id of the
    *  given run (defaults to latest successful run for the account). */
   getSnapshotRows<T>(table: string, adsAccountId: string, opts?: { runId?: number | undefined; limit?: number | undefined } | undefined): T[] {
+    if (!ALLOWED_SNAPSHOT_TABLES.has(table)) {
+      throw new Error(`Unknown snapshot table "${table}". Allowed: ${[...ALLOWED_SNAPSHOT_TABLES].join(', ')}`);
+    }
     const resolvedRunId = this._resolveRunId(adsAccountId, opts?.runId);
     if (resolvedRunId === null) return [];
     const limit = opts?.limit !== undefined ? Math.max(1, Math.min(opts.limit, 5000)) : null;
@@ -1722,6 +1739,9 @@ export class AdsDataStore {
   }
 
   countSnapshotRows(table: string, adsAccountId: string, runId?: number | undefined): number {
+    if (!ALLOWED_SNAPSHOT_TABLES.has(table)) {
+      throw new Error(`Unknown snapshot table "${table}". Allowed: ${[...ALLOWED_SNAPSHOT_TABLES].join(', ')}`);
+    }
     const resolvedRunId = this._resolveRunId(adsAccountId, runId);
     if (resolvedRunId === null) return 0;
     const row = this.db.prepare(`
@@ -1794,4 +1814,30 @@ const ALLOWED_VIEW_NAMES: ReadonlySet<string> = new Set([
   'view_blueprint_organic_overlap',
   'view_blueprint_ga4_conversion_delta',
   'view_blueprint_landing_page_perf',
+]);
+
+const ALLOWED_SNAPSHOT_TABLES: ReadonlySet<string> = new Set([
+  'ads_campaigns',
+  'ads_campaign_performance',
+  'ads_ad_groups',
+  'ads_keywords',
+  'ads_rsa_ads',
+  'ads_asset_groups',
+  'ads_asset_group_assets',
+  'ads_assets',
+  'ads_listing_groups',
+  'ads_shopping_products',
+  'ads_conversion_actions',
+  'ads_campaign_targeting',
+  'ads_search_terms',
+  'ads_pmax_search_terms',
+  'ads_pmax_placements',
+  'ads_landing_pages',
+  'ads_ad_asset_ratings',
+  'ads_audience_signals',
+  'ads_device_performance',
+  'ads_geo_performance',
+  'ads_change_history',
+  'ga4_observations',
+  'gsc_observations',
 ]);

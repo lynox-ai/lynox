@@ -203,13 +203,7 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
         // Idempotent: drop any existing agent row with the same
         // (run_id, entity_type, external_id) before re-inserting. The
         // companion run-decisions row is upserted by insertRunDecision.
-        store.transaction(() => {
-          const raw = store as unknown as { db: import('better-sqlite3').Database };
-          raw.db.prepare(`
-            DELETE FROM ads_blueprint_entities
-            WHERE run_id = ? AND entity_type = ? AND external_id = ? AND source = 'agent'
-          `).run(runId, input.entity_type, externalId);
-        });
+        store.deleteAgentBlueprintEntity(runId, input.entity_type, externalId);
 
         const row = store.insertBlueprintEntity(persistInput);
 

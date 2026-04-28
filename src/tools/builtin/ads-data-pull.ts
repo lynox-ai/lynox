@@ -61,8 +61,9 @@ export class DriveReader implements IDriveReader {
 
   /** Find a single subfolder by name within a parent. Returns null if not found. */
   async findSubfolder(parentId: string, name: string): Promise<DriveFile | null> {
-    const escapedName = name.replace(/'/g, "\\'");
-    const q = `'${parentId}' in parents and name = '${escapedName}' and ` +
+    const escapedParent = escapeDriveQueryString(parentId);
+    const escapedName = escapeDriveQueryString(name);
+    const q = `'${escapedParent}' in parents and name = '${escapedName}' and ` +
       `mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
     const params = new URLSearchParams({
       q,
@@ -78,10 +79,11 @@ export class DriveReader implements IDriveReader {
   /** List all non-folder files in a folder (paginated). */
   async listFiles(folderId: string): Promise<DriveFile[]> {
     const out: DriveFile[] = [];
+    const escapedFolder = escapeDriveQueryString(folderId);
     let pageToken: string | undefined;
     do {
       const params = new URLSearchParams({
-        q: `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`,
+        q: `'${escapedFolder}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`,
         fields: 'files(id,name,mimeType,modifiedTime),nextPageToken',
         pageSize: '100',
       });
@@ -104,6 +106,16 @@ export class DriveReader implements IDriveReader {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
+
+/**
+ * Escape a value for safe interpolation inside a Drive `q` string literal
+ * delimited by single quotes. Backslashes must be doubled before quotes
+ * are escaped, otherwise an attacker-controlled value can break out of
+ * the literal and inject additional clauses.
+ */
+function escapeDriveQueryString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
 
 function parseLastrunIsoDate(text: string): Date | null {
   const trimmed = text.trim();
