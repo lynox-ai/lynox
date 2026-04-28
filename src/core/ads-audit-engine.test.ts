@@ -189,6 +189,64 @@ describe('runAudit', () => {
     expect(result.verification?.kind).toBe('cpa');
   });
 
+  it('flags campaign that misses its ROAS target by >20%', () => {
+    seedAccount(store, { primaryGoal: 'roas' });
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    store.insertCampaignsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'c1', campaignName: 'PMAX-Underperformer',
+        channelType: 'PERFORMANCE_MAX',
+        biddingStrategyType: 'MAXIMIZE_CONVERSION_VALUE',
+        targetRoas: 4.0,
+        clicks: 1000, costMicros: 100_000_000, conversions: 30, convValue: 150, // 1.5x vs 4x → 0.375 ratio
+      }],
+    });
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'campaign_target_underperformance_roas');
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('HIGH'); // 200 / 100 = 2x vs target 4x = 0.5 ratio
+    expect(finding?.text).toMatch(/Underperformer/);
+  });
+
+  it('flags campaign that exceeds its CPA target by >20%', () => {
+    seedAccount(store, { primaryGoal: 'cpa' });
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    store.insertCampaignsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'c2', campaignName: 'Search-Leads-Overpaying',
+        channelType: 'SEARCH',
+        biddingStrategyType: 'TARGET_CPA',
+        targetCpaMicros: 50_000_000, // 50 CHF target
+        clicks: 500, costMicros: 100_000_000, conversions: 1, // 100 CHF / conv → 2x target
+      }],
+    });
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'campaign_target_underperformance_cpa');
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('HIGH');
+    expect(finding?.text).toMatch(/Overpaying/);
+  });
+
+  it('does not flag a campaign that is meeting its target', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    store.insertCampaignsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'c3', campaignName: 'On-Target-PMAX',
+        channelType: 'PERFORMANCE_MAX',
+        biddingStrategyType: 'MAXIMIZE_CONVERSION_VALUE',
+        targetRoas: 3.0,
+        clicks: 1000, costMicros: 100_000_000, conversions: 50, convValue: 320, // 3.2x ROAS
+      }],
+    });
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'campaign_target_underperformance_roas');
+    expect(finding).toBeUndefined();
+  });
+
   it('persists deterministic findings to ads_findings', () => {
     seedAccount(store, { withProfile: false });
     const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });

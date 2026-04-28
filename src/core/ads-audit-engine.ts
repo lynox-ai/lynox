@@ -712,7 +712,75 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
     });
   }
 
+  // 12. Per-campaign target underperformance (uses campaign-level
+  // target_roas / target_cpa_micros captured by the GAS export).
+  // Skipped for campaigns without a recorded target.
+  appendCampaignTargetFindings(findings, ctx);
+
   return findings;
+}
+
+interface CampaignTargetRow {
+  campaign_id: string; campaign_name: string;
+  target_roas: number | null; target_cpa_micros: number | null;
+  bidding_strategy_type: string | null;
+  cost_micros: number | null; conv_value: number | null; conversions: number | null;
+}
+
+function appendCampaignTargetFindings(findings: AuditFindingDraft[], ctx: FindingContext): void {
+  const rows = ctx.store.getSnapshotRows<CampaignTargetRow>(
+    'ads_campaigns', ctx.account.ads_account_id, { runId: ctx.run.run_id },
+  );
+  for (const r of rows) {
+    const spendChf = (r.cost_micros ?? 0) / 1_000_000;
+    if (spendChf < 5) continue; // ignore micro-spend campaigns; signal is too noisy
+
+    if (r.target_roas !== null && r.target_roas > 0) {
+      const actualRoas = spendChf > 0 ? (r.conv_value ?? 0) / spendChf : 0;
+      if (actualRoas > 0) {
+        const ratio = actualRoas / r.target_roas;
+        if (ratio < 0.8) {
+          findings.push({
+            area: 'campaign_target_underperformance_roas',
+            severity: ratio < 0.5 ? 'HIGH' : 'MEDIUM',
+            text: `Campaign "${r.campaign_name}" liefert ROAS ${actualRoas.toFixed(2)}x ` +
+              `gegen Target ${r.target_roas.toFixed(2)}x (${((ratio - 1) * 100).toFixed(0)} %). ` +
+              `Spend ${spendChf.toFixed(2)} CHF — Optimierung priorisieren.`,
+            confidence: 0.9,
+            evidence: {
+              campaign_id: r.campaign_id, campaign_name: r.campaign_name,
+              actual_roas: round2(actualRoas), target_roas: r.target_roas,
+              ratio: round2(ratio), spend_chf: round2(spendChf),
+              bidding_strategy_type: r.bidding_strategy_type,
+            },
+          });
+        }
+      }
+    }
+
+    if (r.target_cpa_micros !== null && r.target_cpa_micros > 0 && (r.conversions ?? 0) > 0) {
+      const targetCpaChf = r.target_cpa_micros / 1_000_000;
+      const actualCpa = spendChf / (r.conversions ?? 1);
+      const ratio = actualCpa / targetCpaChf;
+      if (ratio > 1.2) {
+        findings.push({
+          area: 'campaign_target_underperformance_cpa',
+          severity: ratio > 1.5 ? 'HIGH' : 'MEDIUM',
+          text: `Campaign "${r.campaign_name}" liefert CPA CHF ${actualCpa.toFixed(2)} ` +
+            `gegen Target CHF ${targetCpaChf.toFixed(2)} (+${((ratio - 1) * 100).toFixed(0)} %). ` +
+            `Conv ${(r.conversions ?? 0).toFixed(1)}, Spend ${spendChf.toFixed(2)} CHF.`,
+          confidence: 0.9,
+          evidence: {
+            campaign_id: r.campaign_id, campaign_name: r.campaign_name,
+            actual_cpa: round2(actualCpa), target_cpa: round2(targetCpaChf),
+            ratio: round2(ratio), spend_chf: round2(spendChf),
+            conversions: r.conversions ?? 0,
+            bidding_strategy_type: r.bidding_strategy_type,
+          },
+        });
+      }
+    }
+  }
 }
 
 // ── Number helpers ────────────────────────────────────────────────────
