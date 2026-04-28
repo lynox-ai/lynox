@@ -1,0 +1,99 @@
+/**
+ * Ads Optimizer briefing — injected into the agent's system prompt
+ * whenever the `ads-optimizer` feature flag is on. Tells the agent the
+ * canonical cycle order, the role of each of the 10 tools, and the
+ * Beta-only safety rules from the sprint plan.
+ *
+ * The briefing is intentionally short and operational. Tool-level
+ * details live in each tool's `description` field; this is the
+ * top-level orchestration map.
+ */
+
+const BRIEFING = `<ads_optimizer_cycle>
+You have the Ads Optimizer toolset available. It runs a closed-loop
+optimisation cycle on a single Google Ads account, defaulting to
+monthly cadence (Smart-Bidding learning window).
+
+Canonical cycle order:
+
+  1. ads_customer_profile_set
+     — First cycle ever for a customer: research the customer (web_search +
+       http to read their site), then ask the user via ask_user to confirm
+       brands, languages, target_roas (or target_cpa), monthly_budget_chf,
+       naming_convention_pattern, and pmax_owned_head_terms (8-20 broad
+       category terms PMAX should dominate).
+     — Subsequent cycles: skip unless a profile field needs updating.
+
+  2. ads_data_pull
+     — Reads the 22-CSV pack from the customer's Google Drive (written by
+       the customer-deployed Apps Scripts). Validates the LASTRUN
+       freshness; refuses if older than 14 days unless force=true.
+
+  3. ads_audit_run
+     — Deterministic phase. Computes KPIs, detects mode (BOOTSTRAP vs
+       OPTIMIZE), summarises manual changes since the previous run, runs
+       Wilson-score performance verification (cycle 2+), and writes
+       deterministic findings to ads_findings.
+
+  4. Qualitative research (interleaved with ads_finding_add)
+     — Read the audit report, prioritise by HIGH-severity findings.
+       For campaign_target_underperformance_roas / _cpa: those are the
+       campaigns to focus on first.
+     — For each priority: run DataForSEO via http_request (if a
+       DataForSEO API profile is configured) for keyword research, crawl
+       top landing pages via http to assess relevance, probe GA4-Ads
+       conversion delta for tracking trust, etc.
+     — Record each qualitative insight via ads_finding_add with a
+       descriptive area, severity, and evidence-JSON.
+
+  5. ads_blueprint_run
+     — Deterministic phase. Reads the audit + findings + customer profile,
+       generates KEEP/RENAME/PAUSE/NEW classifications per entity type,
+       three-fold negative proposals, and naming-convention validation.
+
+  6. ads_blueprint_entity_propose (per qualitative finding)
+     — Use this to translate qualitative findings into concrete
+       Editor-import-able entities: new RSAs, asset proposals for
+       low-strength PMAX asset-groups, audience signals, sitelinks,
+       callouts, validated PMAX SPLIT/MERGE.
+     — PMAX SPLIT/MERGE require confidence ≥ 0.9, rationale ≥ 30 chars,
+       and source asset-groups < 30 conv/30d (or matching high
+       confidence + rationale). The tool runs the safeguards.
+
+  7. ads_emit_csv
+     — Idempotent: when nothing has changed since the last cycle's emit,
+       reports "no changes" and writes nothing.
+     — Pre-emit validators block hard errors (broken cross-references,
+       overlong headlines, competitor trademarks in copy, non-HTTPS
+       final URLs, RSAs below 5/2 minimum). Fix and re-call.
+     — Output: per-campaign Editor CSV pack + account-negatives.csv,
+       UTF-16 LE with BOM, in the workspace directory.
+
+  8. Customer review + Editor import (manual step, off-tool)
+     — Customer opens Google Ads Editor, "Account → Import → From file",
+       reviews the proposed changes, posts the ones they accept.
+
+  9. ads_mark_imported
+     — Stamp the import timestamp so the next cycle's Smart-Bidding-Guard
+       (14-day learning-window protection on PMAX restructure proposals)
+       is anchored correctly.
+
+Safety constraints (Beta-gated to brandfusion's own customers):
+  - NEW entities default to Status=Paused. Nothing goes live until the
+    customer reviews + posts in Editor.
+  - PMAX restructure (SPLIT/MERGE) is only auto-promoted when the
+    safeguards in evaluateRestructureSafeguards all pass.
+  - When a HARD validator error blocks emit, do not work around it —
+    fix the underlying entity payload (via revising agent proposals or
+    customer profile) and re-run.
+
+When the user asks for "an Ads Optimizer cycle", default to running
+steps 1-7 in order, pausing for ask_user confirmation at:
+  - missing or load-bearing customer-profile fields,
+  - HIGH-severity findings the agent intends to act on,
+  - the final blueprint summary before emit.
+</ads_optimizer_cycle>`;
+
+export function getAdsOptimizerBriefing(): string {
+  return BRIEFING;
+}

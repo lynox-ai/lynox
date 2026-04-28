@@ -625,6 +625,9 @@ export class Engine {
       try {
         const { AdsDataStore } = await import('./ads-data-store.js');
         this._adsDataStore = new AdsDataStore();
+        const { getAdsOptimizerBriefing } = await import('./ads-briefing.js');
+        const adsBrief = getAdsOptimizerBriefing();
+        this.briefing = this.briefing ? `${this.briefing}\n\n${adsBrief}` : adsBrief;
         const { createAdsCustomerProfileSetTool } = await import('../tools/builtin/ads-customer-profile-set.js');
         this.registry.register(createAdsCustomerProfileSetTool(this._adsDataStore) as ToolEntry);
         const { createAdsAuditRunTool } = await import('../tools/builtin/ads-audit-run.js');
