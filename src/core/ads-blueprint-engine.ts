@@ -245,6 +245,8 @@ function loadEntities(
       const rows = store.getSnapshotRows<{
         campaign_id: string; campaign_name: string; status: string | null;
         budget_micros: number | null; channel_type: string | null;
+        bidding_strategy_type: string | null;
+        target_roas: number | null; target_cpa_micros: number | null;
       }>('ads_campaigns', run.ads_account_id, { runId: run.run_id });
       return rows.map(r => ({
         externalId: r.campaign_id,
@@ -254,6 +256,9 @@ function loadEntities(
           campaign_name: r.campaign_name,
           ...(r.budget_micros !== null ? { budget_micros: r.budget_micros } : {}),
           ...(r.channel_type !== null ? { channel_type: r.channel_type } : {}),
+          ...(r.bidding_strategy_type !== null ? { bidding_strategy_type: r.bidding_strategy_type } : {}),
+          ...(r.target_roas !== null ? { target_roas: r.target_roas } : {}),
+          ...(r.target_cpa_micros !== null ? { target_cpa_micros: r.target_cpa_micros } : {}),
         },
       }));
     }

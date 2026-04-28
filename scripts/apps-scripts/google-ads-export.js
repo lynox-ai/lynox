@@ -78,6 +78,11 @@ function main() {
 function exportCampaigns() {
   var q = 'SELECT campaign.id, campaign.name, campaign.status, ' +
     'campaign.advertising_channel_type, campaign.optimization_score, ' +
+    'campaign.bidding_strategy_type, ' +
+    'campaign.target_roas.target_roas, ' +
+    'campaign.target_cpa.target_cpa_micros, ' +
+    'campaign.maximize_conversion_value.target_roas, ' +
+    'campaign.maximize_conversions.target_cpa_micros, ' +
     'campaign_budget.amount_micros, ' +
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value, metrics.ctr, ' +
@@ -89,15 +94,27 @@ function exportCampaigns() {
     'FROM campaign WHERE segments.date DURING ' + DATE_RANGE + ' ' +
     'AND campaign.status != "REMOVED"';
   var header = 'campaign_id,campaign_name,status,channel_type,opt_score,' +
+    'bidding_strategy_type,target_roas,target_cpa_micros,' +
     'budget_micros,impressions,clicks,cost_micros,conversions,conv_value,' +
     'ctr,avg_cpc,search_is,search_top_is,search_abs_top_is,budget_lost_is,rank_lost_is';
   return runQueryToCsv_(q, header, function (row) {
+    // Target lives on either campaign.target_roas / target_cpa (when the bid
+    // strategy is TARGET_ROAS / TARGET_CPA) or on the strategy-specific
+    // sub-message (Maximize Conversions / Maximize Conversion Value with
+    // optional target). Pick whichever is set.
+    var tRoas = (row.campaign.targetRoas && row.campaign.targetRoas.targetRoas) ||
+      (row.campaign.maximizeConversionValue && row.campaign.maximizeConversionValue.targetRoas);
+    var tCpaMicros = (row.campaign.targetCpa && row.campaign.targetCpa.targetCpaMicros) ||
+      (row.campaign.maximizeConversions && row.campaign.maximizeConversions.targetCpaMicros);
     return [
       row.campaign.id,
       csvStr_(row.campaign.name),
       row.campaign.status,
       row.campaign.advertisingChannelType,
       numOrEmpty_(row.campaign.optimizationScore),
+      row.campaign.biddingStrategyType || '',
+      numOrEmpty_(tRoas),
+      intOrEmpty_(tCpaMicros),
       intOrEmpty_(row.campaignBudget && row.campaignBudget.amountMicros),
       intOrEmpty_(row.metrics.impressions),
       intOrEmpty_(row.metrics.clicks),

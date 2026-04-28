@@ -748,6 +748,19 @@ const MIGRATIONS: string[] = [
      ADD COLUMN source TEXT NOT NULL DEFAULT 'deterministic'
      CHECK (source IN ('deterministic', 'agent'));
    CREATE INDEX IF NOT EXISTS idx_blueprint_source ON ads_blueprint_entities(run_id, source);`,
+
+  // Migration v5: campaign-level bid-strategy + targets. The audit's
+  // performance-verification compares delivered ROAS/CPA against the
+  // customer profile default today; once these columns are populated
+  // by the GAS export, the audit can compare against the actual
+  // campaign-level target. Critical for PMAX optimisation decisions
+  // because PMAX campaigns often have heterogeneous targets even
+  // within one customer.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (5);
+
+   ALTER TABLE ads_campaigns ADD COLUMN bidding_strategy_type TEXT;
+   ALTER TABLE ads_campaigns ADD COLUMN target_roas REAL;
+   ALTER TABLE ads_campaigns ADD COLUMN target_cpa_micros INTEGER;`,
 ];
 
 export interface CustomerProfileRow {
@@ -1408,11 +1421,13 @@ export class AdsDataStore {
     return this._insertSnapshot(
       'ads_campaigns',
       ['campaign_id', 'campaign_name', 'status', 'channel_type', 'opt_score',
+        'bidding_strategy_type', 'target_roas', 'target_cpa_micros',
         'budget_micros', 'impressions', 'clicks', 'cost_micros', 'conversions',
         'conv_value', 'ctr', 'avg_cpc', 'search_is', 'search_top_is',
         'search_abs_top_is', 'budget_lost_is', 'rank_lost_is'],
       input.runId, input.adsAccountId, input.rows,
       r => [r.campaignId, r.campaignName, r.status ?? null, r.channelType ?? null, r.optScore ?? null,
+        r.biddingStrategyType ?? null, r.targetRoas ?? null, r.targetCpaMicros ?? null,
         r.budgetMicros ?? null, r.impressions ?? null, r.clicks ?? null, r.costMicros ?? null, r.conversions ?? null,
         r.convValue ?? null, r.ctr ?? null, r.avgCpc ?? null, r.searchIs ?? null, r.searchTopIs ?? null,
         r.searchAbsTopIs ?? null, r.budgetLostIs ?? null, r.rankLostIs ?? null],

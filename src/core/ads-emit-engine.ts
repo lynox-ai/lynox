@@ -300,12 +300,15 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
     if (!name) continue;
     const bucket = ensureBucket(name);
     const budget = budgetFromPayload(payload);
+    const targetCpa = targetCpaFromPayload(payload);
     bucket.rows.push(buildCampaignRow({
       campaignName: name,
       campaignType: campaignTypeFromPayload(payload),
       ...(budget !== null ? { budget } : {}),
+      ...(stringField(payload, 'bidding_strategy_type') !== null
+        ? { bidStrategy: editorBidStrategy(stringField(payload, 'bidding_strategy_type')!) } : {}),
       ...(numberField(payload, 'target_roas') !== null ? { targetRoas: numberField(payload, 'target_roas')! } : {}),
-      ...(numberField(payload, 'target_cpa_chf') !== null ? { targetCpa: numberField(payload, 'target_cpa_chf')! } : {}),
+      ...(targetCpa !== null ? { targetCpa } : {}),
       ...(stringField(payload, 'status') !== null ? { status: editorStatus(stringField(payload, 'status')!) } : { status: 'Paused' }),
     }));
     bucket.campaignCount++;
@@ -531,6 +534,35 @@ function budgetFromPayload(p: Record<string, unknown>): number | null {
   const micros = numberField(p, 'budget_micros');
   if (micros !== null) return Math.round((micros / 1_000_000) * 100) / 100;
   return numberField(p, 'budget_chf');
+}
+
+function targetCpaFromPayload(p: Record<string, unknown>): number | null {
+  // Same micros↔display-unit pattern as budget. Snapshot writes
+  // target_cpa_micros; agent-proposed payloads may carry target_cpa_chf.
+  const micros = numberField(p, 'target_cpa_micros');
+  if (micros !== null) return Math.round((micros / 1_000_000) * 100) / 100;
+  return numberField(p, 'target_cpa_chf') ?? numberField(p, 'target_cpa');
+}
+
+/**
+ * Map the Google Ads enum value (TARGET_ROAS, MAXIMIZE_CONVERSION_VALUE,
+ * MAXIMIZE_CONVERSIONS, TARGET_CPA, MANUAL_CPC, …) to the human-readable
+ * Editor "Bid Strategy Type" value.
+ */
+function editorBidStrategy(s: string): string {
+  const v = s.toUpperCase();
+  switch (v) {
+    case 'TARGET_ROAS': return 'Target ROAS';
+    case 'MAXIMIZE_CONVERSION_VALUE': return 'Maximize conversion value';
+    case 'TARGET_CPA': return 'Target CPA';
+    case 'MAXIMIZE_CONVERSIONS': return 'Maximize conversions';
+    case 'MANUAL_CPC': return 'Manual CPC';
+    case 'MAXIMIZE_CLICKS': return 'Maximize clicks';
+    case 'TARGET_IMPRESSION_SHARE': return 'Target impression share';
+    case 'MANUAL_CPM': return 'Manual CPM';
+    case 'MANUAL_CPV': return 'Manual CPV';
+    default: return 'Maximize conversions';
+  }
 }
 
 function editorStatus(s: string): 'Paused' | 'Enabled' | 'Removed' {

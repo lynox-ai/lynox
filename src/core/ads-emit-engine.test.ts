@@ -140,6 +140,8 @@ describe('runEmit', () => {
         campaignName: 'PMAX-Drills-DE',
         status: 'ENABLED',
         channelType: 'PERFORMANCE_MAX',
+        biddingStrategyType: 'MAXIMIZE_CONVERSION_VALUE',
+        targetRoas: 4.5,
         budgetMicros: 30_000_000, // 30 CHF / day
       }],
     });
@@ -164,8 +166,34 @@ describe('runEmit', () => {
     expect(text).toMatch(/Performance Max/);
     expect(text).toMatch(/Power-Drills/);
     expect(text).toMatch(/Cordless-Drills/);
+    // Bid strategy + target ROAS came through from snapshot.
+    expect(text).toMatch(/Maximize conversion value/);
+    expect(text).toMatch(/4\.5/);
     // Header order: 1st column=Campaign so the budget converted correctly to 30 CHF.
     expect(text).toMatch(/30(\.0+)?\b/);
+  });
+
+  it('Target CPA: micros from snapshot converts to CHF in emit', async () => {
+    seedCustomerAndAccount(store);
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    store.insertCampaignsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'leadgen-1',
+        campaignName: 'Search-Leads-DE',
+        status: 'ENABLED',
+        channelType: 'SEARCH',
+        biddingStrategyType: 'TARGET_CPA',
+        targetCpaMicros: 50_000_000, // 50 CHF
+      }],
+    });
+    runBlueprint(store, ACCOUNT);
+    const result = runEmit(store, ACCOUNT, { workspaceDir });
+    const file = result.filesWritten.find(f => f.endsWith('search-leads-de.csv'))!;
+    const text = decodeUtf16LeBytes(await readFile(file));
+    expect(text).toMatch(/Target CPA/);
+    expect(text).toMatch(/\b50(\.0+)?\b/);
   });
 });
 

@@ -76,7 +76,9 @@ interface CsvSchema {
 const SCHEMAS = {
   campaigns: {
     required: ['campaign_id', 'campaign_name'],
-    optional: ['status', 'channel_type', 'opt_score', 'budget_micros',
+    optional: ['status', 'channel_type', 'opt_score',
+      'bidding_strategy_type', 'target_roas', 'target_cpa_micros',
+      'budget_micros',
       'impressions', 'clicks', 'cost_micros', 'conversions', 'conv_value',
       'ctr', 'avg_cpc', 'search_is', 'search_top_is', 'search_abs_top_is',
       'budget_lost_is', 'rank_lost_is'],
@@ -342,6 +344,9 @@ const MAPPERS = {
     status: strVal(r['status']),
     channelType: strVal(r['channel_type']),
     optScore: numVal(r['opt_score'], f, l, 'opt_score', w),
+    biddingStrategyType: strVal(r['bidding_strategy_type']),
+    targetRoas: numVal(r['target_roas'], f, l, 'target_roas', w),
+    targetCpaMicros: intVal(r['target_cpa_micros'], f, l, 'target_cpa_micros', w),
     budgetMicros: intVal(r['budget_micros'], f, l, 'budget_micros', w),
     impressions: intVal(r['impressions'], f, l, 'impressions', w),
     clicks: intVal(r['clicks'], f, l, 'clicks', w),

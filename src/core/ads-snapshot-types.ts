@@ -12,6 +12,14 @@ export interface CampaignSnapshot {
   status?: string | undefined;
   channelType?: string | undefined;
   optScore?: number | undefined;
+  /** Google Ads `BiddingStrategyType` enum value (e.g. TARGET_ROAS, MAXIMIZE_CONVERSION_VALUE). */
+  biddingStrategyType?: string | undefined;
+  /** Campaign-level Target ROAS (e.g. 4.0 = 400 %). Set on TARGET_ROAS or
+   *  MAXIMIZE_CONVERSION_VALUE-with-target campaigns. */
+  targetRoas?: number | undefined;
+  /** Campaign-level Target CPA in micros. Set on TARGET_CPA or
+   *  MAXIMIZE_CONVERSIONS-with-target campaigns. */
+  targetCpaMicros?: number | undefined;
   budgetMicros?: number | undefined;
   impressions?: number | undefined;
   clicks?: number | undefined;
