@@ -99,7 +99,11 @@ export class DriveReader implements IDriveReader {
 
   /** Read a file's bytes as UTF-8 text. */
   async readText(fileId: string): Promise<string> {
-    const r = await this.fetch(`${DRIVE_BASE}/files/${fileId}?alt=media`);
+    // encodeURIComponent on the path segment defends against any future
+    // call-site that hands us an agent-controlled fileId — today the IDs
+    // come straight back from listFiles, but the public method shape
+    // doesn't enforce that.
+    const r = await this.fetch(`${DRIVE_BASE}/files/${encodeURIComponent(fileId)}?alt=media`);
     if (!r.ok) throw new Error(`Drive download failed (${r.status})`);
     return await r.text();
   }
@@ -112,8 +116,10 @@ export class DriveReader implements IDriveReader {
  * delimited by single quotes. Backslashes must be doubled before quotes
  * are escaped, otherwise an attacker-controlled value can break out of
  * the literal and inject additional clauses.
+ *
+ * Exported for unit-testing only.
  */
-function escapeDriveQueryString(value: string): string {
+export function escapeDriveQueryString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
@@ -200,7 +206,7 @@ export interface PullDeps {
   store: AdsDataStore;
   reader: IDriveReader;
   /** Override clock for tests. */
-  now?: () => Date;
+  now?: (() => Date) | undefined;
 }
 
 export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): Promise<PullResult> {

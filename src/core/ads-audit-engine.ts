@@ -92,7 +92,7 @@ export interface PerformanceVerificationItem {
   prevDirection: number | null;
   currDirection: number | null;
   goalDelta: number | null;
-  notes?: string;
+  notes?: string | undefined;
 }
 
 export interface PerformanceVerificationSummary {
@@ -103,7 +103,7 @@ export interface PerformanceVerificationSummary {
   counts: Record<WilsonClassification, number>;
   items: PerformanceVerificationItem[];
   skipped: boolean;
-  skippedReason?: string;
+  skippedReason?: string | undefined;
 }
 
 export interface AuditFindingDraft {
@@ -365,6 +365,17 @@ function verifyPerformance(
   const currWindow = computeWindowRange(cutoffDate, +1, windowDays);
   const prevWindow = computeWindowRange(cutoffDate, -1, windowDays);
 
+  // Both windows are read from the current run's perf snapshot. With
+  // GAS export DATE_RANGE = LAST_90_DAYS the snapshot reaches back
+  // far enough to cover a 28d pre-cutoff window even when the
+  // customer imported a few weeks after the previous run — falling
+  // back to previousRun's snapshot was the original design but its
+  // own date range may end BEFORE the cutoff (the import is by
+  // definition after the prev run finished), silently producing
+  // stale or empty pre-window stats. One read + bucket also avoids
+  // the O(decisions × perf_rows) re-scan the per-campaign loop did.
+  const perfByCampaign = bucketPerformanceByCampaign(store, run);
+
   const items: PerformanceVerificationItem[] = [];
   const counts: Record<WilsonClassification, number> = {
     ERFOLG: 0, VERSCHLECHTERUNG: 0, NEUTRAL: 0, NICHT_VERGLEICHBAR: 0,
@@ -378,9 +389,16 @@ function verifyPerformance(
     }
     const currId = currCampaignIds.get(d.entity_external_id);
     const prevId = prevCampaignIds.get(d.entity_external_id) ?? prevCampaignIds.get(d.previous_external_id ?? '');
+    // Use the current run's perf snapshot for BOTH windows. Match
+    // each window to the resolved campaign id; if the campaign was
+    // renamed across runs we look it up under the previous id too,
+    // because the perf rows are keyed on the GAS-export id which is
+    // stable across renames.
+    const lookupId = currId ?? prevId ?? d.entity_external_id;
+    const rows = perfByCampaign.get(lookupId) ?? [];
 
-    const currStats = currId ? aggregateWindow(store, run, currId, currWindow) : zeroStats();
-    const prevStats = prevId ? aggregateWindow(store, previousRun, prevId, prevWindow) : zeroStats();
+    const currStats = aggregateBucket(rows, currWindow);
+    const prevStats = aggregateBucket(rows, prevWindow);
 
     const prevWilson = wilsonScoreInterval(roundConv(prevStats.conversions, prevStats.clicks), prevStats.clicks);
     const currWilson = wilsonScoreInterval(roundConv(currStats.conversions, currStats.clicks), currStats.clicks);
@@ -429,17 +447,39 @@ function zeroStats(): WindowStats {
   return { clicks: 0, conversions: 0, costMicros: 0, convValue: 0, impressions: 0 };
 }
 
-function aggregateWindow(
-  store: AdsDataStore, run: AdsAuditRunRow, campaignId: string, range: { start: string; end: string },
-): WindowStats {
-  const rows = store.getSnapshotRows<{
-    date: string; campaign_id: string;
-    clicks: number | null; conversions: number | null;
-    cost_micros: number | null; conv_value: number | null; impressions: number | null;
-  }>('ads_campaign_performance', run.ads_account_id, { runId: run.run_id });
+interface PerfRow {
+  date: string;
+  campaign_id: string;
+  clicks: number | null;
+  conversions: number | null;
+  cost_micros: number | null;
+  conv_value: number | null;
+  impressions: number | null;
+}
+
+/** Read campaign_performance once per run, bucket by campaign_id so the
+ *  per-decision verification loop is O(rows + decisions × window) instead
+ *  of O(rows × decisions). */
+function bucketPerformanceByCampaign(store: AdsDataStore, run: AdsAuditRunRow): Map<string, PerfRow[]> {
+  const rows = store.getSnapshotRows<PerfRow>(
+    'ads_campaign_performance', run.ads_account_id, { runId: run.run_id },
+  );
+  const map = new Map<string, PerfRow[]>();
+  for (const r of rows) {
+    if (!r.campaign_id) continue;
+    let bucket = map.get(r.campaign_id);
+    if (!bucket) {
+      bucket = [];
+      map.set(r.campaign_id, bucket);
+    }
+    bucket.push(r);
+  }
+  return map;
+}
+
+function aggregateBucket(rows: readonly PerfRow[], range: { start: string; end: string }): WindowStats {
   const stats = zeroStats();
   for (const r of rows) {
-    if (r.campaign_id !== campaignId) continue;
     if (r.date < range.start || r.date > range.end) continue;
     stats.clicks += r.clicks ?? 0;
     stats.conversions += r.conversions ?? 0;
@@ -455,9 +495,16 @@ function buildCampaignIdMap(store: AdsDataStore, run: AdsAuditRunRow): Map<strin
     'ads_campaigns', run.ads_account_id, { runId: run.run_id },
   );
   const m = new Map<string, string>();
+  // ID-keyed entries first; name-keyed entries only when the name is a
+  // non-empty string that isn't already a known campaign id (otherwise a
+  // customer who names a campaign as a digit string matching another
+  // campaign's stable id would overwrite the id-keyed lookup).
   for (const r of rows) {
-    if (r.campaign_id) {
-      m.set(r.campaign_id, r.campaign_id);
+    if (r.campaign_id) m.set(r.campaign_id, r.campaign_id);
+  }
+  for (const r of rows) {
+    if (r.campaign_id && typeof r.campaign_name === 'string' && r.campaign_name.length > 0
+        && !m.has(r.campaign_name)) {
       m.set(r.campaign_name, r.campaign_id);
     }
   }

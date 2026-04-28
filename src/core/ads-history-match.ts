@@ -17,7 +17,7 @@
  * `MatchableEntity` shapes for any type (campaign, ad_group, keyword,
  * asset_group, ...). No SQLite or LLM dependencies.
  */
-import { tokenSetRatio } from './ads-token-set-ratio.js';
+import { tokenise } from './ads-token-set-ratio.js';
 
 export type HistoryMatchKind = 'KEEP' | 'RENAME' | 'NEW' | 'PAUSE';
 
@@ -101,20 +101,49 @@ export function matchHistory(
   // Stage 2: token-set-ratio rename pairing on the unmatched residue.
   // Build all candidate (prev, curr) pairs scoring ≥ threshold, sort by
   // score desc, greedily accept while neither side is already paired.
+  //
+  // Pre-tokenise once + length-prune. Jaccard t = |A∩B| / |A∪B| has
+  // an upper bound min(|A|,|B|) / max(|A|,|B|), so any pair whose
+  // size ratio exceeds 1/threshold cannot meet the threshold. Skipping
+  // those pairs avoids the O(prev × curr) explosion when the residue
+  // contains thousands of keywords. Tokenisation memoised so the
+  // remaining pairs reuse the same Set instances instead of re-parsing
+  // the same name on every comparison.
   interface RenamePair {
     prev: MatchableEntity;
     curr: MatchableEntity;
     score: number;
   }
+  const tokeniseEntity = (e: MatchableEntity): Set<string> => new Set(tokenise(e.name));
+  const prevTokens = new Map<string, Set<string>>();
+  const currTokens = new Map<string, Set<string>>();
+  const prevResidue: MatchableEntity[] = [];
+  const currResidue: MatchableEntity[] = [];
+  for (const p of previous) {
+    if (matchedPrev.has(p.externalId)) continue;
+    prevTokens.set(p.externalId, tokeniseEntity(p));
+    prevResidue.push(p);
+  }
+  for (const c of current) {
+    if (matchedCurr.has(c.externalId)) continue;
+    currTokens.set(c.externalId, tokeniseEntity(c));
+    currResidue.push(c);
+  }
+  const sizeRatioCap = renameThreshold > 0 ? 1 / renameThreshold : Infinity;
   const pairs: RenamePair[] = [];
-  for (const prev of previous) {
-    if (matchedPrev.has(prev.externalId)) continue;
-    for (const curr of current) {
-      if (matchedCurr.has(curr.externalId)) continue;
-      const score = tokenSetRatio(prev.name, curr.name);
-      if (Number.isFinite(score) && score >= renameThreshold) {
-        pairs.push({ prev, curr, score });
-      }
+  for (const prev of prevResidue) {
+    const prevSet = prevTokens.get(prev.externalId)!;
+    if (prevSet.size === 0) continue;
+    for (const curr of currResidue) {
+      const currSet = currTokens.get(curr.externalId)!;
+      if (currSet.size === 0) continue;
+      const minSize = prevSet.size < currSet.size ? prevSet.size : currSet.size;
+      const maxSize = prevSet.size > currSet.size ? prevSet.size : currSet.size;
+      if (maxSize / minSize > sizeRatioCap) continue; // prune impossible pairs
+      let intersection = 0;
+      for (const tok of prevSet) if (currSet.has(tok)) intersection++;
+      const score = intersection / (prevSet.size + currSet.size - intersection);
+      if (score >= renameThreshold) pairs.push({ prev, curr, score });
     }
   }
   pairs.sort((a, b) => b.score - a.score);

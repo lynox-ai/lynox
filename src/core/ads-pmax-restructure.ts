@@ -118,31 +118,36 @@ export function evaluateRestructureSafeguards(
     return true;
   })();
 
+  // Conv-floor ───────────────────────────────────────────────────────
+  // Determined first because confidence + rationale gates only apply
+  // above the floor — below the floor smart-bidding has comparatively
+  // little learned signal at stake and the docstring explicitly relaxes
+  // those checks. A previous version enforced both unconditionally and
+  // blocked legitimate low-volume splits the Sprint plan meant to allow.
+  const volumeMap = new Map<string, number>();
+  for (const v of sourceVolumes) volumeMap.set(v.externalId, v.conversions30d);
+  const aboveFloor = proposal.sourceExternalIds.some(id => (volumeMap.get(id) ?? 0) >= convFloor);
+
   // Confidence ───────────────────────────────────────────────────────
-  const confidenceOk = proposal.confidence >= HIGH_CONFIDENCE;
-  if (!confidenceOk) {
+  const confidenceOk = !aboveFloor || proposal.confidence >= HIGH_CONFIDENCE;
+  if (aboveFloor && !confidenceOk) {
     blockedReasons.push(
       `Confidence ${proposal.confidence.toFixed(2)} < ${HIGH_CONFIDENCE} — ` +
-      `Restructure nur mit hoher Sicherheit.`,
+      `Restructure auf ≥ ${convFloor} conv/30d Asset-Group nur mit hoher Sicherheit.`,
     );
   }
 
   // Explicit rationale ───────────────────────────────────────────────
-  const explicitRationaleOk = (proposal.rationale ?? '').trim().length >= MIN_RATIONALE_CHARS;
-  if (!explicitRationaleOk) {
+  const explicitRationaleOk = !aboveFloor
+    || (proposal.rationale ?? '').trim().length >= MIN_RATIONALE_CHARS;
+  if (aboveFloor && !explicitRationaleOk) {
     blockedReasons.push(
       `Begründung zu kurz (< ${MIN_RATIONALE_CHARS} Zeichen) — ` +
-      `Restructure braucht klar dokumentierten Grund.`,
+      `Restructure auf ≥ ${convFloor} conv/30d Asset-Group braucht klar dokumentierten Grund.`,
     );
   }
 
-  // Conv-floor ───────────────────────────────────────────────────────
-  const volumeMap = new Map<string, number>();
-  for (const v of sourceVolumes) volumeMap.set(v.externalId, v.conversions30d);
-  const aboveFloor = proposal.sourceExternalIds.some(id => (volumeMap.get(id) ?? 0) >= convFloor);
-  // Above floor → both confidence and rationale required (already checked).
-  // Below floor → allowed without high confidence requirement on conv-floor itself.
-  // We model this by saying "convFloorOk" is true when either side of the disjunct is met.
+  // Conv-floor recap (kept on the result for the caller's UI summary).
   const convFloorOk = !aboveFloor || (confidenceOk && explicitRationaleOk);
   if (aboveFloor && !convFloorOk) {
     const offending = proposal.sourceExternalIds

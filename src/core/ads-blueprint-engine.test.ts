@@ -81,6 +81,8 @@ describe('runBlueprint', () => {
     seedCampaign(store, r2.run_id, 'c1', 'DE-Search-Brand-Exact');           // KEEP
     seedCampaign(store, r2.run_id, 'c3', 'DE-Search-Awareness-Phrase');       // NEW
     // c2 absent → PAUSE
+    // pickMode requires ≥ 30 perf-days on the current run to clear OPTIMIZE.
+    seedPerformanceDays(store, r2.run_id, 'c1', 30);
 
     const result = runBlueprint(store, ACCOUNT);
     expect(result.mode).toBe('OPTIMIZE');
@@ -148,6 +150,7 @@ describe('runBlueprint', () => {
     store.completeAuditRun(r2.run_id);
     seedCampaign(store, r2.run_id, 'c1', 'DE-Search-Brand-Exact');            // KEEP
     seedCampaign(store, r2.run_id, 'c2', 'DE-Search-Generic-Exact');          // NEW
+    seedPerformanceDays(store, r2.run_id, 'c1', 30);
 
     const result = runBlueprint(store, ACCOUNT);
     expect(result.counts.KEEP).toBe(1);
@@ -184,6 +187,46 @@ describe('runBlueprint', () => {
     expect(decisions[0]?.entity_external_id).toBe('c1');
     expect(decisions[0]?.decision).toBe('KEEP');
   });
+
+  it('drops orphan ad_group / keyword / asset_group whose campaign is not in the snapshot', () => {
+    // Real-world data exposes parents in REMOVED state filtered by GAS
+    // while children remained ENABLED — the orphan filter must drop
+    // these or emit's cross-reference HARD validator blocks the run.
+    seedCustomerAndAccount(store);
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'c1', 'Real-Campaign');
+    store.insertAdGroupsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { campaignName: 'Real-Campaign', adGroupName: 'AG-real', adGroupId: 'agR' },
+        { campaignName: 'REMOVED-PARENT', adGroupName: 'AG-orphan', adGroupId: 'agO' },
+      ],
+    });
+    store.insertKeywordsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { keyword: 'real-kw', matchType: 'EXACT', campaignName: 'Real-Campaign', adGroupName: 'AG-real' },
+        { keyword: 'orphan-kw', matchType: 'EXACT', campaignName: 'REMOVED-PARENT', adGroupName: 'AG-orphan' },
+      ],
+    });
+    store.insertAssetGroupsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { assetGroupId: 'agg-real', assetGroupName: 'AG-Real', campaignName: 'Real-Campaign' },
+        { assetGroupId: 'agg-orphan', assetGroupName: 'AG-Orphan', campaignName: 'REMOVED-PARENT' },
+      ],
+    });
+
+    const result = runBlueprint(store, ACCOUNT);
+    const adGroupIds = result.historyByType.get('ad_group')!.map(d => d.externalId);
+    const keywordRows = result.historyByType.get('keyword')!;
+    const assetGroupIds = result.historyByType.get('asset_group')!.map(d => d.externalId);
+    expect(adGroupIds).toEqual(['agR']);
+    expect(keywordRows).toHaveLength(1);
+    expect((keywordRows[0]?.payload as { keyword?: string } | undefined)?.keyword).toBe('real-kw');
+    expect(assetGroupIds).toEqual(['agg-real']);
+  });
 });
 
 // ── Fixtures ──────────────────────────────────────────────────────────
@@ -213,4 +256,15 @@ function seedCampaign(store: AdsDataStore, runId: number, id: string, name: stri
     runId, adsAccountId: ACCOUNT,
     rows: [{ campaignId: id, campaignName: name, status: 'ENABLED' }],
   });
+}
+
+/** Seed `days` distinct daily perf rows so pickMode evaluates OPTIMIZE
+ *  (≥ 30 distinct dates needed). Day 0 = 2026-01-01. */
+function seedPerformanceDays(store: AdsDataStore, runId: number, campaignId: string, days: number): void {
+  const rows = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10);
+    rows.push({ date: d, campaignId, clicks: 10, conversions: 1 });
+  }
+  store.insertCampaignPerformanceBatch({ runId, adsAccountId: ACCOUNT, rows });
 }

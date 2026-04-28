@@ -107,7 +107,7 @@ export function runBlueprint(
     ? store.getAuditRun(run.previous_run_id)
     : null;
 
-  const mode = pickMode(run, previousRun);
+  const mode = pickMode(store, run, previousRun);
   const namingTemplate = customer.naming_convention_pattern
     ? parseTemplate(customer.naming_convention_pattern)
     : null;
@@ -228,11 +228,29 @@ export function runBlueprint(
 
 // ── Mode picking ──────────────────────────────────────────────────────
 
-function pickMode(run: AdsAuditRunRow, previousRun: AdsAuditRunRow | null): 'BOOTSTRAP' | 'OPTIMIZE' {
-  // Run.mode is the audit-engine's authoritative judgement; we honor it.
-  // Without a previous successful run we always BOOTSTRAP regardless.
+const MIN_OPTIMIZE_DAYS = 30;
+
+function pickMode(
+  store: AdsDataStore, run: AdsAuditRunRow, previousRun: AdsAuditRunRow | null,
+): 'BOOTSTRAP' | 'OPTIMIZE' {
+  // Recompute mode from the data instead of trusting run.mode. Data_pull
+  // tags a new run with a mode based purely on whether a previous run
+  // exists; the audit then checks performance-day coverage and may
+  // disagree. Blueprint must follow the data, not the recorded tag, or
+  // an account with insufficient days slips into OPTIMIZE and skips the
+  // additive-only safeguards (no rename, no PMAX restructure).
   if (!previousRun) return 'BOOTSTRAP';
-  return run.mode;
+  const performanceDays = countPerformanceDaysForRun(store, run);
+  return performanceDays < MIN_OPTIMIZE_DAYS ? 'BOOTSTRAP' : 'OPTIMIZE';
+}
+
+function countPerformanceDaysForRun(store: AdsDataStore, run: AdsAuditRunRow): number {
+  const rows = store.getSnapshotRows<{ date: string }>(
+    'ads_campaign_performance', run.ads_account_id, { runId: run.run_id },
+  );
+  const set = new Set<string>();
+  for (const r of rows) if (r.date) set.add(r.date);
+  return set.size;
 }
 
 // ── Snapshot loading per entity type ──────────────────────────────────
@@ -263,11 +281,11 @@ function loadEntities(
       }));
     }
     case 'ad_group': {
+      const validCampaigns = collectCampaignNames(store, run);
       const rows = store.getSnapshotRows<{
         ad_group_id: string | null; ad_group_name: string; campaign_name: string | null;
         status: string | null;
       }>('ads_ad_groups', run.ads_account_id, { runId: run.run_id });
-      const validCampaigns = collectCampaignNames(store, run);
       return rows
         .filter(r => r.campaign_name !== null && validCampaigns.has(r.campaign_name))
         .map(r => ({
@@ -281,11 +299,11 @@ function loadEntities(
         }));
     }
     case 'keyword': {
+      const validCampaigns = collectCampaignNames(store, run);
       const rows = store.getSnapshotRows<{
         keyword: string; match_type: string | null; campaign_name: string | null;
         ad_group_name: string | null; status: string | null;
       }>('ads_keywords', run.ads_account_id, { runId: run.run_id });
-      const validCampaigns = collectCampaignNames(store, run);
       return rows
         .filter(r => r.campaign_name !== null && validCampaigns.has(r.campaign_name))
         .map(r => {
@@ -307,11 +325,11 @@ function loadEntities(
         });
     }
     case 'asset_group': {
+      const validCampaigns = collectCampaignNames(store, run);
       const rows = store.getSnapshotRows<{
         asset_group_id: string; asset_group_name: string;
         campaign_name: string | null; status: string | null;
       }>('ads_asset_groups', run.ads_account_id, { runId: run.run_id });
-      const validCampaigns = collectCampaignNames(store, run);
       return rows
         .filter(r => r.campaign_name !== null && validCampaigns.has(r.campaign_name))
         .map(r => ({
@@ -329,17 +347,33 @@ function loadEntities(
   }
 }
 
+// Memoize collectCampaignNames per run inside one orchestrator pass so
+// the three sub-entity branches don't each fan out to their own DB read.
+// Keyed by (account, run_id) — the orchestrator clears the cache between
+// invocations because the dataset can change between runBlueprint calls
+// (re-pull of the same run, or fresh test fixture).
+const _campaignNameCache = new WeakMap<AdsAuditRunRow, Set<string>>();
+
 // Drop sub-entities (ad_group / keyword / asset_group) whose parent
 // campaign is not in the current snapshot. Belt-and-braces against GAS
 // exports that filter the parent by `campaign.status != REMOVED` but
-// leave the children un-joined (as observed on archived aquanatura data
-// where 8 ad-groups referenced REMOVED campaigns and tripped the
-// emit cross-reference validator).
+// leave the children un-joined (a real-world archive snapshot exposed
+// 8 ad-groups referencing REMOVED campaigns, tripping the emit
+// cross-reference validator).
+//
+// Cached per AdsAuditRunRow object so the three sub-entity branches in
+// loadEntities share one DB read instead of three. The WeakMap entry
+// dies with the row object, so a re-run of the orchestrator (which
+// re-fetches the row) starts fresh.
 function collectCampaignNames(store: AdsDataStore, run: AdsAuditRunRow): Set<string> {
+  const cached = _campaignNameCache.get(run);
+  if (cached) return cached;
   const rows = store.getSnapshotRows<{ campaign_name: string }>(
     'ads_campaigns', run.ads_account_id, { runId: run.run_id },
   );
-  return new Set(rows.map(r => r.campaign_name).filter((n): n is string => typeof n === 'string'));
+  const set = new Set(rows.map(r => r.campaign_name).filter((n): n is string => typeof n === 'string'));
+  _campaignNameCache.set(run, set);
+  return set;
 }
 
 function fullHistoryMatch(

@@ -34,7 +34,14 @@
 // ─── Configuration ───────────────────────────────────────────
 var DRIVE_ROOT_FOLDER_ID = 'YOUR_DRIVE_ROOT_FOLDER_ID';
 var ACCOUNT_LABEL = 'YOUR_ACCOUNT_LABEL';   // e.g. 'acme-shop'
-var DATE_RANGE = 'LAST_30_DAYS';            // GAQL date filter
+// LAST_90_DAYS gives the audit's performance verification enough
+// runway for a 28-day pre-import window even when the customer
+// imports a couple of weeks after the previous cycle's snapshot was
+// taken — the audit reads BOTH pre and post windows from the
+// current run's snapshot so the prev-run snapshot's date range is
+// irrelevant. Aggregate metrics (cumulative ROAS / CTR / etc.) on
+// the non-time-series CSVs are also computed over this same window.
+var DATE_RANGE = 'LAST_90_DAYS';            // GAQL date filter
 var SEARCH_TERMS_LIMIT = 5000;
 var PRODUCTS_LIMIT = 1000;
 var CHANGE_HISTORY_DAYS = 14;

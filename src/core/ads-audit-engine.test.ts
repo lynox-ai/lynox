@@ -131,7 +131,6 @@ describe('runAudit', () => {
   it('runs Wilson-score verification for cycle 2 with goal-aware KPI', () => {
     seedAccount(store, { primaryGoal: 'roas' });
     const r1 = createSuccessRun(store, { mode: 'BOOTSTRAP' });
-    seedDailyPerformance(store, r1.run_id, 'c1', '2026-01-15', 30, { dailyClicks: 50, dailyConv: 5 });
     store.insertCampaignsBatch({
       runId: r1.run_id, adsAccountId: ACCOUNT,
       rows: [{ campaignId: 'c1', campaignName: 'Search Brand', clicks: 1500, conversions: 150 }],
@@ -147,6 +146,11 @@ describe('runAudit', () => {
       adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id,
     });
     store.completeAuditRun(r2.run_id);
+    // Seed both pre and post windows on r2 — verifyPerformance reads
+    // both from the current run's snapshot (GAS DATE_RANGE=LAST_90_DAYS
+    // gives the runway). 0.10 conv-rate before (5 conv per 50 clicks)
+    // → 0.50 after (25 conv per 50 clicks) ⇒ ERFOLG.
+    seedDailyPerformance(store, r2.run_id, 'c1', '2026-01-18', 28, { dailyClicks: 50, dailyConv: 5 });
     seedDailyPerformance(store, r2.run_id, 'c1', '2026-02-16', 28, { dailyClicks: 50, dailyConv: 25 });
     store.insertCampaignsBatch({
       runId: r2.run_id, adsAccountId: ACCOUNT,
@@ -173,7 +177,6 @@ describe('runAudit', () => {
       runId: r1.run_id, adsAccountId: ACCOUNT,
       rows: [{ campaignId: 'c1', campaignName: 'Lead Gen', clicks: 500, conversions: 30 }],
     });
-    seedDailyPerformance(store, r1.run_id, 'c1', '2026-01-19', 28, { dailyClicks: 20, dailyConv: 1 });
 
     const r2 = store.createAuditRun({
       adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id,
@@ -183,6 +186,8 @@ describe('runAudit', () => {
       runId: r2.run_id, adsAccountId: ACCOUNT,
       rows: [{ campaignId: 'c1', campaignName: 'Lead Gen', clicks: 500, conversions: 30 }],
     });
+    // Both windows live on the current run's snapshot.
+    seedDailyPerformance(store, r2.run_id, 'c1', '2026-01-19', 28, { dailyClicks: 20, dailyConv: 1 });
     seedDailyPerformance(store, r2.run_id, 'c1', '2026-02-16', 28, { dailyClicks: 20, dailyConv: 1 });
 
     const result = runAudit(store, ACCOUNT);
@@ -245,6 +250,43 @@ describe('runAudit', () => {
     const result = runAudit(store, ACCOUNT);
     const finding = result.findings.find(f => f.area === 'campaign_target_underperformance_roas');
     expect(finding).toBeUndefined();
+  });
+
+  it('caps view-through conversions at clicks before Wilson — does not throw on conv > clicks', () => {
+    // Google Ads conversions can exceed clicks (view-through, cross-device).
+    // wilsonScoreInterval throws on `successes > trials`, so the audit must
+    // cap at clicks before scoring.
+    seedAccount(store, { primaryGoal: 'roas' });
+    const r1 = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    store.insertCampaignsBatch({
+      runId: r1.run_id, adsAccountId: ACCOUNT,
+      rows: [{ campaignId: 'c1', campaignName: 'View-Through-Heavy', clicks: 500, conversions: 600 }],
+    });
+    store.insertRunDecision({
+      runId: r1.run_id, entityType: 'campaign', entityExternalId: 'c1',
+      decision: 'KEEP', confidence: 0.9, rationale: 'Stable view-through performer',
+    });
+    setLastImport(store, '2026-02-15T00:00:00Z');
+
+    const r2 = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id });
+    store.completeAuditRun(r2.run_id);
+    store.insertCampaignsBatch({
+      runId: r2.run_id, adsAccountId: ACCOUNT,
+      rows: [{ campaignId: 'c1', campaignName: 'View-Through-Heavy', clicks: 500, conversions: 700 }],
+    });
+    // Pre and post window with conversions > clicks (50 clicks / day, 60 conv / day).
+    seedDailyPerformance(store, r2.run_id, 'c1', '2026-01-18', 28, { dailyClicks: 50, dailyConv: 60 });
+    seedDailyPerformance(store, r2.run_id, 'c1', '2026-02-16', 28, { dailyClicks: 50, dailyConv: 70 });
+
+    expect(() => runAudit(store, ACCOUNT)).not.toThrow();
+    const result = runAudit(store, ACCOUNT);
+    const item = result.verification?.items[0];
+    expect(item).toBeDefined();
+    // After capping, both windows have successes = clicks = 1400, so the CIs
+    // overlap and the classification is NEUTRAL — the important assertion is
+    // that the audit did not throw.
+    expect(item?.prevWindow.successes).toBeLessThanOrEqual(item?.prevWindow.trials ?? Infinity);
+    expect(item?.currWindow.successes).toBeLessThanOrEqual(item?.currWindow.trials ?? Infinity);
   });
 
   it('persists deterministic findings to ads_findings', () => {

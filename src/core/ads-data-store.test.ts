@@ -502,6 +502,16 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
         .toThrow(/Unknown view "view_does_not_exist"/);
     });
 
+    it('rejects unknown snapshot table names on getSnapshotRows', () => {
+      expect(() => store.getSnapshotRows('not_a_table', 'a1'))
+        .toThrow(/Unknown snapshot table "not_a_table"/);
+    });
+
+    it('rejects unknown snapshot table names on countSnapshotRows', () => {
+      expect(() => store.countSnapshotRows('not_a_table', 'a1'))
+        .toThrow(/Unknown snapshot table "not_a_table"/);
+    });
+
     it('view_blueprint_negative_candidates flags terms disjunct from PMAX', () => {
       store.insertSearchTermsBatch({
         runId, adsAccountId: 'a1',
@@ -578,6 +588,32 @@ describe('AdsDataStore — bulk inserts and latest-state', () => {
       expect(counts.NEW).toBe(1);
       expect(counts.SPLIT).toBe(1);
       expect(counts.PAUSE).toBe(0);
+    });
+
+    it('deleteAgentBlueprintEntity removes only the matching agent row, leaves deterministic intact', () => {
+      // Two rows with the same (run, entity_type, external_id) but
+      // different sources — the agent's idempotent re-call must drop
+      // its own row without disturbing the deterministic-source row
+      // beneath it.
+      store.insertBlueprintEntity({
+        runId, adsAccountId: 'a1', entityType: 'asset', kind: 'NEW',
+        externalId: 'asset-x', confidence: 0.9, source: 'deterministic',
+      });
+      store.insertBlueprintEntity({
+        runId, adsAccountId: 'a1', entityType: 'asset', kind: 'NEW',
+        externalId: 'asset-x', confidence: 0.85, source: 'agent',
+      });
+
+      const deleted = store.deleteAgentBlueprintEntity(runId, 'asset', 'asset-x');
+      expect(deleted).toBe(1);
+      const remaining = store.listBlueprintEntities(runId, { entityType: 'asset' });
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]?.source).toBe('deterministic');
+    });
+
+    it('deleteAgentBlueprintEntity returns 0 when no agent row matches', () => {
+      const deleted = store.deleteAgentBlueprintEntity(runId, 'asset', 'never-existed');
+      expect(deleted).toBe(0);
     });
   });
 });

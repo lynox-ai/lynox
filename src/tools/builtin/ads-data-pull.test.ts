@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AdsDataStore } from '../../core/ads-data-store.js';
-import { runAdsDataPull, type IDriveReader } from './ads-data-pull.js';
+import { runAdsDataPull, escapeDriveQueryString, type IDriveReader } from './ads-data-pull.js';
 
 interface FakeFile { id: string; name: string; mimeType: string; modifiedTime: string; content?: string }
 
@@ -270,5 +270,26 @@ describe('runAdsDataPull — GA4/GSC monthly filtering', () => {
     const ga4Inserts = result.perCsv.filter(p => p.kind === 'ga4' && p.status === 'inserted');
     expect(ga4Inserts.map(p => p.file)).toEqual(['ga4_2026-03.csv', 'ga4_2026-04.csv']);
     expect(store.countSnapshotRows('ga4_observations', 'a1', result.runId)).toBe(2);
+  });
+});
+
+describe('escapeDriveQueryString', () => {
+  it('escapes single quotes', () => {
+    expect(escapeDriveQueryString("a'b")).toBe("a\\'b");
+  });
+
+  it('escapes backslashes BEFORE quotes so an attacker cannot break out of the literal', () => {
+    // Without doubling the backslash first, the input `a\'b` would
+    // produce `a\\'b` which a JS-escaped Drive query would parse as
+    // `a\` plus an unescaped `'b`, ending the literal early.
+    expect(escapeDriveQueryString("a\\'b")).toBe("a\\\\\\'b");
+  });
+
+  it('leaves benign characters alone', () => {
+    expect(escapeDriveQueryString('foo-bar_baz 42')).toBe('foo-bar_baz 42');
+  });
+
+  it('handles empty string', () => {
+    expect(escapeDriveQueryString('')).toBe('');
   });
 });

@@ -67,15 +67,32 @@ describe('evaluateRestructureSafeguards', () => {
     expect(r.allowed).toBe(true);
   });
 
-  it('blocks SPLIT when confidence < 0.9', () => {
+  it('blocks SPLIT above conv-floor when confidence < 0.9', () => {
+    // Above-floor proposals inherit the strict confidence gate;
+    // below-floor proposals do NOT (see test below).
     const r = evaluateRestructureSafeguards(
       splitProposal({ confidence: 0.85 }),
-      [{ externalId: 'ag-1', conversions30d: 5 }],
+      [{ externalId: 'ag-1', conversions30d: 50 }],
       baseAccount(),
     );
     expect(r.allowed).toBe(false);
     expect(r.checks.confidenceOk).toBe(false);
     expect(r.blockedReasons.join('\n')).toMatch(/Confidence/);
+  });
+
+  it('allows SPLIT below conv-floor even with low confidence and short rationale', () => {
+    // The Sprint plan permits below-floor splits without the strict
+    // confidence/rationale gates; learning data at risk is minimal,
+    // and the source-shape + smart-bidding-guard checks still apply.
+    const r = evaluateRestructureSafeguards(
+      splitProposal({ confidence: 0.5, rationale: 'try it' }),
+      [{ externalId: 'ag-1', conversions30d: 5 }],
+      baseAccount(),
+    );
+    expect(r.allowed).toBe(true);
+    expect(r.checks.confidenceOk).toBe(true);
+    expect(r.checks.explicitRationaleOk).toBe(true);
+    expect(r.checks.convFloorOk).toBe(true);
   });
 
   it('blocks SPLIT above conv-floor with too-short rationale', () => {

@@ -117,7 +117,14 @@ export function runEmit(
   const planned = planCsvFiles(grouped);
   const hash = computeEmitHash(planned);
   const previousRun = run.previous_run_id !== null ? store.getAuditRun(run.previous_run_id) : null;
-  const idempotent = previousRun?.emitted_csv_hash === hash;
+  // Idempotency must catch two cases: a same-run re-emit (current run
+  // already stamped with this hash → no need to re-write the same files)
+  // and a true cycle-2 no-op (previous run produced the same hash → no
+  // diff to re-import). Without the same-run guard the hash gets
+  // recomputed on every call, every file is rewritten, and a passive
+  // poll of `runEmit` becomes destructive against a workspace the
+  // customer may already be reviewing.
+  const idempotent = run.emitted_csv_hash === hash || previousRun?.emitted_csv_hash === hash;
 
   if (!validation.canEmit) {
     return baseResult(account, customer, run, validation, hash, idempotent, [],
@@ -126,7 +133,7 @@ export function runEmit(
 
   if (idempotent) {
     return baseResult(account, customer, run, validation, hash, true, [],
-      'Blueprint identisch zum letzten Run (Hash-Match) — kein Re-Import nötig.');
+      'Blueprint identisch — Hash-Match auf aktuellem oder Vorgänger-Run, kein Re-Emit nötig.');
   }
 
   // 3. Write files
@@ -491,7 +498,19 @@ function normaliseMatchType(s: string | null): 'Exact' | 'Phrase' | 'Broad' {
   return 'Broad';
 }
 
+// Google Ads CIDs are always 10 digits formatted as `123-456-7890`. The
+// FK to `ads_accounts` already gates this format at write time, but we
+// re-assert it at the workspace boundary as defence in depth: a future
+// path that lets the agent create accounts must not be able to escape
+// the LYNOX_WORKSPACE root via `../` or absolute-path injection.
+const VALID_ADS_ACCOUNT_ID = /^\d{3}-\d{3}-\d{4}$/u;
+
 function resolveWorkspaceDir(override: string | undefined, accountId: string, runId: number): string {
+  if (!VALID_ADS_ACCOUNT_ID.test(accountId)) {
+    throw new EmitPreconditionError(
+      `Invalid ads_account_id "${accountId}" — expected Google Ads CID format 123-456-7890.`,
+    );
+  }
   const base = override ?? process.env['LYNOX_WORKSPACE'] ?? join(process.cwd(), '.lynox-workspace');
   return resolve(base, 'ads', accountId, 'blueprints', `run-${runId}`);
 }

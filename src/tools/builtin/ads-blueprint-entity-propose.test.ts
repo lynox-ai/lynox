@@ -133,8 +133,12 @@ describe('ads_blueprint_entity_propose tool', () => {
     expect(store.listBlueprintEntities(runId, { entityType: 'asset' })).toHaveLength(2);
   });
 
-  it('blocks PMAX SPLIT when confidence < 0.9', async () => {
-    seedAssetGroup(store, runId);
+  it('blocks PMAX SPLIT above conv-floor when confidence < 0.9', async () => {
+    // 50 conv / 30d puts the asset-group above the strict floor; below-
+    // floor splits intentionally bypass the confidence gate (see
+    // ads-pmax-restructure tests for the permissive case).
+    seedAssetGroup(store, runId, { conversions: 50 });
+    setLastImport(store, '2026-04-01T00:00:00Z');
     const out = await tool.handler({
       ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'SPLIT',
       payload: { campaign_name: 'PMAX-Drills', asset_group_name: 'AG-Mixed' },
