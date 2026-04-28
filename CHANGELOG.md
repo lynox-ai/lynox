@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.3.7 — 2026-04-28
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.6 (delete this block before saving):
+
+Core:
+- ci: build canary docker image on feat/fix/canary branch push (#203)
+- chore(spawn): rename OUTPUT_FILL_RATIO + align max_turns schema type (#202)
+- chore(spawn): trim incident JSDocs, tighten test bounds, finish security trio (#201)
+- fix(spawn): bound caller-supplied input + clamp negative estimate (#198)
+- fix(spawn): realistic cost estimate so legitimate fan-outs aren't blocked (#197)
+- ci(release): record GitHub Deployment object after pro-dispatch (#196)
+- fix(agent): keep recoverable tool errors inline; no global toast (#195)
+- fix(kg): unify stopwords + reject common nouns at v2 extraction (#193)
+- tests: add GreenMail adversarial mailbox fixtures (#192)
+- mail: harden address-list parser + document flag-semantics (#191)
+- http: ensure auth secret is always set (#190)
+- mail: extend charset support in OAuth Gmail body decoder (#189)
+- mail: add per-tool rate limits and per-recipient dedup (#188)
+- fix(mail): preserve persisted default when its provider fails to load (#187)
+- perf(mail): batch Gmail envelope metadata fetches (#186)
+- fix(mail): tighten OAuth Gmail watcher cursor and provider lifecycle (#185)
+- perf(google-auth): cache service-account tokens (#184)
+- perf(google-auth): coalesce concurrent token refreshes (#182)
+- chore: ignore local bench-models results (#183)
+
+Pro:
+- feat(managed): canary pinning + rollout skip (#87)
+- chore(deps): bump pnpm/action-setup from 4 to 6 (#17)
+- chore(release): v1.3.6 (#85)
+-->
 ## 1.3.6 — 2026-04-27
 
 ### Added
