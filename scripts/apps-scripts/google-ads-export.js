@@ -157,11 +157,16 @@ function exportCampaignPerformance() {
 }
 
 function exportAdGroups() {
+  // campaign.status filter prevents orphan ad-groups (parent REMOVED but
+  // ad_group still ENABLED) from landing in the snapshot — those would
+  // pass the lynox blueprint into emit and trip the cross-reference
+  // validator. Same pattern on keyword_view / ad_group_ad / asset_group.
   var q = 'SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, ' +
     'ad_group.status, metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc ' +
     'FROM ad_group WHERE segments.date DURING ' + DATE_RANGE + ' ' +
-    'AND ad_group.status != "REMOVED"';
+    'AND ad_group.status != "REMOVED" ' +
+    'AND campaign.status != "REMOVED"';
   var header = 'campaign_id,campaign_name,ad_group_id,ad_group_name,status,' +
     'impressions,clicks,cost_micros,conversions,conv_value,ctr,avg_cpc';
   return runQueryToCsv_(q, header, function (row) {
@@ -190,7 +195,9 @@ function exportKeywords() {
     'metrics.conversions, metrics.conversions_value, metrics.ctr, ' +
     'metrics.average_cpc, metrics.search_impression_share ' +
     'FROM keyword_view WHERE segments.date DURING ' + DATE_RANGE + ' ' +
-    'AND ad_group_criterion.status != "REMOVED"';
+    'AND ad_group_criterion.status != "REMOVED" ' +
+    'AND ad_group.status != "REMOVED" ' +
+    'AND campaign.status != "REMOVED"';
   var header = 'campaign_name,ad_group_name,keyword,match_type,status,quality_score,' +
     'impressions,clicks,cost_micros,conversions,conv_value,ctr,avg_cpc,search_is';
   return runQueryToCsv_(q, header, function (row) {
@@ -224,6 +231,8 @@ function exportRsaAds() {
     'metrics.conversions, metrics.ctr ' +
     'FROM ad_group_ad WHERE ad_group_ad.ad.type = "RESPONSIVE_SEARCH_AD" ' +
     'AND ad_group_ad.status != "REMOVED" ' +
+    'AND ad_group.status != "REMOVED" ' +
+    'AND campaign.status != "REMOVED" ' +
     'AND segments.date DURING ' + DATE_RANGE;
   var header = 'campaign_name,ad_group_name,ad_id,headlines,descriptions,' +
     'final_url,status,ad_strength,impressions,clicks,cost_micros,conversions,ctr';
@@ -257,7 +266,8 @@ function exportAssetGroups() {
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value ' +
     'FROM asset_group WHERE segments.date DURING ' + DATE_RANGE + ' ' +
-    'AND asset_group.status != "REMOVED"';
+    'AND asset_group.status != "REMOVED" ' +
+    'AND campaign.status != "REMOVED"';
   var header = 'campaign_id,campaign_name,asset_group_id,asset_group_name,status,' +
     'ad_strength,impressions,clicks,cost_micros,conversions,conv_value';
   return runQueryToCsv_(q, header, function (row) {

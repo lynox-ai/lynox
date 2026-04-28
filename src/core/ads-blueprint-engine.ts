@@ -267,57 +267,79 @@ function loadEntities(
         ad_group_id: string | null; ad_group_name: string; campaign_name: string | null;
         status: string | null;
       }>('ads_ad_groups', run.ads_account_id, { runId: run.run_id });
-      return rows.map(r => ({
-        externalId: r.ad_group_id ?? `${r.campaign_name ?? ''}::${r.ad_group_name}`,
-        name: r.ad_group_name,
-        ...(r.status !== null ? { status: r.status } : {}),
-        payload: {
-          ad_group_name: r.ad_group_name,
-          ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
-        },
-      }));
+      const validCampaigns = collectCampaignNames(store, run);
+      return rows
+        .filter(r => r.campaign_name !== null && validCampaigns.has(r.campaign_name))
+        .map(r => ({
+          externalId: r.ad_group_id ?? `${r.campaign_name ?? ''}::${r.ad_group_name}`,
+          name: r.ad_group_name,
+          ...(r.status !== null ? { status: r.status } : {}),
+          payload: {
+            ad_group_name: r.ad_group_name,
+            ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
+          },
+        }));
     }
     case 'keyword': {
       const rows = store.getSnapshotRows<{
         keyword: string; match_type: string | null; campaign_name: string | null;
         ad_group_name: string | null; status: string | null;
       }>('ads_keywords', run.ads_account_id, { runId: run.run_id });
-      return rows.map(r => {
-        // Keywords have no stable Google ID in the export — synthesise from
-        // (campaign, ad_group, keyword, match_type) which is unique within
-        // an account.
-        const id = `${r.campaign_name ?? ''}::${r.ad_group_name ?? ''}::${r.keyword}::${r.match_type ?? ''}`;
-        return {
-          externalId: id,
-          name: r.keyword,
-          ...(r.status !== null ? { status: r.status } : {}),
-          payload: {
-            keyword: r.keyword,
-            ...(r.match_type !== null ? { match_type: r.match_type } : {}),
-            ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
-            ...(r.ad_group_name !== null ? { ad_group_name: r.ad_group_name } : {}),
-          },
-        };
-      });
+      const validCampaigns = collectCampaignNames(store, run);
+      return rows
+        .filter(r => r.campaign_name !== null && validCampaigns.has(r.campaign_name))
+        .map(r => {
+          // Keywords have no stable Google ID in the export — synthesise from
+          // (campaign, ad_group, keyword, match_type) which is unique within
+          // an account.
+          const id = `${r.campaign_name ?? ''}::${r.ad_group_name ?? ''}::${r.keyword}::${r.match_type ?? ''}`;
+          return {
+            externalId: id,
+            name: r.keyword,
+            ...(r.status !== null ? { status: r.status } : {}),
+            payload: {
+              keyword: r.keyword,
+              ...(r.match_type !== null ? { match_type: r.match_type } : {}),
+              ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
+              ...(r.ad_group_name !== null ? { ad_group_name: r.ad_group_name } : {}),
+            },
+          };
+        });
     }
     case 'asset_group': {
       const rows = store.getSnapshotRows<{
         asset_group_id: string; asset_group_name: string;
         campaign_name: string | null; status: string | null;
       }>('ads_asset_groups', run.ads_account_id, { runId: run.run_id });
-      return rows.map(r => ({
-        externalId: r.asset_group_id,
-        name: r.asset_group_name,
-        ...(r.status !== null ? { status: r.status } : {}),
-        payload: {
-          asset_group_name: r.asset_group_name,
-          ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
-        },
-      }));
+      const validCampaigns = collectCampaignNames(store, run);
+      return rows
+        .filter(r => r.campaign_name !== null && validCampaigns.has(r.campaign_name))
+        .map(r => ({
+          externalId: r.asset_group_id,
+          name: r.asset_group_name,
+          ...(r.status !== null ? { status: r.status } : {}),
+          payload: {
+            asset_group_name: r.asset_group_name,
+            ...(r.campaign_name !== null ? { campaign_name: r.campaign_name } : {}),
+          },
+        }));
     }
     default:
       return [];
   }
+}
+
+// Drop sub-entities (ad_group / keyword / asset_group) whose parent
+// campaign is not in the current snapshot. Belt-and-braces against GAS
+// exports that filter the parent by `campaign.status != REMOVED` but
+// leave the children un-joined (as observed on archived aquanatura data
+// where 8 ad-groups referenced REMOVED campaigns and tripped the
+// emit cross-reference validator).
+function collectCampaignNames(store: AdsDataStore, run: AdsAuditRunRow): Set<string> {
+  const rows = store.getSnapshotRows<{ campaign_name: string }>(
+    'ads_campaigns', run.ads_account_id, { runId: run.run_id },
+  );
+  return new Set(rows.map(r => r.campaign_name).filter((n): n is string => typeof n === 'string'));
 }
 
 function fullHistoryMatch(
