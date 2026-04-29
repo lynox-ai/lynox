@@ -433,7 +433,9 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
       ...(budget !== null ? { budget } : {}),
       ...(stringField(payload, 'bidding_strategy_type') !== null
         ? { bidStrategy: editorBidStrategy(stringField(payload, 'bidding_strategy_type')!) } : {}),
-      ...(numberField(payload, 'target_roas') !== null ? { targetRoas: numberField(payload, 'target_roas')! } : {}),
+      ...(numberField(payload, 'target_roas') !== null
+        ? { targetRoas: editorTargetRoas(numberField(payload, 'target_roas')!) }
+        : {}),
       ...(targetCpa !== null ? { targetCpa } : {}),
       ...(status !== undefined ? { status } : {}),
     }));
@@ -781,6 +783,23 @@ function editorBidStrategy(s: string): string {
     case 'MANUAL_CPV': return 'Manual CPV';
     default: return 'Maximize conversions';
   }
+}
+
+/**
+ * Convert a Target ROAS multiplier (Google Ads API convention: 7.0 = 700%
+ * return) to the percent value Editor's CSV "Target ROAS" column expects
+ * (e.g. 700). Without this, Editor reads our 7.0 as "7%" and the production
+ * campaign's 700% target collapses to 7%, killing spend on import. The
+ * snapshot stores the API value verbatim so this conversion belongs at the
+ * emit boundary.
+ *
+ * Heuristic: values < 50 are multipliers (typical Target ROAS multipliers in
+ * the wild are 1–20). Values ≥ 50 are already in percent form (agent or
+ * import payload). Multiply only when in multiplier range.
+ */
+function editorTargetRoas(value: number): number {
+  if (value < 50) return Math.round(value * 100 * 100) / 100; // 8.26 → 826
+  return value; // already in percent (agent payloads may use 826 directly)
 }
 
 function editorStatus(s: string): 'Paused' | 'Enabled' | 'Removed' {

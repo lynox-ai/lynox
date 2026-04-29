@@ -180,9 +180,14 @@ describe('runEmit', () => {
     expect(text).toMatch(/Performance Max/);
     expect(text).toMatch(/Power-Drills/);
     expect(text).toMatch(/Cordless-Drills/);
-    // Bid strategy + target ROAS came through from snapshot.
+    // Bid strategy + target ROAS came through from snapshot. The snapshot
+    // stores the API multiplier (4.5 = 450%); emit converts to the percent
+    // form Editor's "Target ROAS" CSV column expects (450) — without this
+    // conversion Editor reads 4.5 as 4.5%, which on a production campaign
+    // would collapse the existing ROAS target by ~100×.
     expect(text).toMatch(/Maximize conversion value/);
-    expect(text).toMatch(/4\.5/);
+    expect(text).toMatch(/\b450\b/);
+    expect(text).not.toMatch(/\b4\.5\b/);
     // Header order: 1st column=Campaign so the budget converted correctly to 30 CHF.
     expect(text).toMatch(/30(\.0+)?\b/);
   });
