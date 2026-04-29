@@ -164,4 +164,152 @@ describe('generateNegatives', () => {
     const out = generateNegatives(store, ACCOUNT, runId, null);
     expect(out).toEqual([]);
   });
+
+  // ── Auto-derived pmax_owned head terms ──────────────────────────────
+  // The customer profile pmax_owned_head_terms field is operator-curated
+  // and almost always empty in practice. The auto-derive pulls signal
+  // from the live PMax snapshot so the optimizer Just Works.
+
+  it('auto-derives pmax_owned head terms from PMax asset_group_name tokens', () => {
+    // Reset profile to no explicit owned terms — derivation must fill the gap.
+    store.upsertCustomerProfile({
+      customerId: CUSTOMER, clientName: 'Acme Shop',
+      pmaxOwnedHeadTerms: [], competitors: [], primaryGoal: 'roas',
+      ownBrands: [], soldBrands: [],
+    });
+    store.insertCampaignsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: [{ campaignId: 'pmax-1', campaignName: 'PMax | Werkzeug', channelType: 'PERFORMANCE_MAX' }],
+    });
+    store.insertAssetGroupsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: [
+        { assetGroupId: 'ag1', assetGroupName: 'Wasserfilter', campaignName: 'PMax | Werkzeug' },
+        { assetGroupId: 'ag2', assetGroupName: 'Osmoseanlagen', campaignName: 'PMax | Werkzeug' },
+      ],
+    });
+    // Cluster signal is thin (under no-AG threshold) but the AG match
+    // alone is enough — these are categories the customer has explicitly
+    // committed PMax to.
+    store.insertPmaxSearchTermsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: [
+        ...Array.from({ length: 6 }, (_, i) => ({ searchCategory: `wasserfilter cluster ${i}` })),
+        ...Array.from({ length: 5 }, (_, i) => ({ searchCategory: `osmoseanlagen cluster ${i}` })),
+      ],
+    });
+    const customer = store.getCustomerProfile(CUSTOMER)!;
+    const out = generateNegatives(store, ACCOUNT, runId, customer);
+    const owned = out.filter(n => n.source === 'pmax_owned');
+    const tokens = owned.map(n => n.keywordText).sort();
+    expect(tokens).toContain('wasserfilter');
+    expect(tokens).toContain('osmoseanlagen');
+    for (const n of owned) {
+      expect(n.matchType).toBe('Exact');
+      expect(n.scope).toBe('account');
+      expect(n.confidence).toBe(0.7); // auto-derived = 0.7 (vs explicit 0.95)
+      expect(n.evidence?.['asset_group_match']).toBe(true);
+    }
+  });
+
+  it('auto-derives pmax_owned head terms from high-volume cluster tokens (no AG)', () => {
+    store.upsertCustomerProfile({
+      customerId: CUSTOMER, clientName: 'Acme Shop',
+      pmaxOwnedHeadTerms: [], competitors: [], primaryGoal: 'roas',
+      ownBrands: [], soldBrands: [],
+    });
+    // No asset_group named "kefir" — customer hasn't carved it out yet,
+    // but PMax serves it heavily through Gesamtsortiment so 25 distinct
+    // search-term clusters reference it. Above the 20-cluster floor.
+    store.insertPmaxSearchTermsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: Array.from({ length: 25 }, (_, i) => ({ searchCategory: `kefir variant ${i}` })),
+    });
+    const customer = store.getCustomerProfile(CUSTOMER)!;
+    const out = generateNegatives(store, ACCOUNT, runId, customer);
+    const owned = out.filter(n => n.source === 'pmax_owned');
+    const kefir = owned.find(n => n.keywordText === 'kefir');
+    expect(kefir).toBeDefined();
+    expect(kefir!.confidence).toBe(0.7);
+    expect(kefir!.evidence?.['cluster_count']).toBe(25);
+    expect(kefir!.evidence?.['asset_group_match']).toBe(false);
+  });
+
+  it('does NOT auto-derive low-volume cluster tokens without AG match', () => {
+    store.upsertCustomerProfile({
+      customerId: CUSTOMER, clientName: 'Acme Shop',
+      pmaxOwnedHeadTerms: [], competitors: [], primaryGoal: 'roas',
+      ownBrands: [], soldBrands: [],
+    });
+    // 18 clusters — below the 20 floor when no AG match is present.
+    store.insertPmaxSearchTermsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: Array.from({ length: 18 }, (_, i) => ({ searchCategory: `niche thing ${i}` })),
+    });
+    const customer = store.getCustomerProfile(CUSTOMER)!;
+    const out = generateNegatives(store, ACCOUNT, runId, customer);
+    expect(out.filter(n => n.source === 'pmax_owned' && n.keywordText === 'niche')).toHaveLength(0);
+  });
+
+  it('filters brand tokens out of auto-derived pmax_owned (those go via brand_inflation_block)', () => {
+    store.upsertCustomerProfile({
+      customerId: CUSTOMER, clientName: 'Acme Shop',
+      pmaxOwnedHeadTerms: [], competitors: [], primaryGoal: 'roas',
+      ownBrands: ['acme'], soldBrands: ['maunawai'],
+    });
+    store.insertPmaxSearchTermsBatch({
+      runId, adsAccountId: ACCOUNT,
+      // 25 clusters mention the brand — would normally trigger derive,
+      // but brand tokens are excluded.
+      rows: Array.from({ length: 25 }, (_, i) => ({ searchCategory: `acme product ${i}` })),
+    });
+    const customer = store.getCustomerProfile(CUSTOMER)!;
+    const out = generateNegatives(store, ACCOUNT, runId, customer);
+    expect(out.filter(n => n.source === 'pmax_owned' && n.keywordText === 'acme')).toHaveLength(0);
+  });
+
+  it('filters generic funnel words from auto-derived pmax_owned', () => {
+    store.upsertCustomerProfile({
+      customerId: CUSTOMER, clientName: 'Acme Shop',
+      pmaxOwnedHeadTerms: [], competitors: [], primaryGoal: 'roas',
+      ownBrands: [], soldBrands: [],
+    });
+    store.insertPmaxSearchTermsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: Array.from({ length: 25 }, (_, i) => ({ searchCategory: `wasserfilter kaufen schweiz ${i}` })),
+    });
+    const customer = store.getCustomerProfile(CUSTOMER)!;
+    const out = generateNegatives(store, ACCOUNT, runId, customer);
+    const tokens = out.filter(n => n.source === 'pmax_owned').map(n => n.keywordText);
+    expect(tokens).not.toContain('kaufen');
+    expect(tokens).not.toContain('schweiz');
+    expect(tokens).toContain('wasserfilter'); // real category survives
+  });
+
+  it('explicit profile term wins over auto-derived (deduped, confidence 0.95)', () => {
+    // Operator already curated "wasserfilter" — derivation must NOT
+    // emit a duplicate at confidence 0.7. The 0.95 explicit entry wins.
+    store.upsertCustomerProfile({
+      customerId: CUSTOMER, clientName: 'Acme Shop',
+      pmaxOwnedHeadTerms: ['wasserfilter'], competitors: [], primaryGoal: 'roas',
+      ownBrands: [], soldBrands: [],
+    });
+    store.insertCampaignsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: [{ campaignId: 'pmax-1', campaignName: 'PMax', channelType: 'PERFORMANCE_MAX' }],
+    });
+    store.insertAssetGroupsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: [{ assetGroupId: 'ag1', assetGroupName: 'Wasserfilter', campaignName: 'PMax' }],
+    });
+    store.insertPmaxSearchTermsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: Array.from({ length: 10 }, (_, i) => ({ searchCategory: `wasserfilter ${i}` })),
+    });
+    const customer = store.getCustomerProfile(CUSTOMER)!;
+    const out = generateNegatives(store, ACCOUNT, runId, customer);
+    const wasserfilter = out.filter(n => n.source === 'pmax_owned' && n.keywordText === 'wasserfilter');
+    expect(wasserfilter).toHaveLength(1);
+    expect(wasserfilter[0]!.confidence).toBe(0.95);
+  });
 });
