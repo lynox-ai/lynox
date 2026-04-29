@@ -26,6 +26,10 @@ interface AdsEmitCsvInput {
   ads_account_id: string;
   /** Override the workspace base directory. Defaults to LYNOX_WORKSPACE/ads. */
   workspace_dir?: string | undefined;
+  /** Explicit run id to emit. When omitted, the engine picks the latest run
+   *  that has blueprint entities (which may be older than the latest audit
+   *  run if the latest blueprint was skipped due to pending import). */
+  run_id?: number | undefined;
 }
 
 const DESCRIPTION = [
@@ -65,6 +69,10 @@ export function createAdsEmitCsvTool(store: AdsDataStore): ToolEntry<AdsEmitCsvI
             type: 'string',
             description: 'Override the workspace base directory. Defaults to LYNOX_WORKSPACE/ads.',
           },
+          run_id: {
+            type: 'integer',
+            description: 'Explicit run id to emit. Omit to auto-pick the latest run with blueprint entities — useful when the latest audit run was skipped due to pending import.',
+          },
         },
         required: ['ads_account_id'],
       },
@@ -73,6 +81,7 @@ export function createAdsEmitCsvTool(store: AdsDataStore): ToolEntry<AdsEmitCsvI
       try {
         const result = runEmit(store, input.ads_account_id, {
           ...(input.workspace_dir !== undefined ? { workspaceDir: input.workspace_dir } : {}),
+          ...(input.run_id !== undefined ? { runId: input.run_id } : {}),
         });
         return renderEmitReport(result);
       } catch (err) {

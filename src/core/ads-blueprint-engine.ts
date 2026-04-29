@@ -179,6 +179,12 @@ export function runBlueprint(
   // Low-strength asset groups — surfaced in markdown ──────────────────
   const lowStrengthAssetGroups = findLowStrengthAssetGroups(store, run);
 
+  // Theme-coverage expansion — read the audit's theme finding and convert
+  // each strong theme into a NEW asset_group proposal scoped to the top-
+  // spending PMax campaign. Idempotent under re-runs because deterministic
+  // entities get cleared before persist below.
+  const themeExpansions = generateThemeExpansionProposals(store, run, customer);
+
   // Re-run safety: clear our own deterministic output (and the matching
   // ads_run_decisions rows) before writing fresh ones. Agent-source
   // additions (asset proposals, audience signals, validated PMAX
@@ -226,6 +232,40 @@ export function runBlueprint(
         rationale: d.rationale,
       });
     }
+  }
+
+  // Theme-expansion proposals → NEW entities, type='asset_group'.
+  for (const exp of themeExpansions) {
+    const externalId = `bp.assetgroup.${slug(exp.campaignName)}.${slug(exp.assetGroupName)}`;
+    const blueprintInput: InsertBlueprintEntityInput = {
+      runId: run.run_id,
+      adsAccountId,
+      entityType: 'asset_group',
+      kind: 'NEW',
+      externalId,
+      confidence: 0.7,
+      rationale: exp.rationale,
+      payload: {
+        campaign_name: exp.campaignName,
+        asset_group_name: exp.assetGroupName,
+        theme_token: exp.theme,
+        cluster_count: exp.clusters,
+        sample_search_terms: exp.sampleClusters,
+        status: 'PAUSED',
+      },
+      namingValid: true,
+      namingErrors: [],
+    };
+    const row = store.insertBlueprintEntity(blueprintInput);
+    persistedEntityIds.push(row.blueprint_id);
+    store.insertRunDecision({
+      runId: run.run_id,
+      entityType: 'asset_group',
+      entityExternalId: externalId,
+      decision: 'NEW',
+      confidence: 0.7,
+      rationale: exp.rationale,
+    });
   }
 
   // Negatives → NEW entities, type='negative'.
@@ -503,6 +543,70 @@ function toDecisionEntityType(entityType: string): AdsDecisionEntityType {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+
+/** Local slug for blueprint external_ids — matches the propose-tool style. */
+function slug(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-+|-+$/gu, '').slice(0, 60);
+}
+
+interface ThemeExpansionProposal {
+  theme: string;
+  clusters: number;
+  campaignName: string;
+  assetGroupName: string;
+  sampleClusters: string[];
+  rationale: string;
+}
+
+/** Read the theme-coverage finding produced by the audit, pick the
+ *  top-spending PMax campaign as the host, and emit one NEW asset_group
+ *  proposal per strong theme. The asset-group is paused-by-default; the
+ *  customer activates it after editor-import.
+ *
+ *  Guard: limit to MAX_THEME_EXPANSIONS so a single cycle does not flood
+ *  the proposal queue. The agent can still add more via propose. */
+const MAX_THEME_EXPANSIONS = 5;
+
+function generateThemeExpansionProposals(
+  store: AdsDataStore,
+  run: AdsAuditRunRow,
+  customer: CustomerProfileRow,
+): ThemeExpansionProposal[] {
+  const findings = store.listFindings(run.run_id, { area: 'pmax_theme_coverage_gap' });
+  if (findings.length === 0) return [];
+  const finding = findings[0]!;
+  let evidence: { themes?: Array<{ token: string; clusters: number; sample?: string[] }> } = {};
+  try {
+    evidence = JSON.parse(finding.evidence_json);
+  } catch {
+    return [];
+  }
+  const themes = evidence.themes ?? [];
+  if (themes.length === 0) return [];
+
+  // Pick host PMax campaign by highest spend in the snapshot.
+  const pmaxCampaigns = store.getSnapshotRows<{ campaign_name: string | null; channel_type: string | null; cost_micros: number | null }>(
+    'ads_campaigns', run.ads_account_id, { runId: run.run_id },
+  ).filter(r => r.channel_type === 'PERFORMANCE_MAX' && r.campaign_name);
+  if (pmaxCampaigns.length === 0) return [];
+  const host = pmaxCampaigns.reduce((acc, r) => (r.cost_micros ?? 0) > (acc.cost_micros ?? 0) ? r : acc);
+
+  const customerSlug = customer.customer_id;
+  return themes.slice(0, MAX_THEME_EXPANSIONS).map(t => ({
+    theme: t.token,
+    clusters: t.clusters,
+    campaignName: host.campaign_name!,
+    assetGroupName: `Theme-${capitalize(t.token)}`,
+    sampleClusters: t.sample ?? [],
+    rationale: `Theme-Coverage-Gap: "${t.token}" hat ${t.clusters} PMax-Search-Cluster ohne passende Asset-Group. ` +
+      `Neuer Asset-Group-Vorschlag (Status PAUSED) für ${customerSlug}; nach Import + 14d Lernfenster Performance prüfen.`,
+  }));
+}
+
+function capitalize(s: string): string {
+  if (!s) return s;
+  return s[0]!.toUpperCase() + s.slice(1);
+}
 
 function parseJsonArray(s: string): string[] {
   try {

@@ -1202,6 +1202,19 @@ export class AdsDataStore {
     `).get(adsAccountId) as AdsAuditRunRow | undefined ?? null;
   }
 
+  /** Latest SUCCESS run that actually has at least one blueprint_entity row.
+   *  Used by emit to bridge the chicken-and-egg case where a fresh data_pull
+   *  created a newer audit run but its blueprint was skipped (pending import
+   *  from the previous run). */
+  findLatestRunWithBlueprintEntities(adsAccountId: string): AdsAuditRunRow | null {
+    return this.db.prepare(`
+      SELECT r.* FROM ads_audit_runs r
+      WHERE r.ads_account_id = ? AND r.status = 'SUCCESS'
+        AND EXISTS (SELECT 1 FROM ads_blueprint_entities e WHERE e.run_id = r.run_id)
+      ORDER BY r.finished_at DESC, r.run_id DESC LIMIT 1
+    `).get(adsAccountId) as AdsAuditRunRow | undefined ?? null;
+  }
+
   getLatestAuditRun(adsAccountId: string): AdsAuditRunRow | null {
     return this.db.prepare(`
       SELECT * FROM ads_audit_runs

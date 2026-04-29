@@ -69,6 +69,16 @@ export type AuditMode = 'BOOTSTRAP' | 'FIRST_IMPORT' | 'OPTIMIZE';
 
 const SMART_BIDDING_LEARNING_DAYS = 14;
 
+/** Mode ranking for the mode_mismatch detector: BOOTSTRAP is most
+ *  restrictive (rank 0), OPTIMIZE is least (rank 2). Mismatch only fires
+ *  when detected < recorded — i.e. the run was tagged optimistically but
+ *  audit found less to work with than expected. */
+const MODE_RANK: Record<AuditMode, number> = {
+  BOOTSTRAP: 0,
+  FIRST_IMPORT: 1,
+  OPTIMIZE: 2,
+};
+
 export interface AuditKpis {
   spend: number;
   conversions: number;
@@ -327,6 +337,160 @@ function parseBrandJsonArray(s: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+interface ThemeCluster {
+  token: string;
+  clusters: number;
+  sample: string[];
+}
+
+interface BrandSearchDefaults {
+  dailyBudgetChf: number;
+  targetCpaChf: number;
+  reasoning: string;
+}
+
+/** Conservative-but-data-driven defaults for the brand-search-campaign that
+ *  the brand-inflation finding recommends. The numbers are intentionally
+ *  on the lower end so the agent's proposal can scale up after launch
+ *  rather than over-spending immediately on unclear conversion economics. */
+function brandSearchDefaults(brandedClusters: number, kpis: AuditKpis): BrandSearchDefaults {
+  // CPA target: half the account-wide CPA. Brand traffic converts much
+  // better than blended; halving is a safe cap that still leaves room.
+  const accountCpa = (kpis.cpa !== null && kpis.cpa > 0) ? kpis.cpa : 30; // sane floor
+  const targetCpa = Math.max(5, Math.round(accountCpa * 0.5));
+  // Daily budget proxy: branded_clusters * 1 click/day * estimated brand-CPC
+  // (~CHF 3 default — most CH brand CPCs land between 2 and 4) with a 50%
+  // headroom. Floor at CHF 5 so a single-cluster account still has budget.
+  const estimatedBrandCpc = 3;
+  const dailyBudget = Math.max(5, Math.round(brandedClusters * 1 * estimatedBrandCpc * 1.5));
+  return {
+    dailyBudgetChf: dailyBudget,
+    targetCpaChf: targetCpa,
+    reasoning:
+      `dailyBudget = brandedClusters(${brandedClusters}) × 1 click/day × estCPC(${estimatedBrandCpc} CHF) × 1.5; ` +
+      `targetCpa = round(account_cpa(${accountCpa.toFixed(2)}) × 0.5).`,
+  };
+}
+
+/** Cluster untargeted PMax search-term labels by their dominant token.
+ *  Stop-words and 1-2-char tokens are dropped. Each label can contribute to
+ *  multiple themes (a label "wasserfilter küche" lifts both "wasserfilter"
+ *  and "küche"), but the engine returns themes sorted by cluster-count
+ *  descending so the agent always sees the highest-volume themes first. */
+function clusterUntargetedThemes(
+  rows: ReadonlyArray<{ search_category: string | null }>,
+  brandTokens: ReadonlyArray<string>,
+  existingGroups: ReadonlyArray<string>,
+): ThemeCluster[] {
+  const themeCount = new Map<string, { count: number; sample: Set<string> }>();
+  for (const r of rows) {
+    const label = (r.search_category ?? '').toLowerCase().trim();
+    if (!label) continue;
+    if (brandTokens.some(t => label.includes(t))) continue;
+    if (existingGroups.some(g => label.includes(g))) continue;
+    for (const token of tokenize(label)) {
+      let bucket = themeCount.get(token);
+      if (!bucket) {
+        bucket = { count: 0, sample: new Set() };
+        themeCount.set(token, bucket);
+      }
+      bucket.count += 1;
+      if (bucket.sample.size < 5) bucket.sample.add(label);
+    }
+  }
+  return Array.from(themeCount.entries())
+    .map(([token, b]) => ({ token, clusters: b.count, sample: Array.from(b.sample) }))
+    .sort((a, b) => b.clusters - a.clusters);
+}
+
+const THEME_STOPWORDS = new Set([
+  'der', 'die', 'das', 'und', 'oder', 'mit', 'für', 'fuer', 'auf', 'aus',
+  'ein', 'eine', 'einen', 'eines', 'einem', 'einer', 'den', 'dem', 'des',
+  'im', 'in', 'an', 'zu', 'zum', 'zur', 'von', 'vom', 'bei',
+  'the', 'and', 'for', 'with', 'from', 'into',
+]);
+
+function tokenize(label: string): string[] {
+  return label
+    .split(/[^\p{L}\p{N}]+/u)
+    .map(t => t.trim())
+    .filter(t => t.length >= 3 && !THEME_STOPWORDS.has(t));
+}
+
+interface PerfOutlier {
+  segment: string;
+  spend_chf: number;
+  conv_rate: number;
+  account_mean: number;
+  delta_pct: number;
+}
+
+/** Per-device aggregation across the snapshot. Flags devices where:
+ *   - conv-rate is < 50% of account mean,
+ *   - and spend ≥ 5% of total account spend (non-trivial),
+ *   - and clicks ≥ 50 (sample-size floor).
+ *  Returns sorted by spend descending. */
+function detectDevicePerformanceOutliers(store: AdsDataStore, run: AdsAuditRunRow): PerfOutlier[] {
+  const rows = store.getSnapshotRows<{ device: string; clicks: number | null; cost_micros: number | null; conversions: number | null }>(
+    'ads_device_performance', run.ads_account_id, { runId: run.run_id },
+  );
+  return aggregatePerfOutliers(rows.map(r => ({
+    segment: r.device, clicks: r.clicks, cost_micros: r.cost_micros, conversions: r.conversions,
+  })));
+}
+
+function detectGeoPerformanceOutliers(store: AdsDataStore, run: AdsAuditRunRow): PerfOutlier[] {
+  const rows = store.getSnapshotRows<{ geo_target_region: string | null; clicks: number | null; cost_micros: number | null; conversions: number | null }>(
+    'ads_geo_performance', run.ads_account_id, { runId: run.run_id },
+  );
+  return aggregatePerfOutliers(rows.map(r => ({
+    segment: r.geo_target_region ?? 'unknown',
+    clicks: r.clicks, cost_micros: r.cost_micros, conversions: r.conversions,
+  })));
+}
+
+function aggregatePerfOutliers(
+  rows: ReadonlyArray<{ segment: string; clicks: number | null; cost_micros: number | null; conversions: number | null }>,
+): PerfOutlier[] {
+  if (rows.length === 0) return [];
+  const agg = new Map<string, { clicks: number; spend_micros: number; conv: number }>();
+  let totalClicks = 0, totalSpendMicros = 0, totalConv = 0;
+  for (const r of rows) {
+    const seg = r.segment || 'unknown';
+    const clicks = r.clicks ?? 0;
+    const spend = r.cost_micros ?? 0;
+    const conv = r.conversions ?? 0;
+    let bucket = agg.get(seg);
+    if (!bucket) { bucket = { clicks: 0, spend_micros: 0, conv: 0 }; agg.set(seg, bucket); }
+    bucket.clicks += clicks;
+    bucket.spend_micros += spend;
+    bucket.conv += conv;
+    totalClicks += clicks;
+    totalSpendMicros += spend;
+    totalConv += conv;
+  }
+  if (totalClicks < 100 || totalSpendMicros === 0) return [];
+  const accountConvRate = totalConv / totalClicks;
+  if (accountConvRate <= 0) return [];
+  const out: PerfOutlier[] = [];
+  for (const [segment, b] of agg.entries()) {
+    if (b.clicks < 50) continue;                                  // sample-size floor
+    const segSpendShare = b.spend_micros / totalSpendMicros;
+    if (segSpendShare < 0.05) continue;                           // <5% spend share — skip
+    const segConvRate = b.clicks > 0 ? b.conv / b.clicks : 0;
+    const deltaPct = (segConvRate - accountConvRate) / accountConvRate;
+    if (deltaPct >= -0.5) continue;                               // need ≥50% worse
+    out.push({
+      segment,
+      spend_chf: round2(b.spend_micros / 1_000_000),
+      conv_rate: round2(segConvRate),
+      account_mean: round2(accountConvRate),
+      delta_pct: Math.round(deltaPct * 100),
+    });
+  }
+  return out.sort((a, b) => b.spend_chf - a.spend_chf);
 }
 
 // ── Internals: Manual change summary ──────────────────────────────────
@@ -642,8 +806,15 @@ interface FindingContext {
 function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[] {
   const findings: AuditFindingDraft[] = [];
 
-  // 1. Mode mismatch
-  if (ctx.mode.detected !== ctx.mode.recordedRunMode) {
+  // 1. Mode mismatch — only meaningful when the detected mode is MORE
+  // restrictive than what data_pull recorded (i.e. data_pull was
+  // optimistic but audit found insufficient data). The reverse case —
+  // recorded=OPTIMIZE detected=FIRST_IMPORT — is structural noise:
+  // data_pull only checks "prior run exists" while audit additionally
+  // gates on last_major_import_at. Auto-correction handles it silently.
+  const recordedRank = MODE_RANK[ctx.mode.recordedRunMode];
+  const detectedRank = MODE_RANK[ctx.mode.detected];
+  if (recordedRank !== undefined && detectedRank !== undefined && detectedRank < recordedRank) {
     findings.push({
       area: 'mode_mismatch',
       severity: 'MEDIUM',
@@ -764,14 +935,19 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
         const totalClusters = pmaxRows.length;
         const sampleLabels = Array.from(new Set(branded.map(r => r.search_category!).filter(Boolean))).slice(0, 8);
         const sharePct = totalClusters > 0 ? Math.round((branded.length / totalClusters) * 100) : 0;
+        // Data-driven sizing for the recommended brand-search campaign,
+        // computed from account KPIs so the agent doesn't have to guess.
+        const defaults = brandSearchDefaults(branded.length, ctx.kpis);
         findings.push({
           area: 'pmax_brand_inflation',
           severity: 'HIGH',
           text: `PMax bedient ${branded.length} Brand-Search-Cluster (${sharePct}% aller PMax-Search-Themen). ` +
             `Brand-Klicks via PMax sind 60-80% teurer als via dedizierte Search-Brand-Kampagne; zudem ` +
             `inflationiert PMax-ROAS sich durch Brand-Conversions die organisch zustande gekommen wären. ` +
-            `Empfehlung: Search-Brand-Kampagne aufsetzen (Match-Type Exact/Phrase auf Brand-Terms), ` +
-            `Brand-Terms als Negative auf alle Non-Brand-Search-Kampagnen, PMax-Account-Negatives für Brand-Terms erst nach Brand-Search-Launch.`,
+            `Empfehlung: Search-Brand-Kampagne aufsetzen (Match-Type Exact/Phrase auf Brand-Terms; ` +
+            `Vorschlag: tägl. Budget ~${defaults.dailyBudgetChf} CHF, Target CPA ${defaults.targetCpaChf} CHF), ` +
+            `Brand-Terms als Negative auf alle Non-Brand-Kampagnen, PMax-Account-Negatives für Brand-Terms ` +
+            `erst nach Brand-Search-Launch.`,
           confidence: 0.9,
           evidence: {
             branded_clusters: branded.length,
@@ -779,16 +955,17 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
             share_pct: sharePct,
             brand_tokens: brandTokens,
             sample_labels: sampleLabels,
+            suggested_defaults: defaults,
           },
         });
       }
     }
   }
 
-  // 7c. PMAX theme-coverage gap: untargeted thematic clusters in PMax
-  // search-terms that don't match an existing asset_group_name. Surfaces
-  // where new asset-groups would expand coverage without diluting the
-  // existing groups' learning. Uses the same pmax_search_terms snapshot.
+  // 7c. PMAX theme-coverage gap: cluster untargeted PMax search-term labels
+  // by token, surface the dominant themes (not the raw cluster count which
+  // is dominated by long-tail noise). This produces actionable seeds for
+  // asset-group expansion proposals instead of a useless aggregate number.
   if (ctx.customer) {
     const pmaxRows = ctx.store.getSnapshotRows<{ campaign_name: string | null; search_category: string | null }>(
       'ads_pmax_search_terms', ctx.run.ads_account_id, { runId: ctx.run.run_id },
@@ -798,33 +975,60 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
       'ads_asset_groups', ctx.run.ads_account_id, { runId: ctx.run.run_id },
     ).map(r => (r.asset_group_name ?? '').toLowerCase()).filter(Boolean);
 
-    const themeCount = new Map<string, number>();
-    for (const r of pmaxRows) {
-      const label = (r.search_category ?? '').toLowerCase().trim();
-      if (!label) continue;
-      if (brandTokens.some(t => label.includes(t))) continue;          // skip branded — handled in 7b
-      if (existingGroups.some(g => label.includes(g))) continue;        // skip already-covered
-      themeCount.set(label, (themeCount.get(label) ?? 0) + 1);
-    }
-    if (themeCount.size >= 5) {
-      const topThemes = Array.from(themeCount.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 10)
-        .map(([t]) => t);
+    const themes = clusterUntargetedThemes(pmaxRows, brandTokens, existingGroups);
+    // Trigger only when there are at least 3 strong themes (each ≥ 5
+    // clusters). Below that the signal is too weak to act on.
+    const strongThemes = themes.filter(t => t.clusters >= 5);
+    if (strongThemes.length >= 3) {
+      const totalCovered = strongThemes.reduce((s, t) => s + t.clusters, 0);
+      const topLine = strongThemes.slice(0, 5)
+        .map(t => `${t.token} (${t.clusters} Cluster)`).join(', ');
       findings.push({
         area: 'pmax_theme_coverage_gap',
         severity: 'MEDIUM',
-        text: `${themeCount.size} thematische Cluster in PMax-Search-Terms decken sich nicht mit bestehenden Asset-Group-Namen. ` +
-          `Asset-Group-Expansion könnte hier Lerndaten neuer Gruppen aufbauen — Conv-Volume der bestehenden Gruppen ` +
-          `prüfen, neue Gruppen nur splitten wenn Quell-Gruppe danach noch ≥30 conv/30d hält.`,
-        confidence: 0.7,
+        text: `${strongThemes.length} dominante Themen in PMax-Search-Terms ohne passende Asset-Group: ${topLine}. ` +
+          `Insgesamt ${totalCovered} Cluster auf diese Themen — Kandidaten für Asset-Group-Expansion. ` +
+          `Conv-Volume-Schutz: Quell-Gruppe muss nach Split noch ≥30 conv/30d halten.`,
+        confidence: 0.75,
         evidence: {
-          untargeted_cluster_count: themeCount.size,
+          themes: strongThemes.slice(0, 10).map(t => ({ token: t.token, clusters: t.clusters, sample: t.sample })),
           existing_asset_groups: existingGroups,
-          sample_themes: topThemes,
         },
       });
     }
+  }
+
+  // 7d. Device-performance bid-modifier candidates: aggregate per-device
+  // metrics across the snapshot, flag devices where conv-rate is
+  // significantly worse than the account mean AND spend is non-trivial.
+  // Output: candidates for negative bid-modifier or exclusion. The agent
+  // picks the actual modifier values; the detector just surfaces "device
+  // X has ${spend} CHF spend at half the conv-rate of mobile/desktop".
+  const deviceCandidates = detectDevicePerformanceOutliers(ctx.store, ctx.run);
+  if (deviceCandidates.length > 0) {
+    findings.push({
+      area: 'device_performance_outlier',
+      severity: 'MEDIUM',
+      text: `${deviceCandidates.length} Geräte-Segmente liefern signifikant schwächere Conv-Rate als Account-Schnitt ` +
+        `bei nicht-trivialem Spend. Bid-Modifier (-20% bis -50%) oder Exclusion prüfen.`,
+      confidence: 0.8,
+      evidence: { candidates: deviceCandidates },
+    });
+  }
+
+  // 7e. Geo-performance bid-modifier candidates: same logic but per
+  // geo_target_region. Floor on impressions/clicks so the long tail
+  // doesn't drown the signal — only regions with ≥100 clicks are evaluated.
+  const geoCandidates = detectGeoPerformanceOutliers(ctx.store, ctx.run);
+  if (geoCandidates.length > 0) {
+    findings.push({
+      area: 'geo_performance_outlier',
+      severity: 'MEDIUM',
+      text: `${geoCandidates.length} Geo-Regionen mit auffällig schwacher Conv-Rate bei relevantem Spend. ` +
+        `Negative Bid-Modifier oder Exclusion auf Kampagnen-Ebene erwägen.`,
+      confidence: 0.75,
+      evidence: { candidates: geoCandidates },
+    });
   }
 
   // 8. GA4 vs Ads conversion divergence

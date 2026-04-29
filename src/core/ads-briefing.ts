@@ -66,14 +66,26 @@ Canonical cycle order:
        OPTIMIZE — when a real import is ≥14d old), and writes
        deterministic findings to ads_findings. Notable detectors:
          * pmax_brand_inflation (HIGH) — PMax bedient Brand-Queries via
-           Search-Theme-Insights. Triggers Search-Brand-Kampagnen-
-           Empfehlung. Match-Type Exact/Phrase, Brand-Negatives auf alle
-           anderen Search-Kampagnen.
-         * pmax_theme_coverage_gap (MEDIUM) — untargeted thematische
-           Cluster ausserhalb existierender Asset-Group-Themen. Hinweis
-           auf Asset-Group-Expansion (mit Conv-Volume-Schutz!).
+           Search-Theme-Insights. Evidence enthält suggested_defaults
+           (dailyBudgetChf + targetCpaChf) für die empfohlene Search-
+           Brand-Kampagne — diese als Startwerte beim
+           ads_blueprint_entity_propose verwenden, nicht aus dem Hut.
+         * pmax_theme_coverage_gap (MEDIUM) — token-clustered themes mit
+           cluster-counts. Blueprint emit konvertiert die top 5 Themes
+           automatisch in NEW asset_group-Vorschläge (paused-by-default,
+           im top-spending PMax-Campaign verankert). Du musst nicht
+           manuell propose'en.
+         * device_performance_outlier / geo_performance_outlier (MEDIUM)
+           — Segmente mit ≥50% schwächerer Conv-Rate als Account-Mean.
+           Bid-Modifier-Kandidaten. Pro Kandidat: spend_chf, conv_rate
+           vs account_mean, delta_pct in evidence.
          * wasted_search_terms / pmax_search_cannibalisation /
            tracking_trust_ga4_vs_ads / low_ad_strength.
+
+       Workflow-Punkt: HIGH-Findings → konkrete Blueprint-Entity-
+       Vorschläge produzieren (campaign / ad_group / rsa_ad / negative),
+       nicht nur als Markdown beschreiben. Werte aus evidence direkt
+       übernehmen statt zu raten.
 
   4. Qualitative research (interleaved with ads_finding_add)
      — Read the audit report, prioritise by HIGH-severity findings.

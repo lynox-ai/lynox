@@ -70,6 +70,11 @@ export interface RunEmitOptions {
   workspaceDir?: string | undefined;
   /** Inject "now" for deterministic tests. */
   now?: Date | undefined;
+  /** Explicit run id to emit. When omitted, the engine picks the latest run
+   *  with blueprint entities. Use this to re-emit a prior run after a fresh
+   *  data_pull created a newer audit run that has no blueprint yet (the
+   *  pending-import-skip case). */
+  runId?: number | undefined;
 }
 
 export class EmitPreconditionError extends Error {
@@ -88,10 +93,11 @@ export function runEmit(
   if (!account) {
     throw new EmitPreconditionError(`Unknown ads_account_id "${adsAccountId}".`);
   }
-  const run = store.getLatestSuccessfulAuditRun(adsAccountId);
+  const run = resolveTargetRun(store, adsAccountId, opts?.runId);
   if (!run) {
     throw new EmitPreconditionError(
-      `No successful audit run for "${adsAccountId}". Run ads_audit_run + ads_blueprint_run first.`,
+      `No successful audit run with blueprint entities for "${adsAccountId}". ` +
+      `Run ads_audit_run + ads_blueprint_run first.`,
     );
   }
   const customer = store.getCustomerProfile(account.customer_id);
@@ -505,6 +511,35 @@ function normaliseMatchType(s: string | null): 'Exact' | 'Phrase' | 'Broad' {
 // path that lets the agent create accounts must not be able to escape
 // the LYNOX_WORKSPACE root via `../` or absolute-path injection.
 const VALID_ADS_ACCOUNT_ID = /^\d{3}-\d{3}-\d{4}$/u;
+
+/** Target run resolution for emit:
+ *  - explicit runId from caller (must be a SUCCESS run for the account)
+ *  - latest SUCCESS run with at least one blueprint_entity
+ *  - falls back to legacy "latest SUCCESS run" if no blueprint entities exist
+ *    anywhere (lets the existing "no entities" error surface cleanly)
+ *
+ *  This unblocks the cycle-3 deadlock: data_pull creates run #N, blueprint
+ *  for #N is skipped because run #N-1 has pending entities; emit on #N
+ *  would fail. Falling back to #N-1 lets re-emit work without manual run-id
+ *  juggling. */
+function resolveTargetRun(store: AdsDataStore, adsAccountId: string, requestedId: number | undefined): AdsAuditRunRow | null {
+  if (requestedId !== undefined) {
+    const explicit = store.getAuditRun(requestedId);
+    if (!explicit || explicit.ads_account_id !== adsAccountId) {
+      throw new EmitPreconditionError(`Run ${requestedId} not found for ${adsAccountId}.`);
+    }
+    if (explicit.status !== 'SUCCESS') {
+      throw new EmitPreconditionError(`Run ${requestedId} is not in SUCCESS state.`);
+    }
+    return explicit;
+  }
+  // Newest SUCCESS run that actually has entities to emit.
+  const candidate = store.findLatestRunWithBlueprintEntities(adsAccountId);
+  if (candidate) return candidate;
+  // No entities anywhere — fall back to legacy "latest SUCCESS" so the
+  // existing error path produces a familiar message.
+  return store.getLatestSuccessfulAuditRun(adsAccountId);
+}
 
 function resolveWorkspaceDir(override: string | undefined, accountId: string, runId: number): string {
   if (!VALID_ADS_ACCOUNT_ID.test(accountId)) {
