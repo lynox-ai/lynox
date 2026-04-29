@@ -95,7 +95,7 @@ describe('runAdsDataPull — happy path', () => {
 
     const result = await runAdsDataPull(
       { store, reader: drive, now: () => new Date('2026-04-27T11:00:00Z') },
-      { ads_account_id: '123-456-7890', drive_folder_id: 'root' },
+      { customer_id: 'acme-shop', ads_account_id: '123-456-7890', drive_folder_id: 'root' },
     );
 
     expect(result.fatalErrors).toEqual([]);
@@ -127,14 +127,14 @@ describe('runAdsDataPull — happy path', () => {
     ]);
     const r1 = await runAdsDataPull(
       { store, reader: drive, now: () => new Date('2026-04-27T11:00:00Z') },
-      { ads_account_id: '123-456-7890', drive_folder_id: 'root' },
+      { customer_id: 'acme-shop', ads_account_id: '123-456-7890', drive_folder_id: 'root' },
     );
     expect(r1.mode).toBe('BOOTSTRAP');
 
     // Second run picks up the previous one
     const r2 = await runAdsDataPull(
       { store, reader: drive, now: () => new Date('2026-04-27T12:00:00Z') },
-      { ads_account_id: '123-456-7890', drive_folder_id: 'root' },
+      { customer_id: 'acme-shop', ads_account_id: '123-456-7890', drive_folder_id: 'root' },
     );
     expect(r2.mode).toBe('OPTIMIZE');
     const run2 = store.getAuditRun(r2.runId)!;
@@ -150,7 +150,7 @@ describe('runAdsDataPull — happy path', () => {
     ]);
     const result = await runAdsDataPull(
       { store, reader: drive, now: () => new Date('2026-04-27T11:00:00Z') },
-      { ads_account_id: '123-456-7890', drive_folder_id: 'root' },
+      { customer_id: 'acme-shop', ads_account_id: '123-456-7890', drive_folder_id: 'root' },
     );
     expect(result.fatalErrors).toEqual([]);
     expect(result.perCsv.filter(p => p.status === 'missing').length).toBeGreaterThan(15);
@@ -166,7 +166,7 @@ describe('runAdsDataPull — happy path', () => {
     ]);
     const result = await runAdsDataPull(
       { store, reader: drive, now: () => new Date('2026-04-27T11:00:00Z') },
-      { ads_account_id: '123-456-7890', drive_folder_id: 'root' },
+      { customer_id: 'acme-shop', ads_account_id: '123-456-7890', drive_folder_id: 'root' },
     );
     expect(result.fatalErrors.length).toBeGreaterThan(0);
     expect(result.fatalErrors[0]).toMatch(/Missing required column/);
@@ -197,7 +197,7 @@ describe('runAdsDataPull — freshness check', () => {
     drive.setFolder('ads', [makeFile('lr', 'LASTRUN.txt', '2026-04-01T00:00:00Z')]);
     await expect(runAdsDataPull(
       { store, reader: drive, now: () => new Date('2026-04-27T11:00:00Z') }, // 26 days later
-      { ads_account_id: 'a1', drive_folder_id: 'root' },
+      { customer_id: 'c', ads_account_id: 'a1', drive_folder_id: 'root' },
     )).rejects.toThrow(/stale/);
   });
 
@@ -209,7 +209,7 @@ describe('runAdsDataPull — freshness check', () => {
     ]);
     const result = await runAdsDataPull(
       { store, reader: drive, now: () => new Date('2026-04-27T11:00:00Z'), },
-      { ads_account_id: 'a1', drive_folder_id: 'root', force: true },
+      { customer_id: 'c', ads_account_id: 'a1', drive_folder_id: 'root', force: true },
     );
     expect(result.fatalErrors).toEqual([]);
   });
@@ -219,7 +219,7 @@ describe('runAdsDataPull — freshness check', () => {
     drive.setFolder('ads', [makeFile('c', 'campaigns.csv', 'campaign_id,campaign_name\nc1,X\n')]);
     await expect(runAdsDataPull(
       { store, reader: drive },
-      { ads_account_id: 'a1', drive_folder_id: 'root' },
+      { customer_id: 'c', ads_account_id: 'a1', drive_folder_id: 'root' },
     )).rejects.toThrow(/no LASTRUN/);
   });
 
@@ -227,7 +227,7 @@ describe('runAdsDataPull — freshness check', () => {
     drive.setFolder('root', []); // no ads folder
     await expect(runAdsDataPull(
       { store, reader: drive },
-      { ads_account_id: 'a1', drive_folder_id: 'root' },
+      { customer_id: 'c', ads_account_id: 'a1', drive_folder_id: 'root' },
     )).rejects.toThrow(/no "ads" subfolder/);
   });
 });
@@ -265,7 +265,7 @@ describe('runAdsDataPull — GA4/GSC monthly filtering', () => {
     ]);
     const result = await runAdsDataPull(
       { store, reader: drive, now: () => new Date('2026-04-27T11:00:00Z') },
-      { ads_account_id: 'a1', drive_folder_id: 'root' },
+      { customer_id: 'c', ads_account_id: 'a1', drive_folder_id: 'root' },
     );
     const ga4Inserts = result.perCsv.filter(p => p.kind === 'ga4' && p.status === 'inserted');
     expect(ga4Inserts.map(p => p.file)).toEqual(['ga4_2026-03.csv', 'ga4_2026-04.csv']);

@@ -24,8 +24,10 @@ import {
 // ── Types ────────────────────────────────────────────────────────
 
 interface AdsDataPullInput {
+  customer_id: string;
   ads_account_id: string;
   drive_folder_id: string;
+  account_label?: string | undefined;
   force?: boolean | undefined;
 }
 
@@ -257,6 +259,23 @@ export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): P
   const previousRun = store.getLatestSuccessfulAuditRun(input.ads_account_id);
   const mode: 'BOOTSTRAP' | 'OPTIMIZE' = previousRun === null ? 'BOOTSTRAP' : 'OPTIMIZE';
 
+  // 3a. Ensure the ads_accounts row exists. ads_audit_runs.ads_account_id has
+  // an FK to ads_accounts; without this upsert, createAuditRun fails on the
+  // first cycle. Profile must already exist (FK from ads_accounts.customer_id).
+  const profile = store.getCustomerProfile(input.customer_id);
+  if (!profile) {
+    throw new Error(
+      `Customer profile "${input.customer_id}" does not exist. Call ads_customer_profile_set first.`,
+    );
+  }
+  store.upsertAdsAccount({
+    adsAccountId: input.ads_account_id,
+    customerId: input.customer_id,
+    accountLabel: input.account_label ?? input.customer_id,
+    mode,
+    driveFolderId: input.drive_folder_id,
+  });
+
   // 4. Open audit run (creates concurrency lock; throws if one already RUNNING).
   const run = store.createAuditRun({
     adsAccountId: input.ads_account_id,
@@ -381,18 +400,21 @@ export function createAdsDataPullTool(auth: GoogleAuth, store: AdsDataStore): To
         'Pull one cycle of Google Ads + GA4 + GSC data from the customer\'s Google Drive folder ' +
         '(written there by the customer-deployed Apps Scripts) and store it as a snapshot in the ' +
         'Ads Optimizer database. Validates LASTRUN freshness (max 14 days). Returns a summary of ' +
-        'inserted/missing/failed CSVs. Use action: ' +
-        'set ads_account_id (Google Customer ID, e.g. "123-456-7890") and drive_folder_id (the ' +
-        'customer-root Drive folder ID containing ads/, ga4/, gsc/ subfolders). Set force=true to ' +
-        'override the freshness check.',
+        'inserted/missing/failed CSVs. Pass customer_id (the slug used in ads_customer_profile_set), ' +
+        'ads_account_id (Google Customer ID e.g. "123-456-7890"), and drive_folder_id (the ' +
+        'customer-root Drive folder ID containing ads/, ga4/, gsc/ subfolders). On the first cycle ' +
+        'this links the ads account to the customer profile. Set force=true to override the ' +
+        'freshness check.',
       input_schema: {
         type: 'object' as const,
         properties: {
+          customer_id: { type: 'string', description: 'Customer slug from ads_customer_profile_set (e.g. "aquanatura")' },
           ads_account_id: { type: 'string', description: 'Google Ads Customer ID (e.g. "123-456-7890")' },
           drive_folder_id: { type: 'string', description: 'Drive folder ID containing ads/, ga4/, gsc/ subfolders' },
+          account_label: { type: 'string', description: 'Optional human label for the ads account; defaults to customer_id' },
           force: { type: 'boolean', description: 'Override the 14-day freshness check (default false)' },
         },
-        required: ['ads_account_id', 'drive_folder_id'],
+        required: ['customer_id', 'ads_account_id', 'drive_folder_id'],
       },
     },
     handler: async (input: AdsDataPullInput, _agent: IAgent): Promise<string> => {

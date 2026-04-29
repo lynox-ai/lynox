@@ -49,6 +49,10 @@ Canonical cycle order:
      — Reads the 22-CSV pack from the customer's Google Drive (written by
        the customer-deployed Apps Scripts). Validates the LASTRUN
        freshness; refuses if older than 14 days unless force=true.
+     — Pass customer_id (the same slug used in step 1), ads_account_id
+       (Google "123-456-7890" form), and drive_folder_id. On the first
+       cycle, this links the ads account to the customer profile in the
+       store; the customer profile must already exist (FK).
 
   3. ads_audit_run
      — Deterministic phase. Computes KPIs, detects mode (BOOTSTRAP vs
