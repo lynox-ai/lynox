@@ -160,6 +160,12 @@ export interface CampaignRowInput {
   labels?: string | undefined;
   status?: 'Paused' | 'Enabled' | 'Removed' | undefined;
   finalUrlSuffix?: string | undefined;
+  /** Bid modifiers as percent (e.g. -25 for -25% mobile bid). Editor accepts
+   *  the value with a percent sign appended; floor at -90, cap at +900. */
+  desktopBidModifierPct?: number | undefined;
+  mobileBidModifierPct?: number | undefined;
+  tabletBidModifierPct?: number | undefined;
+  tvBidModifierPct?: number | undefined;
 }
 
 export function buildCampaignRow(input: CampaignRowInput): CsvRow {
@@ -176,12 +182,35 @@ export function buildCampaignRow(input: CampaignRowInput): CsvRow {
   if (input.labels) setCol(row, 'Labels', input.labels);
   if (input.finalUrlSuffix) setCol(row, 'Final URL suffix', input.finalUrlSuffix);
   setCol(row, 'EU political ads', "Doesn't have EU political ads");
+  // Bid modifiers — Editor expects the raw percent value with sign,
+  // e.g. -25 for -25%. Skip when undefined so we do not overwrite
+  // existing per-campaign settings on KEEP rows that did not get a
+  // modifier patch this cycle.
+  if (input.desktopBidModifierPct !== undefined) {
+    setCol(row, 'Desktop Bid Modifier', formatBidModifier(input.desktopBidModifierPct));
+  }
+  if (input.mobileBidModifierPct !== undefined) {
+    setCol(row, 'Mobile Bid Modifier', formatBidModifier(input.mobileBidModifierPct));
+  }
+  if (input.tabletBidModifierPct !== undefined) {
+    setCol(row, 'Tablet Bid Modifier', formatBidModifier(input.tabletBidModifierPct));
+  }
+  if (input.tvBidModifierPct !== undefined) {
+    setCol(row, 'TV Screen Bid Modifier', formatBidModifier(input.tvBidModifierPct));
+  }
   // Status only when the caller explicitly sets it. Empty cell = Editor
   // leaves the existing campaign status alone (critical for KEEP rows
   // that anchor child changes — defaulting to Paused would freeze the
   // production campaign on import).
   if (input.status !== undefined) setCol(row, 'Campaign Status', input.status);
   return row;
+}
+
+/** Editor accepts bid modifiers as `-25%` or `25%` strings. Floor at -90
+ *  (Editor's lower bound) and cap at +900. */
+function formatBidModifier(pct: number): string {
+  const clamped = Math.max(-90, Math.min(900, Math.round(pct)));
+  return `${clamped > 0 ? '+' : ''}${clamped}%`;
 }
 
 export interface LocationRowInput {

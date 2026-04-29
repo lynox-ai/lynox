@@ -242,12 +242,25 @@ describe('ads_blueprint_entity_propose tool', () => {
   it('writes companion ads_run_decisions row', async () => {
     await tool.handler({
       ads_account_id: ACCOUNT, entity_type: 'sitelink', kind: 'NEW',
-      payload: { campaign_name: 'C', text: 'Shop now', final_url: 'https://example.com/shop' },
+      payload: {
+        campaign_name: 'C', text: 'Shop now', final_url: 'https://example.com/shop',
+        desc1: 'Free shipping on every order',
+      },
       confidence: 0.9, rationale: 'Adds missing CTA sitelink for traffic split',
     }, fakeAgent);
     const decisions = store.getRunDecisions(runId, { entityType: 'sitelink' });
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.decision).toBe('NEW');
+  });
+
+  it('rejects NEW sitelink without desc1', async () => {
+    const out = await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'sitelink', kind: 'NEW',
+      payload: { campaign_name: 'C', text: 'Shop now', final_url: 'https://example.com/shop' },
+      confidence: 0.9, rationale: 'Adds CTA sitelink',
+    }, fakeAgent);
+    expect(out).toMatch(/desc1.*Pflicht/i);
+    expect(store.listBlueprintEntities(runId, { entityType: 'sitelink' })).toHaveLength(0);
   });
 });
 

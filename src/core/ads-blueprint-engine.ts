@@ -185,6 +185,20 @@ export function runBlueprint(
   // entities get cleared before persist below.
   const themeExpansions = generateThemeExpansionProposals(store, run, customer);
 
+  // Brand-search auto-proposal — read the brand-inflation finding and emit
+  // a Brand-Search campaign + per-brand ad_groups + Phrase/Exact keywords
+  // + cross-channel negatives that block the same brand terms in every
+  // existing PMax campaign. The user must activate the PMax-negatives
+  // *after* the brand-search campaign is live (otherwise brand traffic
+  // disappears for the gap window) — that's documented in the rationale
+  // and the manual-todos summary.
+  const brandSearch = generateBrandSearchProposals(store, run, customer);
+
+  // Bid-modifier auto-proposal — read device/geo outlier findings and
+  // patch the modifier fields onto the corresponding campaign KEEP
+  // payloads. Skipped for PMax campaigns (bid modifiers do not apply).
+  applyBidModifierProposals(store, run, historyByType);
+
   // Re-run safety: clear our own deterministic output (and the matching
   // ads_run_decisions rows) before writing fresh ones. Agent-source
   // additions (asset proposals, audience signals, validated PMAX
@@ -235,16 +249,15 @@ export function runBlueprint(
   }
 
   // Theme-expansion proposals → NEW entities, type='asset_group'.
+  // Each theme-AG also gets 5 templated headlines + 2 descriptions (Status
+  // Paused) so the Editor-import is content-complete out of the box. The
+  // agent can refine the templates via propose; the templates use the
+  // theme-token + customer slug so they are at least topically relevant.
   for (const exp of themeExpansions) {
     const externalId = `bp.assetgroup.${slug(exp.campaignName)}.${slug(exp.assetGroupName)}`;
-    const blueprintInput: InsertBlueprintEntityInput = {
-      runId: run.run_id,
-      adsAccountId,
-      entityType: 'asset_group',
-      kind: 'NEW',
-      externalId,
-      confidence: 0.7,
-      rationale: exp.rationale,
+    persistedEntityIds.push(store.insertBlueprintEntity({
+      runId: run.run_id, adsAccountId, entityType: 'asset_group', kind: 'NEW',
+      externalId, confidence: 0.7, rationale: exp.rationale,
       payload: {
         campaign_name: exp.campaignName,
         asset_group_name: exp.assetGroupName,
@@ -252,20 +265,111 @@ export function runBlueprint(
         cluster_count: exp.clusters,
         sample_search_terms: exp.sampleClusters,
         status: 'PAUSED',
+        ...(exp.finalUrl !== null ? { final_url: exp.finalUrl } : {}),
       },
-      namingValid: true,
-      namingErrors: [],
-    };
-    const row = store.insertBlueprintEntity(blueprintInput);
-    persistedEntityIds.push(row.blueprint_id);
+      namingValid: true, namingErrors: [],
+    }).blueprint_id);
     store.insertRunDecision({
-      runId: run.run_id,
-      entityType: 'asset_group',
-      entityExternalId: externalId,
-      decision: 'NEW',
-      confidence: 0.7,
-      rationale: exp.rationale,
+      runId: run.run_id, entityType: 'asset_group', entityExternalId: externalId,
+      decision: 'NEW', confidence: 0.7, rationale: exp.rationale,
     });
+
+    // Auto-generate 5 headlines + 2 descriptions per theme-AG so the
+    // emit-validator's content-completeness check passes. Templates picked
+    // for short tokens (≤30 chars after substitution).
+    for (const [idx, asset] of generatePlaceholderAssets(exp.theme).entries()) {
+      const assetExt = `bp.asset.${slug(exp.campaignName)}.${slug(exp.assetGroupName)}.${asset.fieldType.toLowerCase()}.${idx + 1}`;
+      persistedEntityIds.push(store.insertBlueprintEntity({
+        runId: run.run_id, adsAccountId, entityType: 'asset', kind: 'NEW',
+        externalId: assetExt, confidence: 0.5,
+        rationale:
+          `Auto-Placeholder für Theme-AG "${exp.assetGroupName}" — Agent soll mit propose ` +
+          `verfeinern (LP-Crawl + Brand-Voice).`,
+        payload: {
+          campaign_name: exp.campaignName,
+          asset_group_name: exp.assetGroupName,
+          field_type: asset.fieldType,
+          index: asset.index,
+          text: asset.text,
+        },
+        namingValid: true, namingErrors: [],
+      }).blueprint_id);
+      store.insertRunDecision({
+        runId: run.run_id, entityType: 'asset', entityExternalId: assetExt,
+        decision: 'NEW', confidence: 0.5,
+        rationale: `Auto-Placeholder ${asset.fieldType} ${asset.index} für "${exp.assetGroupName}".`,
+      });
+    }
+  }
+
+  // Brand-Search proposals → NEW campaign + ad_groups + keywords.
+  if (brandSearch) {
+    const campExt = `bp.campaign.${slug(brandSearch.campaign.name)}`;
+    persistedEntityIds.push(store.insertBlueprintEntity({
+      runId: run.run_id, adsAccountId, entityType: 'campaign', kind: 'NEW',
+      externalId: campExt, confidence: 0.85, rationale: brandSearch.rationale,
+      payload: {
+        campaign_name: brandSearch.campaign.name,
+        channel_type: 'SEARCH',
+        bidding_strategy_type: 'TARGET_CPA',
+        target_cpa_chf: brandSearch.campaign.targetCpa,
+        budget_chf: brandSearch.campaign.budget,
+      },
+      namingValid: true, namingErrors: [],
+    }).blueprint_id);
+    store.insertRunDecision({
+      runId: run.run_id, entityType: 'campaign', entityExternalId: campExt,
+      decision: 'NEW', confidence: 0.85, rationale: brandSearch.rationale,
+    });
+    for (const ag of brandSearch.adGroups) {
+      const agExt = `bp.adgroup.${slug(brandSearch.campaign.name)}.${slug(ag.name)}`;
+      persistedEntityIds.push(store.insertBlueprintEntity({
+        runId: run.run_id, adsAccountId, entityType: 'ad_group', kind: 'NEW',
+        externalId: agExt, confidence: 0.85,
+        rationale: `Brand-Search-Ad-Group für Token "${ag.brandToken}".`,
+        payload: { campaign_name: brandSearch.campaign.name, ad_group_name: ag.name },
+        namingValid: true, namingErrors: [],
+      }).blueprint_id);
+      store.insertRunDecision({
+        runId: run.run_id, entityType: 'ad_group', entityExternalId: agExt,
+        decision: 'NEW', confidence: 0.85,
+        rationale: `Brand-Search-Ad-Group für Token "${ag.brandToken}".`,
+      });
+    }
+    for (const k of brandSearch.keywords) {
+      const kExt = `bp.kw.${slug(brandSearch.campaign.name)}.${slug(k.adGroupName)}.${slug(k.keyword)}.${k.matchType.toLowerCase()}`;
+      persistedEntityIds.push(store.insertBlueprintEntity({
+        runId: run.run_id, adsAccountId, entityType: 'keyword', kind: 'NEW',
+        externalId: kExt, confidence: 0.85,
+        rationale: `Brand-Keyword "${k.keyword}" (${k.matchType}) in Ad-Group "${k.adGroupName}".`,
+        payload: {
+          campaign_name: brandSearch.campaign.name,
+          ad_group_name: k.adGroupName,
+          keyword: k.keyword,
+          match_type: k.matchType,
+        },
+        namingValid: true, namingErrors: [],
+      }).blueprint_id);
+      store.insertRunDecision({
+        runId: run.run_id, entityType: 'keyword', entityExternalId: kExt,
+        decision: 'NEW', confidence: 0.85,
+        rationale: `Brand-Keyword "${k.keyword}" (${k.matchType}).`,
+      });
+    }
+    // Cross-channel negatives — append into the negatives bucket so the
+    // existing persist loop below picks them up.
+    for (const n of brandSearch.crossChannelNegatives) {
+      negatives.push({
+        externalId: `bp.neg.${slug(n.scopeTarget ?? 'account')}.${slug(n.keywordText)}.${n.matchType.toLowerCase()}`,
+        keywordText: n.keywordText, matchType: n.matchType,
+        scope: n.scope, scopeTarget: n.scopeTarget,
+        source: 'brand_inflation_block',
+        confidence: 0.85,
+        rationale:
+          `Cross-Channel-Negative: blockt Brand-Token "${n.keywordText}" auf PMax-Kampagne ` +
+          `"${n.scopeTarget}". WICHTIG: Erst aktivieren NACH Brand-Search-Launch.`,
+      });
+    }
   }
 
   // Negatives → NEW entities, type='negative'.
@@ -555,6 +659,12 @@ interface ThemeExpansionProposal {
   campaignName: string;
   assetGroupName: string;
   sampleClusters: string[];
+  /** Final URL picked from existing landing-page snapshot rows. The proposer
+   *  scores each LP URL by token-overlap with the theme + click volume; ties
+   *  break on conversion volume. Falls back to the customer's most-clicked
+   *  LP when no themed match exists, and to the highest-spend campaign's LP
+   *  as a last resort. */
+  finalUrl: string | null;
   rationale: string;
 }
 
@@ -591,21 +701,345 @@ function generateThemeExpansionProposals(
   if (pmaxCampaigns.length === 0) return [];
   const host = pmaxCampaigns.reduce((acc, r) => (r.cost_micros ?? 0) > (acc.cost_micros ?? 0) ? r : acc);
 
+  // Pull existing LP performance to pick theme-relevant URLs. URL-pattern
+  // matching beats the previous "always use root domain" approach because
+  // PMax learns much faster when the AG ships with a topical LP — Editor
+  // accepts the URL pattern as the asset_group's Final URL field.
+  const lpRows = store.getSnapshotRows<{
+    landing_page_url: string | null; clicks: number | null; conversions: number | null;
+  }>('ads_landing_pages', run.ads_account_id, { runId: run.run_id });
+  const lpSummary = aggregateLpPerformance(lpRows);
+
   const customerSlug = customer.customer_id;
-  return themes.slice(0, MAX_THEME_EXPANSIONS).map(t => ({
-    theme: t.token,
-    clusters: t.clusters,
-    campaignName: host.campaign_name!,
-    assetGroupName: `Theme-${capitalize(t.token)}`,
-    sampleClusters: t.sample ?? [],
-    rationale: `Theme-Coverage-Gap: "${t.token}" hat ${t.clusters} PMax-Search-Cluster ohne passende Asset-Group. ` +
-      `Neuer Asset-Group-Vorschlag (Status PAUSED) für ${customerSlug}; nach Import + 14d Lernfenster Performance prüfen.`,
-  }));
+  return themes.slice(0, MAX_THEME_EXPANSIONS).map(t => {
+    const finalUrl = pickFinalUrlForTheme(t.token, lpSummary);
+    return {
+      theme: t.token,
+      clusters: t.clusters,
+      campaignName: host.campaign_name!,
+      assetGroupName: `Theme-${capitalize(t.token)}`,
+      sampleClusters: t.sample ?? [],
+      finalUrl,
+      rationale: `Theme-Coverage-Gap: "${t.token}" hat ${t.clusters} PMax-Search-Cluster ohne passende Asset-Group. ` +
+        `Neuer Asset-Group-Vorschlag (Status PAUSED) für ${customerSlug}` +
+        (finalUrl ? ` mit themen-spezifischer LP "${finalUrl}"` : ' (LP-Mapping fehlgeschlagen, manuell setzen)') +
+        `; nach Import + 14d Lernfenster Performance prüfen.`,
+    };
+  });
+}
+
+interface LpPerformance {
+  url: string;
+  clicks: number;
+  conversions: number;
+}
+
+/** Aggregate clicks + conversions per landing-page URL across all snapshot
+ *  rows. Multiple campaigns can drive the same LP — sum across them so the
+ *  ranking reflects total customer traffic, not per-campaign noise. */
+function aggregateLpPerformance(
+  rows: ReadonlyArray<{ landing_page_url: string | null; clicks: number | null; conversions: number | null }>,
+): LpPerformance[] {
+  const agg = new Map<string, LpPerformance>();
+  for (const r of rows) {
+    const url = (r.landing_page_url ?? '').trim();
+    if (!url) continue;
+    let bucket = agg.get(url);
+    if (!bucket) { bucket = { url, clicks: 0, conversions: 0 }; agg.set(url, bucket); }
+    bucket.clicks += Number(r.clicks) || 0;
+    bucket.conversions += Number(r.conversions) || 0;
+  }
+  return Array.from(agg.values());
+}
+
+/** Pick the LP whose URL best matches the theme token. Scoring:
+ *   - +50 if the URL slug-form contains the token,
+ *   - +20 if any URL path segment starts with the token,
+ *   - + clicks ÷ 10 as tie-breaker on tied substring matches.
+ *  Falls back to the LP with most conversions (proxy for customer-default).
+ *  Returns null when there are no LP rows at all. */
+function pickFinalUrlForTheme(theme: string, lps: readonly LpPerformance[]): string | null {
+  if (lps.length === 0) return null;
+  const t = theme.toLowerCase().trim();
+  if (t.length === 0) return null;
+  let best: { url: string; score: number } | null = null;
+  for (const lp of lps) {
+    const slugForm = lp.url.toLowerCase().replace(/[^a-z0-9]+/gu, '-');
+    const segments = lp.url.toLowerCase().split('/').map(s => s.replace(/[^a-z0-9]+/gu, ''));
+    let score = 0;
+    if (slugForm.includes(t)) score += 50;
+    if (segments.some(s => s.startsWith(t))) score += 20;
+    if (score > 0) score += lp.clicks / 10;
+    if (best === null || score > best.score) best = { url: lp.url, score };
+  }
+  if (best && best.score > 0) return best.url;
+  // Fallback: most-converting LP (customer's default landing page).
+  const sorted = [...lps].sort((a, b) =>
+    (b.conversions - a.conversions) || (b.clicks - a.clicks),
+  );
+  return sorted[0]?.url ?? null;
 }
 
 function capitalize(s: string): string {
   if (!s) return s;
   return s[0]!.toUpperCase() + s.slice(1);
+}
+
+/** Map a conv-rate delta-pct (negative = under-performing) to a sane
+ *  bid-modifier in percent. Floors at -50% (Editor refuses anything more
+ *  aggressive); zero/positive deltas yield no modifier. The mapping is
+ *  intentionally conservative: -50% conv-rate → -25% bid (half the
+ *  conv-loss), -100% conv-rate → -50% bid. */
+function deltaToBidModifierPct(deltaPct: number): number | null {
+  if (deltaPct >= 0) return null;
+  // deltaPct is negative; absolute value is conv-rate loss.
+  const loss = Math.min(100, Math.abs(deltaPct));
+  const modifier = -Math.round(loss / 2);
+  // No-op below -10% (statistical noise).
+  if (modifier > -10) return null;
+  return Math.max(modifier, -50);
+}
+
+/** Read device/geo outlier findings and patch the corresponding bid-
+ *  modifier fields onto the campaign KEEP payloads. Modifier types Editor
+ *  understands: desktop/mobile/tablet/tv-screen for device; per-location
+ *  modifier for geo. Geo modifiers live on Location rows so we surface them
+ *  via a new `geo_modifiers` payload field which emit translates into
+ *  Location rows.
+ *
+ *  PMax campaigns are skipped — Google's PMax does not honour traditional
+ *  device/geo modifiers (they are routed through asset-signal-side targeting).
+ */
+function applyBidModifierProposals(
+  store: AdsDataStore, run: AdsAuditRunRow,
+  historyByType: Map<string, HistoryMatchDecision[]>,
+): void {
+  const deviceFindings = store.listFindings(run.run_id, { area: 'device_performance_outlier' });
+  const geoFindings = store.listFindings(run.run_id, { area: 'geo_performance_outlier' });
+  if (deviceFindings.length === 0 && geoFindings.length === 0) return;
+
+  // Build a campaign → channel-type map so we can skip PMax.
+  const campaignChannelType = new Map<string, string>();
+  for (const r of store.getSnapshotRows<{ campaign_name: string | null; channel_type: string | null }>(
+    'ads_campaigns', run.ads_account_id, { runId: run.run_id },
+  )) {
+    if (r.campaign_name) campaignChannelType.set(r.campaign_name, r.channel_type ?? '');
+  }
+
+  const deviceModifiers = collectDeviceModifiers(deviceFindings);
+  // Geo modifiers live on Editor Location rows, not on the campaign row
+  // — that needs a separate emit-side path. V1 records them in the
+  // payload for downstream consumers (markdown report) but does not
+  // attempt to translate them into Location rows yet.
+  const geoModifiers = collectGeoModifiers(geoFindings);
+  if (deviceModifiers.size === 0 && geoModifiers.size === 0) return;
+
+  const campaignDecisions = historyByType.get('campaign') ?? [];
+  for (const d of campaignDecisions) {
+    if (d.kind !== 'KEEP' && d.kind !== 'RENAME') continue;
+    const payload = d.payload ?? {};
+    const camp = typeof payload['campaign_name'] === 'string'
+      ? payload['campaign_name'] as string : '';
+    if (!camp) continue;
+    const ch = (campaignChannelType.get(camp) ?? '').toUpperCase();
+    if (ch === 'PERFORMANCE_MAX' || ch === 'SHOPPING') continue;
+
+    if (deviceModifiers.size > 0) {
+      for (const [device, pct] of deviceModifiers) {
+        const key = deviceModifierKey(device);
+        if (key) payload[key] = pct;
+      }
+    }
+    if (geoModifiers.size > 0) {
+      payload['geo_bid_modifiers'] = Array.from(geoModifiers.entries())
+        .map(([region, pct]) => ({ region, modifier_pct: pct }));
+    }
+    d.payload = payload;
+  }
+}
+
+function collectDeviceModifiers(findings: readonly { evidence_json: string }[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const f of findings) {
+    let evidence: { candidates?: Array<{ segment: string; delta_pct: number }> } = {};
+    try { evidence = JSON.parse(f.evidence_json); } catch { continue; }
+    for (const c of evidence.candidates ?? []) {
+      const mod = deltaToBidModifierPct(c.delta_pct);
+      if (mod === null) continue;
+      out.set((c.segment ?? '').toLowerCase(), mod);
+    }
+  }
+  return out;
+}
+
+function collectGeoModifiers(findings: readonly { evidence_json: string }[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const f of findings) {
+    let evidence: { candidates?: Array<{ segment: string; delta_pct: number }> } = {};
+    try { evidence = JSON.parse(f.evidence_json); } catch { continue; }
+    for (const c of evidence.candidates ?? []) {
+      const mod = deltaToBidModifierPct(c.delta_pct);
+      if (mod === null) continue;
+      const region = (c.segment ?? '').trim();
+      if (region.length === 0 || region === 'unknown') continue;
+      out.set(region, mod);
+    }
+  }
+  return out;
+}
+
+function deviceModifierKey(device: string): string | null {
+  switch (device) {
+    case 'mobile': return 'mobile_bid_modifier_pct';
+    case 'desktop': return 'desktop_bid_modifier_pct';
+    case 'tablet': return 'tablet_bid_modifier_pct';
+    case 'tv_screen':
+    case 'connected_tv':
+    case 'tv': return 'tv_bid_modifier_pct';
+    default: return null;
+  }
+}
+
+interface PlaceholderAsset {
+  fieldType: 'HEADLINE' | 'DESCRIPTION';
+  index: number;
+  text: string;
+}
+
+const HEADLINE_TEMPLATES: ReadonlyArray<(theme: string) => string> = [
+  t => capitalize(t),
+  t => `${capitalize(t)} kaufen`,
+  t => `${capitalize(t)} online`,
+  t => `Schweizer ${capitalize(t)}`,
+  t => `${capitalize(t)} entdecken`,
+];
+
+const DESCRIPTION_TEMPLATES: ReadonlyArray<(theme: string) => string> = [
+  t => `Frische ${capitalize(t)}-Produkte direkt aus der Schweiz – fair und nachhaltig.`,
+  t => `Hochwertig, nachhaltig, fair – ${capitalize(t)} online bestellen.`,
+];
+
+/** Build 5 headlines + 2 descriptions for a NEW theme-AG so the emit
+ *  validator's content-completeness check passes and the Editor import is
+ *  immediately usable. Templates that exceed Editor's 30/90-char caps after
+ *  substitution are dropped; the validator catches the remaining gap if any.
+ *  The agent is expected to refine these via ads_blueprint_entity_propose
+ *  (LP-crawl + Brand-Voice) before final import. */
+function generatePlaceholderAssets(themeToken: string): PlaceholderAsset[] {
+  const t = (themeToken ?? '').trim();
+  if (t.length === 0) return [];
+  const out: PlaceholderAsset[] = [];
+  let h = 1;
+  for (const tpl of HEADLINE_TEMPLATES) {
+    const text = tpl(t);
+    if (text.length <= 30) {
+      out.push({ fieldType: 'HEADLINE', index: h++, text });
+      if (h > 5) break;
+    }
+  }
+  let d = 1;
+  for (const tpl of DESCRIPTION_TEMPLATES) {
+    const text = tpl(t);
+    if (text.length <= 90) {
+      out.push({ fieldType: 'DESCRIPTION', index: d++, text });
+      if (d > 2) break;
+    }
+  }
+  return out;
+}
+
+interface BrandSearchProposal {
+  campaign: { name: string; targetCpa: number; budget: number };
+  adGroups: ReadonlyArray<{ name: string; brandToken: string }>;
+  keywords: ReadonlyArray<{ adGroupName: string; keyword: string; matchType: 'Phrase' | 'Exact' }>;
+  crossChannelNegatives: ReadonlyArray<{
+    keywordText: string; matchType: 'Phrase';
+    scope: 'campaign'; scopeTarget: string;
+  }>;
+  rationale: string;
+}
+
+/** Read the brand-inflation finding produced by the audit and emit a
+ *  Brand-Search campaign + per-brand ad_groups + Phrase/Exact keywords +
+ *  cross-channel negatives that block the same brand tokens on every
+ *  existing PMax campaign.
+ *
+ *  Output is paused-by-default through the standard NEW-entity path; the
+ *  customer activates after editor-import. The rationale flags the launch
+ *  ordering: PMax-block must go live AFTER Brand-Search to avoid a
+ *  brand-traffic gap.
+ */
+function generateBrandSearchProposals(
+  store: AdsDataStore, run: AdsAuditRunRow, customer: CustomerProfileRow,
+): BrandSearchProposal | null {
+  const findings = store.listFindings(run.run_id, { area: 'pmax_brand_inflation' });
+  if (findings.length === 0) return null;
+  const finding = findings[0]!;
+  let evidence: {
+    brand_tokens?: string[];
+    suggested_defaults?: { dailyBudgetChf?: number; targetCpaChf?: number };
+  } = {};
+  try {
+    evidence = JSON.parse(finding.evidence_json);
+  } catch {
+    return null;
+  }
+  const brandTokens = (evidence.brand_tokens ?? [])
+    .map(t => (t ?? '').trim()).filter(t => t.length > 0);
+  if (brandTokens.length === 0) return null;
+  const defaults = evidence.suggested_defaults ?? {};
+  const dailyBudget = typeof defaults.dailyBudgetChf === 'number' && defaults.dailyBudgetChf > 0
+    ? defaults.dailyBudgetChf : 5;
+  const targetCpa = typeof defaults.targetCpaChf === 'number' && defaults.targetCpaChf > 0
+    ? defaults.targetCpaChf : 10;
+
+  // Existing PMax campaigns to negative-block. Skip if no PMax exists
+  // (no inflation source to neutralize).
+  const pmaxCampaigns = store.getSnapshotRows<{ campaign_name: string | null; channel_type: string | null }>(
+    'ads_campaigns', run.ads_account_id, { runId: run.run_id },
+  )
+    .filter(r => r.channel_type === 'PERFORMANCE_MAX' && r.campaign_name)
+    .map(r => r.campaign_name!);
+
+  // Mirror the customer's pipe-separator naming convention if their
+  // existing campaigns use it. Aquanatura: "PMax | Wasserfilter" → match
+  // with "Search | Brand". Falls back to "Search-Brand" otherwise.
+  const usesPipeSeparator = pmaxCampaigns.some(n => / \| /.test(n));
+  const campaignName = usesPipeSeparator ? 'Search | Brand' : 'Search-Brand';
+
+  const adGroups = brandTokens.map(b => ({
+    name: `Brand-${capitalize(b)}`,
+    brandToken: b,
+  }));
+
+  const keywords = brandTokens.flatMap(b => {
+    const ag = `Brand-${capitalize(b)}`;
+    return [
+      { adGroupName: ag, keyword: b, matchType: 'Phrase' as const },
+      { adGroupName: ag, keyword: b, matchType: 'Exact' as const },
+    ];
+  });
+
+  const crossChannelNegatives = pmaxCampaigns.flatMap(camp =>
+    brandTokens.map(b => ({
+      keywordText: b, matchType: 'Phrase' as const,
+      scope: 'campaign' as const, scopeTarget: camp,
+    })),
+  );
+
+  const customerSlug = customer.customer_id;
+  const rationale =
+    `Brand-Inflation-Auto-Propose (${customerSlug}): ${brandTokens.length} Brand(s) ` +
+    `(${brandTokens.join(', ')}) bedient sich aktuell via PMax. ` +
+    `Brand-Search-Campaign (Daily ${dailyBudget} CHF, Target CPA ${targetCpa} CHF) + ` +
+    `${pmaxCampaigns.length} PMax-Brand-Block-Negatives. ` +
+    `WICHTIG: PMax-Negatives erst NACH Brand-Search-Launch aktivieren — sonst gehen Brand-Klicks ` +
+    `während dem Gap-Fenster verloren.`;
+
+  return {
+    campaign: { name: campaignName, targetCpa, budget: dailyBudget },
+    adGroups, keywords, crossChannelNegatives, rationale,
+  };
 }
 
 function parseJsonArray(s: string): string[] {

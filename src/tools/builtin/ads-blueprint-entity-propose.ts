@@ -422,6 +422,22 @@ function validatePayload(input: AdsBlueprintEntityProposeInput): { ok: true } | 
       if (text.length > FIELD_LIMITS.sitelink) {
         return { ok: false, error: `Sitelink-Text > ${FIELD_LIMITS.sitelink} Zeichen: "${text}" (${text.length})` };
       }
+      // desc1 is required: Editor flags sitelinks without description lines
+      // ("Der Sitelink umfasst keine Textzeile") and CTR drops noticeably.
+      // desc2 is optional but strongly recommended; not enforced as HARD here
+      // so single-line CTAs (e.g. "Kontakt") still proceed.
+      const desc1 = p['desc1'];
+      if (typeof desc1 !== 'string' || desc1.trim().length === 0) {
+        return { ok: false, error: `Sitelink-Textzeile 1 (desc1) ist Pflicht — Editor warnt sonst und CTR sinkt.` };
+      }
+      const FIELD_DESC = 35; // Editor's per-line cap.
+      if (desc1.length > FIELD_DESC) {
+        return { ok: false, error: `Sitelink-Textzeile 1 > ${FIELD_DESC} Zeichen: "${desc1}" (${desc1.length})` };
+      }
+      const desc2 = p['desc2'];
+      if (typeof desc2 === 'string' && desc2.length > FIELD_DESC) {
+        return { ok: false, error: `Sitelink-Textzeile 2 > ${FIELD_DESC} Zeichen: "${desc2}" (${desc2.length})` };
+      }
       return { ok: true };
     }
     case 'callout': {

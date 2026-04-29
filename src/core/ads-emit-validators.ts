@@ -77,17 +77,37 @@ export function validateBlueprint(
   // Build cross-reference indexes once.
   const campaignNames = new Set<string>();
   const adGroupKeys = new Set<string>(); // "campaign||adGroup"
+  // Asset-content map per asset_group: counts headline + description assets
+  // by (campaign||asset_group). Used to enforce that NEW asset_groups have
+  // ≥5 headlines + ≥2 descriptions before emit — Editor accepts an empty
+  // asset-group row but the resulting AG ships with no creative content,
+  // which is a silent regression on import.
+  const assetCounts = new Map<string, { headlines: number; descriptions: number }>();
+  const bumpAsset = (key: string, kind: 'headlines' | 'descriptions'): void => {
+    const c = assetCounts.get(key) ?? { headlines: 0, descriptions: 0 };
+    c[kind]++;
+    assetCounts.set(key, c);
+  };
   for (const e of entities) {
+    const payload = parsePayload(e.payload_json);
     if (e.entity_type === 'campaign') {
-      const payload = parsePayload(e.payload_json);
       const name = stringField(payload, 'campaign_name');
       if (name) campaignNames.add(name);
     }
     if (e.entity_type === 'ad_group') {
-      const payload = parsePayload(e.payload_json);
       const campaign = stringField(payload, 'campaign_name');
       const adGroup = stringField(payload, 'ad_group_name');
       if (campaign && adGroup) adGroupKeys.add(`${campaign}||${adGroup}`);
+    }
+    if (e.entity_type === 'asset') {
+      const campaign = stringField(payload, 'campaign_name');
+      const ag = stringField(payload, 'asset_group_name');
+      const fieldType = (stringField(payload, 'field_type') ?? '').toUpperCase();
+      if (campaign && ag) {
+        const key = `${campaign}||${ag}`;
+        if (fieldType === 'HEADLINE') bumpAsset(key, 'headlines');
+        else if (fieldType === 'DESCRIPTION') bumpAsset(key, 'descriptions');
+      }
     }
   }
 
@@ -242,6 +262,20 @@ export function validateBlueprint(
             message: `Sitelink-Text > ${SITELINK_TEXT_MAX} Zeichen: "${text}" (${text.length})`,
           });
         }
+        // desc1 required on NEW sitelinks. Editor accepts the row but warns
+        // ("Der Sitelink umfasst keine Textzeile") and live CTR suffers; we
+        // catch it as HARD here so the bundle is import-clean. KEEP rows
+        // pre-existed in the account and are not subject to this gate.
+        if (e.kind === 'NEW') {
+          const desc1 = stringField(payload, 'desc1');
+          if (!desc1 || desc1.trim().length === 0) {
+            hard.push({
+              severity: 'HARD', area: 'sitelink_desc_missing',
+              externalId: e.external_id, entityType: e.entity_type,
+              message: `NEW sitelink "${text ?? '(no text)'}" hat keine desc1 — Editor warnt, CTR sinkt.`,
+            });
+          }
+        }
         const url = stringField(payload, 'final_url');
         if (url) {
           const urlIssue = checkFinalUrl(url);
@@ -255,7 +289,40 @@ export function validateBlueprint(
         }
         break;
       }
-      // negative / asset_group / asset / listing_group: no V1 validators
+      case 'asset_group': {
+        // Content-completeness for NEW asset_groups: Editor accepts an
+        // empty asset_group row but the resulting AG ships with no
+        // creative content, which silently regresses the import (PMax
+        // can't serve assets that don't exist). Enforce min ≥5
+        // headlines + ≥2 descriptions across sibling asset entities.
+        // KEEP asset_groups are existing — Editor leaves their assets
+        // untouched, no enforcement needed.
+        if (e.kind !== 'NEW') break;
+        const campaign = stringField(payload, 'campaign_name');
+        const ag = stringField(payload, 'asset_group_name');
+        if (!campaign || !ag) break;
+        const counts = assetCounts.get(`${campaign}||${ag}`) ?? { headlines: 0, descriptions: 0 };
+        if (counts.headlines < RSA_MIN_HEADLINES) {
+          hard.push({
+            severity: 'HARD', area: 'asset_group_content',
+            externalId: e.external_id, entityType: e.entity_type,
+            message:
+              `NEW asset_group "${ag}" hat ${counts.headlines} Headlines (min. ${RSA_MIN_HEADLINES}). ` +
+              `Per propose 5+ HEADLINE-Assets ergänzen oder die Theme-Expansion erneut aufrufen.`,
+          });
+        }
+        if (counts.descriptions < RSA_MIN_DESCRIPTIONS) {
+          hard.push({
+            severity: 'HARD', area: 'asset_group_content',
+            externalId: e.external_id, entityType: e.entity_type,
+            message:
+              `NEW asset_group "${ag}" hat ${counts.descriptions} Descriptions (min. ${RSA_MIN_DESCRIPTIONS}). ` +
+              `Per propose 2+ DESCRIPTION-Assets ergänzen oder die Theme-Expansion erneut aufrufen.`,
+          });
+        }
+        break;
+      }
+      // negative / listing_group: no V1 validators
       default:
         break;
     }

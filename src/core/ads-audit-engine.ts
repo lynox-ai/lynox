@@ -351,26 +351,83 @@ interface BrandSearchDefaults {
   reasoning: string;
 }
 
+interface BrandSearchTermRow {
+  search_term: string | null;
+  clicks: number | null;
+  cost_micros: number | null;
+}
+
 /** Conservative-but-data-driven defaults for the brand-search-campaign that
- *  the brand-inflation finding recommends. The numbers are intentionally
- *  on the lower end so the agent's proposal can scale up after launch
- *  rather than over-spending immediately on unclear conversion economics. */
-function brandSearchDefaults(brandedClusters: number, kpis: AuditKpis): BrandSearchDefaults {
-  // CPA target: half the account-wide CPA. Brand traffic converts much
-  // better than blended; halving is a safe cap that still leaves room.
-  const accountCpa = (kpis.cpa !== null && kpis.cpa > 0) ? kpis.cpa : 30; // sane floor
+ *  the brand-inflation finding recommends. Three formulas in priority order;
+ *  the first one with usable data wins:
+ *
+ *  1. Real brand-search history (preferred): sum clicks × cost across the
+ *     last 30 days for search_terms containing any brand token. This is the
+ *     existing brand demand (some via Search ad_groups, some via PMax) and
+ *     gives a direct daily-budget anchor. CPA target = real brand-CPA.
+ *  2. PMax-cluster volume: when no Search rows exist (brand demand absorbed
+ *     entirely by PMax), use cluster-count × 0.5 click/day × 2 CHF avg-brand
+ *     CPC × 1.2 headroom. CPA target = account-wide CPA × 0.5.
+ *  3. Fallback when neither branch produced data: cluster-count × 1.5 CHF
+ *     per cluster floor. Floor at CHF 5/day total.
+ *
+ *  The earlier formula (clusters × 1 click/day × 3 CHF × 1.5) over-shot by
+ *  ~3× because it (a) treated each cluster as an independent click, ignoring
+ *  query-overlap, and (b) used the account-wide CPC instead of brand-CPC,
+ *  which on most CH accounts runs 30-50% lower than blended.
+ */
+function brandSearchDefaults(
+  brandedClusters: number, kpis: AuditKpis,
+  brandSearchRows: readonly BrandSearchTermRow[],
+  brandTokens: readonly string[],
+): BrandSearchDefaults {
+  const accountCpa = (kpis.cpa !== null && kpis.cpa > 0) ? kpis.cpa : 30;
   const targetCpa = Math.max(5, Math.round(accountCpa * 0.5));
-  // Daily budget proxy: branded_clusters * 1 click/day * estimated brand-CPC
-  // (~CHF 3 default — most CH brand CPCs land between 2 and 4) with a 50%
-  // headroom. Floor at CHF 5 so a single-cluster account still has budget.
-  const estimatedBrandCpc = 3;
-  const dailyBudget = Math.max(5, Math.round(brandedClusters * 1 * estimatedBrandCpc * 1.5));
+
+  // Path 1: real Search history for brand terms.
+  const lcTokens = brandTokens.map(t => t.toLowerCase()).filter(t => t.length > 0);
+  const branded = brandSearchRows.filter(r => {
+    const term = (r.search_term ?? '').toLowerCase();
+    return term.length > 0 && lcTokens.some(t => term.includes(t));
+  });
+  if (branded.length > 0) {
+    const totalCost = branded.reduce((s, r) => s + (Number(r.cost_micros) || 0), 0) / 1_000_000;
+    const totalClicks = branded.reduce((s, r) => s + (Number(r.clicks) || 0), 0);
+    if (totalCost > 0) {
+      // Snapshot covers the last 30 days. Cost-per-day × 1.2 headroom.
+      const dailyBudget = Math.max(5, Math.round((totalCost / 30) * 1.2));
+      return {
+        dailyBudgetChf: dailyBudget,
+        targetCpaChf: targetCpa,
+        reasoning:
+          `dailyBudget = sum(brand_search_term_cost_30d=${totalCost.toFixed(2)} CHF, ` +
+          `clicks=${totalClicks}) / 30 × 1.2; ` +
+          `targetCpa = round(account_cpa(${accountCpa.toFixed(2)}) × 0.5).`,
+      };
+    }
+  }
+
+  // Path 2: PMax-cluster proxy.
+  if (brandedClusters > 0) {
+    // 0.5 click/day per cluster (overlapping queries), CHF 2 brand-CPC,
+    // 1.2 headroom. Floor at CHF 5/day so a 1-cluster account still has
+    // budget.
+    const dailyBudget = Math.max(5, Math.round(brandedClusters * 0.5 * 2 * 1.2));
+    return {
+      dailyBudgetChf: dailyBudget,
+      targetCpaChf: targetCpa,
+      reasoning:
+        `dailyBudget = brandedClusters(${brandedClusters}) × 0.5 click/day × 2 CHF brand-CPC × 1.2 ` +
+        `(no Search-side brand history; PMax absorbs all brand traffic); ` +
+        `targetCpa = round(account_cpa(${accountCpa.toFixed(2)}) × 0.5).`,
+    };
+  }
+
+  // Path 3: nothing observable; minimal launch budget.
   return {
-    dailyBudgetChf: dailyBudget,
+    dailyBudgetChf: 5,
     targetCpaChf: targetCpa,
-    reasoning:
-      `dailyBudget = brandedClusters(${brandedClusters}) × 1 click/day × estCPC(${estimatedBrandCpc} CHF) × 1.5; ` +
-      `targetCpa = round(account_cpa(${accountCpa.toFixed(2)}) × 0.5).`,
+    reasoning: `no brand-search history and no PMax brand-clusters detected; minimum launch budget.`,
   };
 }
 
@@ -936,8 +993,12 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
         const sampleLabels = Array.from(new Set(branded.map(r => r.search_category!).filter(Boolean))).slice(0, 8);
         const sharePct = totalClusters > 0 ? Math.round((branded.length / totalClusters) * 100) : 0;
         // Data-driven sizing for the recommended brand-search campaign,
-        // computed from account KPIs so the agent doesn't have to guess.
-        const defaults = brandSearchDefaults(branded.length, ctx.kpis);
+        // computed from real brand-search history (clicks + cost over last
+        // 30 days) when available, otherwise from PMax cluster volume.
+        const brandSearchRows = ctx.store.getSnapshotRows<BrandSearchTermRow>(
+          'ads_search_terms', ctx.run.ads_account_id, { runId: ctx.run.run_id },
+        );
+        const defaults = brandSearchDefaults(branded.length, ctx.kpis, brandSearchRows, brandTokens);
         findings.push({
           area: 'pmax_brand_inflation',
           severity: 'HIGH',

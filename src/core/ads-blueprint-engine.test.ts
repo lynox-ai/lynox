@@ -228,6 +228,55 @@ describe('runBlueprint', () => {
     expect(decisions[0]?.decision).toBe('KEEP');
   });
 
+  it('emits Brand-Search-Campaign + ad_groups + keywords + cross-channel negatives from brand-inflation finding', () => {
+    seedCustomerAndAccount(store, { pmaxOwned: ['aquanatura', 'maunawai'] });
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'pmax1', 'PMax | Gesamtsortiment', { channelType: 'PERFORMANCE_MAX' });
+    seedCampaign(store, r.run_id, 'pmax2', 'PMax | Wasserfilter', { channelType: 'PERFORMANCE_MAX' });
+    // Synthetic brand-inflation finding mirrors what audit produces.
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_brand_inflation', severity: 'HIGH', source: 'deterministic',
+      text: 'PMax bedient Brand-Cluster …', confidence: 0.9,
+      evidence: {
+        branded_clusters: 15, total_pmax_clusters: 600, share_pct: 2,
+        brand_tokens: ['aquanatura', 'maunawai'],
+        suggested_defaults: { dailyBudgetChf: 22, targetCpaChf: 9 },
+      },
+    });
+
+    runBlueprint(store, ACCOUNT);
+
+    const newCampaigns = store.listBlueprintEntities(r.run_id, { entityType: 'campaign', kind: 'NEW' });
+    expect(newCampaigns).toHaveLength(1);
+    expect(newCampaigns[0]!.external_id).toBe('bp.campaign.search-brand');
+    const campPayload = JSON.parse(newCampaigns[0]!.payload_json) as Record<string, unknown>;
+    expect(campPayload['campaign_name']).toBe('Search | Brand');
+    expect(campPayload['channel_type']).toBe('SEARCH');
+    expect(campPayload['budget_chf']).toBe(22);
+    expect(campPayload['target_cpa_chf']).toBe(9);
+
+    const adGroups = store.listBlueprintEntities(r.run_id, { entityType: 'ad_group', kind: 'NEW' });
+    expect(adGroups).toHaveLength(2);
+    const agNames = adGroups.map(a => JSON.parse(a.payload_json).ad_group_name as string).sort();
+    expect(agNames).toEqual(['Brand-Aquanatura', 'Brand-Maunawai']);
+
+    const keywords = store.listBlueprintEntities(r.run_id, { entityType: 'keyword', kind: 'NEW' });
+    // 2 brands × 2 match types (Phrase + Exact) = 4 keywords.
+    expect(keywords).toHaveLength(4);
+    const matchTypes = keywords.map(k => JSON.parse(k.payload_json).match_type as string).sort();
+    expect(matchTypes).toEqual(['Exact', 'Exact', 'Phrase', 'Phrase']);
+
+    // Cross-channel negatives: 2 brands × 2 PMax campaigns = 4 entries.
+    const negatives = store.listBlueprintEntities(r.run_id, { entityType: 'negative' })
+      .map(n => JSON.parse(n.payload_json) as Record<string, unknown>)
+      .filter(p => p['source'] === 'brand_inflation_block');
+    expect(negatives).toHaveLength(4);
+    const negTargets = new Set(negatives.map(n => n['scope_target']));
+    expect(negTargets).toEqual(new Set(['PMax | Gesamtsortiment', 'PMax | Wasserfilter']));
+  });
+
   it('drops orphan ad_group / keyword / asset_group whose campaign is not in the snapshot', () => {
     // Real-world data exposes parents in REMOVED state filtered by GAS
     // while children remained ENABLED — the orphan filter must drop
@@ -291,10 +340,16 @@ function seedCustomerAndAccount(
   store.upsertAdsAccount({ adsAccountId: ACCOUNT, customerId: CUSTOMER, accountLabel: 'Main' });
 }
 
-function seedCampaign(store: AdsDataStore, runId: number, id: string, name: string): void {
+function seedCampaign(
+  store: AdsDataStore, runId: number, id: string, name: string,
+  opts?: { channelType?: string | undefined } | undefined,
+): void {
   store.insertCampaignsBatch({
     runId, adsAccountId: ACCOUNT,
-    rows: [{ campaignId: id, campaignName: name, status: 'ENABLED' }],
+    rows: [{
+      campaignId: id, campaignName: name, status: 'ENABLED',
+      ...(opts?.channelType !== undefined ? { channelType: opts.channelType } : {}),
+    }],
   });
 }
 

@@ -437,6 +437,14 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         ? { targetRoas: editorTargetRoas(numberField(payload, 'target_roas')!) }
         : {}),
       ...(targetCpa !== null ? { targetCpa } : {}),
+      ...(numberField(payload, 'desktop_bid_modifier_pct') !== null
+        ? { desktopBidModifierPct: numberField(payload, 'desktop_bid_modifier_pct')! } : {}),
+      ...(numberField(payload, 'mobile_bid_modifier_pct') !== null
+        ? { mobileBidModifierPct: numberField(payload, 'mobile_bid_modifier_pct')! } : {}),
+      ...(numberField(payload, 'tablet_bid_modifier_pct') !== null
+        ? { tabletBidModifierPct: numberField(payload, 'tablet_bid_modifier_pct')! } : {}),
+      ...(numberField(payload, 'tv_bid_modifier_pct') !== null
+        ? { tvBidModifierPct: numberField(payload, 'tv_bid_modifier_pct')! } : {}),
       ...(status !== undefined ? { status } : {}),
     }));
     bucket.campaignCount++;
