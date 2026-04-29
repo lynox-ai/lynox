@@ -40,6 +40,7 @@ import {
   type CsvRow, type AssetFieldType,
 } from './ads-csv-builder.js';
 import { validateBlueprint, type ValidationSummary } from './ads-emit-validators.js';
+import { getLynoxDir } from './config.js';
 
 export interface EmitResult {
   account: AdsAccountRow;
@@ -511,7 +512,10 @@ function resolveWorkspaceDir(override: string | undefined, accountId: string, ru
       `Invalid ads_account_id "${accountId}" — expected Google Ads CID format 123-456-7890.`,
     );
   }
-  const base = override ?? process.env['LYNOX_WORKSPACE'] ?? join(process.cwd(), '.lynox-workspace');
+  // Default sits under ~/.lynox/workspace so it's always writable, even when
+  // the engine runs from a read-only Docker layer (process.cwd() is /app).
+  // LYNOX_WORKSPACE env override stays for explicit deployments.
+  const base = override ?? process.env['LYNOX_WORKSPACE'] ?? join(getLynoxDir(), 'workspace');
   return resolve(base, 'ads', accountId, 'blueprints', `run-${runId}`);
 }
 

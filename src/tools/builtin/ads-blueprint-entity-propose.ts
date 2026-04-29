@@ -145,10 +145,20 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
           runId = run.run_id;
         }
 
+        // Auto-derive campaign_name when the agent only knows the asset_group
+        // (for asset / audience_signal) or when the account has exactly one
+        // campaign (for callout / sitelink). The validator runs after this so
+        // the agent's payload effectively grows a campaign_name field.
+        autofillCampaignName(input, store, runId);
+
         // Validate input shape.
         const validation = validatePayload(input);
         if (!validation.ok) {
-          return `ads_blueprint_entity_propose failed: ${validation.error}`;
+          const knownCampaigns = store.listCampaignNamesForRun(runId, input.ads_account_id);
+          const hint = knownCampaigns.length > 0
+            ? ` Known campaigns in run ${runId}: ${knownCampaigns.map(n => `"${n}"`).join(', ')}.`
+            : '';
+          return `ads_blueprint_entity_propose failed: ${validation.error}${hint}`;
         }
 
         // PMAX SPLIT/MERGE: run safeguards.
@@ -242,6 +252,38 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
 }
 
 // ── Validation per entity_type ────────────────────────────────────────
+
+/** Mutates input.payload to fill in campaign_name when the agent left it
+ *  blank but it is recoverable from the snapshot. Avoids forcing the agent
+ *  to guess campaign names it can derive from the data. */
+function autofillCampaignName(
+  input: AdsBlueprintEntityProposeInput,
+  store: AdsDataStore,
+  runId: number,
+): void {
+  const p = input.payload;
+  const has = (k: string): boolean => typeof p[k] === 'string' && (p[k] as string).length > 0;
+  if (has('campaign_name')) return;
+
+  const groupBound: ReadonlySet<string> = new Set(['asset', 'audience_signal']);
+  if (groupBound.has(input.entity_type) && has('asset_group_name')) {
+    const resolved = store.findCampaignNameByAssetGroup(
+      runId, input.ads_account_id, p['asset_group_name'] as string,
+    );
+    if (resolved) {
+      p['campaign_name'] = resolved;
+      return;
+    }
+  }
+
+  const campaignBound: ReadonlySet<string> = new Set(['callout', 'sitelink']);
+  if (campaignBound.has(input.entity_type)) {
+    const known = store.listCampaignNamesForRun(runId, input.ads_account_id);
+    if (known.length === 1) {
+      p['campaign_name'] = known[0];
+    }
+  }
+}
 
 function validatePayload(input: AdsBlueprintEntityProposeInput): { ok: true } | { ok: false; error: string } {
   if (typeof input.confidence !== 'number' || input.confidence < 0 || input.confidence > 1) {

@@ -1096,6 +1096,28 @@ export class AdsDataStore {
       .run(ts, ts, adsAccountId);
   }
 
+  /** Look up the campaign_name for an asset_group_name within a run. Returns
+   *  null if no asset_group with that name exists, or the name is ambiguous
+   *  (multiple asset_groups with the same name in different campaigns). */
+  findCampaignNameByAssetGroup(runId: number, adsAccountId: string, assetGroupName: string): string | null {
+    const rows = this.db.prepare(
+      'SELECT DISTINCT campaign_name FROM ads_asset_groups ' +
+      'WHERE source_run_id = ? AND ads_account_id = ? AND asset_group_name = ? AND campaign_name IS NOT NULL',
+    ).all(runId, adsAccountId, assetGroupName) as Array<{ campaign_name: string }>;
+    if (rows.length !== 1) return null;
+    return rows[0]!.campaign_name;
+  }
+
+  /** List distinct campaign names from the snapshot for a run. Used to surface
+   *  the choice set in error messages when an agent needs to pick one. */
+  listCampaignNamesForRun(runId: number, adsAccountId: string): string[] {
+    return (this.db.prepare(
+      'SELECT DISTINCT campaign_name FROM ads_campaigns ' +
+      'WHERE source_run_id = ? AND ads_account_id = ? AND campaign_name IS NOT NULL ORDER BY campaign_name',
+    ).all(runId, adsAccountId) as Array<{ campaign_name: string }>)
+      .map(r => r.campaign_name);
+  }
+
   createAuditRun(input: CreateAuditRunInput): AdsAuditRunRow {
     const now = new Date().toISOString();
     return this.transaction(() => {

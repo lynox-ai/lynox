@@ -49,10 +49,14 @@ Canonical cycle order:
      — Reads the 22-CSV pack from the customer's Google Drive (written by
        the customer-deployed Apps Scripts). Validates the LASTRUN
        freshness; refuses if older than 14 days unless force=true.
-     — Pass customer_id (the same slug used in step 1), ads_account_id
-       (Google "123-456-7890" form), and drive_folder_id. On the first
-       cycle, this links the ads account to the customer profile in the
-       store; the customer profile must already exist (FK).
+     — Cycle 1: pass customer_id, ads_account_id (Google "123-456-7890"
+       form), and drive_folder_id. This links the ads account to the
+       customer profile.
+     — Cycle 2+: only customer_id is required — ads_account_id and
+       drive_folder_id auto-resolve from the previous run's link. Do not
+       ask the user for these on subsequent cycles unless the auto-resolve
+       fails (multiple linked accounts or missing drive_folder_id, both
+       reported in the error).
 
   3. ads_audit_run
      — Deterministic phase. Computes KPIs, detects mode (BOOTSTRAP vs
@@ -81,6 +85,13 @@ Canonical cycle order:
        Editor-import-able entities: new RSAs, asset proposals for
        low-strength PMAX asset-groups, audience signals, sitelinks,
        callouts, validated PMAX SPLIT/MERGE.
+     — Payload requirements per entity_type are listed in the tool
+       description. campaign_name is auto-derived for asset and
+       audience_signal proposals when only asset_group_name is given
+       (the snapshot has the link). For callout/sitelink it auto-fills
+       only when the account has a single campaign — otherwise pass it
+       explicitly. On validation failure the tool returns the list of
+       known campaign names from the run so you can choose.
      — PMAX SPLIT/MERGE require confidence ≥ 0.9, rationale ≥ 30 chars,
        and source asset-groups < 30 conv/30d (or matching high
        confidence + rationale). The tool runs the safeguards.

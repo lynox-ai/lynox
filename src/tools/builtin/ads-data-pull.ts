@@ -25,8 +25,11 @@ import {
 
 interface AdsDataPullInput {
   customer_id: string;
-  ads_account_id: string;
-  drive_folder_id: string;
+  /** Optional after the first cycle — auto-resolves from ads_accounts when
+   *  the customer has exactly one linked Google Ads account. */
+  ads_account_id?: string | undefined;
+  /** Optional after the first cycle — same auto-resolution rule as above. */
+  drive_folder_id?: string | undefined;
   account_label?: string | undefined;
   force?: boolean | undefined;
 }
@@ -218,14 +221,18 @@ export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): P
   const fatalErrors: string[] = [];
   const perCsv: PerCsvSummary[] = [];
 
+  // 0. Resolve account + folder. Cycle 1: agent passes both. Cycle 2+: agent
+  // can omit them and we look up the previously-linked ads_account row.
+  const { adsAccountId, driveFolderId } = resolveAccountAndFolder(store, input);
+
   // 1. Locate ads / ga4 / gsc subfolders.
-  const adsFolder = await reader.findSubfolder(input.drive_folder_id, 'ads');
+  const adsFolder = await reader.findSubfolder(driveFolderId, 'ads');
   if (!adsFolder) {
-    throw new Error(`Drive folder ${input.drive_folder_id} has no "ads" subfolder. ` +
+    throw new Error(`Drive folder ${driveFolderId} has no "ads" subfolder. ` +
       `Expected layout: <root>/ads, <root>/ga4, <root>/gsc.`);
   }
-  const ga4Folder = await reader.findSubfolder(input.drive_folder_id, 'ga4');
-  const gscFolder = await reader.findSubfolder(input.drive_folder_id, 'gsc');
+  const ga4Folder = await reader.findSubfolder(driveFolderId, 'ga4');
+  const gscFolder = await reader.findSubfolder(driveFolderId, 'gsc');
 
   // 2. Freshness check via LASTRUN.txt in ads/.
   const adsFiles = await reader.listFiles(adsFolder.id);
@@ -256,29 +263,23 @@ export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): P
   }
 
   // 3. Decide mode based on prior runs.
-  const previousRun = store.getLatestSuccessfulAuditRun(input.ads_account_id);
+  const previousRun = store.getLatestSuccessfulAuditRun(adsAccountId);
   const mode: 'BOOTSTRAP' | 'OPTIMIZE' = previousRun === null ? 'BOOTSTRAP' : 'OPTIMIZE';
 
   // 3a. Ensure the ads_accounts row exists. ads_audit_runs.ads_account_id has
   // an FK to ads_accounts; without this upsert, createAuditRun fails on the
-  // first cycle. Profile must already exist (FK from ads_accounts.customer_id).
-  const profile = store.getCustomerProfile(input.customer_id);
-  if (!profile) {
-    throw new Error(
-      `Customer profile "${input.customer_id}" does not exist. Call ads_customer_profile_set first.`,
-    );
-  }
+  // first cycle. Profile already validated in resolveAccountAndFolder.
   store.upsertAdsAccount({
-    adsAccountId: input.ads_account_id,
+    adsAccountId,
     customerId: input.customer_id,
     accountLabel: input.account_label ?? input.customer_id,
     mode,
-    driveFolderId: input.drive_folder_id,
+    driveFolderId,
   });
 
   // 4. Open audit run (creates concurrency lock; throws if one already RUNNING).
   const run = store.createAuditRun({
-    adsAccountId: input.ads_account_id,
+    adsAccountId,
     mode,
     gasExportLastrun: lastrunIso,
     previousRunId: previousRun?.run_id,
@@ -299,7 +300,7 @@ export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): P
       try {
         const text = await reader.readText(file.id);
         const parsed = parseAdsCsv(kind, expectedName, text);
-        const inserted = dispatchInsert(store, kind, run.run_id, input.ads_account_id, parsed.rows, observedAt);
+        const inserted = dispatchInsert(store, kind, run.run_id, adsAccountId, parsed.rows, observedAt);
         totalRows += inserted;
         totalWarnings += parsed.warnings.length;
         perCsv.push({ kind, file: expectedName, rows: inserted, warnings: parsed.warnings.length, status: 'inserted' });
@@ -317,7 +318,7 @@ export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): P
         try {
           const text = await reader.readText(file.id);
           const parsed = parseAdsCsv('ga4', file.name, text);
-          const inserted = dispatchInsert(store, 'ga4', run.run_id, input.ads_account_id, parsed.rows, observedAt);
+          const inserted = dispatchInsert(store, 'ga4', run.run_id, adsAccountId, parsed.rows, observedAt);
           totalRows += inserted;
           totalWarnings += parsed.warnings.length;
           perCsv.push({ kind: 'ga4', file: file.name, rows: inserted, warnings: parsed.warnings.length, status: 'inserted' });
@@ -336,7 +337,7 @@ export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): P
         try {
           const text = await reader.readText(file.id);
           const parsed = parseAdsCsv('gsc', file.name, text);
-          const inserted = dispatchInsert(store, 'gsc', run.run_id, input.ads_account_id, parsed.rows, observedAt);
+          const inserted = dispatchInsert(store, 'gsc', run.run_id, adsAccountId, parsed.rows, observedAt);
           totalRows += inserted;
           totalWarnings += parsed.warnings.length;
           perCsv.push({ kind: 'gsc', file: file.name, rows: inserted, warnings: parsed.warnings.length, status: 'inserted' });
@@ -363,6 +364,55 @@ export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): P
   }
 
   return { runId: run.run_id, mode, totalRows, totalWarnings, perCsv, fatalErrors };
+}
+
+// ── Account/folder resolution ────────────────────────────────────
+
+/** Decide which ads_account_id and drive_folder_id this pull targets.
+ *
+ * Cycle 1 path: agent passes both. We validate the customer_profile exists.
+ *
+ * Cycle 2+ path: agent only passes customer_id. We look up linked
+ * ads_accounts; exactly-one is auto-resolved, zero or many fail with a
+ * helpful message so the agent knows what to ask. */
+function resolveAccountAndFolder(
+  store: AdsDataStore,
+  input: AdsDataPullInput,
+): { adsAccountId: string; driveFolderId: string } {
+  const profile = store.getCustomerProfile(input.customer_id);
+  if (!profile) {
+    throw new Error(
+      `Customer profile "${input.customer_id}" does not exist. Call ads_customer_profile_set first.`,
+    );
+  }
+  if (input.ads_account_id && input.drive_folder_id) {
+    return { adsAccountId: input.ads_account_id, driveFolderId: input.drive_folder_id };
+  }
+
+  const linked = store.listAdsAccountsForCustomer(input.customer_id);
+  if (linked.length === 0) {
+    throw new Error(
+      `No ads_accounts linked to customer "${input.customer_id}" yet. ` +
+      `On the first cycle pass ads_account_id (e.g. "123-456-7890") and drive_folder_id explicitly.`,
+    );
+  }
+  if (linked.length > 1) {
+    const ids = linked.map(r => `"${r.ads_account_id}" (${r.account_label})`).join(', ');
+    throw new Error(
+      `Customer "${input.customer_id}" has ${linked.length} linked ads_accounts: ${ids}. ` +
+      `Pass ads_account_id explicitly to disambiguate.`,
+    );
+  }
+
+  const only = linked[0]!;
+  const driveFolderId = input.drive_folder_id ?? only.drive_folder_id;
+  if (!driveFolderId) {
+    throw new Error(
+      `Linked ads_account "${only.ads_account_id}" has no recorded drive_folder_id. ` +
+      `Pass drive_folder_id explicitly so the next cycle can find the GAS export.`,
+    );
+  }
+  return { adsAccountId: input.ads_account_id ?? only.ads_account_id, driveFolderId };
 }
 
 // ── Tool factory ─────────────────────────────────────────────────
@@ -400,21 +450,21 @@ export function createAdsDataPullTool(auth: GoogleAuth, store: AdsDataStore): To
         'Pull one cycle of Google Ads + GA4 + GSC data from the customer\'s Google Drive folder ' +
         '(written there by the customer-deployed Apps Scripts) and store it as a snapshot in the ' +
         'Ads Optimizer database. Validates LASTRUN freshness (max 14 days). Returns a summary of ' +
-        'inserted/missing/failed CSVs. Pass customer_id (the slug used in ads_customer_profile_set), ' +
-        'ads_account_id (Google Customer ID e.g. "123-456-7890"), and drive_folder_id (the ' +
-        'customer-root Drive folder ID containing ads/, ga4/, gsc/ subfolders). On the first cycle ' +
-        'this links the ads account to the customer profile. Set force=true to override the ' +
+        'inserted/missing/failed CSVs. Pass customer_id (the slug used in ads_customer_profile_set). ' +
+        'On the first cycle also pass ads_account_id (e.g. "123-456-7890") and drive_folder_id ' +
+        '(the customer-root Drive folder ID containing ads/, ga4/, gsc/ subfolders) — both are ' +
+        'auto-resolved from the prior link on subsequent cycles. Set force=true to override the ' +
         'freshness check.',
       input_schema: {
         type: 'object' as const,
         properties: {
           customer_id: { type: 'string', description: 'Customer slug from ads_customer_profile_set (e.g. "aquanatura")' },
-          ads_account_id: { type: 'string', description: 'Google Ads Customer ID (e.g. "123-456-7890")' },
-          drive_folder_id: { type: 'string', description: 'Drive folder ID containing ads/, ga4/, gsc/ subfolders' },
+          ads_account_id: { type: 'string', description: 'Google Ads Customer ID (e.g. "123-456-7890"). Optional after cycle 1 — auto-resolved from the linked ads_account.' },
+          drive_folder_id: { type: 'string', description: 'Drive folder ID containing ads/, ga4/, gsc/ subfolders. Optional after cycle 1 — auto-resolved from the linked ads_account.' },
           account_label: { type: 'string', description: 'Optional human label for the ads account; defaults to customer_id' },
           force: { type: 'boolean', description: 'Override the 14-day freshness check (default false)' },
         },
-        required: ['customer_id', 'ads_account_id', 'drive_folder_id'],
+        required: ['customer_id'],
       },
     },
     handler: async (input: AdsDataPullInput, _agent: IAgent): Promise<string> => {
