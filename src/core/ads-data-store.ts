@@ -1098,14 +1098,36 @@ export class AdsDataStore {
 
   /** Look up the campaign_name for an asset_group_name within a run. Returns
    *  null if no asset_group with that name exists, or the name is ambiguous
-   *  (multiple asset_groups with the same name in different campaigns). */
+   *  (multiple asset_groups with the same name in different campaigns).
+   *
+   *  Resolves in two passes: first the snapshot (`ads_asset_groups` table),
+   *  then NEW asset_groups proposed in the current run's blueprint. The
+   *  blueprint pass is essential when the agent proposes assets for an
+   *  asset_group that was created earlier in the same run — without it the
+   *  agent has to guess `campaign_name` and routinely picks the wrong one
+   *  (see aquanatura cycle 6: "Wasserfilter-Kaufen" was created under
+   *  "PMax | Gesamtsortiment" but assets ended up under "PMax | Wasserfilter"
+   *  because the agent inferred from the name).
+   */
   findCampaignNameByAssetGroup(runId: number, adsAccountId: string, assetGroupName: string): string | null {
-    const rows = this.db.prepare(
+    const snapshotRows = this.db.prepare(
       'SELECT DISTINCT campaign_name FROM ads_asset_groups ' +
       'WHERE source_run_id = ? AND ads_account_id = ? AND asset_group_name = ? AND campaign_name IS NOT NULL',
     ).all(runId, adsAccountId, assetGroupName) as Array<{ campaign_name: string }>;
-    if (rows.length !== 1) return null;
-    return rows[0]!.campaign_name;
+    if (snapshotRows.length === 1) return snapshotRows[0]!.campaign_name;
+    if (snapshotRows.length > 1) return null;
+
+    // Snapshot didn't resolve. Try NEW asset_groups proposed in this run.
+    const blueprintRows = this.db.prepare(
+      `SELECT DISTINCT json_extract(payload_json, '$.campaign_name') AS campaign_name
+       FROM ads_blueprint_entities
+       WHERE run_id = ? AND ads_account_id = ?
+         AND entity_type = 'asset_group' AND kind = 'NEW'
+         AND json_extract(payload_json, '$.asset_group_name') = ?
+         AND json_extract(payload_json, '$.campaign_name') IS NOT NULL`,
+    ).all(runId, adsAccountId, assetGroupName) as Array<{ campaign_name: string }>;
+    if (blueprintRows.length === 1) return blueprintRows[0]!.campaign_name;
+    return null;
   }
 
   /** List distinct campaign names from the snapshot for a run. Used to surface

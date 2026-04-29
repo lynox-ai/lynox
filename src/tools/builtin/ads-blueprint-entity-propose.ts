@@ -308,8 +308,14 @@ function autofillCampaignName(
 ): void {
   const p = input.payload;
   const has = (k: string): boolean => typeof p[k] === 'string' && (p[k] as string).length > 0;
-  if (has('campaign_name')) return;
 
+  // Asset / audience_signal entities are bound to an asset_group, which is
+  // itself bound to one campaign. The agent must not be able to override
+  // that binding by passing a different campaign_name — that creates the
+  // (campaign, asset_group_name) key drift that causes the emit-validator
+  // to count zero assets and block the import. So for these entity types,
+  // ALWAYS resolve campaign_name from the asset_group, even when the agent
+  // provided one. Mismatches surface as a clear error in validatePayload.
   const groupBound: ReadonlySet<string> = new Set(['asset', 'audience_signal']);
   if (groupBound.has(input.entity_type) && has('asset_group_name')) {
     const resolved = store.findCampaignNameByAssetGroup(
@@ -320,6 +326,8 @@ function autofillCampaignName(
       return;
     }
   }
+
+  if (has('campaign_name')) return;
 
   const campaignBound: ReadonlySet<string> = new Set(['callout', 'sitelink']);
   if (campaignBound.has(input.entity_type)) {

@@ -253,6 +253,57 @@ describe('ads_blueprint_entity_propose tool', () => {
     expect(decisions[0]?.decision).toBe('NEW');
   });
 
+  it('asset proposal under a NEW asset_group resolves campaign_name from blueprint', async () => {
+    // Reproduces the aquanatura cycle 6 bug: agent created NEW asset_group
+    // "Wasserfilter-Kaufen" under "PMAX-Drills" but then proposed assets
+    // for it under a different campaign — emit validator counted 0 because
+    // the (campaign, asset_group) key drifted. The propose tool must
+    // resolve campaign_name from the asset_group entity itself, even when
+    // the asset_group was just created earlier in the same run.
+    await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'Theme-Wasserkefir',
+        final_url: 'https://example.com/wasserkefir',
+      },
+      confidence: 0.9, rationale: 'theme expansion seed',
+    }, fakeAgent);
+
+    // Agent proposes assets WITHOUT campaign_name — autofill must resolve
+    // from the NEW asset_group above.
+    const out1 = await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset', kind: 'NEW',
+      payload: {
+        asset_group_name: 'Theme-Wasserkefir',
+        field_type: 'HEADLINE', index: 1, text: 'Wasserkefir kaufen',
+      },
+      confidence: 0.85, rationale: 'first headline',
+    }, fakeAgent);
+    expect(out1).toMatch(/Blueprint-Vorschlag aufgenommen/);
+
+    // Agent proposes assets WITH WRONG campaign_name — must be overridden
+    // by the asset_group's campaign so emit-validator's (camp, ag) key
+    // matches the asset_group's key.
+    const out2 = await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset', kind: 'NEW',
+      payload: {
+        campaign_name: 'C',  // WRONG — should be PMAX-Drills
+        asset_group_name: 'Theme-Wasserkefir',
+        field_type: 'HEADLINE', index: 2, text: 'Wasserkefir online',
+      },
+      confidence: 0.85, rationale: 'second headline with wrong campaign',
+    }, fakeAgent);
+    expect(out2).toMatch(/Blueprint-Vorschlag aufgenommen/);
+
+    const assets = store.listBlueprintEntities(runId, { entityType: 'asset' });
+    expect(assets).toHaveLength(2);
+    for (const a of assets) {
+      const payload = JSON.parse(a.payload_json) as { campaign_name?: string };
+      expect(payload.campaign_name).toBe('PMAX-Drills');
+    }
+  });
+
   it('rejects NEW sitelink without desc1', async () => {
     const out = await tool.handler({
       ads_account_id: ACCOUNT, entity_type: 'sitelink', kind: 'NEW',
