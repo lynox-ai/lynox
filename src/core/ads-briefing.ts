@@ -115,6 +115,12 @@ Canonical cycle order:
        Editor-import-able entities: new RSAs, asset proposals for
        low-strength PMAX asset-groups, audience signals, sitelinks,
        callouts, validated PMAX SPLIT/MERGE.
+     — Default run target: when omitted, run_id resolves to the run
+       with PENDING action entities (NEW/RENAME/PAUSE/...) ahead of
+       any unrecorded import. So agent additions land on the same run
+       emit will pick — no need to thread run_id through every call.
+       Pass run_id explicitly only when you want to write to a
+       different run than the pending one.
      — Payload requirements per entity_type are listed in the tool
        description. campaign_name is auto-derived for asset and
        audience_signal proposals when only asset_group_name is given
@@ -122,6 +128,16 @@ Canonical cycle order:
        only when the account has a single campaign — otherwise pass it
        explicitly. On validation failure the tool returns the list of
        known campaign names from the run so you can choose.
+     — Editor character limits are validated at propose-time too:
+       headlines ≤ 30, descriptions ≤ 90, sitelink/callout ≤ 25.
+       Failed validation returns each over-limit string + length so
+       you can shorten before retrying — much cheaper than running
+       through emit and finding out at the end.
+     — Updating an existing entity: pass the SAME (run_id, entity_type,
+       external_id) tuple. The tool deletes the prior agent-source row
+       before re-inserting. Use the bare external_id ("bp.rsa.xyz"),
+       NOT the display "rsa_ad/bp.rsa.xyz" string from a previous
+       result message.
      — PMAX SPLIT/MERGE require confidence ≥ 0.9, rationale ≥ 30 chars,
        and source asset-groups < 30 conv/30d (or matching high
        confidence + rationale). The tool runs the safeguards.

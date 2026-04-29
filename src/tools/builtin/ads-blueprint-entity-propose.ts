@@ -29,6 +29,8 @@ import type {
   AdsDataStore,
   AdsBlueprintEntityKind,
   InsertBlueprintEntityInput,
+  AdsAccountRow,
+  AdsAuditRunRow,
 } from '../../core/ads-data-store.js';
 import {
   evaluateRestructureSafeguards,
@@ -129,7 +131,13 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
           return `ads_blueprint_entity_propose failed: customer profile missing for "${account.customer_id}".`;
         }
 
-        // Resolve run.
+        // Resolve run. Priority:
+        //   1. Explicit input.run_id (validated for account match).
+        //   2. Pending-import run: if a previous run produced action entities
+        //      and the customer hasn't imported them yet, agent additions
+        //      should land on THAT run so emit picks them up alongside the
+        //      pending pack. Mirrors emit's fallback logic.
+        //   3. Latest successful audit run.
         let runId: number;
         if (input.run_id !== undefined) {
           const run = store.getAuditRun(input.run_id);
@@ -138,11 +146,16 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
           }
           runId = input.run_id;
         } else {
-          const run = store.getLatestSuccessfulAuditRun(input.ads_account_id);
-          if (!run) {
-            return `ads_blueprint_entity_propose failed: no successful run for ${input.ads_account_id}. Run ads_blueprint_run first.`;
+          const pending = findPendingProposalRun(store, account);
+          if (pending) {
+            runId = pending.run_id;
+          } else {
+            const run = store.getLatestSuccessfulAuditRun(input.ads_account_id);
+            if (!run) {
+              return `ads_blueprint_entity_propose failed: no successful run for ${input.ads_account_id}. Run ads_blueprint_run first.`;
+            }
+            runId = run.run_id;
           }
-          runId = run.run_id;
         }
 
         // Auto-derive campaign_name when the agent only knows the asset_group
@@ -256,6 +269,22 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
 /** Mutates input.payload to fill in campaign_name when the agent left it
  *  blank but it is recoverable from the snapshot. Avoids forcing the agent
  *  to guess campaign names it can derive from the data. */
+/** Find the run an agent proposal should land on by default: the latest
+ *  run whose action entities (NEW/RENAME/PAUSE/SPLIT/MERGE) are not yet
+ *  reflected by a customer import. If the customer is current, falls back
+ *  to the latest SUCCESS run via the caller. */
+function findPendingProposalRun(store: AdsDataStore, account: AdsAccountRow): AdsAuditRunRow | null {
+  const candidate = store.findLatestRunWithBlueprintEntities(account.ads_account_id);
+  if (!candidate || !candidate.finished_at) return null;
+  const counts = store.countBlueprintEntities(candidate.run_id);
+  const pendingActions = counts.NEW + counts.RENAME + counts.PAUSE + counts.SPLIT + counts.MERGE;
+  if (pendingActions === 0) return null;
+  const lastImport = account.last_major_import_at;
+  if (lastImport === null) return candidate;
+  if (new Date(lastImport).getTime() < new Date(candidate.finished_at).getTime()) return candidate;
+  return null;
+}
+
 function autofillCampaignName(
   input: AdsBlueprintEntityProposeInput,
   store: AdsDataStore,
@@ -283,6 +312,32 @@ function autofillCampaignName(
       p['campaign_name'] = known[0];
     }
   }
+}
+
+/** Editor character limits enforced at propose-time so the agent fails fast
+ *  instead of writing entities that emit will reject. Numbers match Google
+ *  Ads Editor's import expectations. */
+const FIELD_LIMITS = {
+  headline: 30,        // RSA headlines, asset HEADLINE
+  description: 90,     // RSA descriptions, asset DESCRIPTION
+  longHeadline: 90,    // PMax LONG_HEADLINE
+  sitelink: 25,        // sitelink display text
+  callout: 25,         // callout text
+} as const;
+
+const ASSET_FIELD_LIMIT: Record<string, number> = {
+  HEADLINE: FIELD_LIMITS.headline,
+  LONG_HEADLINE: FIELD_LIMITS.longHeadline,
+  DESCRIPTION: FIELD_LIMITS.description,
+};
+
+function collectLengthViolations(values: unknown[], limit: number, label: string): string | null {
+  const violations: string[] = [];
+  for (const v of values) {
+    if (typeof v !== 'string') continue;
+    if (v.length > limit) violations.push(`${label} > ${limit} Zeichen: "${v}" (${v.length})`);
+  }
+  return violations.length > 0 ? violations.join(' | ') : null;
 }
 
 function validatePayload(input: AdsBlueprintEntityProposeInput): { ok: true } | { ok: false; error: string } {
@@ -313,6 +368,10 @@ function validatePayload(input: AdsBlueprintEntityProposeInput): { ok: true } | 
       const descs = p['descriptions'];
       if (!Array.isArray(heads) || heads.length < 5) return { ok: false, error: 'rsa_ad needs ≥ 5 headlines' };
       if (!Array.isArray(descs) || descs.length < 2) return { ok: false, error: 'rsa_ad needs ≥ 2 descriptions' };
+      const headViolations = collectLengthViolations(heads, FIELD_LIMITS.headline, 'Headline');
+      if (headViolations) return { ok: false, error: headViolations };
+      const descViolations = collectLengthViolations(descs, FIELD_LIMITS.description, 'Description');
+      if (descViolations) return { ok: false, error: descViolations };
       return { ok: true };
     }
     case 'asset_group': {
@@ -322,6 +381,14 @@ function validatePayload(input: AdsBlueprintEntityProposeInput): { ok: true } | 
     case 'asset': {
       const e = need('campaign_name') ?? need('asset_group_name') ?? need('field_type');
       if (e) return { ok: false, error: e };
+      const fieldType = String(p['field_type']).toUpperCase();
+      const text = p['text'];
+      if (typeof text === 'string') {
+        const limit = ASSET_FIELD_LIMIT[fieldType];
+        if (limit !== undefined && text.length > limit) {
+          return { ok: false, error: `${fieldType} > ${limit} Zeichen: "${text}" (${text.length})` };
+        }
+      }
       return { ok: true };
     }
     case 'audience_signal': {
@@ -334,11 +401,21 @@ function validatePayload(input: AdsBlueprintEntityProposeInput): { ok: true } | 
     }
     case 'sitelink': {
       const e = need('campaign_name') ?? need('text') ?? need('final_url');
-      return e ? { ok: false, error: e } : { ok: true };
+      if (e) return { ok: false, error: e };
+      const text = String(p['text']);
+      if (text.length > FIELD_LIMITS.sitelink) {
+        return { ok: false, error: `Sitelink-Text > ${FIELD_LIMITS.sitelink} Zeichen: "${text}" (${text.length})` };
+      }
+      return { ok: true };
     }
     case 'callout': {
       const e = need('campaign_name') ?? need('text');
-      return e ? { ok: false, error: e } : { ok: true };
+      if (e) return { ok: false, error: e };
+      const text = String(p['text']);
+      if (text.length > FIELD_LIMITS.callout) {
+        return { ok: false, error: `Callout > ${FIELD_LIMITS.callout} Zeichen: "${text}" (${text.length})` };
+      }
+      return { ok: true };
     }
     case 'negative': {
       const e = need('keyword_text') ?? need('match_type');
