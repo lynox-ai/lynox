@@ -331,60 +331,11 @@ export type NegativeMatchType =
   | 'Campaign Negative Exact'
   | 'Exact' | 'Phrase' | 'Broad';
 
-/** Definition row for an account-level shared negative-keyword list. Editor
- *  expects ONE such row per unique Shared Set Name; member rows reference
- *  it by name. The definition row carries `Shared set type` but NOT a
- *  Keyword — the Keyword column on a row with `Shared set type` set is
- *  what made earlier emit attempts fail with "Zweideutiger Zeilentyp"
- *  because Editor could not tell whether the row was defining the set or
- *  inserting a member. Splitting into two row types removes the ambiguity.
- */
-export interface SharedSetDefinitionRowInput {
-  sharedSetName: string;
-  status?: 'Paused' | 'Enabled' | undefined;
-}
-
-export function buildSharedSetDefinitionRow(input: SharedSetDefinitionRowInput): CsvRow {
-  const row = emptyRow();
-  setCol(row, 'Shared set name', input.sharedSetName);
-  setCol(row, 'Shared set type', 'Negative keyword');
-  setCol(row, 'Status', input.status ?? 'Enabled');
-  return row;
-}
-
-/** Member row for an account-level shared negative-keyword list. Carries
- *  Shared set name + Keyword + Criterion Type (with bare "Negative Broad"
- *  / "Negative Phrase" / "Negative Exact" — no "Campaign" prefix and no
- *  "Account keyword type" column. The "Account keyword type" column exists
- *  in the 183-column schema but earlier-generation Editor versions ignore
- *  or reject it; the canonical CSV path is via Criterion Type alone). */
-export interface SharedSetMemberRowInput {
-  sharedSetName: string;
-  keyword: string;
-  matchType: NegativeMatchType;
-  status?: 'Paused' | 'Enabled' | undefined;
-}
-
-export function buildSharedSetMemberRow(input: SharedSetMemberRowInput): CsvRow {
-  const row = emptyRow();
-  setCol(row, 'Shared set name', input.sharedSetName);
-  setCol(row, 'Keyword', input.keyword);
-  setCol(row, 'Criterion Type', sharedSetMatchType(input.matchType));
-  setCol(row, 'Status', input.status ?? 'Enabled');
-  return row;
-}
-
-function sharedSetMatchType(m: NegativeMatchType): string {
-  if (m === 'Campaign Negative Broad' || m === 'Broad') return 'Negative Broad';
-  if (m === 'Campaign Negative Phrase' || m === 'Phrase') return 'Negative Phrase';
-  if (m === 'Campaign Negative Exact' || m === 'Exact') return 'Negative Exact';
-  return m;
-}
-
 export interface NegativeRowInput {
-  /** Required: shared-set negatives are emitted via the manual-TODO list, not
-   *  CSV — Editor's schema for shared-set member rows is not stable enough
-   *  to risk a production import. Only campaign-level negatives reach CSV. */
+  /** Required: shared-set negatives are emitted via the manual-TODO list,
+   *  not CSV — Editor cannot create or modify shared negative keyword
+   *  lists through CSV import (UI-only operation in Tools → Shared
+   *  Library). Only campaign- and ad-group-level negatives reach CSV. */
   campaignName: string;
   adGroupName?: string | undefined;
   keyword: string;

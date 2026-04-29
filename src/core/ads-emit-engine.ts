@@ -36,7 +36,6 @@ import {
   buildAdGroupRow, buildAssetGroupRow, buildAssetRow, buildAudienceSignalRow,
   buildCampaignRow, buildCalloutRow, buildKeywordRow, buildListingGroupRow,
   buildNegativeRow, buildRsaRow, buildSitelinkRow,
-  buildSharedSetDefinitionRow, buildSharedSetMemberRow,
   encodeUtf16LeWithBom, renderCsvBody, slugifyCampaignName,
   type CsvRow, type AssetFieldType,
 } from './ads-csv-builder.js';
@@ -63,8 +62,9 @@ export interface EmitResult {
     assetGroups: number; assets: number; audienceSignals: number;
     listingGroups: number; sitelinks: number; callouts: number; negatives: number;
   };
-  /** Manual TODO entries — entity types whose Editor CSV format is unstable
-   *  (account-level shared-set negatives, PMax text-asset additions). The
+  /** Manual TODO entries — entity types Editor cannot create through CSV
+   *  import (shared negative keyword lists are UI-only by design, and PMax
+   *  single-asset rows on KEEP asset_groups don't round-trip cleanly). The
    *  operator applies these in the Google Ads UI; emit writes them to
    *  `manual-todos.md` alongside the CSVs. */
   manualTodos: ManualTodo[];
@@ -258,36 +258,14 @@ function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
     bundleCounts.calloutCount += bucket.calloutCount;
     bundleCounts.negativeCount += bucket.negativeCount;
   }
-  // Shared-set negatives — one definition row per unique set + N member
-  // rows. Goes into its own per-campaign-style file (shared-sets.csv) and
-  // also into the bundle so customers using the bundle import don't lose
-  // the negatives. Definition rows must come BEFORE member rows so Editor
-  // resolves the set before resolving its members.
-  const sharedSetRows: CsvRow[] = [];
-  let sharedSetMemberCount = 0;
-  for (const [setName, members] of [...grouped.sharedSets.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    if (members.length === 0) continue;
-    sharedSetRows.push(buildSharedSetDefinitionRow({ sharedSetName: setName }));
-    for (const m of members) {
-      sharedSetRows.push(buildSharedSetMemberRow({
-        sharedSetName: setName, keyword: m.keyword, matchType: m.matchType,
-      }));
-      sharedSetMemberCount++;
-    }
-  }
-  if (sharedSetRows.length > 0) {
-    const sharedSetCounts: BucketCounts = {
-      ...zeroBucketCounts(), negativeCount: sharedSetMemberCount,
-    };
-    files.push({
-      fileName: 'shared-sets.csv',
-      body: renderCsvBody(sharedSetRows),
-      rowCount: sharedSetRows.length,
-      counts: sharedSetCounts,
-    });
-    bundleRows.push(...sharedSetRows);
-    bundleCounts.negativeCount += sharedSetMemberCount;
-  }
+  // Shared negative keyword lists are UI-only in Google Ads — Editor's CSV
+  // import schema has no row type that creates a shared set or adds members
+  // to one (the "Type" column accepts "Negative" / "Campaign negative" but
+  // not an account-scope variant; "Shared set name" is read-only on
+  // exports). Earlier emit attempts fabricated a 2-row pattern and Editor
+  // rejected every row as "Zweideutiger Zeilentyp". Account-scope negatives
+  // are routed to manual-todos.md with paste-ready blocks instead — see
+  // groupByCampaign + renderManualTodos.
 
   // Bundle file: concatenated rows under a single header so the operator
   // can run one Editor "Import → From file" instead of N. We always emit
@@ -302,14 +280,6 @@ function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
     });
   }
   return files;
-}
-
-function zeroBucketCounts(): BucketCounts {
-  return {
-    campaignCount: 0, adGroupCount: 0, keywordCount: 0, rsaCount: 0,
-    assetGroupCount: 0, assetCount: 0, audienceSignalCount: 0,
-    listingGroupCount: 0, sitelinkCount: 0, calloutCount: 0, negativeCount: 0,
-  };
 }
 
 function makeEmptyTotals(): EmitResult['totals'] {
@@ -345,9 +315,10 @@ function renderManualTodos(todos: readonly ManualTodo[]): string | null {
   const lines: string[] = [
     '# Manuelle TODOs (Google Ads UI)',
     '',
-    'Diese Einträge können nicht zuverlässig per Editor-CSV importiert werden ' +
-      '(Editor lehnt das Zeilenformat als „Zweideutiger Zeilentyp" ab). ' +
-      'Bitte direkt im Google Ads UI anlegen.',
+    'Diese Einträge muss der Operator direkt im Google Ads UI anlegen — ' +
+      'Editor unterstützt sie nicht im CSV-Import (Shared Negative Lists sind ' +
+      'UI-only by design; einzelne PMax-Asset-Erweiterungen auf KEEP-Asset-Groups ' +
+      'lehnt Editor mit „Zweideutiger Zeilentyp" ab).',
     '',
   ];
 
@@ -357,7 +328,12 @@ function renderManualTodos(todos: readonly ManualTodo[]): string | null {
   if (sharedSet.length > 0) {
     lines.push('## Negative Keywords (Shared Sets)');
     lines.push('');
-    lines.push('Pfad: **Tools → Mediathek → Listen mit auszuschließenden Keywords** → Liste auswählen → Keywords hinzufügen.');
+    lines.push('Google Ads Editor kann Shared-Set-Negativlisten **nicht** per CSV anlegen oder befüllen — das ist eine reine UI-Operation. Pfad:');
+    lines.push('');
+    lines.push('1. **Tools → Shared Library → Negative keyword lists**');
+    lines.push('2. Liste mit dem unten genannten Namen auswählen (oder neu anlegen)');
+    lines.push('3. Im Feld **„Add negative keywords"** den Block per Copy-Paste einfügen — ein Keyword pro Zeile, Match-Type via Schreibweise: `keyword` = broad, `"keyword"` = phrase, `[keyword]` = exact.');
+    lines.push('4. Liste auf alle relevanten Such-Kampagnen anwenden.');
     lines.push('');
     const byList = new Map<string, ManualTodo[]>();
     for (const t of sharedSet) {
@@ -368,7 +344,14 @@ function renderManualTodos(todos: readonly ManualTodo[]): string | null {
     for (const [name, items] of [...byList.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
       lines.push(`### ${name}`);
       lines.push('');
-      for (const t of items) lines.push(`- ${t.detail}`);
+      lines.push('```');
+      const seen = new Set<string>();
+      for (const t of items) {
+        if (seen.has(t.detail)) continue;
+        seen.add(t.detail);
+        lines.push(t.detail);
+      }
+      lines.push('```');
       lines.push('');
     }
   }
@@ -426,16 +409,8 @@ interface CampaignBucket {
   negativeCount: number;
 }
 
-interface SharedSetMember {
-  keyword: string;
-  matchType: 'Exact' | 'Phrase' | 'Broad';
-}
-
 interface GroupedEmit {
   perCampaign: Map<string, CampaignBucket>;
-  /** Account-level shared-set negatives keyed by shared-set name. Each set
-   *  emits one definition row + N member rows in a single shared-sets CSV. */
-  sharedSets: Map<string, SharedSetMember[]>;
   manualTodos: ManualTodo[];
 }
 
@@ -449,7 +424,6 @@ function newBucket(): CampaignBucket {
 
 function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmit {
   const perCampaign = new Map<string, CampaignBucket>();
-  const sharedSets = new Map<string, SharedSetMember[]>();
   const manualTodos: ManualTodo[] = [];
 
   // Pre-pass: index NEW asset_groups + collect their NEW sibling text assets
@@ -721,22 +695,22 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         const scopeTarget = stringField(payload, 'scope_target');
         if (!keyword) continue;
         if (scope === 'account' || scopeTarget === null) {
-          // Account-level negatives target a shared list. Earlier emit
-          // attempts mixed `Shared set type` + `Account keyword type` +
-          // `Keyword` on the same row, which Editor flagged as
-          // "Zweideutiger Zeilentyp" because the row could be parsed as
-          // either a set definition OR a member insert. The canonical
-          // Editor format splits the two: one definition row per set
-          // (Shared set name + Shared set type, no Keyword) plus one
-          // member row per term (Shared set name + Keyword + Criterion
-          // Type, no Shared set type). We collect the members here and
-          // emit both row types in planCsvFiles below.
+          // Account-scope negatives belong in a Shared Negative Keyword
+          // List. Editor cannot create or modify those via CSV import — it
+          // is a UI-only operation in Tools → Shared Library → Negative
+          // Keyword Lists. We route each keyword to manual-todos.md with a
+          // paste-ready block (one keyword per line) so the operator can
+          // bulk-paste into the UI's "Add negative keywords" textarea. The
+          // match type is appended inline using Editor's UI shorthand
+          // (bare keyword = broad, "phrase" = phrase, [exact] = exact).
           const sharedSetName = scope === 'account' && stringField(payload, 'source') === 'pmax_owned'
             ? 'PMax-Owned Negatives'
             : 'Account Competitor Negatives';
-          const arr = sharedSets.get(sharedSetName) ?? [];
-          arr.push({ keyword, matchType });
-          sharedSets.set(sharedSetName, arr);
+          manualTodos.push({
+            kind: 'shared_set_negative',
+            target: sharedSetName,
+            detail: formatSharedSetKeyword(keyword, matchType),
+          });
         } else {
           const bucket = ensureBucket(scopeTarget);
           bucket.rows.push(buildNegativeRow({
@@ -749,7 +723,17 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
     }
   }
 
-  return { perCampaign, sharedSets, manualTodos };
+  return { perCampaign, manualTodos };
+}
+
+/** Format a shared-set negative for paste into the Google Ads UI. The
+ *  "Add negative keywords" textarea accepts one keyword per line and
+ *  parses match-type via punctuation: bare `keyword` = broad,
+ *  `"keyword"` = phrase, `[keyword]` = exact. */
+function formatSharedSetKeyword(keyword: string, matchType: 'Exact' | 'Phrase' | 'Broad'): string {
+  if (matchType === 'Exact') return `[${keyword}]`;
+  if (matchType === 'Phrase') return `"${keyword}"`;
+  return keyword;
 }
 
 function humanFieldType(t: AssetFieldType): string {

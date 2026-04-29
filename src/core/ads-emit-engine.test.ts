@@ -42,7 +42,7 @@ describe('runEmit', () => {
     expect(() => runEmit(store, ACCOUNT)).toThrow(/No blueprint entities/);
   });
 
-  it('writes per-campaign CSVs + shared-sets CSV and stamps hash on success', async () => {
+  it('writes per-campaign CSVs + routes shared-set negatives to manual-todos and stamps hash on success', async () => {
     seedFullScenario(store);
     runBlueprint(store, ACCOUNT);
 
@@ -50,13 +50,13 @@ describe('runEmit', () => {
     expect(result.validation.canEmit).toBe(true);
     expect(result.idempotent).toBe(false);
     expect(result.filesWritten.length).toBeGreaterThan(0);
-    // Account-level negatives now ride along in shared-sets.csv (Editor's
-    // canonical 2-row pattern: definition + member rows). manual-todos
-    // routing is reserved for entity types whose CSV format is genuinely
-    // unstable (PMax single-asset rows on KEEP asset_groups).
-    expect(result.filesWritten.some(f => f.endsWith('shared-sets.csv'))).toBe(true);
+    // Shared negative keyword lists are UI-only in Google Ads — Editor's
+    // CSV import schema cannot create or modify them. Account-scope
+    // negatives are routed to manual-todos.md with paste-ready blocks
+    // instead. No shared-sets.csv / account-negatives.csv must be emitted.
+    expect(result.filesWritten.some(f => f.endsWith('shared-sets.csv'))).toBe(false);
     expect(result.filesWritten.some(f => f.endsWith('account-negatives.csv'))).toBe(false);
-    expect(result.manualTodos.every(t => t.kind !== 'shared_set_negative')).toBe(true);
+    expect(result.manualTodos.some(t => t.kind === 'shared_set_negative')).toBe(true);
     expect(result.hash).toMatch(/^[0-9a-f]{64}$/);
 
     // Hash stamped onto the run
@@ -121,33 +121,23 @@ describe('runEmit', () => {
     expect(bytes[1]).toBe(0xfe);
   });
 
-  it('shared-sets.csv carries definition + member rows for account-level negatives', async () => {
+  it('manual-todos.md renders shared-set negatives as paste-ready code blocks', async () => {
     seedFullScenario(store);
     runBlueprint(store, ACCOUNT);
     const result = runEmit(store, ACCOUNT, { workspaceDir });
-    const sharedFile = result.filesWritten.find(f => f.endsWith('shared-sets.csv'));
-    expect(sharedFile).toBeDefined();
-    const text = decodeUtf16LeBytes(await readFile(sharedFile!));
-    // Definition row: Shared set type=Negative keyword on a row WITHOUT a Keyword.
-    expect(text).toMatch(/Negative keyword/);
-    // Member rows use Criterion Type=Negative Broad/Phrase/Exact.
-    expect(text).toMatch(/Negative (Broad|Phrase|Exact)/);
-    expect(text).toMatch(/drills/i);
-  });
-
-  it('shared-sets-disabled scenario keeps manual-todos.md path empty for negatives', async () => {
-    seedFullScenario(store);
-    runBlueprint(store, ACCOUNT);
-    const result = runEmit(store, ACCOUNT, { workspaceDir });
-    // Operator-friendly path with shared-set heading + match-type + keyword.
     const todosFile = result.filesWritten.find(f => f.endsWith('manual-todos.md'));
-    if (!todosFile) return; // todos may legitimately be empty now.
-    const text = await readFile(todosFile, 'utf8');
-    // No more shared-set negatives in manual-todos.
-    expect(text).not.toMatch(/Negative Keywords \(Shared Sets\)/);
+    expect(todosFile).toBeDefined();
+    const text = await readFile(todosFile!, 'utf8');
+    // Section heading + UI path are present.
+    expect(text).toMatch(/Negative Keywords \(Shared Sets\)/);
+    expect(text).toMatch(/Tools → Shared Library → Negative keyword lists/);
+    // The list name appears as a sub-heading.
     expect(text).toMatch(/(Account Competitor Negatives|PMax-Owned Negatives)/);
-    expect(text).toMatch(/Broad|Phrase|Exact/);
-    expect(text).toMatch(/drills/i);
+    // Keywords are rendered inside a fenced code block so the operator
+    // can copy-paste the entire block into the UI's "Add negative
+    // keywords" textarea. Match-type is encoded via UI shorthand:
+    // bare = broad, "x" = phrase, [x] = exact.
+    expect(text).toMatch(/```[\s\S]*drills[\s\S]*```/i);
   });
 
   it('filesWritten + perFileRowCounts cover the CSVs (manual-todos.md is extra)', () => {
