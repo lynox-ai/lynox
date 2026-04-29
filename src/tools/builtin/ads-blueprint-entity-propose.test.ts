@@ -253,6 +253,65 @@ describe('ads_blueprint_entity_propose tool', () => {
     expect(decisions[0]?.decision).toBe('NEW');
   });
 
+  it('rejects NEW asset_group that duplicates final_url of an existing NEW asset_group', async () => {
+    // Reproduces aquanatura cycle 7: deterministic theme-expansion creates
+    // Theme-Kefir → /collections/diy-wasserkefir-herstellen, then the agent
+    // proposed de-PMAX-Kefir under the SAME url. Validator must reject the
+    // second one and point at the existing external_id for upsert.
+    await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'Theme-Kefir',
+        theme_token: 'kefir',
+        final_url: 'https://example.com/collections/kefir',
+      },
+      external_id: 'bp.assetgroup.pmax-drills.theme-kefir',
+      confidence: 0.7, rationale: 'auto theme expansion',
+    }, fakeAgent);
+
+    const out = await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'de-PMAX-Kefir',
+        final_url: 'https://example.com/collections/kefir',
+      },
+      confidence: 0.85, rationale: 'agent refinement',
+    }, fakeAgent);
+    expect(out).toMatch(/duplicates existing NEW asset_group/);
+    expect(out).toMatch(/bp\.assetgroup\.pmax-drills\.theme-kefir/);
+    // Only one asset_group persisted.
+    expect(store.listBlueprintEntities(runId, { entityType: 'asset_group' })).toHaveLength(1);
+  });
+
+  it('allows re-propose with same external_id (upsert path)', async () => {
+    await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'Theme-Glas',
+        final_url: 'https://example.com/collections/glas',
+      },
+      external_id: 'bp.assetgroup.pmax-drills.theme-glas',
+      confidence: 0.7, rationale: 'auto theme expansion',
+    }, fakeAgent);
+
+    // Same external_id, refined name + content → upsert allowed.
+    const out = await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'Theme-Glas-Refined',
+        final_url: 'https://example.com/collections/glas',
+      },
+      external_id: 'bp.assetgroup.pmax-drills.theme-glas',
+      confidence: 0.85, rationale: 'agent refinement same external_id',
+    }, fakeAgent);
+    expect(out).toMatch(/Blueprint-Vorschlag aufgenommen/);
+    expect(store.listBlueprintEntities(runId, { entityType: 'asset_group' })).toHaveLength(1);
+  });
+
   it('asset proposal under a NEW asset_group resolves campaign_name from blueprint', async () => {
     // Reproduces the aquanatura cycle 6 bug: agent created NEW asset_group
     // "Wasserfilter-Kaufen" under "PMAX-Drills" but then proposed assets

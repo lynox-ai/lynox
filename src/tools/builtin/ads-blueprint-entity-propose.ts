@@ -183,6 +183,15 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
         const refError = validateCampaignReference(input, store, runId);
         if (refError) return `ads_blueprint_entity_propose failed: ${refError}`;
 
+        // Reject duplicate NEW asset_groups in the same run. The deterministic
+        // theme-expansion auto-creates Theme-{Theme} asset_groups with placeholder
+        // content + LP-URL; agents that propose another NEW asset_group with the
+        // same final_url end up shipping two structures for the same theme. The
+        // upsert path (same external_id) is the canonical way to refine the
+        // auto-generated content.
+        const dupError = validateNoDuplicateAssetGroup(input, store, runId);
+        if (dupError) return `ads_blueprint_entity_propose failed: ${dupError}`;
+
         // PMAX SPLIT/MERGE: run safeguards.
         if (input.kind === 'SPLIT' || input.kind === 'MERGE') {
           if (input.entity_type !== 'asset_group') {
@@ -530,6 +539,58 @@ function closestMatch(query: string, candidates: readonly string[]): string | nu
     if (best === null || score > best.score) best = { name: c, score };
   }
   return best && best.score > 0 ? best.name : null;
+}
+
+/** Reject NEW asset_group proposals that collide with an existing NEW
+ *  asset_group on (campaign_name, final_url) or (campaign_name, theme_token).
+ *  The deterministic theme-expansion auto-creates Theme-{X} groups with
+ *  placeholder content + LP-URL; agents that re-propose under a different
+ *  asset_group_name end up shipping two structures for the same theme.
+ *  Re-proposing the SAME external_id (upsert) is allowed so the agent can
+ *  refine the auto-generated content. */
+function validateNoDuplicateAssetGroup(
+  input: AdsBlueprintEntityProposeInput, store: AdsDataStore, runId: number,
+): string | null {
+  if (input.entity_type !== 'asset_group' || input.kind !== 'NEW') return null;
+  const p = input.payload;
+  const proposedExt = stripEntityTypePrefix(
+    input.external_id ?? deriveExternalId(input),
+    input.entity_type,
+  );
+  const proposedFinalUrl = typeof p['final_url'] === 'string' ? p['final_url'].trim() : '';
+  const proposedTheme = typeof p['theme_token'] === 'string' ? p['theme_token'].trim().toLowerCase() : '';
+  const proposedCampaign = typeof p['campaign_name'] === 'string' ? p['campaign_name'] : '';
+
+  const existing = store.listBlueprintEntities(runId)
+    .filter(e => e.entity_type === 'asset_group' && e.kind === 'NEW' && e.external_id !== proposedExt);
+
+  for (const e of existing) {
+    let payload: Record<string, unknown> = {};
+    try { payload = JSON.parse(e.payload_json); } catch { continue; }
+    const eCampaign = typeof payload['campaign_name'] === 'string' ? payload['campaign_name'] : '';
+    if (eCampaign !== proposedCampaign) continue;
+
+    const eFinalUrl = typeof payload['final_url'] === 'string' ? payload['final_url'].trim() : '';
+    if (proposedFinalUrl && eFinalUrl && proposedFinalUrl === eFinalUrl) {
+      const eName = typeof payload['asset_group_name'] === 'string' ? payload['asset_group_name'] : e.external_id;
+      return (
+        `NEW asset_group "${p['asset_group_name']}" duplicates existing NEW asset_group ` +
+        `"${eName}" (same campaign + final_url). Update the existing one with ` +
+        `external_id="${e.external_id}" instead of creating a duplicate.`
+      );
+    }
+
+    const eTheme = typeof payload['theme_token'] === 'string' ? payload['theme_token'].trim().toLowerCase() : '';
+    if (proposedTheme && eTheme && proposedTheme === eTheme) {
+      const eName = typeof payload['asset_group_name'] === 'string' ? payload['asset_group_name'] : e.external_id;
+      return (
+        `NEW asset_group "${p['asset_group_name']}" duplicates existing NEW asset_group ` +
+        `"${eName}" (same campaign + theme_token "${eTheme}"). Update the existing one ` +
+        `with external_id="${e.external_id}" instead of creating a duplicate.`
+      );
+    }
+  }
+  return null;
 }
 
 interface NamingResult { valid: boolean; errors: string[]; }

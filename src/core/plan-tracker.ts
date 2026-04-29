@@ -81,7 +81,11 @@ export function recordStepComplete(
   });
 
   return {
-    completed: plan.stepResults.size,
+    // Count only steps with completedAt set — pre-marked-started entries
+    // exist for the upcoming step but should not inflate the progress
+    // counter (e.g. mid-run "Step entity-proposals (5/6)" was reporting 6/6
+    // because the next step's pre-marker counted as done).
+    completed: [...plan.stepResults.values()].filter(r => r.completedAt.length > 0).length,
     total: plan.steps.length,
   };
 }
@@ -115,7 +119,15 @@ export function markStepStarted(
   });
 }
 
-/** Check if all steps are done and finalize if so. Returns true if finalized. */
+/** Check if all steps are done and finalize if so. Returns true if finalized.
+ *
+ *  A step counts as "done" only when `completedAt` is non-empty. Pre-marked
+ *  started steps (added by markStepStarted with completedAt='') do NOT
+ *  satisfy the gate — otherwise finalize fires after step N-1 because
+ *  recordStepComplete runs markStepStarted for step N before checking, and
+ *  the wrapper then reports "Workflow complete (N-1/N)" even though one
+ *  step still needs to run. Caught on aquanatura cycle 7 where the agent's
+ *  csv-emit step_complete failed with "No active plan." */
 export function checkAndFinalize(
   toolContext: ToolContext,
   runHistory: RunHistory | null,
@@ -123,7 +135,10 @@ export function checkAndFinalize(
   const plan = toolContext.activePlan;
   if (!plan) return false;
 
-  const allDone = plan.steps.every(s => plan.stepResults.has(s.id));
+  const allDone = plan.steps.every(s => {
+    const r = plan.stepResults.get(s.id);
+    return r !== undefined && r.completedAt.length > 0;
+  });
   if (!allDone) return false;
 
   finalizeTrackedPlan(toolContext, runHistory);
