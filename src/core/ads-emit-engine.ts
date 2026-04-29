@@ -23,7 +23,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type {
   AdsDataStore,
@@ -166,6 +166,21 @@ export function runEmit(
   // 3. Write files
   const baseDir = resolveWorkspaceDir(opts?.workspaceDir, adsAccountId, run.run_id);
   mkdirSync(baseDir, { recursive: true });
+
+  // Clean up stale outputs left behind by earlier emit runs (either from a
+  // prior code version or a prior cycle). Without this, a `shared-sets.csv`
+  // written by the pre-fix code stays on disk forever — the operator can
+  // accidentally double-click it from the file browser and Editor rejects
+  // every row as "Zweideutiger Zeilentyp". Only files we recognise as
+  // emit outputs are removed; foreign files (manual notes etc.) stay.
+  const plannedNames = new Set<string>(planned.map(p => p.fileName));
+  plannedNames.add('manual-todos.md');
+  for (const existing of readdirSync(baseDir)) {
+    const isOurOutput = existing.endsWith('.csv') || existing === 'manual-todos.md';
+    if (!isOurOutput) continue;
+    if (plannedNames.has(existing)) continue;
+    try { unlinkSync(join(baseDir, existing)); } catch { /* best-effort */ }
+  }
 
   const filesWritten: string[] = [];
   const perFileRowCounts: Array<{ file: string; rowCount: number }> = [];

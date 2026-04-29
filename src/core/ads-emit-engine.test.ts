@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AdsDataStore } from './ads-data-store.js';
@@ -138,6 +138,30 @@ describe('runEmit', () => {
     // keywords" textarea. Match-type is encoded via UI shorthand:
     // bare = broad, "x" = phrase, [x] = exact.
     expect(text).toMatch(/```[\s\S]*drills[\s\S]*```/i);
+  });
+
+  it('cleans up stale outputs from earlier emit runs (e.g. shared-sets.csv from pre-fix code)', async () => {
+    seedFullScenario(store);
+    runBlueprint(store, ACCOUNT);
+    // Pre-create a stale shared-sets.csv in the run dir — left behind by an
+    // earlier emit that ran under the pre-fix code which used to emit that
+    // file. Without the cleanup pass this lingers forever and the operator
+    // can accidentally double-click it from the file browser; Editor then
+    // rejects every row as "Zweideutiger Zeilentyp".
+    const r = store.getLatestSuccessfulAuditRun(ACCOUNT)!;
+    const runDir = join(workspaceDir, 'ads', ACCOUNT, 'blueprints', `run-${r.run_id}`);
+    await mkdir(runDir, { recursive: true });
+    const stalePath = join(runDir, 'shared-sets.csv');
+    await writeFile(stalePath, 'DO NOT IMPORT — pre-fix junk', 'utf8');
+    // Also drop a foreign file so we can confirm the cleanup leaves it
+    // alone (only known emit output filenames are removed).
+    const foreignPath = join(runDir, 'operator-notes.txt');
+    await writeFile(foreignPath, 'keep me', 'utf8');
+
+    runEmit(store, ACCOUNT, { workspaceDir });
+
+    await expect(access(stalePath)).rejects.toThrow();
+    await expect(access(foreignPath)).resolves.toBeUndefined();
   });
 
   it('filesWritten + perFileRowCounts cover the CSVs (manual-todos.md is extra)', () => {

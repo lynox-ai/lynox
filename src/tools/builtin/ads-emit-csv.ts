@@ -187,11 +187,13 @@ export function renderEmitReport(result: EmitResult): string {
     lines.push('## Manuelle TODOs (Google Ads UI)');
     lines.push('');
     lines.push(
-      `${manualTodos.length} Einträge können nicht zuverlässig per CSV importiert werden ` +
-      `(Editor lehnt das Zeilenformat als „Zweideutiger Zeilentyp" ab) — bitte direkt im Ads UI anlegen:`,
+      `${manualTodos.length} Einträge muss der Customer direkt im Google Ads UI anlegen — ` +
+      `Shared Negative Keyword Lists kann Editor nicht via CSV anlegen (UI-only by design, Pfad: ` +
+      `Tools → Shared Library → Negative keyword lists), und PMax-Asset-Erweiterungen auf KEEP-` +
+      `Asset-Groups lehnt Editor mit „Zweideutiger Zeilentyp" ab:`,
     );
     lines.push('');
-    if (sharedSetCount > 0) lines.push(`- **${sharedSetCount}** Negative Keywords (Shared Sets)`);
+    if (sharedSetCount > 0) lines.push(`- **${sharedSetCount}** Negative Keywords für Shared Lists (paste-ready Code-Blöcke in der Datei)`);
     if (pmaxAssetCount > 0) lines.push(`- **${pmaxAssetCount}** PMax-Asset-Erweiterungen`);
     lines.push('');
     if (todosFile) {
