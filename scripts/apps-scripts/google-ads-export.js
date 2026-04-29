@@ -34,14 +34,16 @@
 // ─── Configuration ───────────────────────────────────────────
 var DRIVE_ROOT_FOLDER_ID = 'YOUR_DRIVE_ROOT_FOLDER_ID';
 var ACCOUNT_LABEL = 'YOUR_ACCOUNT_LABEL';   // e.g. 'acme-shop'
-// LAST_90_DAYS gives the audit's performance verification enough
+// 90-day window gives the audit's performance verification enough
 // runway for a 28-day pre-import window even when the customer
 // imports a couple of weeks after the previous cycle's snapshot was
 // taken — the audit reads BOTH pre and post windows from the
 // current run's snapshot so the prev-run snapshot's date range is
 // irrelevant. Aggregate metrics (cumulative ROAS / CTR / etc.) on
 // the non-time-series CSVs are also computed over this same window.
-var DATE_RANGE = 'LAST_90_DAYS';            // GAQL date filter
+// GAQL has no LAST_90_DAYS literal; build an explicit BETWEEN range.
+var DATE_WINDOW_DAYS = 90;
+var DATE_FILTER = buildDateFilter_(DATE_WINDOW_DAYS);   // "segments.date BETWEEN '...' AND '...'"
 var SEARCH_TERMS_LIMIT = 5000;
 var PRODUCTS_LIMIT = 1000;
 var CHANGE_HISTORY_DAYS = 14;
@@ -51,33 +53,56 @@ function main() {
   var accountFolder = ensureSubfolder(rootFolder, ACCOUNT_LABEL);
   var adsFolder = ensureSubfolder(accountFolder, 'ads');
 
-  // The 22 CSVs. Each export is independent — a failure in one file does not
-  // block the rest. We log per-file outcome via Logger.log so Apps Script's
-  // execution log makes failures obvious.
-  safeExport_('campaigns.csv',              adsFolder, exportCampaigns);
-  safeExport_('campaign_performance.csv',   adsFolder, exportCampaignPerformance);
-  safeExport_('ad_groups.csv',              adsFolder, exportAdGroups);
-  safeExport_('keywords.csv',               adsFolder, exportKeywords);
-  safeExport_('ads_rsa.csv',                adsFolder, exportRsaAds);
-  safeExport_('asset_groups.csv',           adsFolder, exportAssetGroups);
-  safeExport_('asset_group_assets.csv',     adsFolder, exportAssetGroupAssets);
-  safeExport_('assets.csv',                 adsFolder, exportAssets);
-  safeExport_('listing_groups.csv',         adsFolder, exportListingGroups);
-  safeExport_('shopping_products.csv',      adsFolder, exportShoppingProducts);
-  safeExport_('conversions.csv',            adsFolder, exportConversionActions);
-  safeExport_('campaign_targeting.csv',     adsFolder, exportCampaignTargeting);
-  safeExport_('search_terms.csv',           adsFolder, exportSearchTerms);
-  safeExport_('pmax_search_terms.csv',      adsFolder, exportPmaxSearchTerms);
-  safeExport_('pmax_placements.csv',        adsFolder, exportPmaxPlacements);
-  safeExport_('landing_pages.csv',          adsFolder, exportLandingPages);
-  safeExport_('ad_asset_ratings.csv',       adsFolder, exportAdAssetRatings);
-  safeExport_('audience_signals.csv',       adsFolder, exportAudienceSignals);
-  safeExport_('device_performance.csv',     adsFolder, exportDevicePerformance);
-  safeExport_('geo_performance.csv',        adsFolder, exportGeoPerformance);
-  safeExport_('change_history.csv',         adsFolder, exportChangeHistory);
+  // The 21 ads CSVs. Each export is independent — a failure in one file does
+  // not block the rest. We track per-file outcome and only write LASTRUN.txt
+  // if every single export succeeded; partial runs leave LASTRUN unchanged
+  // so the lynox freshness check correctly flags them as stale.
+  var results = {};
+  var exports = [
+    ['campaigns.csv',            exportCampaigns],
+    ['campaign_performance.csv', exportCampaignPerformance],
+    ['ad_groups.csv',            exportAdGroups],
+    ['keywords.csv',             exportKeywords],
+    ['ads_rsa.csv',              exportRsaAds],
+    ['asset_groups.csv',         exportAssetGroups],
+    ['asset_group_assets.csv',   exportAssetGroupAssets],
+    ['assets.csv',               exportAssets],
+    ['listing_groups.csv',       exportListingGroups],
+    ['shopping_products.csv',    exportShoppingProducts],
+    ['conversions.csv',          exportConversionActions],
+    ['campaign_targeting.csv',   exportCampaignTargeting],
+    ['search_terms.csv',         exportSearchTerms],
+    ['pmax_search_terms.csv',    exportPmaxSearchTerms],
+    ['pmax_placements.csv',      exportPmaxPlacements],
+    ['landing_pages.csv',        exportLandingPages],
+    ['ad_asset_ratings.csv',     exportAdAssetRatings],
+    ['audience_signals.csv',     exportAudienceSignals],
+    ['device_performance.csv',   exportDevicePerformance],
+    ['geo_performance.csv',      exportGeoPerformance],
+    ['change_history.csv',       exportChangeHistory],
+  ];
+  for (var i = 0; i < exports.length; i++) {
+    results[exports[i][0]] = safeExport_(exports[i][0], adsFolder, exports[i][1]);
+  }
 
-  writeFile_(adsFolder, 'LASTRUN.txt', new Date().toISOString());
-  Logger.log('Done. 22 CSVs + LASTRUN.txt written to ' + ACCOUNT_LABEL + '/ads/');
+  var ok = 0;
+  var failed = [];
+  for (var name in results) {
+    if (results[name]) { ok++; } else { failed.push(name); }
+  }
+
+  // Read back the folder so the log reflects what's actually in Drive
+  // (catches eventual-consistency or write-replication issues that the
+  // per-export OK log alone would miss).
+  var driveCheck = listFolderFilenames_(adsFolder);
+
+  if (failed.length === 0) {
+    writeFile_(adsFolder, 'LASTRUN.txt', new Date().toISOString());
+    Logger.log('Done. ' + ok + '/' + exports.length + ' CSVs + LASTRUN.txt written to ' + ACCOUNT_LABEL + '/ads/');
+  } else {
+    Logger.log('PARTIAL run. ' + ok + '/' + exports.length + ' CSVs ok. LASTRUN.txt NOT updated. Failed: ' + failed.join(', '));
+  }
+  Logger.log('Drive folder now contains ' + driveCheck.length + ' files: ' + driveCheck.sort().join(', '));
 }
 
 // ─── 22 Export functions ──────────────────────────────────────
@@ -98,7 +123,7 @@ function exportCampaigns() {
     'metrics.search_absolute_top_impression_share, ' +
     'metrics.search_budget_lost_impression_share, ' +
     'metrics.search_rank_lost_impression_share ' +
-    'FROM campaign WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'FROM campaign WHERE ' + DATE_FILTER + ' ' +
     'AND campaign.status != "REMOVED"';
   var header = 'campaign_id,campaign_name,status,channel_type,opt_score,' +
     'bidding_strategy_type,target_roas,target_cpa_micros,' +
@@ -144,7 +169,7 @@ function exportCampaignPerformance() {
     'campaign.advertising_channel_type, ' +
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value ' +
-    'FROM campaign WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'FROM campaign WHERE ' + DATE_FILTER + ' ' +
     'AND campaign.status != "REMOVED"';
   var header = 'date,campaign_id,campaign_name,channel_type,impressions,clicks,' +
     'cost_micros,conversions,conv_value';
@@ -171,7 +196,7 @@ function exportAdGroups() {
   var q = 'SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, ' +
     'ad_group.status, metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc ' +
-    'FROM ad_group WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'FROM ad_group WHERE ' + DATE_FILTER + ' ' +
     'AND ad_group.status != "REMOVED" ' +
     'AND campaign.status != "REMOVED"';
   var header = 'campaign_id,campaign_name,ad_group_id,ad_group_name,status,' +
@@ -201,7 +226,7 @@ function exportKeywords() {
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value, metrics.ctr, ' +
     'metrics.average_cpc, metrics.search_impression_share ' +
-    'FROM keyword_view WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'FROM keyword_view WHERE ' + DATE_FILTER + ' ' +
     'AND ad_group_criterion.status != "REMOVED" ' +
     'AND ad_group.status != "REMOVED" ' +
     'AND campaign.status != "REMOVED"';
@@ -240,7 +265,7 @@ function exportRsaAds() {
     'AND ad_group_ad.status != "REMOVED" ' +
     'AND ad_group.status != "REMOVED" ' +
     'AND campaign.status != "REMOVED" ' +
-    'AND segments.date DURING ' + DATE_RANGE;
+    'AND ' + DATE_FILTER;
   var header = 'campaign_name,ad_group_name,ad_id,headlines,descriptions,' +
     'final_url,status,ad_strength,impressions,clicks,cost_micros,conversions,ctr';
   return runQueryToCsv_(q, header, function (row) {
@@ -272,7 +297,7 @@ function exportAssetGroups() {
     'asset_group.status, asset_group.ad_strength, ' +
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value ' +
-    'FROM asset_group WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'FROM asset_group WHERE ' + DATE_FILTER + ' ' +
     'AND asset_group.status != "REMOVED" ' +
     'AND campaign.status != "REMOVED"';
   var header = 'campaign_id,campaign_name,asset_group_id,asset_group_name,status,' +
@@ -383,12 +408,13 @@ function exportListingGroups() {
 
 function exportShoppingProducts() {
   // Shopping/PMax product level performance — closest available view.
+  // segments.product_status does not exist in shopping_performance_view;
+  // disapproval state lives in Merchant Center and is surfaced separately.
   var q = 'SELECT campaign.name, segments.product_item_id, segments.product_title, ' +
-    'segments.product_brand, segments.product_status, ' +
-    'segments.product_channel, segments.product_language, ' +
+    'segments.product_brand, segments.product_channel, segments.product_language, ' +
     'metrics.impressions, metrics.clicks, metrics.cost_micros ' +
     'FROM shopping_performance_view ' +
-    'WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'WHERE ' + DATE_FILTER + ' ' +
     'ORDER BY metrics.impressions DESC LIMIT ' + PRODUCTS_LIMIT;
   var header = 'campaign_name,item_id,title,brand,status,channel,language,issues,' +
     'impressions,clicks,cost_micros';
@@ -399,10 +425,10 @@ function exportShoppingProducts() {
       csvStr_(s.productItemId || ''),
       csvStr_(s.productTitle || ''),
       csvStr_(s.productBrand || ''),
-      s.productStatus || '',
+      '',  // status — not selectable from shopping_performance_view
       s.productChannel || '',
       s.productLanguage || '',
-      '',  // disapproval issues — not exposed via shopping_performance_view; surface via Merchant Center API in v2
+      '',  // disapproval issues — surface via Merchant Center API in v2
       intOrEmpty_(row.metrics.impressions),
       intOrEmpty_(row.metrics.clicks),
       intOrEmpty_(row.metrics.costMicros),
@@ -478,7 +504,7 @@ function exportSearchTerms() {
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value, metrics.ctr ' +
     'FROM search_term_view ' +
-    'WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'WHERE ' + DATE_FILTER + ' ' +
     'ORDER BY metrics.impressions DESC LIMIT ' + SEARCH_TERMS_LIMIT;
   var header = 'campaign_name,channel_type,ad_group_name,search_term,term_status,' +
     'impressions,clicks,cost_micros,conversions,conv_value,ctr';
@@ -501,21 +527,38 @@ function exportSearchTerms() {
 
 function exportPmaxSearchTerms() {
   // PMax search-category insights (Google's grouping — no raw queries surface).
-  var q = 'SELECT campaign.id, campaign.name, ' +
-    'campaign_search_term_insight.category_label, ' +
-    'campaign_search_term_insight.id ' +
-    'FROM campaign_search_term_insight ' +
-    'WHERE segments.date DURING ' + DATE_RANGE;
+  // GAQL forces this resource to be queried per single campaign_id; we enumerate
+  // PMax campaigns first and then loop. Returns the union of per-campaign rows.
+  var pmaxIter = AdsApp.search(
+    'SELECT campaign.id, campaign.name FROM campaign ' +
+    'WHERE campaign.advertising_channel_type = "PERFORMANCE_MAX" ' +
+    'AND campaign.status != "REMOVED"'
+  );
   var header = 'campaign_id,campaign_name,search_category,insight_id';
-  return runQueryToCsv_(q, header, function (row) {
-    var insight = row.campaignSearchTermInsight;
-    return [
-      row.campaign.id,
-      csvStr_(row.campaign.name),
-      csvStr_(insight.categoryLabel || ''),
-      insight.id || '',
-    ];
-  });
+  var lines = [header];
+  while (pmaxIter.hasNext()) {
+    var c = pmaxIter.next().campaign;
+    var q = 'SELECT campaign_search_term_insight.category_label, ' +
+      'campaign_search_term_insight.id ' +
+      'FROM campaign_search_term_insight ' +
+      'WHERE campaign_search_term_insight.campaign_id = ' + c.id + ' ' +
+      'AND ' + DATE_FILTER;
+    try {
+      var iter = AdsApp.search(q);
+      while (iter.hasNext()) {
+        var insight = iter.next().campaignSearchTermInsight;
+        lines.push([
+          c.id,
+          csvStr_(c.name),
+          csvStr_(insight.categoryLabel || ''),
+          insight.id || '',
+        ].join(','));
+      }
+    } catch (perCampaignErr) {
+      Logger.log('  pmax_search_terms: campaign ' + c.id + ' failed: ' + perCampaignErr);
+    }
+  }
+  return lines.join('\n') + '\n';
 }
 
 function exportPmaxPlacements() {
@@ -523,7 +566,7 @@ function exportPmaxPlacements() {
     'performance_max_placement_view.placement_type, ' +
     'performance_max_placement_view.target_url ' +
     'FROM performance_max_placement_view ' +
-    'WHERE segments.date DURING ' + DATE_RANGE;
+    'WHERE ' + DATE_FILTER;
   var header = 'campaign_id,campaign_name,placement,placement_type,target_url';
   return runQueryToCsv_(q, header, function (row) {
     var p = row.performanceMaxPlacementView;
@@ -542,7 +585,7 @@ function exportLandingPages() {
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value, metrics.average_cpc ' +
     'FROM landing_page_view ' +
-    'WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'WHERE ' + DATE_FILTER + ' ' +
     'ORDER BY metrics.cost_micros DESC';
   var header = 'campaign_name,landing_page_url,impressions,clicks,cost_micros,' +
     'conversions,conv_value,avg_cpc';
@@ -567,7 +610,7 @@ function exportAdAssetRatings() {
     'asset.text_asset.text, ' +
     'metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions ' +
     'FROM ad_group_ad_asset_view ' +
-    'WHERE segments.date DURING ' + DATE_RANGE;
+    'WHERE ' + DATE_FILTER;
   var header = 'campaign_name,ad_group_name,field_type,performance_label,enabled,' +
     'text_content,impressions,clicks,cost_micros,conversions';
   return runQueryToCsv_(q, header, function (row) {
@@ -589,19 +632,31 @@ function exportAdAssetRatings() {
 }
 
 function exportAudienceSignals() {
-  // PMax audience signals attached to asset groups.
-  var q = 'SELECT campaign.name, asset_group.name, asset_group_signal.audience ' +
+  // PMax signals attached to asset groups. The signal can be an audience
+  // reference or a search-theme literal; one row per signal type emitted.
+  // GAQL prohibits selecting the parent message; sub-fields are required.
+  var q = 'SELECT campaign.name, asset_group.name, ' +
+    'asset_group_signal.audience.audience, ' +
+    'asset_group_signal.search_theme.text ' +
     'FROM asset_group_signal';
   var header = 'campaign_name,asset_group_name,signal_type,signal_label';
-  return runQueryToCsv_(q, header, function (row) {
-    var audience = row.assetGroupSignal.audience || '';
-    return [
-      csvStr_(row.campaign.name),
-      csvStr_(row.assetGroup.name),
-      'AUDIENCE',
-      csvStr_(audience),
-    ];
-  });
+  var iter = AdsApp.search(q);
+  var lines = [header];
+  while (iter.hasNext()) {
+    var row = iter.next();
+    var sig = row.assetGroupSignal || {};
+    var audience = (sig.audience && sig.audience.audience) || '';
+    var theme = (sig.searchTheme && sig.searchTheme.text) || '';
+    var campaignCsv = csvStr_(row.campaign.name);
+    var groupCsv = csvStr_(row.assetGroup.name);
+    if (audience) {
+      lines.push([campaignCsv, groupCsv, 'AUDIENCE', csvStr_(audience)].join(','));
+    }
+    if (theme) {
+      lines.push([campaignCsv, groupCsv, 'SEARCH_THEME', csvStr_(theme)].join(','));
+    }
+  }
+  return lines.join('\n') + '\n';
 }
 
 function exportDevicePerformance() {
@@ -609,7 +664,7 @@ function exportDevicePerformance() {
     'segments.device, ' +
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value, metrics.ctr ' +
-    'FROM campaign WHERE segments.date DURING ' + DATE_RANGE + ' ' +
+    'FROM campaign WHERE ' + DATE_FILTER + ' ' +
     'AND campaign.status != "REMOVED"';
   var header = 'campaign_id,campaign_name,channel_type,device,impressions,clicks,' +
     'cost_micros,conversions,conv_value,ctr';
@@ -634,7 +689,7 @@ function exportGeoPerformance() {
     'geographic_view.location_type, segments.geo_target_region, ' +
     'metrics.impressions, metrics.clicks, metrics.cost_micros, ' +
     'metrics.conversions, metrics.conversions_value ' +
-    'FROM geographic_view WHERE segments.date DURING ' + DATE_RANGE;
+    'FROM geographic_view WHERE ' + DATE_FILTER;
   var header = 'campaign_id,campaign_name,country_id,location_type,geo_target_region,' +
     'impressions,clicks,cost_micros,conversions,conv_value';
   return runQueryToCsv_(q, header, function (row) {
@@ -655,15 +710,22 @@ function exportGeoPerformance() {
 }
 
 function exportChangeHistory() {
-  var sinceDate = new Date();
-  sinceDate.setDate(sinceDate.getDate() - CHANGE_HISTORY_DAYS);
-  var since = sinceDate.toISOString().slice(0, 10);
-  var q = 'SELECT change_event.change_date_time, change_event.resource_type, ' +
-    'change_event.change_resource_type, change_event.user_email, ' +
-    'change_event.client_type, change_event.changed_fields, ' +
-    'change_event.campaign ' +
+  // Google Ads rejects an open-ended (>=) filter on change_date_time —
+  // both lower and upper bound are required.
+  var endDate = new Date();
+  var startDate = new Date(endDate.getTime() - CHANGE_HISTORY_DAYS * 86400000);
+  var fmtDt = function (d) {
+    return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd HH:mm:ss');
+  };
+  var since = fmtDt(startDate);
+  var until = fmtDt(endDate);
+  var q = 'SELECT change_event.change_date_time, ' +
+    'change_event.change_resource_type, change_event.resource_change_operation, ' +
+    'change_event.user_email, change_event.client_type, ' +
+    'change_event.changed_fields, change_event.campaign ' +
     'FROM change_event ' +
     'WHERE change_event.change_date_time >= "' + since + '" ' +
+    'AND change_event.change_date_time <= "' + until + '" ' +
     'ORDER BY change_event.change_date_time DESC LIMIT 5000';
   var header = 'change_date,resource_type,operation,changed_fields,user_email,' +
     'client_type,campaign_name';
@@ -677,8 +739,8 @@ function exportChangeHistory() {
     }
     return [
       ce.changeDateTime,
-      ce.resourceType,
       ce.changeResourceType || '',
+      ce.resourceChangeOperation || '',
       csvStr_(changedFields),
       csvStr_(ce.userEmail || ''),
       ce.clientType || '',
@@ -688,6 +750,16 @@ function exportChangeHistory() {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
+
+/** Build a "segments.date BETWEEN 'a' AND 'b'" predicate covering the last
+ *  N days through today. GAQL has no LAST_N_DAYS literal beyond 30; explicit
+ *  ranges are the only way to express a 90-day window. */
+function buildDateFilter_(windowDays) {
+  var end = new Date();
+  var start = new Date(end.getTime() - windowDays * 86400000);
+  var fmt = function (d) { return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd'); };
+  return "segments.date BETWEEN '" + fmt(start) + "' AND '" + fmt(end) + "'";
+}
 
 /** Wrap a string for CSV output: replace embedded quotes, wrap in double quotes. */
 function csvStr_(s) {
@@ -725,15 +797,28 @@ function runQueryToCsv_(query, header, rowMapper) {
 /** Wrap an exporter so a single failure logs but does not abort the whole run.
  *  On failure: do NOT write a file. The lynox reader marks absent files as
  *  status=missing (non-fatal) so missing data is visible without producing
- *  a malformed CSV that would fail header validation. */
+ *  a malformed CSV that would fail header validation. Returns true on success
+ *  so main() can decide whether the run is full or partial. */
 function safeExport_(filename, folder, exporterFn) {
   try {
     var csv = exporterFn();
     writeFile_(folder, filename, csv);
     Logger.log('OK ' + filename);
+    return true;
   } catch (err) {
     Logger.log('FAIL ' + filename + ': ' + err);
+    return false;
   }
+}
+
+/** Read back what's actually in Drive after the run. Used as a sanity check
+ *  in main() so the final log line reflects ground truth, not just the
+ *  per-export OK log. */
+function listFolderFilenames_(folder) {
+  var iter = folder.getFiles();
+  var names = [];
+  while (iter.hasNext()) names.push(iter.next().getName());
+  return names;
 }
 
 function ensureSubfolder(parent, name) {
@@ -742,9 +827,18 @@ function ensureSubfolder(parent, name) {
   return parent.createFolder(name);
 }
 
-/** Idempotent write: trash any prior file with this name, then create. */
+/** Idempotent write that survives Drive's eventual consistency.
+ *  Iterating + trash + create on the same folder produced cases where the
+ *  newly created file inherited content from a sibling export; using
+ *  setContent on the first existing match (and trashing extras) keeps the
+ *  file ID stable per name, so filename and bytes never desync. */
 function writeFile_(folder, filename, content) {
   var existing = folder.getFilesByName(filename);
-  while (existing.hasNext()) existing.next().setTrashed(true);
-  folder.createFile(filename, content, MimeType.CSV);
+  if (existing.hasNext()) {
+    var first = existing.next();
+    first.setContent(content);
+    while (existing.hasNext()) existing.next().setTrashed(true);
+    return first;
+  }
+  return folder.createFile(filename, content, MimeType.CSV);
 }
