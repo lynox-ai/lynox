@@ -77,6 +77,24 @@ export class BlueprintPreconditionError extends Error {
   }
 }
 
+/** Raised when the previous run still has unimported blueprint entities and
+ *  the smart-bidding learning window has not elapsed since the last import.
+ *  Running a fresh blueprint here would just pile new proposals on top of
+ *  ones the customer hasn't acted on. The tool layer catches this and
+ *  renders an "import-pending" status report instead of failing. */
+export class BlueprintPendingImportNotice extends Error {
+  constructor(
+    message: string,
+    public readonly previousRunId: number,
+    public readonly previousRunFinishedAt: string,
+    public readonly pendingEntityCount: number,
+    public readonly lastImportAt: string | null,
+  ) {
+    super(message);
+    this.name = 'BlueprintPendingImportNotice';
+  }
+}
+
 // ── Public entry point ────────────────────────────────────────────────
 
 export function runBlueprint(
@@ -106,6 +124,33 @@ export function runBlueprint(
   const previousRun = run.previous_run_id !== null
     ? store.getAuditRun(run.previous_run_id)
     : null;
+
+  // Idempotency guard: if the previous run already produced blueprint
+  // entities and the customer hasn't imported them yet (or the import is
+  // still inside the smart-bidding learning window), we do not generate a
+  // fresh blueprint — that would just pile new proposals on top of pending
+  // ones. The agent should re-emit the previous run's CSVs and wait.
+  if (previousRun && previousRun.finished_at) {
+    // Pending = anything that produces an Editor change. KEEP rows are
+    // structural confirmations and don't need a re-import.
+    const counts = store.countBlueprintEntities(previousRun.run_id);
+    const pendingCount = counts.NEW + counts.RENAME + counts.PAUSE + counts.SPLIT + counts.MERGE;
+    if (pendingCount > 0) {
+      const lastImport = account.last_major_import_at;
+      const importBeforeLastBlueprint = lastImport === null
+        || new Date(lastImport).getTime() < new Date(previousRun.finished_at).getTime();
+      if (importBeforeLastBlueprint) {
+        throw new BlueprintPendingImportNotice(
+          `Run ${previousRun.run_id} hat ${pendingCount} Blueprint-Vorschläge, die der Customer noch nicht ` +
+          `via Editor importiert hat. Kein neuer Blueprint, bis import passiert ist + ads_mark_imported aufgerufen wurde.`,
+          previousRun.run_id,
+          previousRun.finished_at,
+          pendingCount,
+          lastImport,
+        );
+      }
+    }
+  }
 
   const mode = pickMode(store, run, previousRun);
   const namingTemplate = customer.naming_convention_pattern

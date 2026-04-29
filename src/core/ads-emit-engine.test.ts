@@ -64,6 +64,12 @@ describe('runEmit', () => {
     const first = runEmit(store, ACCOUNT, { workspaceDir });
     expect(first.idempotent).toBe(false);
 
+    // Mark a major import AFTER run #1 finished so the new
+    // BlueprintPendingImportNotice guard sees the entities as imported.
+    // Use Date.now()+1s to guarantee strict ordering against finished_at.
+    const importIso = new Date(Date.now() + 1000).toISOString();
+    store.recordMajorImport(ACCOUNT, importIso);
+
     // Simulate a second cycle with the SAME blueprint state by linking
     // a new run as previous=first-run with the same hash already stamped.
     const r2 = store.createAuditRun({

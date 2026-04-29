@@ -52,7 +52,22 @@ type Goal = 'roas' | 'cpa' | 'leads' | 'traffic' | 'awareness' | 'unknown';
 
 export type VerificationKind = 'roas' | 'cpa' | 'volume';
 
-export type AuditMode = 'BOOTSTRAP' | 'OPTIMIZE';
+/**
+ * Audit modes:
+ * - BOOTSTRAP: first run for the account, OR <30 days of performance data.
+ *   Output is additive-only (negatives, sitelinks, callouts, missing assets).
+ *   No restructure, no performance-verification.
+ * - FIRST_IMPORT: prior run exists with >=30 days data BUT no editor-import
+ *   has happened yet, OR import is <14 days old (smart-bidding still learning).
+ *   Output covers history-preservation + restructure proposals, but skips
+ *   performance-verification because there is no import to compare against.
+ * - OPTIMIZE: prior run exists, last_major_import_at >=14 days ago.
+ *   Full pipeline: history-preservation + restructure + Wilson-score
+ *   performance-verification on the post-import window.
+ */
+export type AuditMode = 'BOOTSTRAP' | 'FIRST_IMPORT' | 'OPTIMIZE';
+
+const SMART_BIDDING_LEARNING_DAYS = 14;
 
 export interface AuditKpis {
   spend: number;
@@ -164,7 +179,10 @@ export function runAudit(store: AdsDataStore, adsAccountId: string, opts?: RunAu
     ? summariseManualChanges(store, run, previousRun)
     : null;
   const verifyWindowDays = clampWindow(opts?.verifyWindowDays);
-  const verification = previousRun !== null
+  // Performance-verification only meaningful in OPTIMIZE mode: prior run +
+  // editor-import + smart-bidding-window elapsed. In BOOTSTRAP/FIRST_IMPORT
+  // there is nothing meaningful to verify.
+  const verification = (previousRun !== null && mode.detected === 'OPTIMIZE')
     ? verifyPerformance(store, account, run, previousRun, customer, verifyWindowDays)
     : null;
 
@@ -250,8 +268,27 @@ function detectMode(store: AdsDataStore, account: AdsAccountRow, run: AdsAuditRu
     detected = 'BOOTSTRAP';
     detectedReason = `Nur ${performanceDays} Tage Performance-Daten (min. ${MIN_OPTIMIZE_DAYS} für OPTIMIZE).`;
   } else {
-    detected = 'OPTIMIZE';
-    detectedReason = `${performanceDays} Tage Performance-Daten verfügbar — voller Restructure möglich.`;
+    // Prior run + enough data. Distinguish OPTIMIZE from FIRST_IMPORT by
+    // whether the customer has actually imported the previous blueprint
+    // and the smart-bidding learning window has elapsed.
+    const importIso = account.last_major_import_at;
+    const importAgeDays = importIso === null
+      ? null
+      : (Date.now() - new Date(importIso).getTime()) / (24 * 60 * 60 * 1000);
+    if (importIso === null) {
+      detected = 'FIRST_IMPORT';
+      detectedReason = `Vorgänger-Run vorhanden, aber noch kein Editor-Import (last_major_import_at=null). ` +
+        `Restructure-Output erlaubt; Performance-Verification skipped (nichts zu verifizieren).`;
+    } else if (importAgeDays !== null && importAgeDays < SMART_BIDDING_LEARNING_DAYS) {
+      detected = 'FIRST_IMPORT';
+      detectedReason = `Letzter Import war ${importAgeDays.toFixed(1)} Tage her ` +
+        `(< ${SMART_BIDDING_LEARNING_DAYS}d Smart-Bidding-Lernfenster). ` +
+        `Restructure-Output erlaubt; Performance-Verification skipped (zu früh).`;
+    } else {
+      detected = 'OPTIMIZE';
+      detectedReason = `${performanceDays} Tage Performance-Daten + Import vor ${(importAgeDays ?? 0).toFixed(0)} Tagen — ` +
+        `voller Restructure + Performance-Verification.`;
+    }
   }
   return {
     detected,
@@ -269,6 +306,27 @@ function countPerformanceDays(store: AdsDataStore, run: AdsAuditRunRow): number 
   const set = new Set<string>();
   for (const r of rows) if (r.date) set.add(r.date);
   return set.size;
+}
+
+/** Lower-case + dedupe brand tokens from own_brands + sold_brands.
+ *  Filters out very short tokens (<=2 chars) which would over-match. */
+function collectBrandTokens(customer: CustomerProfileRow): string[] {
+  const fromOwn = parseBrandJsonArray(customer.own_brands);
+  const fromSold = parseBrandJsonArray(customer.sold_brands);
+  const all = [...fromOwn, ...fromSold]
+    .map(s => s.trim().toLowerCase())
+    .filter(s => s.length > 2);
+  return Array.from(new Set(all));
+}
+
+function parseBrandJsonArray(s: string | null): string[] {
+  if (!s) return [];
+  try {
+    const v = JSON.parse(s);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 // ── Internals: Manual change summary ──────────────────────────────────
@@ -684,6 +742,89 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
       confidence: 0.9,
       evidence: { count: cannibalisation.length, sample: cannibalisation.slice(0, 5) },
     });
+  }
+
+  // 7b. PMAX brand-inflation: PMax bedient Brand-Queries via Search-Theme-
+  // Insights. Eine dedizierte Search-Brand-Kampagne wäre fast immer billiger
+  // (und isoliert Brand- vs. Non-Brand-ROAS). Detector: scan
+  // pmax_search_terms.category_label for tokens that match the customer's
+  // own_brands or sold_brands.
+  if (ctx.customer) {
+    const brandTokens = collectBrandTokens(ctx.customer);
+    if (brandTokens.length > 0) {
+      const pmaxRows = ctx.store.getSnapshotRows<{ campaign_name: string | null; search_category: string | null }>(
+        'ads_pmax_search_terms', ctx.run.ads_account_id, { runId: ctx.run.run_id },
+      );
+      const branded = pmaxRows.filter(r => {
+        const label = (r.search_category ?? '').toLowerCase();
+        if (!label) return false;
+        return brandTokens.some(t => label.includes(t));
+      });
+      if (branded.length > 0) {
+        const totalClusters = pmaxRows.length;
+        const sampleLabels = Array.from(new Set(branded.map(r => r.search_category!).filter(Boolean))).slice(0, 8);
+        const sharePct = totalClusters > 0 ? Math.round((branded.length / totalClusters) * 100) : 0;
+        findings.push({
+          area: 'pmax_brand_inflation',
+          severity: 'HIGH',
+          text: `PMax bedient ${branded.length} Brand-Search-Cluster (${sharePct}% aller PMax-Search-Themen). ` +
+            `Brand-Klicks via PMax sind 60-80% teurer als via dedizierte Search-Brand-Kampagne; zudem ` +
+            `inflationiert PMax-ROAS sich durch Brand-Conversions die organisch zustande gekommen wären. ` +
+            `Empfehlung: Search-Brand-Kampagne aufsetzen (Match-Type Exact/Phrase auf Brand-Terms), ` +
+            `Brand-Terms als Negative auf alle Non-Brand-Search-Kampagnen, PMax-Account-Negatives für Brand-Terms erst nach Brand-Search-Launch.`,
+          confidence: 0.9,
+          evidence: {
+            branded_clusters: branded.length,
+            total_pmax_clusters: totalClusters,
+            share_pct: sharePct,
+            brand_tokens: brandTokens,
+            sample_labels: sampleLabels,
+          },
+        });
+      }
+    }
+  }
+
+  // 7c. PMAX theme-coverage gap: untargeted thematic clusters in PMax
+  // search-terms that don't match an existing asset_group_name. Surfaces
+  // where new asset-groups would expand coverage without diluting the
+  // existing groups' learning. Uses the same pmax_search_terms snapshot.
+  if (ctx.customer) {
+    const pmaxRows = ctx.store.getSnapshotRows<{ campaign_name: string | null; search_category: string | null }>(
+      'ads_pmax_search_terms', ctx.run.ads_account_id, { runId: ctx.run.run_id },
+    );
+    const brandTokens = collectBrandTokens(ctx.customer);
+    const existingGroups = ctx.store.getSnapshotRows<{ asset_group_name: string | null }>(
+      'ads_asset_groups', ctx.run.ads_account_id, { runId: ctx.run.run_id },
+    ).map(r => (r.asset_group_name ?? '').toLowerCase()).filter(Boolean);
+
+    const themeCount = new Map<string, number>();
+    for (const r of pmaxRows) {
+      const label = (r.search_category ?? '').toLowerCase().trim();
+      if (!label) continue;
+      if (brandTokens.some(t => label.includes(t))) continue;          // skip branded — handled in 7b
+      if (existingGroups.some(g => label.includes(g))) continue;        // skip already-covered
+      themeCount.set(label, (themeCount.get(label) ?? 0) + 1);
+    }
+    if (themeCount.size >= 5) {
+      const topThemes = Array.from(themeCount.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([t]) => t);
+      findings.push({
+        area: 'pmax_theme_coverage_gap',
+        severity: 'MEDIUM',
+        text: `${themeCount.size} thematische Cluster in PMax-Search-Terms decken sich nicht mit bestehenden Asset-Group-Namen. ` +
+          `Asset-Group-Expansion könnte hier Lerndaten neuer Gruppen aufbauen — Conv-Volume der bestehenden Gruppen ` +
+          `prüfen, neue Gruppen nur splitten wenn Quell-Gruppe danach noch ≥30 conv/30d hält.`,
+        confidence: 0.7,
+        evidence: {
+          untargeted_cluster_count: themeCount.size,
+          existing_asset_groups: existingGroups,
+          sample_themes: topThemes,
+        },
+      });
+    }
   }
 
   // 8. GA4 vs Ads conversion divergence

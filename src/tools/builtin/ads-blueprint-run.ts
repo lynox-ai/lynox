@@ -27,6 +27,7 @@ import type {
 import {
   runBlueprint,
   BlueprintPreconditionError,
+  BlueprintPendingImportNotice,
   type BlueprintResult,
 } from '../../core/ads-blueprint-engine.js';
 import type { NegativeProposal } from '../../core/ads-negative-generator.js';
@@ -91,6 +92,9 @@ export function createAdsBlueprintRunTool(store: AdsDataStore): ToolEntry<AdsBlu
         });
         return renderBlueprintReport(result);
       } catch (err) {
+        if (err instanceof BlueprintPendingImportNotice) {
+          return renderPendingImportReport(err);
+        }
         if (err instanceof BlueprintPreconditionError) {
           return `ads_blueprint_run failed: ${err.message}`;
         }
@@ -257,6 +261,27 @@ function appendNextSteps(
   if (mode === 'BOOTSTRAP') {
     lines.push(`${namingViolationsCount > 0 ? '3.' : (negativeCount > 0 ? '2.' : '1.')} Nach erstem Editor-Import: 14 Tage warten (Smart-Bidding-Lernfenster), dann nächsten Cycle starten — der wechselt dann automatisch in OPTIMIZE-Mode.`);
   }
+}
+
+function renderPendingImportReport(err: BlueprintPendingImportNotice): string {
+  const lines: string[] = [];
+  lines.push(`# Blueprint übersprungen — pending Import von Run #${err.previousRunId}`);
+  lines.push('');
+  lines.push(`🟡 **${err.pendingEntityCount} Action-Vorschläge** (NEW/RENAME/PAUSE/SPLIT/MERGE) aus Run #${err.previousRunId} ` +
+    `(finished ${err.previousRunFinishedAt}) sind noch nicht via Editor importiert.`);
+  lines.push('');
+  lines.push(`Letzter Import: ${err.lastImportAt ?? '_nie_'}`);
+  lines.push('');
+  lines.push('## Was tun');
+  lines.push('');
+  lines.push(`1. \`ads_emit_csv\` aufrufen — re-emittiert die pending CSVs aus Run #${err.previousRunId} idempotent.`);
+  lines.push('2. Customer öffnet Google Ads Editor → Account → Import → die emittierten Files laden, prüfen, posten.');
+  lines.push('3. Nach erfolgreichem Import: `ads_mark_imported` aufrufen, damit der Cycle-Counter weiterspringt.');
+  lines.push('4. Erst danach hat ein neuer Blueprint-Run sinnvollen Output.');
+  lines.push('');
+  lines.push('Der Skip ist Absicht: ein neuer Blueprint mit pending-Vorschlägen würde Vorschläge nur akkumulieren, ' +
+    'ohne dass sich am Konto etwas ändert.');
+  return lines.join('\n');
 }
 
 // Suppress unused-import lint warning when AdsBlueprintEntityKind is only

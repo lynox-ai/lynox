@@ -31,11 +31,15 @@ import {
   type ModeDetection,
   type PerformanceVerificationSummary,
   type AuditKpis,
+  type AuditMode,
 } from '../../core/ads-audit-engine.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 interface AdsAuditRunInput {
-  ads_account_id: string;
+  /** Either ads_account_id or customer_id (the tool resolves the other from the
+   *  ads_accounts row when only one is given). */
+  ads_account_id?: string | undefined;
+  customer_id?: string | undefined;
   /** Override the verification window in days (default 28, min 7, max 90). */
   verify_window_days?: number | undefined;
 }
@@ -71,19 +75,23 @@ export function createAdsAuditRunTool(store: AdsDataStore): ToolEntry<AdsAuditRu
         properties: {
           ads_account_id: {
             type: 'string',
-            description: 'Google Ads Customer ID (e.g. "123-456-7890") to audit.',
+            description: 'Google Ads Customer ID (e.g. "123-456-7890") to audit. Optional if customer_id has exactly one linked ads account.',
+          },
+          customer_id: {
+            type: 'string',
+            description: 'Customer slug (e.g. "aquanatura"). Used to auto-resolve ads_account_id when only one is linked. Optional when ads_account_id is given.',
           },
           verify_window_days: {
             type: 'integer',
             description: 'Override the post/pre-import verification window length. Default 28, min 7, max 90.',
           },
         },
-        required: ['ads_account_id'],
       },
     },
     handler: async (input: AdsAuditRunInput, agent: IAgent): Promise<string> => {
       try {
-        const result = runAudit(store, input.ads_account_id, {
+        const adsAccountId = resolveAccountId(store, input);
+        const result = runAudit(store, adsAccountId, {
           ...(input.verify_window_days !== undefined ? { verifyWindowDays: input.verify_window_days } : {}),
         });
         const persistedIds = persistFindings(store, result);
@@ -108,6 +116,33 @@ export function createAdsAuditRunTool(store: AdsDataStore): ToolEntry<AdsAuditRu
       }
     },
   };
+}
+
+// ── Account resolution ────────────────────────────────────────────────
+
+/** Same auto-resolve pattern as ads_data_pull: lets the agent pass either
+ *  ads_account_id or customer_id (or both). When only customer_id is given
+ *  and the customer has exactly one linked ads_account, we use that. */
+function resolveAccountId(store: AdsDataStore, input: AdsAuditRunInput): string {
+  if (input.ads_account_id) return input.ads_account_id;
+  if (!input.customer_id) {
+    throw new Error('ads_audit_run requires either ads_account_id or customer_id.');
+  }
+  const linked = store.listAdsAccountsForCustomer(input.customer_id);
+  if (linked.length === 0) {
+    throw new Error(
+      `No ads_accounts linked to customer "${input.customer_id}". ` +
+      `Run ads_data_pull first or pass ads_account_id explicitly.`,
+    );
+  }
+  if (linked.length > 1) {
+    const ids = linked.map(r => `"${r.ads_account_id}" (${r.account_label})`).join(', ');
+    throw new Error(
+      `Customer "${input.customer_id}" has ${linked.length} linked ads_accounts: ${ids}. ` +
+      `Pass ads_account_id explicitly to disambiguate.`,
+    );
+  }
+  return linked[0]!.ads_account_id;
 }
 
 // ── Persistence ───────────────────────────────────────────────────────
@@ -167,7 +202,7 @@ async function mirrorFindingsToKg(
   }
 }
 
-function updateAccountMode(store: AdsDataStore, adsAccountId: string, mode: 'BOOTSTRAP' | 'OPTIMIZE'): void {
+function updateAccountMode(store: AdsDataStore, adsAccountId: string, mode: AuditMode): void {
   // The store's upsertAdsAccount is idempotent and re-writes all columns;
   // we only want to nudge `mode` so we go through it with the existing row.
   const row = store.getAdsAccount(adsAccountId);

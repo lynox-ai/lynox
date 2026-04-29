@@ -62,7 +62,25 @@ describe('runAudit', () => {
     expect(mismatch?.severity).toBe('MEDIUM');
   });
 
-  it('detects OPTIMIZE mode when previous run + ≥30 days data', () => {
+  it('detects OPTIMIZE mode when previous run + ≥30 days data + import ≥14d ago', () => {
+    seedAccount(store);
+    const r1 = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r1.run_id, 30);
+
+    const r2 = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id });
+    store.completeAuditRun(r2.run_id);
+    seedThinSnapshot(store, r2.run_id, 35);
+
+    // Mark a major import 20 days ago — clears the smart-bidding window.
+    const importIso = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
+    store.recordMajorImport(ACCOUNT, importIso);
+
+    const result = runAudit(store, ACCOUNT);
+    expect(result.mode.detected).toBe('OPTIMIZE');
+    expect(result.mode.performanceDays).toBe(35);
+  });
+
+  it('detects FIRST_IMPORT mode when prior run exists but no import yet', () => {
     seedAccount(store);
     const r1 = createSuccessRun(store, { mode: 'BOOTSTRAP' });
     seedThinSnapshot(store, r1.run_id, 30);
@@ -72,8 +90,25 @@ describe('runAudit', () => {
     seedThinSnapshot(store, r2.run_id, 35);
 
     const result = runAudit(store, ACCOUNT);
-    expect(result.mode.detected).toBe('OPTIMIZE');
-    expect(result.mode.performanceDays).toBe(35);
+    expect(result.mode.detected).toBe('FIRST_IMPORT');
+    expect(result.verification).toBeNull();
+  });
+
+  it('detects FIRST_IMPORT mode when import is younger than the smart-bidding window', () => {
+    seedAccount(store);
+    const r1 = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r1.run_id, 30);
+    const r2 = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id });
+    store.completeAuditRun(r2.run_id);
+    seedThinSnapshot(store, r2.run_id, 35);
+
+    // Import 5 days ago — still in smart-bidding learning window.
+    const importIso = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+    store.recordMajorImport(ACCOUNT, importIso);
+
+    const result = runAudit(store, ACCOUNT);
+    expect(result.mode.detected).toBe('FIRST_IMPORT');
+    expect(result.verification).toBeNull();
   });
 
   it('flags stale data when GAS export is older than 7 days', () => {

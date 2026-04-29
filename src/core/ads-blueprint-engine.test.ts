@@ -67,6 +67,46 @@ describe('runBlueprint', () => {
     expect(store.getRunDecisions(r.run_id, { entityType: 'campaign' })).toHaveLength(2);
   });
 
+  it('throws BlueprintPendingImportNotice when previous run has unimported entities', async () => {
+    const { BlueprintPendingImportNotice } = await import('./ads-blueprint-engine.js');
+    seedCustomerAndAccount(store, { competitors: ['Bosch', 'Dewalt'] });
+    const r1 = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r1.run_id);
+    seedCampaign(store, r1.run_id, 'c1', 'DE-Search-Brand-Exact');
+    // First blueprint inserts KEEP + 2 NEW competitor negatives — pending > 0.
+    runBlueprint(store, ACCOUNT);
+
+    const r2 = store.createAuditRun({
+      adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id,
+    });
+    store.completeAuditRun(r2.run_id);
+    seedCampaign(store, r2.run_id, 'c1', 'DE-Search-Brand-Exact');
+    seedPerformanceDays(store, r2.run_id, 'c1', 30);
+
+    // No import recorded → pending guard must trigger.
+    expect(() => runBlueprint(store, ACCOUNT)).toThrow(BlueprintPendingImportNotice);
+  });
+
+  it('skips pending guard once a major import is recorded after the previous blueprint', () => {
+    seedCustomerAndAccount(store, { competitors: ['Bosch', 'Dewalt'] });
+    const r1 = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r1.run_id);
+    seedCampaign(store, r1.run_id, 'c1', 'DE-Search-Brand-Exact');
+    runBlueprint(store, ACCOUNT);
+
+    // Record import strictly after run #1's finished_at.
+    store.recordMajorImport(ACCOUNT, new Date(Date.now() + 1000).toISOString());
+
+    const r2 = store.createAuditRun({
+      adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id,
+    });
+    store.completeAuditRun(r2.run_id);
+    seedCampaign(store, r2.run_id, 'c1', 'DE-Search-Brand-Exact');
+    seedPerformanceDays(store, r2.run_id, 'c1', 30);
+
+    expect(() => runBlueprint(store, ACCOUNT)).not.toThrow();
+  });
+
   it('runs in OPTIMIZE mode: history-match across runs', () => {
     seedCustomerAndAccount(store);
     const r1 = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });

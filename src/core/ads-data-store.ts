@@ -793,7 +793,7 @@ export interface AdsAccountRow {
   account_label: string;
   currency_code: string | null;
   timezone: string | null;
-  mode: 'BOOTSTRAP' | 'OPTIMIZE';
+  mode: 'BOOTSTRAP' | 'FIRST_IMPORT' | 'OPTIMIZE';
   drive_folder_id: string | null;
   last_major_import_at: string | null;
   created_at: string;
@@ -804,7 +804,7 @@ export interface AdsAuditRunRow {
   run_id: number;
   ads_account_id: string;
   status: 'RUNNING' | 'SUCCESS' | 'FAILED' | 'LOCKED';
-  mode: 'BOOTSTRAP' | 'OPTIMIZE';
+  mode: 'BOOTSTRAP' | 'FIRST_IMPORT' | 'OPTIMIZE';
   started_at: string;
   finished_at: string | null;
   gas_export_lastrun: string | null;
@@ -926,13 +926,13 @@ export interface UpsertAdsAccountInput {
   accountLabel: string;
   currencyCode?: string | undefined;
   timezone?: string | undefined;
-  mode?: 'BOOTSTRAP' | 'OPTIMIZE' | undefined;
+  mode?: 'BOOTSTRAP' | 'FIRST_IMPORT' | 'OPTIMIZE' | undefined;
   driveFolderId?: string | undefined;
 }
 
 export interface CreateAuditRunInput {
   adsAccountId: string;
-  mode: 'BOOTSTRAP' | 'OPTIMIZE';
+  mode: 'BOOTSTRAP' | 'FIRST_IMPORT' | 'OPTIMIZE';
   gasExportLastrun?: string | undefined;
   keywordsHash?: string | undefined;
   previousRunId?: number | undefined;

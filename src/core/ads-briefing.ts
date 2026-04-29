@@ -59,10 +59,21 @@ Canonical cycle order:
        reported in the error).
 
   3. ads_audit_run
-     — Deterministic phase. Computes KPIs, detects mode (BOOTSTRAP vs
-       OPTIMIZE), summarises manual changes since the previous run, runs
-       Wilson-score performance verification (cycle 2+), and writes
-       deterministic findings to ads_findings.
+     — Pass either ads_account_id or customer_id; the other auto-resolves.
+     — Deterministic phase. Computes KPIs, detects mode (BOOTSTRAP /
+       FIRST_IMPORT / OPTIMIZE), summarises manual changes since the
+       previous run, runs Wilson-score performance verification (only in
+       OPTIMIZE — when a real import is ≥14d old), and writes
+       deterministic findings to ads_findings. Notable detectors:
+         * pmax_brand_inflation (HIGH) — PMax bedient Brand-Queries via
+           Search-Theme-Insights. Triggers Search-Brand-Kampagnen-
+           Empfehlung. Match-Type Exact/Phrase, Brand-Negatives auf alle
+           anderen Search-Kampagnen.
+         * pmax_theme_coverage_gap (MEDIUM) — untargeted thematische
+           Cluster ausserhalb existierender Asset-Group-Themen. Hinweis
+           auf Asset-Group-Expansion (mit Conv-Volume-Schutz!).
+         * wasted_search_terms / pmax_search_cannibalisation /
+           tracking_trust_ga4_vs_ads / low_ad_strength.
 
   4. Qualitative research (interleaved with ads_finding_add)
      — Read the audit report, prioritise by HIGH-severity findings.
@@ -79,6 +90,13 @@ Canonical cycle order:
      — Deterministic phase. Reads the audit + findings + customer profile,
        generates KEEP/RENAME/PAUSE/NEW classifications per entity type,
        three-fold negative proposals, and naming-convention validation.
+     — Idempotency guard: when the previous run still has unimported
+       NEW/RENAME/PAUSE/SPLIT/MERGE entities AND no major import was
+       recorded since then, blueprint_run short-circuits with an
+       "import-pending" report. Re-emit via ads_emit_csv (idempotent),
+       customer imports, then call ads_mark_imported and a new blueprint
+       can run. This prevents proposal accumulation across non-imported
+       cycles.
 
   6. ads_blueprint_entity_propose (per qualitative finding)
      — Use this to translate qualitative findings into concrete
