@@ -91,17 +91,17 @@ function main() {
     if (results[name]) { ok++; } else { failed.push(name); }
   }
 
-  // Read back the folder so the log reflects what's actually in Drive
-  // (catches eventual-consistency or write-replication issues that the
-  // per-export OK log alone would miss).
-  var driveCheck = listFolderFilenames_(adsFolder);
-
   if (failed.length === 0) {
     writeFile_(adsFolder, 'LASTRUN.txt', new Date().toISOString());
     Logger.log('Done. ' + ok + '/' + exports.length + ' CSVs + LASTRUN.txt written to ' + ACCOUNT_LABEL + '/ads/');
   } else {
     Logger.log('PARTIAL run. ' + ok + '/' + exports.length + ' CSVs ok. LASTRUN.txt NOT updated. Failed: ' + failed.join(', '));
   }
+
+  // Read back the folder AFTER all writes so the log reflects what's
+  // actually in Drive (catches eventual-consistency or write-replication
+  // issues that the per-export OK log alone would miss).
+  var driveCheck = listFolderFilenames_(adsFolder);
   Logger.log('Drive folder now contains ' + driveCheck.length + ' files: ' + driveCheck.sort().join(', '));
 }
 
