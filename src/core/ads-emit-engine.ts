@@ -316,6 +316,14 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
     const bucket = ensureBucket(name);
     const budget = budgetFromPayload(payload);
     const targetCpa = targetCpaFromPayload(payload);
+    // KEEP campaigns are existing entities — emit only the name as bucket
+    // anchor so child rows reference an existing parent. Status must stay
+    // empty so Editor does not flip the live campaign to Paused. NEW/RENAME/
+    // PAUSE rows propagate the appropriate status explicitly.
+    const explicitStatus = stringField(payload, 'status');
+    const status = explicitStatus !== null
+      ? editorStatus(explicitStatus)
+      : (e.kind === 'KEEP' ? undefined : 'Paused');
     bucket.rows.push(buildCampaignRow({
       campaignName: name,
       campaignType: campaignTypeFromPayload(payload),
@@ -324,7 +332,7 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         ? { bidStrategy: editorBidStrategy(stringField(payload, 'bidding_strategy_type')!) } : {}),
       ...(numberField(payload, 'target_roas') !== null ? { targetRoas: numberField(payload, 'target_roas')! } : {}),
       ...(targetCpa !== null ? { targetCpa } : {}),
-      ...(stringField(payload, 'status') !== null ? { status: editorStatus(stringField(payload, 'status')!) } : { status: 'Paused' }),
+      ...(status !== undefined ? { status } : {}),
     }));
     bucket.campaignCount++;
   }
@@ -386,15 +394,17 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         const groupName = stringField(payload, 'asset_group_name');
         if (!campaign || !groupName) continue;
         const bucket = ensureBucket(campaign);
+        // KEEP asset-groups are existing — Status empty so Editor does
+        // not pause the running PMax learning. NEW/PAUSE proposals emit
+        // Paused so manual review controls go-live.
+        const groupStatus = e.kind === 'KEEP' ? undefined : 'Paused';
         bucket.rows.push(buildAssetGroupRow({
           campaignName: campaign, assetGroupName: groupName,
           ...(stringField(payload, 'final_url') !== null ? { finalUrl: stringField(payload, 'final_url')! } : {}),
           ...(stringField(payload, 'final_mobile_url') !== null ? { finalMobileUrl: stringField(payload, 'final_mobile_url')! } : {}),
           ...(stringField(payload, 'path1') !== null ? { path1: stringField(payload, 'path1')! } : {}),
           ...(stringField(payload, 'path2') !== null ? { path2: stringField(payload, 'path2')! } : {}),
-          // Asset-groups always emit Paused — Editor import never auto-enables a
-          // PMAX restructure, the customer flips it on after manual review.
-          status: 'Paused',
+          ...(groupStatus !== undefined ? { status: groupStatus } : {}),
         }));
         bucket.assetGroupCount++;
         break;

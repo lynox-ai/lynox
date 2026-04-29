@@ -176,7 +176,11 @@ export function buildCampaignRow(input: CampaignRowInput): CsvRow {
   if (input.labels) setCol(row, 'Labels', input.labels);
   if (input.finalUrlSuffix) setCol(row, 'Final URL suffix', input.finalUrlSuffix);
   setCol(row, 'EU political ads', "Doesn't have EU political ads");
-  setCol(row, 'Campaign Status', input.status ?? 'Paused');
+  // Status only when the caller explicitly sets it. Empty cell = Editor
+  // leaves the existing campaign status alone (critical for KEEP rows
+  // that anchor child changes — defaulting to Paused would freeze the
+  // production campaign on import).
+  if (input.status !== undefined) setCol(row, 'Campaign Status', input.status);
   return row;
 }
 
@@ -344,7 +348,9 @@ export function buildAssetGroupRow(input: AssetGroupRowInput): CsvRow {
   if (input.finalMobileUrl) setCol(row, 'Final mobile URL', input.finalMobileUrl);
   if (input.path1) setCol(row, 'Path 1', input.path1);
   if (input.path2) setCol(row, 'Path 2', input.path2);
-  setCol(row, 'Asset Group Status', input.status ?? 'Paused');
+  // Same safety as buildCampaignRow: only emit Status when the caller
+  // sets it. Empty cell preserves existing asset-group state.
+  if (input.status !== undefined) setCol(row, 'Asset Group Status', input.status);
   return row;
 }
 

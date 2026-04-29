@@ -81,15 +81,22 @@ describe('encodeUtf16LeWithBom', () => {
 });
 
 describe('Search row builders', () => {
-  it('buildCampaignRow defaults to Search + Paused', () => {
+  it('buildCampaignRow defaults to Search; status only when caller sets it', () => {
     const r = buildCampaignRow({ campaignName: 'C1' });
     expect(r[COL_INDEX['Campaign']!]).toBe('C1');
     expect(r[COL_INDEX['Campaign Type']!]).toBe('Search');
-    expect(r[COL_INDEX['Campaign Status']!]).toBe('Paused');
+    // Empty cell — Editor leaves the existing campaign status alone, which
+    // is the safety the KEEP-row import path depends on.
+    expect(r[COL_INDEX['Campaign Status']!]).toBe('');
     expect(r[COL_INDEX['Networks']!]).toBe('Google search;Search Partners');
     expect(r[COL_INDEX['Languages']!]).toBe('de');
     expect(r[COL_INDEX['Bid Strategy Type']!]).toBe('Maximize conversions');
     expect(r[COL_INDEX['EU political ads']!]).toBe("Doesn't have EU political ads");
+  });
+
+  it('buildCampaignRow propagates explicit Paused for NEW rows', () => {
+    const r = buildCampaignRow({ campaignName: 'C1', status: 'Paused' });
+    expect(r[COL_INDEX['Campaign Status']!]).toBe('Paused');
   });
 
   it('buildCampaignRow with Performance Max + tROAS', () => {
@@ -184,13 +191,21 @@ describe('Search row builders', () => {
 });
 
 describe('PMAX row builders', () => {
-  it('buildAssetGroupRow', () => {
+  it('buildAssetGroupRow leaves Asset Group Status empty when caller omits it', () => {
     const r = buildAssetGroupRow({
       campaignName: 'PMAX-1', assetGroupName: 'AG-Drills',
       finalUrl: 'https://example.com/drills',
     });
     expect(r[COL_INDEX['Asset Group']!]).toBe('AG-Drills');
     expect(r[COL_INDEX['Final URL']!]).toBe('https://example.com/drills');
+    expect(r[COL_INDEX['Asset Group Status']!]).toBe('');
+  });
+
+  it('buildAssetGroupRow propagates explicit Paused for NEW asset groups', () => {
+    const r = buildAssetGroupRow({
+      campaignName: 'PMAX-1', assetGroupName: 'AG-Drills',
+      finalUrl: 'https://example.com/drills', status: 'Paused',
+    });
     expect(r[COL_INDEX['Asset Group Status']!]).toBe('Paused');
   });
 
