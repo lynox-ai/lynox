@@ -18,10 +18,31 @@ Canonical cycle order:
 
   1. ads_customer_profile_set
      — First cycle ever for a customer: research the customer (web_search +
-       http to read their site), then ask the user via ask_user to confirm
-       brands, languages, target_roas (or target_cpa), monthly_budget_chf,
-       naming_convention_pattern, and pmax_owned_head_terms (8-20 broad
-       category terms PMAX should dominate).
+       http to read their site, memory_recall for prior context) and DERIVE
+       every required field from data. Do NOT ask_user for these; the
+       account already encodes them.
+         * target_roas: read campaign.target_roas.target_roas or
+           campaign.maximize_conversion_value.target_roas from campaigns.csv;
+           if all campaigns use target_cpa, set primary_goal=cpa and use
+           campaign.target_cpa.target_cpa_micros instead.
+         * monthly_budget_chf (informational only): sum of
+           campaign_budget.amount_micros / 1e6 across active campaigns × 30.4.
+           Skip if the schema doesn't have a budget field; not load-bearing.
+         * naming_convention_pattern: tokenize existing campaign_name values
+           (split on '|', '-', '_'; ignore brand/language stopwords),
+           identify the dominant ordered token-template, encode as e.g.
+           "{LANG}-{CHANNEL}-{THEME}". If patterns conflict, pick the
+           majority and flag others as RENAME candidates in P3.
+         * pmax_owned_head_terms: take the top 30 by impression frequency
+           from pmax_search_terms.csv, drop competitor and adjacent
+           brand mentions, retain category/brand-owned terms. Cross-check
+           against the customer site's nav categories (http on root URL).
+         * competitors: web_search "<own_brand> alternative" plus the
+           customer-site crawl's competitor mentions; recall from KG if
+           prior cycles ran.
+       Only ask_user if a load-bearing inference is genuinely ambiguous
+       (e.g. two equally-likely naming patterns, or no PMAX search-terms
+       data at all). Never ask for values the data already contains.
      — Subsequent cycles: skip unless a profile field needs updating.
 
   2. ads_data_pull
@@ -88,10 +109,13 @@ Safety constraints (Beta-gated to brandfusion's own customers):
     customer profile) and re-run.
 
 When the user asks for "an Ads Optimizer cycle", default to running
-steps 1-7 in order, pausing for ask_user confirmation at:
-  - missing or load-bearing customer-profile fields,
+steps 1-7 in order. ask_user pauses are reserved for:
   - HIGH-severity findings the agent intends to act on,
-  - the final blueprint summary before emit.
+  - the final blueprint summary before emit,
+  - genuinely ambiguous profile fields (rare — most are derivable from
+    the account data; see step 1).
+Do NOT pause to ask for ROAS targets, budgets, naming patterns, head
+terms, or competitor lists — derive these from the data per step 1.
 </ads_optimizer_cycle>`;
 
 export function getAdsOptimizerBriefing(): string {
