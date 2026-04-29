@@ -3672,9 +3672,14 @@ export class LynoxHTTPApi {
           isDirectory: e.isDirectory(),
           size: e.isFile() ? (await stat(join(target, e.name))).size : 0,
         })));
-        jsonResponse(res, 200, { path: dirPath, entries });
-      } catch {
-        jsonResponse(res, 200, { path: dirPath, entries: [] });
+        jsonResponse(res, 200, { path: dirPath, entries, base });
+      } catch (err) {
+        // Surface the error for ops debugging — this endpoint silently
+        // swallowed listing failures previously, which made the empty
+        // FileBrowserView impossible to triage.
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[GET /api/files] path=${dirPath} error: ${msg}\n`);
+        jsonResponse(res, 200, { path: dirPath, entries: [], error: msg });
       }
     });
 

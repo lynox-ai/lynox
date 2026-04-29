@@ -41,6 +41,7 @@ import {
 } from './ads-csv-builder.js';
 import { validateBlueprint, type ValidationSummary } from './ads-emit-validators.js';
 import { getLynoxDir } from './config.js';
+import { getWorkspaceDir } from './workspace.js';
 
 export interface EmitResult {
   account: AdsAccountRow;
@@ -547,10 +548,12 @@ function resolveWorkspaceDir(override: string | undefined, accountId: string, ru
       `Invalid ads_account_id "${accountId}" — expected Google Ads CID format 123-456-7890.`,
     );
   }
-  // Default sits under ~/.lynox/workspace so it's always writable, even when
-  // the engine runs from a read-only Docker layer (process.cwd() is /app).
-  // LYNOX_WORKSPACE env override stays for explicit deployments.
-  const base = override ?? process.env['LYNOX_WORKSPACE'] ?? join(getLynoxDir(), 'workspace');
+  // Resolve via the same chain the engine HTTP API and the chat file browser
+  // use — getWorkspaceDir() respects tenant-scope overrides set during
+  // engine init, so emit and the FileBrowserView read/write the same dir.
+  // Without this the two diverge (emit -> ~/.lynox/workspace/, browser ->
+  // ~/.lynox/workspace/<context>/) and customers cannot reach the CSVs.
+  const base = override ?? getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
   return resolve(base, 'ads', accountId, 'blueprints', `run-${runId}`);
 }
 
