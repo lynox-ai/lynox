@@ -492,7 +492,15 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         const scopeTarget = stringField(payload, 'scope_target');
         if (!keyword) continue;
         if (scope === 'account' || scopeTarget === null) {
-          accountNegatives.push(buildNegativeRow({ keyword, matchType }));
+          // Account-level negatives go into a shared list. Without an anchor
+          // (campaign or shared set) Editor silently drops the row, so the
+          // pmax_owned + competitor brand-protection lists never reach the
+          // account. Use a stable list name keyed off the source bucket so
+          // re-imports update the same set.
+          const sharedSetName = scope === 'account' && stringField(payload, 'source') === 'pmax_owned'
+            ? 'PMax-Owned Negatives'
+            : 'Account Competitor Negatives';
+          accountNegatives.push(buildNegativeRow({ keyword, matchType, sharedSetName }));
         } else {
           const bucket = ensureBucket(scopeTarget);
           bucket.rows.push(buildNegativeRow({

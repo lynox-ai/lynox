@@ -303,8 +303,12 @@ export type NegativeMatchType =
   | 'Exact' | 'Phrase' | 'Broad';
 
 export interface NegativeRowInput {
-  campaignName?: string | undefined; // empty for account-level
+  campaignName?: string | undefined; // omit for account-level (use sharedSetName instead)
   adGroupName?: string | undefined;
+  /** Shared-set name for account-level negatives. Required when campaignName
+   *  is omitted — Editor refuses orphaned campaign-negatives without an
+   *  anchor (no campaign + no shared set = silently dropped on import). */
+  sharedSetName?: string | undefined;
   keyword: string;
   matchType: NegativeMatchType;
   status?: 'Paused' | 'Enabled' | undefined;
@@ -312,7 +316,12 @@ export interface NegativeRowInput {
 
 export function buildNegativeRow(input: NegativeRowInput): CsvRow {
   const row = emptyRow();
-  if (input.campaignName) setCol(row, 'Campaign', input.campaignName);
+  if (input.campaignName) {
+    setCol(row, 'Campaign', input.campaignName);
+  } else if (input.sharedSetName) {
+    setCol(row, 'Shared set name', input.sharedSetName);
+    setCol(row, 'Shared set type', 'Negative keyword');
+  }
   if (input.adGroupName) setCol(row, 'Ad Group', input.adGroupName);
   setCol(row, 'Keyword', input.keyword);
   setCol(row, 'Criterion Type', normaliseNegMatchType(input.matchType));
