@@ -42,7 +42,7 @@ describe('runEmit', () => {
     expect(() => runEmit(store, ACCOUNT)).toThrow(/No blueprint entities/);
   });
 
-  it('writes per-campaign + account-negatives CSVs and stamps hash on success', async () => {
+  it('writes per-campaign CSVs + manual-todos and stamps hash on success', async () => {
     seedFullScenario(store);
     runBlueprint(store, ACCOUNT);
 
@@ -50,7 +50,10 @@ describe('runEmit', () => {
     expect(result.validation.canEmit).toBe(true);
     expect(result.idempotent).toBe(false);
     expect(result.filesWritten.length).toBeGreaterThan(0);
-    expect(result.filesWritten.some(f => f.endsWith('account-negatives.csv'))).toBe(true);
+    // Account-level negatives are now routed to manual-todos.md, not CSV.
+    expect(result.filesWritten.some(f => f.endsWith('account-negatives.csv'))).toBe(false);
+    expect(result.filesWritten.some(f => f.endsWith('manual-todos.md'))).toBe(true);
+    expect(result.manualTodos.some(t => t.kind === 'shared_set_negative')).toBe(true);
     expect(result.hash).toMatch(/^[0-9a-f]{64}$/);
 
     // Hash stamped onto the run
@@ -115,27 +118,29 @@ describe('runEmit', () => {
     expect(bytes[1]).toBe(0xfe);
   });
 
-  it('accountnegatives file holds account-level negatives only', async () => {
+  it('manual-todos.md captures account-level negatives with anchor list', async () => {
     seedFullScenario(store);
     runBlueprint(store, ACCOUNT);
     const result = runEmit(store, ACCOUNT, { workspaceDir });
-    const negFile = result.filesWritten.find(f => f.endsWith('account-negatives.csv'));
-    expect(negFile).toBeDefined();
-    const bytes = await readFile(negFile!);
-    // decode UTF-16 LE manually
-    const text = decodeUtf16LeBytes(bytes);
-    // Shared-set negatives use Account keyword type (no "Campaign" prefix)
-    // and a Shared set anchor — Editor rejects rows without that anchor.
-    expect(text).toMatch(/Negative (Broad|Phrase|Exact)/);
-    expect(text).toMatch(/Negative keyword/);
+    const todosFile = result.filesWritten.find(f => f.endsWith('manual-todos.md'));
+    expect(todosFile).toBeDefined();
+    const text = await readFile(todosFile!, 'utf8');
+    // Operator-friendly path with shared-set heading + match-type + keyword.
+    expect(text).toMatch(/Negative Keywords \(Shared Sets\)/);
+    expect(text).toMatch(/(Account Competitor Negatives|PMax-Owned Negatives)/);
+    expect(text).toMatch(/Broad|Phrase|Exact/);
     expect(text).toMatch(/drills/i);
   });
 
-  it('filesWritten + perFileRowCounts agree', () => {
+  it('filesWritten + perFileRowCounts cover the CSVs (manual-todos.md is extra)', () => {
     seedFullScenario(store);
     runBlueprint(store, ACCOUNT);
     const result = runEmit(store, ACCOUNT, { workspaceDir });
-    expect(result.perFileRowCounts.map(p => p.file)).toEqual(result.filesWritten);
+    // perFileRowCounts only covers CSVs; manual-todos.md is appended to
+    // filesWritten so the operator can download it but isn't counted as
+    // a CSV row source.
+    const csvFiles = result.filesWritten.filter(f => !f.endsWith('manual-todos.md'));
+    expect(result.perFileRowCounts.map(p => p.file)).toEqual(csvFiles);
   });
 
   it('PMAX end-to-end: campaign + asset_groups round-trip into editor CSV', async () => {

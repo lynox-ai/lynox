@@ -303,12 +303,11 @@ export type NegativeMatchType =
   | 'Exact' | 'Phrase' | 'Broad';
 
 export interface NegativeRowInput {
-  campaignName?: string | undefined; // omit for account-level (use sharedSetName instead)
+  /** Required: shared-set negatives are emitted via the manual-TODO list, not
+   *  CSV — Editor's schema for shared-set member rows is not stable enough
+   *  to risk a production import. Only campaign-level negatives reach CSV. */
+  campaignName: string;
   adGroupName?: string | undefined;
-  /** Shared-set name for account-level negatives. Required when campaignName
-   *  is omitted — Editor refuses orphaned campaign-negatives without an
-   *  anchor (no campaign + no shared set = silently dropped on import). */
-  sharedSetName?: string | undefined;
   keyword: string;
   matchType: NegativeMatchType;
   status?: 'Paused' | 'Enabled' | undefined;
@@ -316,34 +315,12 @@ export interface NegativeRowInput {
 
 export function buildNegativeRow(input: NegativeRowInput): CsvRow {
   const row = emptyRow();
-  if (input.campaignName) {
-    setCol(row, 'Campaign', input.campaignName);
-    if (input.adGroupName) setCol(row, 'Ad Group', input.adGroupName);
-    setCol(row, 'Keyword', input.keyword);
-    // Campaign-level negatives use Criterion Type column.
-    setCol(row, 'Criterion Type', normaliseNegMatchType(input.matchType));
-  } else if (input.sharedSetName) {
-    setCol(row, 'Shared set name', input.sharedSetName);
-    setCol(row, 'Shared set type', 'Negative keyword');
-    setCol(row, 'Keyword', input.keyword);
-    // Shared-set negatives use Account keyword type — Editor rejects
-    // "Criterion Type=Campaign Negative …" rows when there is no Campaign
-    // anchor (it cannot tell whether the row is campaign- or account-level).
-    setCol(row, 'Account keyword type', sharedSetNegMatchType(input.matchType));
-  }
+  setCol(row, 'Campaign', input.campaignName);
+  if (input.adGroupName) setCol(row, 'Ad Group', input.adGroupName);
+  setCol(row, 'Keyword', input.keyword);
+  setCol(row, 'Criterion Type', normaliseNegMatchType(input.matchType));
   setCol(row, 'Status', input.status ?? 'Enabled');
   return row;
-}
-
-/** Strip the "Campaign Negative" prefix when emitting to a shared set —
- *  Editor wants the bare match type ("Negative Broad", "Negative Exact",
- *  "Negative Phrase") in the Account keyword type column. */
-function sharedSetNegMatchType(m: NegativeMatchType): string {
-  if (m === 'Campaign Negative Broad') return 'Negative Broad';
-  if (m === 'Campaign Negative Phrase') return 'Negative Phrase';
-  if (m === 'Campaign Negative Exact') return 'Negative Exact';
-  if (m === 'Broad' || m === 'Phrase' || m === 'Exact') return `Negative ${m}`;
-  return m;
 }
 
 function normaliseNegMatchType(m: NegativeMatchType): string {

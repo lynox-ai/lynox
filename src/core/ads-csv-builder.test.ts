@@ -183,20 +183,11 @@ describe('Search row builders', () => {
     expect(r[COL_INDEX['Criterion Type']!]).toBe('Campaign Negative Phrase');
   });
 
-  it('buildNegativeRow account-level requires sharedSetName + uses Account keyword type', () => {
-    const r = buildNegativeRow({
-      keyword: 'drills', matchType: 'Broad',
-      sharedSetName: 'My List',
-    });
-    expect(r[COL_INDEX['Campaign']!]).toBe('');
-    expect(r[COL_INDEX['Keyword']!]).toBe('drills');
-    expect(r[COL_INDEX['Shared set name']!]).toBe('My List');
-    expect(r[COL_INDEX['Shared set type']!]).toBe('Negative keyword');
-    expect(r[COL_INDEX['Account keyword type']!]).toBe('Negative Broad');
-    // Must NOT carry Criterion Type — Editor rejects shared-set rows that
-    // also fill the campaign-level negative column.
-    expect(r[COL_INDEX['Criterion Type']!]).toBe('');
-  });
+  // NOTE: account-level shared-set negatives are no longer emitted as CSV rows
+  // — Editor's row-classifier flags every column pattern we tried with
+  // "Zweideutiger Zeilentyp", so emit routes them to a manual-todos.md file
+  // the operator pastes into the Ads UI. buildNegativeRow now accepts only
+  // campaign-level inputs.
 
   it('buildNegativeRow campaign-level uses Criterion Type column', () => {
     const r = buildNegativeRow({

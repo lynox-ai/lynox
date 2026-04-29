@@ -109,7 +109,7 @@ function workspaceRelativePath(absoluteFilePath: string, account: AdsAccountRow,
 
 export function renderEmitReport(result: EmitResult): string {
   const { account, customer, run, validation, hash, idempotent,
-    filesWritten, perFileRowCounts, totals, blockedReason } = result;
+    filesWritten, perFileRowCounts, totals, manualTodos, blockedReason } = result;
 
   const lines: string[] = [];
   lines.push(`# Emit Report — ${customer.client_name} (${account.ads_account_id})`);
@@ -152,11 +152,24 @@ export function renderEmitReport(result: EmitResult): string {
 
   lines.push('## Editor-CSV-Pack — Direkt herunterladen');
   lines.push('');
-  lines.push(`Gesamt: ${filesWritten.length} CSVs (${totals.campaigns} Campaigns · ${totals.adGroups} Ad-Groups · ${totals.keywords} Keywords · ${totals.negatives} Negatives).`);
+  const csvCount = perFileRowCounts.length;
+  lines.push(`Gesamt: ${csvCount} CSVs (${totals.campaigns} Campaigns · ${totals.adGroups} Ad-Groups · ${totals.keywords} Keywords · ${totals.negatives} Negatives).`);
   lines.push('');
+  // Highlight the bundle when present — most operators prefer one Editor
+  // import over N. Per-campaign files remain available for selective imports.
+  const bundle = perFileRowCounts.find(f => f.file.endsWith('/import-bundle.csv'));
+  if (bundle) {
+    const rel = workspaceRelativePath(bundle.file, account, run.run_id);
+    const url = `/api/files/download?path=${encodeURIComponent(rel)}`;
+    lines.push(`**Empfohlen: [import-bundle.csv](${url})** (${bundle.rowCount} Zeilen) — alle Campaigns in einem File, ein Editor-Import-Schritt.`);
+    lines.push('');
+    lines.push('Alternative: einzelne Campaigns importieren:');
+    lines.push('');
+  }
   lines.push('| File | Zeilen | Download |');
   lines.push('|---|---|---|');
   for (const f of perFileRowCounts) {
+    if (f.file.endsWith('/import-bundle.csv')) continue;
     const lastSep = f.file.lastIndexOf('/');
     const filename = lastSep >= 0 ? f.file.slice(lastSep + 1) : f.file;
     const rel = workspaceRelativePath(f.file, account, run.run_id);
@@ -167,12 +180,39 @@ export function renderEmitReport(result: EmitResult): string {
   lines.push(`Alle Files liegen auch im **Dateien**-Tab unter \`ads/${account.ads_account_id}/blueprints/run-${run.run_id}/\` falls die Download-Links nicht funktionieren.`);
   lines.push('');
 
+  if (manualTodos.length > 0) {
+    const todosFile = filesWritten.find(p => p.endsWith('/manual-todos.md'));
+    const sharedSetCount = manualTodos.filter(t => t.kind === 'shared_set_negative').length;
+    const pmaxAssetCount = manualTodos.filter(t => t.kind === 'pmax_asset_addition').length;
+    lines.push('## Manuelle TODOs (Google Ads UI)');
+    lines.push('');
+    lines.push(
+      `${manualTodos.length} Einträge können nicht zuverlässig per CSV importiert werden ` +
+      `(Editor lehnt das Zeilenformat als „Zweideutiger Zeilentyp" ab) — bitte direkt im Ads UI anlegen:`,
+    );
+    lines.push('');
+    if (sharedSetCount > 0) lines.push(`- **${sharedSetCount}** Negative Keywords (Shared Sets)`);
+    if (pmaxAssetCount > 0) lines.push(`- **${pmaxAssetCount}** PMax-Asset-Erweiterungen`);
+    lines.push('');
+    if (todosFile) {
+      const rel = workspaceRelativePath(todosFile, account, run.run_id);
+      const url = `/api/files/download?path=${encodeURIComponent(rel)}`;
+      lines.push(`Vollständige Liste: [manual-todos.md](${url})`);
+      lines.push('');
+    }
+  }
+
   lines.push('## Nächste Schritte');
   lines.push('');
   lines.push('1. Klick auf jeden **Download**-Link oben → Browser speichert die `.csv` (UTF-16 LE mit BOM).');
   lines.push('2. Google Ads Editor → Account → Import → From file → die heruntergeladenen Dateien laden.');
   lines.push('3. Vorschau prüfen, posten.');
-  lines.push('4. Bescheid geben → ich rufe `ads_mark_imported` auf damit der 14-Tage-Smart-Bidding-Guard greift.');
+  if (manualTodos.length > 0) {
+    lines.push('4. `manual-todos.md` öffnen und die aufgelisteten Einträge im Google Ads UI anlegen.');
+    lines.push('5. Bescheid geben → ich rufe `ads_mark_imported` auf damit der 14-Tage-Smart-Bidding-Guard greift.');
+  } else {
+    lines.push('4. Bescheid geben → ich rufe `ads_mark_imported` auf damit der 14-Tage-Smart-Bidding-Guard greift.');
+  }
 
   return lines.join('\n');
 }

@@ -62,8 +62,23 @@ export interface EmitResult {
     assetGroups: number; assets: number; audienceSignals: number;
     listingGroups: number; sitelinks: number; callouts: number; negatives: number;
   };
+  /** Manual TODO entries — entity types whose Editor CSV format is unstable
+   *  (account-level shared-set negatives, PMax text-asset additions). The
+   *  operator applies these in the Google Ads UI; emit writes them to
+   *  `manual-todos.md` alongside the CSVs. */
+  manualTodos: ManualTodo[];
   /** Reason emit was blocked (hard validator errors), null when emit succeeded or was idempotent. */
   blockedReason: string | null;
+}
+
+export type ManualTodoKind = 'shared_set_negative' | 'pmax_asset_addition';
+
+export interface ManualTodo {
+  kind: ManualTodoKind;
+  /** UI-friendly anchor (shared set name or "<Campaign> / <Asset Group>"). */
+  target: string;
+  /** Human-readable instruction line, ready to paste into the Ads UI. */
+  detail: string;
 }
 
 export interface RunEmitOptions {
@@ -123,7 +138,8 @@ export function runEmit(
   //    differences from history-match do not invalidate idempotency).
   const grouped = groupByCampaign(entities);
   const planned = planCsvFiles(grouped);
-  const hash = computeEmitHash(planned);
+  const todosBody = renderManualTodos(grouped.manualTodos);
+  const hash = computeEmitHash(planned, todosBody);
   const previousRun = run.previous_run_id !== null ? store.getAuditRun(run.previous_run_id) : null;
   // Idempotency must catch two cases: a same-run re-emit (current run
   // already stamped with this hash → no need to re-write the same files)
@@ -136,12 +152,14 @@ export function runEmit(
 
   if (!validation.canEmit) {
     return baseResult(account, customer, run, validation, hash, idempotent, [],
-      'Pre-Emit-Validators haben HARD-Errors gemeldet — kein File geschrieben.');
+      'Pre-Emit-Validators haben HARD-Errors gemeldet — kein File geschrieben.',
+      [], makeEmptyTotals(), grouped.manualTodos);
   }
 
   if (idempotent) {
     return baseResult(account, customer, run, validation, hash, true, [],
-      'Blueprint identisch — Hash-Match auf aktuellem oder Vorgänger-Run, kein Re-Emit nötig.');
+      'Blueprint identisch — Hash-Match auf aktuellem oder Vorgänger-Run, kein Re-Emit nötig.',
+      [], makeEmptyTotals(), grouped.manualTodos);
   }
 
   // 3. Write files
@@ -157,6 +175,10 @@ export function runEmit(
     writeFileSync(file, encodeUtf16LeWithBom(f.body));
     filesWritten.push(file);
     perFileRowCounts.push({ file, rowCount: f.rowCount });
+    // The bundle file mirrors the per-campaign rows — counting it again
+    // would double the totals. Per-campaign files remain the source of
+    // truth for headline counts.
+    if (f.fileName === 'import-bundle.csv') continue;
     totals.campaigns += f.counts.campaignCount;
     totals.adGroups += f.counts.adGroupCount;
     totals.keywords += f.counts.keywordCount;
@@ -170,11 +192,17 @@ export function runEmit(
     totals.negatives += f.counts.negativeCount;
   }
 
+  if (todosBody !== null) {
+    const todosFile = join(baseDir, 'manual-todos.md');
+    writeFileSync(todosFile, todosBody, 'utf8');
+    filesWritten.push(todosFile);
+  }
+
   // 4. Stamp hash onto the run row.
   store.setEmittedCsvHash(run.run_id, hash);
 
   return baseResult(account, customer, run, validation, hash, false,
-    filesWritten, null, perFileRowCounts, totals);
+    filesWritten, null, perFileRowCounts, totals, grouped.manualTodos);
 }
 
 interface BucketCounts {
@@ -194,6 +222,12 @@ interface PlannedFile {
 function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
   const files: PlannedFile[] = [];
   const campaignNames = [...grouped.perCampaign.keys()].sort();
+  const bundleRows: CsvRow[] = [];
+  const bundleCounts: BucketCounts = {
+    campaignCount: 0, adGroupCount: 0, keywordCount: 0, rsaCount: 0,
+    assetGroupCount: 0, assetCount: 0, audienceSignalCount: 0,
+    listingGroupCount: 0, sitelinkCount: 0, calloutCount: 0, negativeCount: 0,
+  };
   for (const name of campaignNames) {
     const bucket = grouped.perCampaign.get(name)!;
     files.push({
@@ -210,24 +244,32 @@ function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
         negativeCount: bucket.negativeCount,
       },
     });
+    bundleRows.push(...bucket.rows);
+    bundleCounts.campaignCount += bucket.campaignCount;
+    bundleCounts.adGroupCount += bucket.adGroupCount;
+    bundleCounts.keywordCount += bucket.keywordCount;
+    bundleCounts.rsaCount += bucket.rsaCount;
+    bundleCounts.assetGroupCount += bucket.assetGroupCount;
+    bundleCounts.assetCount += bucket.assetCount;
+    bundleCounts.audienceSignalCount += bucket.audienceSignalCount;
+    bundleCounts.listingGroupCount += bucket.listingGroupCount;
+    bundleCounts.sitelinkCount += bucket.sitelinkCount;
+    bundleCounts.calloutCount += bucket.calloutCount;
+    bundleCounts.negativeCount += bucket.negativeCount;
   }
-  if (grouped.accountNegatives.length > 0) {
+  // Bundle file: concatenated rows under a single header so the operator
+  // can run one Editor "Import → From file" instead of N. We always emit
+  // the bundle (even with 1 campaign) so the markdown response can link
+  // it as the recommended single-file import path.
+  if (bundleRows.length > 0) {
     files.push({
-      fileName: 'account-negatives.csv',
-      body: renderCsvBody(grouped.accountNegatives),
-      rowCount: grouped.accountNegatives.length,
-      counts: { ...zeroBucketCounts(), negativeCount: grouped.accountNegatives.length },
+      fileName: 'import-bundle.csv',
+      body: renderCsvBody(bundleRows),
+      rowCount: bundleRows.length,
+      counts: bundleCounts,
     });
   }
   return files;
-}
-
-function zeroBucketCounts(): BucketCounts {
-  return {
-    campaignCount: 0, adGroupCount: 0, keywordCount: 0, rsaCount: 0,
-    assetGroupCount: 0, assetCount: 0, audienceSignalCount: 0,
-    listingGroupCount: 0, sitelinkCount: 0, calloutCount: 0, negativeCount: 0,
-  };
 }
 
 function makeEmptyTotals(): EmitResult['totals'] {
@@ -238,10 +280,11 @@ function makeEmptyTotals(): EmitResult['totals'] {
   };
 }
 
-function computeEmitHash(files: readonly PlannedFile[]): string {
+function computeEmitHash(files: readonly PlannedFile[], todosBody: string | null): string {
   // Sort by filename for stable hashing across iteration orders, then
   // concatenate filename + body for each file with a separator that
-  // cannot occur inside a TSV body.
+  // cannot occur inside a TSV body. The manual-todos.md body is folded
+  // in too so a TODO-only diff still invalidates the previous-run hash.
   const sorted = [...files].sort((a, b) => a.fileName.localeCompare(b.fileName));
   const h = createHash('sha256');
   for (const f of sorted) {
@@ -250,7 +293,66 @@ function computeEmitHash(files: readonly PlannedFile[]): string {
     h.update(f.body);
     h.update('\n');
   }
+  if (todosBody !== null) {
+    h.update('manual-todos.md\n');
+    h.update(todosBody);
+  }
   return h.digest('hex');
+}
+
+function renderManualTodos(todos: readonly ManualTodo[]): string | null {
+  if (todos.length === 0) return null;
+  const lines: string[] = [
+    '# Manuelle TODOs (Google Ads UI)',
+    '',
+    'Diese Einträge können nicht zuverlässig per Editor-CSV importiert werden ' +
+      '(Editor lehnt das Zeilenformat als „Zweideutiger Zeilentyp" ab). ' +
+      'Bitte direkt im Google Ads UI anlegen.',
+    '',
+  ];
+
+  const sharedSet = todos.filter(t => t.kind === 'shared_set_negative');
+  const pmaxAssets = todos.filter(t => t.kind === 'pmax_asset_addition');
+
+  if (sharedSet.length > 0) {
+    lines.push('## Negative Keywords (Shared Sets)');
+    lines.push('');
+    lines.push('Pfad: **Tools → Mediathek → Listen mit auszuschließenden Keywords** → Liste auswählen → Keywords hinzufügen.');
+    lines.push('');
+    const byList = new Map<string, ManualTodo[]>();
+    for (const t of sharedSet) {
+      const arr = byList.get(t.target) ?? [];
+      arr.push(t);
+      byList.set(t.target, arr);
+    }
+    for (const [name, items] of [...byList.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`### ${name}`);
+      lines.push('');
+      for (const t of items) lines.push(`- ${t.detail}`);
+      lines.push('');
+    }
+  }
+
+  if (pmaxAssets.length > 0) {
+    lines.push('## PMax-Asset-Erweiterungen');
+    lines.push('');
+    lines.push('Pfad: **Kampagnen → PMax-Kampagne → Asset-Group öffnen → Assets hinzufügen**.');
+    lines.push('');
+    const byGroup = new Map<string, ManualTodo[]>();
+    for (const t of pmaxAssets) {
+      const arr = byGroup.get(t.target) ?? [];
+      arr.push(t);
+      byGroup.set(t.target, arr);
+    }
+    for (const [name, items] of [...byGroup.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`### ${name}`);
+      lines.push('');
+      for (const t of items) lines.push(`- ${t.detail}`);
+      lines.push('');
+    }
+  }
+
+  return lines.join('\n');
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -261,10 +363,11 @@ function baseResult(
   filesWritten: string[], blockedReason: string | null,
   perFileRowCounts: Array<{ file: string; rowCount: number }> = [],
   totals: EmitResult['totals'] = makeEmptyTotals(),
+  manualTodos: ManualTodo[] = [],
 ): EmitResult {
   return {
     account, customer, run, validation, hash, idempotent,
-    filesWritten, perFileRowCounts, totals, blockedReason,
+    filesWritten, perFileRowCounts, totals, manualTodos, blockedReason,
   };
 }
 
@@ -285,7 +388,7 @@ interface CampaignBucket {
 
 interface GroupedEmit {
   perCampaign: Map<string, CampaignBucket>;
-  accountNegatives: CsvRow[];
+  manualTodos: ManualTodo[];
 }
 
 function newBucket(): CampaignBucket {
@@ -298,7 +401,7 @@ function newBucket(): CampaignBucket {
 
 function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmit {
   const perCampaign = new Map<string, CampaignBucket>();
-  const accountNegatives: CsvRow[] = [];
+  const manualTodos: ManualTodo[] = [];
   const ensureBucket = (name: string): CampaignBucket => {
     let b = perCampaign.get(name);
     if (b) return b;
@@ -414,6 +517,23 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         const groupName = stringField(payload, 'asset_group_name');
         const fieldType = parseAssetFieldType(stringField(payload, 'field_type'));
         if (!campaign || !groupName || !fieldType) continue;
+        // PMax text assets (HEADLINE/LONG_HEADLINE/DESCRIPTION) cannot be
+        // emitted as standalone CSV rows — Editor flags them with
+        // "Zweideutiger Zeilentyp" because the row signature
+        // (Campaign + Asset Group + a single Description N column) collides
+        // with the asset_group row signature. Route these to the manual-TODO
+        // file so the operator pastes them into the Ads UI directly.
+        if (fieldType === 'HEADLINE' || fieldType === 'LONG_HEADLINE' || fieldType === 'DESCRIPTION') {
+          const text = stringField(payload, 'text') ?? '';
+          const idx = numberField(payload, 'index');
+          const slot = idx !== null ? `${humanFieldType(fieldType)} ${idx}` : humanFieldType(fieldType);
+          manualTodos.push({
+            kind: 'pmax_asset_addition',
+            target: `${campaign} / ${groupName}`,
+            detail: `${slot}: ${text}`,
+          });
+          break;
+        }
         const bucket = ensureBucket(campaign);
         bucket.rows.push(buildAssetRow({
           campaignName: campaign, assetGroupName: groupName,
@@ -492,15 +612,19 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         const scopeTarget = stringField(payload, 'scope_target');
         if (!keyword) continue;
         if (scope === 'account' || scopeTarget === null) {
-          // Account-level negatives go into a shared list. Without an anchor
-          // (campaign or shared set) Editor silently drops the row, so the
-          // pmax_owned + competitor brand-protection lists never reach the
-          // account. Use a stable list name keyed off the source bucket so
-          // re-imports update the same set.
+          // Account-level negatives target a shared list. Editor's CSV format
+          // for shared-set member rows is unstable (Editor flags them with
+          // "Zweideutiger Zeilentyp" across multiple column patterns we have
+          // tried), so we surface them as a manual TODO instead of risking
+          // a partial or mis-applied import on a production account.
           const sharedSetName = scope === 'account' && stringField(payload, 'source') === 'pmax_owned'
             ? 'PMax-Owned Negatives'
             : 'Account Competitor Negatives';
-          accountNegatives.push(buildNegativeRow({ keyword, matchType, sharedSetName }));
+          manualTodos.push({
+            kind: 'shared_set_negative',
+            target: sharedSetName,
+            detail: `${matchType}: ${keyword}`,
+          });
         } else {
           const bucket = ensureBucket(scopeTarget);
           bucket.rows.push(buildNegativeRow({
@@ -513,7 +637,20 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
     }
   }
 
-  return { perCampaign, accountNegatives };
+  return { perCampaign, manualTodos };
+}
+
+function humanFieldType(t: AssetFieldType): string {
+  switch (t) {
+    case 'HEADLINE': return 'Headline';
+    case 'LONG_HEADLINE': return 'Long headline';
+    case 'DESCRIPTION': return 'Description';
+    case 'BUSINESS_NAME': return 'Business name';
+    case 'CALL_TO_ACTION': return 'Call to action';
+    case 'IMAGE': return 'Image';
+    case 'LOGO': return 'Logo';
+    case 'VIDEO': return 'Video';
+  }
 }
 
 function normaliseMatchType(s: string | null): 'Exact' | 'Phrase' | 'Broad' {
