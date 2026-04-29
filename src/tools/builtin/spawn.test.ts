@@ -710,15 +710,23 @@ describe('spawn_agent tool', () => {
       expect(result).toContain('## b9');
     });
 
-    it('max_turns at the lower bound (1) succeeds', async () => {
+    it('max_turns:1 is rejected (silent-fail trap for tool-using sub-agents)', async () => {
+      const agent = makeAgent();
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'min', task: 'Think', max_turns: 1 }] },
+        agent,
+      )).rejects.toThrow(/max_turns:1 forbidden/);
+    });
+
+    it('max_turns at the lower bound (2) succeeds', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const agent = makeAgent();
       await spawnAgentTool.handler(
-        { agents: [{ name: 'min', task: 'Think', max_turns: 1 }] },
+        { agents: [{ name: 'min', task: 'Think', max_turns: 2 }] },
         agent,
       );
       const cg = (vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['costGuard'] as { maxIterations: number };
-      expect(cg.maxIterations).toBe(1);
+      expect(cg.maxIterations).toBe(2);
     });
 
     it('max_turns at the upper bound (50) succeeds', async () => {

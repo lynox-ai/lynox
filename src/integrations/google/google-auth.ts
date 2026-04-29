@@ -154,6 +154,19 @@ function deleteTokenData(vault?: SecretVault | undefined): void {
   }
 }
 
+/** Extract the OAuth `error` field from a refresh-token error body. Google
+ *  returns JSON like `{"error":"invalid_grant","error_description":"..."}`
+ *  for permanent failures. A non-JSON body or missing field returns null. */
+function parseRefreshErrorCode(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const code = parsed['error'];
+    return typeof code === 'string' && code.length > 0 ? code : null;
+  } catch {
+    return null;
+  }
+}
+
 function base64url(input: string | Buffer): string {
   const buf = typeof input === 'string' ? Buffer.from(input) : input;
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -649,9 +662,29 @@ export class GoogleAuth {
 
     if (!response.ok) {
       const text = await response.text();
-      this.tokenData = null;
-      deleteTokenData(this.vault);
-      throw new Error(`Token refresh failed: ${response.status} ${text}. Re-connect your Google account in Settings → Integrations.`);
+      // Distinguish permanent revocation from transient errors. Google's
+      // documented permanent codes for the token endpoint are `invalid_grant`
+      // (refresh token revoked / expired) and `invalid_client` (client app
+      // disabled). Anything else — 5xx, rate-limit, network blip seen as 408,
+      // a 400 without a known body — is treated as transient: keep the vault
+      // entry so the next call retries instead of forcing a full re-connect.
+      // Discovered 2026-04-29 after a rafael canary redeploy: a single
+      // transient refresh failure had wiped the user's GOOGLE_OAUTH_TOKENS
+      // and silently broke Drive + Gmail OAuth across sessions.
+      const errorCode = parseRefreshErrorCode(text);
+      const permanent = errorCode === 'invalid_grant' || errorCode === 'invalid_client';
+      if (permanent) {
+        this.tokenData = null;
+        deleteTokenData(this.vault);
+        throw new Error(
+          `Token refresh failed (${errorCode}): ${response.status} ${text}. ` +
+          `Re-connect your Google account in Settings → Integrations.`,
+        );
+      }
+      throw new Error(
+        `Token refresh failed transiently (${response.status}): ${text}. ` +
+        `Will retry on next request — vault entry preserved.`,
+      );
     }
 
     const refreshed = validateTokenResponse(await response.json());

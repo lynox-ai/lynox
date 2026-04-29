@@ -513,6 +513,49 @@ describe('GoogleAuth', () => {
       });
       expect(noVaultAuth.isAuthenticated()).toBe(false);
     });
+
+    it('refresh transient 5xx keeps vault token (does not force re-connect)', async () => {
+      const vault = createMockVault();
+      vault._store.set('GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'expired-access',
+        refresh_token: 'still-valid-refresh',
+        expires_at: Date.now() - 10_000, // expired so refresh will fire
+        scopes: ['https://www.googleapis.com/auth/drive'],
+      }));
+      mockFetch.mockResolvedValueOnce({
+        ok: false, status: 503, text: async () => 'Service Unavailable',
+      });
+      const auth = new GoogleAuth({
+        clientId: 'test-id', clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      await expect(auth.getAccessToken()).rejects.toThrow(/transient/);
+      expect(vault.delete).not.toHaveBeenCalled();
+      expect(vault._store.has('GOOGLE_OAUTH_TOKENS')).toBe(true);
+    });
+
+    it('refresh permanent invalid_grant wipes vault token (forces re-connect)', async () => {
+      const vault = createMockVault();
+      vault._store.set('GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'expired-access',
+        refresh_token: 'revoked-refresh',
+        expires_at: Date.now() - 10_000,
+        scopes: ['https://www.googleapis.com/auth/drive'],
+      }));
+      mockFetch.mockResolvedValueOnce({
+        ok: false, status: 400,
+        text: async () => JSON.stringify({
+          error: 'invalid_grant',
+          error_description: 'Token has been expired or revoked.',
+        }),
+      });
+      const auth = new GoogleAuth({
+        clientId: 'test-id', clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      await expect(auth.getAccessToken()).rejects.toThrow(/Re-connect your Google account/);
+      expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+    });
   });
 
   describe('service account token caching', () => {

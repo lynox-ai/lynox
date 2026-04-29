@@ -106,6 +106,20 @@ function validateSpawnInput(input: SpawnAgentInput): void {
           `spawn_agent "${spec.name}": max_turns must be an integer in [1, ${MAX_SPAWN_TURNS}] (got ${spec.max_turns}).`,
         );
       }
+      // max_turns:1 silently truncates work for any sub-agent that needs to
+      // observe tool results — turn 1 fires the calls, turn 2 receives them.
+      // The wrapper would return ok:true while the calls are still mid-flight
+      // and the parent moves on with no side effects persisted. Reject early
+      // so the caller bumps to ≥2 instead of debugging silent failures.
+      if (spec.max_turns === 1) {
+        throw new Error(
+          `spawn_agent "${spec.name}": max_turns:1 forbidden — the sub-agent terminates ` +
+          `before any tool results return, so any work that depends on observing tool ` +
+          `output is silently dropped. Use max_turns ≥ 2 (turn 1 fires calls, turn 2 ` +
+          `confirms results), or invoke the tool directly from the parent if no ` +
+          `sub-agent reasoning is needed.`,
+        );
+      }
     }
     if (spec.max_budget_usd !== undefined) {
       if (!Number.isFinite(spec.max_budget_usd) || spec.max_budget_usd < 0 || spec.max_budget_usd > MAX_SPAWN_BUDGET_USD) {
