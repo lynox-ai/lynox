@@ -25,6 +25,17 @@ describe('ads_blueprint_entity_propose tool', () => {
     const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
     store.completeAuditRun(r.run_id);
     runId = r.run_id;
+    // Seed parent campaigns for the propose-side campaign-reference validator
+    // — child rows whose campaign_name doesn't resolve to a snapshot or NEW
+    // campaign are rejected so Editor "Zweideutiger Zeilentyp" cannot reach
+    // import. Tests need at least one matching campaign per common payload.
+    store.insertCampaignsBatch({
+      runId, adsAccountId: ACCOUNT,
+      rows: [
+        { campaignId: 'cmp-c', campaignName: 'C', status: 'ENABLED', channelType: 'SEARCH' },
+        { campaignId: 'cmp-pmax', campaignName: 'PMAX-Drills', status: 'ENABLED', channelType: 'PERFORMANCE_MAX' },
+      ],
+    });
   });
 
   afterEach(async () => {
@@ -105,11 +116,43 @@ describe('ads_blueprint_entity_propose tool', () => {
     expect(JSON.parse(stored[0]!.payload_json)).toMatchObject({ field_type: 'HEADLINE', text: 'Profi Bohrhammer' });
   });
 
+  it('rejects asset_group whose campaign_name does not exist in snapshot', async () => {
+    // Reproduces the aquanatura cycle-5 bug: agent typed "PMax" instead of
+    // "PMAX-Drills"; emit produced a row Editor classifies as "Zweideutiger
+    // Zeilentyp". Propose-side check must catch the typo before persist.
+    const out = await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: { campaign_name: 'PMax', asset_group_name: 'Wasserkefir', final_url: 'https://example.com' },
+      confidence: 0.9, rationale: 'theme expansion under the existing PMax campaign',
+    }, fakeAgent);
+    expect(out).toMatch(/not found in run/i);
+    expect(out).toMatch(/Closest match: "PMAX-Drills"/);
+    // Nothing persisted.
+    expect(store.listBlueprintEntities(runId, { entityType: 'asset_group' })).toHaveLength(0);
+  });
+
+  it('accepts child entity referencing a NEW campaign proposed in the same run', async () => {
+    // Propose a new campaign first, then a child asset_group referencing it.
+    // Both must persist — the validator should consult both snapshot AND
+    // pending NEW campaigns when resolving the parent.
+    await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'campaign', kind: 'NEW',
+      payload: { campaign_name: 'PMax-Refresh', channel_type: 'PERFORMANCE_MAX', budget_chf: 30 },
+      confidence: 0.9, rationale: 'fresh PMax campaign for refresh-water vertical',
+    }, fakeAgent);
+    const out = await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: { campaign_name: 'PMax-Refresh', asset_group_name: 'AG-Refresh', final_url: 'https://example.com' },
+      confidence: 0.9, rationale: 'first asset_group of the new PMax campaign',
+    }, fakeAgent);
+    expect(out).toMatch(/Blueprint-Vorschlag aufgenommen/);
+  });
+
   it('upserts when caller supplies an explicit external_id (idempotent revision)', async () => {
     const input = {
       ads_account_id: ACCOUNT, entity_type: 'asset' as const, kind: 'NEW' as const,
       external_id: 'agent.asset.ag.headline.1',
-      payload: { campaign_name: 'PMAX', asset_group_name: 'AG', field_type: 'HEADLINE', index: 1, text: 'v1' },
+      payload: { campaign_name: 'PMAX-Drills', asset_group_name: 'AG', field_type: 'HEADLINE', index: 1, text: 'v1' },
       confidence: 0.7, rationale: 'first take of headline draft',
     };
     await tool.handler(input, fakeAgent);
@@ -125,7 +168,7 @@ describe('ads_blueprint_entity_propose tool', () => {
   it('auto-derived external_ids treat different text as different assets', async () => {
     const base = {
       ads_account_id: ACCOUNT, entity_type: 'asset' as const, kind: 'NEW' as const,
-      payload: { campaign_name: 'PMAX', asset_group_name: 'AG', field_type: 'HEADLINE', index: 1, text: 'first' },
+      payload: { campaign_name: 'PMAX-Drills', asset_group_name: 'AG', field_type: 'HEADLINE', index: 1, text: 'first' },
       confidence: 0.8, rationale: 'first variant',
     };
     await tool.handler(base, fakeAgent);
@@ -172,7 +215,7 @@ describe('ads_blueprint_entity_propose tool', () => {
     setLastImport(store, '2026-04-01T00:00:00Z');
     const out = await tool.handler({
       ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'SPLIT',
-      payload: { campaign_name: 'PMAX', asset_group_name: 'AG' },
+      payload: { campaign_name: 'PMAX-Drills', asset_group_name: 'AG' },
       source_external_ids: ['ag1'], proposed_external_ids: ['a', 'b'],
       confidence: 0.95, rationale: 'short',
     }, fakeAgent);

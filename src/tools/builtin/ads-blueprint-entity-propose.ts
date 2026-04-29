@@ -174,6 +174,15 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
           return `ads_blueprint_entity_propose failed: ${validation.error}${hint}`;
         }
 
+        // Validate that any referenced campaign_name actually exists — either
+        // in the snapshot or as a NEW campaign proposed in the same run. Editor
+        // rejects child rows whose parent campaign cannot be resolved with
+        // "Zweideutiger Zeilentyp" and emit cannot detect this at row-build
+        // time. Catching it at propose-time gives the agent a usable error
+        // (with the closest match) instead of a silent broken-import surprise.
+        const refError = validateCampaignReference(input, store, runId);
+        if (refError) return `ads_blueprint_entity_propose failed: ${refError}`;
+
         // PMAX SPLIT/MERGE: run safeguards.
         if (input.kind === 'SPLIT' || input.kind === 'MERGE') {
           if (input.entity_type !== 'asset_group') {
@@ -429,6 +438,74 @@ function validatePayload(input: AdsBlueprintEntityProposeInput): { ok: true } | 
       return e ? { ok: false, error: e } : { ok: true };
     }
   }
+}
+
+/**
+ * Verify the campaign referenced by the proposed entity actually exists in
+ * either the snapshot for this run or as a NEW campaign being proposed in
+ * the same run. Returns a human-readable error string or null when valid.
+ *
+ * Skipped for:
+ *  - `entity_type === 'campaign'` (the entity itself is the campaign)
+ *  - `entity_type === 'negative'` with `scope === 'account'` (no campaign anchor)
+ */
+function validateCampaignReference(
+  input: AdsBlueprintEntityProposeInput, store: AdsDataStore, runId: number,
+): string | null {
+  if (input.entity_type === 'campaign') return null;
+  const p = input.payload;
+  let referencedName: string | null = null;
+  if (input.entity_type === 'negative') {
+    const scope = typeof p['scope'] === 'string' ? (p['scope'] as string) : null;
+    if (scope === 'account') return null;
+    referencedName = typeof p['scope_target'] === 'string' ? (p['scope_target'] as string)
+      : typeof p['campaign_name'] === 'string' ? (p['campaign_name'] as string)
+      : null;
+  } else {
+    referencedName = typeof p['campaign_name'] === 'string' ? (p['campaign_name'] as string) : null;
+  }
+  if (referencedName === null || referencedName.length === 0) return null;
+
+  const snapshot = new Set(store.listCampaignNamesForRun(runId, input.ads_account_id));
+  if (snapshot.has(referencedName)) return null;
+  const proposedNew = new Set(
+    store.listBlueprintEntities(runId)
+      .filter(e => e.entity_type === 'campaign' && e.kind === 'NEW')
+      .map(e => {
+        try {
+          const obj = JSON.parse(e.payload_json) as Record<string, unknown>;
+          return typeof obj['campaign_name'] === 'string' ? (obj['campaign_name'] as string) : '';
+        } catch { return ''; }
+      })
+      .filter(n => n.length > 0),
+  );
+  if (proposedNew.has(referencedName)) return null;
+
+  const allKnown = [...snapshot, ...proposedNew];
+  const suggestion = closestMatch(referencedName, allKnown);
+  const list = allKnown.length > 0 ? allKnown.map(n => `"${n}"`).join(', ') : '(none)';
+  const hint = suggestion ? ` Closest match: "${suggestion}".` : '';
+  return `Campaign "${referencedName}" not found in run ${runId}.${hint} Known campaigns: ${list}.`;
+}
+
+/** Cheap typo-suggestion: pick the candidate with the longest common substring
+ *  + matching prefix. Good enough for "PMax" → "PMax | Gesamtsortiment". */
+function closestMatch(query: string, candidates: readonly string[]): string | null {
+  if (candidates.length === 0) return null;
+  const q = query.toLowerCase();
+  let best: { name: string; score: number } | null = null;
+  for (const c of candidates) {
+    const lc = c.toLowerCase();
+    let score = 0;
+    if (lc.startsWith(q) || q.startsWith(lc)) score += 100;
+    if (lc.includes(q) || q.includes(lc)) score += 50;
+    // Common-prefix length as tiebreaker.
+    let common = 0;
+    while (common < q.length && common < lc.length && q[common] === lc[common]) common++;
+    score += common;
+    if (best === null || score > best.score) best = { name: c, score };
+  }
+  return best && best.score > 0 ? best.name : null;
 }
 
 interface NamingResult { valid: boolean; errors: string[]; }
