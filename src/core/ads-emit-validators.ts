@@ -202,6 +202,37 @@ export function validateBlueprint(
         }
         break;
       }
+      case 'asset': {
+        // PMax asset additions to existing asset groups. Field-length is
+        // governed by field_type — Editor refuses imports with over-limit
+        // text and aquanatura's first run shipped two 130-char descriptions
+        // because propose-side validation didn't exist yet.
+        const text = stringField(payload, 'text');
+        const fieldType = (stringField(payload, 'field_type') ?? '').toUpperCase();
+        if (text) {
+          const limit = fieldType === 'HEADLINE' ? HEADLINE_MAX
+            : fieldType === 'LONG_HEADLINE' ? 90
+            : fieldType === 'DESCRIPTION' ? DESCRIPTION_MAX
+            : null;
+          if (limit !== null && text.length > limit) {
+            hard.push({
+              severity: 'HARD', area: 'field_length',
+              externalId: e.external_id, entityType: e.entity_type,
+              message: `${fieldType} > ${limit} Zeichen: "${text}" (${text.length})`,
+            });
+          }
+          for (const c of competitors) {
+            if (text.toLowerCase().includes(c.toLowerCase())) {
+              hard.push({
+                severity: 'HARD', area: 'competitor_trademark',
+                externalId: e.external_id, entityType: e.entity_type,
+                message: `${fieldType} enthält Competitor-Trademark "${c}": "${text}".`,
+              });
+            }
+          }
+        }
+        break;
+      }
       case 'sitelink': {
         const text = stringField(payload, 'text');
         if (text && text.length > SITELINK_TEXT_MAX) {

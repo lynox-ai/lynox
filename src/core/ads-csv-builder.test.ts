@@ -183,10 +183,28 @@ describe('Search row builders', () => {
     expect(r[COL_INDEX['Criterion Type']!]).toBe('Campaign Negative Phrase');
   });
 
-  it('buildNegativeRow with no campaign produces account-level row', () => {
-    const r = buildNegativeRow({ keyword: 'drills', matchType: 'Broad' });
+  it('buildNegativeRow account-level requires sharedSetName + uses Account keyword type', () => {
+    const r = buildNegativeRow({
+      keyword: 'drills', matchType: 'Broad',
+      sharedSetName: 'My List',
+    });
     expect(r[COL_INDEX['Campaign']!]).toBe('');
     expect(r[COL_INDEX['Keyword']!]).toBe('drills');
+    expect(r[COL_INDEX['Shared set name']!]).toBe('My List');
+    expect(r[COL_INDEX['Shared set type']!]).toBe('Negative keyword');
+    expect(r[COL_INDEX['Account keyword type']!]).toBe('Negative Broad');
+    // Must NOT carry Criterion Type — Editor rejects shared-set rows that
+    // also fill the campaign-level negative column.
+    expect(r[COL_INDEX['Criterion Type']!]).toBe('');
+  });
+
+  it('buildNegativeRow campaign-level uses Criterion Type column', () => {
+    const r = buildNegativeRow({
+      campaignName: 'My Campaign', keyword: 'drills', matchType: 'Broad',
+    });
+    expect(r[COL_INDEX['Campaign']!]).toBe('My Campaign');
+    expect(r[COL_INDEX['Criterion Type']!]).toBe('Campaign Negative Broad');
+    expect(r[COL_INDEX['Account keyword type']!]).toBe('');
   });
 });
 

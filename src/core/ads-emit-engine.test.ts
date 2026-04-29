@@ -124,7 +124,10 @@ describe('runEmit', () => {
     const bytes = await readFile(negFile!);
     // decode UTF-16 LE manually
     const text = decodeUtf16LeBytes(bytes);
-    expect(text).toMatch(/Campaign Negative/);
+    // Shared-set negatives use Account keyword type (no "Campaign" prefix)
+    // and a Shared set anchor — Editor rejects rows without that anchor.
+    expect(text).toMatch(/Negative (Broad|Phrase|Exact)/);
+    expect(text).toMatch(/Negative keyword/);
     expect(text).toMatch(/drills/i);
   });
 
