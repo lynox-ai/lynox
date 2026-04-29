@@ -77,12 +77,19 @@ export function createAdsEmitCsvTool(store: AdsDataStore): ToolEntry<AdsEmitCsvI
         required: ['ads_account_id'],
       },
     },
-    handler: async (input: AdsEmitCsvInput, _agent: IAgent): Promise<string> => {
+    handler: async (input: AdsEmitCsvInput, agent: IAgent): Promise<string> => {
       try {
         const result = runEmit(store, input.ads_account_id, {
           ...(input.workspace_dir !== undefined ? { workspaceDir: input.workspace_dir } : {}),
           ...(input.run_id !== undefined ? { runId: input.run_id } : {}),
         });
+        // Mirror successful CSV writes into the artifact store. Workspace
+        // files exist on disk but the chat UI exposes downloads via
+        // Artifacts; without this step the customer cannot reach what
+        // emit produced unless they navigate the FileBrowserView.
+        if (result.filesWritten.length > 0 && !result.idempotent) {
+          await mirrorEmitToArtifacts(agent, result);
+        }
         return renderEmitReport(result);
       } catch (err) {
         if (err instanceof EmitPreconditionError) {
@@ -95,6 +102,65 @@ export function createAdsEmitCsvTool(store: AdsDataStore): ToolEntry<AdsEmitCsvI
 }
 
 // ── Markdown rendering ────────────────────────────────────────────────
+
+/** Read each emitted CSV from disk and register it in the artifact store as
+ *  a single Markdown artifact wrapping all files in code-blocks. The chat
+ *  UI surfaces artifacts with a click-to-open view; workspace files are
+ *  not surfaced through the same affordance, so customers were stuck
+ *  without a way to download what emit produced. */
+async function mirrorEmitToArtifacts(agent: IAgent, result: EmitResult): Promise<void> {
+  // The mirror is best-effort. Tests + headless runners may pass a fake
+  // agent without toolContext — return silently in that case so the
+  // primary emit success path is unaffected.
+  const store = agent.toolContext?.artifactStore;
+  if (!store) return;
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const blocks: string[] = [];
+  blocks.push(`# Editor-CSV-Pack — Run #${result.run.run_id}`);
+  blocks.push('');
+  blocks.push(`**Account:** ${result.customer.client_name} (${result.account.ads_account_id})`);
+  blocks.push(`**Files:** ${result.filesWritten.length}`);
+  blocks.push('');
+  blocks.push('Workspace-Pfade liegen unter `~/.lynox/workspace/...` — alle Dateien hier zum direkten Kopieren oder zum Zwischenspeichern als `.csv` (UTF-16 LE mit BOM).');
+  blocks.push('');
+  for (const file of result.filesWritten) {
+    const filename = path.basename(file);
+    let content = '';
+    try {
+      // Files are written UTF-16 LE with BOM. Read raw and decode for the
+      // markdown view; the workspace file on disk stays the canonical bytes.
+      const buf = await fs.readFile(file);
+      content = decodeUtf16Le(buf);
+    } catch (err) {
+      content = `<read error: ${err instanceof Error ? err.message : String(err)}>`;
+    }
+    blocks.push(`## \`${filename}\``);
+    blocks.push('');
+    blocks.push('```csv');
+    blocks.push(content.trimEnd());
+    blocks.push('```');
+    blocks.push('');
+  }
+  try {
+    store.save({
+      title: `Editor-CSV-Pack Run #${result.run.run_id} — ${result.account.ads_account_id}`,
+      content: blocks.join('\n'),
+      type: 'markdown',
+      description: `${result.filesWritten.length} CSV(s) ready for Google Ads Editor import`,
+      id: `ads-emit-${result.account.ads_account_id}-run-${result.run.run_id}`,
+    });
+  } catch {
+    // Artifact mirror is best-effort; the underlying disk write already
+    // succeeded so the Editor import path remains available either way.
+  }
+}
+
+function decodeUtf16Le(buf: Buffer): string {
+  // Strip BOM (FF FE) if present, then decode rest as UTF-16 LE.
+  const start = buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe ? 2 : 0;
+  return buf.subarray(start).toString('utf16le');
+}
 
 export function renderEmitReport(result: EmitResult): string {
   const { account, customer, run, validation, hash, idempotent,
