@@ -206,8 +206,15 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
         // Naming-convention check on KEEP/RENAME/NEW for visible entity types.
         const namingResult = runNamingCheck(input, customer);
 
-        // Auto-derive external_id from payload when missing.
-        const externalId = input.external_id ?? deriveExternalId(input);
+        // Auto-derive external_id from payload when missing. If the agent
+        // copy-pasted the "{entity_type}/{id}" display form from a previous
+        // result message or emit error, strip the leading prefix
+        // defensively so re-proposing replaces the right row instead of
+        // silently inserting a fork-id.
+        const externalId = stripEntityTypePrefix(
+          input.external_id ?? deriveExternalId(input),
+          input.entity_type,
+        );
 
         const persistInput: InsertBlueprintEntityInput = {
           runId,
@@ -456,6 +463,18 @@ function parseStringArray(s: string): string[] {
 }
 
 // ── External-id derivation + decision-type mapping ───────────────────
+
+/** Drop a leading "<entity_type>/" prefix that the agent may have copied
+ *  from a previous tool's display string. The display format
+ *  `${entity_type}/${external_id}` was repeatedly causing fork-ids when
+ *  agents passed the whole prefix back as external_id. */
+function stripEntityTypePrefix(rawId: string, entityType: string): string {
+  const prefix = `${entityType}/`;
+  let id = rawId;
+  // Tolerate accidental double prefixes too: "rsa_ad/rsa_ad/bp.rsa..."
+  while (id.startsWith(prefix)) id = id.slice(prefix.length);
+  return id;
+}
 
 function deriveExternalId(input: AdsBlueprintEntityProposeInput): string {
   const p = input.payload;

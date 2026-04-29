@@ -43,7 +43,8 @@ describe('ads_emit_csv tool', () => {
     const out = await tool.handler({ ads_account_id: ACCOUNT, workspace_dir: workspaceDir }, fakeAgent);
     expect(out).toMatch(/^# Emit Report/);
     expect(out).toMatch(/Emit erfolgreich/);
-    expect(out).toMatch(/Geschriebene Files/);
+    expect(out).toMatch(/Editor-CSV-Pack — Direkt herunterladen/);
+    expect(out).toMatch(/\/api\/files\/download\?path=/);
 
     // CSV files exist
     const runDir = join(workspaceDir, 'ads', ACCOUNT, 'blueprints');

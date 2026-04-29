@@ -16,7 +16,7 @@
  * Gated by feature flag 'ads-optimizer'.
  */
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import type { AdsDataStore } from '../../core/ads-data-store.js';
+import type { AdsDataStore, AdsAccountRow } from '../../core/ads-data-store.js';
 import {
   runEmit, EmitPreconditionError, type EmitResult,
 } from '../../core/ads-emit-engine.js';
@@ -77,19 +77,12 @@ export function createAdsEmitCsvTool(store: AdsDataStore): ToolEntry<AdsEmitCsvI
         required: ['ads_account_id'],
       },
     },
-    handler: async (input: AdsEmitCsvInput, agent: IAgent): Promise<string> => {
+    handler: async (input: AdsEmitCsvInput, _agent: IAgent): Promise<string> => {
       try {
         const result = runEmit(store, input.ads_account_id, {
           ...(input.workspace_dir !== undefined ? { workspaceDir: input.workspace_dir } : {}),
           ...(input.run_id !== undefined ? { runId: input.run_id } : {}),
         });
-        // Mirror successful CSV writes into the artifact store. Workspace
-        // files exist on disk but the chat UI exposes downloads via
-        // Artifacts; without this step the customer cannot reach what
-        // emit produced unless they navigate the FileBrowserView.
-        if (result.filesWritten.length > 0 && !result.idempotent) {
-          await mirrorEmitToArtifacts(agent, result);
-        }
         return renderEmitReport(result);
       } catch (err) {
         if (err instanceof EmitPreconditionError) {
@@ -103,63 +96,15 @@ export function createAdsEmitCsvTool(store: AdsDataStore): ToolEntry<AdsEmitCsvI
 
 // ── Markdown rendering ────────────────────────────────────────────────
 
-/** Read each emitted CSV from disk and register it in the artifact store as
- *  a single Markdown artifact wrapping all files in code-blocks. The chat
- *  UI surfaces artifacts with a click-to-open view; workspace files are
- *  not surfaced through the same affordance, so customers were stuck
- *  without a way to download what emit produced. */
-async function mirrorEmitToArtifacts(agent: IAgent, result: EmitResult): Promise<void> {
-  // The mirror is best-effort. Tests + headless runners may pass a fake
-  // agent without toolContext — return silently in that case so the
-  // primary emit success path is unaffected.
-  const store = agent.toolContext?.artifactStore;
-  if (!store) return;
-  const fs = await import('node:fs/promises');
-  const path = await import('node:path');
-  const blocks: string[] = [];
-  blocks.push(`# Editor-CSV-Pack — Run #${result.run.run_id}`);
-  blocks.push('');
-  blocks.push(`**Account:** ${result.customer.client_name} (${result.account.ads_account_id})`);
-  blocks.push(`**Files:** ${result.filesWritten.length}`);
-  blocks.push('');
-  blocks.push('Workspace-Pfade liegen unter `~/.lynox/workspace/...` — alle Dateien hier zum direkten Kopieren oder zum Zwischenspeichern als `.csv` (UTF-16 LE mit BOM).');
-  blocks.push('');
-  for (const file of result.filesWritten) {
-    const filename = path.basename(file);
-    let content = '';
-    try {
-      // Files are written UTF-16 LE with BOM. Read raw and decode for the
-      // markdown view; the workspace file on disk stays the canonical bytes.
-      const buf = await fs.readFile(file);
-      content = decodeUtf16Le(buf);
-    } catch (err) {
-      content = `<read error: ${err instanceof Error ? err.message : String(err)}>`;
-    }
-    blocks.push(`## \`${filename}\``);
-    blocks.push('');
-    blocks.push('```csv');
-    blocks.push(content.trimEnd());
-    blocks.push('```');
-    blocks.push('');
-  }
-  try {
-    store.save({
-      title: `Editor-CSV-Pack Run #${result.run.run_id} — ${result.account.ads_account_id}`,
-      content: blocks.join('\n'),
-      type: 'markdown',
-      description: `${result.filesWritten.length} CSV(s) ready for Google Ads Editor import`,
-      id: `ads-emit-${result.account.ads_account_id}-run-${result.run.run_id}`,
-    });
-  } catch {
-    // Artifact mirror is best-effort; the underlying disk write already
-    // succeeded so the Editor import path remains available either way.
-  }
-}
-
-function decodeUtf16Le(buf: Buffer): string {
-  // Strip BOM (FF FE) if present, then decode rest as UTF-16 LE.
-  const start = buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe ? 2 : 0;
-  return buf.subarray(start).toString('utf16le');
+/** Workspace-relative path for an emitted CSV. Used to build the
+ *  /api/files/download URL the chat UI can render as a clickable link. */
+function workspaceRelativePath(absoluteFilePath: string, account: AdsAccountRow, runId: number): string {
+  // Files always sit at <ws>/ads/<account>/blueprints/run-<id>/<basename>.
+  // Build the relative form deterministically so the chat link doesn't
+  // depend on the workspace root happening to be in scope here.
+  const lastSep = absoluteFilePath.lastIndexOf('/');
+  const filename = lastSep >= 0 ? absoluteFilePath.slice(lastSep + 1) : absoluteFilePath;
+  return `ads/${account.ads_account_id}/blueprints/run-${runId}/${filename}`;
 }
 
 export function renderEmitReport(result: EmitResult): string {
@@ -188,10 +133,10 @@ export function renderEmitReport(result: EmitResult): string {
   } else {
     lines.push(`- HARD-Checks: **${validation.hard.length} Errors** — Emit ist blockiert bis behoben.`);
     lines.push('');
-    lines.push('| Area | Entity | Problem |');
-    lines.push('|---|---|---|');
+    lines.push('| Area | Entity Type | External ID | Problem |');
+    lines.push('|---|---|---|---|');
     for (const issue of validation.hard.slice(0, 30)) {
-      lines.push(`| ${issue.area} | \`${issue.entityType}/${issue.externalId}\` | ${issue.message} |`);
+      lines.push(`| ${issue.area} | ${issue.entityType} | \`${issue.externalId}\` | ${issue.message} |`);
     }
     if (validation.hard.length > 30) {
       lines.push(`| _… ${validation.hard.length - 30} weitere_ |  |  |`);
@@ -205,23 +150,29 @@ export function renderEmitReport(result: EmitResult): string {
 
   if (filesWritten.length === 0) return lines.join('\n');
 
-  lines.push('## Geschriebene Files');
+  lines.push('## Editor-CSV-Pack — Direkt herunterladen');
   lines.push('');
   lines.push(`Gesamt: ${filesWritten.length} CSVs (${totals.campaigns} Campaigns · ${totals.adGroups} Ad-Groups · ${totals.keywords} Keywords · ${totals.negatives} Negatives).`);
   lines.push('');
-  lines.push('| File | Zeilen |');
-  lines.push('|---|---|');
+  lines.push('| File | Zeilen | Download |');
+  lines.push('|---|---|---|');
   for (const f of perFileRowCounts) {
-    lines.push(`| \`${f.file}\` | ${f.rowCount} |`);
+    const lastSep = f.file.lastIndexOf('/');
+    const filename = lastSep >= 0 ? f.file.slice(lastSep + 1) : f.file;
+    const rel = workspaceRelativePath(f.file, account, run.run_id);
+    const url = `/api/files/download?path=${encodeURIComponent(rel)}`;
+    lines.push(`| \`${filename}\` | ${f.rowCount} | [Download](${url}) |`);
   }
+  lines.push('');
+  lines.push(`Alle Files liegen auch im **Dateien**-Tab unter \`ads/${account.ads_account_id}/blueprints/run-${run.run_id}/\` falls die Download-Links nicht funktionieren.`);
   lines.push('');
 
   lines.push('## Nächste Schritte');
   lines.push('');
-  lines.push('1. Customer öffnet Google Ads Editor → Account → Import → From file.');
-  lines.push('2. Customer wählt einzelne Files aus dem Verzeichnis pro Kampagne aus, prüft Editor-Vorschau.');
-  lines.push('3. Customer postet die geprüften Änderungen ans Konto.');
-  lines.push('4. **Anschließend `ads_mark_imported` aufrufen**, damit der 14-Tage-Smart-Bidding-Guard für den nächsten Cycle korrekt verankert ist.');
+  lines.push('1. Klick auf jeden **Download**-Link oben → Browser speichert die `.csv` (UTF-16 LE mit BOM).');
+  lines.push('2. Google Ads Editor → Account → Import → From file → die heruntergeladenen Dateien laden.');
+  lines.push('3. Vorschau prüfen, posten.');
+  lines.push('4. Bescheid geben → ich rufe `ads_mark_imported` auf damit der 14-Tage-Smart-Bidding-Guard greift.');
 
   return lines.join('\n');
 }
