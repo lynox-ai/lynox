@@ -331,6 +331,56 @@ export type NegativeMatchType =
   | 'Campaign Negative Exact'
   | 'Exact' | 'Phrase' | 'Broad';
 
+/** Definition row for an account-level shared negative-keyword list. Editor
+ *  expects ONE such row per unique Shared Set Name; member rows reference
+ *  it by name. The definition row carries `Shared set type` but NOT a
+ *  Keyword — the Keyword column on a row with `Shared set type` set is
+ *  what made earlier emit attempts fail with "Zweideutiger Zeilentyp"
+ *  because Editor could not tell whether the row was defining the set or
+ *  inserting a member. Splitting into two row types removes the ambiguity.
+ */
+export interface SharedSetDefinitionRowInput {
+  sharedSetName: string;
+  status?: 'Paused' | 'Enabled' | undefined;
+}
+
+export function buildSharedSetDefinitionRow(input: SharedSetDefinitionRowInput): CsvRow {
+  const row = emptyRow();
+  setCol(row, 'Shared set name', input.sharedSetName);
+  setCol(row, 'Shared set type', 'Negative keyword');
+  setCol(row, 'Status', input.status ?? 'Enabled');
+  return row;
+}
+
+/** Member row for an account-level shared negative-keyword list. Carries
+ *  Shared set name + Keyword + Criterion Type (with bare "Negative Broad"
+ *  / "Negative Phrase" / "Negative Exact" — no "Campaign" prefix and no
+ *  "Account keyword type" column. The "Account keyword type" column exists
+ *  in the 183-column schema but earlier-generation Editor versions ignore
+ *  or reject it; the canonical CSV path is via Criterion Type alone). */
+export interface SharedSetMemberRowInput {
+  sharedSetName: string;
+  keyword: string;
+  matchType: NegativeMatchType;
+  status?: 'Paused' | 'Enabled' | undefined;
+}
+
+export function buildSharedSetMemberRow(input: SharedSetMemberRowInput): CsvRow {
+  const row = emptyRow();
+  setCol(row, 'Shared set name', input.sharedSetName);
+  setCol(row, 'Keyword', input.keyword);
+  setCol(row, 'Criterion Type', sharedSetMatchType(input.matchType));
+  setCol(row, 'Status', input.status ?? 'Enabled');
+  return row;
+}
+
+function sharedSetMatchType(m: NegativeMatchType): string {
+  if (m === 'Campaign Negative Broad' || m === 'Broad') return 'Negative Broad';
+  if (m === 'Campaign Negative Phrase' || m === 'Phrase') return 'Negative Phrase';
+  if (m === 'Campaign Negative Exact' || m === 'Exact') return 'Negative Exact';
+  return m;
+}
+
 export interface NegativeRowInput {
   /** Required: shared-set negatives are emitted via the manual-TODO list, not
    *  CSV — Editor's schema for shared-set member rows is not stable enough
@@ -370,6 +420,17 @@ export interface AssetGroupRowInput {
   path1?: string | undefined;
   path2?: string | undefined;
   status?: 'Paused' | 'Enabled' | undefined;
+  /** Headlines to inline on the asset_group row (Headline 1-15 columns).
+   *  Editor accepts the indexed columns directly on a NEW asset_group row,
+   *  which is how customers actually use the bulk-import path — single-asset
+   *  rows that target an existing asset_group are the unreliable shape that
+   *  triggers "Zweideutiger Zeilentyp". For NEW asset_groups we always
+   *  inline. Truncated to first 15. */
+  inlineHeadlines?: readonly string[] | undefined;
+  /** Long headlines (Long headline 1-5 columns). Truncated to first 5. */
+  inlineLongHeadlines?: readonly string[] | undefined;
+  /** Descriptions (Description 1-5 columns). Truncated to first 5. */
+  inlineDescriptions?: readonly string[] | undefined;
 }
 
 export function buildAssetGroupRow(input: AssetGroupRowInput): CsvRow {
@@ -380,6 +441,21 @@ export function buildAssetGroupRow(input: AssetGroupRowInput): CsvRow {
   if (input.finalMobileUrl) setCol(row, 'Final mobile URL', input.finalMobileUrl);
   if (input.path1) setCol(row, 'Path 1', input.path1);
   if (input.path2) setCol(row, 'Path 2', input.path2);
+  if (input.inlineHeadlines) {
+    for (let i = 0; i < Math.min(15, input.inlineHeadlines.length); i++) {
+      setCol(row, `Headline ${i + 1}`, input.inlineHeadlines[i]!);
+    }
+  }
+  if (input.inlineLongHeadlines) {
+    for (let i = 0; i < Math.min(5, input.inlineLongHeadlines.length); i++) {
+      setCol(row, `Long headline ${i + 1}`, input.inlineLongHeadlines[i]!);
+    }
+  }
+  if (input.inlineDescriptions) {
+    for (let i = 0; i < Math.min(5, input.inlineDescriptions.length); i++) {
+      setCol(row, `Description ${i + 1}`, input.inlineDescriptions[i]!);
+    }
+  }
   // Same safety as buildCampaignRow: only emit Status when the caller
   // sets it. Empty cell preserves existing asset-group state.
   if (input.status !== undefined) setCol(row, 'Asset Group Status', input.status);

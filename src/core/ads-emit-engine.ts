@@ -36,6 +36,7 @@ import {
   buildAdGroupRow, buildAssetGroupRow, buildAssetRow, buildAudienceSignalRow,
   buildCampaignRow, buildCalloutRow, buildKeywordRow, buildListingGroupRow,
   buildNegativeRow, buildRsaRow, buildSitelinkRow,
+  buildSharedSetDefinitionRow, buildSharedSetMemberRow,
   encodeUtf16LeWithBom, renderCsvBody, slugifyCampaignName,
   type CsvRow, type AssetFieldType,
 } from './ads-csv-builder.js';
@@ -257,6 +258,37 @@ function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
     bundleCounts.calloutCount += bucket.calloutCount;
     bundleCounts.negativeCount += bucket.negativeCount;
   }
+  // Shared-set negatives — one definition row per unique set + N member
+  // rows. Goes into its own per-campaign-style file (shared-sets.csv) and
+  // also into the bundle so customers using the bundle import don't lose
+  // the negatives. Definition rows must come BEFORE member rows so Editor
+  // resolves the set before resolving its members.
+  const sharedSetRows: CsvRow[] = [];
+  let sharedSetMemberCount = 0;
+  for (const [setName, members] of [...grouped.sharedSets.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (members.length === 0) continue;
+    sharedSetRows.push(buildSharedSetDefinitionRow({ sharedSetName: setName }));
+    for (const m of members) {
+      sharedSetRows.push(buildSharedSetMemberRow({
+        sharedSetName: setName, keyword: m.keyword, matchType: m.matchType,
+      }));
+      sharedSetMemberCount++;
+    }
+  }
+  if (sharedSetRows.length > 0) {
+    const sharedSetCounts: BucketCounts = {
+      ...zeroBucketCounts(), negativeCount: sharedSetMemberCount,
+    };
+    files.push({
+      fileName: 'shared-sets.csv',
+      body: renderCsvBody(sharedSetRows),
+      rowCount: sharedSetRows.length,
+      counts: sharedSetCounts,
+    });
+    bundleRows.push(...sharedSetRows);
+    bundleCounts.negativeCount += sharedSetMemberCount;
+  }
+
   // Bundle file: concatenated rows under a single header so the operator
   // can run one Editor "Import → From file" instead of N. We always emit
   // the bundle (even with 1 campaign) so the markdown response can link
@@ -270,6 +302,14 @@ function planCsvFiles(grouped: GroupedEmit): PlannedFile[] {
     });
   }
   return files;
+}
+
+function zeroBucketCounts(): BucketCounts {
+  return {
+    campaignCount: 0, adGroupCount: 0, keywordCount: 0, rsaCount: 0,
+    assetGroupCount: 0, assetCount: 0, audienceSignalCount: 0,
+    listingGroupCount: 0, sitelinkCount: 0, calloutCount: 0, negativeCount: 0,
+  };
 }
 
 function makeEmptyTotals(): EmitResult['totals'] {
@@ -386,8 +426,16 @@ interface CampaignBucket {
   negativeCount: number;
 }
 
+interface SharedSetMember {
+  keyword: string;
+  matchType: 'Exact' | 'Phrase' | 'Broad';
+}
+
 interface GroupedEmit {
   perCampaign: Map<string, CampaignBucket>;
+  /** Account-level shared-set negatives keyed by shared-set name. Each set
+   *  emits one definition row + N member rows in a single shared-sets CSV. */
+  sharedSets: Map<string, SharedSetMember[]>;
   manualTodos: ManualTodo[];
 }
 
@@ -401,7 +449,48 @@ function newBucket(): CampaignBucket {
 
 function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmit {
   const perCampaign = new Map<string, CampaignBucket>();
+  const sharedSets = new Map<string, SharedSetMember[]>();
   const manualTodos: ManualTodo[] = [];
+
+  // Pre-pass: index NEW asset_groups + collect their NEW sibling text assets
+  // (HEADLINE / LONG_HEADLINE / DESCRIPTION) so the asset_group row can ship
+  // them inline via Editor's indexed columns. This drops the bulk of manual
+  // TODOs because Editor's separate single-asset row pattern is the
+  // unreliable one — inline columns on the asset_group row are fully
+  // supported. Assets whose parent asset_group is KEEP (existing in account)
+  // still route to manual_todos because Editor's incremental update path is
+  // not stable.
+  const newAssetGroupKeys = new Set<string>(); // "campaign||ag_name"
+  for (const e of entities) {
+    if (e.entity_type !== 'asset_group' || e.kind !== 'NEW') continue;
+    const payload = parsePayload(e.payload_json);
+    const c = stringField(payload, 'campaign_name');
+    const a = stringField(payload, 'asset_group_name');
+    if (c && a) newAssetGroupKeys.add(`${c}||${a}`);
+  }
+  const inlineAssetsForAg = new Map<string, {
+    headlines: string[]; longHeadlines: string[]; descriptions: string[];
+  }>();
+  const inlinedAssetIds = new Set<number>();
+  for (const e of entities) {
+    if (e.entity_type !== 'asset' || e.kind !== 'NEW') continue;
+    const payload = parsePayload(e.payload_json);
+    const c = stringField(payload, 'campaign_name');
+    const a = stringField(payload, 'asset_group_name');
+    const ft = (stringField(payload, 'field_type') ?? '').toUpperCase();
+    const text = stringField(payload, 'text') ?? '';
+    if (!c || !a || !text) continue;
+    const key = `${c}||${a}`;
+    if (!newAssetGroupKeys.has(key)) continue; // parent is KEEP — handle below
+    if (ft !== 'HEADLINE' && ft !== 'LONG_HEADLINE' && ft !== 'DESCRIPTION') continue;
+    const slot = inlineAssetsForAg.get(key) ?? { headlines: [], longHeadlines: [], descriptions: [] };
+    if (ft === 'HEADLINE') slot.headlines.push(text);
+    else if (ft === 'LONG_HEADLINE') slot.longHeadlines.push(text);
+    else slot.descriptions.push(text);
+    inlineAssetsForAg.set(key, slot);
+    inlinedAssetIds.add(e.blueprint_id);
+  }
+
   const ensureBucket = (name: string): CampaignBucket => {
     let b = perCampaign.get(name);
     if (b) return b;
@@ -511,6 +600,8 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         // not pause the running PMax learning. NEW/PAUSE proposals emit
         // Paused so manual review controls go-live.
         const groupStatus = e.kind === 'KEEP' ? undefined : 'Paused';
+        const inlineKey = `${campaign}||${groupName}`;
+        const inlineSlots = e.kind === 'NEW' ? inlineAssetsForAg.get(inlineKey) : undefined;
         bucket.rows.push(buildAssetGroupRow({
           campaignName: campaign, assetGroupName: groupName,
           ...(stringField(payload, 'final_url') !== null ? { finalUrl: stringField(payload, 'final_url')! } : {}),
@@ -518,6 +609,11 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
           ...(stringField(payload, 'path1') !== null ? { path1: stringField(payload, 'path1')! } : {}),
           ...(stringField(payload, 'path2') !== null ? { path2: stringField(payload, 'path2')! } : {}),
           ...(groupStatus !== undefined ? { status: groupStatus } : {}),
+          ...(inlineSlots ? {
+            inlineHeadlines: inlineSlots.headlines,
+            inlineLongHeadlines: inlineSlots.longHeadlines,
+            inlineDescriptions: inlineSlots.descriptions,
+          } : {}),
         }));
         bucket.assetGroupCount++;
         break;
@@ -527,13 +623,16 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         const groupName = stringField(payload, 'asset_group_name');
         const fieldType = parseAssetFieldType(stringField(payload, 'field_type'));
         if (!campaign || !groupName || !fieldType) continue;
-        // PMax text assets (HEADLINE/LONG_HEADLINE/DESCRIPTION) cannot be
-        // emitted as standalone CSV rows — Editor flags them with
-        // "Zweideutiger Zeilentyp" because the row signature
-        // (Campaign + Asset Group + a single Description N column) collides
-        // with the asset_group row signature. Route these to the manual-TODO
-        // file so the operator pastes them into the Ads UI directly.
+        // Text assets (HEADLINE / LONG_HEADLINE / DESCRIPTION) on a parent
+        // asset_group that is itself NEW in this run get inlined onto the
+        // asset_group row above (Headline 1-15 / Long headline 1-5 /
+        // Description 1-5 columns). Skip them here so we do not emit a
+        // separate single-asset row that Editor would flag as
+        // "Zweideutiger Zeilentyp". Inlining is only safe for NEW
+        // asset_groups — KEEP asset_groups still take additions through the
+        // manual-todo route below.
         if (fieldType === 'HEADLINE' || fieldType === 'LONG_HEADLINE' || fieldType === 'DESCRIPTION') {
+          if (inlinedAssetIds.has(e.blueprint_id)) break;
           const text = stringField(payload, 'text') ?? '';
           const idx = numberField(payload, 'index');
           const slot = idx !== null ? `${humanFieldType(fieldType)} ${idx}` : humanFieldType(fieldType);
@@ -622,19 +721,22 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
         const scopeTarget = stringField(payload, 'scope_target');
         if (!keyword) continue;
         if (scope === 'account' || scopeTarget === null) {
-          // Account-level negatives target a shared list. Editor's CSV format
-          // for shared-set member rows is unstable (Editor flags them with
-          // "Zweideutiger Zeilentyp" across multiple column patterns we have
-          // tried), so we surface them as a manual TODO instead of risking
-          // a partial or mis-applied import on a production account.
+          // Account-level negatives target a shared list. Earlier emit
+          // attempts mixed `Shared set type` + `Account keyword type` +
+          // `Keyword` on the same row, which Editor flagged as
+          // "Zweideutiger Zeilentyp" because the row could be parsed as
+          // either a set definition OR a member insert. The canonical
+          // Editor format splits the two: one definition row per set
+          // (Shared set name + Shared set type, no Keyword) plus one
+          // member row per term (Shared set name + Keyword + Criterion
+          // Type, no Shared set type). We collect the members here and
+          // emit both row types in planCsvFiles below.
           const sharedSetName = scope === 'account' && stringField(payload, 'source') === 'pmax_owned'
             ? 'PMax-Owned Negatives'
             : 'Account Competitor Negatives';
-          manualTodos.push({
-            kind: 'shared_set_negative',
-            target: sharedSetName,
-            detail: `${matchType}: ${keyword}`,
-          });
+          const arr = sharedSets.get(sharedSetName) ?? [];
+          arr.push({ keyword, matchType });
+          sharedSets.set(sharedSetName, arr);
         } else {
           const bucket = ensureBucket(scopeTarget);
           bucket.rows.push(buildNegativeRow({
@@ -647,7 +749,7 @@ function groupByCampaign(entities: readonly AdsBlueprintEntityRow[]): GroupedEmi
     }
   }
 
-  return { perCampaign, manualTodos };
+  return { perCampaign, sharedSets, manualTodos };
 }
 
 function humanFieldType(t: AssetFieldType): string {
