@@ -37,6 +37,10 @@ import {
   classifyThemeTokens,
   type ClassifyOptions, type ClassifiedToken, type ThemeCategory,
 } from '../../core/ads-theme-classifier.js';
+import {
+  classifySearchTermRelevance,
+  type ClassifySearchTermOptions, type ClassifiedSearchTerm, type RelevanceCategory,
+} from '../../core/ads-search-term-relevance-classifier.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 interface AdsAuditRunInput {
@@ -103,6 +107,13 @@ export function createAdsAuditRunTool(store: AdsDataStore): ToolEntry<AdsAuditRu
         // uncertain tokens stay in but the blueprint stage adds an operator
         // review marker so the call doesn't silently pollute asset_groups.
         await classifyThemeFindingTokens(result);
+        // P1 Tier-2: same harness, different question — classify the
+        // top per-term wasted spend candidates as relevant/irrelevant/
+        // uncertain against the customer offer. Relevant terms drop
+        // out of the negative-candidate pool (they're a fix-needed
+        // signal, not waste); irrelevant ones stay; uncertain ones
+        // get tagged for Phase-A operator review at blueprint time.
+        await classifyIrrelevantSearchTermFinding(result);
         const persistedIds = persistFindings(store, result);
 
         // Mirror to KG (best-effort, async). Failure must not break the audit.
@@ -224,6 +235,81 @@ export async function classifyThemeFindingTokens(
   finding.text = `${surviving.length} klassifizierte Themen in PMax-Search-Terms ohne passende Asset-Group: ${topLine}. ` +
     `Insgesamt ${totalCovered} Cluster — Kandidaten für Asset-Group-Expansion. ` +
     `Conv-Volume-Schutz: Quell-Gruppe muss nach Split noch ≥30 conv/30d halten.`;
+}
+
+/** Tier-2 of the per-term wasted-spend detector. Reads the
+ *  Tier-1 candidates from the `irrelevant_search_term_spend` finding
+ *  evidence, runs them through the LLM relevance classifier, and
+ *  rewrites the evidence so each candidate carries its
+ *  `classification` + `classification_reason`. Drops the entire
+ *  finding if no irrelevant + uncertain candidates remain.
+ *
+ *  Cost-bound: a single Haiku call. Falls back to all-uncertain on
+ *  any classifier error. */
+export async function classifyIrrelevantSearchTermFinding(
+  result: AuditResult,
+  classifyOpts?: ClassifySearchTermOptions,
+): Promise<void> {
+  if (!result.customer) return;
+  const idx = result.findings.findIndex(f => f.area === 'irrelevant_search_term_spend');
+  if (idx < 0) return;
+  const finding = result.findings[idx]!;
+  const evidence = (finding.evidence ?? {}) as Record<string, unknown>;
+  const candidatesRaw = evidence['candidates'];
+  if (!Array.isArray(candidatesRaw) || candidatesRaw.length === 0) return;
+
+  type RawCandidate = Record<string, unknown>;
+  const candidates = candidatesRaw.filter((c): c is RawCandidate =>
+    c !== null && typeof c === 'object');
+  const terms = candidates
+    .map(c => (typeof c['term'] === 'string' ? c['term'] : ''))
+    .filter(t => t.length > 0);
+  if (terms.length === 0) return;
+
+  const classification = await classifySearchTermRelevance(terms, result.customer, classifyOpts ?? {});
+  const byTerm = new Map<string, ClassifiedSearchTerm>();
+  for (const c of classification.classifications) {
+    byTerm.set(c.term.toLowerCase(), c);
+  }
+
+  const surviving: Array<Record<string, unknown>> = [];
+  let irrelevantCount = 0;
+  let uncertainCount = 0;
+  for (const c of candidates) {
+    const term = typeof c['term'] === 'string' ? c['term'] : '';
+    const cls = byTerm.get(term.toLowerCase());
+    const category: RelevanceCategory = cls?.category ?? 'uncertain';
+    if (category === 'relevant') continue; // not waste; needs LP/copy fix, not a negative
+    surviving.push({
+      ...c,
+      classification: category,
+      ...(cls?.reason ? { classification_reason: cls.reason } : {}),
+    });
+    if (category === 'irrelevant') irrelevantCount++;
+    else uncertainCount++;
+  }
+
+  if (surviving.length === 0) {
+    result.findings.splice(idx, 1);
+    return;
+  }
+
+  evidence['candidates'] = surviving;
+  evidence['classification'] = classification.classifications;
+  evidence['summary'] = {
+    irrelevant: irrelevantCount,
+    uncertain: uncertainCount,
+    relevant_filtered_out: candidates.length - surviving.length,
+  };
+  finding.evidence = evidence;
+  // Refresh the finding text now that we know the post-classification
+  // breakdown. Spend total of surviving items only — relevant terms
+  // (filtered out) are NOT waste.
+  const totalSpend = surviving.reduce(
+    (s, c) => s + (typeof c['spend_chf'] === 'number' ? (c['spend_chf'] as number) : 0), 0);
+  finding.text = `${irrelevantCount} klar irrelevante + ${uncertainCount} unsichere Suchbegriffe ` +
+    `mit ${totalSpend.toFixed(2)} CHF Spend ohne Conversions. ` +
+    `Irrelevante → Negativ-Liste; unsichere → Operator-Review im Blueprint.`;
 }
 
 // ── Persistence ───────────────────────────────────────────────────────

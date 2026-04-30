@@ -3,7 +3,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AdsDataStore } from '../../core/ads-data-store.js';
-import { createAdsAuditRunTool, classifyThemeFindingTokens, renderMarkdownReport } from './ads-audit-run.js';
+import {
+  createAdsAuditRunTool, classifyThemeFindingTokens,
+  classifyIrrelevantSearchTermFinding, renderMarkdownReport,
+} from './ads-audit-run.js';
 import { runAudit, type AuditResult } from '../../core/ads-audit-engine.js';
 import type { IAgent, IKnowledgeLayer } from '../../types/index.js';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -203,6 +206,58 @@ describe('classifyThemeFindingTokens (Phase B)', () => {
   });
 });
 
+describe('classifyIrrelevantSearchTermFinding (P1 Tier-2)', () => {
+  it('drops relevant terms, tags irrelevant + uncertain, rewrites finding text', async () => {
+    const result = makeFakeAuditWithSearchTermFinding([
+      { term: 'wasserfilter test', spend_chf: 60, clicks: 30, conversions: 0, campaign_name: 'C', ad_group_name: 'AG' },
+      { term: 'kaffeemaschine entkalken', spend_chf: 80, clicks: 40, conversions: 0, campaign_name: 'C', ad_group_name: 'AG' },
+      { term: 'glas', spend_chf: 25, clicks: 15, conversions: 0, campaign_name: 'C', ad_group_name: 'AG' },
+    ]);
+    const client = makeRelevanceClient([
+      { term: 'wasserfilter test', category: 'relevant', reason: 'core product' },
+      { term: 'kaffeemaschine entkalken', category: 'irrelevant', reason: 'not in catalogue' },
+      { term: 'glas', category: 'uncertain', reason: 'plausible bottle category' },
+    ]);
+
+    await classifyIrrelevantSearchTermFinding(result, { client });
+
+    const finding = result.findings.find(f => f.area === 'irrelevant_search_term_spend')!;
+    const evidence = finding.evidence as {
+      candidates: Array<{ term: string; classification: string }>;
+      summary: { irrelevant: number; uncertain: number; relevant_filtered_out: number };
+    };
+    const surviving = evidence.candidates.map(c => c.term).sort();
+    expect(surviving).toEqual(['glas', 'kaffeemaschine entkalken']);
+    expect(evidence.summary).toEqual({ irrelevant: 1, uncertain: 1, relevant_filtered_out: 1 });
+    expect(finding.text).toMatch(/1 klar irrelevante \+ 1 unsichere/);
+  });
+
+  it('removes the entire finding when every candidate is classified relevant', async () => {
+    const result = makeFakeAuditWithSearchTermFinding([
+      { term: 'wasserfilter', spend_chf: 30, clicks: 15, conversions: 0, campaign_name: 'C', ad_group_name: 'AG' },
+    ]);
+    const client = makeRelevanceClient([
+      { term: 'wasserfilter', category: 'relevant', reason: 'top product' },
+    ]);
+    await classifyIrrelevantSearchTermFinding(result, { client });
+    expect(result.findings.find(f => f.area === 'irrelevant_search_term_spend')).toBeUndefined();
+  });
+
+  it('routes every term to uncertain when the LLM call throws', async () => {
+    const result = makeFakeAuditWithSearchTermFinding([
+      { term: 'a', spend_chf: 30, clicks: 15, conversions: 0, campaign_name: 'C', ad_group_name: 'AG' },
+      { term: 'b', spend_chf: 20, clicks: 10, conversions: 0, campaign_name: 'C', ad_group_name: 'AG' },
+    ]);
+    const throwing = {
+      beta: { messages: { stream: () => ({ finalMessage: async () => { throw new Error('boom'); } }) } },
+    } as unknown as Anthropic;
+    await classifyIrrelevantSearchTermFinding(result, { client: throwing });
+    const finding = result.findings.find(f => f.area === 'irrelevant_search_term_spend')!;
+    const candidates = (finding.evidence as { candidates: Array<{ classification: string }> }).candidates;
+    expect(candidates.every(c => c.classification === 'uncertain')).toBe(true);
+  });
+});
+
 describe('renderMarkdownReport', () => {
   let tempDir: string;
   let store: AdsDataStore;
@@ -282,6 +337,62 @@ function makeClassifierClient(items: Array<{ token: string; category: string; re
         stream: () => ({
           finalMessage: async () => ({
             content: [{ type: 'tool_use', name: 'classify_theme_tokens', input: { classifications: items } }],
+          }),
+        }),
+      },
+    },
+  } as unknown as Anthropic;
+}
+
+interface SearchTermCandidateFixture {
+  term: string;
+  campaign_name: string;
+  ad_group_name: string | null;
+  spend_chf: number;
+  clicks: number;
+  conversions: number;
+}
+
+function makeFakeAuditWithSearchTermFinding(candidates: SearchTermCandidateFixture[]): AuditResult {
+  return {
+    account: { ads_account_id: ACCOUNT, customer_id: CUSTOMER, account_label: 'Main',
+      currency_code: 'CHF', timezone: 'Europe/Zurich', mode: 'BOOTSTRAP',
+      drive_folder_id: null, last_major_import_at: null,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    customer: {
+      customer_id: CUSTOMER, client_name: 'Acme', business_model: null, offer_summary: null,
+      primary_goal: null, target_roas: null, target_cpa_chf: null, monthly_budget_chf: null,
+      typical_cpc_chf: null, country: 'CH', timezone: 'Europe/Zurich',
+      languages: '["DE"]', top_products: '["wasserfilter"]', own_brands: '[]', sold_brands: '[]',
+      competitors: '[]', pmax_owned_head_terms: '[]', naming_convention_pattern: null,
+      tracking_notes: '{}',
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    },
+    run: { run_id: 1, ads_account_id: ACCOUNT, status: 'SUCCESS', mode: 'BOOTSTRAP',
+      started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z',
+      gas_export_lastrun: null, keywords_hash: null, previous_run_id: null,
+      emitted_csv_hash: null, token_cost_micros: null, error_message: null },
+    previousRun: null,
+    kpis: { spendChf: 0, conversions: 0, clicks: 0, impressions: 0, costPerConversion: 0, ctr: 0, conversionRate: 0, roas: 0 },
+    mode: { detected: 'BOOTSTRAP', recordedAccountMode: 'BOOTSTRAP', daysOfData: 5, reasoning: 'first cycle' },
+    manualChanges: null, verification: null,
+    findings: [
+      {
+        area: 'irrelevant_search_term_spend', severity: 'MEDIUM',
+        text: 'X einzelne Suchbegriffe …', confidence: 0.7,
+        evidence: { candidates },
+      },
+    ],
+  } as unknown as AuditResult;
+}
+
+function makeRelevanceClient(items: Array<{ term: string; category: string; reason: string }>): Anthropic {
+  return {
+    beta: {
+      messages: {
+        stream: () => ({
+          finalMessage: async () => ({
+            content: [{ type: 'tool_use', name: 'classify_search_term_relevance', input: { classifications: items } }],
           }),
         }),
       },

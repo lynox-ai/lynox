@@ -955,7 +955,7 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
     });
   }
 
-  // 6. Wasted search terms
+  // 6. Wasted search terms (account-aggregate)
   const wastedTerms = ctx.store.queryView('view_audit_top_search_terms', ctx.account.ads_account_id, { runId: ctx.run.run_id })
     .filter(r => r['classification'] === 'WASTE');
   if (wastedTerms.length > 0) {
@@ -967,6 +967,47 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
         `${totalSpend.toFixed(2)} CHF verbrannt. Negative-Liste muss erweitert werden.`,
       confidence: 0.95,
       evidence: { count: wastedTerms.length, total_spend: round2(totalSpend), sample: wastedTerms.slice(0, 10) },
+    });
+  }
+
+  // 6b. Per-term irrelevance candidates (Tier 1 of the hybrid harness).
+  // The aggregate `wasted_search_terms` finding tells the operator HOW
+  // MUCH was wasted; this finding lists the individual terms that are
+  // worst-offenders so the LLM relevance classifier (Tier 2 in the
+  // audit-tool layer) can label each as relevant / irrelevant /
+  // uncertain against the customer profile. Irrelevant ones become
+  // negative-keyword candidates; uncertain ones get a Phase-A review
+  // marker. Relevant ones with spend = real customer interest with a
+  // bad LP/copy/setup, NOT waste — those need a different fix.
+  const irrelevantCandidates = collectIrrelevantSearchTermCandidates(ctx);
+  if (irrelevantCandidates.length > 0) {
+    findings.push({
+      area: 'irrelevant_search_term_spend',
+      severity: irrelevantCandidates[0]!.spend_chf > 100 ? 'HIGH' : 'MEDIUM',
+      text: `${irrelevantCandidates.length} einzelne Suchbegriffe mit hohem Spend ohne Conversions — ` +
+        `LLM-Relevance-Klassifikation läuft danach (Operator-Review für unsichere Treffer).`,
+      confidence: 0.7,
+      evidence: { candidates: irrelevantCandidates },
+    });
+  }
+
+  // 6c. Quality-Score collapse on high-spend keywords (pure Tier-1).
+  // QS-Drop ist immer ein hartes Signal für Anzeigen-Relevanz oder
+  // Landing-Page-Quality — keine LLM-Verifikation nötig. Detector
+  // gruppiert nach ad_group damit der Operator nicht 50 einzelne
+  // QS-3-Keywords sieht, sondern "Brand-Hamoni-AG: 8 KW unter QS 4
+  // mit 120 CHF Spend".
+  const qsCollapse = collectQualityScoreCollapse(ctx);
+  if (qsCollapse.length > 0) {
+    const totalSpend = qsCollapse.reduce((s, c) => s + c.spend_chf, 0);
+    findings.push({
+      area: 'quality_score_collapse',
+      severity: totalSpend > 50 ? 'HIGH' : 'MEDIUM',
+      text: `${qsCollapse.length} Ad-Groups mit Quality-Score < 4 auf high-spend Keywords ` +
+        `(${totalSpend.toFixed(2)} CHF gesamt). Anzeigen-Relevanz oder Landing-Page-Qualität ` +
+        `nachschauen — niedriger QS verteuert jeden Klick spürbar.`,
+      confidence: 0.95,
+      evidence: { count: qsCollapse.length, total_spend_chf: round2(totalSpend), candidates: qsCollapse },
     });
   }
 
@@ -1246,6 +1287,140 @@ function appendCampaignTargetFindings(findings: AuditFindingDraft[], ctx: Findin
       }
     }
   }
+}
+
+// ── Detector helpers (P1 / hybrid harness) ────────────────────────────
+
+interface IrrelevantSearchTermCandidate {
+  term: string;
+  campaign_name: string;
+  ad_group_name: string | null;
+  spend_chf: number;
+  clicks: number;
+  conversions: number;
+  /** Filled by the audit-tool's Tier-2 LLM classifier; absent until then. */
+  classification?: 'relevant' | 'irrelevant' | 'uncertain';
+  classification_reason?: string;
+}
+
+const IRRELEVANT_TERM_MIN_SPEND_CHF = 5;
+const IRRELEVANT_TERM_MIN_CLICKS = 5;
+const IRRELEVANT_TERM_TOP_N = 25;
+
+/** Collect raw candidates for the Tier-2 LLM relevance classifier:
+ *  search terms with spend ≥ threshold AND zero conversions AND
+ *  enough clicks to rule out volume noise. Returns top-N by spend
+ *  so the LLM call stays bounded — long-tail terms are addressed
+ *  by the existing aggregate `wasted_search_terms` finding. */
+function collectIrrelevantSearchTermCandidates(ctx: FindingContext): IrrelevantSearchTermCandidate[] {
+  const rows = ctx.store.getSnapshotRows<{
+    search_term: string | null; campaign_name: string | null; ad_group_name: string | null;
+    cost_micros: number | null; clicks: number | null; conversions: number | null;
+  }>('ads_search_terms', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+
+  // Aggregate per (term, campaign) so a term split across days/ad-groups
+  // shows as one candidate the LLM judges once.
+  type Bucket = {
+    term: string; campaign: string; adGroup: string | null;
+    spend: number; clicks: number; conversions: number;
+  };
+  const agg = new Map<string, Bucket>();
+  for (const r of rows) {
+    const term = (r.search_term ?? '').trim();
+    const campaign = (r.campaign_name ?? '').trim();
+    if (term.length === 0 || campaign.length === 0) continue;
+    const spend = (r.cost_micros ?? 0) / 1_000_000;
+    const clicks = r.clicks ?? 0;
+    const conversions = r.conversions ?? 0;
+    const key = `${campaign}\x00${term.toLowerCase()}`;
+    const prior = agg.get(key);
+    if (prior) {
+      prior.spend += spend; prior.clicks += clicks; prior.conversions += conversions;
+    } else {
+      agg.set(key, { term, campaign, adGroup: r.ad_group_name, spend, clicks, conversions });
+    }
+  }
+
+  const out: IrrelevantSearchTermCandidate[] = [];
+  for (const b of agg.values()) {
+    if (b.conversions > 0) continue;
+    if (b.spend < IRRELEVANT_TERM_MIN_SPEND_CHF) continue;
+    if (b.clicks < IRRELEVANT_TERM_MIN_CLICKS) continue;
+    out.push({
+      term: b.term, campaign_name: b.campaign, ad_group_name: b.adGroup,
+      spend_chf: round2(b.spend), clicks: b.clicks,
+      conversions: round2(b.conversions),
+    });
+  }
+  out.sort((a, b) => b.spend_chf - a.spend_chf);
+  return out.slice(0, IRRELEVANT_TERM_TOP_N);
+}
+
+interface QualityScoreCollapseGroup {
+  campaign_name: string;
+  ad_group_name: string;
+  keyword_count: number;
+  avg_quality_score: number;
+  spend_chf: number;
+  /** Sample of the worst keywords for the operator's drill-in. */
+  sample: ReadonlyArray<{ keyword: string; quality_score: number; spend_chf: number }>;
+}
+
+const QS_COLLAPSE_MAX_QS = 4; // QS < 4 considered collapsed
+const QS_COLLAPSE_MIN_AD_GROUP_SPEND_CHF = 10;
+const QS_COLLAPSE_TOP_N = 15;
+
+/** Pure Tier-1: group keywords with QS < threshold per ad-group, only
+ *  surface ad-groups whose collapsed-QS keywords have meaningful spend.
+ *  No LLM needed — QS is a structural Google Ads signal that always
+ *  costs money regardless of context. */
+function collectQualityScoreCollapse(ctx: FindingContext): QualityScoreCollapseGroup[] {
+  const rows = ctx.store.getSnapshotRows<{
+    campaign_name: string | null; ad_group_name: string | null;
+    keyword: string | null; quality_score: number | null; cost_micros: number | null;
+  }>('ads_keywords', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+
+  type AgBucket = {
+    campaign: string; adGroup: string;
+    keywords: Array<{ keyword: string; qs: number; spend: number }>;
+    spend: number; qsSum: number;
+  };
+  const agg = new Map<string, AgBucket>();
+  for (const r of rows) {
+    if (r.quality_score === null || r.quality_score >= QS_COLLAPSE_MAX_QS) continue;
+    const campaign = (r.campaign_name ?? '').trim();
+    const adGroup = (r.ad_group_name ?? '').trim();
+    const keyword = (r.keyword ?? '').trim();
+    if (!campaign || !adGroup || !keyword) continue;
+    const spend = (r.cost_micros ?? 0) / 1_000_000;
+    const key = `${campaign}\x00${adGroup}`;
+    const bucket = agg.get(key) ?? {
+      campaign, adGroup, keywords: [], spend: 0, qsSum: 0,
+    };
+    bucket.keywords.push({ keyword, qs: r.quality_score, spend });
+    bucket.spend += spend;
+    bucket.qsSum += r.quality_score;
+    agg.set(key, bucket);
+  }
+
+  const out: QualityScoreCollapseGroup[] = [];
+  for (const b of agg.values()) {
+    if (b.spend < QS_COLLAPSE_MIN_AD_GROUP_SPEND_CHF) continue;
+    const avgQs = b.keywords.length > 0 ? b.qsSum / b.keywords.length : 0;
+    const sample = [...b.keywords]
+      .sort((x, y) => (x.qs - y.qs) || (y.spend - x.spend))
+      .slice(0, 5)
+      .map(k => ({ keyword: k.keyword, quality_score: k.qs, spend_chf: round2(k.spend) }));
+    out.push({
+      campaign_name: b.campaign, ad_group_name: b.adGroup,
+      keyword_count: b.keywords.length,
+      avg_quality_score: round2(avgQs),
+      spend_chf: round2(b.spend),
+      sample,
+    });
+  }
+  out.sort((a, b) => b.spend_chf - a.spend_chf);
+  return out.slice(0, QS_COLLAPSE_TOP_N);
 }
 
 // ── Number helpers ────────────────────────────────────────────────────

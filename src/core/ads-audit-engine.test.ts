@@ -342,6 +342,113 @@ describe('runAudit', () => {
   });
 });
 
+describe('runAudit — P1 hybrid detectors', () => {
+  let tempDir: string;
+  let store: AdsDataStore;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'lynox-audit-p1-'));
+    store = new AdsDataStore(join(tempDir, 'ads-optimizer.db'));
+  });
+
+  afterEach(async () => {
+    store.close();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('Tier-1: irrelevant_search_term_spend collects per-term wasted candidates ordered by spend', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    // Three search terms: one wastes a lot (top candidate), one a little
+    // (still over threshold), one too small to surface.
+    store.insertSearchTermsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { searchTerm: 'kaffeemaschine entkalken', campaignName: 'Search Brand',
+          adGroupName: 'AG-A', clicks: 30, costMicros: 80_000_000, conversions: 0 },
+        { searchTerm: 'duschkopf reinigen', campaignName: 'Search Brand',
+          adGroupName: 'AG-A', clicks: 12, costMicros: 25_000_000, conversions: 0 },
+        { searchTerm: 'wasserhahn', campaignName: 'Search Brand',
+          adGroupName: 'AG-A', clicks: 2, costMicros: 1_000_000, conversions: 0 },
+      ],
+    });
+
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'irrelevant_search_term_spend');
+    expect(finding).toBeDefined();
+    const candidates = (finding!.evidence as { candidates: Array<{ term: string; spend_chf: number }> }).candidates;
+    // Two surviving (above min spend + min clicks); ordered by spend desc.
+    expect(candidates.map(c => c.term)).toEqual(['kaffeemaschine entkalken', 'duschkopf reinigen']);
+    expect(candidates[0]!.spend_chf).toBeCloseTo(80, 1);
+    // Tier-1 candidates ship without classification; Tier-2 fills it in.
+    expect((candidates[0] as { classification?: string }).classification).toBeUndefined();
+  });
+
+  it('Tier-1: irrelevant_search_term_spend skips terms that already converted', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertSearchTermsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        // Spend 50 CHF but produced 2 conversions — not waste.
+        { searchTerm: 'wasserfilter test', campaignName: 'Search Brand',
+          adGroupName: 'AG-A', clicks: 20, costMicros: 50_000_000, conversions: 2 },
+      ],
+    });
+    const result = runAudit(store, ACCOUNT);
+    expect(result.findings.find(f => f.area === 'irrelevant_search_term_spend')).toBeUndefined();
+  });
+
+  it('Tier-1: quality_score_collapse groups < QS-4 keywords by ad-group with sample', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertKeywordsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { keyword: 'bad-kw-1', campaignName: 'Search Brand', adGroupName: 'AG-Bad',
+          matchType: 'EXACT', qualityScore: 2, costMicros: 8_000_000, clicks: 30 },
+        { keyword: 'bad-kw-2', campaignName: 'Search Brand', adGroupName: 'AG-Bad',
+          matchType: 'EXACT', qualityScore: 3, costMicros: 7_000_000, clicks: 20 },
+        // Healthy QS keyword — must NOT contribute to the collapse group.
+        { keyword: 'good-kw', campaignName: 'Search Brand', adGroupName: 'AG-Bad',
+          matchType: 'EXACT', qualityScore: 8, costMicros: 50_000_000, clicks: 100 },
+        // Different ad-group with low spend — filtered by spend threshold.
+        { keyword: 'low-spend-kw', campaignName: 'Search Brand', adGroupName: 'AG-Cheap',
+          matchType: 'EXACT', qualityScore: 2, costMicros: 1_000_000, clicks: 1 },
+      ],
+    });
+
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'quality_score_collapse');
+    expect(finding).toBeDefined();
+    const candidates = (finding!.evidence as {
+      candidates: Array<{ ad_group_name: string; keyword_count: number; spend_chf: number; sample: unknown[] }>;
+    }).candidates;
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.ad_group_name).toBe('AG-Bad');
+    expect(candidates[0]!.keyword_count).toBe(2);
+    expect(candidates[0]!.spend_chf).toBeCloseTo(15, 1);
+  });
+
+  it('Tier-1: quality_score_collapse skips when total ad-group spend is below threshold', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertKeywordsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        keyword: 'tiny-kw', campaignName: 'Search Brand', adGroupName: 'AG-Tiny',
+        matchType: 'EXACT', qualityScore: 2, costMicros: 1_000_000, clicks: 5,
+      }],
+    });
+    const result = runAudit(store, ACCOUNT);
+    expect(result.findings.find(f => f.area === 'quality_score_collapse')).toBeUndefined();
+  });
+});
+
 // ── Fixture helpers ───────────────────────────────────────────────────
 
 function seedAccount(
