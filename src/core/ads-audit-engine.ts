@@ -463,17 +463,33 @@ function clusterUntargetedThemes(
 }
 
 const THEME_STOPWORDS = new Set([
+  // Articles / prepositions / conjunctions (DE + EN).
   'der', 'die', 'das', 'und', 'oder', 'mit', 'für', 'fuer', 'auf', 'aus',
   'ein', 'eine', 'einen', 'eines', 'einem', 'einer', 'den', 'dem', 'des',
   'im', 'in', 'an', 'zu', 'zum', 'zur', 'von', 'vom', 'bei',
   'the', 'and', 'for', 'with', 'from', 'into',
+  // Funnel / commerce words: never identify a category, just intent.
+  // Without filtering them the theme-coverage gap detector hallucinates
+  // "Theme-Kaufen" / "Theme-Online" asset_groups.
+  'kaufen', 'bestellen', 'online', 'shop', 'shops', 'preis', 'preise',
+  'günstig', 'guenstig', 'billig', 'angebot', 'angebote', 'sale', 'rabatt',
+  'aktion', 'beste', 'bester', 'test', 'tests', 'vergleich', 'erfahrung',
+  'erfahrungen', 'schweiz', 'austria', 'österreich', 'oesterreich',
+  'deutschland',
+  'buy', 'cheap', 'best', 'review', 'reviews', 'shipping', 'delivery',
+  'price', 'prices',
+  // Common foreign-language category nouns that slip into Swiss-DE
+  // PMax search-term clusters but are not actionable as DE asset_groups.
+  // (Task #51 will replace this with a proper customer.languages filter,
+  // for now the explicit list catches the common offenders.)
+  'water', 'cheap',
 ]);
 
 function tokenize(label: string): string[] {
   return label
     .split(/[^\p{L}\p{N}]+/u)
     .map(t => t.trim())
-    .filter(t => t.length >= 3 && !THEME_STOPWORDS.has(t));
+    .filter(t => t.length >= 4 && !THEME_STOPWORDS.has(t));
 }
 
 interface PerfOutlier {

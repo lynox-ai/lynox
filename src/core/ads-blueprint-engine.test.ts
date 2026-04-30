@@ -275,6 +275,70 @@ describe('runBlueprint', () => {
     expect(negatives).toHaveLength(4);
     const negTargets = new Set(negatives.map(n => n['scope_target']));
     expect(negTargets).toEqual(new Set(['PMax | Gesamtsortiment', 'PMax | Wasserfilter']));
+
+    // Brand-Search must use MAXIMIZE_CONVERSIONS — Editor blocks
+    // standalone TARGET_CPA on new Search campaigns (deprecated).
+    expect(campPayload['bidding_strategy_type']).toBe('MAXIMIZE_CONVERSIONS');
+
+    // Each Brand-Search ad-group must ship with an RSA — without it
+    // Editor warns "Anzeigengruppe enthält keine aktivierten Anzeigen"
+    // and the ad-group can't serve.
+    const rsas = store.listBlueprintEntities(r.run_id, { entityType: 'rsa_ad', kind: 'NEW' });
+    expect(rsas).toHaveLength(2);
+    const rsaPayloads = rsas.map(r => JSON.parse(r.payload_json) as Record<string, unknown>);
+    expect(new Set(rsaPayloads.map(p => p['ad_group_name']))).toEqual(
+      new Set(['Brand-Aquanatura', 'Brand-Maunawai']),
+    );
+    for (const p of rsaPayloads) {
+      const headlines = p['headlines'] as string[];
+      const descriptions = p['descriptions'] as string[];
+      expect(headlines.length).toBeGreaterThanOrEqual(3);
+      expect(descriptions.length).toBeGreaterThanOrEqual(2);
+      expect(p['final_url']).toMatch(/^https?:\/\//);
+      for (const h of headlines) expect(h.length).toBeLessThanOrEqual(30);
+      for (const d of descriptions) expect(d.length).toBeLessThanOrEqual(90);
+    }
+  });
+
+  it('Theme-expansion AGs ship with HEADLINE + LONG_HEADLINE + DESCRIPTION placeholder assets', () => {
+    seedCustomerAndAccount(store);
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'pmax1', 'PMax | Gesamtsortiment', { channelType: 'PERFORMANCE_MAX' });
+    // Synthetic theme-coverage finding mirrors what audit produces. Three
+    // strong themes is the minimum for the expansion path to fire.
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_theme_coverage_gap', severity: 'MEDIUM', source: 'deterministic',
+      text: 'PMax-Themen ohne AG …', confidence: 0.75,
+      evidence: {
+        themes: [
+          { token: 'kefir', clusters: 32, sample: ['kefir milch', 'kefir set'] },
+          { token: 'kombucha', clusters: 24, sample: ['kombucha kaufen'] },
+          { token: 'glas', clusters: 12, sample: ['glasflasche'] },
+        ],
+        existing_asset_groups: [],
+      },
+    });
+
+    runBlueprint(store, ACCOUNT);
+
+    // Each theme-AG must have at least 1 LONG_HEADLINE — PMax requires it
+    // and Editor blocks the AG without one ("Fügen Sie mindestens 1 langen
+    // Anzeigentitel hinzu").
+    const newAssets = store.listBlueprintEntities(r.run_id, { entityType: 'asset', kind: 'NEW' })
+      .map(a => JSON.parse(a.payload_json) as Record<string, unknown>);
+    const longHeadlines = newAssets.filter(a => a['field_type'] === 'LONG_HEADLINE');
+    const headlines = newAssets.filter(a => a['field_type'] === 'HEADLINE');
+    const descriptions = newAssets.filter(a => a['field_type'] === 'DESCRIPTION');
+    // Three theme-AGs × ≥1 long headline.
+    expect(longHeadlines.length).toBeGreaterThanOrEqual(3);
+    expect(headlines.length).toBeGreaterThanOrEqual(9); // ≥3 short headlines per AG
+    expect(descriptions.length).toBeGreaterThanOrEqual(6);
+    // Length caps must hold: HEADLINE ≤ 30, LONG_HEADLINE/DESCRIPTION ≤ 90.
+    for (const h of headlines) expect((h['text'] as string).length).toBeLessThanOrEqual(30);
+    for (const lh of longHeadlines) expect((lh['text'] as string).length).toBeLessThanOrEqual(90);
+    for (const d of descriptions) expect((d['text'] as string).length).toBeLessThanOrEqual(90);
   });
 
   it('drops orphan ad_group / keyword / asset_group whose campaign is not in the snapshot', () => {

@@ -311,7 +311,12 @@ export function runBlueprint(
       payload: {
         campaign_name: brandSearch.campaign.name,
         channel_type: 'SEARCH',
-        bidding_strategy_type: 'TARGET_CPA',
+        // Google deprecated standalone TARGET_CPA for new Search campaigns
+        // (Editor blocks it: "Die Gebotsstrategie 'Ziel-CPA' kann nicht
+        // mehr in Suchkampagnen verwendet werden. Nutzen Sie stattdessen
+        // die Gebotsstrategie 'Conversions maximieren'."). MAXIMIZE_CONVERSIONS
+        // accepts a Target-CPA portfolio constraint as a soft cap.
+        bidding_strategy_type: 'MAXIMIZE_CONVERSIONS',
         target_cpa_chf: brandSearch.campaign.targetCpa,
         budget_chf: brandSearch.campaign.budget,
       },
@@ -354,6 +359,31 @@ export function runBlueprint(
         runId: run.run_id, entityType: 'keyword', entityExternalId: kExt,
         decision: 'NEW', confidence: 0.85,
         rationale: `Brand-Keyword "${k.keyword}" (${k.matchType}).`,
+      });
+    }
+    // RSA per ad-group — Editor blocks publish for an ad-group without
+    // any active ad. Status defaults to Paused via the standard NEW
+    // path; operator activates after image/asset review.
+    for (const rsa of brandSearch.rsas) {
+      const rsaExt = `bp.rsa.${slug(brandSearch.campaign.name)}.${slug(rsa.adGroupName)}`;
+      persistedEntityIds.push(store.insertBlueprintEntity({
+        runId: run.run_id, adsAccountId, entityType: 'rsa_ad', kind: 'NEW',
+        externalId: rsaExt, confidence: 0.7,
+        rationale: `Brand-RSA für Ad-Group "${rsa.adGroupName}" — Auto-Headlines/Descriptions, ` +
+          `final_url aus Top-LP. Agent soll mit ads_blueprint_entity_propose verfeinern.`,
+        payload: {
+          campaign_name: brandSearch.campaign.name,
+          ad_group_name: rsa.adGroupName,
+          headlines: rsa.headlines,
+          descriptions: rsa.descriptions,
+          final_url: rsa.finalUrl,
+        },
+        namingValid: true, namingErrors: [],
+      }).blueprint_id);
+      store.insertRunDecision({
+        runId: run.run_id, entityType: 'rsa_ad', entityExternalId: rsaExt,
+        decision: 'NEW', confidence: 0.7,
+        rationale: `Brand-RSA Auto-Placeholder für "${rsa.adGroupName}".`,
       });
     }
     // Cross-channel negatives — append into the negatives bucket so the
@@ -901,7 +931,7 @@ function deviceModifierKey(device: string): string | null {
 }
 
 interface PlaceholderAsset {
-  fieldType: 'HEADLINE' | 'DESCRIPTION';
+  fieldType: 'HEADLINE' | 'LONG_HEADLINE' | 'DESCRIPTION';
   index: number;
   text: string;
 }
@@ -914,17 +944,30 @@ const HEADLINE_TEMPLATES: ReadonlyArray<(theme: string) => string> = [
   t => `${capitalize(t)} entdecken`,
 ];
 
+const LONG_HEADLINE_TEMPLATES: ReadonlyArray<(theme: string) => string> = [
+  t => `Hochwertige ${capitalize(t)}-Produkte direkt aus der Schweiz bestellen`,
+  t => `${capitalize(t)} entdecken — fair, nachhaltig, regional aus der Schweiz`,
+  t => `Premium-${capitalize(t)} mit Schweizer Qualität: kuratierte Auswahl online`,
+];
+
 const DESCRIPTION_TEMPLATES: ReadonlyArray<(theme: string) => string> = [
   t => `Frische ${capitalize(t)}-Produkte direkt aus der Schweiz – fair und nachhaltig.`,
   t => `Hochwertig, nachhaltig, fair – ${capitalize(t)} online bestellen.`,
 ];
 
-/** Build 5 headlines + 2 descriptions for a NEW theme-AG so the emit
- *  validator's content-completeness check passes and the Editor import is
- *  immediately usable. Templates that exceed Editor's 30/90-char caps after
- *  substitution are dropped; the validator catches the remaining gap if any.
- *  The agent is expected to refine these via ads_blueprint_entity_propose
- *  (LP-crawl + Brand-Voice) before final import. */
+/** Build 5 headlines + 2 long headlines + 2 descriptions for a NEW
+ *  theme-AG so the emit validator's content-completeness check passes
+ *  and the Editor import is immediately usable. PMax requires:
+ *    - ≥3 short headlines (≤30 chars)
+ *    - ≥1 long headline   (≤90 chars)
+ *    - ≥2 descriptions    (≤90 chars)
+ *    - ≥1 1:1 image + ≥1 1.91:1 image (image assets are NOT generated
+ *      by the optimizer — must be uploaded by the customer in the UI;
+ *      that's why theme-AGs ship paused). Templates that exceed the
+ *  caps after substitution are dropped; the validator catches the
+ *  remaining gap if any. The agent is expected to refine these via
+ *  ads_blueprint_entity_propose (LP-crawl + Brand-Voice) before final
+ *  import. */
 function generatePlaceholderAssets(themeToken: string): PlaceholderAsset[] {
   const t = (themeToken ?? '').trim();
   if (t.length === 0) return [];
@@ -935,6 +978,14 @@ function generatePlaceholderAssets(themeToken: string): PlaceholderAsset[] {
     if (text.length <= 30) {
       out.push({ fieldType: 'HEADLINE', index: h++, text });
       if (h > 5) break;
+    }
+  }
+  let lh = 1;
+  for (const tpl of LONG_HEADLINE_TEMPLATES) {
+    const text = tpl(t);
+    if (text.length <= 90) {
+      out.push({ fieldType: 'LONG_HEADLINE', index: lh++, text });
+      if (lh > 2) break;
     }
   }
   let d = 1;
@@ -952,6 +1003,12 @@ interface BrandSearchProposal {
   campaign: { name: string; targetCpa: number; budget: number };
   adGroups: ReadonlyArray<{ name: string; brandToken: string }>;
   keywords: ReadonlyArray<{ adGroupName: string; keyword: string; matchType: 'Phrase' | 'Exact' }>;
+  /** RSA per ad-group — Editor blocks publish for an ad-group with zero
+   *  ads ("Anzeigengruppe enthält keine aktivierten Anzeigen"). Final
+   *  URL falls back to the customer's top-clicked LP. */
+  rsas: ReadonlyArray<{
+    adGroupName: string; headlines: string[]; descriptions: string[]; finalUrl: string;
+  }>;
   crossChannelNegatives: ReadonlyArray<{
     keywordText: string; matchType: 'Phrase';
     scope: 'campaign'; scopeTarget: string;
@@ -1027,6 +1084,36 @@ function generateBrandSearchProposals(
     })),
   );
 
+  // Pick a sensible default final_url for the RSA: top landing page by
+  // clicks from the snapshot (typically the customer's homepage or the
+  // strongest brand-page). The agent can refine via ads_blueprint_entity_propose
+  // after import — what matters here is that Editor sees a valid URL so
+  // the RSA actually publishes.
+  const lpRows = store.getSnapshotRows<{ landing_page_url: string | null; clicks: number | null }>(
+    'ads_landing_pages', run.ads_account_id, { runId: run.run_id },
+  );
+  const topLp = [...lpRows]
+    .filter(r => (r.landing_page_url ?? '').startsWith('http'))
+    .sort((a, b) => (b.clicks ?? 0) - (a.clicks ?? 0))[0];
+  const fallbackUrl = topLp?.landing_page_url ?? `https://${(customer.client_name ?? '').toLowerCase().replace(/\s+/g, '')}.ch`;
+
+  const rsas = adGroups.map(ag => {
+    const brand = capitalize(ag.brandToken);
+    const headlines = [
+      brand,
+      `${brand} kaufen`,
+      `${brand} online`,
+      `${brand} Schweiz`,
+      `${brand} entdecken`,
+      `Original ${brand}`,
+    ].filter(h => h.length <= 30);
+    const descriptions = [
+      `Original ${brand} direkt vom Schweizer Anbieter — schnelle Lieferung, faire Preise.`,
+      `Hochwertige ${brand}-Produkte: kuratierte Auswahl, persönlicher Kundenservice.`,
+    ].filter(d => d.length <= 90);
+    return { adGroupName: ag.name, headlines, descriptions, finalUrl: fallbackUrl };
+  });
+
   const customerSlug = customer.customer_id;
   const rationale =
     `Brand-Inflation-Auto-Propose (${customerSlug}): ${brandTokens.length} Brand(s) ` +
@@ -1038,7 +1125,7 @@ function generateBrandSearchProposals(
 
   return {
     campaign: { name: campaignName, targetCpa, budget: dailyBudget },
-    adGroups, keywords, crossChannelNegatives, rationale,
+    adGroups, keywords, rsas, crossChannelNegatives, rationale,
   };
 }
 
