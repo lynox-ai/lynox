@@ -78,6 +78,10 @@ export interface ChatMessage {
 	thinking?: string;
 	usage?: UsageInfo;
 	queued?: boolean;
+	/** Stable id correlating this bubble with its `messageQueue` entry. Set
+	 *  while queued, kept after un-queue (cheap) so removeQueuedMessage can
+	 *  always identify which queue entry a bubble belongs to. */
+	queueId?: string;
 	/** Message failed to send (API error, connection lost, etc.) */
 	failed?: boolean;
 	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
@@ -155,8 +159,16 @@ export interface TabsPrompt {
 }
 
 interface QueuedMessage {
+	id: string;
 	task: string;
 	files?: FileAttachment[];
+}
+
+function newQueueId(): string {
+	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+		return crypto.randomUUID();
+	}
+	return `q_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**
@@ -373,13 +385,14 @@ if (typeof window !== 'undefined') {
 		if (lastFailed && !isStreaming) {
 			lastFailed.failed = false;
 			lastFailed.queued = true;
-			messageQueue.push({ task: lastFailed.content });
+			lastFailed.queueId = newQueueId();
+			messageQueue.push({ id: lastFailed.queueId, task: lastFailed.content });
 			chatError = null;
 			// Small delay to let network stabilize
 			setTimeout(() => {
 				if (messageQueue.length > 0) {
 					const next = messageQueue.shift()!;
-					void _executeRun(next.task, next.files);
+					void _executeRun(next.task, next.files, undefined, undefined, next.id);
 				}
 			}, 500);
 		}
@@ -458,8 +471,9 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 	if (isStreaming) {
 		const display = displayText ?? task;
 		const fileNames = files?.map((f) => f.name).join(', ');
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true });
-		messageQueue.push({ task, files });
+		const id = newQueueId();
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id });
+		messageQueue.push({ id, task, files });
 		return;
 	}
 
@@ -491,7 +505,7 @@ function mapApiError(status: number, detail: string): string {
 	return t('chat.error_start');
 }
 
-async function _executeRun(task: string, files?: FileAttachment[], displayText?: string, runOptions?: RunOptions): Promise<void> {
+async function _executeRun(task: string, files?: FileAttachment[], displayText?: string, runOptions?: RunOptions, queueId?: string): Promise<void> {
 	chatError = null;
 	retryStatus = null;
 
@@ -513,10 +527,14 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		throw err;
 	}
 
-	// Find and un-queue if this message was already added as queued
+	// Find and un-queue if this message was already added as queued.
+	// Prefer id-based lookup when the run originated from messageQueue;
+	// fall back to display-prefix match for the legacy direct-send path.
 	let userMsgIdx: number;
 	const display = displayText ?? task;
-	const queuedIdx = messages.findIndex((m) => m.role === 'user' && m.queued && m.content.startsWith(display.slice(0, 50)));
+	const queuedIdx = queueId !== undefined
+		? messages.findIndex((m) => m.role === 'user' && m.queued && m.queueId === queueId)
+		: messages.findIndex((m) => m.role === 'user' && m.queued && m.content.startsWith(display.slice(0, 50)));
 	if (queuedIdx !== -1) {
 		messages[queuedIdx]!.queued = false;
 		messages[queuedIdx]!.failed = false;
@@ -789,7 +807,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	if (messageQueue.length > 0) {
 		const next = messageQueue.shift()!;
 		// Small delay so the UI updates before next run starts
-		setTimeout(() => { _executeRun(next.task, next.files); }, 100);
+		setTimeout(() => { void _executeRun(next.task, next.files, undefined, undefined, next.id); }, 100);
 	}
 }
 
@@ -1331,19 +1349,24 @@ export function cancelQueue(): void {
 
 /**
  * Remove a single queued user message — both the rendered bubble and its
- * matching task in `messageQueue`. The queue is FIFO and pushed in lockstep
- * with the bubbles, so we match the first messageQueue entry whose task
- * starts with the bubble's display text (mirroring the un-queue logic in
- * `_executeRun`, which strips any "📎 …" file marker added during push).
+ * matching `messageQueue` entry. Matched strictly by `queueId` so duplicate
+ * content, custom displayText (where bubble.content ≠ queue.task), and
+ * concurrent dequeues don't desync the FIFO. If the queue entry has already
+ * been shifted (run is starting), this is a no-op so the run isn't left
+ * with an orphaned bubble.
  */
 export function removeQueuedMessage(target: ChatMessage): void {
-	const msgIdx = messages.findIndex((m) => m === target);
-	if (msgIdx === -1 || !messages[msgIdx]?.queued) return;
-	messages.splice(msgIdx, 1);
+	const id = target.queueId;
+	if (id === undefined) return;
 
-	const display = (target.content.split('\n📎 ')[0] ?? target.content).slice(0, 50);
-	const queueIdx = messageQueue.findIndex((q) => q.task.startsWith(display));
-	if (queueIdx !== -1) messageQueue.splice(queueIdx, 1);
+	const queueIdx = messageQueue.findIndex((q) => q.id === id);
+	if (queueIdx === -1) return;
+
+	const msgIdx = messages.findIndex((m) => m.queueId === id);
+	if (msgIdx === -1 || !messages[msgIdx]?.queued) return;
+
+	messages.splice(msgIdx, 1);
+	messageQueue.splice(queueIdx, 1);
 }
 
 export function getMessages() {
