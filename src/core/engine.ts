@@ -644,6 +644,8 @@ export class Engine {
         this.registry.register(createAdsBlueprintReviewPicksTool(this._adsDataStore) as ToolEntry);
         const { createAdsBlueprintReviewTool } = await import('../tools/builtin/ads-blueprint-review.js');
         this.registry.register(createAdsBlueprintReviewTool(this._adsDataStore) as ToolEntry);
+        const { createAdsEmitDiffPreviewTool } = await import('../tools/builtin/ads-emit-diff-preview.js');
+        this.registry.register(createAdsEmitDiffPreviewTool(this._adsDataStore) as ToolEntry);
         const { createAdsEmitCsvTool } = await import('../tools/builtin/ads-emit-csv.js');
         this.registry.register(createAdsEmitCsvTool(this._adsDataStore) as ToolEntry);
         const { createAdsMarkImportedTool } = await import('../tools/builtin/ads-mark-imported.js');

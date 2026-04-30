@@ -32,15 +32,30 @@ describe('ads_emit_csv tool', () => {
   });
 
   it('returns error string for unknown account', async () => {
-    const out = await tool.handler({ ads_account_id: 'nope' }, fakeAgent);
+    const out = await tool.handler({ ads_account_id: 'nope', confirm_account_id: 'nope' }, fakeAgent);
     expect(out).toMatch(/^ads_emit_csv failed/);
+  });
+
+  it('P6: refuses emit when confirm_account_id is missing', async () => {
+    const out = await tool.handler({ ads_account_id: ACCOUNT }, fakeAgent);
+    expect(out).toMatch(/account-lock check failed/);
+    expect(out).toMatch(/<missing>/);
+  });
+
+  it('P6: refuses emit when confirm_account_id mismatches ads_account_id', async () => {
+    const out = await tool.handler({
+      ads_account_id: ACCOUNT,
+      confirm_account_id: 'wrong-account',
+    }, fakeAgent);
+    expect(out).toMatch(/account-lock check failed/);
+    expect(out).toMatch(/wrong-account/);
   });
 
   it('writes per-campaign CSVs and produces success-shaped markdown', async () => {
     seedFullScenario(store);
     runBlueprint(store, ACCOUNT);
 
-    const out = await tool.handler({ ads_account_id: ACCOUNT, workspace_dir: workspaceDir }, fakeAgent);
+    const out = await tool.handler({ ads_account_id: ACCOUNT, confirm_account_id: ACCOUNT, workspace_dir: workspaceDir }, fakeAgent);
     expect(out).toMatch(/^# Emit Report/);
     expect(out).toMatch(/Emit erfolgreich/);
     expect(out).toMatch(/Editor-CSV-Pack — Direkt herunterladen/);
@@ -66,7 +81,7 @@ describe('ads_emit_csv tool', () => {
       confidence: 1, rationale: '',
     });
 
-    const out = await tool.handler({ ads_account_id: ACCOUNT, workspace_dir: workspaceDir }, fakeAgent);
+    const out = await tool.handler({ ads_account_id: ACCOUNT, confirm_account_id: ACCOUNT, workspace_dir: workspaceDir }, fakeAgent);
     expect(out).toMatch(/Pre-Emit-Validators/);
     expect(out).toMatch(/Errors/);
     expect(out).toMatch(/HARD-Checks/);

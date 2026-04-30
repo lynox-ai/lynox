@@ -30,6 +30,13 @@ interface AdsEmitCsvInput {
    *  that has blueprint entities (which may be older than the latest audit
    *  run if the latest blueprint was skipped due to pending import). */
   run_id?: number | undefined;
+  /** P6: required account-lock confirmation. Operator must supply the
+   *  EXACT same ads_account_id again to confirm they're emitting against
+   *  the right account. Defends against fat-finger emit on the wrong
+   *  customer (the auto-pipeline can't tell the difference; the operator
+   *  has to pin it). When omitted or mismatched, emit is refused with a
+   *  precondition error. */
+  confirm_account_id?: string | undefined;
 }
 
 const DESCRIPTION = [
@@ -73,12 +80,24 @@ export function createAdsEmitCsvTool(store: AdsDataStore): ToolEntry<AdsEmitCsvI
             type: 'integer',
             description: 'Explicit run id to emit. Omit to auto-pick the latest run with blueprint entities — useful when the latest audit run was skipped due to pending import.',
           },
+          confirm_account_id: {
+            type: 'string',
+            description: 'REQUIRED account-lock confirmation. Must match ads_account_id verbatim. Defends against emit on the wrong customer account.',
+          },
         },
-        required: ['ads_account_id'],
+        required: ['ads_account_id', 'confirm_account_id'],
       },
     },
     handler: async (input: AdsEmitCsvInput, _agent: IAgent): Promise<string> => {
       try {
+        // P6 Account-lock: refuse if confirm_account_id is missing or
+        // doesn't match. The auto-pipeline cannot detect "wrong account"
+        // emit; the operator pins it explicitly.
+        if (!input.confirm_account_id || input.confirm_account_id !== input.ads_account_id) {
+          const provided = input.confirm_account_id ?? '<missing>';
+          return `ads_emit_csv failed: account-lock check failed. ads_account_id="${input.ads_account_id}" but confirm_account_id="${provided}". ` +
+            `Pass both fields with the SAME ads_account_id value to acknowledge you are emitting against this account.`;
+        }
         const result = runEmit(store, input.ads_account_id, {
           ...(input.workspace_dir !== undefined ? { workspaceDir: input.workspace_dir } : {}),
           ...(input.run_id !== undefined ? { runId: input.run_id } : {}),
