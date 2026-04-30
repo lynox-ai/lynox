@@ -809,6 +809,42 @@ const MIGRATIONS: string[] = [
    DROP TABLE ads_findings_v6;
    CREATE INDEX IF NOT EXISTS idx_findings_run ON ads_findings(run_id, severity);
    CREATE INDEX IF NOT EXISTS idx_findings_area ON ads_findings(ads_account_id, area);`,
+
+  // Migration v8: Strategist-Brief + Critique persistence. The brief
+  // is the LLM-synthesized headline + priorities + risks + do-not-touch
+  // list emitted by ads_strategist_brief after each audit run; the
+  // critique is the LLM-driven challenge of the auto-blueprint emitted
+  // by ads_blueprint_critique. Both are persisted so subsequent cycles
+  // can reference / diff against them, and so the audit Markdown can
+  // include them as the "lead" section.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (8);
+
+   CREATE TABLE IF NOT EXISTS ads_strategist_briefs (
+     brief_id INTEGER PRIMARY KEY AUTOINCREMENT,
+     run_id INTEGER NOT NULL REFERENCES ads_audit_runs(run_id),
+     ads_account_id TEXT NOT NULL,
+     account_state TEXT NOT NULL CHECK (account_state IN
+       ('greenfield', 'bootstrap', 'messy_running', 'structured_optimizing', 'high_performance')),
+     headline TEXT NOT NULL,
+     priorities_json TEXT NOT NULL DEFAULT '[]',
+     risks_json TEXT NOT NULL DEFAULT '[]',
+     do_not_touch_json TEXT NOT NULL DEFAULT '[]',
+     classification_reason TEXT NOT NULL DEFAULT '',
+     llm_failed INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS idx_briefs_run ON ads_strategist_briefs(run_id);
+   CREATE INDEX IF NOT EXISTS idx_briefs_account_state ON ads_strategist_briefs(ads_account_id, account_state);
+
+   CREATE TABLE IF NOT EXISTS ads_blueprint_critiques (
+     critique_id INTEGER PRIMARY KEY AUTOINCREMENT,
+     run_id INTEGER NOT NULL REFERENCES ads_audit_runs(run_id),
+     ads_account_id TEXT NOT NULL,
+     challenges_json TEXT NOT NULL DEFAULT '[]',
+     llm_failed INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS idx_critiques_run ON ads_blueprint_critiques(run_id);`,
 ];
 
 export interface CustomerProfileRow {
@@ -883,6 +919,69 @@ export interface AdsRunDecisionRow {
 }
 
 export type AdsFindingSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'BLOCK';
+
+export type AdsAccountState =
+  | 'greenfield'
+  | 'bootstrap'
+  | 'messy_running'
+  | 'structured_optimizing'
+  | 'high_performance';
+
+export interface StrategistPriority {
+  title: string;
+  rationale: string;
+  actions: string[];
+}
+
+export interface StrategistBriefRow {
+  brief_id: number;
+  run_id: number;
+  ads_account_id: string;
+  account_state: AdsAccountState;
+  headline: string;
+  priorities_json: string;
+  risks_json: string;
+  do_not_touch_json: string;
+  classification_reason: string;
+  llm_failed: number;
+  created_at: string;
+}
+
+export interface InsertStrategistBriefInput {
+  runId: number;
+  adsAccountId: string;
+  accountState: AdsAccountState;
+  headline: string;
+  priorities: readonly StrategistPriority[];
+  risks: readonly string[];
+  doNotTouch: readonly string[];
+  classificationReason: string;
+  llmFailed: boolean;
+}
+
+export interface BlueprintCritiqueChallenge {
+  title: string;
+  challenge: string;
+  /** Optional pointer back to the blueprint entity / finding the
+   *  challenge concerns, so the operator can drill in. */
+  ref?: string | undefined;
+}
+
+export interface BlueprintCritiqueRow {
+  critique_id: number;
+  run_id: number;
+  ads_account_id: string;
+  challenges_json: string;
+  llm_failed: number;
+  created_at: string;
+}
+
+export interface InsertBlueprintCritiqueInput {
+  runId: number;
+  adsAccountId: string;
+  challenges: readonly BlueprintCritiqueChallenge[];
+  llmFailed: boolean;
+}
 export type AdsFindingSource = 'deterministic' | 'agent';
 
 export type AdsBlueprintEntityKind = 'KEEP' | 'RENAME' | 'NEW' | 'PAUSE' | 'SPLIT' | 'MERGE';
@@ -1403,6 +1502,63 @@ export class AdsDataStore {
       DELETE FROM ads_findings WHERE run_id = ? AND source = ?
     `).run(runId, source);
     return Number(result.changes);
+  }
+
+  // ── Strategist Brief (D4) ──────────────────────────────────────
+  // The brief is the LLM-synthesized "lead" of the audit Markdown:
+  // account-state classification + 3 priorities + risks + don't-touch
+  // list. Replaces (not appends) on re-run so the audit Markdown
+  // stays accurate when the user re-triggers ads_audit_run.
+
+  insertStrategistBrief(input: InsertStrategistBriefInput): StrategistBriefRow {
+    const now = new Date().toISOString();
+    // Replace pattern — re-running audit re-synthesizes the brief.
+    this.db.prepare('DELETE FROM ads_strategist_briefs WHERE run_id = ?').run(input.runId);
+    const result = this.db.prepare(`
+      INSERT INTO ads_strategist_briefs (
+        run_id, ads_account_id, account_state, headline,
+        priorities_json, risks_json, do_not_touch_json,
+        classification_reason, llm_failed, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.runId, input.adsAccountId, input.accountState, input.headline,
+      JSON.stringify(input.priorities), JSON.stringify(input.risks),
+      JSON.stringify(input.doNotTouch),
+      input.classificationReason, input.llmFailed ? 1 : 0, now,
+    );
+    return this.db.prepare('SELECT * FROM ads_strategist_briefs WHERE brief_id = ?')
+      .get(Number(result.lastInsertRowid)) as StrategistBriefRow;
+  }
+
+  getStrategistBrief(runId: number): StrategistBriefRow | null {
+    return this.db.prepare('SELECT * FROM ads_strategist_briefs WHERE run_id = ?')
+      .get(runId) as StrategistBriefRow | undefined ?? null;
+  }
+
+  // ── Blueprint Critique (D5) ────────────────────────────────────
+  // The critique is the LLM-driven challenge of the auto-blueprint —
+  // 3-5 challenges that the operator should consider before emit.
+  // Replaces on re-run so a fresh blueprint always gets a fresh
+  // critique.
+
+  insertBlueprintCritique(input: InsertBlueprintCritiqueInput): BlueprintCritiqueRow {
+    const now = new Date().toISOString();
+    this.db.prepare('DELETE FROM ads_blueprint_critiques WHERE run_id = ?').run(input.runId);
+    const result = this.db.prepare(`
+      INSERT INTO ads_blueprint_critiques (
+        run_id, ads_account_id, challenges_json, llm_failed, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      input.runId, input.adsAccountId,
+      JSON.stringify(input.challenges), input.llmFailed ? 1 : 0, now,
+    );
+    return this.db.prepare('SELECT * FROM ads_blueprint_critiques WHERE critique_id = ?')
+      .get(Number(result.lastInsertRowid)) as BlueprintCritiqueRow;
+  }
+
+  getBlueprintCritique(runId: number): BlueprintCritiqueRow | null {
+    return this.db.prepare('SELECT * FROM ads_blueprint_critiques WHERE run_id = ?')
+      .get(runId) as BlueprintCritiqueRow | undefined ?? null;
   }
 
   listFindings(

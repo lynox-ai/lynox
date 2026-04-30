@@ -45,6 +45,11 @@ import {
   classifyCompetitorTermIntent,
   type ClassifyCompetitorOptions, type ClassifiedCompetitorTerm, type CompetitorIntentCategory,
 } from '../../core/ads-competitor-term-classifier.js';
+import { classifyAccountState } from '../../core/ads-account-state.js';
+import {
+  generateStrategistBrief,
+  type StrategistBriefOptions, type StrategistBriefResult,
+} from '../../core/ads-strategist-brief.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 interface AdsAuditRunInput {
@@ -138,7 +143,15 @@ export function createAdsAuditRunTool(store: AdsDataStore): ToolEntry<AdsAuditRu
           updateAccountMode(store, result.account.ads_account_id, result.mode.detected);
         }
 
-        return renderMarkdownReport(result, persistedIds.length);
+        // D4: Strategist brief on top of the deterministic findings.
+        // The brief reads the post-classification findings + KPIs +
+        // customer profile + run-over-run state, produces a 1-page
+        // synthesis (headline + 3 priorities + risks + don't-touch
+        // list). Best-effort: if the LLM fails, the fallback brief
+        // surfaces deterministic state + a heads-up; audit Markdown
+        // still renders the findings.
+        const strategistBrief = await runStrategistBrief(store, result);
+        return renderMarkdownReport(result, persistedIds.length, strategistBrief);
       } catch (err) {
         if (err instanceof AuditPreconditionError) {
           return `ads_audit_run failed: ${err.message}`;
@@ -402,6 +415,30 @@ export async function classifyCompetitorTermFinding(
     `Leaks → Negativ-Liste; unsichere → Operator-Review im Blueprint.`;
 }
 
+/** D4: classify the audit result's account-state, ask the strategist
+ *  module for a brief, persist it, and return the result for Markdown
+ *  rendering. Best-effort throughout — fallback brief is persisted on
+ *  LLM failure so subsequent runs / cross-cycle diffs remain coherent. */
+async function runStrategistBrief(
+  store: AdsDataStore, result: AuditResult,
+  opts?: StrategistBriefOptions,
+): Promise<StrategistBriefResult & { accountState: import('../../core/ads-data-store.js').AdsAccountState; stateReason: string }> {
+  const verdict = classifyAccountState(result);
+  const brief = await generateStrategistBrief(result, verdict.state, verdict.reason, opts ?? {});
+  store.insertStrategistBrief({
+    runId: result.run.run_id,
+    adsAccountId: result.account.ads_account_id,
+    accountState: verdict.state,
+    headline: brief.headline,
+    priorities: brief.priorities,
+    risks: brief.risks,
+    doNotTouch: brief.doNotTouch,
+    classificationReason: verdict.reason,
+    llmFailed: brief.llmFailed,
+  });
+  return { ...brief, accountState: verdict.state, stateReason: verdict.reason };
+}
+
 // ── Persistence ───────────────────────────────────────────────────────
 
 function persistFindings(store: AdsDataStore, result: AuditResult): number[] {
@@ -485,7 +522,15 @@ function updateAccountMode(store: AdsDataStore, adsAccountId: string, mode: Audi
 
 // ── Markdown rendering ────────────────────────────────────────────────
 
-export function renderMarkdownReport(result: AuditResult, persistedFindingCount: number): string {
+interface StrategistBriefForRender extends StrategistBriefResult {
+  accountState: import('../../core/ads-data-store.js').AdsAccountState;
+  stateReason: string;
+}
+
+export function renderMarkdownReport(
+  result: AuditResult, persistedFindingCount: number,
+  brief?: StrategistBriefForRender | undefined,
+): string {
   const lines: string[] = [];
   const { account, customer, run, previousRun, kpis, mode, manualChanges, verification, findings } = result;
 
@@ -500,6 +545,13 @@ export function renderMarkdownReport(result: AuditResult, persistedFindingCount:
   if (run.gas_export_lastrun) lines.push(`**GAS-Export-LASTRUN:** ${run.gas_export_lastrun}`);
   lines.push('');
 
+  // D4: Strategist brief is the LEAD of the report — synthesis before
+  // the raw KPIs/findings. The operator reads the headline + 3
+  // priorities first; the deterministic data follows for verification.
+  if (brief) {
+    appendStrategistBrief(lines, brief);
+  }
+
   appendKpis(lines, kpis);
   appendMode(lines, mode);
   appendManualChanges(lines, manualChanges);
@@ -508,6 +560,52 @@ export function renderMarkdownReport(result: AuditResult, persistedFindingCount:
   appendNextSteps(lines, mode, customer, findings);
 
   return lines.join('\n');
+}
+
+function appendStrategistBrief(lines: string[], brief: StrategistBriefForRender): void {
+  const stateLabel = ({
+    greenfield: '🌱 Greenfield', bootstrap: '🏗️ Bootstrap',
+    messy_running: '🔧 Messy / Restructure', structured_optimizing: '📈 Structured / Optimizing',
+    high_performance: '🟢 High Performance — protect',
+  } as const)[brief.accountState];
+  lines.push(`## Strategist Brief — ${stateLabel}`);
+  lines.push('');
+  if (brief.llmFailed) {
+    lines.push(`> ⚠️ LLM-Strategist nicht verfügbar (${brief.failureReason ?? 'unknown'}). ` +
+      `Fallback-Brief unten basiert nur auf deterministischen Findings — Operator-Synthese empfohlen.`);
+    lines.push('');
+  }
+  if (brief.headline) {
+    lines.push(`**${brief.headline}**`);
+    lines.push('');
+  }
+  lines.push(`*Account-State: ${brief.stateReason}*`);
+  lines.push('');
+  if (brief.priorities.length > 0) {
+    lines.push('### Prioritäten');
+    lines.push('');
+    for (let i = 0; i < brief.priorities.length; i++) {
+      const p = brief.priorities[i]!;
+      lines.push(`**${i + 1}. ${p.title}**`);
+      if (p.rationale) lines.push(p.rationale);
+      if (p.actions.length > 0) {
+        for (const a of p.actions) lines.push(`- ${a}`);
+      }
+      lines.push('');
+    }
+  }
+  if (brief.risks.length > 0) {
+    lines.push('### Risiken');
+    lines.push('');
+    for (const r of brief.risks) lines.push(`- ⚠️ ${r}`);
+    lines.push('');
+  }
+  if (brief.doNotTouch.length > 0) {
+    lines.push('### Don\'t touch');
+    lines.push('');
+    for (const c of brief.doNotTouch) lines.push(`- 🟢 \`${c}\``);
+    lines.push('');
+  }
 }
 
 function appendKpis(lines: string[], kpis: AuditKpis): void {
