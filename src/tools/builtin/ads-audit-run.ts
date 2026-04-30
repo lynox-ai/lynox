@@ -33,6 +33,10 @@ import {
   type AuditKpis,
   type AuditMode,
 } from '../../core/ads-audit-engine.js';
+import {
+  classifyThemeTokens,
+  type ClassifyOptions, type ClassifiedToken, type ThemeCategory,
+} from '../../core/ads-theme-classifier.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 interface AdsAuditRunInput {
@@ -94,6 +98,11 @@ export function createAdsAuditRunTool(store: AdsDataStore): ToolEntry<AdsAuditRu
         const result = runAudit(store, adsAccountId, {
           ...(input.verify_window_days !== undefined ? { verifyWindowDays: input.verify_window_days } : {}),
         });
+        // Phase B: classify theme-coverage candidates against the customer
+        // profile before persisting. Funnel + irrelevant tokens are dropped;
+        // uncertain tokens stay in but the blueprint stage adds an operator
+        // review marker so the call doesn't silently pollute asset_groups.
+        await classifyThemeFindingTokens(result);
         const persistedIds = persistFindings(store, result);
 
         // Mirror to KG (best-effort, async). Failure must not break the audit.
@@ -143,6 +152,78 @@ function resolveAccountId(store: AdsDataStore, input: AdsAuditRunInput): string 
     );
   }
   return linked[0]!.ads_account_id;
+}
+
+// ── Theme classification (Phase B) ─────────────────────────────────────
+
+/** Mutates the audit result in place: takes the deterministic
+ *  `pmax_theme_coverage_gap` finding, runs every candidate token
+ *  through `classifyThemeTokens`, and rewrites evidence so:
+ *    - dropped (funnel + irrelevant) tokens disappear,
+ *    - surviving tokens carry their `category` so the blueprint
+ *      can decide whether to attach a Phase-A review marker,
+ *    - the full classification is preserved for transparency.
+ *  Drops the entire finding when no actionable+uncertain themes
+ *  remain after classification. Cost-bound: a single Haiku call. */
+export async function classifyThemeFindingTokens(
+  result: AuditResult,
+  classifyOpts?: ClassifyOptions,
+): Promise<void> {
+  if (!result.customer) return;
+  const idx = result.findings.findIndex(f => f.area === 'pmax_theme_coverage_gap');
+  if (idx < 0) return;
+  const finding = result.findings[idx]!;
+  const evidence = (finding.evidence ?? {}) as Record<string, unknown>;
+  const themesRaw = evidence['themes'];
+  if (!Array.isArray(themesRaw) || themesRaw.length === 0) return;
+  type RawTheme = { token?: unknown; clusters?: unknown; sample?: unknown };
+  const themes = themesRaw.filter((t): t is RawTheme => t !== null && typeof t === 'object');
+  const tokens = themes
+    .map(t => (typeof t.token === 'string' ? t.token : ''))
+    .filter(t => t.length > 0);
+  if (tokens.length === 0) return;
+
+  const classification = await classifyThemeTokens(tokens, result.customer, classifyOpts ?? {});
+  const byToken = new Map<string, ClassifiedToken>();
+  for (const c of classification.classifications) {
+    byToken.set(c.token.toLowerCase(), c);
+  }
+
+  const surviving: Array<Record<string, unknown>> = [];
+  for (const t of themes) {
+    const tok = typeof t.token === 'string' ? t.token : '';
+    const cls = byToken.get(tok.toLowerCase());
+    const category: ThemeCategory = cls?.category ?? 'uncertain';
+    if (category === 'funnel' || category === 'irrelevant') continue;
+    surviving.push({
+      token: tok,
+      clusters: typeof t.clusters === 'number' ? t.clusters : 0,
+      sample: Array.isArray(t.sample) ? t.sample : [],
+      category,
+      ...(cls?.reason ? { classification_reason: cls.reason } : {}),
+    });
+  }
+
+  if (surviving.length === 0) {
+    // No theme survives — strip the finding so blueprint doesn't surface
+    // an empty gap and the audit Markdown report stays accurate.
+    result.findings.splice(idx, 1);
+    return;
+  }
+
+  evidence['themes'] = surviving;
+  evidence['classification'] = classification.classifications;
+  finding.evidence = evidence;
+  // Refresh the user-facing text so the audit Markdown report reflects
+  // post-classification truth. Keep total cluster count over surviving
+  // themes only — that's the volume the operator actually has to act on.
+  const totalCovered = surviving.reduce((s, t) => s + (typeof t['clusters'] === 'number' ? (t['clusters'] as number) : 0), 0);
+  const topLine = surviving.slice(0, 5)
+    .map(t => `${String(t['token'])} (${Number(t['clusters'] ?? 0)} Cluster${t['category'] === 'uncertain' ? ', unsicher' : ''})`)
+    .join(', ');
+  finding.text = `${surviving.length} klassifizierte Themen in PMax-Search-Terms ohne passende Asset-Group: ${topLine}. ` +
+    `Insgesamt ${totalCovered} Cluster — Kandidaten für Asset-Group-Expansion. ` +
+    `Conv-Volume-Schutz: Quell-Gruppe muss nach Split noch ≥30 conv/30d halten.`;
 }
 
 // ── Persistence ───────────────────────────────────────────────────────

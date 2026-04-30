@@ -397,6 +397,49 @@ describe('runBlueprint', () => {
     expect(JSON.parse(updated.payload_json).final_url).toBe(chosenUrl);
   });
 
+  it('Phase B: Theme-AG with category=uncertain gets a theme-uncertainty review marker', () => {
+    seedCustomerAndAccount(store);
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'pmax1', 'PMax | Gesamtsortiment', { channelType: 'PERFORMANCE_MAX' });
+    store.insertLandingPagesBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { landingPageUrl: 'https://acme-shop.example/produkte/kefir',    clicks: 120, conversions: 4 },
+        { landingPageUrl: 'https://acme-shop.example/produkte/fermenten', clicks: 30, conversions: 1 },
+        { landingPageUrl: 'https://acme-shop.example/',                  clicks: 300, conversions: 9 },
+      ],
+    });
+    // Audit-tool would write category onto each theme; simulate that here.
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_theme_coverage_gap', severity: 'MEDIUM', source: 'deterministic',
+      text: '2 klassifizierte Themen …', confidence: 0.75,
+      evidence: {
+        themes: [
+          { token: 'kefir',    clusters: 30, sample: ['kefir milch'], category: 'actionable' },
+          { token: 'fermenten', clusters: 6, sample: [], category: 'uncertain', classification_reason: 'plausibly product but not in offer' },
+        ],
+        existing_asset_groups: [],
+      },
+    });
+
+    runBlueprint(store, ACCOUNT);
+
+    const ags = store.listBlueprintEntities(r.run_id, { entityType: 'asset_group', kind: 'NEW' });
+    expect(ags).toHaveLength(2);
+    const byTheme = new Map(ags.map(a => [JSON.parse(a.payload_json).theme_token as string, a]));
+    // kefir: actionable + slug match → no review marker.
+    expect(JSON.parse(byTheme.get('kefir')!.needs_review_json)).toEqual([]);
+    // fermenten: uncertain → at least a theme-uncertainty review marker.
+    const fReviews = JSON.parse(byTheme.get('fermenten')!.needs_review_json) as Array<{ field: string; reason: string; candidates: Array<{ value: string }> }>;
+    const themeReview = fReviews.find(r => r.reason === 'uncertain_theme_classification');
+    expect(themeReview).toBeDefined();
+    expect(themeReview!.field).toBe('_status');
+    const candidateValues = themeReview!.candidates.map(c => c.value).sort();
+    expect(candidateValues).toEqual(['KEEP', '__DROP__']);
+  });
+
   it('Theme-AG: clear slug match → no review marker; ambiguous → review marker on asset_group', () => {
     seedCustomerAndAccount(store);
     const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });

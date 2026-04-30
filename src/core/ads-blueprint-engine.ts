@@ -256,6 +256,9 @@ export function runBlueprint(
   // theme-token + customer slug so they are at least topically relevant.
   for (const exp of themeExpansions) {
     const externalId = `bp.assetgroup.${slug(exp.campaignName)}.${slug(exp.assetGroupName)}`;
+    const reviews: BlueprintReviewItem[] = [];
+    if (exp.urlReview) reviews.push(exp.urlReview);
+    if (exp.themeReview) reviews.push(exp.themeReview);
     persistedEntityIds.push(store.insertBlueprintEntity({
       runId: run.run_id, adsAccountId, entityType: 'asset_group', kind: 'NEW',
       externalId, confidence: 0.7, rationale: exp.rationale,
@@ -269,7 +272,7 @@ export function runBlueprint(
         ...(exp.finalUrl !== null ? { final_url: exp.finalUrl } : {}),
       },
       namingValid: true, namingErrors: [],
-      ...(exp.urlReview ? { needsReview: [exp.urlReview] } : {}),
+      ...(reviews.length > 0 ? { needsReview: reviews } : {}),
     }).blueprint_id);
     store.insertRunDecision({
       runId: run.run_id, entityType: 'asset_group', entityExternalId: externalId,
@@ -704,6 +707,10 @@ interface ThemeExpansionProposal {
    *  needs_review_json column; ads_blueprint_review_picks resolves it
    *  before emit can proceed. */
   urlReview: BlueprintReviewItem | null;
+  /** Phase-B classifier verdict carried over from the audit's
+   *  theme-coverage finding. 'uncertain' triggers a separate review
+   *  marker that asks the operator to confirm/skip the AG entirely. */
+  themeReview: BlueprintReviewItem | null;
   rationale: string;
 }
 
@@ -724,7 +731,16 @@ function generateThemeExpansionProposals(
   const findings = store.listFindings(run.run_id, { area: 'pmax_theme_coverage_gap' });
   if (findings.length === 0) return [];
   const finding = findings[0]!;
-  let evidence: { themes?: Array<{ token: string; clusters: number; sample?: string[] }> } = {};
+  let evidence: {
+    themes?: Array<{
+      token: string; clusters: number; sample?: string[];
+      // Phase B: the audit-run tool tags each surviving theme with the
+      // classifier verdict. 'actionable' = autoplay AG; 'uncertain' =
+      // emit AG plus a needs_review marker so the operator confirms.
+      category?: 'actionable' | 'uncertain' | 'funnel' | 'irrelevant';
+      classification_reason?: string;
+    }>;
+  } = {};
   try {
     evidence = JSON.parse(finding.evidence_json);
   } catch {
@@ -752,6 +768,9 @@ function generateThemeExpansionProposals(
   const customerSlug = customer.customer_id;
   return themes.slice(0, MAX_THEME_EXPANSIONS).map(t => {
     const { url: finalUrl, review: urlReview } = pickFinalUrlForTheme(t.token, lpSummary);
+    const themeReview = t.category === 'uncertain'
+      ? buildThemeUncertaintyReview(t.token, t.classification_reason)
+      : null;
     return {
       theme: t.token,
       clusters: t.clusters,
@@ -760,10 +779,12 @@ function generateThemeExpansionProposals(
       sampleClusters: t.sample ?? [],
       finalUrl,
       urlReview,
+      themeReview,
       rationale: `Theme-Coverage-Gap: "${t.token}" hat ${t.clusters} PMax-Search-Cluster ohne passende Asset-Group. ` +
         `Neuer Asset-Group-Vorschlag (Status PAUSED) für ${customerSlug}` +
         (finalUrl ? ` mit themen-spezifischer LP "${finalUrl}"` : ' (LP-Mapping fehlgeschlagen, manuell setzen)') +
         (urlReview ? ' — Operator-Review nötig (URL-Pick mehrdeutig).' : '') +
+        (themeReview ? ' — Operator-Review nötig (Theme-Klassifikation unsicher).' : '') +
         `; nach Import + 14d Lernfenster Performance prüfen.`,
     };
   });
@@ -859,6 +880,27 @@ function pickFinalUrlForToken(
 function pickFinalUrlForTheme(theme: string, lps: readonly LpPerformance[]):
   { url: string | null; review: BlueprintReviewItem | null } {
   return pickFinalUrlForToken(theme, lps, 'theme');
+}
+
+/** Phase B: ask the operator to keep or drop a theme-AG when the
+ *  classifier rated the source token 'uncertain'. The "drop" choice
+ *  is encoded by writing the value `'__DROP__'` into the entity's
+ *  `_status` payload field; ads_emit_csv treats that as a paused
+ *  drop-candidate (no CSV row). The "keep" choice clears the marker
+ *  without changing the payload. */
+function buildThemeUncertaintyReview(
+  themeToken: string, reason: string | undefined,
+): BlueprintReviewItem {
+  const why = reason ? ` Klassifikator: ${reason}` : '';
+  return {
+    field: '_status',
+    reason: 'uncertain_theme_classification',
+    prompt: `Theme-Asset-Group "${themeToken}": Klassifikation unsicher.${why} Behalten oder verwerfen?`,
+    candidates: [
+      { value: 'KEEP', label: `Behalten — Theme-AG für "${themeToken}" anlegen` },
+      { value: '__DROP__', label: `Verwerfen — kein AG für "${themeToken}"` },
+    ],
+  };
 }
 
 function buildUrlReview(

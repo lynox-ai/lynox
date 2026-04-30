@@ -462,34 +462,30 @@ function clusterUntargetedThemes(
     .sort((a, b) => b.clusters - a.clusters);
 }
 
-const THEME_STOPWORDS = new Set([
-  // Articles / prepositions / conjunctions (DE + EN).
+/** Articles, prepositions, conjunctions (DE + EN). True linguistic
+ *  noise — these can never be a theme, regardless of customer context.
+ *
+ *  Funnel words ("kaufen", "online", "günstig", …), country / language
+ *  names ("schweiz", "water", …) and other context-dependent tokens
+ *  used to live here as a hardcoded list. Phase B replaces that with
+ *  an LLM classifier (`ads-theme-classifier`) that judges every
+ *  surviving token against the customer profile (country, languages,
+ *  top_products, brands). Drop the static list, let the model decide.
+ */
+const LINGUISTIC_STOPWORDS = new Set([
+  // German articles, prepositions, conjunctions.
   'der', 'die', 'das', 'und', 'oder', 'mit', 'für', 'fuer', 'auf', 'aus',
   'ein', 'eine', 'einen', 'eines', 'einem', 'einer', 'den', 'dem', 'des',
   'im', 'in', 'an', 'zu', 'zum', 'zur', 'von', 'vom', 'bei',
+  // English equivalents.
   'the', 'and', 'for', 'with', 'from', 'into',
-  // Funnel / commerce words: never identify a category, just intent.
-  // Without filtering them the theme-coverage gap detector hallucinates
-  // "Theme-Kaufen" / "Theme-Online" asset_groups.
-  'kaufen', 'bestellen', 'online', 'shop', 'shops', 'preis', 'preise',
-  'günstig', 'guenstig', 'billig', 'angebot', 'angebote', 'sale', 'rabatt',
-  'aktion', 'beste', 'bester', 'test', 'tests', 'vergleich', 'erfahrung',
-  'erfahrungen', 'schweiz', 'austria', 'österreich', 'oesterreich',
-  'deutschland',
-  'buy', 'cheap', 'best', 'review', 'reviews', 'shipping', 'delivery',
-  'price', 'prices',
-  // Common foreign-language category nouns that slip into Swiss-DE
-  // PMax search-term clusters but are not actionable as DE asset_groups.
-  // (Task #51 will replace this with a proper customer.languages filter,
-  // for now the explicit list catches the common offenders.)
-  'water', 'cheap',
 ]);
 
 function tokenize(label: string): string[] {
   return label
     .split(/[^\p{L}\p{N}]+/u)
     .map(t => t.trim())
-    .filter(t => t.length >= 4 && !THEME_STOPWORDS.has(t));
+    .filter(t => t.length >= 4 && !LINGUISTIC_STOPWORDS.has(t));
 }
 
 interface PerfOutlier {

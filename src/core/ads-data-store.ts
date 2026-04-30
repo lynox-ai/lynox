@@ -1427,6 +1427,63 @@ export class AdsDataStore {
     `).all(runId) as AdsBlueprintEntityRow[];
   }
 
+  /** Hard-delete an asset_group entity plus every dependent
+   *  asset / audience_signal / listing_group row that linked to it via
+   *  (campaign_name, asset_group_name). Used when the operator answers
+   *  `__DROP__` to a Phase-B theme-uncertainty review: the AG never
+   *  reaches Editor and child assets do not strand in manual-todos.
+   *  Returns the number of rows removed (≥ 1 includes the AG itself). */
+  dropAssetGroupEntityAndChildren(blueprintId: number): number {
+    return this.transaction(() => {
+      const row = this.db.prepare(
+        'SELECT run_id, entity_type, external_id, payload_json FROM ads_blueprint_entities WHERE blueprint_id = ?',
+      ).get(blueprintId) as
+        { run_id: number; entity_type: string; external_id: string; payload_json: string } | undefined;
+      if (!row) throw new Error(`blueprint_id ${blueprintId} not found`);
+      if (row.entity_type !== 'asset_group') {
+        throw new Error(`dropAssetGroupEntityAndChildren only supports entity_type=asset_group (got "${row.entity_type}")`);
+      }
+      let payload: Record<string, unknown> = {};
+      try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { /* */ }
+      const campaignName = typeof payload['campaign_name'] === 'string' ? payload['campaign_name'] as string : '';
+      const assetGroupName = typeof payload['asset_group_name'] === 'string' ? payload['asset_group_name'] as string : '';
+
+      let removed = 0;
+      // Children first so the parent removal does not orphan rows mid-tx.
+      if (campaignName && assetGroupName) {
+        const childRows = this.db.prepare(`
+          SELECT blueprint_id, payload_json FROM ads_blueprint_entities
+          WHERE run_id = ? AND entity_type IN ('asset', 'audience_signal', 'listing_group')
+        `).all(row.run_id) as Array<{ blueprint_id: number; payload_json: string }>;
+        for (const c of childRows) {
+          let cPayload: Record<string, unknown> = {};
+          try { cPayload = JSON.parse(c.payload_json) as Record<string, unknown>; } catch { continue; }
+          if (cPayload['campaign_name'] !== campaignName) continue;
+          if (cPayload['asset_group_name'] !== assetGroupName) continue;
+          const r = this.db.prepare('DELETE FROM ads_blueprint_entities WHERE blueprint_id = ?')
+            .run(c.blueprint_id);
+          removed += Number(r.changes);
+          // Mirror cleanup in ads_run_decisions.
+          this.db.prepare(`
+            DELETE FROM ads_run_decisions
+            WHERE run_id = ? AND entity_type = 'asset' AND entity_external_id IN (
+              SELECT external_id FROM ads_blueprint_entities
+              WHERE blueprint_id = ?
+            )
+          `).run(row.run_id, c.blueprint_id);
+        }
+      }
+      const r = this.db.prepare('DELETE FROM ads_blueprint_entities WHERE blueprint_id = ?')
+        .run(blueprintId);
+      removed += Number(r.changes);
+      this.db.prepare(`
+        DELETE FROM ads_run_decisions
+        WHERE run_id = ? AND entity_type = 'asset_group' AND entity_external_id = ?
+      `).run(row.run_id, row.external_id);
+      return removed;
+    });
+  }
+
   /** Apply a single operator pick to a blueprint entity. Atomically
    *  overwrites payload_json.{field} with the chosen value and removes
    *  the matching {field} entry from needs_review_json. Throws when the

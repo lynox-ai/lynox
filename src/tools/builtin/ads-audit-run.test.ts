@@ -3,9 +3,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AdsDataStore } from '../../core/ads-data-store.js';
-import { createAdsAuditRunTool, renderMarkdownReport } from './ads-audit-run.js';
-import { runAudit } from '../../core/ads-audit-engine.js';
+import { createAdsAuditRunTool, classifyThemeFindingTokens, renderMarkdownReport } from './ads-audit-run.js';
+import { runAudit, type AuditResult } from '../../core/ads-audit-engine.js';
 import type { IAgent, IKnowledgeLayer } from '../../types/index.js';
+import type Anthropic from '@anthropic-ai/sdk';
 
 const ACCOUNT = '123-456-7890';
 const CUSTOMER = 'acme-shop';
@@ -99,6 +100,73 @@ describe('ads_audit_run tool', () => {
   });
 });
 
+describe('classifyThemeFindingTokens (Phase B)', () => {
+  it('drops funnel + irrelevant tokens, keeps actionable + uncertain, tags categories', async () => {
+    const result = makeFakeAuditResult([
+      { token: 'kefir',    clusters: 30, sample: ['kefir milch'] },
+      { token: 'kombucha', clusters: 20, sample: ['kombucha kaufen'] },
+      { token: 'kaufen',   clusters: 50, sample: ['kefir kaufen'] },
+      { token: 'guenstig', clusters: 12, sample: ['kefir guenstig'] },
+      { token: 'water',    clusters: 9,  sample: ['water filter'] },
+      { token: 'fermenten', clusters: 6, sample: ['fermenten anleitung'] },
+    ]);
+    const fakeClient = makeClassifierClient([
+      { token: 'kefir',     category: 'actionable', reason: 'top product' },
+      { token: 'kombucha',  category: 'actionable', reason: 'top product' },
+      { token: 'kaufen',    category: 'funnel',     reason: 'commerce intent' },
+      { token: 'guenstig',  category: 'funnel',     reason: 'price modifier' },
+      { token: 'water',     category: 'irrelevant', reason: 'EN word, DE-only shop' },
+      { token: 'fermenten', category: 'uncertain',  reason: 'plausibly product' },
+    ]);
+
+    await classifyThemeFindingTokens(result, { client: fakeClient });
+
+    const finding = result.findings.find(f => f.area === 'pmax_theme_coverage_gap')!;
+    const evidence = finding.evidence as { themes: Array<{ token: string; category: string }>; classification: unknown };
+    const tokens = evidence.themes.map(t => t.token).sort();
+    // Funnel + irrelevant are gone; actionable + uncertain remain.
+    expect(tokens).toEqual(['fermenten', 'kefir', 'kombucha']);
+    const byToken = new Map(evidence.themes.map(t => [t.token, t.category]));
+    expect(byToken.get('kefir')).toBe('actionable');
+    expect(byToken.get('fermenten')).toBe('uncertain');
+    // Full classification is preserved for transparency.
+    expect(Array.isArray(evidence.classification)).toBe(true);
+  });
+
+  it('removes the entire finding when no actionable + uncertain themes survive', async () => {
+    const result = makeFakeAuditResult([
+      { token: 'kaufen',   clusters: 50, sample: [] },
+      { token: 'guenstig', clusters: 12, sample: [] },
+    ]);
+    const fakeClient = makeClassifierClient([
+      { token: 'kaufen',   category: 'funnel', reason: 'intent' },
+      { token: 'guenstig', category: 'funnel', reason: 'modifier' },
+    ]);
+    await classifyThemeFindingTokens(result, { client: fakeClient });
+    expect(result.findings.find(f => f.area === 'pmax_theme_coverage_gap')).toBeUndefined();
+  });
+
+  it('is a no-op when there is no theme finding to classify', async () => {
+    const result = makeEmptyAuditResult();
+    await classifyThemeFindingTokens(result, {});
+    expect(result.findings).toHaveLength(0);
+  });
+
+  it('routes every token to uncertain on classifier failure', async () => {
+    const result = makeFakeAuditResult([
+      { token: 'kefir',    clusters: 30, sample: [] },
+      { token: 'kombucha', clusters: 20, sample: [] },
+    ]);
+    const throwingClient = {
+      beta: { messages: { stream: () => ({ finalMessage: async () => { throw new Error('5xx'); } }) } },
+    } as unknown as Anthropic;
+    await classifyThemeFindingTokens(result, { client: throwingClient });
+    const finding = result.findings.find(f => f.area === 'pmax_theme_coverage_gap')!;
+    const evidence = finding.evidence as { themes: Array<{ category: string }> };
+    expect(evidence.themes.every(t => t.category === 'uncertain')).toBe(true);
+  });
+});
+
 describe('renderMarkdownReport', () => {
   let tempDir: string;
   let store: AdsDataStore;
@@ -131,6 +199,59 @@ describe('renderMarkdownReport', () => {
 });
 
 // ── Fixtures ──────────────────────────────────────────────────────────
+
+function makeFakeAuditResult(themes: Array<{ token: string; clusters: number; sample: string[] }>): AuditResult {
+  return {
+    account: { ads_account_id: ACCOUNT, customer_id: CUSTOMER, account_label: 'Main',
+      currency_code: 'CHF', timezone: 'Europe/Zurich', mode: 'BOOTSTRAP',
+      drive_folder_id: null, last_major_import_at: null,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    customer: {
+      customer_id: CUSTOMER, client_name: 'Acme', business_model: null, offer_summary: null,
+      primary_goal: null, target_roas: null, target_cpa_chf: null, monthly_budget_chf: null,
+      typical_cpc_chf: null, country: 'CH', timezone: 'Europe/Zurich',
+      languages: '["DE"]', top_products: '[]', own_brands: '[]', sold_brands: '[]',
+      competitors: '[]', pmax_owned_head_terms: '[]', naming_convention_pattern: null,
+      tracking_notes: '{}',
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    },
+    run: { run_id: 1, ads_account_id: ACCOUNT, status: 'SUCCESS', mode: 'BOOTSTRAP',
+      started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z',
+      gas_export_lastrun: null, keywords_hash: null, previous_run_id: null,
+      emitted_csv_hash: null, token_cost_micros: null, error_message: null },
+    previousRun: null,
+    kpis: { spendChf: 0, conversions: 0, clicks: 0, impressions: 0, costPerConversion: 0, ctr: 0, conversionRate: 0, roas: 0 },
+    mode: { detected: 'BOOTSTRAP', recordedAccountMode: 'BOOTSTRAP', daysOfData: 5, reasoning: 'first cycle' },
+    manualChanges: null, verification: null,
+    findings: [
+      {
+        area: 'pmax_theme_coverage_gap', severity: 'MEDIUM',
+        text: '6 dominante Themen …', confidence: 0.75,
+        evidence: { themes, existing_asset_groups: [] },
+      },
+    ],
+  } as unknown as AuditResult;
+}
+
+function makeEmptyAuditResult(): AuditResult {
+  const r = makeFakeAuditResult([]);
+  r.findings = [];
+  return r;
+}
+
+function makeClassifierClient(items: Array<{ token: string; category: string; reason: string }>): Anthropic {
+  return {
+    beta: {
+      messages: {
+        stream: () => ({
+          finalMessage: async () => ({
+            content: [{ type: 'tool_use', name: 'classify_theme_tokens', input: { classifications: items } }],
+          }),
+        }),
+      },
+    },
+  } as unknown as Anthropic;
+}
 
 function seedFullAccount(store: AdsDataStore): void {
   store.upsertCustomerProfile({

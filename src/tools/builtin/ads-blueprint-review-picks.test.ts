@@ -123,6 +123,48 @@ describe('ads_blueprint_review_picks tool', () => {
     expect(out).toMatch(/2 Picks angewendet/);
   });
 
+  it('Phase B: __DROP__ on theme-uncertainty review hard-removes AG + child assets', async () => {
+    store.upsertCustomerProfile({ customerId: CUSTOMER, clientName: 'Acme', languages: ['DE'] });
+    store.upsertAdsAccount({ adsAccountId: ACCOUNT, customerId: CUSTOMER, accountLabel: 'Main' });
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    store.insertCampaignsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{ campaignId: 'pmax1', campaignName: 'PMax | Gesamt', status: 'ENABLED', channelType: 'PERFORMANCE_MAX' }],
+    });
+    store.insertLandingPagesBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{ landingPageUrl: 'https://acme-shop.example/', clicks: 100, conversions: 2 }],
+    });
+    // Seed a theme finding with one uncertain token. Blueprint will emit
+    // an asset_group + 5 placeholder asset rows.
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_theme_coverage_gap', severity: 'MEDIUM', source: 'deterministic',
+      text: '…', confidence: 0.75,
+      evidence: {
+        themes: [{ token: 'fermenten', clusters: 6, sample: [], category: 'uncertain', classification_reason: 'unclear' }],
+        existing_asset_groups: [],
+      },
+    });
+    runBlueprint(store, ACCOUNT);
+
+    const ags = store.listBlueprintEntities(r.run_id, { entityType: 'asset_group' });
+    expect(ags).toHaveLength(1);
+    const assetsBefore = store.listBlueprintEntities(r.run_id, { entityType: 'asset' });
+    expect(assetsBefore.length).toBeGreaterThan(0);
+
+    // Operator picks __DROP__ via the tool.
+    const promptTabs = vi.fn(async (questions: TabQuestion[]) =>
+      questions.map(q => q.options?.find(o => o.startsWith('Verwerfen')) ?? ''));
+    const agent = makeAgent(vi.fn(), promptTabs);
+
+    const out = await tool.handler({ ads_account_id: ACCOUNT }, agent);
+    expect(out).toMatch(/verworfen/);
+    expect(store.listBlueprintEntities(r.run_id, { entityType: 'asset_group' })).toHaveLength(0);
+    expect(store.listBlueprintEntities(r.run_id, { entityType: 'asset' })).toHaveLength(0);
+  });
+
   it('keeps the queue intact when the operator cancels promptTabs (empty result)', async () => {
     const runId = seedRunWithBrandReviews();
     const promptTabs = vi.fn(async () => [] as string[]);

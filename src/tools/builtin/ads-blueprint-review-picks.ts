@@ -156,8 +156,18 @@ export function createAdsBlueprintReviewPicksTool(
           }
           const value = labelToValue[i]!.get(display) ?? display;
           try {
-            store.applyEntityReviewPick(p.blueprintId, p.review.field, value);
-            applied.push(`${p.entityType}/${p.entityName} → ${p.review.field} = ${value}`);
+            // Phase-B theme-uncertainty review with `__DROP__` is special:
+            // the operator wants the AG (and its children) gone, not a
+            // payload field overwritten. Route to the dedicated drop
+            // method so emit doesn't strand orphan asset rows.
+            if (p.review.field === '_status' && value === '__DROP__'
+              && p.entityType === 'asset_group') {
+              const removed = store.dropAssetGroupEntityAndChildren(p.blueprintId);
+              applied.push(`${p.entityType}/${p.entityName} → verworfen (${removed} Zeile(n) entfernt)`);
+            } else {
+              store.applyEntityReviewPick(p.blueprintId, p.review.field, value);
+              applied.push(`${p.entityType}/${p.entityName} → ${p.review.field} = ${value}`);
+            }
           } catch (err) {
             skipped.push(`${p.entityType}/${p.entityName}: ${getErrorMessage(err)}`);
           }
