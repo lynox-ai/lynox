@@ -991,6 +991,45 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
     });
   }
 
+  // 6d. Audience-signal thin / missing on PMax asset_groups (pure Tier-1).
+  // PMax asset_groups without audience_signals start cold — Smart-Bidding
+  // takes weeks longer to converge and overspends during the warm-up.
+  // Detector: count signals per asset_group; flag groups with 0 (or, for
+  // very-thin warning tier, < 3 mixed signal types).
+  const signalGaps = collectAudienceSignalGaps(ctx);
+  if (signalGaps.length > 0) {
+    const missingCount = signalGaps.filter(g => g.signal_count === 0).length;
+    findings.push({
+      area: 'audience_signal_thin',
+      severity: missingCount > 0 ? 'HIGH' : 'MEDIUM',
+      text: `${signalGaps.length} PMax-Asset-Group(s) ohne ausreichende Audience-Signals ` +
+        `(davon ${missingCount} komplett ohne Signal). Smart-Bidding lernt deutlich langsamer; ` +
+        `Operator soll vor Re-Optimierung mind. 3 Signal-Typen pro AG hinterlegen ` +
+        `(Custom-Segment, Customer-List, Demographics).`,
+      confidence: 0.9,
+      evidence: { count: signalGaps.length, missing: missingCount, candidates: signalGaps },
+    });
+  }
+
+  // 6e. PMax asset_count below Google's published minimums (pure Tier-1).
+  // Editor + Google Ads UI hard-block PMax AGs below: 3 short headlines,
+  // 1 long headline, 2 descriptions, 1×1 image, 1×1.91 image. The
+  // existing `low_ad_strength` finding uses Google's pre-computed
+  // ad_strength enum which lags asset edits by a day; this finding is
+  // directly actionable ("AG-X has 1 HEADLINE, needs 3").
+  const assetGaps = collectPmaxAssetCountGaps(ctx);
+  if (assetGaps.length > 0) {
+    findings.push({
+      area: 'pmax_asset_count_below_minimum',
+      severity: 'HIGH',
+      text: `${assetGaps.length} PMax-Asset-Group(s) unter Google's hartem Asset-Minimum. ` +
+        `Bei Re-Emit blockiert Editor diese AGs als unvollständig. ` +
+        `Pro AG fehlende Asset-Typen sind in der Evidence aufgelistet.`,
+      confidence: 1.0,
+      evidence: { count: assetGaps.length, candidates: assetGaps },
+    });
+  }
+
   // 6c. Quality-Score collapse on high-spend keywords (pure Tier-1).
   // QS-Drop ist immer ein hartes Signal für Anzeigen-Relevanz oder
   // Landing-Page-Quality — keine LLM-Verifikation nötig. Detector
@@ -1421,6 +1460,139 @@ function collectQualityScoreCollapse(ctx: FindingContext): QualityScoreCollapseG
   }
   out.sort((a, b) => b.spend_chf - a.spend_chf);
   return out.slice(0, QS_COLLAPSE_TOP_N);
+}
+
+interface AudienceSignalGap {
+  campaign_name: string;
+  asset_group_name: string;
+  signal_count: number;
+  signal_types: string[];
+}
+
+const AUDIENCE_SIGNAL_MIN_TYPES = 3;
+const AUDIENCE_SIGNAL_TOP_N = 30;
+
+/** Pure Tier-1: per asset_group count distinct audience_signal_types.
+ *  Flag asset_groups with fewer than the recommended minimum (Google
+ *  guidance: at least 3 mixed signal types so Smart-Bidding has
+ *  multi-axis learning seed). Asset-groups with 0 signals are the
+ *  highest-severity sub-bucket inside the same finding. */
+function collectAudienceSignalGaps(ctx: FindingContext): AudienceSignalGap[] {
+  // First pull the universe of NON-empty asset_groups for the run so
+  // we can list groups with ZERO signals (left anti-join semantics).
+  const groups = ctx.store.getSnapshotRows<{ campaign_name: string | null; asset_group_name: string | null }>(
+    'ads_asset_groups', ctx.account.ads_account_id, { runId: ctx.run.run_id },
+  ).filter(g => (g.asset_group_name ?? '').trim().length > 0)
+    .map(g => ({ campaign: (g.campaign_name ?? '?').trim(), ag: (g.asset_group_name ?? '').trim() }));
+
+  const signalsByAg = new Map<string, Set<string>>();
+  const signalRows = ctx.store.getSnapshotRows<{ asset_group_name: string | null; signal_type: string | null }>(
+    'ads_audience_signals', ctx.account.ads_account_id, { runId: ctx.run.run_id },
+  );
+  for (const r of signalRows) {
+    const ag = (r.asset_group_name ?? '').trim();
+    const t = (r.signal_type ?? '').trim().toUpperCase();
+    if (!ag || !t) continue;
+    const set = signalsByAg.get(ag) ?? new Set();
+    set.add(t);
+    signalsByAg.set(ag, set);
+  }
+
+  const out: AudienceSignalGap[] = [];
+  for (const g of groups) {
+    const types = signalsByAg.get(g.ag);
+    const count = types?.size ?? 0;
+    if (count >= AUDIENCE_SIGNAL_MIN_TYPES) continue;
+    out.push({
+      campaign_name: g.campaign,
+      asset_group_name: g.ag,
+      signal_count: count,
+      signal_types: types ? Array.from(types).sort() : [],
+    });
+  }
+  // Surface zero-signal groups first, then sort by AG name for stability.
+  out.sort((a, b) => (a.signal_count - b.signal_count) || a.asset_group_name.localeCompare(b.asset_group_name));
+  return out.slice(0, AUDIENCE_SIGNAL_TOP_N);
+}
+
+interface PmaxAssetCountGap {
+  campaign_name: string;
+  asset_group_name: string;
+  /** Field-type → count of currently-attached assets. */
+  counts: Record<string, number>;
+  /** field_type → required minimum (only the ones below their minimum). */
+  missing: Array<{ field_type: string; have: number; need: number }>;
+}
+
+const PMAX_ASSET_MIN_BY_TYPE: Record<string, number> = {
+  HEADLINE: 3,
+  LONG_HEADLINE: 1,
+  DESCRIPTION: 2,
+  MARKETING_IMAGE: 1,           // 1.91:1
+  SQUARE_MARKETING_IMAGE: 1,    // 1:1
+  // Google also wants a logo + business-name but those are account-level;
+  // skipped here to avoid false positives on per-AG check.
+};
+const PMAX_ASSET_TOP_N = 30;
+
+/** Pure Tier-1: per asset_group count assets by field_type. Flag groups
+ *  whose attached counts fall below Google's hard minimums for any
+ *  required field_type. Editor blocks these AGs from publishing. */
+function collectPmaxAssetCountGaps(ctx: FindingContext): PmaxAssetCountGap[] {
+  // Need to scope to PMax asset_groups; ads_asset_group_assets carries
+  // the campaign_name on each row already.
+  const rows = ctx.store.getSnapshotRows<{
+    campaign_name: string | null; asset_group_name: string | null;
+    field_type: string | null; asset_status: string | null;
+  }>('ads_asset_group_assets', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+
+  type Bucket = { campaign: string; ag: string; counts: Map<string, number> };
+  const agg = new Map<string, Bucket>();
+  for (const r of rows) {
+    const campaign = (r.campaign_name ?? '').trim();
+    const ag = (r.asset_group_name ?? '').trim();
+    const ft = (r.field_type ?? '').trim().toUpperCase();
+    if (!campaign || !ag || !ft) continue;
+    // REMOVED / paused assets do not satisfy Google's minimums.
+    const status = (r.asset_status ?? '').trim().toUpperCase();
+    if (status && status !== 'ENABLED' && status !== 'ACTIVE') continue;
+    const key = `${campaign}\x00${ag}`;
+    const bucket = agg.get(key) ?? { campaign, ag, counts: new Map() };
+    bucket.counts.set(ft, (bucket.counts.get(ft) ?? 0) + 1);
+    agg.set(key, bucket);
+  }
+
+  // Also include asset_groups that have ZERO assets recorded — anti-join
+  // against ads_asset_groups so brand-new (empty) AGs surface too.
+  const groups = ctx.store.getSnapshotRows<{ campaign_name: string | null; asset_group_name: string | null }>(
+    'ads_asset_groups', ctx.account.ads_account_id, { runId: ctx.run.run_id },
+  ).filter(g => (g.asset_group_name ?? '').trim().length > 0);
+  for (const g of groups) {
+    const campaign = (g.campaign_name ?? '?').trim();
+    const ag = (g.asset_group_name ?? '').trim();
+    const key = `${campaign}\x00${ag}`;
+    if (!agg.has(key)) agg.set(key, { campaign, ag, counts: new Map() });
+  }
+
+  const out: PmaxAssetCountGap[] = [];
+  for (const b of agg.values()) {
+    const missing: PmaxAssetCountGap['missing'] = [];
+    const countsObj: Record<string, number> = {};
+    for (const [ft, need] of Object.entries(PMAX_ASSET_MIN_BY_TYPE)) {
+      const have = b.counts.get(ft) ?? 0;
+      countsObj[ft] = have;
+      if (have < need) missing.push({ field_type: ft, have, need });
+    }
+    if (missing.length === 0) continue;
+    out.push({
+      campaign_name: b.campaign,
+      asset_group_name: b.ag,
+      counts: countsObj,
+      missing,
+    });
+  }
+  out.sort((a, b) => (b.missing.length - a.missing.length) || a.asset_group_name.localeCompare(b.asset_group_name));
+  return out.slice(0, PMAX_ASSET_TOP_N);
 }
 
 // ── Number helpers ────────────────────────────────────────────────────

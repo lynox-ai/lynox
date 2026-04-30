@@ -433,6 +433,91 @@ describe('runAudit — P1 hybrid detectors', () => {
     expect(candidates[0]!.spend_chf).toBeCloseTo(15, 1);
   });
 
+  it('Tier-1: audience_signal_thin flags asset_groups with < 3 signal types', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertAssetGroupsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { assetGroupId: 'ag-zero', assetGroupName: 'AG-Zero', campaignName: 'PMax-Brand' },
+        { assetGroupId: 'ag-one',  assetGroupName: 'AG-One',  campaignName: 'PMax-Brand' },
+        { assetGroupId: 'ag-full', assetGroupName: 'AG-Full', campaignName: 'PMax-Brand' },
+      ],
+    });
+    store.insertAudienceSignalsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        // AG-Zero: no signals at all (left anti-join must surface it).
+        // AG-One: a single signal type.
+        { assetGroupName: 'AG-One', signalType: 'CUSTOM_SEGMENT', campaignName: 'PMax-Brand' },
+        // AG-Full: three distinct types — passes the minimum.
+        { assetGroupName: 'AG-Full', signalType: 'CUSTOM_SEGMENT', campaignName: 'PMax-Brand' },
+        { assetGroupName: 'AG-Full', signalType: 'USER_LIST',      campaignName: 'PMax-Brand' },
+        { assetGroupName: 'AG-Full', signalType: 'DEMOGRAPHICS',   campaignName: 'PMax-Brand' },
+      ],
+    });
+
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'audience_signal_thin');
+    expect(finding).toBeDefined();
+    const candidates = (finding!.evidence as { candidates: Array<{ asset_group_name: string; signal_count: number }> }).candidates;
+    // Two flagged: AG-Zero (0 signals, sorted first) + AG-One (1 signal).
+    // AG-Full with 3 types must NOT appear.
+    expect(candidates.map(c => c.asset_group_name)).toEqual(['AG-Zero', 'AG-One']);
+    expect(candidates[0]!.signal_count).toBe(0);
+    // Severity is HIGH because at least one AG has zero signals.
+    expect(finding!.severity).toBe('HIGH');
+  });
+
+  it('Tier-1: pmax_asset_count_below_minimum lists missing field_types per AG', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertAssetGroupsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { assetGroupId: 'ag-thin',  assetGroupName: 'AG-Thin',  campaignName: 'PMax-Brand' },
+        { assetGroupId: 'ag-full',  assetGroupName: 'AG-Full',  campaignName: 'PMax-Brand' },
+        { assetGroupId: 'ag-empty', assetGroupName: 'AG-Empty', campaignName: 'PMax-Brand' },
+      ],
+    });
+    store.insertAssetGroupAssetsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        // AG-Thin: only 1 HEADLINE — needs 3 — also missing every other type.
+        { assetGroupName: 'AG-Thin', fieldType: 'HEADLINE', assetStatus: 'ENABLED',
+          campaignName: 'PMax-Brand', textContent: 'one' },
+        // AG-Full: meets every minimum.
+        ...['HEADLINE', 'HEADLINE', 'HEADLINE'].map(ft => ({
+          assetGroupName: 'AG-Full', fieldType: ft, assetStatus: 'ENABLED',
+          campaignName: 'PMax-Brand', textContent: 'h',
+        })),
+        { assetGroupName: 'AG-Full', fieldType: 'LONG_HEADLINE', assetStatus: 'ENABLED',
+          campaignName: 'PMax-Brand', textContent: 'long' },
+        { assetGroupName: 'AG-Full', fieldType: 'DESCRIPTION', assetStatus: 'ENABLED',
+          campaignName: 'PMax-Brand', textContent: 'd1' },
+        { assetGroupName: 'AG-Full', fieldType: 'DESCRIPTION', assetStatus: 'ENABLED',
+          campaignName: 'PMax-Brand', textContent: 'd2' },
+        { assetGroupName: 'AG-Full', fieldType: 'MARKETING_IMAGE', assetStatus: 'ENABLED',
+          campaignName: 'PMax-Brand', imageUrl: 'https://x' },
+        { assetGroupName: 'AG-Full', fieldType: 'SQUARE_MARKETING_IMAGE', assetStatus: 'ENABLED',
+          campaignName: 'PMax-Brand', imageUrl: 'https://x' },
+        // AG-Empty: zero asset rows — must still surface via the anti-join.
+      ],
+    });
+
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'pmax_asset_count_below_minimum');
+    expect(finding).toBeDefined();
+    const candidates = (finding!.evidence as { candidates: Array<{ asset_group_name: string; missing: Array<{ field_type: string; have: number; need: number }> }> }).candidates;
+    const names = candidates.map(c => c.asset_group_name).sort();
+    expect(names).toEqual(['AG-Empty', 'AG-Thin']);
+    const thin = candidates.find(c => c.asset_group_name === 'AG-Thin')!;
+    const headlineGap = thin.missing.find(m => m.field_type === 'HEADLINE')!;
+    expect(headlineGap).toEqual({ field_type: 'HEADLINE', have: 1, need: 3 });
+  });
+
   it('Tier-1: quality_score_collapse skips when total ad-group spend is below threshold', () => {
     seedAccount(store);
     const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
