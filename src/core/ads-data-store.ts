@@ -1394,6 +1394,17 @@ export class AdsDataStore {
     return Number(result.changes);
   }
 
+  /** Delete every finding for a run with the given source. The audit
+   *  tool calls this before persisting so re-runs replace (not
+   *  accumulate) deterministic findings. Phase-C tool findings live
+   *  under source='agent' and are unaffected. */
+  deleteFindingsBySource(runId: number, source: AdsFindingSource): number {
+    const result = this.db.prepare(`
+      DELETE FROM ads_findings WHERE run_id = ? AND source = ?
+    `).run(runId, source);
+    return Number(result.changes);
+  }
+
   listFindings(
     runId: number,
     opts?: { severity?: AdsFindingSeverity | undefined; area?: string | undefined; source?: AdsFindingSource | undefined } | undefined,

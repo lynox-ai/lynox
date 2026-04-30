@@ -92,6 +92,42 @@ describe('ads_audit_run tool', () => {
     expect(account.mode).toBe('BOOTSTRAP');
   });
 
+  it('replaces deterministic findings on re-run instead of accumulating duplicates', async () => {
+    seedFullAccount(store);
+    await tool.handler({ ads_account_id: ACCOUNT }, makeAgent());
+    const run = store.getLatestSuccessfulAuditRun(ACCOUNT)!;
+    const firstSet = store.listFindings(run.run_id, { source: 'deterministic' });
+    const firstAreas = firstSet.map(f => f.area).sort();
+
+    // Second call against the same snapshot: same findings should
+    // surface, but the row count must NOT double — otherwise downstream
+    // tools that read `findings[0]` deterministically pick the oldest
+    // and run on stale evidence.
+    await tool.handler({ ads_account_id: ACCOUNT }, makeAgent());
+    const secondSet = store.listFindings(run.run_id, { source: 'deterministic' });
+    expect(secondSet.map(f => f.area).sort()).toEqual(firstAreas);
+    expect(secondSet).toHaveLength(firstSet.length);
+  });
+
+  it('preserves agent-source findings (e.g. Phase-C pre_emit_review) across audit re-runs', async () => {
+    seedFullAccount(store);
+    await tool.handler({ ads_account_id: ACCOUNT }, makeAgent());
+    const run = store.getLatestSuccessfulAuditRun(ACCOUNT)!;
+    // Inject a Phase-C-style agent finding into the same run.
+    store.insertFinding({
+      runId: run.run_id, adsAccountId: ACCOUNT,
+      area: 'pre_emit_review:duplicate_final_url',
+      severity: 'BLOCK', source: 'agent',
+      text: 'two NEW ad-groups share a Final URL',
+      confidence: 0.95, evidence: { url: 'https://x' },
+    });
+    expect(store.listFindings(run.run_id, { source: 'agent' })).toHaveLength(1);
+
+    await tool.handler({ ads_account_id: ACCOUNT }, makeAgent());
+    // Audit re-run must NOT wipe the agent finding.
+    expect(store.listFindings(run.run_id, { source: 'agent' })).toHaveLength(1);
+  });
+
   it('clamps verify_window_days to [7, 90]', async () => {
     seedFullAccount(store);
     const result = await tool.handler({ ads_account_id: ACCOUNT, verify_window_days: 1 }, makeAgent());

@@ -126,8 +126,14 @@ export function createAdsBlueprintReviewTool(
 
         for (const f of persisted) {
           store.insertFinding({
+            // Phase-C findings carry source='agent' even though the
+            // engine itself is deterministic — they're produced by a
+            // tool the agent invoked, not by ads_audit_run's
+            // deterministic detector pipeline. This keeps audit-run's
+            // dedup (`deleteFindingsBySource(_, 'deterministic')`) from
+            // wiping pre-emit-review verdicts on the next audit call.
             runId, adsAccountId: input.ads_account_id,
-            area: f.area, severity: f.severity, source: 'deterministic',
+            area: f.area, severity: f.severity, source: 'agent',
             text: f.text, confidence: f.confidence, evidence: f.evidence,
           });
         }

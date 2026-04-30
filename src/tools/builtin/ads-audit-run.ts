@@ -229,6 +229,14 @@ export async function classifyThemeFindingTokens(
 // ── Persistence ───────────────────────────────────────────────────────
 
 function persistFindings(store: AdsDataStore, result: AuditResult): number[] {
+  // Replace, don't accumulate. ads_audit_run re-computes the full
+  // deterministic finding set on every call against the latest
+  // snapshot; without this clear the same run row would carry
+  // duplicate `pmax_theme_coverage_gap` (or any other) findings on
+  // re-runs and downstream tools (e.g. blueprint-engine reading
+  // `findings[0]!`) would deterministically pick the oldest. Phase-C
+  // findings live under source='agent' and survive.
+  store.deleteFindingsBySource(result.run.run_id, 'deterministic');
   const ids: number[] = [];
   for (const f of result.findings) {
     const row = store.insertFinding({
