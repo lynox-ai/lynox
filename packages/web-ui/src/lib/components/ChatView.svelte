@@ -373,6 +373,8 @@
 
 	let inputText = $state('');
 	let messagesEl: HTMLDivElement;
+	let autoScroll = $state(true);
+	const SCROLL_THRESHOLD_PX = 64;
 	let textareaEl = $state<HTMLTextAreaElement>();
 	let fileInputEl: HTMLInputElement;
 	let pendingFiles = $state<FileAttachment[]>([]);
@@ -1135,9 +1137,37 @@
 		await sendMessage(task || t('chat.analyze_files'), files);
 	}
 
+	function isAtBottom(): boolean {
+		if (!messagesEl) return true;
+		const distance = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+		return distance < SCROLL_THRESHOLD_PX;
+	}
+
+	function onMessagesScroll(): void {
+		// Engages auto-scroll when user is at the bottom; releases it as soon
+		// as they scroll up. Re-engages once they scroll back to the bottom.
+		autoScroll = isAtBottom();
+	}
+
+	// Track streaming token churn and tool-call activity so the effect
+	// re-runs while the assistant is writing, not just when a turn ends.
+	const streamSignal = $derived.by(() => {
+		let s = messages.length;
+		for (const m of messages) {
+			s += m.content.length;
+			if (m.blocks) s += m.blocks.length;
+			if (m.toolCalls) s += m.toolCalls.length;
+		}
+		return s;
+	});
+
 	$effect(() => {
-		if (messages.length > 0 && messagesEl) {
-			messagesEl.scrollTop = messagesEl.scrollHeight;
+		// Read reactive deps so the effect re-runs as content grows.
+		void streamSignal;
+		if (autoScroll && messagesEl) {
+			requestAnimationFrame(() => {
+				if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+			});
 		}
 	});
 
@@ -1224,7 +1254,7 @@
 
 <div class="flex h-full flex-col">
 	<!-- Messages -->
-	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl}>
+	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
 				{#if hasApiKey === false}
