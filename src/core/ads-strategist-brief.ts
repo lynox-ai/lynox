@@ -27,6 +27,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages.js';
 import type {
   CustomerProfileRow, AdsAccountState, StrategistPriority,
+  StrategistBriefRow,
 } from './ads-data-store.js';
 import type { AuditResult, AuditFindingDraft } from './ads-audit-engine.js';
 import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
@@ -38,6 +39,9 @@ export interface StrategistBriefResult {
   priorities: StrategistPriority[];
   risks: string[];
   doNotTouch: string[];
+  /** P4: optional last-cycle-impact narrative. Empty when there is
+   *  no previous brief to compare against. */
+  lastCycleImpact: string;
   llmFailed: boolean;
   failureReason?: string;
 }
@@ -81,6 +85,10 @@ const TOOL_DEFINITION = {
         items: { type: 'string' as const },
         description: 'Campaign or asset-group names to leave alone (high-performers, fragile setups).',
       },
+      last_cycle_impact: {
+        type: 'string' as const,
+        description: 'Short narrative comparing the PREVIOUS cycle\'s priorities to what was implemented and the measured effect. Empty string when there is no previous brief or no implementation drift to report.',
+      },
     },
     required: ['headline', 'priorities', 'risks', 'do_not_touch'],
   },
@@ -106,7 +114,13 @@ Use the customer profile depth fields when present (P3):
 - "Pricing strategy" → match recommendations (don't suggest discount messaging on premium positioning).
 - "Seasonality" → time priorities accordingly (e.g. "scale up budget for kefir terms in Mar-May per stated seasonality").
 
-When a depth field is missing, just stick to the basic profile + findings.`;
+When a depth field is missing, just stick to the basic profile + findings.
+
+P4 — Last-cycle impact (when previous-cycle context is provided):
+- The "Cycle context" user message includes a "## Previous cycle" block when this isn't the first run. It lists the priorities the previous brief proposed, what was measurably implemented (manual changes since), and the verification result (KPI improvement / regression).
+- When that block is present, populate "last_cycle_impact" with a short factual narrative: which priority was implemented, which wasn't, what the KPI delta says about effect.
+- Be honest about misses: if the operator skipped a priority or implemented it differently than proposed, say so. Don't whitewash.
+- When the previous-cycle block is absent (cycle 1 / no prior brief / no manual changes), set last_cycle_impact to an empty string.`;
 
   switch (state) {
     case 'greenfield':
@@ -149,7 +163,10 @@ function buildCustomerContext(customer: CustomerProfileRow | null): string {
   return buildCustomerContextWithDepth(customer);
 }
 
-function buildCycleContext(result: AuditResult, state: AdsAccountState, stateReason: string): string {
+function buildCycleContext(
+  result: AuditResult, state: AdsAccountState, stateReason: string,
+  previousBrief: StrategistBriefRow | null,
+): string {
   const lines: string[] = [];
   lines.push(`# Cycle context`);
   lines.push(`- Account state: **${state}** (${stateReason})`);
@@ -166,6 +183,18 @@ function buildCycleContext(result: AuditResult, state: AdsAccountState, stateRea
   if (result.kpis.roas !== null) lines.push(`- ROAS: ${result.kpis.roas.toFixed(2)}x`);
   if (result.kpis.cpa !== null && result.kpis.cpa > 0) lines.push(`- CPA: ${result.kpis.cpa.toFixed(2)} CHF`);
   if (result.kpis.ctr !== null) lines.push(`- CTR: ${(result.kpis.ctr * 100).toFixed(2)}%`);
+
+  if (result.previousKpis) {
+    lines.push('');
+    lines.push('## KPI delta vs previous cycle');
+    const prev = result.previousKpis;
+    lines.push(`- Spend: ${prev.spend.toFixed(2)} → ${result.kpis.spend.toFixed(2)} CHF`);
+    lines.push(`- Conversions: ${prev.conversions.toFixed(1)} → ${result.kpis.conversions.toFixed(1)}`);
+    if (prev.roas !== null && result.kpis.roas !== null) {
+      lines.push(`- ROAS: ${prev.roas.toFixed(2)}x → ${result.kpis.roas.toFixed(2)}x`);
+    }
+  }
+
   lines.push('');
   lines.push('## Findings (post-classification)');
   if (result.findings.length === 0) {
@@ -184,6 +213,28 @@ function buildCycleContext(result: AuditResult, state: AdsAccountState, stateRea
     if (counts['VERSCHLECHTERUNG']) lines.push(`- Regressions: ${counts['VERSCHLECHTERUNG']}`);
     if (counts['VERBESSERUNG']) lines.push(`- Improvements: ${counts['VERBESSERUNG']}`);
   }
+
+  // P4: previous-cycle context — feeds last_cycle_impact narrative.
+  if (previousBrief) {
+    lines.push('');
+    lines.push('## Previous cycle');
+    lines.push(`- Previous account state: ${previousBrief.account_state}`);
+    if (previousBrief.headline) lines.push(`- Headline was: ${previousBrief.headline}`);
+    try {
+      const prevPriorities = JSON.parse(previousBrief.priorities_json) as StrategistPriority[];
+      if (Array.isArray(prevPriorities) && prevPriorities.length > 0) {
+        lines.push('- Priorities proposed last cycle:');
+        for (const p of prevPriorities) {
+          lines.push(`  - ${p.title}`);
+        }
+      }
+    } catch { /* ignore malformed */ }
+    if (result.manualChanges) {
+      lines.push(`- Manual changes since: ${result.manualChanges.totalChanges} total, ` +
+        `${result.manualChanges.driftAgainstEmittedEntities} drift against emitted entities`);
+    }
+  }
+
   return lines.join('\n');
 }
 
@@ -195,6 +246,7 @@ export async function generateStrategistBrief(
   result: AuditResult,
   state: AdsAccountState,
   stateReason: string,
+  previousBrief: StrategistBriefRow | null,
   opts: StrategistBriefOptions = {},
 ): Promise<StrategistBriefResult> {
   const client = opts.client ?? safeCreateClient(opts);
@@ -216,7 +268,7 @@ export async function generateStrategistBrief(
   ];
 
   // User message is the per-cycle volatile context.
-  const userMessage = buildCycleContext(result, state, stateReason);
+  const userMessage = buildCycleContext(result, state, stateReason, previousBrief);
 
   try {
     // Sonnet for synthesis quality — Haiku tends to repeat findings
@@ -259,7 +311,8 @@ function safeCreateClient(opts: StrategistBriefOptions): Anthropic | null {
 /** Parse the model's tool-use input into our typed result shape. */
 export function parseBrief(rawInput: unknown): StrategistBriefResult {
   const empty: StrategistBriefResult = {
-    headline: '', priorities: [], risks: [], doNotTouch: [], llmFailed: false,
+    headline: '', priorities: [], risks: [], doNotTouch: [],
+    lastCycleImpact: '', llmFailed: false,
   };
   if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
     return { ...empty, llmFailed: true, failureReason: 'malformed brief input' };
@@ -287,11 +340,13 @@ export function parseBrief(rawInput: unknown): StrategistBriefResult {
   const doNotTouch = Array.isArray(obj['do_not_touch'])
     ? obj['do_not_touch'].filter((r): r is string => typeof r === 'string').map(r => r.trim()).filter(r => r.length > 0)
     : [];
+  const lastCycleImpact = typeof obj['last_cycle_impact'] === 'string'
+    ? obj['last_cycle_impact'].trim() : '';
 
   if (headline.length === 0 && priorities.length === 0) {
     return { ...empty, llmFailed: true, failureReason: 'empty brief from model' };
   }
-  return { headline, priorities, risks, doNotTouch, llmFailed: false };
+  return { headline, priorities, risks, doNotTouch, lastCycleImpact, llmFailed: false };
 }
 
 /** Fail-safe brief — keeps the audit Markdown useful even when the
@@ -311,6 +366,7 @@ function fallback(
     priorities,
     risks: ['LLM strategist unavailable — operator must synthesize the priorities manually from the finding list below.'],
     doNotTouch: [],
+    lastCycleImpact: '',
     llmFailed: true,
     failureReason: reason,
   };

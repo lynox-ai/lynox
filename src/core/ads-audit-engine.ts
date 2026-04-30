@@ -145,6 +145,11 @@ export interface AuditResult {
   run: AdsAuditRunRow;
   previousRun: AdsAuditRunRow | null;
   kpis: AuditKpis;
+  /** P4: KPIs of the previous run (when one exists). Used by the
+   *  cycle-anomaly detector and the strategist brief's last-cycle
+   *  impact narrative. Null on cycle 1 / when there is no previous
+   *  successful run. */
+  previousKpis: AuditKpis | null;
   mode: ModeDetection;
   manualChanges: ManualChangeSummary | null;
   verification: PerformanceVerificationSummary | null;
@@ -184,6 +189,7 @@ export function runAudit(store: AdsDataStore, adsAccountId: string, opts?: RunAu
     : null;
 
   const kpis = computeKpis(store, run);
+  const previousKpis = previousRun !== null ? computeKpis(store, previousRun) : null;
   const mode = detectMode(store, account, run);
   const manualChanges = run.previous_run_id !== null
     ? summariseManualChanges(store, run, previousRun)
@@ -198,12 +204,12 @@ export function runAudit(store: AdsDataStore, adsAccountId: string, opts?: RunAu
 
   const findings = generateDeterministicFindings({
     store, account, customer, run, previousRun,
-    kpis, mode, manualChanges, verification,
+    kpis, previousKpis, mode, manualChanges, verification,
     now: opts?.now ?? new Date(),
   });
 
   return {
-    account, customer, run, previousRun, kpis, mode,
+    account, customer, run, previousRun, kpis, previousKpis, mode,
     manualChanges, verification, findings,
   };
 }
@@ -866,6 +872,7 @@ interface FindingContext {
   run: AdsAuditRunRow;
   previousRun: AdsAuditRunRow | null;
   kpis: AuditKpis;
+  previousKpis: AuditKpis | null;
   mode: ModeDetection;
   manualChanges: ManualChangeSummary | null;
   verification: PerformanceVerificationSummary | null;
@@ -1081,6 +1088,27 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
         `Smart-Bidding kann nicht unterscheiden welche AG funktioniert — pro AG mind. 1-2 unique Lines empfohlen.`,
       confidence: 0.9,
       evidence: { count: duplicates.length, candidates: duplicates },
+    });
+  }
+
+  // 6k. Cycle KPI anomaly (pure Tier-1).
+  // Compare current run KPIs to the previous run. ROAS / conv-rate /
+  // CTR drops over the configured threshold trigger the finding so
+  // the strategist can lead the cycle with "stop the bleeding" vs
+  // "incremental tweaks". Only fires when previousKpis exists AND
+  // both runs have meaningful spend (>= 100 CHF).
+  const anomalies = collectCycleKpiAnomalies(ctx);
+  if (anomalies.length > 0) {
+    const worst = anomalies[0]!;
+    const severity: 'HIGH' | 'MEDIUM' = anomalies.some(a => a.drop_pct >= 25) ? 'HIGH' : 'MEDIUM';
+    findings.push({
+      area: 'cycle_kpi_anomaly',
+      severity,
+      text: `${anomalies.length} KPI(s) sind seit dem letzten Run signifikant gefallen — ` +
+        `worst: ${worst.kpi} ${worst.previous.toFixed(2)} → ${worst.current.toFixed(2)} (${worst.drop_pct.toFixed(0)}% Abfall). ` +
+        `Strategist soll vor Restructure die Ursache identifizieren (Saisonalität? Asset-Drift? Bid-Strategy-Change?).`,
+      confidence: 0.9,
+      evidence: { anomalies },
     });
   }
 
@@ -1804,6 +1832,46 @@ function collectCompetitorTermCandidates(ctx: FindingContext): CompetitorTermCan
   }
   out.sort((a, b) => b.spend_chf - a.spend_chf);
   return out.slice(0, COMPETITOR_TERM_TOP_N);
+}
+
+interface CycleKpiAnomaly {
+  kpi: 'roas' | 'conversion_rate' | 'ctr';
+  previous: number;
+  current: number;
+  drop_pct: number;
+}
+
+const CYCLE_ANOMALY_MIN_DROP_PCT = 15;
+const CYCLE_ANOMALY_MIN_SPEND_CHF = 100;
+
+/** Pure Tier-1: compare current run KPIs vs previous run KPIs.
+ *  Flag drops above the threshold when both runs have meaningful
+ *  spend so single-day blips don't trigger false positives. */
+function collectCycleKpiAnomalies(ctx: FindingContext): CycleKpiAnomaly[] {
+  if (!ctx.previousKpis) return [];
+  const cur = ctx.kpis;
+  const prev = ctx.previousKpis;
+  if (cur.spend < CYCLE_ANOMALY_MIN_SPEND_CHF || prev.spend < CYCLE_ANOMALY_MIN_SPEND_CHF) return [];
+
+  const out: CycleKpiAnomaly[] = [];
+  const compare = (kpi: CycleKpiAnomaly['kpi'], curVal: number | null, prevVal: number | null): void => {
+    if (curVal === null || prevVal === null || prevVal <= 0) return;
+    const dropPct = ((prevVal - curVal) / prevVal) * 100;
+    if (dropPct >= CYCLE_ANOMALY_MIN_DROP_PCT) {
+      out.push({ kpi, previous: prevVal, current: curVal, drop_pct: round1(dropPct) });
+    }
+  };
+
+  compare('roas', cur.roas, prev.roas);
+  // Conversion rate isn't directly in AuditKpis — derive from
+  // conversions / clicks for both runs.
+  const curConvRate = cur.clicks > 0 ? cur.conversions / cur.clicks : null;
+  const prevConvRate = prev.clicks > 0 ? prev.conversions / prev.clicks : null;
+  compare('conversion_rate', curConvRate, prevConvRate);
+  compare('ctr', cur.ctr, prev.ctr);
+
+  out.sort((a, b) => b.drop_pct - a.drop_pct);
+  return out;
 }
 
 interface PlaceholderAssetCandidate {

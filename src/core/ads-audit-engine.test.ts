@@ -622,6 +622,75 @@ describe('runAudit — P1 hybrid detectors', () => {
     expect(candidates.length).toBe(4);
   });
 
+  it('Tier-1: cycle_kpi_anomaly fires when ROAS dropped > 15% vs previous run', () => {
+    seedAccount(store);
+    // Previous run: solid ROAS — campaign with 500 CHF spend, 6.0 ROAS.
+    const r1 = createSuccessRun(store, { mode: 'OPTIMIZE' });
+    seedDailyPerformance(store, r1.run_id, 'c1', '2026-01-01', 30, { dailyClicks: 50, dailyConv: 2 });
+    store.insertCampaignsBatch({
+      runId: r1.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'c1', campaignName: 'Search',
+        clicks: 1500, impressions: 50000,
+        costMicros: 500_000_000, conversions: 50, convValue: 3000, // ROAS 6.0
+      }],
+    });
+    // Current run: ROAS dropped to 4.0 — 33% drop.
+    const r2 = store.createAuditRun({
+      adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id,
+    });
+    store.completeAuditRun(r2.run_id);
+    seedDailyPerformance(store, r2.run_id, 'c1', '2026-02-01', 30, { dailyClicks: 50, dailyConv: 2 });
+    store.insertCampaignsBatch({
+      runId: r2.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'c1', campaignName: 'Search',
+        clicks: 1500, impressions: 50000,
+        costMicros: 500_000_000, conversions: 50, convValue: 2000, // ROAS 4.0
+      }],
+    });
+    store.recordMajorImport(ACCOUNT, new Date(Date.now() + 1000).toISOString());
+
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'cycle_kpi_anomaly');
+    expect(finding).toBeDefined();
+    expect(finding!.severity).toBe('HIGH'); // 33% drop > 25% threshold
+    const anomalies = (finding!.evidence as { anomalies: Array<{ kpi: string; drop_pct: number }> }).anomalies;
+    expect(anomalies[0]!.kpi).toBe('roas');
+    expect(anomalies[0]!.drop_pct).toBeGreaterThan(25);
+  });
+
+  it('Tier-1: cycle_kpi_anomaly skips when both runs have low spend (single-day blips filtered)', () => {
+    seedAccount(store);
+    const r1 = createSuccessRun(store, { mode: 'OPTIMIZE' });
+    seedDailyPerformance(store, r1.run_id, 'c1', '2026-01-01', 30, { dailyClicks: 5, dailyConv: 1 });
+    store.insertCampaignsBatch({
+      runId: r1.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'c1', campaignName: 'X',
+        clicks: 150, impressions: 3000, costMicros: 50_000_000, // 50 CHF — under threshold
+        conversions: 30, convValue: 300,
+      }],
+    });
+    const r2 = store.createAuditRun({
+      adsAccountId: ACCOUNT, mode: 'OPTIMIZE', previousRunId: r1.run_id,
+    });
+    store.completeAuditRun(r2.run_id);
+    seedDailyPerformance(store, r2.run_id, 'c1', '2026-02-01', 30, { dailyClicks: 5, dailyConv: 1 });
+    store.insertCampaignsBatch({
+      runId: r2.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        campaignId: 'c1', campaignName: 'X',
+        clicks: 150, impressions: 3000, costMicros: 50_000_000,
+        conversions: 30, convValue: 100, // big drop but low spend
+      }],
+    });
+    store.recordMajorImport(ACCOUNT, new Date(Date.now() + 1000).toISOString());
+
+    const result = runAudit(store, ACCOUNT);
+    expect(result.findings.find(f => f.area === 'cycle_kpi_anomaly')).toBeUndefined();
+  });
+
   it('Tier-1: brand_voice_drift skips when customer.brand_voice is empty', () => {
     seedAccount(store); // no brand voice
     const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });

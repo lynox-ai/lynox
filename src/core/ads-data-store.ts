@@ -860,6 +860,16 @@ const MIGRATIONS: string[] = [
    ALTER TABLE customer_profiles ADD COLUMN compliance_constraints TEXT NOT NULL DEFAULT '';
    ALTER TABLE customer_profiles ADD COLUMN pricing_strategy TEXT NOT NULL DEFAULT '';
    ALTER TABLE customer_profiles ADD COLUMN seasonal_patterns TEXT NOT NULL DEFAULT '';`,
+
+  // Migration v10: P4 last-cycle-impact field on strategist briefs.
+  // The brief now carries an optional narrative that compares the
+  // PREVIOUS cycle's proposed priorities to what was actually
+  // implemented (manual-change drift) and the measured effect (KPI
+  // verification). Only populated from cycle 2 onwards — cycle 1
+  // briefs leave it blank.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (10);
+
+   ALTER TABLE ads_strategist_briefs ADD COLUMN last_cycle_impact TEXT NOT NULL DEFAULT '';`,
 ];
 
 export interface CustomerProfileRow {
@@ -987,6 +997,9 @@ export interface StrategistBriefRow {
   do_not_touch_json: string;
   classification_reason: string;
   llm_failed: number;
+  /** P4: optional narrative comparing previous-cycle proposals to
+   *  what was implemented and the measured effect. Empty on cycle 1. */
+  last_cycle_impact: string;
   created_at: string;
 }
 
@@ -1000,6 +1013,9 @@ export interface InsertStrategistBriefInput {
   doNotTouch: readonly string[];
   classificationReason: string;
   llmFailed: boolean;
+  /** P4: optional last-cycle narrative. Pass empty string when not
+   *  applicable (cycle 1) or when no previous brief exists. */
+  lastCycleImpact?: string | undefined;
 }
 
 export interface BlueprintCritiqueChallenge {
@@ -1599,16 +1615,30 @@ export class AdsDataStore {
       INSERT INTO ads_strategist_briefs (
         run_id, ads_account_id, account_state, headline,
         priorities_json, risks_json, do_not_touch_json,
-        classification_reason, llm_failed, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        classification_reason, llm_failed, last_cycle_impact, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.runId, input.adsAccountId, input.accountState, input.headline,
       JSON.stringify(input.priorities), JSON.stringify(input.risks),
       JSON.stringify(input.doNotTouch),
-      input.classificationReason, input.llmFailed ? 1 : 0, now,
+      input.classificationReason, input.llmFailed ? 1 : 0,
+      input.lastCycleImpact ?? '', now,
     );
     return this.db.prepare('SELECT * FROM ads_strategist_briefs WHERE brief_id = ?')
       .get(Number(result.lastInsertRowid)) as StrategistBriefRow;
+  }
+
+  /** Fetch the strategist brief for the run that immediately preceded
+   *  the given run on the same account. Used by the brief generator
+   *  to ground the last-cycle-impact narrative. Returns null when
+   *  there is no previous run or no brief was ever stored. */
+  getPreviousBrief(currentRunId: number, adsAccountId: string): StrategistBriefRow | null {
+    return this.db.prepare(`
+      SELECT * FROM ads_strategist_briefs
+      WHERE ads_account_id = ? AND run_id < ?
+      ORDER BY run_id DESC
+      LIMIT 1
+    `).get(adsAccountId, currentRunId) as StrategistBriefRow | undefined ?? null;
   }
 
   getStrategistBrief(runId: number): StrategistBriefRow | null {

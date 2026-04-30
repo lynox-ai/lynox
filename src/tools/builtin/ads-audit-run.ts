@@ -495,13 +495,18 @@ export async function classifyBrandVoiceDriftFinding(
 /** D4: classify the audit result's account-state, ask the strategist
  *  module for a brief, persist it, and return the result for Markdown
  *  rendering. Best-effort throughout — fallback brief is persisted on
- *  LLM failure so subsequent runs / cross-cycle diffs remain coherent. */
+ *  LLM failure so subsequent runs / cross-cycle diffs remain coherent.
+ *
+ *  P4: looks up the previous brief on the same account and feeds it
+ *  to the LLM so the new brief can include a last_cycle_impact
+ *  narrative grounding the recommendations in what just happened. */
 async function runStrategistBrief(
   store: AdsDataStore, result: AuditResult,
   opts?: StrategistBriefOptions,
 ): Promise<StrategistBriefResult & { accountState: import('../../core/ads-data-store.js').AdsAccountState; stateReason: string }> {
   const verdict = classifyAccountState(result);
-  const brief = await generateStrategistBrief(result, verdict.state, verdict.reason, opts ?? {});
+  const previousBrief = store.getPreviousBrief(result.run.run_id, result.account.ads_account_id);
+  const brief = await generateStrategistBrief(result, verdict.state, verdict.reason, previousBrief, opts ?? {});
   store.insertStrategistBrief({
     runId: result.run.run_id,
     adsAccountId: result.account.ads_account_id,
@@ -512,6 +517,7 @@ async function runStrategistBrief(
     doNotTouch: brief.doNotTouch,
     classificationReason: verdict.reason,
     llmFailed: brief.llmFailed,
+    lastCycleImpact: brief.lastCycleImpact,
   });
   return { ...brief, accountState: verdict.state, stateReason: verdict.reason };
 }
@@ -658,6 +664,13 @@ function appendStrategistBrief(lines: string[], brief: StrategistBriefForRender)
   }
   lines.push(`*Account-State: ${brief.stateReason}*`);
   lines.push('');
+  // P4: last-cycle impact narrative — only emit when populated.
+  if (brief.lastCycleImpact && brief.lastCycleImpact.length > 0) {
+    lines.push('### Last-Cycle Impact');
+    lines.push('');
+    lines.push(brief.lastCycleImpact);
+    lines.push('');
+  }
   if (brief.priorities.length > 0) {
     lines.push('### Prioritäten');
     lines.push('');

@@ -73,7 +73,7 @@ describe('generateStrategistBrief', () => {
     });
 
     const result = await generateStrategistBrief(makeAuditResult(), 'messy_running',
-      'Restructure required', { client });
+      'Restructure required', null, { client });
 
     expect(result.llmFailed).toBe(false);
     expect(result.headline).toMatch(/Brand-Inflation/);
@@ -90,7 +90,7 @@ describe('generateStrategistBrief', () => {
     const result = await generateStrategistBrief(makeAuditResult(), 'messy_running',
       'Restructure required', { client: throwing });
     expect(result.llmFailed).toBe(true);
-    expect(result.failureReason).toMatch(/5xx/);
+    expect(result.failureReason).toMatch(/LLM error/);
     // Fallback synthesizes one priority per HIGH finding.
     expect(result.priorities.length).toBeGreaterThan(0);
     expect(result.risks[0]).toMatch(/LLM strategist unavailable/);
