@@ -32,6 +32,10 @@ import {
 } from '../../core/ads-blueprint-engine.js';
 import type { NegativeProposal } from '../../core/ads-negative-generator.js';
 import type { LowStrengthAssetGroup } from '../../core/ads-pmax-restructure.js';
+import {
+  generateBlueprintCritique,
+  type BlueprintCritiqueOptions, type BlueprintCritiqueResult,
+} from '../../core/ads-blueprint-critique.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 interface AdsBlueprintRunInput {
@@ -90,7 +94,13 @@ export function createAdsBlueprintRunTool(store: AdsDataStore): ToolEntry<AdsBlu
           ...(input.waste_spend_threshold_chf !== undefined
             ? { wasteSpendThreshold: input.waste_spend_threshold_chf } : {}),
         });
-        return renderBlueprintReport(result);
+        // D5: critique runs after the blueprint is persisted. Best-effort —
+        // if the LLM fails, we persist a fallback critique row (with
+        // llm_failed=1) and continue. The blueprint Markdown still
+        // renders the deterministic summary; the critique section
+        // surfaces a heads-up that the layer didn't run.
+        const critique = await runBlueprintCritique(store, result);
+        return renderBlueprintReport(result, critique);
       } catch (err) {
         if (err instanceof BlueprintPendingImportNotice) {
           return renderPendingImportReport(err);
@@ -104,9 +114,29 @@ export function createAdsBlueprintRunTool(store: AdsDataStore): ToolEntry<AdsBlu
   };
 }
 
+/** D5: Run the LLM critique on the just-persisted blueprint and
+ *  store the result. Best-effort throughout — fallback critique row
+ *  is persisted with llm_failed=1 so subsequent diffs are coherent. */
+async function runBlueprintCritique(
+  store: AdsDataStore, result: BlueprintResult,
+  opts?: BlueprintCritiqueOptions,
+): Promise<BlueprintCritiqueResult> {
+  if (!result.customer) {
+    return { challenges: [], llmFailed: false };
+  }
+  const critique = await generateBlueprintCritique(store, result.run.run_id, result.customer, opts ?? {});
+  store.insertBlueprintCritique({
+    runId: result.run.run_id,
+    adsAccountId: result.account.ads_account_id,
+    challenges: critique.challenges,
+    llmFailed: critique.llmFailed,
+  });
+  return critique;
+}
+
 // ── Markdown rendering ────────────────────────────────────────────────
 
-export function renderBlueprintReport(result: BlueprintResult): string {
+export function renderBlueprintReport(result: BlueprintResult, critique?: BlueprintCritiqueResult): string {
   const { account, customer, run, previousRun, mode, historyByType, negatives,
     lowStrengthAssetGroups, counts, namingViolations } = result;
 
@@ -129,6 +159,10 @@ export function renderBlueprintReport(result: BlueprintResult): string {
   appendNamingViolations(lines, namingViolations);
   appendLowStrengthAssetGroups(lines, lowStrengthAssetGroups);
   appendTradeOffWarnings(lines, mode, lowStrengthAssetGroups);
+  // D5: critique surfaces here so the operator sees the LLM challenges
+  // before the next-steps section. Soft warnings — Phase-C is the hard
+  // gate via ads_blueprint_review.
+  if (critique) appendCritique(lines, critique);
   appendNextSteps(lines, mode, namingViolations.length, negatives.length);
 
   return lines.join('\n');
@@ -244,6 +278,28 @@ function appendTradeOffWarnings(
   lines.push('');
   for (const w of warnings) lines.push(`- ${w}`);
   lines.push('');
+}
+
+function appendCritique(lines: string[], critique: BlueprintCritiqueResult): void {
+  if (critique.challenges.length === 0 && !critique.llmFailed) return;
+  lines.push('## Strategist Critique');
+  lines.push('');
+  if (critique.llmFailed) {
+    lines.push(`> ⚠️ LLM-Critique nicht verfügbar (${critique.failureReason ?? 'unknown'}). ` +
+      `Operator soll den Blueprint manuell challengen.`);
+    lines.push('');
+    return;
+  }
+  lines.push('Soft challenges — kein hard block (das macht Phase-C). ' +
+    'Operator entscheidet, ob er drauf eingeht.');
+  lines.push('');
+  for (let i = 0; i < critique.challenges.length; i++) {
+    const c = critique.challenges[i]!;
+    const refSuffix = c.ref ? ` _(${c.ref})_` : '';
+    lines.push(`**${i + 1}. ${c.title}**${refSuffix}`);
+    lines.push(c.challenge);
+    lines.push('');
+  }
 }
 
 function appendNextSteps(
