@@ -41,6 +41,10 @@ import {
   classifySearchTermRelevance,
   type ClassifySearchTermOptions, type ClassifiedSearchTerm, type RelevanceCategory,
 } from '../../core/ads-search-term-relevance-classifier.js';
+import {
+  classifyCompetitorTermIntent,
+  type ClassifyCompetitorOptions, type ClassifiedCompetitorTerm, type CompetitorIntentCategory,
+} from '../../core/ads-competitor-term-classifier.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 interface AdsAuditRunInput {
@@ -114,6 +118,13 @@ export function createAdsAuditRunTool(store: AdsDataStore): ToolEntry<AdsAuditRu
         // signal, not waste); irrelevant ones stay; uncertain ones
         // get tagged for Phase-A operator review at blueprint time.
         await classifyIrrelevantSearchTermFinding(result);
+        // P1/D3 Tier-2: same harness for competitor-term bidding —
+        // classify each search term that matched a customer competitor
+        // as intentional_competitive, unintentional_leak, or uncertain.
+        // The blueprint stage drops "intentional_competitive" from the
+        // negative-candidate pool, ships "unintentional_leak" as a
+        // negative proposal, and tags "uncertain" for operator review.
+        await classifyCompetitorTermFinding(result);
         const persistedIds = persistFindings(store, result);
 
         // Mirror to KG (best-effort, async). Failure must not break the audit.
@@ -310,6 +321,85 @@ export async function classifyIrrelevantSearchTermFinding(
   finding.text = `${irrelevantCount} klar irrelevante + ${uncertainCount} unsichere Suchbegriffe ` +
     `mit ${totalSpend.toFixed(2)} CHF Spend ohne Conversions. ` +
     `Irrelevante → Negativ-Liste; unsichere → Operator-Review im Blueprint.`;
+}
+
+/** Tier-2 of the competitor-term-bidding detector. Reads the Tier-1
+ *  candidates from the `competitor_term_bidding` finding evidence,
+ *  runs them through the LLM intent classifier, and rewrites the
+ *  evidence so each candidate carries its `classification` +
+ *  `classification_reason`. Drops the entire finding when no
+ *  unintentional + uncertain candidates remain (intentional-only
+ *  signal isn't actionable as a finding — operator already chose to
+ *  bid). Cost-bound: a single Haiku call. */
+export async function classifyCompetitorTermFinding(
+  result: AuditResult,
+  classifyOpts?: ClassifyCompetitorOptions,
+): Promise<void> {
+  if (!result.customer) return;
+  const idx = result.findings.findIndex(f => f.area === 'competitor_term_bidding');
+  if (idx < 0) return;
+  const finding = result.findings[idx]!;
+  const evidence = (finding.evidence ?? {}) as Record<string, unknown>;
+  const candidatesRaw = evidence['candidates'];
+  if (!Array.isArray(candidatesRaw) || candidatesRaw.length === 0) return;
+
+  type RawCandidate = Record<string, unknown>;
+  const candidates = candidatesRaw.filter((c): c is RawCandidate =>
+    c !== null && typeof c === 'object');
+  const items = candidates
+    .map(c => ({
+      term: typeof c['term'] === 'string' ? c['term'] : '',
+      matched_competitor: typeof c['matched_competitor'] === 'string' ? c['matched_competitor'] : '',
+    }))
+    .filter(it => it.term.length > 0 && it.matched_competitor.length > 0);
+  if (items.length === 0) return;
+
+  const classification = await classifyCompetitorTermIntent(items, result.customer, classifyOpts ?? {});
+  const byKey = new Map<string, ClassifiedCompetitorTerm>();
+  for (const c of classification.classifications) {
+    byKey.set(`${c.term.toLowerCase()}\x00${c.matched_competitor.toLowerCase()}`, c);
+  }
+
+  const surviving: Array<Record<string, unknown>> = [];
+  let leakCount = 0;
+  let uncertainCount = 0;
+  let intentionalCount = 0;
+  for (const c of candidates) {
+    const term = typeof c['term'] === 'string' ? c['term'] : '';
+    const comp = typeof c['matched_competitor'] === 'string' ? c['matched_competitor'] : '';
+    const cls = byKey.get(`${term.toLowerCase()}\x00${comp.toLowerCase()}`);
+    const category: CompetitorIntentCategory = cls?.category ?? 'uncertain';
+    if (category === 'intentional_competitive') {
+      intentionalCount++;
+      continue; // operator has chosen to bid here — drop from finding
+    }
+    surviving.push({
+      ...c,
+      classification: category,
+      ...(cls?.reason ? { classification_reason: cls.reason } : {}),
+    });
+    if (category === 'unintentional_leak') leakCount++;
+    else uncertainCount++;
+  }
+
+  if (surviving.length === 0) {
+    result.findings.splice(idx, 1);
+    return;
+  }
+
+  evidence['candidates'] = surviving;
+  evidence['classification'] = classification.classifications;
+  evidence['summary'] = {
+    unintentional_leak: leakCount,
+    uncertain: uncertainCount,
+    intentional_filtered_out: intentionalCount,
+  };
+  finding.evidence = evidence;
+  const totalSpend = surviving.reduce(
+    (s, c) => s + (typeof c['spend_chf'] === 'number' ? (c['spend_chf'] as number) : 0), 0);
+  finding.text = `${leakCount} unintentional Leak(s) + ${uncertainCount} unsichere Treffer ` +
+    `auf Customer-Wettbewerber, ${totalSpend.toFixed(2)} CHF Spend. ` +
+    `Leaks → Negativ-Liste; unsichere → Operator-Review im Blueprint.`;
 }
 
 // ── Persistence ───────────────────────────────────────────────────────

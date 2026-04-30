@@ -470,6 +470,90 @@ describe('runAudit — P1 hybrid detectors', () => {
     expect(finding!.severity).toBe('HIGH');
   });
 
+  it('Tier-1: disabled_converting_keyword surfaces paused/removed keywords with conversions', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertKeywordsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        // Paused keyword that converted: must surface, sorted first by conv_value.
+        { keyword: 'wasserfilter test', campaignName: 'Search', adGroupName: 'AG-A',
+          matchType: 'EXACT', status: 'PAUSED', conversions: 8, convValue: 320, costMicros: 50_000_000 },
+        // Removed keyword that converted: also surfaces.
+        { keyword: 'kefir set', campaignName: 'Search', adGroupName: 'AG-A',
+          matchType: 'EXACT', status: 'REMOVED', conversions: 3, convValue: 90, costMicros: 20_000_000 },
+        // Paused but never converted: NOT a finding (no lost opportunity).
+        { keyword: 'random kw', campaignName: 'Search', adGroupName: 'AG-A',
+          matchType: 'EXACT', status: 'PAUSED', conversions: 0, convValue: 0, costMicros: 5_000_000 },
+        // Enabled with conversions: NOT a finding (currently working).
+        { keyword: 'kombucha', campaignName: 'Search', adGroupName: 'AG-A',
+          matchType: 'EXACT', status: 'ENABLED', conversions: 4, convValue: 160, costMicros: 30_000_000 },
+      ],
+    });
+
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'disabled_converting_keyword');
+    expect(finding).toBeDefined();
+    const candidates = (finding!.evidence as { candidates: Array<{ keyword: string; status: string; conversions: number }> }).candidates;
+    expect(candidates.map(c => c.keyword)).toEqual(['wasserfilter test', 'kefir set']);
+    expect(candidates[0]!.status).toBe('PAUSED');
+    expect(candidates[0]!.conversions).toBeCloseTo(8, 1);
+    // Total conversions > 5 → severity HIGH.
+    expect(finding!.severity).toBe('HIGH');
+  });
+
+  it('Tier-1: competitor_term_bidding surfaces search terms matching customer.competitors', () => {
+    store.upsertCustomerProfile({
+      customerId: CUSTOMER, clientName: 'Acme Shop',
+      competitors: ['brita', 'soulbottle'],
+    });
+    store.upsertAdsAccount({ adsAccountId: ACCOUNT, customerId: CUSTOMER, accountLabel: 'Main' });
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertSearchTermsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        // Matches "brita" — surfaces.
+        { searchTerm: 'brita filter test', campaignName: 'PMax', adGroupName: null,
+          clicks: 18, costMicros: 25_000_000, conversions: 0 },
+        // Matches "soulbottle" — surfaces.
+        { searchTerm: 'soulbottle alternative', campaignName: 'PMax', adGroupName: null,
+          clicks: 8, costMicros: 12_000_000, conversions: 1 },
+        // No competitor match — does NOT surface.
+        { searchTerm: 'wasserfilter', campaignName: 'PMax', adGroupName: null,
+          clicks: 50, costMicros: 100_000_000, conversions: 5 },
+        // Below click threshold — filtered out.
+        { searchTerm: 'brita junior', campaignName: 'PMax', adGroupName: null,
+          clicks: 1, costMicros: 1_000_000, conversions: 0 },
+      ],
+    });
+
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'competitor_term_bidding');
+    expect(finding).toBeDefined();
+    const candidates = (finding!.evidence as { candidates: Array<{ term: string; matched_competitor: string; classification?: string }> }).candidates;
+    expect(candidates.map(c => c.term).sort()).toEqual(['brita filter test', 'soulbottle alternative']);
+    expect(candidates[0]!.matched_competitor).toBe('brita'); // sorted by spend desc
+    // Tier-1 candidates ship without classification — Tier-2 fills it in.
+    expect(candidates[0]!.classification).toBeUndefined();
+  });
+
+  it('Tier-1: competitor_term_bidding skips when customer has no competitors', () => {
+    seedAccount(store); // no competitors in profile
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertSearchTermsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { searchTerm: 'brita filter test', campaignName: 'PMax', adGroupName: null,
+          clicks: 18, costMicros: 25_000_000, conversions: 0 },
+      ],
+    });
+    const result = runAudit(store, ACCOUNT);
+    expect(result.findings.find(f => f.area === 'competitor_term_bidding')).toBeUndefined();
+  });
+
   it('Tier-1: pmax_asset_count_below_minimum lists missing field_types per AG', () => {
     seedAccount(store);
     const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });

@@ -1011,6 +1011,43 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
     });
   }
 
+  // 6f. Disabled keywords with historical conversions (pure Tier-1).
+  // PAUSED / REMOVED keywords that previously converted are dropped revenue
+  // potential — either reactivate them, or leave a documented reason. Pure
+  // structural signal, no LLM judgment needed (a converted keyword is a
+  // converted keyword, regardless of customer intent).
+  const disabledConverting = collectDisabledConvertingKeywords(ctx);
+  if (disabledConverting.length > 0) {
+    const totalConv = disabledConverting.reduce((s, k) => s + k.conversions, 0);
+    findings.push({
+      area: 'disabled_converting_keyword',
+      severity: totalConv > 5 ? 'HIGH' : 'MEDIUM',
+      text: `${disabledConverting.length} pausierte / entfernte Keyword(s) haben historisch konvertiert ` +
+        `(${totalConv.toFixed(1)} Conv gesamt). Reaktivieren oder Grund dokumentieren — sonst entgeht ` +
+        `dem Account jede Cycle Conversion-Volumen.`,
+      confidence: 0.95,
+      evidence: { count: disabledConverting.length, total_conversions: round2(totalConv), candidates: disabledConverting },
+    });
+  }
+
+  // 6g. Competitor-term bidding candidates (Tier-1 of the hybrid harness).
+  // Pure SQL-Pre-Pass: search terms matching any tokens from
+  // customer.competitors. Tier-2 LLM later judges whether the bidding is
+  // intentional (some customers run competitor-conquest campaigns) or an
+  // unintentional broad-match leak. Cycle 2 negative-keyword candidates
+  // come from the unintentional bucket.
+  const competitorCandidates = collectCompetitorTermCandidates(ctx);
+  if (competitorCandidates.length > 0) {
+    findings.push({
+      area: 'competitor_term_bidding',
+      severity: 'MEDIUM',
+      text: `${competitorCandidates.length} Suchbegriff(e) treffen auf Customer-Profile-Wettbewerber ` +
+        `— LLM-Intent-Klassifikation läuft danach (intentional vs. unintentional vs. uncertain).`,
+      confidence: 0.7,
+      evidence: { candidates: competitorCandidates },
+    });
+  }
+
   // 6e. PMax asset_count below Google's published minimums (pure Tier-1).
   // Editor + Google Ads UI hard-block PMax AGs below: 3 short headlines,
   // 1 long headline, 2 descriptions, 1×1 image, 1×1.91 image. The
@@ -1593,6 +1630,127 @@ function collectPmaxAssetCountGaps(ctx: FindingContext): PmaxAssetCountGap[] {
   }
   out.sort((a, b) => (b.missing.length - a.missing.length) || a.asset_group_name.localeCompare(b.asset_group_name));
   return out.slice(0, PMAX_ASSET_TOP_N);
+}
+
+interface DisabledConvertingKeyword {
+  campaign_name: string;
+  ad_group_name: string;
+  keyword: string;
+  match_type: string | null;
+  status: string;
+  conversions: number;
+  conv_value: number;
+}
+
+const DISABLED_CONVERTING_TOP_N = 25;
+
+/** Pure Tier-1: keywords whose status is NOT ENABLED but who carry
+ *  historical conversions. Sort by conv-value desc so the operator
+ *  drills into the highest-revenue paused keywords first. Surfaces
+ *  both PAUSED and REMOVED — REMOVED keywords need a different fix
+ *  (re-create vs unpause) but the audit just flags them. */
+function collectDisabledConvertingKeywords(ctx: FindingContext): DisabledConvertingKeyword[] {
+  const rows = ctx.store.getSnapshotRows<{
+    campaign_name: string | null; ad_group_name: string | null;
+    keyword: string | null; match_type: string | null; status: string | null;
+    conversions: number | null; conv_value: number | null;
+  }>('ads_keywords', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+
+  const out: DisabledConvertingKeyword[] = [];
+  for (const r of rows) {
+    const status = (r.status ?? '').trim().toUpperCase();
+    if (status === '' || status === 'ENABLED' || status === 'ACTIVE') continue;
+    const conversions = r.conversions ?? 0;
+    if (conversions <= 0) continue;
+    const campaign = (r.campaign_name ?? '').trim();
+    const adGroup = (r.ad_group_name ?? '').trim();
+    const keyword = (r.keyword ?? '').trim();
+    if (!campaign || !adGroup || !keyword) continue;
+    out.push({
+      campaign_name: campaign, ad_group_name: adGroup,
+      keyword, match_type: r.match_type, status,
+      conversions: round2(conversions),
+      conv_value: round2(r.conv_value ?? 0),
+    });
+  }
+  out.sort((a, b) => (b.conv_value - a.conv_value) || (b.conversions - a.conversions));
+  return out.slice(0, DISABLED_CONVERTING_TOP_N);
+}
+
+interface CompetitorTermCandidate {
+  term: string;
+  campaign_name: string;
+  ad_group_name: string | null;
+  matched_competitor: string;
+  spend_chf: number;
+  clicks: number;
+  conversions: number;
+  /** Filled by Tier-2 LLM classifier; absent until then. */
+  classification?: 'intentional_competitive' | 'unintentional_leak' | 'uncertain';
+  classification_reason?: string;
+}
+
+const COMPETITOR_TERM_MIN_CLICKS = 3;
+const COMPETITOR_TERM_TOP_N = 25;
+
+/** Pure Tier-1: scan ads_search_terms for any term whose lowercased
+ *  form contains a token from customer.competitors. Returns top-N by
+ *  spend, deduplicated per (term, campaign), so the LLM call stays
+ *  bounded. Skips low-traffic terms (< MIN_CLICKS) to filter long-tail
+ *  noise — the operator only cares about competitor terms with real
+ *  budget impact. */
+function collectCompetitorTermCandidates(ctx: FindingContext): CompetitorTermCandidate[] {
+  if (!ctx.customer) return [];
+  const competitors = parseBrandJsonArray(ctx.customer.competitors)
+    .map(c => c.trim().toLowerCase())
+    .filter(c => c.length >= 3);
+  if (competitors.length === 0) return [];
+
+  const rows = ctx.store.getSnapshotRows<{
+    search_term: string | null; campaign_name: string | null; ad_group_name: string | null;
+    cost_micros: number | null; clicks: number | null; conversions: number | null;
+  }>('ads_search_terms', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+
+  type Bucket = {
+    term: string; campaign: string; adGroup: string | null; competitor: string;
+    spend: number; clicks: number; conversions: number;
+  };
+  const agg = new Map<string, Bucket>();
+  for (const r of rows) {
+    const term = (r.search_term ?? '').trim();
+    const campaign = (r.campaign_name ?? '').trim();
+    if (term.length === 0 || campaign.length === 0) continue;
+    const lower = term.toLowerCase();
+    const matched = competitors.find(c => lower.includes(c));
+    if (!matched) continue;
+    const spend = (r.cost_micros ?? 0) / 1_000_000;
+    const clicks = r.clicks ?? 0;
+    const conversions = r.conversions ?? 0;
+    const key = `${campaign}\x00${term.toLowerCase()}`;
+    const prior = agg.get(key);
+    if (prior) {
+      prior.spend += spend; prior.clicks += clicks; prior.conversions += conversions;
+    } else {
+      agg.set(key, {
+        term, campaign, adGroup: r.ad_group_name, competitor: matched,
+        spend, clicks, conversions,
+      });
+    }
+  }
+
+  const out: CompetitorTermCandidate[] = [];
+  for (const b of agg.values()) {
+    if (b.clicks < COMPETITOR_TERM_MIN_CLICKS) continue;
+    out.push({
+      term: b.term, campaign_name: b.campaign, ad_group_name: b.adGroup,
+      matched_competitor: b.competitor,
+      spend_chf: round2(b.spend),
+      clicks: b.clicks,
+      conversions: round2(b.conversions),
+    });
+  }
+  out.sort((a, b) => b.spend_chf - a.spend_chf);
+  return out.slice(0, COMPETITOR_TERM_TOP_N);
 }
 
 // ── Number helpers ────────────────────────────────────────────────────

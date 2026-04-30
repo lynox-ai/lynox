@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { AdsDataStore } from '../../core/ads-data-store.js';
 import {
   createAdsAuditRunTool, classifyThemeFindingTokens,
-  classifyIrrelevantSearchTermFinding, renderMarkdownReport,
+  classifyIrrelevantSearchTermFinding, classifyCompetitorTermFinding,
+  renderMarkdownReport,
 } from './ads-audit-run.js';
 import { runAudit, type AuditResult } from '../../core/ads-audit-engine.js';
 import type { IAgent, IKnowledgeLayer } from '../../types/index.js';
@@ -258,6 +259,66 @@ describe('classifyIrrelevantSearchTermFinding (P1 Tier-2)', () => {
   });
 });
 
+describe('classifyCompetitorTermFinding (D3 Tier-2)', () => {
+  it('drops intentional competitive bids, keeps leaks + uncertain, rewrites finding text', async () => {
+    const result = makeFakeAuditWithCompetitorFinding([
+      { term: 'brita filter', matched_competitor: 'brita', spend_chf: 25, clicks: 18, conversions: 0,
+        campaign_name: 'PMax', ad_group_name: null },
+      { term: 'brita alternative', matched_competitor: 'brita', spend_chf: 12, clicks: 8, conversions: 1,
+        campaign_name: 'PMax', ad_group_name: null },
+      { term: 'soulbottle', matched_competitor: 'soulbottle', spend_chf: 8, clicks: 6, conversions: 0,
+        campaign_name: 'PMax', ad_group_name: null },
+    ]);
+    const client = makeCompetitorClient([
+      { term: 'brita filter', matched_competitor: 'brita',
+        category: 'unintentional_leak', reason: 'PMax broad match' },
+      { term: 'brita alternative', matched_competitor: 'brita',
+        category: 'intentional_competitive', reason: 'conquest pattern' },
+      { term: 'soulbottle', matched_competitor: 'soulbottle',
+        category: 'uncertain', reason: 'ambiguous' },
+    ]);
+
+    await classifyCompetitorTermFinding(result, { client });
+
+    const finding = result.findings.find(f => f.area === 'competitor_term_bidding')!;
+    const evidence = finding.evidence as {
+      candidates: Array<{ term: string; classification: string }>;
+      summary: { unintentional_leak: number; uncertain: number; intentional_filtered_out: number };
+    };
+    const surviving = evidence.candidates.map(c => c.term).sort();
+    expect(surviving).toEqual(['brita filter', 'soulbottle']);
+    expect(evidence.summary).toEqual({ unintentional_leak: 1, uncertain: 1, intentional_filtered_out: 1 });
+    expect(finding.text).toMatch(/1 unintentional Leak.*1 unsichere/);
+  });
+
+  it('removes the finding when every candidate is classified intentional', async () => {
+    const result = makeFakeAuditWithCompetitorFinding([
+      { term: 'brita alternative', matched_competitor: 'brita', spend_chf: 12, clicks: 8, conversions: 0,
+        campaign_name: 'PMax', ad_group_name: null },
+    ]);
+    const client = makeCompetitorClient([
+      { term: 'brita alternative', matched_competitor: 'brita',
+        category: 'intentional_competitive', reason: 'conquest' },
+    ]);
+    await classifyCompetitorTermFinding(result, { client });
+    expect(result.findings.find(f => f.area === 'competitor_term_bidding')).toBeUndefined();
+  });
+
+  it('routes every candidate to uncertain when the LLM throws', async () => {
+    const result = makeFakeAuditWithCompetitorFinding([
+      { term: 'brita filter', matched_competitor: 'brita', spend_chf: 25, clicks: 18, conversions: 0,
+        campaign_name: 'PMax', ad_group_name: null },
+    ]);
+    const throwing = {
+      beta: { messages: { stream: () => ({ finalMessage: async () => { throw new Error('boom'); } }) } },
+    } as unknown as Anthropic;
+    await classifyCompetitorTermFinding(result, { client: throwing });
+    const finding = result.findings.find(f => f.area === 'competitor_term_bidding')!;
+    const candidates = (finding.evidence as { candidates: Array<{ classification: string }> }).candidates;
+    expect(candidates.every(c => c.classification === 'uncertain')).toBe(true);
+  });
+});
+
 describe('renderMarkdownReport', () => {
   let tempDir: string;
   let store: AdsDataStore;
@@ -393,6 +454,63 @@ function makeRelevanceClient(items: Array<{ term: string; category: string; reas
         stream: () => ({
           finalMessage: async () => ({
             content: [{ type: 'tool_use', name: 'classify_search_term_relevance', input: { classifications: items } }],
+          }),
+        }),
+      },
+    },
+  } as unknown as Anthropic;
+}
+
+interface CompetitorCandidateFixture {
+  term: string;
+  matched_competitor: string;
+  campaign_name: string;
+  ad_group_name: string | null;
+  spend_chf: number;
+  clicks: number;
+  conversions: number;
+}
+
+function makeFakeAuditWithCompetitorFinding(candidates: CompetitorCandidateFixture[]): AuditResult {
+  return {
+    account: { ads_account_id: ACCOUNT, customer_id: CUSTOMER, account_label: 'Main',
+      currency_code: 'CHF', timezone: 'Europe/Zurich', mode: 'BOOTSTRAP',
+      drive_folder_id: null, last_major_import_at: null,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    customer: {
+      customer_id: CUSTOMER, client_name: 'Acme', business_model: null, offer_summary: null,
+      primary_goal: null, target_roas: null, target_cpa_chf: null, monthly_budget_chf: null,
+      typical_cpc_chf: null, country: 'CH', timezone: 'Europe/Zurich',
+      languages: '["DE"]', top_products: '[]', own_brands: '[]', sold_brands: '[]',
+      competitors: '["brita","soulbottle"]', pmax_owned_head_terms: '[]',
+      naming_convention_pattern: null, tracking_notes: '{}',
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    },
+    run: { run_id: 1, ads_account_id: ACCOUNT, status: 'SUCCESS', mode: 'BOOTSTRAP',
+      started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z',
+      gas_export_lastrun: null, keywords_hash: null, previous_run_id: null,
+      emitted_csv_hash: null, token_cost_micros: null, error_message: null },
+    previousRun: null,
+    kpis: { spendChf: 0, conversions: 0, clicks: 0, impressions: 0, costPerConversion: 0, ctr: 0, conversionRate: 0, roas: 0 },
+    mode: { detected: 'BOOTSTRAP', recordedAccountMode: 'BOOTSTRAP', daysOfData: 5, reasoning: 'first cycle' },
+    manualChanges: null, verification: null,
+    findings: [
+      {
+        area: 'competitor_term_bidding', severity: 'MEDIUM',
+        text: 'X Suchbegriffe …', confidence: 0.7,
+        evidence: { candidates },
+      },
+    ],
+  } as unknown as AuditResult;
+}
+
+function makeCompetitorClient(items: Array<{ term: string; matched_competitor: string; category: string; reason: string }>): Anthropic {
+  return {
+    beta: {
+      messages: {
+        stream: () => ({
+          finalMessage: async () => ({
+            content: [{ type: 'tool_use', name: 'classify_competitor_term_intent', input: { classifications: items } }],
           }),
         }),
       },
