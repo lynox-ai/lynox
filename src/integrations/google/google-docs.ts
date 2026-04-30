@@ -26,7 +26,6 @@ interface BatchUpdateResponse {
 // === Constants ===
 
 const DOCS_BASE = 'https://docs.googleapis.com/v1/documents';
-const CONFIRM_ACTIONS = new Set(['create', 'replace']);
 const WRITE_ACTIONS = new Set(['create', 'append', 'replace']);
 
 // === Helpers ===
@@ -89,29 +88,19 @@ export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
         required: ['action'],
       },
     },
-    handler: async (input: DocsInput, agent: IAgent): Promise<string> => {
+    handler: async (input: DocsInput, _agent: IAgent): Promise<string> => {
       try {
         // Check write scope
         if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DOCS)) {
           return `Error: This action requires document write permissions. Grant access in Settings → Integrations → Google.`;
         }
 
-        // Confirmation — fail-safe: block if no prompt available
-        if (CONFIRM_ACTIONS.has(input.action) && !agent.promptUser) {
-          return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
-        }
-        if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
-          let confirmMsg = '';
-          if (input.action === 'create') {
-            confirmMsg = `Create Google Doc "${input.title ?? 'Untitled'}"?`;
-          } else if (input.action === 'replace') {
-            confirmMsg = `Replace "${input.find ?? ''}" with "${input.replace_with ?? ''}" in document ${input.document_id ?? '(unknown)'}?`;
-          }
-          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
-          if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return 'Action cancelled by user.';
-          }
-        }
+        // Write actions confirmation is owned by the permission guard
+        // (src/tools/permission-guard.ts), which fires the canonical
+        // "modifies external data" Allow/Deny prompt and blocks in
+        // autonomous mode. A second tool-internal prompt was both
+        // redundant and visually invisible to UI clients (the run hung
+        // with no second prompt rendered).
 
         switch (input.action) {
           case 'read': return await handleRead(auth, input);
