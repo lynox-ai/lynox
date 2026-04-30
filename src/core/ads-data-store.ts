@@ -761,6 +761,21 @@ const MIGRATIONS: string[] = [
    ALTER TABLE ads_campaigns ADD COLUMN bidding_strategy_type TEXT;
    ALTER TABLE ads_campaigns ADD COLUMN target_roas REAL;
    ALTER TABLE ads_campaigns ADD COLUMN target_cpa_micros INTEGER;`,
+
+  // Migration v6: Phase A operator-review queue. Blueprint generators
+  // attach review markers to entities whose deterministic pick is
+  // ambiguous (e.g. theme-AG without a slug-matching landing page,
+  // brand-AG whose top-clicks LP doesn't carry the brand token).
+  // The companion ads_blueprint_review_picks tool drains this queue
+  // via a single batched ask_user prompt and writes the operator's
+  // chosen value back into payload_json; emit blocks while pending
+  // reviews exist for the run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
+
+   ALTER TABLE ads_blueprint_entities
+     ADD COLUMN needs_review_json TEXT NOT NULL DEFAULT '[]';
+   CREATE INDEX IF NOT EXISTS idx_blueprint_review
+     ON ads_blueprint_entities(run_id) WHERE needs_review_json != '[]';`,
 ];
 
 export interface CustomerProfileRow {
@@ -854,7 +869,30 @@ export interface AdsBlueprintEntityRow {
   naming_valid: number;
   naming_errors_json: string;
   source: AdsBlueprintSource;
+  needs_review_json: string;
   created_at: string;
+}
+
+/** A pending operator-review marker attached to a blueprint entity.
+ *  Surfaced through `ads_blueprint_review_picks` as a single batched
+ *  ask_user dialog; the operator's chosen `value` is written into
+ *  payload_json.{field} and the marker is removed. Emit blocks until
+ *  every review for the run is drained. */
+export interface BlueprintReviewItem {
+  /** payload_json field that will be overwritten with the chosen value. */
+  field: string;
+  /** Machine-readable category, e.g. 'ambiguous_url_pick'. */
+  reason: string;
+  /** Operator-facing question (German). */
+  prompt: string;
+  /** Choices. Each candidate is shown to the operator with `label`; the
+   *  resolved `value` is what gets written into payload_json.{field}. */
+  candidates: ReadonlyArray<{
+    value: string;
+    label: string;
+    /** Optional supplemental info for the operator (e.g. clicks/conversions). */
+    hint?: string | undefined;
+  }>;
 }
 
 export interface InsertBlueprintEntityInput {
@@ -870,6 +908,7 @@ export interface InsertBlueprintEntityInput {
   namingValid?: boolean | undefined;
   namingErrors?: readonly string[] | undefined;
   source?: AdsBlueprintSource | undefined;
+  needsReview?: readonly BlueprintReviewItem[] | undefined;
 }
 
 export interface AdsFindingRow {
@@ -1358,21 +1397,72 @@ export class AdsDataStore {
     const now = new Date().toISOString();
     const payload = JSON.stringify(input.payload ?? {});
     const errors = JSON.stringify(input.namingErrors ?? []);
+    const reviews = JSON.stringify(input.needsReview ?? []);
     const result = this.db.prepare(`
       INSERT INTO ads_blueprint_entities (
         run_id, ads_account_id, entity_type, kind,
         external_id, previous_external_id, payload_json,
-        confidence, rationale, naming_valid, naming_errors_json, source, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        confidence, rationale, naming_valid, naming_errors_json, source,
+        needs_review_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.runId, input.adsAccountId, input.entityType, input.kind,
       input.externalId, input.previousExternalId ?? null, payload,
       input.confidence, input.rationale ?? '',
       input.namingValid === false ? 0 : 1, errors,
-      input.source ?? 'deterministic', now,
+      input.source ?? 'deterministic', reviews, now,
     );
     return this.db.prepare('SELECT * FROM ads_blueprint_entities WHERE blueprint_id = ?')
       .get(Number(result.lastInsertRowid)) as AdsBlueprintEntityRow;
+  }
+
+  /** List blueprint entities for a run that still carry pending operator
+   *  review markers. Used by ads_blueprint_review_picks to drain the
+   *  queue and by ads_emit_csv to gate emission. */
+  listEntitiesNeedingReview(runId: number): AdsBlueprintEntityRow[] {
+    return this.db.prepare(`
+      SELECT * FROM ads_blueprint_entities
+      WHERE run_id = ? AND needs_review_json != '[]'
+      ORDER BY entity_type, blueprint_id ASC
+    `).all(runId) as AdsBlueprintEntityRow[];
+  }
+
+  /** Apply a single operator pick to a blueprint entity. Atomically
+   *  overwrites payload_json.{field} with the chosen value and removes
+   *  the matching {field} entry from needs_review_json. Throws when the
+   *  blueprint row is missing or the field has no pending review. */
+  applyEntityReviewPick(blueprintId: number, field: string, value: unknown): void {
+    this.transaction(() => {
+      const row = this.db.prepare(
+        'SELECT payload_json, needs_review_json FROM ads_blueprint_entities WHERE blueprint_id = ?',
+      ).get(blueprintId) as { payload_json: string; needs_review_json: string } | undefined;
+      if (!row) throw new Error(`blueprint_id ${blueprintId} not found`);
+
+      let reviews: BlueprintReviewItem[] = [];
+      try {
+        const parsed = JSON.parse(row.needs_review_json);
+        reviews = Array.isArray(parsed) ? parsed as BlueprintReviewItem[] : [];
+      } catch { reviews = []; }
+      const beforeLen = reviews.length;
+      reviews = reviews.filter(r => r.field !== field);
+      if (reviews.length === beforeLen) {
+        throw new Error(`blueprint_id ${blueprintId} has no pending review for field "${field}"`);
+      }
+
+      let payload: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(row.payload_json);
+        payload = (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+          ? parsed as Record<string, unknown> : {};
+      } catch { payload = {}; }
+      payload[field] = value;
+
+      this.db.prepare(`
+        UPDATE ads_blueprint_entities
+        SET payload_json = ?, needs_review_json = ?
+        WHERE blueprint_id = ?
+      `).run(JSON.stringify(payload), JSON.stringify(reviews), blueprintId);
+    });
   }
 
   /**

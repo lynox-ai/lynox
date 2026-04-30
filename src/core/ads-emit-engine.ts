@@ -101,6 +101,24 @@ export class EmitPreconditionError extends Error {
   }
 }
 
+/** Best-effort human-readable label for a blueprint row, used in error
+ *  messages so the operator can locate the entity in the UI without
+ *  copying internal external_ids. Falls back to external_id. */
+function extractEntityName(row: { entity_type: string; external_id: string; payload_json: string }): string {
+  let payload: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(row.payload_json);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      payload = parsed as Record<string, unknown>;
+    }
+  } catch { /* fall through */ }
+  for (const k of ['asset_group_name', 'campaign_name', 'ad_group_name']) {
+    const v = payload[k];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return row.external_id;
+}
+
 // ── Public entry point ────────────────────────────────────────────────
 
 export function runEmit(
@@ -127,6 +145,25 @@ export function runEmit(
   if (entities.length === 0) {
     throw new EmitPreconditionError(
       `No blueprint entities for run ${run.run_id}. Run ads_blueprint_run first.`,
+    );
+  }
+
+  // Operator-review gate: when the blueprint left ambiguous URL picks (or
+  // any other reviewable field) on entities, emit must not bake the
+  // deterministic guess into the CSV — call ads_blueprint_review_picks
+  // first to drain the queue. The reentry path is explicit: emit_csv
+  // checks pending reviews → blocks → operator runs review_picks → review
+  // queue empties → re-call emit_csv.
+  const pendingReviews = entities.filter(e => e.needs_review_json !== '[]');
+  if (pendingReviews.length > 0) {
+    const summary = pendingReviews.slice(0, 3).map(e => {
+      const name = extractEntityName(e);
+      return `${e.entity_type}:${name}`;
+    }).join(', ');
+    const more = pendingReviews.length > 3 ? `, +${pendingReviews.length - 3} weitere` : '';
+    throw new EmitPreconditionError(
+      `${pendingReviews.length} Blueprint-Entities mit pending Operator-Review (${summary}${more}). ` +
+      `Vor ads_emit_csv erst ads_blueprint_review_picks aufrufen, um die Reviews zu beantworten.`,
     );
   }
 

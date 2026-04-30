@@ -341,6 +341,103 @@ describe('runBlueprint', () => {
     for (const d of descriptions) expect((d['text'] as string).length).toBeLessThanOrEqual(90);
   });
 
+  it('Brand-RSA: 2 brand tokens + 5 LPs without slug match → needs_review marker on each RSA, emit blocks', async () => {
+    seedCustomerAndAccount(store, { pmaxOwned: ['hamoni', 'maunawai'] });
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'pmax1', 'PMax | Gesamtsortiment', { channelType: 'PERFORMANCE_MAX' });
+    // Five LPs, none of whose URLs contain the brand token in the slug —
+    // the URL picker must mark every Brand-RSA for operator review.
+    store.insertLandingPagesBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { landingPageUrl: 'https://acme-shop.example/wasser', clicks: 200, conversions: 6 },
+        { landingPageUrl: 'https://acme-shop.example/luft',   clicks: 150, conversions: 4 },
+        { landingPageUrl: 'https://acme-shop.example/produkte/glas', clicks: 80,  conversions: 2 },
+        { landingPageUrl: 'https://acme-shop.example/sortiment',     clicks: 60,  conversions: 1 },
+        { landingPageUrl: 'https://acme-shop.example/',              clicks: 300, conversions: 9 },
+      ],
+    });
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_brand_inflation', severity: 'HIGH', source: 'deterministic',
+      text: 'PMax bedient Brand-Cluster …', confidence: 0.9,
+      evidence: { brand_tokens: ['hamoni', 'maunawai'] },
+    });
+
+    runBlueprint(store, ACCOUNT);
+
+    const rsas = store.listBlueprintEntities(r.run_id, { entityType: 'rsa_ad', kind: 'NEW' });
+    expect(rsas).toHaveLength(2);
+    for (const rsa of rsas) {
+      const reviews = JSON.parse(rsa.needs_review_json) as Array<{ field: string; reason: string; candidates: unknown[] }>;
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]!.field).toBe('final_url');
+      expect(reviews[0]!.reason).toMatch(/no_slug_match/);
+      // Operator gets ≥2 candidates (top 3 by traffic).
+      expect((reviews[0]!.candidates as unknown[]).length).toBeGreaterThanOrEqual(2);
+    }
+
+    // listEntitiesNeedingReview surfaces both rows.
+    const pending = store.listEntitiesNeedingReview(r.run_id);
+    expect(pending).toHaveLength(2);
+
+    // Emit blocks while reviews are pending.
+    const { runEmit, EmitPreconditionError } = await import('./ads-emit-engine.js');
+    expect(() => runEmit(store, ACCOUNT)).toThrow(EmitPreconditionError);
+    expect(() => runEmit(store, ACCOUNT)).toThrow(/pending Operator-Review/);
+
+    // applyEntityReviewPick clears the marker and writes the chosen value.
+    const chosenUrl = 'https://acme-shop.example/marken/hamoni';
+    store.applyEntityReviewPick(pending[0]!.blueprint_id, 'final_url', chosenUrl);
+    const after = store.listEntitiesNeedingReview(r.run_id);
+    expect(after).toHaveLength(1);
+    const updated = store.listBlueprintEntities(r.run_id, { entityType: 'rsa_ad' })
+      .find(e => e.blueprint_id === pending[0]!.blueprint_id)!;
+    expect(JSON.parse(updated.payload_json).final_url).toBe(chosenUrl);
+  });
+
+  it('Theme-AG: clear slug match → no review marker; ambiguous → review marker on asset_group', () => {
+    seedCustomerAndAccount(store);
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'pmax1', 'PMax | Gesamtsortiment', { channelType: 'PERFORMANCE_MAX' });
+    // Two themes: 'kefir' has a slug-matching LP (clear pick); 'glas'
+    // has no match, must trigger a review marker.
+    store.insertLandingPagesBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { landingPageUrl: 'https://acme-shop.example/produkte/kefir', clicks: 120, conversions: 4 },
+        { landingPageUrl: 'https://acme-shop.example/wasser',         clicks: 200, conversions: 6 },
+        { landingPageUrl: 'https://acme-shop.example/',               clicks: 300, conversions: 9 },
+      ],
+    });
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_theme_coverage_gap', severity: 'MEDIUM', source: 'deterministic',
+      text: 'PMax-Themen ohne AG …', confidence: 0.75,
+      evidence: {
+        themes: [
+          { token: 'kefir', clusters: 32, sample: ['kefir milch'] },
+          { token: 'glas',  clusters: 12, sample: ['glasflasche'] },
+        ],
+      },
+    });
+
+    runBlueprint(store, ACCOUNT);
+
+    const ags = store.listBlueprintEntities(r.run_id, { entityType: 'asset_group', kind: 'NEW' });
+    expect(ags).toHaveLength(2);
+    const byTheme = new Map(ags.map(a => [JSON.parse(a.payload_json).theme_token as string, a]));
+    // kefir: slug match wins, no review.
+    expect(JSON.parse(byTheme.get('kefir')!.needs_review_json)).toEqual([]);
+    expect(JSON.parse(byTheme.get('kefir')!.payload_json).final_url).toContain('kefir');
+    // glas: no slug match, review fires.
+    const glasReviews = JSON.parse(byTheme.get('glas')!.needs_review_json) as Array<{ field: string }>;
+    expect(glasReviews).toHaveLength(1);
+    expect(glasReviews[0]!.field).toBe('final_url');
+  });
+
   it('drops orphan ad_group / keyword / asset_group whose campaign is not in the snapshot', () => {
     // Real-world data exposes parents in REMOVED state filtered by GAS
     // while children remained ENABLED — the orphan filter must drop

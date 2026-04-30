@@ -26,6 +26,7 @@ import type {
   AdsAccountRow,
   AdsAuditRunRow,
   AdsBlueprintEntityKind,
+  BlueprintReviewItem,
   CustomerProfileRow,
   InsertBlueprintEntityInput,
   AdsDecision,
@@ -268,6 +269,7 @@ export function runBlueprint(
         ...(exp.finalUrl !== null ? { final_url: exp.finalUrl } : {}),
       },
       namingValid: true, namingErrors: [],
+      ...(exp.urlReview ? { needsReview: [exp.urlReview] } : {}),
     }).blueprint_id);
     store.insertRunDecision({
       runId: run.run_id, entityType: 'asset_group', entityExternalId: externalId,
@@ -370,7 +372,8 @@ export function runBlueprint(
         runId: run.run_id, adsAccountId, entityType: 'rsa_ad', kind: 'NEW',
         externalId: rsaExt, confidence: 0.7,
         rationale: `Brand-RSA für Ad-Group "${rsa.adGroupName}" — Auto-Headlines/Descriptions, ` +
-          `final_url aus Top-LP. Agent soll mit ads_blueprint_entity_propose verfeinern.`,
+          `final_url aus Top-LP. Agent soll mit ads_blueprint_entity_propose verfeinern.` +
+          (rsa.urlReview ? ' — Operator-Review nötig (Brand-URL mehrdeutig).' : ''),
         payload: {
           campaign_name: brandSearch.campaign.name,
           ad_group_name: rsa.adGroupName,
@@ -379,6 +382,7 @@ export function runBlueprint(
           final_url: rsa.finalUrl,
         },
         namingValid: true, namingErrors: [],
+        ...(rsa.urlReview ? { needsReview: [rsa.urlReview] } : {}),
       }).blueprint_id);
       store.insertRunDecision({
         runId: run.run_id, entityType: 'rsa_ad', entityExternalId: rsaExt,
@@ -695,6 +699,11 @@ interface ThemeExpansionProposal {
    *  LP when no themed match exists, and to the highest-spend campaign's LP
    *  as a last resort. */
   finalUrl: string | null;
+  /** Non-null when the URL pick is ambiguous (no slug match or near-tied
+   *  scores). The orchestrator persists this onto the asset_group entity's
+   *  needs_review_json column; ads_blueprint_review_picks resolves it
+   *  before emit can proceed. */
+  urlReview: BlueprintReviewItem | null;
   rationale: string;
 }
 
@@ -742,7 +751,7 @@ function generateThemeExpansionProposals(
 
   const customerSlug = customer.customer_id;
   return themes.slice(0, MAX_THEME_EXPANSIONS).map(t => {
-    const finalUrl = pickFinalUrlForTheme(t.token, lpSummary);
+    const { url: finalUrl, review: urlReview } = pickFinalUrlForTheme(t.token, lpSummary);
     return {
       theme: t.token,
       clusters: t.clusters,
@@ -750,9 +759,11 @@ function generateThemeExpansionProposals(
       assetGroupName: `Theme-${capitalize(t.token)}`,
       sampleClusters: t.sample ?? [],
       finalUrl,
+      urlReview,
       rationale: `Theme-Coverage-Gap: "${t.token}" hat ${t.clusters} PMax-Search-Cluster ohne passende Asset-Group. ` +
         `Neuer Asset-Group-Vorschlag (Status PAUSED) für ${customerSlug}` +
         (finalUrl ? ` mit themen-spezifischer LP "${finalUrl}"` : ' (LP-Mapping fehlgeschlagen, manuell setzen)') +
+        (urlReview ? ' — Operator-Review nötig (URL-Pick mehrdeutig).' : '') +
         `; nach Import + 14d Lernfenster Performance prüfen.`,
     };
   });
@@ -782,32 +793,94 @@ function aggregateLpPerformance(
   return Array.from(agg.values());
 }
 
-/** Pick the LP whose URL best matches the theme token. Scoring:
+/** Pick the LP whose URL best matches a token (theme or brand). Scoring:
  *   - +50 if the URL slug-form contains the token,
  *   - +20 if any URL path segment starts with the token,
  *   - + clicks ÷ 10 as tie-breaker on tied substring matches.
  *  Falls back to the LP with most conversions (proxy for customer-default).
- *  Returns null when there are no LP rows at all. */
-function pickFinalUrlForTheme(theme: string, lps: readonly LpPerformance[]): string | null {
-  if (lps.length === 0) return null;
-  const t = theme.toLowerCase().trim();
-  if (t.length === 0) return null;
-  let best: { url: string; score: number } | null = null;
-  for (const lp of lps) {
+ *  Returns null when there are no LP rows at all.
+ *
+ *  When the deterministic pick is ambiguous (zero positive score, or two
+ *  candidates within 10% of each other), `review` carries a non-null
+ *  marker that the orchestrator persists onto the entity row. The
+ *  ads_blueprint_review_picks tool drains the queue with one batched
+ *  ask_user dialog before emit can run. */
+function pickFinalUrlForToken(
+  token: string, lps: readonly LpPerformance[], context: 'theme' | 'brand',
+): { url: string | null; review: BlueprintReviewItem | null } {
+  if (lps.length === 0) return { url: null, review: null };
+  const t = token.toLowerCase().trim();
+  if (t.length === 0) return { url: null, review: null };
+
+  const scored = lps.map(lp => {
     const slugForm = lp.url.toLowerCase().replace(/[^a-z0-9]+/gu, '-');
     const segments = lp.url.toLowerCase().split('/').map(s => s.replace(/[^a-z0-9]+/gu, ''));
     let score = 0;
     if (slugForm.includes(t)) score += 50;
     if (segments.some(s => s.startsWith(t))) score += 20;
     if (score > 0) score += lp.clicks / 10;
-    if (best === null || score > best.score) best = { url: lp.url, score };
+    return { ...lp, score };
+  }).sort((a, b) => b.score - a.score);
+
+  const top = scored[0]!;
+  if (top.score > 0) {
+    // Confident pick — but flag for review when the runner-up is within
+    // 10% of the leader (true tie/near-tie). Customer should pick
+    // explicitly; otherwise the deterministic tie-breaker is opaque.
+    const second = scored[1];
+    const tiedClose = second && second.score > 0 &&
+      (top.score - second.score) / top.score <= 0.10;
+    if (tiedClose) {
+      return {
+        url: top.url,
+        review: buildUrlReview(token, scored.slice(0, 3), context, 'tied_url_score'),
+      };
+    }
+    return { url: top.url, review: null };
   }
-  if (best && best.score > 0) return best.url;
-  // Fallback: most-converting LP (customer's default landing page).
-  const sorted = [...lps].sort((a, b) =>
+
+  // No slug match — surface the top three by traffic (clicks then conv)
+  // and ask the operator to pick. Use the conversions-default as the
+  // working URL until the review resolves so emit-validators that
+  // require final_url still see a value.
+  const fallbackOrdered = [...lps].sort((a, b) =>
     (b.conversions - a.conversions) || (b.clicks - a.clicks),
   );
-  return sorted[0]?.url ?? null;
+  const candidates = fallbackOrdered.slice(0, Math.min(3, fallbackOrdered.length));
+  return {
+    url: fallbackOrdered[0]?.url ?? null,
+    review: buildUrlReview(token, candidates, context, 'no_slug_match'),
+  };
+}
+
+/** Wrap the legacy theme-only signature so existing callers keep working
+ *  with a string return. The proposal type keeps the optional review
+ *  marker which the orchestrator persists on the entity row. */
+function pickFinalUrlForTheme(theme: string, lps: readonly LpPerformance[]):
+  { url: string | null; review: BlueprintReviewItem | null } {
+  return pickFinalUrlForToken(theme, lps, 'theme');
+}
+
+function buildUrlReview(
+  token: string, candidates: readonly LpPerformance[],
+  context: 'theme' | 'brand', reason: 'tied_url_score' | 'no_slug_match',
+): BlueprintReviewItem {
+  const promptHead = context === 'brand'
+    ? `Brand-Search-Anzeige für "${token}": welche Landing-Page als Final URL?`
+    : `Theme-Asset-Group "${token}": welche Landing-Page als Final URL?`;
+  const promptTail = reason === 'no_slug_match'
+    ? 'Keine LP-URL enthält den Token im Slug — bitte manuell zuweisen.'
+    : 'Top-Kandidaten haben fast identischen Score — bitte zuordnen.';
+  return {
+    field: 'final_url',
+    reason: `ambiguous_url_pick:${reason}`,
+    prompt: `${promptHead} ${promptTail}`,
+    candidates: candidates.map(c => ({
+      value: c.url,
+      label: c.url,
+      hint: `${c.clicks} Klicks · ${c.conversions.toFixed(1)} Conv`,
+    })),
+  };
 }
 
 function capitalize(s: string): string {
@@ -1005,9 +1078,13 @@ interface BrandSearchProposal {
   keywords: ReadonlyArray<{ adGroupName: string; keyword: string; matchType: 'Phrase' | 'Exact' }>;
   /** RSA per ad-group — Editor blocks publish for an ad-group with zero
    *  ads ("Anzeigengruppe enthält keine aktivierten Anzeigen"). Final
-   *  URL falls back to the customer's top-clicked LP. */
+   *  URL is picked per brand-token: a slug match wins, otherwise the
+   *  top-clicks LP is used and a review marker fires so the operator
+   *  can pin the correct brand-page before emit. */
   rsas: ReadonlyArray<{
-    adGroupName: string; headlines: string[]; descriptions: string[]; finalUrl: string;
+    adGroupName: string; headlines: string[]; descriptions: string[];
+    finalUrl: string;
+    urlReview: BlueprintReviewItem | null;
   }>;
   crossChannelNegatives: ReadonlyArray<{
     keywordText: string; matchType: 'Phrase';
@@ -1084,18 +1161,21 @@ function generateBrandSearchProposals(
     })),
   );
 
-  // Pick a sensible default final_url for the RSA: top landing page by
-  // clicks from the snapshot (typically the customer's homepage or the
-  // strongest brand-page). The agent can refine via ads_blueprint_entity_propose
-  // after import — what matters here is that Editor sees a valid URL so
-  // the RSA actually publishes.
-  const lpRows = store.getSnapshotRows<{ landing_page_url: string | null; clicks: number | null }>(
-    'ads_landing_pages', run.ads_account_id, { runId: run.run_id },
-  );
-  const topLp = [...lpRows]
+  // Pick a per-brand final_url for the RSA: prefer an LP whose URL slug
+  // contains the brand-token (Brand-Aquanatura → /aquanatura/* page); fall
+  // back to the customer's top-clicked LP and emit a review marker so the
+  // operator can confirm/replace the URL before emit. Falling back to the
+  // company root for *every* Brand-AG silently buries the case where the
+  // brand has its own LP — the review prompt forces an explicit decision.
+  const lpRowsFull = store.getSnapshotRows<{
+    landing_page_url: string | null; clicks: number | null; conversions: number | null;
+  }>('ads_landing_pages', run.ads_account_id, { runId: run.run_id });
+  const lpSummary = aggregateLpPerformance(lpRowsFull);
+  const topLp = [...lpRowsFull]
     .filter(r => (r.landing_page_url ?? '').startsWith('http'))
     .sort((a, b) => (b.clicks ?? 0) - (a.clicks ?? 0))[0];
-  const fallbackUrl = topLp?.landing_page_url ?? `https://${(customer.client_name ?? '').toLowerCase().replace(/\s+/g, '')}.ch`;
+  const homepageFallback = topLp?.landing_page_url
+    ?? `https://${(customer.client_name ?? '').toLowerCase().replace(/\s+/g, '')}.ch`;
 
   const rsas = adGroups.map(ag => {
     const brand = capitalize(ag.brandToken);
@@ -1111,7 +1191,13 @@ function generateBrandSearchProposals(
       `Original ${brand} direkt vom Schweizer Anbieter — schnelle Lieferung, faire Preise.`,
       `Hochwertige ${brand}-Produkte: kuratierte Auswahl, persönlicher Kundenservice.`,
     ].filter(d => d.length <= 90);
-    return { adGroupName: ag.name, headlines, descriptions, finalUrl: fallbackUrl };
+    const { url, review } = pickFinalUrlForToken(ag.brandToken, lpSummary, 'brand');
+    return {
+      adGroupName: ag.name,
+      headlines, descriptions,
+      finalUrl: url ?? homepageFallback,
+      urlReview: review,
+    };
   });
 
   const customerSlug = customer.customer_id;
