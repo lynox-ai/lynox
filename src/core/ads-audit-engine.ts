@@ -1048,6 +1048,59 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
     });
   }
 
+  // 6h. Placeholder text in shipped assets (pure Tier-1).
+  // Auto-pipelines emit "Auto-Placeholder" / "TODO" / "REPLACE_ME"
+  // copy when the operator is meant to refine before publish. If
+  // the operator skips the refinement and emits anyway, the live
+  // ads carry the placeholder copy. Detector scans every text-bearing
+  // asset table for the standard placeholder markers.
+  const placeholders = collectPlaceholderAssets(ctx);
+  if (placeholders.length > 0) {
+    findings.push({
+      area: 'placeholder_text_in_assets',
+      severity: 'HIGH',
+      text: `${placeholders.length} Asset(s) tragen Placeholder-Text (Auto-Placeholder / TODO / REPLACE_ME). ` +
+        `Diese Assets dürfen NICHT live gehen — Operator muss sie verfeinern bevor emit_csv läuft.`,
+      confidence: 1.0,
+      evidence: { count: placeholders.length, candidates: placeholders },
+    });
+  }
+
+  // 6i. Duplicate RSA copy across ad-groups (pure Tier-1).
+  // Same headline / description used in multiple ad-groups dilutes
+  // smart-bidding signal — Google can't tell which ad-group the
+  // user is responding to if the copy is identical. Operator
+  // typically pastes one good RSA into many AGs as a starting
+  // template but forgets to specialize.
+  const duplicates = collectDuplicateRsaCopy(ctx);
+  if (duplicates.length > 0) {
+    findings.push({
+      area: 'duplicate_rsa_headlines',
+      severity: 'MEDIUM',
+      text: `${duplicates.length} Headline(s) / Description(s) werden in mehreren Ad-Groups identisch verwendet. ` +
+        `Smart-Bidding kann nicht unterscheiden welche AG funktioniert — pro AG mind. 1-2 unique Lines empfohlen.`,
+      confidence: 0.9,
+      evidence: { count: duplicates.length, candidates: duplicates },
+    });
+  }
+
+  // 6j. Brand-voice drift candidates (Tier-1 of hybrid).
+  // Tier-1 collects RSA copy when customer.brand_voice has do_not_use
+  // entries; Tier-2 LLM (audit-tool layer) judges actual drift against
+  // tone + signature_phrases. Without a brand_voice profile this
+  // detector is a no-op (graceful degradation).
+  const brandVoiceCandidates = collectBrandVoiceDriftCandidates(ctx);
+  if (brandVoiceCandidates.length > 0) {
+    findings.push({
+      area: 'brand_voice_drift',
+      severity: 'MEDIUM',
+      text: `${brandVoiceCandidates.length} RSA-Texte werden gegen Customer-Brand-Voice geprüft — ` +
+        `LLM-Drift-Klassifikation läuft danach.`,
+      confidence: 0.7,
+      evidence: { candidates: brandVoiceCandidates },
+    });
+  }
+
   // 6e. PMax asset_count below Google's published minimums (pure Tier-1).
   // Editor + Google Ads UI hard-block PMax AGs below: 3 short headlines,
   // 1 long headline, 2 descriptions, 1×1 image, 1×1.91 image. The
@@ -1751,6 +1804,208 @@ function collectCompetitorTermCandidates(ctx: FindingContext): CompetitorTermCan
   }
   out.sort((a, b) => b.spend_chf - a.spend_chf);
   return out.slice(0, COMPETITOR_TERM_TOP_N);
+}
+
+interface PlaceholderAssetCandidate {
+  table: string;
+  campaign_name: string | null;
+  ad_group_or_asset_group_name: string | null;
+  field_type: string | null;
+  text: string;
+  match: string;
+}
+
+const PLACEHOLDER_PATTERNS: ReadonlyArray<RegExp> = [
+  /auto[\s-]?placeholder/i,
+  /\bplaceholder\b/i,
+  /\bTODO\b/,
+  /REPLACE[_\s-]?ME/i,
+  /\bTBD\b/,
+  /\bTBC\b/,
+  /\bXXX\b/,
+  /lorem ipsum/i,
+];
+const PLACEHOLDER_TOP_N = 50;
+
+function findPlaceholderMatch(text: string): string | null {
+  for (const re of PLACEHOLDER_PATTERNS) {
+    const m = re.exec(text);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+/** Pure Tier-1: scan ads_rsa_ads + ads_asset_group_assets for
+ *  text matching standard placeholder markers. Surfaces ads that
+ *  must NOT go live before the operator refines them. */
+function collectPlaceholderAssets(ctx: FindingContext): PlaceholderAssetCandidate[] {
+  const out: PlaceholderAssetCandidate[] = [];
+
+  const rsas = ctx.store.getSnapshotRows<{
+    campaign_name: string; ad_group_name: string; headlines: string; descriptions: string;
+  }>('ads_rsa_ads', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  for (const r of rsas) {
+    for (const [field, json] of [['HEADLINE', r.headlines], ['DESCRIPTION', r.descriptions]] as const) {
+      try {
+        const arr = JSON.parse(json);
+        if (!Array.isArray(arr)) continue;
+        for (const t of arr) {
+          if (typeof t !== 'string') continue;
+          const m = findPlaceholderMatch(t);
+          if (m) {
+            out.push({
+              table: 'ads_rsa_ads',
+              campaign_name: r.campaign_name,
+              ad_group_or_asset_group_name: r.ad_group_name,
+              field_type: field, text: t, match: m,
+            });
+          }
+        }
+      } catch { /* ignore malformed */ }
+    }
+  }
+
+  const aga = ctx.store.getSnapshotRows<{
+    campaign_name: string | null; asset_group_name: string;
+    field_type: string; text_content: string | null;
+  }>('ads_asset_group_assets', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  for (const r of aga) {
+    if (!r.text_content) continue;
+    const m = findPlaceholderMatch(r.text_content);
+    if (m) {
+      out.push({
+        table: 'ads_asset_group_assets',
+        campaign_name: r.campaign_name,
+        ad_group_or_asset_group_name: r.asset_group_name,
+        field_type: r.field_type, text: r.text_content, match: m,
+      });
+    }
+  }
+
+  return out.slice(0, PLACEHOLDER_TOP_N);
+}
+
+interface DuplicateRsaCandidate {
+  text: string;
+  field_type: 'HEADLINE' | 'DESCRIPTION';
+  occurrences: ReadonlyArray<{ campaign_name: string; ad_group_name: string }>;
+}
+
+const DUPLICATE_RSA_TOP_N = 20;
+const DUPLICATE_RSA_MIN_OCCURRENCES = 2;
+
+/** Pure Tier-1: find RSA headlines / descriptions used identically
+ *  across multiple ad-groups. Account-wide dedupe. */
+function collectDuplicateRsaCopy(ctx: FindingContext): DuplicateRsaCandidate[] {
+  const rsas = ctx.store.getSnapshotRows<{
+    campaign_name: string; ad_group_name: string;
+    headlines: string; descriptions: string;
+  }>('ads_rsa_ads', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+
+  const headlineMap = new Map<string, Set<string>>();
+  const descriptionMap = new Map<string, Set<string>>();
+
+  for (const r of rsas) {
+    if (!r.campaign_name || !r.ad_group_name) continue;
+    const key = `${r.campaign_name}\x00${r.ad_group_name}`;
+    pushUnique(headlineMap, r.headlines, key);
+    pushUnique(descriptionMap, r.descriptions, key);
+  }
+
+  const out: DuplicateRsaCandidate[] = [];
+  for (const [text, keys] of headlineMap) {
+    if (keys.size < DUPLICATE_RSA_MIN_OCCURRENCES) continue;
+    out.push({
+      text, field_type: 'HEADLINE',
+      occurrences: Array.from(keys).map(k => {
+        const [c, ag] = k.split('\x00');
+        return { campaign_name: c ?? '?', ad_group_name: ag ?? '?' };
+      }),
+    });
+  }
+  for (const [text, keys] of descriptionMap) {
+    if (keys.size < DUPLICATE_RSA_MIN_OCCURRENCES) continue;
+    out.push({
+      text, field_type: 'DESCRIPTION',
+      occurrences: Array.from(keys).map(k => {
+        const [c, ag] = k.split('\x00');
+        return { campaign_name: c ?? '?', ad_group_name: ag ?? '?' };
+      }),
+    });
+  }
+  out.sort((a, b) => b.occurrences.length - a.occurrences.length);
+  return out.slice(0, DUPLICATE_RSA_TOP_N);
+}
+
+function pushUnique(map: Map<string, Set<string>>, json: string, agKey: string): void {
+  try {
+    const arr = JSON.parse(json);
+    if (!Array.isArray(arr)) return;
+    for (const t of arr) {
+      if (typeof t !== 'string') continue;
+      const trimmed = t.trim();
+      if (trimmed.length === 0) continue;
+      const set = map.get(trimmed) ?? new Set();
+      set.add(agKey);
+      map.set(trimmed, set);
+    }
+  } catch { /* ignore */ }
+}
+
+interface BrandVoiceDriftCandidate {
+  campaign_name: string;
+  ad_group_name: string;
+  field_type: 'HEADLINE' | 'DESCRIPTION';
+  text: string;
+  classification?: 'on_brand' | 'drift' | 'uncertain';
+  classification_reason?: string;
+}
+
+const BRAND_VOICE_DRIFT_TOP_N = 30;
+
+/** Pure Tier-1: collect a sample of RSA copy ONLY when
+ *  customer.brand_voice has do_not_use / signature_phrases / tone
+ *  configured. Without that depth, the LLM has nothing to measure
+ *  drift against — graceful no-op. */
+function collectBrandVoiceDriftCandidates(ctx: FindingContext): BrandVoiceDriftCandidate[] {
+  if (!ctx.customer) return [];
+  let bv: { tone?: string; do_not_use?: string[]; signature_phrases?: string[] } = {};
+  try {
+    const parsed = JSON.parse(ctx.customer.brand_voice_json);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      bv = parsed as typeof bv;
+    }
+  } catch { /* fall through */ }
+  const hasContent = Boolean(bv.tone)
+    || (bv.do_not_use && bv.do_not_use.length > 0)
+    || (bv.signature_phrases && bv.signature_phrases.length > 0);
+  if (!hasContent) return [];
+
+  const rsas = ctx.store.getSnapshotRows<{
+    campaign_name: string; ad_group_name: string;
+    headlines: string; descriptions: string;
+  }>('ads_rsa_ads', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+
+  const out: BrandVoiceDriftCandidate[] = [];
+  for (const r of rsas) {
+    if (!r.campaign_name || !r.ad_group_name) continue;
+    for (const [field, json] of [['HEADLINE', r.headlines], ['DESCRIPTION', r.descriptions]] as const) {
+      try {
+        const arr = JSON.parse(json);
+        if (!Array.isArray(arr)) continue;
+        for (const t of arr) {
+          if (typeof t !== 'string' || t.length < 3) continue;
+          out.push({
+            campaign_name: r.campaign_name,
+            ad_group_name: r.ad_group_name,
+            field_type: field, text: t,
+          });
+          if (out.length >= BRAND_VOICE_DRIFT_TOP_N) return out;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+  return out;
 }
 
 // ── Number helpers ────────────────────────────────────────────────────

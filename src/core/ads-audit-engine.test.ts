@@ -539,6 +539,104 @@ describe('runAudit — P1 hybrid detectors', () => {
     expect(candidates[0]!.classification).toBeUndefined();
   });
 
+  it('Tier-1: placeholder_text_in_assets surfaces RSA + asset-group placeholders', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertRsaAdsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        adId: 'ad1', campaignName: 'Search', adGroupName: 'AG-Brand',
+        headlines: ['Auto-Placeholder Headline 1', 'Real Brand Wasserfilter'],
+        descriptions: ['TODO: write real description', 'Echte description'],
+      }],
+    });
+    store.insertAssetGroupAssetsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        assetGroupName: 'AG-Theme', fieldType: 'HEADLINE', assetStatus: 'ENABLED',
+        textContent: 'REPLACE_ME with real copy', campaignName: 'PMax',
+      }],
+    });
+
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'placeholder_text_in_assets');
+    expect(finding).toBeDefined();
+    expect(finding!.severity).toBe('HIGH');
+    const candidates = (finding!.evidence as { candidates: Array<{ match: string; table: string }> }).candidates;
+    expect(candidates.length).toBeGreaterThanOrEqual(3);
+    const matches = candidates.map(c => c.match.toLowerCase());
+    expect(matches.some(m => m.includes('auto-placeholder'))).toBe(true);
+    expect(matches.some(m => m.includes('todo'))).toBe(true);
+    expect(matches.some(m => m.includes('replace_me'))).toBe(true);
+  });
+
+  it('Tier-1: duplicate_rsa_headlines flags identical copy across multiple ad-groups', () => {
+    seedAccount(store);
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertRsaAdsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { adId: 'a1', campaignName: 'C1', adGroupName: 'AG-A',
+          headlines: ['Same Headline', 'Unique A1'], descriptions: ['Same Description'] },
+        { adId: 'a2', campaignName: 'C1', adGroupName: 'AG-B',
+          headlines: ['Same Headline', 'Unique B1'], descriptions: ['Same Description'] },
+        { adId: 'a3', campaignName: 'C2', adGroupName: 'AG-C',
+          headlines: ['Different Headline', 'Different B'], descriptions: ['Different desc'] },
+      ],
+    });
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'duplicate_rsa_headlines');
+    expect(finding).toBeDefined();
+    const candidates = (finding!.evidence as { candidates: Array<{ text: string; field_type: string; occurrences: unknown[] }> }).candidates;
+    const headline = candidates.find(c => c.text === 'Same Headline');
+    const description = candidates.find(c => c.text === 'Same Description');
+    expect(headline).toBeDefined();
+    expect(headline!.field_type).toBe('HEADLINE');
+    expect(headline!.occurrences).toHaveLength(2);
+    expect(description).toBeDefined();
+    expect(description!.field_type).toBe('DESCRIPTION');
+  });
+
+  it('Tier-1: brand_voice_drift collects RSA copy only when customer.brand_voice is populated', () => {
+    store.upsertCustomerProfile({
+      customerId: CUSTOMER, clientName: 'Acme',
+      brandVoice: { tone: 'direkt, technisch', do_not_use: ['game-changer'] },
+    });
+    store.upsertAdsAccount({ adsAccountId: ACCOUNT, customerId: CUSTOMER, accountLabel: 'Main' });
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertRsaAdsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        adId: 'ad1', campaignName: 'C', adGroupName: 'AG',
+        headlines: ['Headline 1', 'Headline 2'],
+        descriptions: ['Desc 1', 'Desc 2'],
+      }],
+    });
+    const result = runAudit(store, ACCOUNT);
+    const finding = result.findings.find(f => f.area === 'brand_voice_drift');
+    expect(finding).toBeDefined();
+    const candidates = (finding!.evidence as { candidates: Array<{ text: string }> }).candidates;
+    expect(candidates.length).toBe(4);
+  });
+
+  it('Tier-1: brand_voice_drift skips when customer.brand_voice is empty', () => {
+    seedAccount(store); // no brand voice
+    const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });
+    seedThinSnapshot(store, r.run_id, 5);
+    store.insertRsaAdsBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [{
+        adId: 'ad1', campaignName: 'C', adGroupName: 'AG',
+        headlines: ['x'], descriptions: ['y'],
+      }],
+    });
+    const result = runAudit(store, ACCOUNT);
+    expect(result.findings.find(f => f.area === 'brand_voice_drift')).toBeUndefined();
+  });
+
   it('Tier-1: competitor_term_bidding skips when customer has no competitors', () => {
     seedAccount(store); // no competitors in profile
     const r = createSuccessRun(store, { mode: 'BOOTSTRAP' });

@@ -45,6 +45,10 @@ import {
   classifyCompetitorTermIntent,
   type ClassifyCompetitorOptions, type ClassifiedCompetitorTerm, type CompetitorIntentCategory,
 } from '../../core/ads-competitor-term-classifier.js';
+import {
+  classifyBrandVoiceDrift,
+  type ClassifyBrandVoiceOptions, type ClassifiedBrandVoiceLine, type BrandVoiceCategory,
+} from '../../core/ads-brand-voice-classifier.js';
 import { classifyAccountState } from '../../core/ads-account-state.js';
 import {
   generateStrategistBrief,
@@ -130,6 +134,10 @@ export function createAdsAuditRunTool(store: AdsDataStore): ToolEntry<AdsAuditRu
         // negative-candidate pool, ships "unintentional_leak" as a
         // negative proposal, and tags "uncertain" for operator review.
         await classifyCompetitorTermFinding(result);
+        // P2 Tier-2: brand-voice drift on RSA copy (only fires when
+        // customer.brand_voice has do_not_use / signature_phrases /
+        // tone — Tier-1 produced no candidates otherwise).
+        await classifyBrandVoiceDriftFinding(result);
         const persistedIds = persistFindings(store, result);
 
         // Mirror to KG (best-effort, async). Failure must not break the audit.
@@ -413,6 +421,75 @@ export async function classifyCompetitorTermFinding(
   finding.text = `${leakCount} unintentional Leak(s) + ${uncertainCount} unsichere Treffer ` +
     `auf Customer-Wettbewerber, ${totalSpend.toFixed(2)} CHF Spend. ` +
     `Leaks → Negativ-Liste; unsichere → Operator-Review im Blueprint.`;
+}
+
+/** P2 Tier-2: brand-voice drift on RSA copy. Reads the brand_voice_drift
+ *  finding's tier-1 candidates, classifies each line on_brand / drift /
+ *  uncertain, drops on_brand from the candidate pool, keeps drift +
+ *  uncertain with classification metadata. Drops the entire finding
+ *  if no drift / uncertain remain. */
+export async function classifyBrandVoiceDriftFinding(
+  result: AuditResult,
+  classifyOpts?: ClassifyBrandVoiceOptions,
+): Promise<void> {
+  if (!result.customer) return;
+  const idx = result.findings.findIndex(f => f.area === 'brand_voice_drift');
+  if (idx < 0) return;
+  const finding = result.findings[idx]!;
+  const evidence = (finding.evidence ?? {}) as Record<string, unknown>;
+  const candidatesRaw = evidence['candidates'];
+  if (!Array.isArray(candidatesRaw) || candidatesRaw.length === 0) return;
+
+  type RawCandidate = Record<string, unknown>;
+  const candidates = candidatesRaw.filter((c): c is RawCandidate =>
+    c !== null && typeof c === 'object');
+  const items = candidates
+    .map(c => ({ text: typeof c['text'] === 'string' ? c['text'] : '' }))
+    .filter(it => it.text.length > 0);
+  if (items.length === 0) return;
+
+  const classification = await classifyBrandVoiceDrift(items, result.customer, classifyOpts ?? {});
+  const byText = new Map<string, ClassifiedBrandVoiceLine>();
+  for (const c of classification.classifications) {
+    byText.set(c.text.toLowerCase(), c);
+  }
+
+  const surviving: Array<Record<string, unknown>> = [];
+  let driftCount = 0;
+  let uncertainCount = 0;
+  let onBrandCount = 0;
+  for (const c of candidates) {
+    const text = typeof c['text'] === 'string' ? c['text'] : '';
+    const cls = byText.get(text.toLowerCase());
+    const category: BrandVoiceCategory = cls?.category ?? 'uncertain';
+    if (category === 'on_brand') {
+      onBrandCount++;
+      continue;
+    }
+    surviving.push({
+      ...c,
+      classification: category,
+      ...(cls?.reason ? { classification_reason: cls.reason } : {}),
+    });
+    if (category === 'drift') driftCount++;
+    else uncertainCount++;
+  }
+
+  if (surviving.length === 0) {
+    result.findings.splice(idx, 1);
+    return;
+  }
+
+  evidence['candidates'] = surviving;
+  evidence['classification'] = classification.classifications;
+  evidence['summary'] = {
+    drift: driftCount,
+    uncertain: uncertainCount,
+    on_brand_filtered_out: onBrandCount,
+  };
+  finding.evidence = evidence;
+  finding.text = `${driftCount} klar abweichende RSA-Lines + ${uncertainCount} unsichere ` +
+    `gegen Customer-Brand-Voice. Operator soll Texte vor Emit überarbeiten.`;
 }
 
 /** D4: classify the audit result's account-state, ask the strategist
