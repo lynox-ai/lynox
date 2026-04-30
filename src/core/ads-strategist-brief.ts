@@ -26,7 +26,7 @@ import type {
   BetaTextBlockParam, BetaCacheControlEphemeral,
 } from '@anthropic-ai/sdk/resources/beta/messages.js';
 import type {
-  CustomerProfileRow, AdsAccountState, StrategistPriority,
+  AdsAccountState, StrategistPriority,
   StrategistBriefRow,
 } from './ads-data-store.js';
 import type { AuditResult, AuditFindingDraft } from './ads-audit-engine.js';
@@ -158,10 +158,6 @@ Risks: any structural change risks regression; warn against broad-match expansio
   }
 }
 
-function buildCustomerContext(customer: CustomerProfileRow | null): string {
-  if (!customer) return '# Customer profile\n- (missing)';
-  return buildCustomerContextWithDepth(customer);
-}
 
 function buildCycleContext(
   result: AuditResult, state: AdsAccountState, stateReason: string,
@@ -211,7 +207,7 @@ function buildCycleContext(
     const counts = v.counts as Record<string, number>;
     lines.push(`- ${v.items.length} entities verified over ${v.windowDays} days`);
     if (counts['VERSCHLECHTERUNG']) lines.push(`- Regressions: ${counts['VERSCHLECHTERUNG']}`);
-    if (counts['VERBESSERUNG']) lines.push(`- Improvements: ${counts['VERBESSERUNG']}`);
+    if (counts['ERFOLG']) lines.push(`- Improvements: ${counts['ERFOLG']}`);
   }
 
   // P4: previous-cycle context — feeds last_cycle_impact narrative.
@@ -262,7 +258,7 @@ export async function generateStrategistBrief(
   const systemBlocks: BetaTextBlockParam[] = [
     {
       type: 'text',
-      text: `${systemPromptForState(state)}\n\n${buildCustomerContext(result.customer)}`,
+      text: `${systemPromptForState(state)}\n\n${result.customer ? buildCustomerContextWithDepth(result.customer) : '# Customer profile\n- (missing)'}`,
       ...(cacheControl ? { cache_control: cacheControl } : {}),
     },
   ];

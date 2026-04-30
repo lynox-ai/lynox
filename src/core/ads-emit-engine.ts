@@ -214,6 +214,15 @@ export function runEmit(
   }
 
   if (idempotent) {
+    // Stamp the hash even on the idempotent return so a later
+    // ads_audit_run / ads_blueprint_run cycle that observes this
+    // run's row sees its emit was acknowledged. Without this,
+    // run.emitted_csv_hash stays NULL whenever the match path fired
+    // off the PREVIOUS run's hash, forcing every subsequent emit to
+    // re-derive the same bytes only to hit the same idempotent path.
+    if (run.emitted_csv_hash !== hash) {
+      store.setEmittedCsvHash(run.run_id, hash);
+    }
     return baseResult(account, customer, run, validation, hash, true, [],
       'Blueprint identisch — Hash-Match auf aktuellem oder Vorgänger-Run, kein Re-Emit nötig.',
       [], makeEmptyTotals(), grouped.manualTodos);
@@ -875,6 +884,9 @@ function resolveWorkspaceDir(override: string | undefined, accountId: string, ru
   // engine init, so emit and the FileBrowserView read/write the same dir.
   // Without this the two diverge (emit -> ~/.lynox/workspace/, browser ->
   // ~/.lynox/workspace/<context>/) and customers cannot reach the CSVs.
+  // NOTE: path-traversal containment is enforced at the TOOL layer
+  // (ads-emit-csv handler) which is the trust boundary. Library callers
+  // (tests, internal engine paths) trust their own override.
   const base = override ?? getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
   return resolve(base, 'ads', accountId, 'blueprints', `run-${runId}`);
 }

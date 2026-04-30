@@ -6,6 +6,7 @@ import { AdsDataStore } from '../../core/ads-data-store.js';
 import { runBlueprint } from '../../core/ads-blueprint-engine.js';
 import { createAdsEmitCsvTool, renderEmitReport } from './ads-emit-csv.js';
 import { runEmit } from '../../core/ads-emit-engine.js';
+import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 import type { IAgent } from '../../types/index.js';
 
 const ACCOUNT = '123-456-7890';
@@ -21,11 +22,13 @@ describe('ads_emit_csv tool', () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'lynox-emit-tool-'));
     workspaceDir = await mkdtemp(join(tmpdir(), 'lynox-emit-tool-ws-'));
+    setTenantWorkspace(workspaceDir);
     store = new AdsDataStore(join(tempDir, 'ads-optimizer.db'));
     tool = createAdsEmitCsvTool(store);
   });
 
   afterEach(async () => {
+    clearTenantWorkspace();
     store.close();
     await rm(tempDir, { recursive: true, force: true });
     await rm(workspaceDir, { recursive: true, force: true });

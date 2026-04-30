@@ -15,11 +15,14 @@
  *
  * Gated by feature flag 'ads-optimizer'.
  */
+import { join, resolve, sep } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { AdsDataStore, AdsAccountRow } from '../../core/ads-data-store.js';
 import {
   runEmit, EmitPreconditionError, type EmitResult,
 } from '../../core/ads-emit-engine.js';
+import { getWorkspaceDir } from '../../core/workspace.js';
+import { getLynoxDir } from '../../core/config.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 interface AdsEmitCsvInput {
@@ -90,13 +93,29 @@ export function createAdsEmitCsvTool(store: AdsDataStore): ToolEntry<AdsEmitCsvI
     },
     handler: async (input: AdsEmitCsvInput, _agent: IAgent): Promise<string> => {
       try {
-        // P6 Account-lock: refuse if confirm_account_id is missing or
-        // doesn't match. The auto-pipeline cannot detect "wrong account"
-        // emit; the operator pins it explicitly.
+        // P6 fat-finger guard (NOT a security boundary — both fields
+        // ride in the same tool input, prompt-injection trivially passes
+        // both). Catches the "wrong account selected" typo that the
+        // auto-pipeline cannot detect on its own. For real account
+        // isolation, see the permission-guard rules at the agent layer.
         if (!input.confirm_account_id || input.confirm_account_id !== input.ads_account_id) {
           const provided = input.confirm_account_id ?? '<missing>';
           return `ads_emit_csv failed: account-lock check failed. ads_account_id="${input.ads_account_id}" but confirm_account_id="${provided}". ` +
-            `Pass both fields with the SAME ads_account_id value to acknowledge you are emitting against this account.`;
+            `Pass both fields with the SAME ads_account_id value to confirm you are emitting against this account.`;
+        }
+        // Path-traversal guard on workspace_dir. The override comes via
+        // tool input, which an LLM agent can fill from a prompt-injected
+        // source. Without this check, an attacker-controlled value like
+        // "/etc/cron.d" would land workspace files outside the intended
+        // root. Trust boundary lives at the tool layer; the engine
+        // library trusts its caller.
+        if (input.workspace_dir !== undefined) {
+          const trustedRoot = resolve(getWorkspaceDir() ?? join(getLynoxDir(), 'workspace'));
+          const requested = resolve(input.workspace_dir);
+          if (requested !== trustedRoot && !requested.startsWith(trustedRoot + sep)) {
+            return `ads_emit_csv failed: workspace_dir "${input.workspace_dir}" resolves outside the trusted workspace root (${trustedRoot}). ` +
+              `Drop the override or use a path inside the workspace.`;
+          }
         }
         const result = runEmit(store, input.ads_account_id, {
           ...(input.workspace_dir !== undefined ? { workspaceDir: input.workspace_dir } : {}),

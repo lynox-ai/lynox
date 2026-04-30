@@ -44,6 +44,22 @@ import type {
   GscObservationSnapshot,
 } from './ads-snapshot-types.js';
 
+/** Maximum size for any JSON column we serialize. Caps both the
+ *  insert path (truncate / reject) and protects parsers downstream
+ *  from OOM on a poisoned blob. 64 KB is more than 30× the size of a
+ *  realistic finding-evidence object. */
+const JSON_COLUMN_MAX_BYTES = 64 * 1024;
+
+function capJsonColumn(serialized: string, label: string): string {
+  if (serialized.length > JSON_COLUMN_MAX_BYTES) {
+    throw new Error(
+      `${label} JSON exceeds ${JSON_COLUMN_MAX_BYTES} bytes ` +
+      `(got ${serialized.length}). Refusing to persist — caller should reduce payload.`,
+    );
+  }
+  return serialized;
+}
+
 const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (1);
 
@@ -1227,8 +1243,17 @@ export class AdsDataStore {
 
   private _migrate(): void {
     const currentVersion = this._getVersion();
+    const db = this.db;
     for (let i = currentVersion; i < MIGRATIONS.length; i++) {
-      this.db.exec(MIGRATIONS[i]!);
+      const sql = MIGRATIONS[i]!;
+      // Wrap each migration in a transaction so a mid-script crash
+      // (e.g. interrupted v7 RENAME → CREATE → INSERT → DROP rebuild)
+      // rolls back atomically. Without this, partial state would leave
+      // ads_findings_v6 alive but ads_findings missing on restart, and
+      // the resumed migration would crash because the source table
+      // already got renamed.
+      const apply = db.transaction(() => { db.exec(sql); });
+      apply();
     }
   }
 
@@ -1559,7 +1584,7 @@ export class AdsDataStore {
 
   insertFinding(input: InsertFindingInput): AdsFindingRow {
     const now = new Date().toISOString();
-    const evidence = JSON.stringify(input.evidence ?? {});
+    const evidence = capJsonColumn(JSON.stringify(input.evidence ?? {}), 'finding.evidence');
     const result = this.db.prepare(`
       INSERT INTO ads_findings (
         run_id, ads_account_id, area, severity, source, text,
@@ -1719,9 +1744,9 @@ export class AdsDataStore {
 
   insertBlueprintEntity(input: InsertBlueprintEntityInput): AdsBlueprintEntityRow {
     const now = new Date().toISOString();
-    const payload = JSON.stringify(input.payload ?? {});
-    const errors = JSON.stringify(input.namingErrors ?? []);
-    const reviews = JSON.stringify(input.needsReview ?? []);
+    const payload = capJsonColumn(JSON.stringify(input.payload ?? {}), 'blueprint.payload');
+    const errors = capJsonColumn(JSON.stringify(input.namingErrors ?? []), 'blueprint.naming_errors');
+    const reviews = capJsonColumn(JSON.stringify(input.needsReview ?? []), 'blueprint.needs_review');
     const result = this.db.prepare(`
       INSERT INTO ads_blueprint_entities (
         run_id, ads_account_id, entity_type, kind,

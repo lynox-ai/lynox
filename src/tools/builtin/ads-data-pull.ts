@@ -266,23 +266,28 @@ export async function runAdsDataPull(deps: PullDeps, input: AdsDataPullInput): P
   const previousRun = store.getLatestSuccessfulAuditRun(adsAccountId);
   const mode: 'BOOTSTRAP' | 'OPTIMIZE' = previousRun === null ? 'BOOTSTRAP' : 'OPTIMIZE';
 
-  // 3a. Ensure the ads_accounts row exists. ads_audit_runs.ads_account_id has
-  // an FK to ads_accounts; without this upsert, createAuditRun fails on the
-  // first cycle. Profile already validated in resolveAccountAndFolder.
-  store.upsertAdsAccount({
-    adsAccountId,
-    customerId: input.customer_id,
-    accountLabel: input.account_label ?? input.customer_id,
-    mode,
-    driveFolderId,
-  });
-
-  // 4. Open audit run (creates concurrency lock; throws if one already RUNNING).
-  const run = store.createAuditRun({
-    adsAccountId,
-    mode,
-    gasExportLastrun: lastrunIso,
-    previousRunId: previousRun?.run_id,
+  // 3a. Ensure the ads_accounts row exists + open the audit run in ONE
+  // transaction. ads_audit_runs.ads_account_id has an FK to ads_accounts;
+  // without the upsert, createAuditRun fails on the first cycle. The
+  // transaction matters because createAuditRun also acts as the
+  // concurrency lock — throwing if one is already RUNNING. Without
+  // wrapping, a concurrent lock failure would still mutate
+  // ads_accounts.mode / drive_folder_id from THIS caller, racing with
+  // whatever run is actually executing.
+  const run = store.transaction(() => {
+    store.upsertAdsAccount({
+      adsAccountId,
+      customerId: input.customer_id,
+      accountLabel: input.account_label ?? input.customer_id,
+      mode,
+      driveFolderId,
+    });
+    return store.createAuditRun({
+      adsAccountId,
+      mode,
+      gasExportLastrun: lastrunIso,
+      previousRunId: previousRun?.run_id,
+    });
   });
 
   let totalRows = 0;

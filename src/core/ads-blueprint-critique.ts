@@ -113,9 +113,6 @@ Use customer profile depth fields when present (P3):
 
 When a depth field is missing, just challenge from base profile + findings.`;
 
-function buildCustomerContext(customer: CustomerProfileRow): string {
-  return buildCustomerContextWithDepth(customer);
-}
 
 function buildBlueprintContext(
   entities: readonly AdsBlueprintEntityRow[],
@@ -242,7 +239,7 @@ export async function generateBlueprintCritique(
   const systemBlocks: BetaTextBlockParam[] = [
     {
       type: 'text',
-      text: `${SYSTEM_PROMPT}\n\n${buildCustomerContext(customer)}`,
+      text: `${SYSTEM_PROMPT}\n\n${buildCustomerContextWithDepth(customer)}`,
       ...(cacheControl ? { cache_control: cacheControl } : {}),
     },
   ];

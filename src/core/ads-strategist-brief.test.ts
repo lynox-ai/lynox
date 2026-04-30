@@ -88,9 +88,9 @@ describe('generateStrategistBrief', () => {
       beta: { messages: { stream: () => ({ finalMessage: async () => { throw new Error('5xx'); } }) } },
     } as unknown as Anthropic;
     const result = await generateStrategistBrief(makeAuditResult(), 'messy_running',
-      'Restructure required', { client: throwing });
+      'Restructure required', null, { client: throwing });
     expect(result.llmFailed).toBe(true);
-    expect(result.failureReason).toMatch(/LLM error/);
+    expect(result.failureReason).toMatch(/5xx/);
     // Fallback synthesizes one priority per HIGH finding.
     expect(result.priorities.length).toBeGreaterThan(0);
     expect(result.risks[0]).toMatch(/LLM strategist unavailable/);
@@ -101,7 +101,7 @@ describe('generateStrategistBrief', () => {
       beta: { messages: { stream: () => ({ finalMessage: async () => ({ content: [] }) }) } },
     } as unknown as Anthropic;
     const result = await generateStrategistBrief(makeAuditResult(), 'structured_optimizing',
-      'normal', { client: empty });
+      'normal', null, { client: empty });
     expect(result.llmFailed).toBe(true);
   });
 });

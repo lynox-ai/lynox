@@ -134,12 +134,9 @@ describe('ads_blueprint_review tool', () => {
       override_reason: 'Dies ist ein expliziter Override für den Cycle 12 Test-Setup-Fall.',
     }, fakeAgent);
     // The duplicate-URL gate is now downgraded; emit will fail for
-    // OTHER reasons (validation) but not pre_emit_review block.
-    try {
-      runEmit(store, ACCOUNT);
-    } catch (err) {
-      expect(err).toBeInstanceOf(EmitPreconditionError);
-      expect((err as Error).message).not.toMatch(/Pre-Emit-Review BLOCK/);
-    }
+    // OTHER reasons (validation) but NOT for pre_emit_review block.
+    // Use vitest's negative-toThrow so a no-throw fails fast — the
+    // earlier try/catch silently passed when runEmit didn't throw.
+    expect(() => runEmit(store, ACCOUNT)).not.toThrow(/Pre-Emit-Review BLOCK/);
   });
 });

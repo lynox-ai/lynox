@@ -28,6 +28,7 @@ import type {
 import type { CustomerProfileRow } from './ads-data-store.js';
 import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
 import { getBetasForProvider, getModelId } from '../types/index.js';
+import { buildCustomerContextWithDepth } from './ads-customer-profile-context.js';
 
 export type CompetitorIntentCategory = 'intentional_competitive' | 'unintentional_leak' | 'uncertain';
 
@@ -92,32 +93,6 @@ Defensive bias: when in doubt, mark "uncertain" so the operator decides. A wrong
 
 Each "reason" must be one short sentence.`;
 
-function buildCustomerContext(customer: CustomerProfileRow): string {
-  const parsed = (json: string): string[] => {
-    try {
-      const v = JSON.parse(json);
-      return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-    } catch { return []; }
-  };
-  const lines: string[] = [];
-  lines.push('# Customer profile');
-  lines.push(`- Client: ${customer.client_name}`);
-  if (customer.country) lines.push(`- Country: ${customer.country}`);
-  const langs = parsed(customer.languages);
-  if (langs.length) lines.push(`- Languages: ${langs.join(', ')}`);
-  if (customer.business_model) lines.push(`- Business model: ${customer.business_model}`);
-  if (customer.offer_summary) lines.push(`- Offer: ${customer.offer_summary}`);
-  if (customer.primary_goal) lines.push(`- Primary goal: ${customer.primary_goal}`);
-  const tops = parsed(customer.top_products);
-  if (tops.length) lines.push(`- Top products / themes: ${tops.join(', ')}`);
-  const own = parsed(customer.own_brands);
-  if (own.length) lines.push(`- Own brands: ${own.join(', ')}`);
-  const sold = parsed(customer.sold_brands);
-  if (sold.length) lines.push(`- Sold brands: ${sold.join(', ')}`);
-  const comp = parsed(customer.competitors);
-  if (comp.length) lines.push(`- Known competitors: ${comp.join(', ')}`);
-  return lines.join('\n');
-}
 
 interface InputItem {
   term: string;
@@ -157,7 +132,7 @@ export async function classifyCompetitorTermIntent(
   const systemBlocks: BetaTextBlockParam[] = [
     {
       type: 'text',
-      text: `${SYSTEM_PROMPT_HEAD}\n\n${buildCustomerContext(customer)}`,
+      text: `${SYSTEM_PROMPT_HEAD}\n\n${buildCustomerContextWithDepth(customer)}`,
       ...(cacheControl ? { cache_control: cacheControl } : {}),
     },
   ];

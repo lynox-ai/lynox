@@ -206,6 +206,7 @@ export function runAudit(store: AdsDataStore, adsAccountId: string, opts?: RunAu
     store, account, customer, run, previousRun,
     kpis, previousKpis, mode, manualChanges, verification,
     now: opts?.now ?? new Date(),
+    snapshotCache: new Map<string, unknown[]>(),
   });
 
   return {
@@ -877,6 +878,23 @@ interface FindingContext {
   manualChanges: ManualChangeSummary | null;
   verification: PerformanceVerificationSummary | null;
   now: Date;
+  /** Per-audit memoization for `getSnapshotRows` reads. ~22
+   *  detectors read the same six snapshot tables 2-3× each per
+   *  audit; the cache collapses those to one read per table. */
+  snapshotCache: Map<string, unknown[]>;
+}
+
+/** Memoized read of a snapshot table for the current audit run.
+ *  Use this whenever a detector reads a table that may be re-read by
+ *  another detector in the same audit. */
+function readSnapshotCached<T>(ctx: FindingContext, table: string): T[] {
+  const cached = ctx.snapshotCache.get(table);
+  if (cached) return cached as T[];
+  const rows = ctx.store.getSnapshotRows<T>(
+    table, ctx.account.ads_account_id, { runId: ctx.run.run_id },
+  );
+  ctx.snapshotCache.set(table, rows as unknown[]);
+  return rows;
 }
 
 function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[] {
@@ -1190,8 +1208,8 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
   if (ctx.customer) {
     const brandTokens = collectBrandTokens(ctx.customer);
     if (brandTokens.length > 0) {
-      const pmaxRows = ctx.store.getSnapshotRows<{ campaign_name: string | null; search_category: string | null }>(
-        'ads_pmax_search_terms', ctx.run.ads_account_id, { runId: ctx.run.run_id },
+      const pmaxRows = readSnapshotCached<{ campaign_name: string | null; search_category: string | null }>(
+        ctx, 'ads_pmax_search_terms',
       );
       const branded = pmaxRows.filter(r => {
         const label = (r.search_category ?? '').toLowerCase();
@@ -1238,8 +1256,8 @@ function generateDeterministicFindings(ctx: FindingContext): AuditFindingDraft[]
   // is dominated by long-tail noise). This produces actionable seeds for
   // asset-group expansion proposals instead of a useless aggregate number.
   if (ctx.customer) {
-    const pmaxRows = ctx.store.getSnapshotRows<{ campaign_name: string | null; search_category: string | null }>(
-      'ads_pmax_search_terms', ctx.run.ads_account_id, { runId: ctx.run.run_id },
+    const pmaxRows = readSnapshotCached<{ campaign_name: string | null; search_category: string | null }>(
+      ctx, 'ads_pmax_search_terms',
     );
     const brandTokens = collectBrandTokens(ctx.customer);
     const existingGroups = ctx.store.getSnapshotRows<{ asset_group_name: string | null }>(
@@ -1470,10 +1488,10 @@ const IRRELEVANT_TERM_TOP_N = 25;
  *  so the LLM call stays bounded — long-tail terms are addressed
  *  by the existing aggregate `wasted_search_terms` finding. */
 function collectIrrelevantSearchTermCandidates(ctx: FindingContext): IrrelevantSearchTermCandidate[] {
-  const rows = ctx.store.getSnapshotRows<{
+  const rows = readSnapshotCached<{
     search_term: string | null; campaign_name: string | null; ad_group_name: string | null;
     cost_micros: number | null; clicks: number | null; conversions: number | null;
-  }>('ads_search_terms', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_search_terms');
 
   // Aggregate per (term, campaign) so a term split across days/ad-groups
   // shows as one candidate the LLM judges once.
@@ -1532,10 +1550,10 @@ const QS_COLLAPSE_TOP_N = 15;
  *  No LLM needed — QS is a structural Google Ads signal that always
  *  costs money regardless of context. */
 function collectQualityScoreCollapse(ctx: FindingContext): QualityScoreCollapseGroup[] {
-  const rows = ctx.store.getSnapshotRows<{
+  const rows = readSnapshotCached<{
     campaign_name: string | null; ad_group_name: string | null;
     keyword: string | null; quality_score: number | null; cost_micros: number | null;
-  }>('ads_keywords', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_keywords');
 
   type AgBucket = {
     campaign: string; adGroup: string;
@@ -1598,14 +1616,14 @@ const AUDIENCE_SIGNAL_TOP_N = 30;
 function collectAudienceSignalGaps(ctx: FindingContext): AudienceSignalGap[] {
   // First pull the universe of NON-empty asset_groups for the run so
   // we can list groups with ZERO signals (left anti-join semantics).
-  const groups = ctx.store.getSnapshotRows<{ campaign_name: string | null; asset_group_name: string | null }>(
-    'ads_asset_groups', ctx.account.ads_account_id, { runId: ctx.run.run_id },
+  const groups = readSnapshotCached<{ campaign_name: string | null; asset_group_name: string | null }>(
+    ctx, 'ads_asset_groups',
   ).filter(g => (g.asset_group_name ?? '').trim().length > 0)
     .map(g => ({ campaign: (g.campaign_name ?? '?').trim(), ag: (g.asset_group_name ?? '').trim() }));
 
   const signalsByAg = new Map<string, Set<string>>();
-  const signalRows = ctx.store.getSnapshotRows<{ asset_group_name: string | null; signal_type: string | null }>(
-    'ads_audience_signals', ctx.account.ads_account_id, { runId: ctx.run.run_id },
+  const signalRows = readSnapshotCached<{ asset_group_name: string | null; signal_type: string | null }>(
+    ctx, 'ads_audience_signals',
   );
   for (const r of signalRows) {
     const ag = (r.asset_group_name ?? '').trim();
@@ -1659,10 +1677,10 @@ const PMAX_ASSET_TOP_N = 30;
 function collectPmaxAssetCountGaps(ctx: FindingContext): PmaxAssetCountGap[] {
   // Need to scope to PMax asset_groups; ads_asset_group_assets carries
   // the campaign_name on each row already.
-  const rows = ctx.store.getSnapshotRows<{
+  const rows = readSnapshotCached<{
     campaign_name: string | null; asset_group_name: string | null;
     field_type: string | null; asset_status: string | null;
-  }>('ads_asset_group_assets', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_asset_group_assets');
 
   type Bucket = { campaign: string; ag: string; counts: Map<string, number> };
   const agg = new Map<string, Bucket>();
@@ -1682,8 +1700,8 @@ function collectPmaxAssetCountGaps(ctx: FindingContext): PmaxAssetCountGap[] {
 
   // Also include asset_groups that have ZERO assets recorded — anti-join
   // against ads_asset_groups so brand-new (empty) AGs surface too.
-  const groups = ctx.store.getSnapshotRows<{ campaign_name: string | null; asset_group_name: string | null }>(
-    'ads_asset_groups', ctx.account.ads_account_id, { runId: ctx.run.run_id },
+  const groups = readSnapshotCached<{ campaign_name: string | null; asset_group_name: string | null }>(
+    ctx, 'ads_asset_groups',
   ).filter(g => (g.asset_group_name ?? '').trim().length > 0);
   for (const g of groups) {
     const campaign = (g.campaign_name ?? '?').trim();
@@ -1731,11 +1749,11 @@ const DISABLED_CONVERTING_TOP_N = 25;
  *  both PAUSED and REMOVED — REMOVED keywords need a different fix
  *  (re-create vs unpause) but the audit just flags them. */
 function collectDisabledConvertingKeywords(ctx: FindingContext): DisabledConvertingKeyword[] {
-  const rows = ctx.store.getSnapshotRows<{
+  const rows = readSnapshotCached<{
     campaign_name: string | null; ad_group_name: string | null;
     keyword: string | null; match_type: string | null; status: string | null;
     conversions: number | null; conv_value: number | null;
-  }>('ads_keywords', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_keywords');
 
   const out: DisabledConvertingKeyword[] = [];
   for (const r of rows) {
@@ -1787,10 +1805,10 @@ function collectCompetitorTermCandidates(ctx: FindingContext): CompetitorTermCan
     .filter(c => c.length >= 3);
   if (competitors.length === 0) return [];
 
-  const rows = ctx.store.getSnapshotRows<{
+  const rows = readSnapshotCached<{
     search_term: string | null; campaign_name: string | null; ad_group_name: string | null;
     cost_micros: number | null; clicks: number | null; conversions: number | null;
-  }>('ads_search_terms', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_search_terms');
 
   type Bucket = {
     term: string; campaign: string; adGroup: string | null; competitor: string;
@@ -1909,9 +1927,9 @@ function findPlaceholderMatch(text: string): string | null {
 function collectPlaceholderAssets(ctx: FindingContext): PlaceholderAssetCandidate[] {
   const out: PlaceholderAssetCandidate[] = [];
 
-  const rsas = ctx.store.getSnapshotRows<{
+  const rsas = readSnapshotCached<{
     campaign_name: string; ad_group_name: string; headlines: string; descriptions: string;
-  }>('ads_rsa_ads', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_rsa_ads');
   for (const r of rsas) {
     for (const [field, json] of [['HEADLINE', r.headlines], ['DESCRIPTION', r.descriptions]] as const) {
       try {
@@ -1933,10 +1951,10 @@ function collectPlaceholderAssets(ctx: FindingContext): PlaceholderAssetCandidat
     }
   }
 
-  const aga = ctx.store.getSnapshotRows<{
+  const aga = readSnapshotCached<{
     campaign_name: string | null; asset_group_name: string;
     field_type: string; text_content: string | null;
-  }>('ads_asset_group_assets', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_asset_group_assets');
   for (const r of aga) {
     if (!r.text_content) continue;
     const m = findPlaceholderMatch(r.text_content);
@@ -1965,10 +1983,10 @@ const DUPLICATE_RSA_MIN_OCCURRENCES = 2;
 /** Pure Tier-1: find RSA headlines / descriptions used identically
  *  across multiple ad-groups. Account-wide dedupe. */
 function collectDuplicateRsaCopy(ctx: FindingContext): DuplicateRsaCandidate[] {
-  const rsas = ctx.store.getSnapshotRows<{
+  const rsas = readSnapshotCached<{
     campaign_name: string; ad_group_name: string;
     headlines: string; descriptions: string;
-  }>('ads_rsa_ads', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_rsa_ads');
 
   const headlineMap = new Map<string, Set<string>>();
   const descriptionMap = new Map<string, Set<string>>();
@@ -2049,10 +2067,10 @@ function collectBrandVoiceDriftCandidates(ctx: FindingContext): BrandVoiceDriftC
     || (bv.signature_phrases && bv.signature_phrases.length > 0);
   if (!hasContent) return [];
 
-  const rsas = ctx.store.getSnapshotRows<{
+  const rsas = readSnapshotCached<{
     campaign_name: string; ad_group_name: string;
     headlines: string; descriptions: string;
-  }>('ads_rsa_ads', ctx.account.ads_account_id, { runId: ctx.run.run_id });
+  }>(ctx, 'ads_rsa_ads');
 
   const out: BrandVoiceDriftCandidate[] = [];
   for (const r of rsas) {
