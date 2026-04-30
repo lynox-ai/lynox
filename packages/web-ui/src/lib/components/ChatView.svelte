@@ -27,6 +27,7 @@
 		getIsOffline,
 		clearError,
 		cancelQueue,
+		removeQueuedMessage,
 		downloadExport,
 		getSessionModel,
 		getContextBudget,
@@ -1423,7 +1424,17 @@
 		<div class="mx-auto max-w-3xl space-y-5">
 			{#each messages as msg, msgIdx (msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.role === 'user'}
-					<div class="flex justify-end">
+					<div class="flex justify-end items-start gap-1.5">
+						{#if msg.queued}
+							<button
+								onclick={() => removeQueuedMessage(msg)}
+								aria-label={t('chat.remove_queued')}
+								title={t('chat.remove_queued')}
+								class="mt-1 shrink-0 rounded-full p-1 text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+							</button>
+						{/if}
 						<button
 							onclick={() => { if (msg.failed) { sendMessage(msg.content); msg.failed = false; } else { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); } }}
 							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
@@ -2137,7 +2148,7 @@
 			</p>
 		{/if}
 		{#if isStreaming && queueLength > 0}
-			<div class="hidden md:flex mt-1.5 max-w-3xl mx-auto items-center gap-3">
+			<div class="flex mt-1.5 max-w-3xl mx-auto items-center gap-3">
 				<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
 					{queueLength} {t('chat.hint_queued')}
 				</p>

@@ -1329,6 +1329,23 @@ export function cancelQueue(): void {
 	messageQueue = [];
 }
 
+/**
+ * Remove a single queued user message — both the rendered bubble and its
+ * matching task in `messageQueue`. The queue is FIFO and pushed in lockstep
+ * with the bubbles, so we match the first messageQueue entry whose task
+ * starts with the bubble's display text (mirroring the un-queue logic in
+ * `_executeRun`, which strips any "📎 …" file marker added during push).
+ */
+export function removeQueuedMessage(target: ChatMessage): void {
+	const msgIdx = messages.findIndex((m) => m === target);
+	if (msgIdx === -1 || !messages[msgIdx]?.queued) return;
+	messages.splice(msgIdx, 1);
+
+	const display = (target.content.split('\n📎 ')[0] ?? target.content).slice(0, 50);
+	const queueIdx = messageQueue.findIndex((q) => q.task.startsWith(display));
+	if (queueIdx !== -1) messageQueue.splice(queueIdx, 1);
+}
+
 export function getMessages() {
 	return messages;
 }
