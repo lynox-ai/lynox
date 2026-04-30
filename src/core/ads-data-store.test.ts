@@ -78,6 +78,59 @@ describe('AdsDataStore', () => {
     it('returns null for unknown customer', () => {
       expect(store.getCustomerProfile('nonexistent')).toBeNull();
     });
+
+    it('P3: persists depth fields (personas, brand voice, USPs, compliance, pricing, seasonality)', () => {
+      const personas = [{
+        name: 'Tech-affine Selbstständige', age_range: '30-45',
+        motivation: 'Keine Zeit für Tools', pain_points: ['Tool-Switching'],
+      }];
+      const brandVoice = {
+        tone: 'direkt', do_not_use: ['game-changer'],
+      };
+      const profile = store.upsertCustomerProfile({
+        customerId: 'p3-test', clientName: 'P3 Test',
+        personas, brandVoice,
+        usp: ['Patent', 'Schnell-Lieferung'],
+        complianceConstraints: 'No "guarantee".',
+        pricingStrategy: 'Premium, no discount.',
+        seasonalPatterns: 'Peak Q1.',
+      });
+      expect(JSON.parse(profile.personas_json)).toEqual(personas);
+      expect(JSON.parse(profile.brand_voice_json)).toEqual(brandVoice);
+      expect(JSON.parse(profile.usp_json)).toEqual(['Patent', 'Schnell-Lieferung']);
+      expect(profile.compliance_constraints).toBe('No "guarantee".');
+      expect(profile.pricing_strategy).toBe('Premium, no discount.');
+      expect(profile.seasonal_patterns).toBe('Peak Q1.');
+    });
+
+    it('P3: partial update preserves existing depth fields when input omits them', () => {
+      // Cycle 1: set personas + brand_voice.
+      store.upsertCustomerProfile({
+        customerId: 'partial', clientName: 'Acme',
+        personas: [{ name: 'Persona A' }],
+        brandVoice: { tone: 'direkt' },
+      });
+      // Cycle 2: refine USP only — personas + brand_voice MUST survive.
+      const updated = store.upsertCustomerProfile({
+        customerId: 'partial', clientName: 'Acme',
+        usp: ['New USP'],
+      });
+      expect(JSON.parse(updated.personas_json)).toEqual([{ name: 'Persona A' }]);
+      expect(JSON.parse(updated.brand_voice_json)).toEqual({ tone: 'direkt' });
+      expect(JSON.parse(updated.usp_json)).toEqual(['New USP']);
+    });
+
+    it('P3: passing depth field as empty array CLEARS prior content (intentional reset)', () => {
+      store.upsertCustomerProfile({
+        customerId: 'reset-test', clientName: 'Acme',
+        personas: [{ name: 'Old' }],
+      });
+      const updated = store.upsertCustomerProfile({
+        customerId: 'reset-test', clientName: 'Acme',
+        personas: [],
+      });
+      expect(JSON.parse(updated.personas_json)).toEqual([]);
+    });
   });
 
   describe('ads account', () => {

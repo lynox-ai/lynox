@@ -31,6 +31,7 @@ import type {
 import type { AuditResult, AuditFindingDraft } from './ads-audit-engine.js';
 import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
 import { getBetasForProvider, getModelId } from '../types/index.js';
+import { buildCustomerContextWithDepth } from './ads-customer-profile-context.js';
 
 export interface StrategistBriefResult {
   headline: string;
@@ -95,7 +96,17 @@ Hard rules:
 - Three priorities. Ranked. Top one is what the operator should do FIRST.
 - Risks are warnings about side-effects of acting on the priorities (smart-bidding learning loss, cannibalization, brand-traffic gap).
 - "do_not_touch" is the watch-list of campaigns / asset-groups that work — protect them.
-- No marketing language. The operator is technical.`;
+- No marketing language. The operator is technical.
+
+Use the customer profile depth fields when present (P3):
+- "Personas" — tailor channel mix and targeting recommendations.
+- "Brand voice" → tone / signature phrases / do_not_use → use these to suggest specific RSA copy directions, flag tone drift.
+- "Unique selling points" → reference these when proposing ad-copy themes.
+- "Compliance constraints" → never recommend copy that violates them.
+- "Pricing strategy" → match recommendations (don't suggest discount messaging on premium positioning).
+- "Seasonality" → time priorities accordingly (e.g. "scale up budget for kefir terms in Mar-May per stated seasonality").
+
+When a depth field is missing, just stick to the basic profile + findings.`;
 
   switch (state) {
     case 'greenfield':
@@ -135,33 +146,7 @@ Risks: any structural change risks regression; warn against broad-match expansio
 
 function buildCustomerContext(customer: CustomerProfileRow | null): string {
   if (!customer) return '# Customer profile\n- (missing)';
-  const parsed = (json: string): string[] => {
-    try {
-      const v = JSON.parse(json);
-      return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-    } catch { return []; }
-  };
-  const lines: string[] = [];
-  lines.push('# Customer profile');
-  lines.push(`- Client: ${customer.client_name}`);
-  if (customer.country) lines.push(`- Country: ${customer.country}`);
-  const langs = parsed(customer.languages);
-  if (langs.length) lines.push(`- Languages: ${langs.join(', ')}`);
-  if (customer.business_model) lines.push(`- Business model: ${customer.business_model}`);
-  if (customer.offer_summary) lines.push(`- Offer: ${customer.offer_summary}`);
-  if (customer.primary_goal) lines.push(`- Primary goal: ${customer.primary_goal}`);
-  if (customer.target_roas) lines.push(`- Target ROAS: ${customer.target_roas.toFixed(2)}x`);
-  if (customer.target_cpa_chf) lines.push(`- Target CPA: ${customer.target_cpa_chf.toFixed(2)} CHF`);
-  if (customer.monthly_budget_chf) lines.push(`- Monthly budget: ${customer.monthly_budget_chf.toFixed(0)} CHF`);
-  const tops = parsed(customer.top_products);
-  if (tops.length) lines.push(`- Top products / themes: ${tops.join(', ')}`);
-  const own = parsed(customer.own_brands);
-  if (own.length) lines.push(`- Own brands: ${own.join(', ')}`);
-  const sold = parsed(customer.sold_brands);
-  if (sold.length) lines.push(`- Sold brands: ${sold.join(', ')}`);
-  const comp = parsed(customer.competitors);
-  if (comp.length) lines.push(`- Competitors: ${comp.join(', ')}`);
-  return lines.join('\n');
+  return buildCustomerContextWithDepth(customer);
 }
 
 function buildCycleContext(result: AuditResult, state: AdsAccountState, stateReason: string): string {

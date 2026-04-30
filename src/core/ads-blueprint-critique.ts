@@ -36,6 +36,7 @@ import type {
 } from './ads-data-store.js';
 import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
 import { getBetasForProvider, getModelId } from '../types/index.js';
+import { buildCustomerContextWithDepth } from './ads-customer-profile-context.js';
 
 export interface BlueprintCritiqueResult {
   challenges: BlueprintCritiqueChallenge[];
@@ -100,36 +101,20 @@ Examples of GOOD challenges:
 Examples of BAD challenges (do NOT emit these):
 - "Review your bidding strategy" (no specificity)
 - "Make sure your ads convert" (generic)
-- "Check Google Ads best practices" (no actionable insight)`;
+- "Check Google Ads best practices" (no actionable insight)
+
+Use customer profile depth fields when present (P3):
+- "Brand voice" do_not_use list → flag any RSA / Asset-Group copy that drifts toward forbidden tone or words.
+- "Compliance constraints" → flag any copy or claim that risks violating them. This is high-priority — compliance failures are expensive.
+- "Pricing strategy" → flag mismatches (e.g. discount-tone copy on a premium-positioning customer).
+- "Personas" → flag missing persona alignment in Brand-RSAs.
+- "Seasonality" → flag launch timing conflicts (e.g. ramping a kefir AG in November when peak is Mar-May).
+- "Unique selling points" → flag RSA copy that buries USPs in description position 2.
+
+When a depth field is missing, just challenge from base profile + findings.`;
 
 function buildCustomerContext(customer: CustomerProfileRow): string {
-  const parsed = (json: string): string[] => {
-    try {
-      const v = JSON.parse(json);
-      return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-    } catch { return []; }
-  };
-  const lines: string[] = [];
-  lines.push('# Customer profile');
-  lines.push(`- Client: ${customer.client_name}`);
-  if (customer.country) lines.push(`- Country: ${customer.country}`);
-  const langs = parsed(customer.languages);
-  if (langs.length) lines.push(`- Languages: ${langs.join(', ')}`);
-  if (customer.business_model) lines.push(`- Business model: ${customer.business_model}`);
-  if (customer.offer_summary) lines.push(`- Offer: ${customer.offer_summary}`);
-  if (customer.primary_goal) lines.push(`- Primary goal: ${customer.primary_goal}`);
-  if (customer.target_roas) lines.push(`- Target ROAS: ${customer.target_roas.toFixed(2)}x`);
-  if (customer.target_cpa_chf) lines.push(`- Target CPA: ${customer.target_cpa_chf.toFixed(2)} CHF`);
-  if (customer.monthly_budget_chf) lines.push(`- Monthly budget: ${customer.monthly_budget_chf.toFixed(0)} CHF`);
-  const tops = parsed(customer.top_products);
-  if (tops.length) lines.push(`- Top products / themes: ${tops.join(', ')}`);
-  const own = parsed(customer.own_brands);
-  if (own.length) lines.push(`- Own brands: ${own.join(', ')}`);
-  const sold = parsed(customer.sold_brands);
-  if (sold.length) lines.push(`- Sold brands: ${sold.join(', ')}`);
-  const comp = parsed(customer.competitors);
-  if (comp.length) lines.push(`- Competitors: ${comp.join(', ')}`);
-  return lines.join('\n');
+  return buildCustomerContextWithDepth(customer);
 }
 
 function buildBlueprintContext(

@@ -845,6 +845,21 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL
    );
    CREATE INDEX IF NOT EXISTS idx_critiques_run ON ads_blueprint_critiques(run_id);`,
+
+  // Migration v9: P3 Customer-Profile-Depth. Six optional JSON / text
+  // fields that flesh out the customer profile so D4 Strategist Brief
+  // and D5 Blueprint Critique can synthesize sharper, more contextual
+  // recommendations (persona-aware copy, brand-voice-aware critique,
+  // compliance-aware Negatives, etc). All fields default to empty —
+  // graceful degradation when an operator hasn't filled them yet.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (9);
+
+   ALTER TABLE customer_profiles ADD COLUMN personas_json TEXT NOT NULL DEFAULT '[]';
+   ALTER TABLE customer_profiles ADD COLUMN brand_voice_json TEXT NOT NULL DEFAULT '{}';
+   ALTER TABLE customer_profiles ADD COLUMN usp_json TEXT NOT NULL DEFAULT '[]';
+   ALTER TABLE customer_profiles ADD COLUMN compliance_constraints TEXT NOT NULL DEFAULT '';
+   ALTER TABLE customer_profiles ADD COLUMN pricing_strategy TEXT NOT NULL DEFAULT '';
+   ALTER TABLE customer_profiles ADD COLUMN seasonal_patterns TEXT NOT NULL DEFAULT '';`,
 ];
 
 export interface CustomerProfileRow {
@@ -867,8 +882,36 @@ export interface CustomerProfileRow {
   pmax_owned_head_terms: string;
   naming_convention_pattern: string | null;
   tracking_notes: string;
+  // P3 depth fields — all optional, default empty so cycle-1 customers
+  // without a refined profile still flow through. Strategist + Critique
+  // read these when present and ignore them when blank.
+  personas_json: string;
+  brand_voice_json: string;
+  usp_json: string;
+  compliance_constraints: string;
+  pricing_strategy: string;
+  seasonal_patterns: string;
   created_at: string;
   updated_at: string;
+}
+
+/** Persona shape used inside personas_json. Free-form by design — the
+ *  agent / operator picks the depth they want. Only `name` is required. */
+export interface CustomerPersona {
+  name: string;
+  age_range?: string | undefined;
+  motivation?: string | undefined;
+  pain_points?: readonly string[] | undefined;
+  buying_triggers?: readonly string[] | undefined;
+}
+
+/** Brand-voice descriptor used inside brand_voice_json. Same free-form
+ *  rule — operator can fill what's relevant, omit the rest. */
+export interface CustomerBrandVoice {
+  tone?: string | undefined;
+  voice_examples?: readonly string[] | undefined;
+  do_not_use?: readonly string[] | undefined;
+  signature_phrases?: readonly string[] | undefined;
 }
 
 export interface AdsAccountRow {
@@ -1089,6 +1132,15 @@ export interface UpsertCustomerProfileInput {
   pmaxOwnedHeadTerms?: readonly string[] | undefined;
   namingConventionPattern?: string | undefined;
   trackingNotes?: Record<string, unknown> | undefined;
+  // P3 depth fields — all optional. Pass undefined to leave the
+  // existing value untouched (upsert preserves prior depth on partial
+  // updates so iterative refinement doesn't wipe earlier inputs).
+  personas?: readonly CustomerPersona[] | undefined;
+  brandVoice?: CustomerBrandVoice | undefined;
+  usp?: readonly string[] | undefined;
+  complianceConstraints?: string | undefined;
+  pricingStrategy?: string | undefined;
+  seasonalPatterns?: string | undefined;
 }
 
 export interface UpsertAdsAccountInput {
@@ -1169,14 +1221,35 @@ export class AdsDataStore {
     const existing = this.getCustomerProfile(input.customerId);
     const createdAt = existing?.created_at ?? now;
 
+    // P3 partial-update preservation: when an input field is undefined
+    // AND the row already exists, keep the existing column value.
+    // This lets the operator iteratively refine the profile across
+    // calls (set personas in call 1, brand_voice in call 2) without
+    // each call wiping the prior depth fields.
+    const personasJson = input.personas !== undefined
+      ? JSON.stringify(input.personas)
+      : (existing?.personas_json ?? '[]');
+    const brandVoiceJson = input.brandVoice !== undefined
+      ? JSON.stringify(input.brandVoice)
+      : (existing?.brand_voice_json ?? '{}');
+    const uspJson = input.usp !== undefined
+      ? JSON.stringify(input.usp)
+      : (existing?.usp_json ?? '[]');
+    const complianceConstraints = input.complianceConstraints ?? existing?.compliance_constraints ?? '';
+    const pricingStrategy = input.pricingStrategy ?? existing?.pricing_strategy ?? '';
+    const seasonalPatterns = input.seasonalPatterns ?? existing?.seasonal_patterns ?? '';
+
     this.db.prepare(`
       INSERT INTO customer_profiles (
         customer_id, client_name, business_model, offer_summary, primary_goal,
         target_roas, target_cpa_chf, monthly_budget_chf, typical_cpc_chf,
         country, timezone, languages, top_products, own_brands, sold_brands,
         competitors, pmax_owned_head_terms, naming_convention_pattern,
-        tracking_notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        tracking_notes,
+        personas_json, brand_voice_json, usp_json,
+        compliance_constraints, pricing_strategy, seasonal_patterns,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(customer_id) DO UPDATE SET
         client_name = excluded.client_name,
         business_model = excluded.business_model,
@@ -1196,6 +1269,12 @@ export class AdsDataStore {
         pmax_owned_head_terms = excluded.pmax_owned_head_terms,
         naming_convention_pattern = excluded.naming_convention_pattern,
         tracking_notes = excluded.tracking_notes,
+        personas_json = excluded.personas_json,
+        brand_voice_json = excluded.brand_voice_json,
+        usp_json = excluded.usp_json,
+        compliance_constraints = excluded.compliance_constraints,
+        pricing_strategy = excluded.pricing_strategy,
+        seasonal_patterns = excluded.seasonal_patterns,
         updated_at = excluded.updated_at
     `).run(
       input.customerId, input.clientName,
@@ -1211,6 +1290,8 @@ export class AdsDataStore {
       JSON.stringify(input.pmaxOwnedHeadTerms ?? []),
       input.namingConventionPattern ?? null,
       JSON.stringify(input.trackingNotes ?? {}),
+      personasJson, brandVoiceJson, uspJson,
+      complianceConstraints, pricingStrategy, seasonalPatterns,
       createdAt, now,
     );
 

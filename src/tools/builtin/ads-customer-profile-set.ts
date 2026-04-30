@@ -43,6 +43,26 @@ interface AdsCustomerProfileSetInput {
   pmax_owned_head_terms?: string[] | undefined;
   naming_convention_pattern?: string | undefined;
   tracking_notes?: Record<string, unknown> | undefined;
+  // P3 depth fields — all optional. Pass undefined to leave existing
+  // values untouched on update. Strategist Brief + Blueprint Critique
+  // read these when present and produce sharper recommendations.
+  personas?: Array<{
+    name: string;
+    age_range?: string | undefined;
+    motivation?: string | undefined;
+    pain_points?: string[] | undefined;
+    buying_triggers?: string[] | undefined;
+  }> | undefined;
+  brand_voice?: {
+    tone?: string | undefined;
+    voice_examples?: string[] | undefined;
+    do_not_use?: string[] | undefined;
+    signature_phrases?: string[] | undefined;
+  } | undefined;
+  usp?: string[] | undefined;
+  compliance_constraints?: string | undefined;
+  pricing_strategy?: string | undefined;
+  seasonal_patterns?: string | undefined;
 }
 
 const DESCRIPTION = [
@@ -161,6 +181,48 @@ export function createAdsCustomerProfileSetTool(store: AdsDataStore): ToolEntry<
             description: 'Free-form key-value pairs for tracking-related context (e.g. {"ga4_linked": true, "enhanced_conversions": false, "primary_conversion_action": "Purchase"}).',
             additionalProperties: true,
           },
+          personas: {
+            type: 'array',
+            description: 'Optional buyer personas (1-4 typical). Strategist Brief + Critique reference these to tailor copy and channel mix recommendations.',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Short label (e.g. "tech-affine Selbstständige").' },
+                age_range: { type: 'string', description: 'Optional age band (e.g. "30-45").' },
+                motivation: { type: 'string', description: 'Why this persona buys.' },
+                pain_points: { type: 'array', items: { type: 'string' }, description: 'Top frustrations the offer solves.' },
+                buying_triggers: { type: 'array', items: { type: 'string' }, description: 'Concrete events that trigger purchase.' },
+              },
+              required: ['name'],
+            },
+          },
+          brand_voice: {
+            type: 'object',
+            description: 'Optional brand-voice descriptor. Critique uses do_not_use to flag drifting RSA copy.',
+            properties: {
+              tone: { type: 'string', description: 'e.g. "direkt, technisch, no-marketing-fluff".' },
+              voice_examples: { type: 'array', items: { type: 'string' }, description: 'Real lines that capture the brand voice.' },
+              do_not_use: { type: 'array', items: { type: 'string' }, description: 'Phrases / tones to avoid.' },
+              signature_phrases: { type: 'array', items: { type: 'string' }, description: 'Brand-signature wording the customer wants in copy.' },
+            },
+          },
+          usp: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Unique selling points — concrete reasons customers buy. Strategist references these when building Brand-Search RSA copy direction.',
+          },
+          compliance_constraints: {
+            type: 'string',
+            description: 'Free-form note on regulatory / legal copy constraints (e.g. "Healthcare claims must avoid \'cure\', \'guarantee\'; food: avoid health-effect promises that need EU approval"). Critique uses this to flag risky copy.',
+          },
+          pricing_strategy: {
+            type: 'string',
+            description: 'Free-form note on pricing posture (e.g. "Premium positioning, never discount; free shipping over CHF 100"). Critique uses this to flag mispriced copy or wrong audience signals.',
+          },
+          seasonal_patterns: {
+            type: 'string',
+            description: 'Free-form note on seasonality (e.g. "Peak Mar-May for kefir, Oct-Dec for water filters; B2B contract season Sep-Nov"). Strategist Brief uses this to time the priorities recommended in the cycle.',
+          },
         },
         required: ['customer_id', 'client_name'],
       },
@@ -196,6 +258,14 @@ export function createAdsCustomerProfileSetTool(store: AdsDataStore): ToolEntry<
           pmaxOwnedHeadTerms: input.pmax_owned_head_terms,
           namingConventionPattern: input.naming_convention_pattern,
           trackingNotes: input.tracking_notes,
+          // P3 depth fields — pass through so partial updates can refine
+          // the profile incrementally without wiping prior values.
+          personas: input.personas,
+          brandVoice: input.brand_voice,
+          usp: input.usp,
+          complianceConstraints: input.compliance_constraints,
+          pricingStrategy: input.pricing_strategy,
+          seasonalPatterns: input.seasonal_patterns,
         });
         return summariseProfile(profile, existed);
       } catch (err) {
