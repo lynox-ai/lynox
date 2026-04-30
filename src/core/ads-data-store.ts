@@ -776,6 +776,39 @@ const MIGRATIONS: string[] = [
      ADD COLUMN needs_review_json TEXT NOT NULL DEFAULT '[]';
    CREATE INDEX IF NOT EXISTS idx_blueprint_review
      ON ads_blueprint_entities(run_id) WHERE needs_review_json != '[]';`,
+
+  // Migration v7: Phase C pre-emit sanity-check findings need a
+  // dedicated severity 'BLOCK' that the emit engine treats as a
+  // hard gate. Existing 'HIGH' findings continue to render as
+  // warnings — they predate Phase C and never blocked emit.
+  // SQLite's CHECK constraint cannot be ALTER'd in place, so the
+  // table is rebuilt the standard way: rename, recreate, copy.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (7);
+
+   ALTER TABLE ads_findings RENAME TO ads_findings_v6;
+   CREATE TABLE ads_findings (
+     finding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+     run_id INTEGER NOT NULL REFERENCES ads_audit_runs(run_id),
+     ads_account_id TEXT NOT NULL,
+     area TEXT NOT NULL,
+     severity TEXT NOT NULL CHECK (severity IN ('LOW', 'MEDIUM', 'HIGH', 'BLOCK')),
+     source TEXT NOT NULL CHECK (source IN ('deterministic', 'agent')),
+     text TEXT NOT NULL,
+     confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+     evidence_json TEXT NOT NULL DEFAULT '{}',
+     kg_memory_id TEXT,
+     created_at TEXT NOT NULL
+   );
+   INSERT INTO ads_findings (
+     finding_id, run_id, ads_account_id, area, severity, source,
+     text, confidence, evidence_json, kg_memory_id, created_at
+   ) SELECT
+     finding_id, run_id, ads_account_id, area, severity, source,
+     text, confidence, evidence_json, kg_memory_id, created_at
+   FROM ads_findings_v6;
+   DROP TABLE ads_findings_v6;
+   CREATE INDEX IF NOT EXISTS idx_findings_run ON ads_findings(run_id, severity);
+   CREATE INDEX IF NOT EXISTS idx_findings_area ON ads_findings(ads_account_id, area);`,
 ];
 
 export interface CustomerProfileRow {
@@ -849,7 +882,7 @@ export interface AdsRunDecisionRow {
   created_at: string;
 }
 
-export type AdsFindingSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
+export type AdsFindingSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'BLOCK';
 export type AdsFindingSource = 'deterministic' | 'agent';
 
 export type AdsBlueprintEntityKind = 'KEEP' | 'RENAME' | 'NEW' | 'PAUSE' | 'SPLIT' | 'MERGE';
@@ -1350,6 +1383,17 @@ export class AdsDataStore {
       .run(kgMemoryId, findingId);
   }
 
+  /** Delete every finding for a run whose area starts with the given
+   *  prefix. Used by the Phase-C pre-emit-review tool to clear its
+   *  prior verdict before re-running so the operator's fixes get
+   *  re-evaluated against the current blueprint state. */
+  deleteFindingsByAreaPrefix(runId: number, areaPrefix: string): number {
+    const result = this.db.prepare(`
+      DELETE FROM ads_findings WHERE run_id = ? AND area LIKE ? || '%'
+    `).run(runId, areaPrefix);
+    return Number(result.changes);
+  }
+
   listFindings(
     runId: number,
     opts?: { severity?: AdsFindingSeverity | undefined; area?: string | undefined; source?: AdsFindingSource | undefined } | undefined,
@@ -1362,7 +1406,9 @@ export class AdsDataStore {
     return this.db.prepare(`
       SELECT * FROM ads_findings WHERE ${clauses.join(' AND ')}
       ORDER BY
-        CASE severity WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END,
+        CASE severity
+          WHEN 'BLOCK' THEN 0 WHEN 'HIGH' THEN 1
+          WHEN 'MEDIUM' THEN 2 ELSE 3 END,
         finding_id ASC
     `).all(...params) as AdsFindingRow[];
   }

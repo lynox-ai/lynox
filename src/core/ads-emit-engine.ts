@@ -167,6 +167,25 @@ export function runEmit(
     );
   }
 
+  // Phase-C pre-emit gate: any BLOCK-severity finding scoped to the
+  // current run blocks emit. Reentry: operator either fixes the
+  // blueprint and re-runs ads_blueprint_review, or sets override=true
+  // on the review tool which downgrades BLOCK to HIGH. The emit gate
+  // never invents BLOCKs on its own — it just checks what
+  // ads_blueprint_review persisted.
+  const runFindings = store.listFindings(run.run_id, { severity: 'BLOCK' });
+  const blockingFindings = runFindings.filter(f => f.area.startsWith('pre_emit_review:'));
+  if (blockingFindings.length > 0) {
+    const summary = blockingFindings.slice(0, 3)
+      .map(f => f.area.replace(/^pre_emit_review:/, '')).join(', ');
+    const more = blockingFindings.length > 3 ? `, +${blockingFindings.length - 3} weitere` : '';
+    throw new EmitPreconditionError(
+      `${blockingFindings.length} Pre-Emit-Review BLOCK-Finding(s) (${summary}${more}). ` +
+      `Vor ads_emit_csv: Blueprint korrigieren und ads_blueprint_review erneut aufrufen, ` +
+      `oder ads_blueprint_review override=true mit override_reason setzen.`,
+    );
+  }
+
   // 1. Validate
   const validation = validateBlueprint(entities, { customer });
 

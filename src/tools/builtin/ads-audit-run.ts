@@ -432,7 +432,7 @@ function appendFindings(lines: string[], findings: AuditFindingDraft[], persiste
     lines.push('');
     return;
   }
-  for (const severity of ['HIGH', 'MEDIUM', 'LOW'] as AdsFindingSeverity[]) {
+  for (const severity of ['BLOCK', 'HIGH', 'MEDIUM', 'LOW'] as AdsFindingSeverity[]) {
     const subset = findings.filter(f => f.severity === severity);
     if (subset.length === 0) continue;
     lines.push(`### ${severity} (${subset.length})`);
