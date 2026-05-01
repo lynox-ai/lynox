@@ -985,10 +985,13 @@ export class LynoxHTTPApi {
       const existingSlot = this.runningSessions.get(sessionId);
       if (existingSlot && !existingSlot.streamAlive && promptStoreEarly?.getPending(sessionId)) {
         existingSlot.takeover();
-        // Wait for the previous handler's `finally` to clear the slot
-        // (≤5 s — well under the client's 3 s poll cadence × retry budget).
+        // Wait for the previous handler's `finally` to clear the slot.
+        // Realistic drain after takeover() is sub-100 ms (one tick to
+        // resolve waitForSettled, then session.run unwinds); the 1 s cap
+        // bounds worker-tying if the previous handler is unexpectedly slow
+        // to unwind. Falls through to a 409 if the slot still hasn't drained.
         const drainStart = Date.now();
-        while (this.runningSessions.has(sessionId) && Date.now() - drainStart < 5000) {
+        while (this.runningSessions.has(sessionId) && Date.now() - drainStart < 1000) {
           await new Promise<void>((r) => setTimeout(r, 25));
         }
       }
