@@ -184,7 +184,24 @@ export function runBlueprint(
   // each strong theme into a NEW asset_group proposal scoped to the top-
   // spending PMax campaign. Idempotent under re-runs because deterministic
   // entities get cleared before persist below.
-  const themeExpansions = generateThemeExpansionProposals(store, run, customer);
+  //
+  // Strategist-brief hard-constraint: when the brief lists `hold_themes`,
+  // we filter those tokens out BEFORE they become NEW asset_groups. This
+  // closes the AquaNatura cycle 14 gap — brief said "do not build keramik
+  // and selber yet" and the blueprint built them anyway because the brief
+  // was advisory prose, not a constraint. The skipped themes get a
+  // deterministic finding in the audit so they're traceable.
+  const briefHoldThemes = readBriefHoldThemes(store, run.run_id);
+  const allThemeExpansions = generateThemeExpansionProposals(store, run, customer);
+  const themeExpansions = briefHoldThemes.size === 0
+    ? allThemeExpansions
+    : allThemeExpansions.filter(exp => !briefHoldThemes.has(exp.theme.toLowerCase()));
+  const heldThemes = allThemeExpansions
+    .filter(exp => briefHoldThemes.has(exp.theme.toLowerCase()))
+    .map(exp => exp.theme);
+  if (heldThemes.length > 0) {
+    persistHeldThemesFinding(store, run, heldThemes);
+  }
 
   // Brand-search auto-proposal — read the brand-inflation finding and emit
   // a Brand-Search campaign + per-brand ad_groups + Phrase/Exact keywords
@@ -1264,4 +1281,50 @@ function parseJsonArray(s: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** Read `hold_themes` from the strategist brief for this run. Returns
+ *  a normalized lowercase Set so token-matching against theme expansions
+ *  is case-insensitive. Empty set when there is no brief or the column
+ *  is missing (legacy DBs before migration v11). */
+function readBriefHoldThemes(store: AdsDataStore, runId: number): Set<string> {
+  const brief = store.getStrategistBrief(runId);
+  if (!brief) return new Set();
+  try {
+    const raw = (brief as unknown as { hold_themes_json?: string }).hold_themes_json;
+    if (typeof raw !== 'string' || raw.length === 0) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed
+        .filter((t): t is string => typeof t === 'string')
+        .map(t => t.trim().toLowerCase())
+        .filter(t => t.length > 0),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+/** Persist a deterministic finding listing the themes the blueprint
+ *  suppressed because the strategist brief told it to hold them. Gives
+ *  the operator a paper trail — without this, it would look like the
+ *  blueprint silently dropped themes that the audit had flagged. */
+function persistHeldThemesFinding(
+  store: AdsDataStore, run: AdsAuditRunRow, heldThemes: readonly string[],
+): void {
+  store.insertFinding({
+    runId: run.run_id,
+    adsAccountId: run.ads_account_id,
+    area: 'theme_held_by_strategist_brief',
+    severity: 'LOW',
+    text:
+      `Blueprint hat ${heldThemes.length} Theme(s) ausgelassen, weil der Strategist-Brief sie auf hold_themes setzt: ` +
+      `${heldThemes.map(t => `"${t}"`).join(', ')}. ` +
+      `Diese Themen werden nicht als NEW asset_group emittiert. Brief-Wechsel im nächsten Cycle ` +
+      `(z.B. nach Intent-Validierung) gibt sie automatisch wieder frei.`,
+    confidence: 1,
+    source: 'deterministic',
+    evidence: { held_themes: heldThemes },
+  });
 }

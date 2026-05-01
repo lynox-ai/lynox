@@ -886,6 +886,18 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (10);
 
    ALTER TABLE ads_strategist_briefs ADD COLUMN last_cycle_impact TEXT NOT NULL DEFAULT '';`,
+
+  // Migration v11: hold_themes_json on strategist briefs. Lowercase
+  // theme tokens that the brief explicitly tells the blueprint NOT to
+  // turn into asset_groups this cycle (e.g. uncertain clusters that
+  // need a more focused launch later). The blueprint reads this list
+  // and skips matching theme-AGs at generation time — closing the
+  // architectural gap where the brief would advise against a launch
+  // and the blueprint would launch anyway (AquaNatura cycle 14:
+  // keramik + selber generated despite explicit hold guidance).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (11);
+
+   ALTER TABLE ads_strategist_briefs ADD COLUMN hold_themes_json TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 export interface CustomerProfileRow {
@@ -1016,6 +1028,10 @@ export interface StrategistBriefRow {
   /** P4: optional narrative comparing previous-cycle proposals to
    *  what was implemented and the measured effect. Empty on cycle 1. */
   last_cycle_impact: string;
+  /** Hard-constraint signal for runBlueprint: lowercase theme tokens
+   *  that must NOT be turned into NEW asset_groups this cycle.
+   *  See migration v11 for context. */
+  hold_themes_json: string;
   created_at: string;
 }
 
@@ -1032,6 +1048,8 @@ export interface InsertStrategistBriefInput {
   /** P4: optional last-cycle narrative. Pass empty string when not
    *  applicable (cycle 1) or when no previous brief exists. */
   lastCycleImpact?: string | undefined;
+  /** Lowercase theme tokens to suppress in this cycle's blueprint. */
+  holdThemes?: readonly string[] | undefined;
 }
 
 export interface BlueprintCritiqueChallenge {
@@ -1640,14 +1658,16 @@ export class AdsDataStore {
       INSERT INTO ads_strategist_briefs (
         run_id, ads_account_id, account_state, headline,
         priorities_json, risks_json, do_not_touch_json,
-        classification_reason, llm_failed, last_cycle_impact, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        classification_reason, llm_failed, last_cycle_impact,
+        hold_themes_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.runId, input.adsAccountId, input.accountState, input.headline,
       JSON.stringify(input.priorities), JSON.stringify(input.risks),
       JSON.stringify(input.doNotTouch),
       input.classificationReason, input.llmFailed ? 1 : 0,
-      input.lastCycleImpact ?? '', now,
+      input.lastCycleImpact ?? '',
+      JSON.stringify(input.holdThemes ?? []), now,
     );
     return this.db.prepare('SELECT * FROM ads_strategist_briefs WHERE brief_id = ?')
       .get(Number(result.lastInsertRowid)) as StrategistBriefRow;

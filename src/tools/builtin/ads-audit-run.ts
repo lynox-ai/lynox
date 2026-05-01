@@ -518,6 +518,7 @@ async function runStrategistBrief(
     classificationReason: verdict.reason,
     llmFailed: brief.llmFailed,
     lastCycleImpact: brief.lastCycleImpact,
+    holdThemes: brief.holdThemes,
   });
   return { ...brief, accountState: verdict.state, stateReason: verdict.reason };
 }
@@ -694,6 +695,12 @@ function appendStrategistBrief(lines: string[], brief: StrategistBriefForRender)
     lines.push('### Don\'t touch');
     lines.push('');
     for (const c of brief.doNotTouch) lines.push(`- 🟢 \`${c}\``);
+    lines.push('');
+  }
+  if (brief.holdThemes.length > 0) {
+    lines.push('### Hold themes (Blueprint emittiert KEINE asset_groups dafür)');
+    lines.push('');
+    for (const t of brief.holdThemes) lines.push(`- 🛑 \`${t}\``);
     lines.push('');
   }
 }

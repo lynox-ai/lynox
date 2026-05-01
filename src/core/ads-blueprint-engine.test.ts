@@ -341,6 +341,81 @@ describe('runBlueprint', () => {
     for (const d of descriptions) expect((d['text'] as string).length).toBeLessThanOrEqual(90);
   });
 
+  it('Strategist-brief hold_themes is a hard constraint: matching theme-AGs are not generated', () => {
+    // Reproduces AquaNatura cycle 14: brief said "do not build keramik and
+    // selber yet" but blueprint built them anyway. With the hold_themes
+    // hard-constraint, those theme-AGs never make it into the run; a
+    // tracking finding `theme_held_by_strategist_brief` is persisted so
+    // the operator sees what was suppressed.
+    seedCustomerAndAccount(store);
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'pmax1', 'PMax | Gesamtsortiment', { channelType: 'PERFORMANCE_MAX' });
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_theme_coverage_gap', severity: 'MEDIUM', source: 'deterministic',
+      text: 'PMax-Themen ohne AG …', confidence: 0.75,
+      evidence: {
+        themes: [
+          { token: 'glas', clusters: 29, sample: ['glasflasche'] },
+          { token: 'keramik', clusters: 15, sample: ['keramik'], category: 'uncertain' },
+          { token: 'selber', clusters: 11, sample: ['selber bauen'], category: 'uncertain' },
+        ],
+        existing_asset_groups: [],
+      },
+    });
+    // Brief explicitly holds keramik + selber.
+    store.insertStrategistBrief({
+      runId: r.run_id, adsAccountId: ACCOUNT, accountState: 'bootstrap',
+      headline: 'Bootstrap with intent gaps on keramik / selber',
+      priorities: [], risks: [], doNotTouch: [],
+      classificationReason: 'first run', llmFailed: false,
+      holdThemes: ['keramik', 'selber'],
+    });
+
+    runBlueprint(store, ACCOUNT);
+
+    const themeAgs = store.listBlueprintEntities(r.run_id, { entityType: 'asset_group', kind: 'NEW' })
+      .map(e => JSON.parse(e.payload_json) as Record<string, unknown>);
+    const tokens = themeAgs.map(p => (p['theme_token'] as string | undefined)?.toLowerCase()).filter(Boolean);
+    expect(tokens).toContain('glas');
+    expect(tokens).not.toContain('keramik');
+    expect(tokens).not.toContain('selber');
+
+    // The held themes are surfaced as a deterministic finding for traceability.
+    const heldFindings = store.listFindings(r.run_id, { area: 'theme_held_by_strategist_brief' });
+    expect(heldFindings).toHaveLength(1);
+    const evidence = JSON.parse(heldFindings[0]!.evidence_json) as { held_themes: string[] };
+    expect(evidence.held_themes.sort()).toEqual(['keramik', 'selber']);
+  });
+
+  it('hold_themes is case-insensitive and tolerates legacy briefs without the column', () => {
+    seedCustomerAndAccount(store);
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'pmax1', 'PMax | Gesamtsortiment', { channelType: 'PERFORMANCE_MAX' });
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_theme_coverage_gap', severity: 'MEDIUM', source: 'deterministic',
+      text: 'themes', confidence: 0.75,
+      evidence: { themes: [
+        { token: 'KERAMIK', clusters: 15, sample: [] },
+        { token: 'GLAS', clusters: 29, sample: [] },
+      ] },
+    });
+    // Brief lists hold-token in mixed case — must still match.
+    store.insertStrategistBrief({
+      runId: r.run_id, adsAccountId: ACCOUNT, accountState: 'bootstrap',
+      headline: 'h', priorities: [], risks: [], doNotTouch: [],
+      classificationReason: '', llmFailed: false, holdThemes: ['Keramik'],
+    });
+    runBlueprint(store, ACCOUNT);
+    const tokens = store.listBlueprintEntities(r.run_id, { entityType: 'asset_group', kind: 'NEW' })
+      .map(e => (JSON.parse(e.payload_json) as { theme_token?: string }).theme_token?.toLowerCase());
+    expect(tokens).toContain('glas');
+    expect(tokens).not.toContain('keramik');
+  });
+
   it('Brand-RSA: 2 brand tokens + 5 LPs without slug match → needs_review marker on each RSA, emit blocks', async () => {
     seedCustomerAndAccount(store, { pmaxOwned: ['hamoni', 'maunawai'] });
     const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });

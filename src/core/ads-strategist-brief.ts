@@ -42,6 +42,12 @@ export interface StrategistBriefResult {
   /** P4: optional last-cycle-impact narrative. Empty when there is
    *  no previous brief to compare against. */
   lastCycleImpact: string;
+  /** Lowercase theme tokens that the blueprint MUST NOT turn into
+   *  NEW asset_groups this cycle. Hard constraint, not advice — read
+   *  by `runBlueprint` to suppress matching theme-AG generation.
+   *  Use sparingly: only for genuinely uncertain or off-segment
+   *  clusters where premature launch would burn budget. */
+  holdThemes: string[];
   llmFailed: boolean;
   failureReason?: string;
 }
@@ -89,6 +95,11 @@ const TOOL_DEFINITION = {
         type: 'string' as const,
         description: 'Short narrative comparing the PREVIOUS cycle\'s priorities to what was implemented and the measured effect. Empty string when there is no previous brief or no implementation drift to report.',
       },
+      hold_themes: {
+        type: 'array' as const,
+        items: { type: 'string' as const },
+        description: 'Lowercase theme tokens (single words, e.g. "keramik", "selber") that the blueprint must NOT turn into NEW asset_groups this cycle. Hard constraint — used to suppress generation when a theme is uncertain, off-segment, or premature. Empty array when every uncovered theme is fair game.',
+      },
     },
     required: ['headline', 'priorities', 'risks', 'do_not_touch'],
   },
@@ -120,7 +131,14 @@ P4 — Last-cycle impact (when previous-cycle context is provided):
 - The "Cycle context" user message includes a "## Previous cycle" block when this isn't the first run. It lists the priorities the previous brief proposed, what was measurably implemented (manual changes since), and the verification result (KPI improvement / regression).
 - When that block is present, populate "last_cycle_impact" with a short factual narrative: which priority was implemented, which wasn't, what the KPI delta says about effect.
 - Be honest about misses: if the operator skipped a priority or implemented it differently than proposed, say so. Don't whitewash.
-- When the previous-cycle block is absent (cycle 1 / no prior brief / no manual changes), set last_cycle_impact to an empty string.`;
+- When the previous-cycle block is absent (cycle 1 / no prior brief / no manual changes), set last_cycle_impact to an empty string.
+
+hold_themes — hard constraint on the blueprint:
+- The audit's pmax_theme_coverage_gap finding lists every PMax search-cluster theme. Each theme is tagged 'actionable' (clear buyer intent), 'uncertain' (mixed signals), or 'irrelevant'/'funnel'.
+- For every theme tagged 'uncertain' that you would NOT recommend launching this cycle (off-segment, ambiguous intent, premature for current account state), put its lowercase token into hold_themes (e.g. ["keramik", "selber"]).
+- This list is read directly by the blueprint generator. Themes you list here will NOT be turned into NEW asset_groups — full stop. The risks section can still mention them as advisory.
+- Leave hold_themes empty when every uncovered theme is genuinely fair game (rare in bootstrap, common in optimizing).
+- Bootstrap rule of thumb: hold_themes should be aggressive in cycle 1-2 — only ship asset_groups for themes with proven catalogue match + transactional intent.`;
 
   switch (state) {
     case 'greenfield':
@@ -308,7 +326,7 @@ function safeCreateClient(opts: StrategistBriefOptions): Anthropic | null {
 export function parseBrief(rawInput: unknown): StrategistBriefResult {
   const empty: StrategistBriefResult = {
     headline: '', priorities: [], risks: [], doNotTouch: [],
-    lastCycleImpact: '', llmFailed: false,
+    lastCycleImpact: '', holdThemes: [], llmFailed: false,
   };
   if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
     return { ...empty, llmFailed: true, failureReason: 'malformed brief input' };
@@ -338,11 +356,17 @@ export function parseBrief(rawInput: unknown): StrategistBriefResult {
     : [];
   const lastCycleImpact = typeof obj['last_cycle_impact'] === 'string'
     ? obj['last_cycle_impact'].trim() : '';
+  const holdThemes = Array.isArray(obj['hold_themes'])
+    ? obj['hold_themes']
+        .filter((t): t is string => typeof t === 'string')
+        .map(t => t.trim().toLowerCase())
+        .filter(t => t.length > 0)
+    : [];
 
   if (headline.length === 0 && priorities.length === 0) {
     return { ...empty, llmFailed: true, failureReason: 'empty brief from model' };
   }
-  return { headline, priorities, risks, doNotTouch, lastCycleImpact, llmFailed: false };
+  return { headline, priorities, risks, doNotTouch, lastCycleImpact, holdThemes, llmFailed: false };
 }
 
 /** Fail-safe brief — keeps the audit Markdown useful even when the
@@ -363,6 +387,7 @@ function fallback(
     risks: ['LLM strategist unavailable — operator must synthesize the priorities manually from the finding list below.'],
     doNotTouch: [],
     lastCycleImpact: '',
+    holdThemes: [],
     llmFailed: true,
     failureReason: reason,
   };
