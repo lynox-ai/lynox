@@ -7,7 +7,7 @@ import { z } from 'zod';
 // === Shared enums ===
 
 const ModelTierSchema = z.enum(['opus', 'sonnet', 'haiku']);
-const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'max']);
+const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
 // AutonomyLevelSchema and ThinkingModeSchema validated at runtime via type checks, not Zod
 
 // === LynoxUserConfig ===

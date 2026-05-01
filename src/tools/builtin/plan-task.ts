@@ -223,7 +223,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
               },
               effort: {
                 type: 'string',
-                enum: ['low', 'medium', 'high', 'max'],
+                enum: ['low', 'medium', 'high', 'xhigh', 'max'],
                 description: 'Effort level for this step. Omit for medium (default).',
               },
               verification: {
