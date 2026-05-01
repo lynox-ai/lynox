@@ -332,6 +332,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.queued': { de: 'wartet', en: 'queued' },
 	'chat.send_failed': { de: 'Nicht gesendet — tippen zum Wiederholen', en: 'Not sent — tap to retry' },
 	'chat.cancel_queue': { de: 'Queue leeren', en: 'Clear queue' },
+	'chat.remove_queued': { de: 'Aus Queue entfernen', en: 'Remove from queue' },
 	'chat.placeholder_streaming': { de: 'Nächste Nachricht vorbereiten...', en: 'Prepare next message...' },
 	'chat.placeholder_answer': { de: 'Antwort eingeben...', en: 'Type your answer...' },
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
