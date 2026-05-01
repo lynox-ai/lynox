@@ -1143,10 +1143,17 @@
 		return distance < SCROLL_THRESHOLD_PX;
 	}
 
+	let _scrollFrame: number | null = null;
 	function onMessagesScroll(): void {
 		// Engages auto-scroll when user is at the bottom; releases it as soon
 		// as they scroll up. Re-engages once they scroll back to the bottom.
-		autoScroll = isAtBottom();
+		// Coalesce per frame so wheel/touch streams don't force a layout read
+		// on every event during streaming — `isAtBottom` reads scrollHeight.
+		if (_scrollFrame !== null) return;
+		_scrollFrame = requestAnimationFrame(() => {
+			_scrollFrame = null;
+			autoScroll = isAtBottom();
+		});
 	}
 
 	// Track streaming token churn and tool-call activity so the effect
