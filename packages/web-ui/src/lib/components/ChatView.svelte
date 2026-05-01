@@ -281,6 +281,19 @@
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'step_done'; stepId: string; summary: string };
 
+	/** Wrap artifact content in a fenced code block whose delimiter is long
+	 *  enough to survive any backtick run inside the content. CommonMark closes
+	 *  a fenced block on the first line made entirely of >= N backticks; so a
+	 *  3-backtick fence around content with a nested ``` ASCII-tree closes the
+	 *  outer artifact frame early and the tail renders outside the chrome.
+	 *  Count the longest inner run, fence with one more. */
+	function artifactFenceWrap(header: string, body: string): string {
+		const runs = body.match(/`+/g);
+		const longest = runs ? Math.max(...runs.map(r => r.length)) : 0;
+		const fence = '`'.repeat(Math.max(3, longest + 1));
+		return `${fence}artifact\n${header}${body}\n${fence}`;
+	}
+
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
 		const result: GroupedBlock[] = [];
@@ -314,14 +327,10 @@
 						if (content) {
 							const title = String(inp?.['title'] ?? 'Artifact');
 							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
-							if (artifactType === 'markdown') {
-								result.push({
-									type: 'text',
-									text: `\`\`\`artifact\n<!-- title: ${title} -->\n<!-- type: markdown -->\n${content}\n\`\`\``,
-								});
-							} else {
-								result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
-							}
+							const header = artifactType === 'markdown'
+								? `<!-- title: ${title} -->\n<!-- type: markdown -->\n`
+								: `<!-- title: ${title} -->\n`;
+							result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 						}
 					}
 					continue;
