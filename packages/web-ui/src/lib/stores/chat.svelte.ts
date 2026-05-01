@@ -1307,6 +1307,50 @@ export async function abortRun(): Promise<void> {
 	streamingToolName = null;
 }
 
+let isCompacting = $state(false);
+
+export function getIsCompacting(): boolean {
+	return isCompacting;
+}
+
+/**
+ * Trigger a manual compaction of the conversation. Server summarizes the
+ * history in-place. Safe to call before auto-compact's 75% threshold fires —
+ * useful when a single turn is about to blow past the window via a large
+ * tool response (see feedback from 2026-04-23 pillar-run: auto-compact ran
+ * too late to save tokens).
+ */
+export async function compactNow(): Promise<{ ok: boolean; error?: string }> {
+	if (!sessionId) return { ok: false, error: 'no-session' };
+	if (isCompacting) return { ok: false, error: 'already-compacting' };
+	if (isStreaming) return { ok: false, error: 'streaming' };
+
+	isCompacting = true;
+	try {
+		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/compact`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({}),
+		});
+		// Server returns 409 when a /run is in flight; surface that as the same
+		// soft error code the local guard uses so the caller can suppress the
+		// generic compact_failed toast for an unavoidable race.
+		if (res.status === 409) return { ok: false, error: 'streaming' };
+		if (!res.ok) {
+			const detail = await res.text().catch(() => `HTTP ${res.status}`);
+			return { ok: false, error: detail };
+		}
+		const data = await res.json() as { ok: boolean; summary: string };
+		// Reset local state so the UI reflects the compacted server-side view.
+		contextBudget = null;
+		return { ok: data.ok };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	} finally {
+		isCompacting = false;
+	}
+}
+
 async function fetchChangeset(): Promise<void> {
 	if (!sessionId) return;
 	changesetLoading = true;
