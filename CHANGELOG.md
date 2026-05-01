@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.3.8 — 2026-05-01
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.7 (delete this block before saving):
+
+Core:
+- chore(deps): bump docker/build-push-action from 6 to 7 (#217)
+- chore(deps): bump dependabot/fetch-metadata from 2 to 3 (#216)
+- chore(deps): bump actions/github-script from 7 to 9 (#218)
+- chore(deps): bump nodemailer and @types/nodemailer (#221)
+- chore(deps): bump @huggingface/transformers from 3.8.1 to 4.2.0 (#220)
+- chore(deps): bump email-reply-parser from 1.9.4 to 2.3.5 (#225)
+- chore(deps): bump the minor-and-patch group with 6 updates (#219)
+- chore(deps): bump @rolldown/binding-darwin-arm64 (#224)
+- test(mail/triage): add real-world body-clean fixtures (#227)
+- feat(bench): model + config benchmark suite + xhigh effort tier (#226)
+- feat(web-ui): Usage Dashboard as Activity tab + status-bar link (#112)
+- chore(deps): bump aquasecurity/trivy-action (#215)
+- chore(deps): auto-merge non-major dependabot PRs (#214)
+- chore(deps): bump marked from 17.0.5 to 18.0.2 (#33)
+- chore(deps): bump docker/build-push-action from 6 to 7 (#31)
+- chore(deps): bump pnpm/action-setup from 4 to 6 (#30)
+- chore(deps): bump the minor-and-patch group across 1 directory with 21 updates (#161)
+- chore(deps): bump aquasecurity/trivy-action from 0.35.0 to 0.36.0 (#194)
+- feat(web-ui): manual compact button in context banner (#145)
+- fix(web-ui): queued messages visible on mobile + per-item remove (#208)
+- feat(web-ui): smart auto-scroll in ChatView (#207)
+- fix(web-ui): harden markdown rendering against overflow + sloppy fences (#209)
+- fix(web-ui): dynamic fence length for inline artifact chip wrap (#144)
+- test: include packages/web-ui tests in root vitest run (#210)
+- fix(tools/http): share one outbound-consent prompt across parallel calls (#146)
+- fix(google-docs): drop redundant in-tool confirmation that hangs create (#206)
+- fix(agent): preserve user message on abort to fix history loss (#205)
+- fix(http-api): take over stale runs parked on pending prompts (#213)
+- fix(web-ui): truncate long option labels in active prompt tab (#212)
+- fix(web-ui): show question text in active prompt tab (#211)
+
+Pro:
+- chore(release): v1.3.7 (#88)
+-->
 ## 1.3.7 — 2026-04-28
 
 ### Added
