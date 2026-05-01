@@ -1713,7 +1713,10 @@
 					{#if batchFocusIdx === i}
 						<!-- Focused question: expanded -->
 						<div class="rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 px-3 py-2">
-							<p class="text-xs font-medium text-text-muted mb-1">{q.header ?? q.question}</p>
+							{#if q.header && q.header !== q.question}
+								<p class="text-[10px] font-medium uppercase tracking-wide text-text-subtle mb-0.5">{q.header}</p>
+							{/if}
+							<p class="text-xs font-medium text-text mb-1">{q.question}</p>
 							{#if q.options.length > 0}
 								<div class="flex flex-wrap gap-1.5">
 									{#each q.options as option}
