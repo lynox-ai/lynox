@@ -193,7 +193,7 @@ jobs:
       # RELEASE_TAG is read via env: (not interpolated into the script) — same
       # safe pattern as the dispatch step above.
       - name: Record GitHub Deployment (production)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         with:
