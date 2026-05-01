@@ -1332,6 +1332,10 @@ export async function compactNow(): Promise<{ ok: boolean; error?: string }> {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({}),
 		});
+		// Server returns 409 when a /run is in flight; surface that as the same
+		// soft error code the local guard uses so the caller can suppress the
+		// generic compact_failed toast for an unavoidable race.
+		if (res.status === 409) return { ok: false, error: 'streaming' };
 		if (!res.ok) {
 			const detail = await res.text().catch(() => `HTTP ${res.status}`);
 			return { ok: false, error: detail };
