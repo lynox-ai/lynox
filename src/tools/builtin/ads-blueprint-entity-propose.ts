@@ -248,12 +248,12 @@ export function createAdsBlueprintEntityProposeTool(store: AdsDataStore): ToolEn
           ...(namingResult ? { namingValid: namingResult.valid, namingErrors: namingResult.errors } : {}),
         };
 
-        // Idempotent: drop any existing agent row with the same
-        // (run_id, entity_type, external_id) before re-inserting. The
-        // companion run-decisions row is upserted by insertRunDecision.
-        store.deleteAgentBlueprintEntity(runId, input.entity_type, externalId);
-
-        const row = store.insertBlueprintEntity(persistInput);
+        // Idempotent + agent-overrides-deterministic: replace any existing
+        // row with the same (run_id, entity_type, external_id) regardless of
+        // source. needs_review markers are carried over MINUS the fields the
+        // agent set in payload — so the picks engine never re-asks (and
+        // can't silently overwrite) what the agent has just decided.
+        const { row } = store.upsertAgentBlueprintEntity(persistInput);
 
         // Companion ads_run_decisions row.
         store.insertRunDecision({

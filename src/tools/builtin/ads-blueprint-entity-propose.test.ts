@@ -285,6 +285,106 @@ describe('ads_blueprint_entity_propose tool', () => {
     expect(store.listBlueprintEntities(runId, { entityType: 'asset_group' })).toHaveLength(1);
   });
 
+  it('agent override on deterministic row drops the review marker for that field', async () => {
+    // Reproduces the AquaNatura cycle 14 bug: blueprint_run auto-generated a
+    // Theme-Glas asset_group with a needs_review on final_url (ambiguous URL
+    // candidates from PMax search-terms). The agent then proposed a corrected
+    // final_url via entity_propose. Before the upsertAgentBlueprintEntity fix,
+    // both rows coexisted (deterministic + agent), and ads_blueprint_review_picks
+    // re-asked the operator using the deterministic row's stale candidates,
+    // overwriting the agent's intent. After the fix: a single agent-source row
+    // remains, with the final_url review removed because the agent set it.
+    store.insertBlueprintEntity({
+      runId, adsAccountId: ACCOUNT, entityType: 'asset_group', kind: 'NEW',
+      externalId: 'bp.assetgroup.pmax-drills.theme-glas',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'Theme-Glas',
+        final_url: 'https://example.com/collections/glas-trinkflasche',
+        theme_token: 'glas',
+      },
+      confidence: 0.5,
+      rationale: 'auto theme expansion',
+      source: 'deterministic',
+      needsReview: [{
+        field: 'final_url',
+        reason: 'ambiguous_url_pick',
+        prompt: 'Welche LP für Theme-Glas?',
+        candidates: [
+          { value: 'https://example.com/collections/glas-trinkflasche', label: 'glas-trinkflasche' },
+          { value: 'https://example.com/collections/trinkflaschen', label: 'trinkflaschen' },
+        ],
+      }],
+    });
+
+    const out = await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'Theme-Glas',
+        final_url: 'https://example.com/collections/trinkflaschen',
+      },
+      external_id: 'bp.assetgroup.pmax-drills.theme-glas',
+      confidence: 0.9,
+      rationale: 'corrected to validated trinkflaschen URL',
+    }, fakeAgent);
+    expect(out).toMatch(/Blueprint-Vorschlag aufgenommen/);
+
+    const rows = store.listBlueprintEntities(runId, { entityType: 'asset_group' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.source).toBe('agent');
+    expect(JSON.parse(rows[0]!.payload_json).final_url)
+      .toBe('https://example.com/collections/trinkflaschen');
+    expect(JSON.parse(rows[0]!.needs_review_json)).toEqual([]);
+
+    // The picks engine must see no pending review for this entity.
+    expect(store.listEntitiesNeedingReview(runId)).toHaveLength(0);
+  });
+
+  it('agent override carries over reviews on OTHER fields (only resolved fields drop)', async () => {
+    // When the deterministic row has reviews on multiple fields and the agent
+    // only overrides one, the unrelated reviews must persist so the operator
+    // can still answer them via ads_blueprint_review_picks.
+    store.insertBlueprintEntity({
+      runId, adsAccountId: ACCOUNT, entityType: 'asset_group', kind: 'NEW',
+      externalId: 'bp.assetgroup.pmax-drills.theme-glas',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'Theme-Glas',
+        final_url: 'https://example.com/collections/glas-trinkflasche',
+      },
+      confidence: 0.5,
+      rationale: 'auto',
+      source: 'deterministic',
+      needsReview: [
+        {
+          field: 'final_url', reason: 'ambiguous_url_pick',
+          prompt: 'URL?', candidates: [{ value: 'a', label: 'a' }],
+        },
+        {
+          field: '_status', reason: 'theme_uncertainty',
+          prompt: 'Behalten?', candidates: [{ value: '__DROP__', label: 'verwerfen' }],
+        },
+      ],
+    });
+
+    await tool.handler({
+      ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
+      payload: {
+        campaign_name: 'PMAX-Drills',
+        asset_group_name: 'Theme-Glas',
+        final_url: 'https://example.com/collections/trinkflaschen',
+      },
+      external_id: 'bp.assetgroup.pmax-drills.theme-glas',
+      confidence: 0.9, rationale: 'agent override on final_url only',
+    }, fakeAgent);
+
+    const rows = store.listBlueprintEntities(runId, { entityType: 'asset_group' });
+    expect(rows).toHaveLength(1);
+    const reviews = JSON.parse(rows[0]!.needs_review_json) as Array<{ field: string }>;
+    expect(reviews.map(r => r.field).sort()).toEqual(['_status']);
+  });
+
   it('allows re-propose with same external_id (upsert path)', async () => {
     await tool.handler({
       ads_account_id: ACCOUNT, entity_type: 'asset_group', kind: 'NEW',
