@@ -357,7 +357,7 @@ describe('Agent Loop Integration', () => {
 
   // -- 8. Abort mid-loop --
 
-  it('abort mid-loop: restores messages to snapshot', async () => {
+  it('abort mid-loop: keeps user message, drops partial assistant content', async () => {
     mockProcess.mockImplementation(() => {
       return new Promise((_resolve, reject) => {
         setTimeout(() => reject(new Error('Aborted')), 10);
@@ -378,8 +378,9 @@ describe('Agent Loop Integration', () => {
 
     const result = await sendPromise;
     expect(result).toBe('');
-    // Messages should be restored to snapshot (only 'old')
-    expect(agent.getMessages()).toHaveLength(1);
+    // The aborted user message is preserved so the next turn carries its context.
+    expect(agent.getMessages()).toHaveLength(2);
     expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
+    expect(agent.getMessages()[1]).toEqual({ role: 'user', content: 'new message' });
   });
 });

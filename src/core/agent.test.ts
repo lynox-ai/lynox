@@ -149,7 +149,7 @@ describe('Agent', () => {
       expect(mockProcess).toHaveBeenCalledTimes(2);
     });
 
-    it('restores messages to snapshot length on abort', async () => {
+    it('keeps user message but drops partial assistant content on abort', async () => {
       mockProcess.mockImplementation(() => {
         return new Promise((_resolve, reject) => {
           // Simulate delayed rejection after abort
@@ -171,7 +171,19 @@ describe('Agent', () => {
 
       const result = await sendPromise;
       expect(result).toBe('');
-      // Messages should be restored to snapshot (only 'old')
+      // The aborted user message stays in history so the next send has its context.
+      expect(agent.getMessages()).toHaveLength(2);
+      expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
+      expect(agent.getMessages()[1]).toEqual({ role: 'user', content: 'new message' });
+    });
+
+    it('rolls back fully on non-abort errors', async () => {
+      mockProcess.mockRejectedValue(new Error('boom'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      agent.loadMessages([{ role: 'user', content: 'old' }]);
+
+      await expect(agent.send('new message')).rejects.toThrow('boom');
       expect(agent.getMessages()).toHaveLength(1);
       expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
     });
