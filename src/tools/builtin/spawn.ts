@@ -263,7 +263,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               system_prompt: { type: 'string' },
               model: { type: 'string', enum: ['opus', 'sonnet', 'haiku'] },
               thinking: { type: 'object' },
-              effort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+              effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
               max_tokens: { type: 'number' },
               tools: { type: 'array', items: { type: 'string' } },
               max_turns: { type: 'number', minimum: 1, maximum: MAX_SPAWN_TURNS },
