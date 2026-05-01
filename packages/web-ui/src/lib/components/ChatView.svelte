@@ -1422,7 +1422,7 @@
 		{/if}
 
 		<div class="mx-auto max-w-3xl space-y-5">
-			{#each messages as msg, msgIdx (msgIdx + ':' + msg.content.slice(0, 20))}
+			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.role === 'user'}
 					<div class="flex justify-end items-start gap-1.5">
 						{#if msg.queued}
