@@ -419,6 +419,43 @@ describe('runBlueprint', () => {
     expect(tokens).not.toContain('keramik');
   });
 
+
+  it('Brand-RSA whose token matches customer.own_brands defaults to homepage without operator review', async () => {
+    // Repro from AquaNatura cycle 14: Brand-Aquanatura RSA was needlessly
+    // pushed into the picks queue because no LP slug contained "aquanatura".
+    // The customer IS the company — their homepage IS the brand landing
+    // page — so we resolve it deterministically and skip the pick.
+    seedCustomerAndAccount(store, { ownBrands: ['acme-shop', 'aquanatura'] });
+    const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
+    store.completeAuditRun(r.run_id);
+    seedCampaign(store, r.run_id, 'pmax1', 'PMax | Gesamtsortiment', { channelType: 'PERFORMANCE_MAX' });
+    store.insertLandingPagesBatch({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      rows: [
+        { landingPageUrl: 'https://acme-shop.example/wasser', clicks: 200, conversions: 6 },
+        { landingPageUrl: 'https://acme-shop.example/',       clicks: 800, conversions: 9 },
+      ],
+    });
+    store.insertFinding({
+      runId: r.run_id, adsAccountId: ACCOUNT,
+      area: 'pmax_brand_inflation', severity: 'HIGH', source: 'deterministic',
+      text: 'Brand-Inflation', confidence: 0.9,
+      evidence: { brand_tokens: ['acme-shop', 'aquanatura'] },
+    });
+
+    runBlueprint(store, ACCOUNT);
+
+    const rsas = store.listBlueprintEntities(r.run_id, { entityType: 'rsa_ad', kind: 'NEW' });
+    expect(rsas).toHaveLength(2);
+    for (const rsa of rsas) {
+      expect(JSON.parse(rsa.needs_review_json)).toEqual([]);
+      const url = JSON.parse(rsa.payload_json).final_url as string;
+      expect(url.startsWith('https://acme-shop.example/')).toBe(true);
+    }
+    // No pending review for the picks engine to drain.
+    expect(store.listEntitiesNeedingReview(r.run_id)).toHaveLength(0);
+  });
+
   it('Brand-RSA: 2 brand tokens + 5 LPs without slug match → needs_review marker on each RSA, emit blocks', async () => {
     seedCustomerAndAccount(store, { pmaxOwned: ['hamoni', 'maunawai'] });
     const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
@@ -616,6 +653,7 @@ function seedCustomerAndAccount(
     pmaxOwned?: readonly string[] | undefined;
     competitors?: readonly string[] | undefined;
     goal?: string | undefined;
+    ownBrands?: readonly string[] | undefined;
   } | undefined,
 ): void {
   store.upsertCustomerProfile({
@@ -625,6 +663,7 @@ function seedCustomerAndAccount(
     ...(opts?.pmaxOwned !== undefined ? { pmaxOwnedHeadTerms: opts.pmaxOwned } : {}),
     ...(opts?.competitors !== undefined ? { competitors: opts.competitors } : {}),
     ...(opts?.goal !== undefined ? { primaryGoal: opts.goal } : {}),
+    ...(opts?.ownBrands !== undefined ? { ownBrands: opts.ownBrands } : {}),
   });
   store.upsertAdsAccount({ adsAccountId: ACCOUNT, customerId: CUSTOMER, accountLabel: 'Main' });
 }

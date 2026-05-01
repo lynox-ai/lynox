@@ -1230,6 +1230,16 @@ function generateBrandSearchProposals(
   const homepageFallback = topLp?.landing_page_url
     ?? `https://${(customer.client_name ?? '').toLowerCase().replace(/\s+/g, '')}.ch`;
 
+  // Customer's own brand tokens default to the homepage without an
+  // operator pick — the customer IS the company, the homepage IS the
+  // brand landing page. Sold brands keep the slug-match-or-ask flow
+  // because they often have dedicated sub-collection LPs that beat
+  // the homepage. Closes the AquaNatura cycle 14 noise where
+  // Brand-Aquanatura needlessly asked for a URL when customer.website
+  // was already known.
+  const ownBrandTokens = new Set(
+    parseJsonArray(customer.own_brands).map(b => b.toLowerCase()),
+  );
   const rsas = adGroups.map(ag => {
     const brand = capitalize(ag.brandToken);
     const headlines = [
@@ -1244,6 +1254,14 @@ function generateBrandSearchProposals(
       `Original ${brand} direkt vom Schweizer Anbieter — schnelle Lieferung, faire Preise.`,
       `Hochwertige ${brand}-Produkte: kuratierte Auswahl, persönlicher Kundenservice.`,
     ].filter(d => d.length <= 90);
+    if (ownBrandTokens.has(ag.brandToken.toLowerCase())) {
+      return {
+        adGroupName: ag.name,
+        headlines, descriptions,
+        finalUrl: homepageFallback,
+        urlReview: null,
+      };
+    }
     const { url, review } = pickFinalUrlForToken(ag.brandToken, lpSummary, 'brand');
     return {
       adGroupName: ag.name,
