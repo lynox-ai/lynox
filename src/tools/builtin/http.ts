@@ -248,6 +248,16 @@ async function readBodyLimited(response: Response, maxBytes: number): Promise<{ 
 
 /** Domains approved for outbound data requests (POST/PUT/PATCH) in this session. */
 const approvedOutboundDomains = new Set<string>();
+/**
+ * In-flight permission prompts keyed by hostname. Parallel `http_request`
+ * tool_use blocks against the same hostname must share one prompt — the
+ * PromptStore has a UNIQUE index per session_id WHERE status='pending', so
+ * a second concurrent insertAskUser throws PromptConflictError. Without a
+ * shared promise, calls 2..N of a five-way parallel batch all fail with
+ * "Session already has a pending prompt" before the user even sees the
+ * first prompt. See feedback_2026-04-23 (Keyword-Research run).
+ */
+const pendingOutboundPrompts = new Map<string, Promise<boolean>>();
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 const MAX_REQUESTS_PER_SESSION = 100;
@@ -484,22 +494,37 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
-    // First-use consent for outbound data requests (POST/PUT/PATCH)
+    // First-use consent for outbound data requests (POST/PUT/PATCH).
+    // Concurrent tool_use blocks against the same hostname share one prompt
+    // via `pendingOutboundPrompts` so we don't collide on PromptStore's
+    // per-session unique index.
     if (WRITE_METHODS.has(method)) {
       const hostname = new URL(input.url).hostname;
       if (!approvedOutboundDomains.has(hostname)) {
         if (!agent.promptUser) {
           return `Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).`;
         }
-        if (agent.promptUser) {
-          const answer = await agent.promptUser(
-            `⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
-            ['Allow', 'Deny', '\x00'],
-          );
-          if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-            return `Blocked: outbound ${method} to ${hostname} denied by user.`;
-          }
-          approvedOutboundDomains.add(hostname);
+        const promptUser = agent.promptUser;
+        let pending = pendingOutboundPrompts.get(hostname);
+        if (!pending) {
+          pending = (async () => {
+            try {
+              const answer = await promptUser(
+                `⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
+                ['Allow', 'Deny', '\x00'],
+              );
+              const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
+              if (allowed) approvedOutboundDomains.add(hostname);
+              return allowed;
+            } finally {
+              pendingOutboundPrompts.delete(hostname);
+            }
+          })();
+          pendingOutboundPrompts.set(hostname, pending);
+        }
+        const allowed = await pending;
+        if (!allowed) {
+          return `Blocked: outbound ${method} to ${hostname} denied by user.`;
         }
       }
     }

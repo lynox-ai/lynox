@@ -5,7 +5,7 @@
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
-	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
+	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
 
 	interface Props {
 		content: string;
@@ -17,25 +17,13 @@
 
 	let highlightedHtml = $state('');
 
-	// Close unclosed code fences to prevent the entire response rendering as raw code.
-	// Only count valid fences: opening (```lang) and closing (``` alone on line).
-	// "```Pipeline erfolgreich" is NOT a valid closing fence.
-	function closeOpenFences(md: string): string {
-		const validFence = /^```\w*\s*$/gm;
-		const fenceCount = (md.match(validFence) ?? []).length;
-		return fenceCount % 2 !== 0 ? md + '\n```' : md;
-	}
-
-	// Pre-processing for raw markdown — see fixMarkdownPreprocessing in
-	// utils/markdown-preprocess.ts for the rules and the regression-test set.
-
 	// Wrap <table> elements in a scrollable container for wide tables.
 	function wrapTables(html: string): string {
 		return html.replace(/<table\b[^>]*>/g, '<div class="table-wrap">$&').replace(/<\/table>/g, '</table></div>');
 	}
 
 	const baseHtml = $derived(
-		wrapTables(DOMPurify.sanitize(marked.parse(closeOpenFences(fixMarkdownPreprocessing(content)), { async: false }) as string))
+		wrapTables(DOMPurify.sanitize(marked.parse(repairCodeFences(fixMarkdownPreprocessing(content)), { async: false }) as string))
 	);
 
 	function decodeEntities(str: string): string {
@@ -635,7 +623,7 @@ window.addEventListener('afterprint', function () { window.close(); });
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div onclick={handleContainerClick} class="prose prose-invert max-w-none
+<div onclick={handleContainerClick} class="markdown-root prose prose-invert max-w-none min-w-0
 	prose-pre:bg-bg-muted prose-pre:border prose-pre:border-border prose-pre:rounded-[var(--radius-md)] prose-pre:overflow-x-auto
 	prose-code:text-accent-text prose-code:text-xs prose-code:font-mono
 	prose-a:text-accent-text prose-a:no-underline hover:prose-a:opacity-80
@@ -666,11 +654,49 @@ window.addEventListener('afterprint', function () { window.close(); });
 		line-height: 1.6;
 	}
 
-	/* Styled scrollbars for code blocks and pre elements */
+	/* Width hardening — nothing inside the markdown root may push the
+	   chat container wider than its parent. The :global(.markdown-root)
+	   layer forces a 0 min-width even when this component is rendered
+	   inside a flex item that hasn't been given min-w-0 by its parent. */
+	:global(.markdown-root) {
+		min-width: 0;
+		max-width: 100%;
+	}
+
+	/* Long single-token strings (URLs, IDs, paths) wrap inside paragraphs
+	   and list items instead of forcing horizontal scroll. */
+	div :global(p),
+	div :global(li),
+	div :global(blockquote),
+	div :global(h1),
+	div :global(h2),
+	div :global(h3),
+	div :global(h4),
+	div :global(h5),
+	div :global(h6) {
+		overflow-wrap: anywhere;
+	}
+
+	/* Inline code: long IDs / URLs in backticks should wrap, not overflow. */
+	div :global(code) {
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
+
+	/* Code blocks scroll INTERNALLY only — never push the parent wider. */
 	div :global(pre) {
 		scrollbar-width: thin;
 		scrollbar-color: var(--color-border) transparent;
 		max-width: 100%;
+		min-width: 0;
+		overflow-x: auto;
+	}
+	/* Override the inline-code wrap rule when the code is inside a <pre>:
+	   preserve original formatting for genuine code, just scroll if needed. */
+	div :global(pre > code) {
+		overflow-wrap: normal;
+		word-break: normal;
+		white-space: pre;
 	}
 
 	/* Tables */
@@ -680,6 +706,8 @@ window.addEventListener('afterprint', function () { window.close(); });
 		-webkit-overflow-scrolling: touch;
 		scrollbar-width: thin;
 		scrollbar-color: var(--color-border) transparent;
+		max-width: 100%;
+		min-width: 0;
 	}
 	div :global(table) {
 		width: 100%;

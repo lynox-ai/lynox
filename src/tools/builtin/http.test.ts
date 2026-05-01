@@ -639,4 +639,102 @@ describe('httpRequestTool', () => {
       expect(result).toContain('"b": 2');
     });
   });
+
+  // Regression: parallel POSTs to the same (not-yet-approved) hostname used
+  // to race on the outbound-consent prompt. The PromptStore enforces a unique
+  // pending prompt per session, so only the first insertAskUser succeeded and
+  // calls 2..N threw PromptConflictError. Real-world hit: a 5-way parallel
+  // http_request batch against api.dataforseo.com (keyword-research run,
+  // 2026-04-23) where 4 of 5 tool_uses came back as errors.
+  describe('Parallel outbound-consent prompt', () => {
+    it('shares one prompt across concurrent POSTs to the same hostname', async () => {
+      mockDnsPublic();
+      // Fresh Response per call — body streams can only be consumed once.
+      const fetchMock = vi.fn().mockImplementation(
+        () => Promise.resolve(createMockResponse({ json: { ok: true } })),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      // promptUser resolves only after all three calls are in flight.
+      // Deferred resolve lets us prove parallel calls await one shared promise.
+      let resolvePrompt: (ans: string) => void = () => {};
+      const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>(() =>
+        new Promise<string>((res) => {
+          resolvePrompt = res;
+        }),
+      );
+      const agent = { promptUser } as never;
+
+      const url = `https://api-parallel-consent-${Date.now()}.example.com/v1/x`;
+      const results = Promise.all([
+        handler({ url, method: 'POST', body: '{"a":1}' }, agent),
+        handler({ url, method: 'POST', body: '{"b":2}' }, agent),
+        handler({ url, method: 'POST', body: '{"c":3}' }, agent),
+      ]);
+
+      // Give the concurrent handlers a tick to all subscribe before we approve.
+      await new Promise((r) => setTimeout(r, 5));
+      resolvePrompt('Allow');
+
+      const [r1, r2, r3] = await results;
+      expect(r1).toContain('HTTP 200');
+      expect(r2).toContain('HTTP 200');
+      expect(r3).toContain('HTTP 200');
+      // Only ONE prompt despite three calls.
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      // All three requests fired.
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('denies all concurrent callers if the shared prompt is denied', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(
+        () => Promise.resolve(createMockResponse({ json: { ok: true } })),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      let resolvePrompt: (ans: string) => void = () => {};
+      const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>(() =>
+        new Promise<string>((res) => { resolvePrompt = res; }),
+      );
+      const agent = { promptUser } as never;
+
+      const url = `https://api-parallel-deny-${Date.now()}.example.com/v1/x`;
+      const results = Promise.all([
+        handler({ url, method: 'POST', body: '{}' }, agent),
+        handler({ url, method: 'POST', body: '{}' }, agent),
+      ]);
+
+      await new Promise((r) => setTimeout(r, 5));
+      resolvePrompt('Deny');
+
+      const [r1, r2] = await results;
+      expect(r1).toContain('denied by user');
+      expect(r2).toContain('denied by user');
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('re-prompts after a denial (no stale approval in the pending map)', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(
+        () => Promise.resolve(createMockResponse({ json: { ok: true } })),
+      ));
+
+      const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>()
+        .mockResolvedValueOnce('Deny')
+        .mockResolvedValueOnce('Allow');
+      const agent = { promptUser } as never;
+
+      const url = `https://api-reprompt-${Date.now()}.example.com/v1/x`;
+      const first = await handler({ url, method: 'POST', body: '{}' }, agent);
+      expect(first).toContain('denied');
+
+      // Second call (sequential, not concurrent) should prompt again — the
+      // first call's prompt entry was cleaned up from the pending map.
+      const second = await handler({ url, method: 'POST', body: '{}' }, agent);
+      expect(second).toContain('HTTP 200');
+      expect(promptUser).toHaveBeenCalledTimes(2);
+    });
+  });
 });

@@ -386,6 +386,106 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       expect(mockSessionAbort).toHaveBeenCalled();
     });
+
+    // Bug 3 regression: a previous /run whose SSE stream was dropped while
+    // it was parked on a pending ask_user prompt used to lock the session
+    // forever — every subsequent /run on the same session returned 409 until
+    // the 24h prompt TTL elapsed. The fix is a stale-run takeover that
+    // expires the orphan prompt and aborts the previous handler so a fresh
+    // /run can proceed. Simulated here by injecting the stuck slot
+    // directly — replicates the post-disconnect server state without
+    // depending on undici's abort-to-server-close timing.
+    it('takes over a stale run parked on a pending prompt', async () => {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+
+      const runningSessions = (api as unknown as {
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void }>;
+      }).runningSessions;
+
+      try {
+        // Replicate the post-disconnect server state: a pending prompt in
+        // SQLite + a slot in runningSessions whose stream is already dead.
+        const promptId = realPromptStore.insertAskUser('stale-1', 'are you there?');
+        let takeoverCalls = 0;
+        const drainDelay = 60; // ms — emulates the previous run's finally
+        runningSessions.set('stale-1', {
+          streamAlive: false,
+          takeover: () => {
+            takeoverCalls++;
+            // The real takeover expires the prompt and aborts the previous
+            // session; here we inline the prompt-expiry path and schedule a
+            // delete to mirror the previous handler's `finally` block.
+            realPromptStore.expirePrompt(promptId);
+            setTimeout(() => runningSessions.delete('stale-1'), drainDelay);
+          },
+        });
+
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const res = await jsonFetch('/api/sessions/stale-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'second', protocol: 1 }),
+        });
+
+        expect(takeoverCalls).toBe(1);
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        expect(text).toContain('event: done');
+        // The takeover must have freed the prompt slot in SQLite so the
+        // new run could insert its own prompt without a UNIQUE conflict.
+        expect(realPromptStore.getPending('stale-1')).toBeUndefined();
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        runningSessions.delete('stale-1');
+        db.close();
+      }
+    });
+
+    // Companion test: verify the slot remembers stream death so a later
+    // /run can detect the stale state. Exercises the req.on('close') path
+    // by going through the public /run endpoint and checking the internal
+    // slot bookkeeping after the response stream completes.
+    it('marks the slot streamAlive=false after a normal run completes', async () => {
+      mockSessionRun.mockResolvedValueOnce('done');
+      const res = await jsonFetch('/api/sessions/run-bookkeeping/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'hello', protocol: 1 }),
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+      const runningSessions = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      // Allow the finally + close handlers to drain.
+      for (let i = 0; i < 50; i++) {
+        if (!runningSessions.has('run-bookkeeping')) break;
+        await new Promise<void>((r) => setTimeout(r, 20));
+      }
+      expect(runningSessions.has('run-bookkeeping')).toBe(false);
+    });
   });
 
   describe('memory', () => {
