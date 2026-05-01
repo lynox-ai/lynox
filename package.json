@@ -77,7 +77,7 @@
     "@rolldown/binding-darwin-arm64": "1.0.0-rc.13",
     "@sentry/node": "^10.46.0",
     "better-sqlite3": "^12.6.2",
-    "email-reply-parser": "^1.7.0",
+    "email-reply-parser": "^2.3.5",
     "iconv-lite": "^0.7.2",
     "imapflow": "^1.0.181",
     "linkedom": "^0.18.12",

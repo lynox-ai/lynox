@@ -40,8 +40,8 @@ importers:
         specifier: ^12.6.2
         version: 12.9.0
       email-reply-parser:
-        specifier: ^1.7.0
-        version: 1.9.4
+        specifier: ^2.3.5
+        version: 2.3.5
       iconv-lite:
         specifier: ^0.7.2
         version: 0.7.2
@@ -2137,11 +2137,11 @@ packages:
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
 
-  email-reply-parser@1.9.4:
-    resolution: {integrity: sha512-MVAmUJqWaC1Tfym0UAFUTV2igovkKpa1XR1cOG+9orXfN2M7bQnFjoAf3Iv3K9xzOGAD0GqNcinx79b74kkbaQ==}
-    engines: {node: '>= 10.0.0'}
+  email-reply-parser@2.3.5:
+    resolution: {integrity: sha512-0giLt6y7TKHrd+X1jxblFiDqGeeQmXalGLBkqjyBBl9O0gT19r2da2zMqNa1wHs3uoMZVesjNPny8+g0YtI5fw==}
+    engines: {node: '>= 20.0.0'}
     peerDependencies:
-      re2: 1.21.4
+      re2: 1.22.1
     peerDependenciesMeta:
       re2:
         optional: true
@@ -3529,6 +3529,7 @@ packages:
 
   uuid@9.0.1:
     resolution: {integrity: sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   vary@1.1.2:
@@ -5639,7 +5640,7 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  email-reply-parser@1.9.4: {}
+  email-reply-parser@2.3.5: {}
 
   encodeurl@2.0.0: {}
 
