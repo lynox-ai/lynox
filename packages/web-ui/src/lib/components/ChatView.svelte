@@ -1728,7 +1728,8 @@
 											batchAnswers[i] = (batchSelections[i] ?? []).join(', ');
 											batchAnswers = [...batchAnswers];
 										}}
-											class="rounded-[var(--radius-sm)] border px-2.5 py-1 text-xs transition-all {(batchSelections[i] ?? []).includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
+											title={option}
+											class="max-w-full truncate text-left rounded-[var(--radius-sm)] border px-2.5 py-1 text-xs transition-all {(batchSelections[i] ?? []).includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
 										>{option}</button>
 									{/each}
 								</div>
