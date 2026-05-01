@@ -62,3 +62,61 @@ describe('visibleBody', () => {
     expect(visibleBody(text)).toBe(cleanBody(text).visible);
   });
 });
+
+// Real-world shapes that mail clients produce in the wild — guards against
+// regressions when email-reply-parser changes its quote/signature
+// classification across major versions.
+describe('cleanBody real-world shapes', () => {
+  it('strips German Outlook "Am ... schrieb:" quote header', () => {
+    const text = `Danke für die Info — passt so.
+
+Am Donnerstag, 24. April 2026 um 09:12 schrieb Alice <alice@example.de>:
+> Hallo Bob,
+> Anbei die Zahlen für Q1.
+> Liebe Grüße, Alice`;
+    const out = cleanBody(text);
+    expect(out.visible).toContain('Danke für die Info');
+    expect(out.visible).not.toContain('Anbei die Zahlen');
+    expect(out.quoted).toContain('Anbei die Zahlen');
+  });
+
+  it('strips iOS Mail "Sent from my iPhone" signature', () => {
+    const text = `Klingt gut, machen wir so.
+
+Sent from my iPhone`;
+    const out = cleanBody(text);
+    expect(out.visible).toContain('Klingt gut');
+    expect(out.visible).not.toContain('Sent from my iPhone');
+    expect(out.signature).toContain('Sent from my iPhone');
+  });
+
+  it('handles multi-level reply chain (reply to reply)', () => {
+    const text = `Top-level reply.
+
+On Fri, May 1, 2026 at 11:00 AM, Carol <carol@example.com> wrote:
+> Middle reply.
+>
+> On Wed, Apr 30, 2026 at 09:00 AM, Bob <bob@example.com> wrote:
+>> Original message.
+>> Bob`;
+    const out = cleanBody(text);
+    expect(out.visible).toContain('Top-level reply');
+    expect(out.visible).not.toContain('Middle reply');
+    expect(out.visible).not.toContain('Original message');
+    expect(out.quoted).toContain('Middle reply');
+  });
+
+  it('preserves both inline answers when the quote block trails', () => {
+    const text = `Quick answers below.
+
+Sounds fine to me — go ahead.
+
+On Wed, Apr 30, 2026 at 14:00, Dave <dave@example.com> wrote:
+> Should we ship Friday or Monday?
+> Dave`;
+    const out = cleanBody(text);
+    expect(out.visible).toContain('Quick answers below');
+    expect(out.visible).toContain('go ahead');
+    expect(out.visible).not.toContain('Should we ship Friday');
+  });
+});
