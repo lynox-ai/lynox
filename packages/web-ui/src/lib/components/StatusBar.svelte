@@ -140,7 +140,10 @@
 		if (staleBundleNotified) return;
 		if (!BUILT_VERSION || BUILT_VERSION === engineV) return;
 		staleBundleNotified = true;
-		addToast(t('status.stale_bundle'), 'info', 30_000);
+		addToast(t('status.stale_bundle'), 'info', 30_000, {
+			label: t('status.stale_bundle_action'),
+			handler: () => { location.reload(); },
+		});
 	}
 
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -177,8 +180,26 @@
 	});
 </script>
 
-<!-- Mobile: minimal engine indicator -->
-<div class="flex md:hidden items-center justify-center border-t border-border bg-bg-subtle h-7 px-2">
+{#snippet autoSpeakBtn()}
+	{#if ttsAvailable}
+		<button
+			onclick={toggleAutoSpeak}
+			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSpeakOn ? 'text-accent-text' : 'text-text-subtle'}"
+			title={autoSpeakOn ? (speakState === 'playing' ? t('status.autospeak_playing') : t('status.autospeak_on')) : t('status.autospeak_off')}
+			aria-label={autoSpeakOn ? t('status.autospeak_on') : t('status.autospeak_off')}
+			aria-pressed={autoSpeakOn}
+		>
+			{#if autoSpeakOn}
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 {speakState === 'playing' ? 'motion-safe:animate-pulse' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
+			{:else}
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
+			{/if}
+		</button>
+	{/if}
+{/snippet}
+
+<!-- Mobile: minimal engine indicator + auto-speak toggle -->
+<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2 pb-[env(safe-area-inset-bottom)]">
 	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
@@ -188,10 +209,11 @@
 		<span class="text-border mx-1">|</span>
 		{formatCost(todayCost)}
 	</button>
+	{@render autoSpeakBtn()}
 </div>
 
 <!-- Desktop: full status bar -->
-<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle h-8 px-1 overflow-x-auto scrollbar-none">
+<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle min-h-8 px-1 pb-[env(safe-area-inset-bottom)] overflow-x-auto scrollbar-none">
 	<!-- Engine Status (clickable) -->
 	<button onclick={togglePanel} class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
@@ -232,21 +254,7 @@
 	<span class="text-border">|</span>
 
 	<!-- Auto-speak toggle — hidden entirely when no TTS provider is available -->
-	{#if ttsAvailable}
-		<button
-			onclick={toggleAutoSpeak}
-			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSpeakOn ? 'text-accent-text' : 'text-text-subtle'}"
-			title={autoSpeakOn ? (speakState === 'playing' ? t('status.autospeak_playing') : t('status.autospeak_on')) : t('status.autospeak_off')}
-			aria-label={autoSpeakOn ? t('status.autospeak_on') : t('status.autospeak_off')}
-			aria-pressed={autoSpeakOn}
-		>
-			{#if autoSpeakOn}
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 {speakState === 'playing' ? 'motion-safe:animate-pulse' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
-			{:else}
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
-			{/if}
-		</button>
-	{/if}
+	{@render autoSpeakBtn()}
 
 	<!-- Mobile Access shortcut -->
 	<a href="/app/settings/mobile" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" title={t('mobile.title')}>
@@ -256,8 +264,8 @@
 	<!-- Context Window -->
 	{#if getContextBudget()}
 		{@const pct = getContextBudget()?.usagePercent ?? 0}
-		{@const color = pct >= 80 ? 'bg-danger' : pct >= 50 ? 'bg-warning' : 'bg-accent'}
-		{@const textColor = pct >= 80 ? 'text-danger' : pct >= 50 ? 'text-warning' : 'text-text-subtle'}
+		{@const color = pct >= 75 ? 'bg-danger' : pct >= 60 ? 'bg-warning' : 'bg-accent'}
+		{@const textColor = pct >= 75 ? 'text-danger' : pct >= 60 ? 'text-warning' : 'text-text-subtle'}
 		<span class="text-border">|</span>
 		<div class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="{getContextBudget()?.totalTokens ?? 0} / {getContextBudget()?.maxTokens ?? 0} tokens{getSessionModel() ? ` · ${getSessionModel()}` : ''}">
 			<div class="w-16 h-1 rounded-full bg-border overflow-hidden">

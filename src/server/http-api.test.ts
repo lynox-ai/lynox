@@ -24,6 +24,18 @@ const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
 const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'completed' });
+const mockGoogleIsAuthenticated = vi.fn().mockReturnValue(false);
+const mockGoogleStartRedirectAuth = vi.fn().mockReturnValue({ authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state', state: 'test-state' });
+const mockGoogleExchangeRedirectCode = vi.fn().mockResolvedValue(undefined);
+const mockGoogleAuth = {
+  isAuthenticated: mockGoogleIsAuthenticated,
+  startRedirectAuth: mockGoogleStartRedirectAuth,
+  exchangeRedirectCode: mockGoogleExchangeRedirectCode,
+  getAccountInfo: vi.fn().mockReturnValue({}),
+  startDeviceFlow: vi.fn(),
+  getScopes: vi.fn().mockReturnValue([]),
+  getTokenExpiry: vi.fn().mockReturnValue(null),
+};
 
 const mockSessionInstance = {
   run: mockSessionRun,
@@ -76,6 +88,8 @@ vi.mock('../core/engine.js', () => ({
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     this.getPromptStore = vi.fn().mockReturnValue(null);
+    this.getGoogleAuth = vi.fn().mockReturnValue(mockGoogleAuth);
+    this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = vi.fn().mockResolvedValue(undefined);
     this.getUserConfig = vi.fn().mockReturnValue({});
     return this;
@@ -199,6 +213,50 @@ describe('LynoxHTTPApi', () => {
     it('accepts requests with correct token', async () => {
       const res = await jsonFetch('/api/secrets');
       expect(res.status).toBe(200);
+    });
+
+    it('rejects /api/mail/* without auth (regression lock for sprint S2)', async () => {
+      // Mail routes share the global auth gate — these assertions lock that
+      // wiring in so a future refactor cannot accidentally exempt them.
+      const get = await fetch(`${baseUrl}/api/mail/accounts`);
+      expect(get.status).toBe(401);
+
+      const post = await fetch(`${baseUrl}/api/mail/accounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(post.status).toBe(401);
+
+      const presets = await fetch(`${baseUrl}/api/mail/presets`);
+      expect(presets.status).toBe(401);
+
+      const del = await fetch(`${baseUrl}/api/mail/accounts/some-id`, { method: 'DELETE' });
+      expect(del.status).toBe(401);
+
+      const setDefault = await fetch(`${baseUrl}/api/mail/accounts/some-id/default`, { method: 'POST' });
+      expect(setDefault.status).toBe(401);
+
+      const test = await fetch(`${baseUrl}/api/mail/accounts/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(test.status).toBe(401);
+
+      const auto = await fetch(`${baseUrl}/api/mail/autodiscover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(auto.status).toBe(401);
+    });
+
+    it('rejects /api/mail/* with the wrong bearer token', async () => {
+      const res = await fetch(`${baseUrl}/api/mail/accounts`, {
+        headers: { Authorization: 'Bearer wrong-token' },
+      });
+      expect(res.status).toBe(401);
     });
 
     it('lets public WhatsApp paths through without bearer token', async () => {
@@ -328,6 +386,106 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       expect(mockSessionAbort).toHaveBeenCalled();
     });
+
+    // Bug 3 regression: a previous /run whose SSE stream was dropped while
+    // it was parked on a pending ask_user prompt used to lock the session
+    // forever — every subsequent /run on the same session returned 409 until
+    // the 24h prompt TTL elapsed. The fix is a stale-run takeover that
+    // expires the orphan prompt and aborts the previous handler so a fresh
+    // /run can proceed. Simulated here by injecting the stuck slot
+    // directly — replicates the post-disconnect server state without
+    // depending on undici's abort-to-server-close timing.
+    it('takes over a stale run parked on a pending prompt', async () => {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+
+      const runningSessions = (api as unknown as {
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void }>;
+      }).runningSessions;
+
+      try {
+        // Replicate the post-disconnect server state: a pending prompt in
+        // SQLite + a slot in runningSessions whose stream is already dead.
+        const promptId = realPromptStore.insertAskUser('stale-1', 'are you there?');
+        let takeoverCalls = 0;
+        const drainDelay = 60; // ms — emulates the previous run's finally
+        runningSessions.set('stale-1', {
+          streamAlive: false,
+          takeover: () => {
+            takeoverCalls++;
+            // The real takeover expires the prompt and aborts the previous
+            // session; here we inline the prompt-expiry path and schedule a
+            // delete to mirror the previous handler's `finally` block.
+            realPromptStore.expirePrompt(promptId);
+            setTimeout(() => runningSessions.delete('stale-1'), drainDelay);
+          },
+        });
+
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const res = await jsonFetch('/api/sessions/stale-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'second', protocol: 1 }),
+        });
+
+        expect(takeoverCalls).toBe(1);
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        expect(text).toContain('event: done');
+        // The takeover must have freed the prompt slot in SQLite so the
+        // new run could insert its own prompt without a UNIQUE conflict.
+        expect(realPromptStore.getPending('stale-1')).toBeUndefined();
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        runningSessions.delete('stale-1');
+        db.close();
+      }
+    });
+
+    // Companion test: verify the slot remembers stream death so a later
+    // /run can detect the stale state. Exercises the req.on('close') path
+    // by going through the public /run endpoint and checking the internal
+    // slot bookkeeping after the response stream completes.
+    it('marks the slot streamAlive=false after a normal run completes', async () => {
+      mockSessionRun.mockResolvedValueOnce('done');
+      const res = await jsonFetch('/api/sessions/run-bookkeeping/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'hello', protocol: 1 }),
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+      const runningSessions = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      // Allow the finally + close handlers to drain.
+      for (let i = 0; i < 50; i++) {
+        if (!runningSessions.has('run-bookkeeping')) break;
+        await new Promise<void>((r) => setTimeout(r, 20));
+      }
+      expect(runningSessions.has('run-bookkeeping')).toBe(false);
+    });
   });
 
   describe('memory', () => {
@@ -428,6 +586,43 @@ describe('LynoxHTTPApi', () => {
         body: JSON.stringify({ default_tier: 'sonnet' }),
       });
       expect(res.status).toBe(200);
+    });
+
+    it('PUT in managed mode rejects locked-field changes', async () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ default_tier: 'haiku' }), // mock effective is 'opus'
+        });
+        expect(res.status).toBe(403);
+        const body = await res.json() as { error: string };
+        expect(body.error).toContain('default_tier');
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
+    it('PUT in managed mode allows no-op locked-field re-send (regression v1.3.5)', async () => {
+      // Web UI re-sends every field on every save. A no-op write of `default_tier`
+      // (same value as effective config) must NOT block unrelated updates like
+      // changing `experience` from 'business' to 'developer'.
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ default_tier: 'opus', experience: 'developer' }), // mock effective is 'opus'
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
     });
   });
 
@@ -572,6 +767,111 @@ describe('LynoxHTTPApi', () => {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
       }
+    });
+  });
+
+  describe('Google OAuth callback', () => {
+    beforeEach(() => {
+      mockGoogleIsAuthenticated.mockReturnValue(false);
+      mockGoogleStartRedirectAuth.mockReturnValue({
+        authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state',
+        state: 'test-state',
+      });
+      mockGoogleExchangeRedirectCode.mockResolvedValue(undefined);
+      vi.stubEnv('ORIGIN', 'https://test.example.com');
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+      vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+    });
+
+    it('successful exchange renders meta-refresh (not inline script — engine API CSP blocks it)', async () => {
+      // Prime singleton state by invoking the auth-start endpoint
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({ scopeMode: 'read' }),
+      });
+      expect(startRes.status).toBe(200);
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid-code&state=test-state`);
+      expect(cbRes.status).toBe(200);
+      expect(cbRes.headers.get('content-type')).toContain('text/html');
+
+      const body = await cbRes.text();
+      expect(body).toContain('meta http-equiv="refresh"');
+      expect(body).toContain('https://test.example.com/app/settings/integrations');
+      // CSP `default-src 'none'` blocks inline scripts — must not regress
+      expect(body).not.toContain('<script>');
+      expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledWith('valid-code', expect.stringContaining('/api/google/callback'));
+    });
+
+    it('reload after success — state mismatch but already authenticated → renders success, no re-exchange', async () => {
+      // Simulate the "user reloads the callback URL after success" case:
+      // state slot already cleared by the earlier successful exchange.
+      mockGoogleIsAuthenticated.mockReturnValue(true);
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=stale-code&state=stale-state`);
+      expect(cbRes.status).toBe(200);
+
+      const body = await cbRes.text();
+      expect(body).toContain('meta http-equiv="refresh"');
+      expect(body).toContain('/app/settings/integrations');
+      // Idempotent — must NOT re-exchange the (already-spent) code
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('CSRF — state mismatch and not authenticated → 400 error', async () => {
+      mockGoogleIsAuthenticated.mockReturnValue(false);
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=any&state=wrong`);
+      expect(cbRes.status).toBe(400);
+
+      const body = await cbRes.text();
+      expect(body).toContain('Invalid callback');
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('Google error param (e.g. ?error=access_denied) → 400 with error surfaced', async () => {
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?error=access_denied`);
+      expect(cbRes.status).toBe(400);
+
+      const body = await cbRes.text();
+      expect(body).toContain('access_denied');
+      expect(body).toContain('You can close this tab');
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('Google error param is HTML-escaped (XSS guard)', async () => {
+      // Google never sends this in practice, but the handler must escape
+      // anything that arrives in the error querystring.
+      const malicious = '<script>alert(1)</script>';
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?error=${encodeURIComponent(malicious)}`);
+      expect(cbRes.status).toBe(400);
+
+      const body = await cbRes.text();
+      expect(body).not.toContain('<script>alert(1)</script>');
+      expect(body).toContain('&lt;script&gt;');
+    });
+
+    it('exchange failure → 500 with sanitized error message', async () => {
+      // Prime state so the request passes the state check and hits the try/catch
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      expect(startRes.status).toBe(200);
+
+      mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error('token endpoint unreachable'));
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`);
+      expect(cbRes.status).toBe(500);
+
+      const body = await cbRes.text();
+      expect(body).toContain('token endpoint unreachable');
+      expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledTimes(1);
     });
   });
 

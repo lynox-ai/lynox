@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TavilyProvider, SearXNGProvider, createSearchProvider } from './search-provider.js';
+import type { WebSearchEvent } from './search-provider.js';
+import { channels } from '../../core/observability.js';
 
 // Mock global fetch
 const mockFetch = vi.fn();
@@ -314,7 +316,13 @@ describe('SearXNGProvider', () => {
     expect(url).toContain('categories=science');
   });
 
-  it('maps it topic to it category', async () => {
+  // Reverses 2026-04-24 finding: `topic: "it"` used to set categories=it,
+  // but that filters queries to dev-index engines (github/npm/pypi/
+  // stackoverflow) which lack full-text web indices — verified to return
+  // 0 results for research queries like "pytrends rate limits" against
+  // the real lynox SearXNG config. General engines handle IT queries
+  // better without any category filter.
+  it('does not set categories for it topic (empirically worse than general)', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({ results: [] }),
@@ -324,7 +332,7 @@ describe('SearXNGProvider', () => {
     await provider.search('typescript generics', { topic: 'it' });
 
     const url = mockFetch.mock.calls[0]![0] as string;
-    expect(url).toContain('categories=it');
+    expect(url).not.toContain('categories');
   });
 
   it('does not set categories for finance topic (no SearXNG equivalent)', async () => {
@@ -351,6 +359,151 @@ describe('SearXNGProvider', () => {
 
     const url = mockFetch.mock.calls[0]![0] as string;
     expect(url).not.toContain('categories');
+  });
+
+  it('publishes webSearch event with engine attribution + unresponsive list', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [
+          { title: 'r1', url: 'https://a', content: 's', engine: 'google' },
+          { title: 'r2', url: 'https://b', content: 's', engine: 'google' },
+          { title: 'r3', url: 'https://c', content: 's', engine: 'duckduckgo' },
+        ],
+        unresponsive_engines: [['bing', 'timeout'], ['brave', 'HTTP error']],
+      }),
+    });
+    const events: WebSearchEvent[] = [];
+    const onMessage = (msg: unknown): void => { events.push(msg as WebSearchEvent); };
+    channels.webSearch.subscribe(onMessage);
+    try {
+      const provider = new SearXNGProvider('http://localhost:8888');
+      await provider.search('test query');
+    } finally {
+      channels.webSearch.unsubscribe(onMessage);
+    }
+
+    expect(events).toHaveLength(1);
+    const ev = events[0]!;
+    expect(ev.provider).toBe('searxng');
+    expect(ev.queryHash).toMatch(/^[0-9a-f]{16}$/);
+    expect(ev.queryLength).toBe('test query'.length);
+    expect(ev).not.toHaveProperty('query'); // no plaintext leak
+    expect(ev.resultCount).toBe(3);
+    expect(ev.engines).toEqual({ google: 2, duckduckgo: 1 });
+    expect(ev.unresponsiveEngines).toEqual(['bing', 'brave']);
+    expect(ev.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('queryHash is deterministic for the same query and differs across queries', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [], unresponsive_engines: [] }),
+    });
+    const events: WebSearchEvent[] = [];
+    const onMessage = (msg: unknown): void => { events.push(msg as WebSearchEvent); };
+    channels.webSearch.subscribe(onMessage);
+    try {
+      const provider = new SearXNGProvider('http://localhost:8888');
+      await provider.search('alpha');
+      await provider.search('alpha');
+      await provider.search('beta');
+    } finally {
+      channels.webSearch.unsubscribe(onMessage);
+    }
+    expect(events).toHaveLength(3);
+    expect(events[0]!.queryHash).toBe(events[1]!.queryHash);
+    expect(events[0]!.queryHash).not.toBe(events[2]!.queryHash);
+  });
+
+  it('skips event publication entirely when no subscribers (cost-free observability)', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ title: 'r', url: 'https://a', content: 's', engine: 'google' }],
+        unresponsive_engines: [],
+      }),
+    });
+    // Spy on publish to confirm it isn't called when nobody subscribes.
+    const publishSpy = vi.spyOn(channels.webSearch, 'publish');
+    try {
+      const provider = new SearXNGProvider('http://localhost:8888');
+      await provider.search('whoever');
+    } finally {
+      publishSpy.mockRestore();
+    }
+    expect(publishSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses <unattributed> sentinel for results SearXNG returned without engine field', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [
+          { title: 'r1', url: 'https://a', content: 's' },          // no engine
+          { title: 'r2', url: 'https://b', content: 's', engine: 'google' },
+        ],
+        unresponsive_engines: [],
+      }),
+    });
+    const events: WebSearchEvent[] = [];
+    const onMessage = (msg: unknown): void => { events.push(msg as WebSearchEvent); };
+    channels.webSearch.subscribe(onMessage);
+    try {
+      const provider = new SearXNGProvider('http://localhost:8888');
+      await provider.search('q');
+    } finally {
+      channels.webSearch.unsubscribe(onMessage);
+    }
+    expect(events[0]!.engines).toEqual({ '<unattributed>': 1, google: 1 });
+  });
+
+  it('publishes webSearch event even when no results and no unresponsive engines', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [], unresponsive_engines: [] }),
+    });
+    const events: WebSearchEvent[] = [];
+    const onMessage = (msg: unknown): void => { events.push(msg as WebSearchEvent); };
+    channels.webSearch.subscribe(onMessage);
+    try {
+      const provider = new SearXNGProvider('http://localhost:8888');
+      await provider.search('empty');
+    } finally {
+      channels.webSearch.unsubscribe(onMessage);
+    }
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.resultCount).toBe(0);
+    expect(events[0]!.engines).toEqual({});
+    expect(events[0]!.unresponsiveEngines).toEqual([]);
+  });
+
+  it('Tavily provider publishes webSearch event with synthetic engine bucket', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [
+          { title: 'r1', url: 'https://a', content: 's', score: 0.9 },
+          { title: 'r2', url: 'https://b', content: 's', score: 0.8 },
+        ],
+      }),
+    });
+    const events: WebSearchEvent[] = [];
+    const onMessage = (msg: unknown): void => { events.push(msg as WebSearchEvent); };
+    channels.webSearch.subscribe(onMessage);
+    try {
+      const provider = new TavilyProvider('tvly-key');
+      await provider.search('x');
+    } finally {
+      channels.webSearch.unsubscribe(onMessage);
+    }
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.provider).toBe('tavily');
+    expect(events[0]!.engines).toEqual({ tavily: 2 });
+    expect(events[0]!).not.toHaveProperty('query');
+    expect(events[0]!.queryLength).toBe(1);
   });
 
   it('handles network timeout gracefully in healthCheck', async () => {

@@ -2,13 +2,14 @@ import type { ToolEntry } from '../../types/index.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
 import { extractContent } from './content-extractor.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { rerankSearchResults } from './search-reranker.js';
 
 interface WebSearchInput {
   action: 'search' | 'read';
   query?: string | undefined;
   url?: string | undefined;
   max_results?: number | undefined;
-  topic?: 'general' | 'news' | 'finance' | undefined;
+  topic?: 'general' | 'news' | 'finance' | 'science' | undefined;
   time_range?: 'day' | 'week' | 'month' | 'year' | undefined;
 }
 
@@ -62,7 +63,25 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
   return {
     definition: {
       name: 'web_research',
-      description: `Search the web or read a URL. Provider: ${provider.name}. Use "search" with a specific query (not broad questions). Use "read" to extract full content from a URL. Use topic to target results: "news" for current events, "science" for papers/research, "it" for code/packages. Top results include full page content.`,
+      description: `Search the web or read a URL. Provider: ${provider.name}.
+
+Action "search": query a public search engine. Query formulation matters more than most tools — this feeds Google/Bing/DDG, not a vector store.
+
+QUERY RULES:
+- Use 2-4 high-signal terms. Prefer nouns, proper names, product names.
+- NO year qualifiers ("2024", "2025") — use time_range if recency matters.
+- NO country/region codes ("DACH", "Germany", "EU") — engines treat these as noise.
+- NO stacked modifiers ("free tier pricing rate limits"). Pick ONE angle per query; run a follow-up search for the next angle.
+- If first results look off-topic or empty, REFORMULATE with fewer/different terms. Do not repeat the same bad query. For broad topics, start generic, then narrow in a follow-up.
+
+Examples:
+  Good: "pytrends github"                 Bad: "pytrends Google Trends unofficial API 2024 rate limits DACH Germany"
+  Good: "serpapi pricing"                 Bad: "SerpApi Google Trends API pricing free tier 2024"
+  Good: "reddit trending api"             Bad: "Reddit trends API free keyword popularity rising topics 2024"
+
+Action "read": extract full text from a specific URL.
+
+Use topic to narrow: "news" for current events, "science" for papers/research. For general research (code, libraries, APIs, company info), omit topic — default engines cover these better than any filter. Top results include full page content.`,
       eager_input_streaming: true,
       input_schema: {
         type: 'object' as const,
@@ -74,7 +93,7 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
           },
           query: {
             type: 'string',
-            description: 'Search query (required for action "search")',
+            description: 'Search query (required for action "search"). 2-4 high-signal terms; no year/country qualifiers; one angle per query. See tool description for examples.',
           },
           url: {
             type: 'string',
@@ -86,8 +105,8 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
           },
           topic: {
             type: 'string',
-            enum: ['general', 'news', 'finance', 'science', 'it'],
-            description: 'Search topic category. Only used with action "search"',
+            enum: ['general', 'news', 'finance', 'science'],
+            description: 'Search topic category. Only used with action "search". Use "news" for current events, "science" for papers/research; omit for code/library/API queries (general engines outperform any filter there).',
           },
           time_range: {
             type: 'string',
@@ -107,6 +126,12 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
             topic: input.topic,
             timeRange: input.time_range,
           });
+          // Rerank BEFORE enrichment: dropping low-relevance hits first
+          // avoids fetching full pages for results we're about to discard.
+          // No-op unless LYNOX_SEARCH_RERANK is enabled; falls through on
+          // any failure so original results remain accessible.
+          const reranked = await rerankSearchResults(input.query, results);
+          results = reranked.results;
           results = await enrichResults(results);
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;

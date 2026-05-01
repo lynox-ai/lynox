@@ -22,3 +22,8 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - ci
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch

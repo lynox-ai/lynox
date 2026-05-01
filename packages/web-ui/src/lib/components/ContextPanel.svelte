@@ -70,8 +70,67 @@
 		<!-- Content -->
 		<div class="flex-1 p-4 space-y-3">
 
+			<!-- === Spawn (sub-agent delegation, live progress) === -->
+			{#if ctx.type === 'spawn'}
+				{@const agents = ctx.spawnAgents ?? []}
+				{@const running = ctx.spawnRunning ?? []}
+				{@const done = ctx.spawnDone ?? []}
+				{@const lastTool = ctx.spawnLastTool ?? {}}
+				{@const elapsed = ctx.spawnElapsedS ?? 0}
+				<div class="flex items-center gap-2 text-xs text-text-muted" role="status" aria-live="polite">
+					<span class="font-mono">{elapsed}s</span>
+					{#if running.length > 0}
+						<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
+						<span>{running.length} {t('spawn.active')}</span>
+					{:else}
+						<span class="inline-block h-1.5 w-1.5 rounded-full bg-success" aria-hidden="true"></span>
+						<span>{t('spawn.done')}</span>
+					{/if}
+					{#if agents.length > 0}
+						<span class="text-text-subtle">·</span>
+						<span>{done.length}/{agents.length}</span>
+					{/if}
+				</div>
+
+				{#if running.length > 0}
+					<div class="rounded-[var(--radius-md)] bg-bg border border-warning/20 overflow-hidden">
+						<div class="px-3 py-1.5 border-b border-border bg-bg-muted">
+							<span class="text-[10px] font-mono uppercase tracking-widest text-warning">{t('spawn.running')}</span>
+						</div>
+						<ul class="divide-y divide-border" aria-live="polite">
+							{#each running as subName}
+								<li class="px-3 py-2 flex items-center gap-2">
+									<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse shrink-0" aria-hidden="true"></span>
+									<span class="text-xs font-mono text-text">{subName}</span>
+									{#if lastTool[subName]}
+										<span class="text-text-subtle text-[10px]">·</span>
+										<span class="text-[10px] font-mono text-text-subtle truncate">{lastTool[subName]}</span>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+
+				{#if done.length > 0}
+					<div class="rounded-[var(--radius-md)] bg-bg border border-border overflow-hidden">
+						<div class="px-3 py-1.5 border-b border-border bg-bg-muted">
+							<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('spawn.completed')}</span>
+						</div>
+						<ul class="divide-y divide-border">
+							{#each done as d}
+								<li class="px-3 py-2 flex items-center gap-2">
+									<span class={d.ok ? 'text-success' : 'text-danger'} aria-label={d.ok ? t('spawn.status_ok') : t('spawn.status_fail')}>{d.ok ? '✓' : '✗'}</span>
+									<span class="text-xs font-mono text-text-muted truncate flex-1">{d.name}</span>
+									<span class="text-[10px] font-mono text-text-subtle shrink-0">{d.elapsedS}s</span>
+								</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+
 			<!-- === File Operations === -->
-			{#if ctx.toolName === 'write_file' || ctx.toolName === 'read_file'}
+			{:else if ctx.toolName === 'write_file' || ctx.toolName === 'read_file'}
 				<a href="/app/files" class="flex items-center gap-2 text-xs text-accent-text hover:underline cursor-pointer">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
 					<span class="font-mono break-all">{getInput('path')}</span>

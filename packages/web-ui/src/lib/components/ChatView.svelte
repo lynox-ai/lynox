@@ -27,6 +27,7 @@
 		getIsOffline,
 		clearError,
 		cancelQueue,
+		removeQueuedMessage,
 		downloadExport,
 		getSessionModel,
 		getContextBudget,
@@ -34,22 +35,27 @@
 		getPendingChangeset,
 		getChangesetLoading,
 		submitChangesetReview,
+		getSessionId,
+		compactNow,
+		getIsCompacting,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
 		type ToolCallInfo,
 	} from '../stores/chat.svelte.js';
+	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
+	import { formatCountdown } from '../utils/time.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { playSpeech, playSpeechQueued, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint } from '../stores/speak.svelte.js';
+	import { playSpeech, playSpeechQueued, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
@@ -278,6 +284,19 @@
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'step_done'; stepId: string; summary: string };
 
+	/** Wrap artifact content in a fenced code block whose delimiter is long
+	 *  enough to survive any backtick run inside the content. CommonMark closes
+	 *  a fenced block on the first line made entirely of >= N backticks; so a
+	 *  3-backtick fence around content with a nested ``` ASCII-tree closes the
+	 *  outer artifact frame early and the tail renders outside the chrome.
+	 *  Count the longest inner run, fence with one more. */
+	function artifactFenceWrap(header: string, body: string): string {
+		const runs = body.match(/`+/g);
+		const longest = runs ? Math.max(...runs.map(r => r.length)) : 0;
+		const fence = '`'.repeat(Math.max(3, longest + 1));
+		return `${fence}artifact\n${header}${body}\n${fence}`;
+	}
+
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
 		const result: GroupedBlock[] = [];
@@ -297,14 +316,24 @@
 				if (!tc) continue;
 				if (HIDDEN_TOOLS.has(tc.name)) continue;
 
-				// Special: artifact_save → render inline if not already in text
+				// Special: artifact_save → render inline if not already in text.
+				// All artifact types route through the ```artifact fence so they
+				// share container chrome (toolbar + label). MarkdownRenderer
+				// dispatches by detecting a `<!-- type: markdown -->` marker in
+				// the fence body: markdown-typed content renders as inline prose
+				// inside the container (no iframe — content is trusted prose);
+				// HTML/SVG/Mermaid wrap into a sandboxed iframe via buildArtifact.
 				if (tc.name === 'artifact_save') {
 					if (!hasInlineArtifact) {
 						const inp = tc.input as Record<string, unknown> | undefined;
 						const content = String(inp?.['content'] ?? '');
 						if (content) {
 							const title = String(inp?.['title'] ?? 'Artifact');
-							result.push({ type: 'text', text: `\`\`\`artifact\n<!-- title: ${title} -->\n${content}\n\`\`\`` });
+							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
+							const header = artifactType === 'markdown'
+								? `<!-- title: ${title} -->\n<!-- type: markdown -->\n`
+								: `<!-- title: ${title} -->\n`;
+							result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 						}
 					}
 					continue;
@@ -347,6 +376,8 @@
 
 	let inputText = $state('');
 	let messagesEl: HTMLDivElement;
+	let autoScroll = $state(true);
+	const SCROLL_THRESHOLD_PX = 64;
 	let textareaEl = $state<HTMLTextAreaElement>();
 	let fileInputEl: HTMLInputElement;
 	let pendingFiles = $state<FileAttachment[]>([]);
@@ -749,7 +780,11 @@
 
 		// Single-question path: requires pendingPermission.
 		if (!pendingPermission) return;
-		answeredPrompts = [...answeredPrompts, { question: pendingPermission.question, answer }];
+		// Keep only the last answer — back-to-back prompts during one run
+		// were stacking the entire decision history above the active prompt
+		// and pushing the chat off-screen. Users only need the last answer
+		// to reconsider via the "edit" button below.
+		answeredPrompts = [{ question: pendingPermission.question, answer }];
 		selectedOptions = [];
 		promptAnswer = '';
 		replyPermission(answer);
@@ -910,9 +945,25 @@
 		if (!block.content.trim()) return;
 		maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
 		void playSpeechQueued(block.content, block.key).then((err) => {
-			if (err) addToast(t('chat.speak_failed'), 'error');
+			if (err) addToast(formatSpeakError(err), 'error');
 		});
 	});
+
+	// Translate the SpeakError discriminator into a user-facing string. Lives
+	// here (not in the speak store) so the speak store stays free of i18n
+	// concerns and so the toast text stays in the same module as `addToast`.
+	function formatSpeakError(err: SpeakError): string {
+		switch (err.code) {
+			case 'unavailable': return t('chat.speak_failed_unavailable');
+			case 'too_long':    return t('chat.speak_failed_too_long');
+			case 'http':        return `${t('chat.speak_failed_http')} ${String(err.status)}`;
+			case 'network':     return t('chat.speak_failed_network');
+			case 'stream':      return t('chat.speak_failed_stream');
+			case 'synth':       return t('chat.speak_failed_synth');
+			case 'empty':       return t('chat.speak_failed_empty');
+			case 'blocked':     return t('chat.speak_failed_blocked');
+		}
+	}
 
 	// Double-tap the modifier key (⌘ on macOS, Ctrl on Win/Linux) to toggle
 	// voice recording — Raycast/Spotlight-style, zero collision with any
@@ -1000,6 +1051,16 @@
 	const ctxModel = $derived(getSessionModel());
 	const ctxBudget = $derived(getContextBudget());
 	const ctxWindow = $derived(getContextWindow());
+	const compacting = $derived(getIsCompacting());
+
+	async function handleCompactClick() {
+		const result = await compactNow();
+		if (result.ok) {
+			addToast(t('chat.compact_done'), 'success');
+		} else if (result.error && result.error !== 'already-compacting' && result.error !== 'streaming') {
+			addToast(t('chat.compact_failed'), 'error');
+		}
+	}
 
 	// Active pipeline from the latest message (for sticky progress bar)
 	const activePipeline = $derived(
@@ -1013,6 +1074,17 @@
 	const pipelineRunning = $derived(
 		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
 	);
+
+	// Per-session artifact shelf. Populated from the shared artifacts store,
+	// filtered to the current thread. Kick a load on mount and again when the
+	// session changes so the shelf is ready without needing a prior visit to
+	// /app/artifacts.
+	const currentSessionId = $derived(getSessionId());
+	const sessionArtifacts = $derived(getSessionArtifacts(currentSessionId));
+	let artifactShelfExpanded = $state(false);
+	$effect(() => {
+		if (currentSessionId) void loadArtifacts();
+	});
 
 	// Auto-focus textarea and clear leftover input when chat is empty (new chat or initial load)
 	function focusInput() {
@@ -1078,9 +1150,44 @@
 		await sendMessage(task || t('chat.analyze_files'), files);
 	}
 
+	function isAtBottom(): boolean {
+		if (!messagesEl) return true;
+		const distance = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+		return distance < SCROLL_THRESHOLD_PX;
+	}
+
+	let _scrollFrame: number | null = null;
+	function onMessagesScroll(): void {
+		// Engages auto-scroll when user is at the bottom; releases it as soon
+		// as they scroll up. Re-engages once they scroll back to the bottom.
+		// Coalesce per frame so wheel/touch streams don't force a layout read
+		// on every event during streaming — `isAtBottom` reads scrollHeight.
+		if (_scrollFrame !== null) return;
+		_scrollFrame = requestAnimationFrame(() => {
+			_scrollFrame = null;
+			autoScroll = isAtBottom();
+		});
+	}
+
+	// Track streaming token churn and tool-call activity so the effect
+	// re-runs while the assistant is writing, not just when a turn ends.
+	const streamSignal = $derived.by(() => {
+		let s = messages.length;
+		for (const m of messages) {
+			s += m.content.length;
+			if (m.blocks) s += m.blocks.length;
+			if (m.toolCalls) s += m.toolCalls.length;
+		}
+		return s;
+	});
+
 	$effect(() => {
-		if (messages.length > 0 && messagesEl) {
-			messagesEl.scrollTop = messagesEl.scrollHeight;
+		// Read reactive deps so the effect re-runs as content grows.
+		void streamSignal;
+		if (autoScroll && messagesEl) {
+			requestAnimationFrame(() => {
+				if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+			});
 		}
 	});
 
@@ -1147,7 +1254,7 @@
 				if (active) { stopSpeech(); return; }
 				maybeShowPrivacyHint(t('chat.tts_privacy_hint'));
 				void playSpeech(msgContent, msgKey).then((err) => {
-					if (err) addToast(t('chat.speak_failed'), 'error');
+					if (err) addToast(formatSpeakError(err), 'error');
 				});
 			}}
 			class="text-text-subtle hover:text-text transition-all p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted {active ? 'opacity-100' : 'opacity-0 group-hover/copy:opacity-100 focus:opacity-100'}"
@@ -1167,7 +1274,7 @@
 
 <div class="flex h-full flex-col">
 	<!-- Messages -->
-	<div class="flex-1 overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl}>
+	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
 				{#if hasApiKey === false}
@@ -1327,9 +1434,19 @@
 		{/if}
 
 		<div class="mx-auto max-w-3xl space-y-5">
-			{#each messages as msg, msgIdx (msgIdx + ':' + msg.content.slice(0, 20))}
+			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.role === 'user'}
-					<div class="flex justify-end">
+					<div class="flex justify-end items-start gap-1.5">
+						{#if msg.queued}
+							<button
+								onclick={() => removeQueuedMessage(msg)}
+								aria-label={t('chat.remove_queued')}
+								title={t('chat.remove_queued')}
+								class="mt-1 shrink-0 rounded-full p-1 text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+							</button>
+						{/if}
 						<button
 							onclick={() => { if (msg.failed) { sendMessage(msg.content); msg.failed = false; } else { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); } }}
 							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
@@ -1389,6 +1506,41 @@
 									</svg>
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
 								</div>
+								{#if gBlock.toolName === 'spawn_agent' && msg.spawn}
+									{@const sp = msg.spawn}
+									{@const elapsed = Math.max(sp.elapsedS, Math.floor((Date.now() - sp.startedAt) / 1000))}
+									<div class="ml-3 mt-1 mb-1 text-[11px] font-mono text-text-subtle/80 border-l-2 border-warning/30 pl-3 py-1">
+										<div class="flex items-center gap-2 text-text-subtle">
+											<span>{elapsed}s</span>
+											{#if sp.running.length > 0}
+												<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
+												<span>{sp.running.length} aktiv</span>
+											{:else}
+												<span>fertig</span>
+											{/if}
+											{#if elapsed >= 120 && sp.running.length > 0}
+												<span class="text-warning">ungewöhnlich lang</span>
+											{/if}
+										</div>
+										{#each sp.running as subName}
+											<div class="flex items-center gap-2 mt-0.5">
+												<span class="text-text-subtle/60">-&gt;</span>
+												<span class="text-text">{subName}</span>
+												{#if sp.lastToolBySub[subName]}
+													<span class="text-text-subtle/60">·</span>
+													<span class="text-text-subtle/70">{sp.lastToolBySub[subName]}</span>
+												{/if}
+											</div>
+										{/each}
+										{#each sp.done as d}
+											<div class="flex items-center gap-2 mt-0.5">
+												<span class={d.ok ? 'text-success' : 'text-danger'}>{d.ok ? '✓' : '✗'}</span>
+												<span class="text-text-subtle/80">{d.name}</span>
+												<span class="text-text-subtle/50">{d.elapsedS}s</span>
+											</div>
+										{/each}
+									</div>
+								{/if}
 							{:else if gBlock.type === 'text' && gBlock.text}
 								{@const hasArtifact = gBlock.text.includes('```html') && (gBlock.text.includes('<!DOCTYPE') || gBlock.text.includes('<html'))}
 								<div class="relative group/copy">
@@ -1569,7 +1721,7 @@
 			{#if retryStatus}
 				<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-2.5 text-sm text-warning flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-					<span>{t('chat.retry').replace('{attempt}', String(retryStatus.attempt)).replace('{max}', String(retryStatus.maxAttempts))}</span>
+					<span>{retryStatus.reason === 'busy' ? t('chat.busy_wait') : t('chat.retry').replace('{attempt}', String(retryStatus.attempt)).replace('{max}', String(retryStatus.maxAttempts))}</span>
 				</div>
 			{/if}
 
@@ -1630,7 +1782,10 @@
 					{#if batchFocusIdx === i}
 						<!-- Focused question: expanded -->
 						<div class="rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 px-3 py-2">
-							<p class="text-xs font-medium text-text-muted mb-1">{q.header ?? q.question}</p>
+							{#if q.header && q.header !== q.question}
+								<p class="text-[10px] font-medium uppercase tracking-wide text-text-subtle mb-0.5">{q.header}</p>
+							{/if}
+							<p class="text-xs font-medium text-text mb-1">{q.question}</p>
 							{#if q.options.length > 0}
 								<div class="flex flex-wrap gap-1.5">
 									{#each q.options as option}
@@ -1645,7 +1800,8 @@
 											batchAnswers[i] = (batchSelections[i] ?? []).join(', ');
 											batchAnswers = [...batchAnswers];
 										}}
-											class="rounded-[var(--radius-sm)] border px-2.5 py-1 text-xs transition-all {(batchSelections[i] ?? []).includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
+											title={option}
+											class="max-w-full truncate text-left rounded-[var(--radius-sm)] border px-2.5 py-1 text-xs transition-all {(batchSelections[i] ?? []).includes(option) ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-border-hover'}"
 										>{option}</button>
 									{/each}
 								</div>
@@ -1735,7 +1891,7 @@
 					{/if}
 					<div class="flex items-center gap-1.5 shrink-0">
 						{#if promptSecondsLeft != null}
-							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}">{Math.floor(promptSecondsLeft / 60)}:{String(promptSecondsLeft % 60).padStart(2, '0')}</span>
+							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
 						{#if !isPermissionGuard}
 							<button onclick={() => answerPrompt('__dismissed__')} class="p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
@@ -1802,6 +1958,79 @@
 						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
 					</div>
 				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Per-session artifact shelf — silent unless artifacts exist in this thread -->
+	{#if sessionArtifacts.length > 0}
+		<div class="border-t border-border bg-bg-subtle px-4 py-1.5 text-xs">
+			<div class="max-w-3xl mx-auto">
+				<button
+					type="button"
+					onclick={() => { artifactShelfExpanded = !artifactShelfExpanded; }}
+					class="flex items-center gap-2 text-text-subtle hover:text-text transition-colors w-full text-left"
+					aria-expanded={artifactShelfExpanded}
+				>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 transition-transform {artifactShelfExpanded ? 'rotate-90' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+					</svg>
+					<span class="font-mono tabular-nums">{sessionArtifacts.length} · {t('artifacts.title')}</span>
+				</button>
+				{#if artifactShelfExpanded}
+					<div class="mt-2 flex flex-wrap gap-1.5 pb-1">
+						{#each sessionArtifacts as a}
+							<a
+								href="/app/artifacts?focus={encodeURIComponent(a.id)}"
+								class="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg px-2.5 py-1 text-[11px] text-text-muted hover:text-text hover:border-accent/40 transition-all max-w-[20rem]"
+								title={a.title}
+							>
+								<span class="uppercase tracking-wider text-accent-text text-[9px] font-medium shrink-0">{a.type}</span>
+								<span class="truncate">{a.title}</span>
+							</a>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Context-usage banner (only renders at ≥60 %, silent below) -->
+	{#if ctxBudget && ctxBudget.usagePercent >= 60}
+		{@const pct = ctxBudget.usagePercent}
+		{@const critical = pct >= 75}
+		<div
+			class="border-t {critical ? 'border-danger/30 bg-danger/10 text-danger' : 'border-warning/30 bg-warning/10 text-warning'} px-4 py-1.5 text-xs"
+			role="status"
+			aria-live="polite"
+		>
+			<div class="max-w-3xl mx-auto flex items-center gap-2">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3l-6.93-12a2 2 0 00-3.48 0l-6.93 12a2 2 0 001.74 3z" />
+				</svg>
+				<span class="font-mono tabular-nums">{t('status.context')}: {pct}%</span>
+				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">·</span>
+				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">{formatK(ctxBudget.totalTokens)} / {formatK(ctxBudget.maxTokens)} {t('chat.context_tokens')}</span>
+				{#if critical}
+					<span class="opacity-80 hidden md:inline">— {t('chat.context_auto_compact_imminent')}</span>
+				{/if}
+				<!--
+					Manual-compact escape hatch. Auto-compact fires at 75% between
+					turns, but a single turn can push context from 60% → 90%+ when
+					a tool returns a massive payload (DataForSEO ranked_keywords
+					is the canonical case). Giving the user an explicit "compact
+					now" button lets them reclaim the window before the next
+					send, without waiting for the next turn boundary.
+				-->
+				<button
+					type="button"
+					onclick={handleCompactClick}
+					disabled={compacting || isStreaming}
+					class="ml-auto rounded-[var(--radius-sm)] border border-current/40 px-2 py-0.5 text-[11px] font-medium hover:bg-current/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+					title={isStreaming ? t('chat.context_auto_compact_imminent') : t('chat.compact_now')}
+				>
+					{compacting ? t('chat.compact_in_progress') : t('chat.compact_now')}
+				</button>
 			</div>
 		</div>
 	{/if}
@@ -1948,7 +2177,7 @@
 			</p>
 		{/if}
 		{#if isStreaming && queueLength > 0}
-			<div class="hidden md:flex mt-1.5 max-w-3xl mx-auto items-center gap-3">
+			<div class="flex mt-1.5 max-w-3xl mx-auto items-center gap-3">
 				<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
 					{queueLength} {t('chat.hint_queued')}
 				</p>
@@ -1994,6 +2223,16 @@
 {/if}
 
 <style>
+	/* On touch devices (no hover capability), reveal hover-only action buttons
+	   like the per-message copy + speak controls. Without this, the
+	   `opacity-0 group-hover/copy:opacity-100` Tailwind pattern leaves them
+	   permanently invisible on iOS/Android because :hover never fires. */
+	@media (hover: none) {
+		:global(.opacity-0.group-hover\/copy\:opacity-100) {
+			opacity: 1;
+		}
+	}
+
 	@keyframes fadeUp {
 		from { opacity: 0; transform: translateY(12px); }
 		to { opacity: 1; transform: translateY(0); }

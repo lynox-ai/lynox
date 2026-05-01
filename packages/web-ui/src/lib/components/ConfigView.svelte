@@ -65,6 +65,12 @@
 	}
 	let voiceInfo = $state<VoiceInfo | null>(null);
 
+	// Voice quality tier — only `en_paul_neutral` reliably handles non-English
+	// text (DE/FR/IT/ES) on the current Mistral Voxtral catalog (2026-04-25).
+	// Every other voice is marked experimental in the picker so users don't
+	// silently get garbled audio on German chats.
+	const STABLE_VOICE_IDS: ReadonlySet<string> = new Set(['en_paul_neutral']);
+
 	async function loadVoiceInfo() {
 		try {
 			const res = await fetch(`${getApiBase()}/voice/info`);
@@ -115,7 +121,14 @@
 				body: JSON.stringify(payload)
 			});
 			if (!res.ok) {
-				const detail = await res.text().catch(() => '');
+				// Server replies with `{ "error": "..." }` JSON — extract that
+				// instead of dumping the whole response body in the toast.
+				const raw = await res.text().catch(() => '');
+				let detail = '';
+				try {
+					const parsedErr = raw ? (JSON.parse(raw) as { error?: string }) : null;
+					if (parsedErr?.error && typeof parsedErr.error === 'string') detail = parsedErr.error;
+				} catch { /* not JSON — fall through to generic message */ }
 				error = detail ? `${t('common.save_failed')}: ${detail}` : t('common.save_failed');
 				saving = false;
 				return;
@@ -466,11 +479,11 @@
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else}
 		<!-- Tab Bar -->
-		<div class="flex gap-1 border-b border-border mb-6">
+		<div class="flex gap-1 border-b border-border mb-6 overflow-x-auto -mx-1 px-1 scrollbar-thin">
 			{#each tabs as tab}
 				<button
 					onclick={() => setTab(tab.id)}
-					class="px-4 py-2 text-sm transition-colors relative {activeTab === tab.id ? 'text-text font-medium' : 'text-text-muted hover:text-text'}"
+					class="shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm transition-colors relative {activeTab === tab.id ? 'text-text font-medium' : 'text-text-muted hover:text-text'}"
 				>
 					{tab.label}
 					{#if activeTab === tab.id}
@@ -488,13 +501,21 @@
 				<div class={cardClass}>
 					<label for="model" class="block text-sm font-medium mb-1">{t('config.model')}</label>
 					<p class="text-xs text-text-muted mb-2">{t('config.model_desc')}</p>
-					<select id="model" bind:value={config.default_tier} class={inputClass} disabled={isManagedEu}>
-						<option value="haiku" disabled={isManagedEu}>{t('config.model_haiku')}{isManagedEu ? t('config.model_managed_suffix') : ''}</option>
-						<option value="sonnet">{t('config.model_sonnet')}</option>
-						<option value="opus" disabled={isManagedEu}>{t('config.model_opus')}{isManagedEu ? t('config.model_managed_suffix') : ''}</option>
-					</select>
 					{#if isManagedEu}
-						<p class="text-xs text-text-muted mt-1">{t('config.managed_eu_model_locked')}</p>
+						<div class="rounded-[var(--radius-md)] border border-border bg-bg-muted px-3 py-2 text-sm flex items-center gap-2">
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-text-muted shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+							</svg>
+							<span class="font-medium">{t('config.model_sonnet')}</span>
+							<span class="text-text-muted text-xs ml-auto">{t('config.managed_eu_model_managed_label')}</span>
+						</div>
+						<p class="text-xs text-text-muted mt-2">{t('config.managed_eu_model_locked')}</p>
+					{:else}
+						<select id="model" bind:value={config.default_tier} class={inputClass}>
+							<option value="haiku">{t('config.model_haiku')}</option>
+							<option value="sonnet">{t('config.model_sonnet')}</option>
+							<option value="opus">{t('config.model_opus')}</option>
+						</select>
 					{/if}
 				</div>
 
@@ -811,10 +832,11 @@
 							<option value="">{t('config.voice_tts_voice_default')}</option>
 							{#each voiceInfo.tts.voices as v}
 								<option value={v.id}>
-									{v.id}{v.description ? ` — ${v.description}` : ''}{v.language ? ` (${v.language})` : ''}
+									{v.description ?? v.id}{v.language ? ` (${v.language})` : ''}{STABLE_VOICE_IDS.has(v.id) ? '' : ` — ${t('config.voice_tts_voice_experimental_suffix')}`}
 								</option>
 							{/each}
 						</select>
+						<p class="text-xs text-text-muted mt-2">{t('config.voice_tts_voice_non_en_hint')}</p>
 					{/if}
 				</div>
 

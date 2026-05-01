@@ -1,6 +1,6 @@
 {
   "name": "@lynox-ai/core",
-  "version": "1.3.0",
+  "version": "1.3.7",
   "description": "Run your business, not your tools — AI runtime for CRM, workflows, research, monitoring. Self-hosted or managed EU. Source-available (ELv2).",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
@@ -70,7 +70,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
+    "@anthropic-ai/sdk": "^0.91.1",
     "@huggingface/transformers": "^3.8.1",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@mozilla/readability": "^0.6.0",
@@ -78,6 +78,7 @@
     "@sentry/node": "^10.46.0",
     "better-sqlite3": "^12.6.2",
     "email-reply-parser": "^1.7.0",
+    "iconv-lite": "^0.7.2",
     "imapflow": "^1.0.181",
     "linkedom": "^0.18.12",
     "nodemailer": "^7.0.10",

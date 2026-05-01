@@ -67,6 +67,7 @@ export function loadConfig(): LynoxUserConfig {
     'changeset_review', 'greeting', 'context_name',
     'max_daily_cost_usd', 'max_monthly_cost_usd',
     'max_http_requests_per_hour', 'max_http_requests_per_day',
+    'max_mail_sends_per_hour', 'max_mail_sends_per_day', 'mail_dedup_window_sec',
     'memory_extraction',
     'memory_half_life_days',
     'pipeline_context_limit', 'pipeline_step_result_limit',
@@ -150,6 +151,13 @@ export function loadConfig(): LynoxUserConfig {
     if (tier === 'haiku' || tier === 'sonnet' || tier === 'opus') {
       merged.max_tier = tier;
     }
+  }
+  // Account plan tier (separate from LLM model tier) — 'pro' unlocks
+  // capabilities like the researcher-role Opus override. Defaults to
+  // 'standard' when unset.
+  if (process.env['LYNOX_ACCOUNT_TIER']) {
+    const t = process.env['LYNOX_ACCOUNT_TIER'];
+    if (t === 'standard' || t === 'pro') merged.account_tier = t;
   }
   // GCP config for Vertex AI
   if (process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']) {

@@ -15,6 +15,17 @@ export interface MailAddress {
 //
 // Standard IMAP system flags use the backslash prefix (e.g. '\\Seen').
 // Custom keywords (e.g. '$lynox-processed') are passed through as-is.
+//
+// Provider asymmetry (do not assume cross-provider symmetry):
+//
+// - `\\Answered` is IMAP-only. The Gmail provider never emits it because
+//   Gmail tracks reply state at thread level — no per-message label
+//   maps to it, and deriving it would cost a thread round-trip per
+//   envelope with ambiguous results on multi-participant threads. Code
+//   that filters or branches on `\\Answered` will see different results
+//   on Gmail vs. IMAP accounts.
+// - `\\Recent` is an IMAP-session concept and is not produced by either
+//   provider in lynox.
 export type MailFlag =
   | '\\Seen'
   | '\\Answered'
@@ -200,9 +211,30 @@ export interface MailWatchHandle {
 
 // ── Provider contract ──────────────────────────────────────────────────────
 
+/**
+ * Auth/transport flavor of a configured mailbox.
+ *
+ * - `imap`            — IMAP/SMTP with app-password credentials
+ * - `oauth_google`    — Gmail API via Google OAuth tokens (Phase 1b)
+ * - `oauth_microsoft` — Microsoft Graph via Microsoft OAuth tokens (Phase 1b+)
+ *
+ * Lives on both `MailAccountConfig.authType` and `MailProvider.authType` so
+ * callers can branch on it without inspecting the concrete provider class.
+ */
+export type MailAuthType = 'imap' | 'oauth_google' | 'oauth_microsoft';
+
+export const ALL_AUTH_TYPES: ReadonlyArray<MailAuthType> = ['imap', 'oauth_google', 'oauth_microsoft'];
+
+export function isValidAuthType(value: unknown): value is MailAuthType {
+  return typeof value === 'string' && (ALL_AUTH_TYPES as ReadonlyArray<string>).includes(value);
+}
+
 export interface MailProvider {
   /** Stable identifier for this provider instance (account id). */
   readonly accountId: string;
+
+  /** Auth/transport flavor of this provider. */
+  readonly authType: MailAuthType;
 
   /** Lightweight envelope listing — never fetches full bodies. */
   list(opts?: MailListOptions): Promise<ReadonlyArray<MailEnvelope>>;
@@ -235,6 +267,11 @@ export interface MailServerConfig {
 /**
  * Stored, non-secret account configuration. Credentials are resolved at
  * connection time via the SecretStore — never stored on this object.
+ *
+ * `authType` selects which provider implementation hydrates this row:
+ *   - `imap`            → ImapSmtpProvider, requires `imap` + `smtp` fields
+ *   - `oauth_google`    → OAuthGmailProvider, requires `oauthProviderKey`
+ *   - `oauth_microsoft` → OAuthMicrosoftProvider (future), requires `oauthProviderKey`
  */
 export interface MailAccountConfig {
   /** Stable id, e.g. 'rafael-gmail'. Used as the SecretStore key prefix. */
@@ -245,10 +282,18 @@ export interface MailAccountConfig {
   address: string;
   /** Preset slug for telemetry and onboarding context (e.g. 'gmail'). */
   preset: MailPresetSlug;
+  /** IMAP server config — required when `authType === 'imap'`, ignored otherwise. */
   imap: MailServerConfig;
+  /** SMTP server config — required when `authType === 'imap'`, ignored otherwise. */
   smtp: MailServerConfig;
-  /** Phase 0 only supports app-password. Phase 1b will add 'ms-oauth'. */
-  auth: 'app-password';
+  /** Auth/transport flavor — see {@link MailAuthType}. */
+  authType: MailAuthType;
+  /**
+   * Pointer to the vault key holding OAuth tokens for this account. Required
+   * when `authType` starts with `oauth_`. For `imap` accounts, leave undefined —
+   * IMAP credentials are resolved separately via the credential store.
+   */
+  oauthProviderKey?: string | undefined;
   /**
    * Semantic role of this mailbox. Drives agent behavior, tone, auto-reply
    * policy, and the receive-only hard block for compliance addresses.
@@ -260,6 +305,12 @@ export interface MailAccountConfig {
    * When unset, the agent uses the default persona derived from `type`.
    */
   personaPrompt?: string | undefined;
+  /**
+   * True iff this mailbox is the user's chosen default. Persisted across
+   * restarts so the default no longer flips when providers happen to
+   * register in a different order. Updated via `MailContext.setDefault()`.
+   */
+  isDefault?: boolean | undefined;
 }
 
 export type MailPresetSlug =

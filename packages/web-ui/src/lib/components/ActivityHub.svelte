@@ -263,7 +263,7 @@
 								{#each openTasks.slice(0, 5) as task}
 									<div class="flex items-center gap-2 text-sm">
 										<span class="h-1.5 w-1.5 rounded-full {task.status === 'in_progress' ? 'bg-warning' : 'bg-text-subtle'}"></span>
-										<span class="text-text flex-1 truncate">{task.title}</span>
+										<span class="text-text flex-1 line-clamp-2 break-words">{task.title}</span>
 										{#if task.assignee}
 											<span class="text-[10px] text-text-subtle">@{task.assignee}</span>
 										{/if}
@@ -280,7 +280,7 @@
 							<div class="space-y-2">
 								{#each scheduledTasks.slice(0, 5) as task}
 									<div class="flex items-center justify-between text-sm">
-										<span class="text-text truncate">{task.title}</span>
+										<span class="text-text min-w-0 line-clamp-2 break-words">{task.title}</span>
 										<span class="text-[10px] text-text-subtle">{cronToHuman(task.schedule_cron ?? '')}</span>
 									</div>
 								{/each}

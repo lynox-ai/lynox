@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createWebSearchTool } from './web-search-tool.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
+import * as reranker from './search-reranker.js';
 
 function mockProvider(results: SearchResult[] = []): SearchProvider {
   return {
@@ -19,6 +20,20 @@ describe('createWebSearchTool', () => {
   it('includes provider name in description', () => {
     const tool = createWebSearchTool(mockProvider());
     expect(tool.definition.description).toContain('test');
+  });
+
+  // Guards against accidental removal of the query-formulation guidance.
+  // These markers are what steers the agent away from noisy 10-word queries
+  // like "pytrends Google Trends unofficial API 2024 rate limits DACH Germany".
+  it('description includes query formulation guidance', () => {
+    const tool = createWebSearchTool(mockProvider());
+    const desc = tool.definition.description ?? '';
+    expect(desc).toMatch(/2-4 high-signal terms/i);
+    expect(desc).toMatch(/no year qualifiers/i);
+    expect(desc).toMatch(/no country\/region codes|no country codes/i);
+    expect(desc).toMatch(/reformulate/i);
+    // Positive + negative example present
+    expect(desc).toMatch(/good:.*bad:/is);
   });
 });
 
@@ -186,6 +201,49 @@ describe('search edge cases', () => {
     const publishedCount = (result.match(/Published:/g) ?? []).length;
     expect(publishedCount).toBe(1);
     expect(result).toContain('Published: 2026-04-01');
+  });
+
+  it('calls reranker between provider.search and enrichment', async () => {
+    const raw: SearchResult[] = [
+      { title: 'Noise', url: 'https://mdn.example/webgpu', snippet: 'GPU limits' },
+      { title: 'Pytrends', url: 'https://github.com/pytrends', snippet: 'Google Trends wrapper' },
+    ];
+    const filtered: SearchResult[] = [raw[1]!];
+    const rerankSpy = vi.spyOn(reranker, 'rerankSearchResults').mockResolvedValue({
+      results: filtered,
+      droppedCount: 1,
+      meanScore: 5,
+      durationMs: 10,
+    });
+    const provider = mockProvider(raw);
+    const tool = createWebSearchTool(provider);
+    const result = await tool.handler({ action: 'search', query: 'pytrends github' }, {} as never);
+
+    expect(rerankSpy).toHaveBeenCalledWith('pytrends github', raw);
+    expect(result).toContain('Pytrends');
+    expect(result).not.toContain('Noise');
+    rerankSpy.mockRestore();
+  });
+
+  it('passes reranker failures through transparently (original results preserved)', async () => {
+    const raw: SearchResult[] = [
+      { title: 'A', url: 'https://a', snippet: 's1' },
+      { title: 'B', url: 'https://b', snippet: 's2' },
+    ];
+    const rerankSpy = vi.spyOn(reranker, 'rerankSearchResults').mockResolvedValue({
+      results: raw,
+      droppedCount: 0,
+      meanScore: null,
+      skipReason: 'llm-error',
+      durationMs: 5,
+    });
+    const tool = createWebSearchTool(mockProvider(raw));
+    const result = await tool.handler({ action: 'search', query: 'x' }, {} as never);
+
+    expect(rerankSpy).toHaveBeenCalled();
+    expect(result).toContain('A');
+    expect(result).toContain('B');
+    rerankSpy.mockRestore();
   });
 
   it('handles whitespace-only query', async () => {

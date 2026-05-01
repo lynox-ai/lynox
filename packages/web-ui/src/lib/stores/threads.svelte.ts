@@ -1,6 +1,7 @@
 import { getApiBase } from '../config.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { t } from '../i18n.svelte.js';
+import { dropPersistedThread } from './chat.svelte.js';
 
 export interface Thread {
 	id: string;
@@ -51,6 +52,7 @@ export async function archiveThread(id: string, activeSessionId?: string | null)
 		return;
 	}
 	threads = threads.filter((t) => t.id !== id);
+	dropPersistedThread(id);
 	if (activeSessionId && activeSessionId === id) _onActiveThreadRemoved?.(id);
 }
 
@@ -74,6 +76,7 @@ export async function deleteThread(id: string, activeSessionId?: string | null):
 		return;
 	}
 	threads = threads.filter((t) => t.id !== id);
+	dropPersistedThread(id);
 	if (activeSessionId && activeSessionId === id) _onActiveThreadRemoved?.(id);
 }
 

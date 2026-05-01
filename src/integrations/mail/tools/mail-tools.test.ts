@@ -21,6 +21,7 @@ import { createMailReadTool } from './mail-read.js';
 import { createMailSendTool } from './mail-send.js';
 import { createMailReplyTool } from './mail-reply.js';
 import { createMailTriageTool } from './mail-triage.js';
+import { configureMailRateLimits, resetMailRateLimits } from './rate-limit.js';
 import type { MailContext, MailAccountView } from '../context.js';
 import type { MailAccountConfig } from '../provider.js';
 
@@ -91,6 +92,12 @@ beforeEach(() => {
   provider = new FakeProvider('rafael-gmail');
   registry = new InMemoryMailRegistry();
   registry.add(provider);
+  // PR3: registry.add no longer auto-defaults — tests pick the default
+  // explicitly here so resolveProvider falls back to the right account.
+  registry.setDefault(provider.accountId);
+  // Mail rate limit + dedup state is module-level; reset between tests so
+  // ordering doesn't matter and the dedup map can't leak across cases.
+  resetMailRateLimits();
 });
 
 // ── mail_search ────────────────────────────────────────────────────────────
@@ -111,8 +118,12 @@ describe('mail_search tool', () => {
     expect(q.unseen).toBe(true);
     expect(o?.limit).toBe(10);
     expect(out).toContain('Found 2 message(s)');
-    expect(out).toContain('1. Invoice');
-    expect(out).toContain('2. Contract');
+    // PR4 hardening: subject lives inside the per-envelope untrusted_data
+    // wrapper, not on the operational header line.
+    expect(out).toContain('Subject: Invoice');
+    expect(out).toContain('Subject: Contract');
+    expect(out).toContain('1. uid:1');
+    expect(out).toContain('2. uid:2');
   });
 
   it('parses since/before into Date objects', async () => {
@@ -259,11 +270,58 @@ describe('mail_send tool', () => {
     const out = await tool.handler({ to: 'not-an-email; also-not', subject: 's', body: 'b' }, yesAgent);
     expect(out).toContain('did not parse');
   });
+
+  it('blocks bodies that look like they contain credentials (Anthropic API key)', async () => {
+    const tool = createMailSendTool(registry);
+    // Token built from parts so the source file isn't flagged by gitleaks /
+    // pre-push pattern scan as containing a real key.
+    const fakeAnthropic = 'sk-ant' + '-api03-' + 'AAAAAAAAAAAAAAAAAAAA';
+    const out = await tool.handler({
+      to: 'a@x.com',
+      subject: 'fwd',
+      body: `Here is the key you asked for: ${fakeAnthropic}`,
+    }, yesAgent);
+    expect(out).toContain('mail_send blocked');
+    expect(out).toContain('Anthropic API key');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('blocks bodies containing JWT tokens', async () => {
+    const tool = createMailSendTool(registry);
+    const fakeJwt = 'eyJhbGc' + 'iOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature';
+    const out = await tool.handler({
+      to: 'a@x.com',
+      subject: 'fwd',
+      body: `Auth: ${fakeJwt}`,
+    }, yesAgent);
+    expect(out).toContain('mail_send blocked');
+    expect(out).toContain('JWT token');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
 });
 
 // ── mail_reply ─────────────────────────────────────────────────────────────
 
 describe('mail_reply tool', () => {
+  it('blocks reply bodies that contain credentials', async () => {
+    const orig = envelope(50, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'API question' });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: 'How do I authenticate?', html: undefined, attachments: [],
+      inReplyTo: undefined, references: undefined,
+    });
+    const tool = createMailReplyTool(registry);
+    // Construct the token at runtime so neither pre-push gitleaks nor the
+    // pattern scanner flags this test file as containing a real PAT.
+    const fakeToken = 'ghp' + '_' + 'abcdefghijklmnopqrstuvwxyz0123456789';
+    const out = await tool.handler({
+      uid: 50,
+      body: `Use this token: ${fakeToken}`,
+    }, yesAgent);
+    expect(out).toContain('mail_reply blocked');
+    expect(out).toContain('GitHub');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
   it('fetches the original, builds In-Reply-To + References, and sends after confirm', async () => {
     const orig = envelope(100, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'Question' });
     provider.fetch.mockResolvedValue({
@@ -301,13 +359,15 @@ describe('mail_reply tool', () => {
 
   it('reply_all unions To+Cc minus our own address (accountId-as-email heuristic)', async () => {
     // Use an account whose id IS the email address so the dedup heuristic kicks in
-    const myProvider = new FakeProvider('rafael@example.com');
+    const myProvider = new FakeProvider('user@example.com');
+    // PR3: registry.add no longer auto-defaults — must set explicitly
     const myRegistry = new InMemoryMailRegistry();
     myRegistry.add(myProvider);
+    myRegistry.setDefault(myProvider.accountId);
 
     const orig: MailEnvelope = {
       ...envelope(5, { messageId: '<o@x>', from: 'alice@example.com', subject: 'Q' }),
-      to: [{ address: 'rafael@example.com' }, { address: 'colleague@example.com' }],
+      to: [{ address: 'user@example.com' }, { address: 'colleague@example.com' }],
       cc: [{ address: 'manager@example.com' }],
     };
     myProvider.fetch.mockResolvedValue({
@@ -324,7 +384,7 @@ describe('mail_reply tool', () => {
     expect(ccAddrs).toContain('colleague@example.com');
     expect(ccAddrs).toContain('manager@example.com');
     // Our own address is filtered out
-    expect(ccAddrs).not.toContain('rafael@example.com');
+    expect(ccAddrs).not.toContain('user@example.com');
   });
 
   it('rejects when the original has no sender and no override is given', async () => {
@@ -481,7 +541,7 @@ function businessAccount(id: string, address: string): MailAccountConfig {
     id, displayName: id, address, preset: 'custom',
     imap: { host: 'i', port: 993, secure: true },
     smtp: { host: 's', port: 465, secure: true },
-    auth: 'app-password',
+    authType: 'imap',
     type: 'business',
   };
 }
@@ -491,7 +551,7 @@ function receiveOnlyAccount(id: string, address: string, type: 'info' | 'abuse' 
     id, displayName: id, address, preset: 'custom',
     imap: { host: 'i', port: 993, secure: true },
     smtp: { host: 's', port: 465, secure: true },
-    auth: 'app-password',
+    authType: 'imap',
     type,
   };
 }
@@ -550,7 +610,7 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
   it('blocks mail_send from an info@ account without prompting', async () => {
     // The default registry fixture has a provider with id 'rafael-gmail' —
     // declare its config as receive-only so the hard block fires.
-    const cfg = receiveOnlyAccount('rafael-gmail', 'info@brandfusion.ch', 'info');
+    const cfg = receiveOnlyAccount('rafael-gmail', 'info@example.com', 'info');
     const ctx = makeStubContext([cfg]);
     const tool = createMailSendTool(registry, ctx);
     const promptSpy = vi.fn(async () => 'Yes');
@@ -563,7 +623,7 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
   });
 
   it('blocks mail_send from an abuse@ account — compliance channel', async () => {
-    const cfg = receiveOnlyAccount('rafael-gmail', 'abuse@brandfusion.ch', 'abuse');
+    const cfg = receiveOnlyAccount('rafael-gmail', 'abuse@example.com', 'abuse');
     const ctx = makeStubContext([cfg]);
     const tool = createMailSendTool(registry, ctx);
     const agent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
@@ -573,14 +633,14 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
   });
 
   it('blocks mail_reply when sending account would be receive-only', async () => {
-    const abuseCfg = receiveOnlyAccount('rafael-gmail', 'abuse@brandfusion.ch', 'abuse');
+    const abuseCfg = receiveOnlyAccount('rafael-gmail', 'abuse@example.com', 'abuse');
     const ctx = makeStubContext([abuseCfg]);
     // Provider read path: the original was received via 'rafael-gmail' (declared abuse),
     // and the reply-from derivation would pick the same — so the hard block kicks in.
     provider.fetch.mockResolvedValue({
       envelope: {
         ...envelope(1, { messageId: '<o@x>' }),
-        to: [{ address: 'abuse@brandfusion.ch' }],
+        to: [{ address: 'abuse@example.com' }],
       },
       text: 'Phishing report content',
       html: undefined,
@@ -602,10 +662,10 @@ describe('mail_reply — smart reply-from', () => {
     const personal = new FakeProvider('personal');
     const business = new FakeProvider('business');
     const personalCfg: MailAccountConfig = {
-      ...businessAccount('personal', 'rafael@gmail.com'),
+      ...businessAccount('personal', 'user@gmail.com'),
       type: 'personal',
     };
-    const businessCfg = businessAccount('business', 'rafael@brandfusion.ch');
+    const businessCfg = businessAccount('business', 'user@example.com');
     const ctx = makeStubContext([personalCfg, businessCfg]);
     const reg = new InMemoryMailRegistry();
     reg.add(personal);
@@ -616,7 +676,7 @@ describe('mail_reply — smart reply-from', () => {
       envelope: {
         ...envelope(42, { messageId: '<inbound@x>' }),
         to: [{ address: 'someone@example.com' }],
-        cc: [{ address: 'rafael@brandfusion.ch' }],
+        cc: [{ address: 'user@example.com' }],
       },
       text: 'hi',
       html: undefined,
@@ -638,12 +698,13 @@ describe('mail_reply — smart reply-from', () => {
   it('falls back to the read account when no recipient matches a registered account', async () => {
     const p = new FakeProvider('personal');
     const personalCfg: MailAccountConfig = {
-      ...businessAccount('personal', 'rafael@gmail.com'),
+      ...businessAccount('personal', 'user@gmail.com'),
       type: 'personal',
     };
     const ctx = makeStubContext([personalCfg]);
     const reg = new InMemoryMailRegistry();
     reg.add(p);
+    reg.setDefault(p.accountId);
 
     p.fetch.mockResolvedValue({
       envelope: {
@@ -682,7 +743,7 @@ describe('mail_send — mass-send cross-field counting', () => {
 
 describe('receive-only types still allow read operations', () => {
   it('info@ account can be listed by mail_triage', async () => {
-    const infoCfg = receiveOnlyAccount('rafael-gmail', 'info@brandfusion.ch', 'info');
+    const infoCfg = receiveOnlyAccount('rafael-gmail', 'info@example.com', 'info');
     const ctx = makeStubContext([infoCfg]);
     provider.list.mockResolvedValue([
       envelope(1, { messageId: '<m@x>', from: 'client@example.com', subject: 'Question' }),
@@ -729,5 +790,182 @@ describe('mail_send — persona hint in confirmation prompt', () => {
     const agent: IAgent = { promptUser: async (q: string) => { prompt = q; return 'Yes'; } } as unknown as IAgent;
     await tool.handler({ to: 'bob@example.com', subject: 's', body: 'b' }, agent);
     expect(prompt).toContain('Captain Marvel');
+  });
+});
+
+// ── Rate limits + per-recipient dedup ──────────────────────────────────────
+
+describe('mail_send + mail_reply — rate limits', () => {
+  function fakeCountProvider(counts: Partial<Record<'mail_send' | 'mail_reply', { 1?: number; 24?: number }>>) {
+    return {
+      getToolCallCountSince: (toolName: string, hours: number): number => {
+        const t = counts[toolName as 'mail_send' | 'mail_reply'];
+        if (!t) return 0;
+        const slot = hours <= 1 ? t[1] : t[24];
+        return slot ?? 0;
+      },
+    };
+  }
+
+  it('blocks mail_send when the hourly cap is reached', async () => {
+    configureMailRateLimits({
+      provider: fakeCountProvider({ mail_send: { 1: 50 } }),
+      hourlyLimit: 50,
+      dailyLimit: 200,
+    });
+    provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    const tool = createMailSendTool(registry);
+    const out = await tool.handler({ to: 'a@x.com', subject: 's', body: 'b' }, yesAgent);
+    expect(out).toContain('hourly mail_send limit');
+    expect(out).toContain('50');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('blocks mail_send when the daily cap is reached', async () => {
+    configureMailRateLimits({
+      provider: fakeCountProvider({ mail_send: { 1: 5, 24: 200 } }),
+      hourlyLimit: 50,
+      dailyLimit: 200,
+    });
+    const tool = createMailSendTool(registry);
+    const out = await tool.handler({ to: 'a@x.com', subject: 's', body: 'b' }, yesAgent);
+    expect(out).toContain('daily mail_send limit');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('passes through when below the caps', async () => {
+    configureMailRateLimits({
+      provider: fakeCountProvider({ mail_send: { 1: 5, 24: 30 } }),
+      hourlyLimit: 50,
+      dailyLimit: 200,
+    });
+    provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: ['a@x.com'], rejected: [] });
+    const tool = createMailSendTool(registry);
+    const out = await tool.handler({ to: 'a@x.com', subject: 's', body: 'b' }, yesAgent);
+    expect(out).toContain('Email sent');
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('mail_send and mail_reply count independently', async () => {
+    // mail_send is at the cap; mail_reply has zero count → reply still goes through.
+    configureMailRateLimits({
+      provider: fakeCountProvider({ mail_send: { 1: 50 } }),
+      hourlyLimit: 50,
+    });
+    const orig = envelope(1, { messageId: '<o@x>', from: 'alice@example.com', subject: 'Q' });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: '', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: [], rejected: [] });
+    const tool = createMailReplyTool(registry);
+    const out = await tool.handler({ uid: 1, body: 'reply' }, yesAgent);
+    expect(out).toContain('Reply sent');
+  });
+});
+
+describe('mail_send + mail_reply — per-recipient dedup', () => {
+  it('blocks the second send with the same recipients + subject within the window', async () => {
+    provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    const tool = createMailSendTool(registry);
+
+    const first = await tool.handler({ to: 'a@x.com', subject: 'Hello', body: 'first' }, yesAgent);
+    expect(first).toContain('Email sent');
+
+    const second = await tool.handler({ to: 'a@x.com', subject: 'Hello', body: 'second' }, yesAgent);
+    expect(second).toContain('same recipient');
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('different subject is not deduped', async () => {
+    provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    const tool = createMailSendTool(registry);
+
+    await tool.handler({ to: 'a@x.com', subject: 'Subject A', body: 'b' }, yesAgent);
+    const second = await tool.handler({ to: 'a@x.com', subject: 'Subject B', body: 'b' }, yesAgent);
+    expect(second).toContain('Email sent');
+    expect(provider.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('different recipient is not deduped', async () => {
+    provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    const tool = createMailSendTool(registry);
+
+    await tool.handler({ to: 'a@x.com', subject: 'Hi', body: 'b' }, yesAgent);
+    const second = await tool.handler({ to: 'b@x.com', subject: 'Hi', body: 'b' }, yesAgent);
+    expect(second).toContain('Email sent');
+    expect(provider.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('dedup is normalized — recipient case + subject whitespace do not let a duplicate slip through', async () => {
+    provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    const tool = createMailSendTool(registry);
+
+    await tool.handler({ to: 'a@x.com', subject: 'Hi', body: 'b' }, yesAgent);
+    const second = await tool.handler({ to: 'A@X.COM', subject: '  Hi  ', body: 'b' }, yesAgent);
+    expect(second).toContain('same recipient');
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('mail_reply shares the dedup window with mail_send (recipients+subject keyed)', async () => {
+    // mail_send fires first.
+    provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    const sendTool = createMailSendTool(registry);
+    await sendTool.handler({ to: 'alice@example.com', subject: 'Re: Question', body: 'b' }, yesAgent);
+
+    // mail_reply with identical recipients + subject is rejected.
+    const orig = envelope(1, { messageId: '<o@x>', from: 'alice@example.com', subject: 'Question' });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: '', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    const replyTool = createMailReplyTool(registry);
+    const out = await replyTool.handler({ uid: 1, body: 'reply' }, yesAgent);
+    expect(out).toContain('same recipient');
+    // Only the original mail_send went through.
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('disabled when window is 0', async () => {
+    configureMailRateLimits({
+      provider: { getToolCallCountSince: () => 0 },
+      dedupWindowMs: 0,
+    });
+    provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    const tool = createMailSendTool(registry);
+    await tool.handler({ to: 'a@x.com', subject: 'Hi', body: 'b' }, yesAgent);
+    const out = await tool.handler({ to: 'a@x.com', subject: 'Hi', body: 'b' }, yesAgent);
+    expect(out).toContain('Email sent');
+    expect(provider.send).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('mail_send + mail_reply — audit redactor strips body', () => {
+  it('mail_send.redactInputForAudit removes body, keeps everything else', () => {
+    const tool = createMailSendTool(registry);
+    expect(tool.redactInputForAudit).toBeDefined();
+    const redacted = tool.redactInputForAudit!({
+      to: 'a@x.com',
+      cc: 'cc@x.com',
+      subject: 'Hi',
+      body: 'sensitive body content here',
+    }) as Record<string, unknown>;
+    expect(redacted.body).toBeUndefined();
+    expect(redacted.body_chars).toBe(27);
+    expect(redacted.to).toBe('a@x.com');
+    expect(redacted.cc).toBe('cc@x.com');
+    expect(redacted.subject).toBe('Hi');
+  });
+
+  it('mail_reply.redactInputForAudit removes body, keeps uid and metadata', () => {
+    const tool = createMailReplyTool(registry);
+    expect(tool.redactInputForAudit).toBeDefined();
+    const redacted = tool.redactInputForAudit!({
+      uid: 42,
+      body: 'sensitive reply',
+      reply_all: true,
+    }) as Record<string, unknown>;
+    expect(redacted.body).toBeUndefined();
+    expect(redacted.body_chars).toBe(15);
+    expect(redacted.uid).toBe(42);
+    expect(redacted.reply_all).toBe(true);
   });
 });

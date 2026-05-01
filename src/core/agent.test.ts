@@ -95,7 +95,9 @@ function makeTool(name: string, handler?: ToolEntry['handler']): ToolEntry {
     definition: {
       name,
       description: `Test tool ${name}`,
-      input_schema: { type: 'object' as const, properties: {} },
+      // Test stubs accept arbitrary inputs — the validator runs strict by
+      // default for real tools but opts these out via additionalProperties.
+      input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
     },
     handler: handler ?? vi.fn().mockResolvedValue('tool result'),
   };
@@ -147,7 +149,7 @@ describe('Agent', () => {
       expect(mockProcess).toHaveBeenCalledTimes(2);
     });
 
-    it('restores messages to snapshot length on abort', async () => {
+    it('keeps user message but drops partial assistant content on abort', async () => {
       mockProcess.mockImplementation(() => {
         return new Promise((_resolve, reject) => {
           // Simulate delayed rejection after abort
@@ -169,7 +171,19 @@ describe('Agent', () => {
 
       const result = await sendPromise;
       expect(result).toBe('');
-      // Messages should be restored to snapshot (only 'old')
+      // The aborted user message stays in history so the next send has its context.
+      expect(agent.getMessages()).toHaveLength(2);
+      expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
+      expect(agent.getMessages()[1]).toEqual({ role: 'user', content: 'new message' });
+    });
+
+    it('rolls back fully on non-abort errors', async () => {
+      mockProcess.mockRejectedValue(new Error('boom'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      agent.loadMessages([{ role: 'user', content: 'old' }]);
+
+      await expect(agent.send('new message')).rejects.toThrow('boom');
       expect(agent.getMessages()).toHaveLength(1);
       expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
     });
@@ -390,6 +404,35 @@ describe('Agent', () => {
       expect(toolResultEvents[0]!.result).toContain('boom');
     });
 
+    it('does NOT emit a fatal `error` stream event when a tool throws and the agent recovers', async () => {
+      // Regression for the rafael.lynox.cloud incident (2026-04-26): spawn_agent
+      // threw on the session cost ceiling, the agent fell back to direct
+      // web_research and finished the turn — but the UI showed a global
+      // "Etwas ist schiefgelaufen" toast because the engine emitted an
+      // `error` SSE on top of the inline tool_result. Tool-level errors must
+      // stay inline; only iteration-limit / _callAPI failures may emit `error`.
+      const failTool = makeTool('bad_tool', vi.fn().mockRejectedValue(new Error('cost ceiling')));
+      const onStream = vi.fn();
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_bad', name: 'bad_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Recovered'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [failTool],
+        onStream,
+      });
+      const result = await agent.send('Use it');
+
+      expect(result).toBe('Recovered');
+      const errorEvents = onStream.mock.calls
+        .map(c => c[0])
+        .filter(e => e.type === 'error');
+      expect(errorEvents).toEqual([]);
+    });
+
     it('tool not found: returns error result', async () => {
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_missing', name: 'nonexistent', input: {} }]))
@@ -408,6 +451,61 @@ describe('Agent', () => {
       const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
       expect(results[0]!.content).toContain('Tool not found: nonexistent');
       expect(results[0]!.is_error).toBe(true);
+      // Non-retryable prefix steers the model away from "let me try again with haiku"
+      expect(results[0]!.content).toContain('[NON_RETRYABLE');
+    });
+
+    it('annotates non-retryable config errors with a clear prefix', async () => {
+      const roleErrorTool = makeTool(
+        'spawn_agent',
+        vi.fn().mockRejectedValue(
+          new Error('Unknown role "analyst". Available roles: researcher, creator, operator, collector.'),
+        ),
+      );
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_spawn', name: 'spawn_agent', input: { agents: [] } }]))
+        .mockResolvedValueOnce(endTurnResponse('OK'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [roleErrorTool],
+      });
+      await agent.send('Spawn analyst');
+
+      const messages = agent.getMessages();
+      const toolResultsMsg = messages[2];
+      const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
+      expect(results[0]!.is_error).toBe(true);
+      expect(results[0]!.content).toContain('[NON_RETRYABLE config error');
+      expect(results[0]!.content).toContain('do not retry with a different model');
+      expect(results[0]!.content).toContain('Unknown role "analyst"');
+    });
+
+    it('leaves unfamiliar errors untouched (no false-positive annotation)', async () => {
+      const transientTool = makeTool(
+        'http_request',
+        vi.fn().mockRejectedValue(new Error('fetch failed: ECONNRESET')),
+      );
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_http', name: 'http_request', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('OK'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [transientTool],
+      });
+      await agent.send('Fetch');
+
+      const messages = agent.getMessages();
+      const toolResultsMsg = messages[2];
+      const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
+      // Transient network errors may legitimately retry — do NOT prefix.
+      expect(results[0]!.content).not.toContain('[NON_RETRYABLE');
+      expect(results[0]!.content).toContain('ECONNRESET');
     });
 
     it('isDangerous + promptUser: y allows execution', async () => {
@@ -481,6 +579,73 @@ describe('Agent', () => {
       expect(results[0]!.content).toContain('Permission denied (non-interactive)');
       expect(results[0]!.is_error).toBe(true);
       expect(tool.handler).not.toHaveBeenCalled();
+    });
+
+    it('input validation: rejects unknown top-level key before handler runs', async () => {
+      const handler = vi.fn().mockResolvedValue('never called');
+      const strictTool: ToolEntry = {
+        definition: {
+          name: 'strict_tool',
+          description: 'Strict schema — no additionalProperties',
+          input_schema: {
+            type: 'object',
+            properties: { title: { type: 'string' } },
+            required: ['title'],
+          },
+        },
+        handler,
+      };
+
+      mockProcess
+        .mockResolvedValueOnce(
+          toolUseResponse([{ id: 'tu_v', name: 'strict_tool', input: { title: 'ok', bogus_key: 1 } }]),
+        )
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [strictTool] });
+      await agent.send('x');
+
+      expect(handler).not.toHaveBeenCalled();
+      const messages = agent.getMessages();
+      const toolResultsMsg = messages[2];
+      const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
+      expect(results[0]!.content).toContain('Input validation failed');
+      expect(results[0]!.content).toContain('bogus_key');
+      expect(results[0]!.is_error).toBe(true);
+    });
+
+    it('input validation: rejects missing required field', async () => {
+      const handler = vi.fn().mockResolvedValue('never called');
+      const strictTool: ToolEntry = {
+        definition: {
+          name: 'req_tool',
+          description: 'Schema with required title',
+          input_schema: {
+            type: 'object',
+            properties: { title: { type: 'string' } },
+            required: ['title'],
+          },
+        },
+        handler,
+      };
+
+      mockProcess
+        .mockResolvedValueOnce(
+          toolUseResponse([{ id: 'tu_r', name: 'req_tool', input: {} }]),
+        )
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [strictTool] });
+      await agent.send('x');
+
+      expect(handler).not.toHaveBeenCalled();
+      const messages = agent.getMessages();
+      const toolResultsMsg = messages[2];
+      const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
+      expect(results[0]!.content).toContain('Input validation failed');
+      expect(results[0]!.content).toContain('title');
+      expect(results[0]!.content).toContain('required');
+      expect(results[0]!.is_error).toBe(true);
     });
   });
 

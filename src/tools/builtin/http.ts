@@ -1,5 +1,8 @@
 import dns from 'node:dns/promises';
 import type { ToolEntry, NetworkPolicy } from '../../types/index.js';
+import { applyShape } from '../../core/api-shape.js';
+import { channels } from '../../core/observability.js';
+import type { ToolContext } from '../../core/tool-context.js';
 
 // === Network policy enforcement ===
 
@@ -245,6 +248,16 @@ async function readBodyLimited(response: Response, maxBytes: number): Promise<{ 
 
 /** Domains approved for outbound data requests (POST/PUT/PATCH) in this session. */
 const approvedOutboundDomains = new Set<string>();
+/**
+ * In-flight permission prompts keyed by hostname. Parallel `http_request`
+ * tool_use blocks against the same hostname must share one prompt — the
+ * PromptStore has a UNIQUE index per session_id WHERE status='pending', so
+ * a second concurrent insertAskUser throws PromptConflictError. Without a
+ * shared promise, calls 2..N of a five-way parallel batch all fail with
+ * "Session already has a pending prompt" before the user even sees the
+ * first prompt. See feedback_2026-04-23 (Keyword-Research run).
+ */
+const pendingOutboundPrompts = new Map<string, Promise<boolean>>();
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 const MAX_REQUESTS_PER_SESSION = 100;
@@ -329,6 +342,51 @@ function detectGetExfiltration(url: string): string | null {
     // Invalid URL — will be caught by validateUrl later
   }
   return null;
+}
+
+/**
+ * Apply the API profile's response_shape (if any) to a parsed JSON response.
+ * Falls back to standard JSON.stringify on any error; never throws.
+ */
+async function maybeShapeJson(json: unknown, url: string, toolContext: ToolContext | undefined): Promise<string> {
+  const defaultBody = JSON.stringify(json, null, 2);
+  if (!toolContext?.apiStore) return defaultBody;
+
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return defaultBody;
+  }
+
+  const profile = toolContext.apiStore.getByHostname(hostname);
+  const shape = profile?.response_shape;
+  if (!profile || !shape) return defaultBody;
+
+  const result = applyShape(json, shape);
+
+  if (result.error) {
+    if (channels.shapeError.hasSubscribers) {
+      channels.shapeError.publish({
+        profileId: profile.id,
+        hostname,
+        error: result.error,
+      });
+    }
+    return defaultBody;
+  }
+
+  if (channels.shapeApplied.hasSubscribers) {
+    channels.shapeApplied.publish({
+      profileId: profile.id,
+      hostname,
+      beforeChars: result.beforeChars,
+      afterChars: result.afterChars,
+      kind: shape.kind ?? 'reduce',
+    });
+  }
+
+  return result.shaped;
 }
 
 interface HttpRequestInput {
@@ -436,22 +494,37 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
-    // First-use consent for outbound data requests (POST/PUT/PATCH)
+    // First-use consent for outbound data requests (POST/PUT/PATCH).
+    // Concurrent tool_use blocks against the same hostname share one prompt
+    // via `pendingOutboundPrompts` so we don't collide on PromptStore's
+    // per-session unique index.
     if (WRITE_METHODS.has(method)) {
       const hostname = new URL(input.url).hostname;
       if (!approvedOutboundDomains.has(hostname)) {
         if (!agent.promptUser) {
           return `Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).`;
         }
-        if (agent.promptUser) {
-          const answer = await agent.promptUser(
-            `⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
-            ['Allow', 'Deny', '\x00'],
-          );
-          if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-            return `Blocked: outbound ${method} to ${hostname} denied by user.`;
-          }
-          approvedOutboundDomains.add(hostname);
+        const promptUser = agent.promptUser;
+        let pending = pendingOutboundPrompts.get(hostname);
+        if (!pending) {
+          pending = (async () => {
+            try {
+              const answer = await promptUser(
+                `⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
+                ['Allow', 'Deny', '\x00'],
+              );
+              const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
+              if (allowed) approvedOutboundDomains.add(hostname);
+              return allowed;
+            } finally {
+              pendingOutboundPrompts.delete(hostname);
+            }
+          })();
+          pendingOutboundPrompts.set(hostname, pending);
+        }
+        const allowed = await pending;
+        if (!allowed) {
+          return `Blocked: outbound ${method} to ${hostname} denied by user.`;
         }
       }
     }
@@ -492,7 +565,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (contentType.includes('json') && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
-          body = JSON.stringify(json, null, 2);
+          // Apply per-API response shaping if the profile defines one.
+          const shapedBody = await maybeShapeJson(json, input.url, toolContext);
+          body = shapedBody;
         } catch {
           body = text;
         }

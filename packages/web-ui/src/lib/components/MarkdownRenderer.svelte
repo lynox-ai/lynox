@@ -5,6 +5,7 @@
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
 
 	interface Props {
 		content: string;
@@ -16,36 +17,13 @@
 
 	let highlightedHtml = $state('');
 
-	// Close unclosed code fences to prevent the entire response rendering as raw code.
-	// Only count valid fences: opening (```lang) and closing (``` alone on line).
-	// "```Pipeline erfolgreich" is NOT a valid closing fence.
-	function closeOpenFences(md: string): string {
-		const validFence = /^```\w*\s*$/gm;
-		const fenceCount = (md.match(validFence) ?? []).length;
-		return fenceCount % 2 !== 0 ? md + '\n```' : md;
-	}
-
-	// Fix missing line breaks between concatenated sentences (from streamed tool-call gaps).
-	// Pattern: period/exclamation/question followed directly by uppercase letter without space.
-	// Only applied outside code blocks to avoid breaking code content.
-	function fixSentenceSpacing(md: string): string {
-		const parts = md.split(/(```[\s\S]*?```)/g);
-		return parts.map((part, i) => {
-			if (i % 2 !== 0) return part; // inside code block — skip
-			// Apply per-line, skip table rows (contain pipe) to avoid breaking tables
-			return part.split('\n').map(line =>
-				line.includes('|') ? line : line.replace(/([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2')
-			).join('\n');
-		}).join('');
-	}
-
 	// Wrap <table> elements in a scrollable container for wide tables.
 	function wrapTables(html: string): string {
 		return html.replace(/<table\b[^>]*>/g, '<div class="table-wrap">$&').replace(/<\/table>/g, '</table></div>');
 	}
 
 	const baseHtml = $derived(
-		wrapTables(DOMPurify.sanitize(marked.parse(closeOpenFences(fixSentenceSpacing(content)), { async: false }) as string))
+		wrapTables(DOMPurify.sanitize(marked.parse(repairCodeFences(fixMarkdownPreprocessing(content)), { async: false }) as string))
 	);
 
 	function decodeEntities(str: string): string {
@@ -94,6 +72,17 @@
 		return `<div class="mermaid-diagram">${btns}${svg}</div>`;
 	}
 
+	function buildMermaidError(code: string, message: string): string {
+		return `<div class="mermaid-error">
+			<div class="mermaid-error-header">
+				<span class="mermaid-error-icon">!</span>
+				<span class="mermaid-error-title">${escapeHtml(t('markdown.mermaid_error'))}</span>
+			</div>
+			<div class="mermaid-error-message">${escapeHtml(message)}</div>
+			<pre class="mermaid-error-source"><code>${escapeHtml(code)}</code></pre>
+		</div>`;
+	}
+
 	// ── Artifacts ────────────────────────────────────────────
 
 	function escapeHtml(str: string): string {
@@ -110,7 +99,38 @@
 
 	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
+	/** Detect whether an artifact fence body is explicitly typed as markdown. */
+	function isMarkdownArtifact(code: string): boolean {
+		return /<!--\s*type:\s*markdown\s*-->/i.test(code);
+	}
+
+	/** Build a markdown-typed artifact: same chrome as the iframe variant
+	 *  (container + toolbar + label) but body is rendered markdown, not an
+	 *  iframe. Expanded by default because markdown carries no script risk
+	 *  and hiding prose behind a "Click to open" toggle hurts readability.
+	 *  The raw markdown source is embedded as `data-md` so the toolbar
+	 *  buttons can produce a .md download and a print-to-PDF popup from the
+	 *  original text (not the rendered HTML). */
+	function buildMarkdownArtifact(code: string): string {
+		const { title, clean } = extractTitle(code);
+		const body = clean.replace(/<!--\s*type:\s*markdown\s*-->\s*/i, '').trim();
+		const displayTitle = title || 'Artifact';
+		const safeTitle = escapeHtml(displayTitle);
+		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
+		const encodedMd = btoa(unescape(encodeURIComponent(body)));
+		return `<div class="artifact-container artifact-md" data-md="${encodedMd}" data-title="${safeTitle}">
+			<div class="artifact-toolbar">
+				<span class="artifact-label">Markdown</span>
+				<span class="artifact-md-title">${safeTitle}</span>
+				<button class="artifact-btn" data-action="download-md" title="Download as .md">${ICON_DOWNLOAD}</button>
+				<button class="artifact-btn" data-action="print-pdf" title="Print / Save as PDF">${ICON_PRINT}</button>
+			</div>
+			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
+		</div>`;
+	}
+
 	function buildArtifact(code: string): string {
+		if (isMarkdownArtifact(code)) return buildMarkdownArtifact(code);
 		const { title, clean } = extractTitle(code);
 		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
 		const overflowFix = `<style>html,body{overflow-x:hidden!important;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
@@ -149,6 +169,7 @@
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
 	const ICON_CLIPBOARD = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 3A1.5 1.5 0 017 1.5h2A1.5 1.5 0 0110.5 3M5.5 3H4a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1V4a1 1 0 00-1-1h-1.5M5.5 3h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_CLOSE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+	const ICON_PRINT = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 2.5h7v3.5M4.5 11.5H3A1.5 1.5 0 011.5 10V7A1.5 1.5 0 013 5.5h10A1.5 1.5 0 0114.5 7v3a1.5 1.5 0 01-1.5 1.5h-1.5M4.5 9.5h7V14h-7V9.5z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 	/** Injected into artifact iframes — posts height via postMessage for cross-origin resize */
 	const RESIZE_SCRIPT = '<script>(function(){function s(){parent.postMessage({type:"lynox-resize",h:document.documentElement.scrollHeight},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
@@ -209,7 +230,114 @@
 			else if (action === 'expand') handleArtifactExpand(container);
 			else if (action === 'close') handleArtifactExpand(container);
 			else if (action === 'export') handleArtifactExport(container);
+			else if (action === 'download-md') handleMarkdownDownload(container);
+			else if (action === 'print-pdf') handleMarkdownPrint(container);
 		}
+	}
+
+	function decodeDataMd(container: HTMLElement): string {
+		const encoded = container.dataset['md'] ?? '';
+		if (!encoded) return '';
+		try { return decodeURIComponent(escape(atob(encoded))); }
+		catch { return ''; }
+	}
+
+	function handleMarkdownDownload(container: HTMLElement) {
+		const md = decodeDataMd(container);
+		if (!md) { addToast('Download failed', 'error'); return; }
+		const title = container.dataset['title'] ?? 'artifact';
+		const filename = `${title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '')}.md`;
+		const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+		const a = document.createElement('a');
+		a.href = URL.createObjectURL(blob);
+		a.download = filename || 'artifact.md';
+		a.click();
+		URL.revokeObjectURL(a.href);
+	}
+
+	/** Open the rendered markdown in a fresh popup with a print-friendly
+	 *  stylesheet, then auto-trigger the browser's print dialog. User picks
+	 *  "Save as PDF" (Desktop) or "Save to Files" (iOS Safari share sheet).
+	 *  Pure-browser flow — no dependency, PDF output has selectable text,
+	 *  tables render natively. */
+	function handleMarkdownPrint(container: HTMLElement) {
+		const md = decodeDataMd(container);
+		if (!md) { addToast('PDF export failed', 'error'); return; }
+		const title = container.dataset['title'] ?? 'Artifact';
+		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(md), { async: false }) as string);
+		const html = buildPrintDocument(title, rendered);
+		const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+		const url = URL.createObjectURL(blob);
+		const win = window.open(url, '_blank');
+		if (!win) {
+			addToast('Popup blocked — allow popups for this site to print', 'error');
+			URL.revokeObjectURL(url);
+			return;
+		}
+		// Popup owns its blob URL; revoke after a minute so memory doesn't leak
+		// even if the user closes the window without dismissing the print dialog.
+		setTimeout(() => URL.revokeObjectURL(url), 60_000);
+	}
+
+	function buildPrintDocument(title: string, renderedBody: string): string {
+		const safeTitle = escapeHtml(title);
+		return `<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${safeTitle}</title>
+<style>
+@page { margin: 2cm; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+	font-size: 11pt;
+	line-height: 1.55;
+	color: #1a1a1a;
+	background: #fff;
+	max-width: 18cm;
+	margin: 2rem auto;
+	padding: 0 1rem;
+}
+h1, h2, h3, h4, h5, h6 { color: #000; line-height: 1.25; margin: 1.5em 0 0.5em; }
+h1 { font-size: 1.9em; border-bottom: 2px solid #000; padding-bottom: 0.2em; }
+h2 { font-size: 1.4em; }
+h3 { font-size: 1.15em; }
+p { margin: 0.7em 0; }
+ul, ol { margin: 0.7em 0; padding-left: 1.6em; }
+li { margin: 0.2em 0; }
+a { color: #0057b0; text-decoration: underline; word-break: break-word; }
+pre, code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+code { background: #f3f3f5; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.92em; }
+pre { background: #f5f5f7; border: 1px solid #e6e6ea; border-radius: 4px; padding: 0.8em 1em; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.92em; }
+th, td { border: 1px solid #d0d0d6; padding: 0.4em 0.7em; text-align: left; vertical-align: top; }
+th { background: #f5f5f7; font-weight: 600; }
+blockquote { border-left: 3px solid #c0c0c8; padding: 0.1em 1em; color: #555; margin: 1em 0; }
+hr { border: none; border-top: 1px solid #d0d0d6; margin: 2em 0; }
+img { max-width: 100%; height: auto; }
+@media print {
+	body { max-width: none; margin: 0; padding: 0; }
+	a { color: #000; }
+	pre, table, blockquote, img { break-inside: avoid; }
+	h1, h2, h3 { break-after: avoid; }
+}
+</style>
+</head>
+<body>
+<h1>${safeTitle}</h1>
+${renderedBody}
+<script>
+window.addEventListener('load', function () {
+	setTimeout(function () { window.print(); }, 150);
+});
+window.addEventListener('afterprint', function () { window.close(); });
+<\/script>
+</body>
+</html>`;
 	}
 
 	function exportMermaidPng(btn: Element) {
@@ -453,23 +581,41 @@
 				|| (lang === 'html' && (code.includes('&lt;!DOCTYPE') || code.includes('&lt;html')));
 			return isRich && !richCache.has(code);
 		});
-		// While streaming, keep artifacts as syntax-highlighted code (no iframe)
-		if (uncached.length === 0 || streaming) return;
+		// While streaming, keep iframe artifacts as syntax-highlighted code
+		// to avoid flash. Markdown artifacts render live — no iframe, no flash.
+		const workset = streaming
+			? uncached.filter(m => (m[1] ?? '') === 'artifact' && isMarkdownArtifact(decodeEntities(m[2] ?? '')))
+			: uncached;
+		if (workset.length === 0) return;
+
+		// Markdown artifacts render fast, without a debounce — the user
+		// expects them to appear live during streaming. Iframe artifacts
+		// keep the 400 ms debounce to coalesce late fence closings.
+		const delay = workset.every(m => (m[1] ?? '') === 'artifact' && isMarkdownArtifact(decodeEntities(m[2] ?? ''))) ? 0 : 400;
 
 		const timer = setTimeout(async () => {
-			for (const match of uncached) {
+			for (const match of workset) {
 				const lang = match[1] ?? 'text';
 				const raw = match[2] ?? '';
 				const code = decodeEntities(raw);
 				try {
 					if (lang === 'mermaid') richCache.set(raw, await renderMermaid(code));
 					else richCache.set(raw, buildArtifact(code)); // artifact + html full docs
-				} catch { /* keep shiki fallback */ }
+				} catch (err) {
+					// Failed mermaid would otherwise show a perma-placeholder
+					// because processBlocks falls back to placeholder for any
+					// uncached rich block. Cache an error block so the user
+					// sees what happened and can copy the source.
+					if (lang === 'mermaid') {
+						const message = err instanceof Error ? err.message : String(err);
+						richCache.set(raw, buildMermaidError(code, message));
+					}
+				}
 			}
 			if (baseHtml === html) {
 				highlightedHtml = await processBlocks(html, matches);
 			}
-		}, 400);
+		}, delay);
 
 		return () => clearTimeout(timer);
 	});
@@ -477,7 +623,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div onclick={handleContainerClick} class="prose prose-invert max-w-none
+<div onclick={handleContainerClick} class="markdown-root prose prose-invert max-w-none min-w-0
 	prose-pre:bg-bg-muted prose-pre:border prose-pre:border-border prose-pre:rounded-[var(--radius-md)] prose-pre:overflow-x-auto
 	prose-code:text-accent-text prose-code:text-xs prose-code:font-mono
 	prose-a:text-accent-text prose-a:no-underline hover:prose-a:opacity-80
@@ -508,10 +654,49 @@
 		line-height: 1.6;
 	}
 
-	/* Styled scrollbars for code blocks and pre elements */
+	/* Width hardening — nothing inside the markdown root may push the
+	   chat container wider than its parent. The :global(.markdown-root)
+	   layer forces a 0 min-width even when this component is rendered
+	   inside a flex item that hasn't been given min-w-0 by its parent. */
+	:global(.markdown-root) {
+		min-width: 0;
+		max-width: 100%;
+	}
+
+	/* Long single-token strings (URLs, IDs, paths) wrap inside paragraphs
+	   and list items instead of forcing horizontal scroll. */
+	div :global(p),
+	div :global(li),
+	div :global(blockquote),
+	div :global(h1),
+	div :global(h2),
+	div :global(h3),
+	div :global(h4),
+	div :global(h5),
+	div :global(h6) {
+		overflow-wrap: anywhere;
+	}
+
+	/* Inline code: long IDs / URLs in backticks should wrap, not overflow. */
+	div :global(code) {
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
+
+	/* Code blocks scroll INTERNALLY only — never push the parent wider. */
 	div :global(pre) {
 		scrollbar-width: thin;
 		scrollbar-color: var(--color-border) transparent;
+		max-width: 100%;
+		min-width: 0;
+		overflow-x: auto;
+	}
+	/* Override the inline-code wrap rule when the code is inside a <pre>:
+	   preserve original formatting for genuine code, just scroll if needed. */
+	div :global(pre > code) {
+		overflow-wrap: normal;
+		word-break: normal;
+		white-space: pre;
 	}
 
 	/* Tables */
@@ -521,6 +706,8 @@
 		-webkit-overflow-scrolling: touch;
 		scrollbar-width: thin;
 		scrollbar-color: var(--color-border) transparent;
+		max-width: 100%;
+		min-width: 0;
 	}
 	div :global(table) {
 		width: 100%;
@@ -617,10 +804,12 @@
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-md);
 		overflow-x: auto;
+		max-width: 100%;
 	}
 	div :global(.mermaid-diagram svg) {
 		max-width: 100%;
 		height: auto;
+		min-width: 0;
 	}
 	div :global(.diagram-actions) {
 		position: absolute;
@@ -647,6 +836,50 @@
 	div :global(.diagram-btn:hover) {
 		color: var(--color-text);
 		background: var(--color-bg-subtle);
+	}
+
+	/* ── Mermaid render error ───────────────────────────── */
+	div :global(.mermaid-error) {
+		margin: 1rem 0;
+		padding: 0.75rem 1rem;
+		border: 1px solid var(--color-danger, #ef4444);
+		border-radius: var(--radius-md);
+		background: color-mix(in srgb, var(--color-danger, #ef4444) 8%, transparent);
+		font-size: 0.8125rem;
+	}
+	div :global(.mermaid-error-header) {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		color: var(--color-danger, #ef4444);
+		font-weight: 600;
+		margin-bottom: 0.375rem;
+	}
+	div :global(.mermaid-error-icon) {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.125rem;
+		height: 1.125rem;
+		border-radius: 50%;
+		background: var(--color-danger, #ef4444);
+		color: #fff;
+		font-size: 0.6875rem;
+		line-height: 1;
+	}
+	div :global(.mermaid-error-message) {
+		color: var(--color-text-muted);
+		margin-bottom: 0.5rem;
+		word-break: break-word;
+	}
+	div :global(.mermaid-error-source) {
+		margin: 0;
+		padding: 0.5rem 0.75rem;
+		background: var(--color-bg-muted);
+		border-radius: var(--radius-sm, 4px);
+		font-size: 0.75rem;
+		max-height: 240px;
+		overflow: auto;
 	}
 
 	/* ── Artifact placeholder during streaming ─────────── */
@@ -699,6 +932,53 @@
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 		margin-right: auto;
+	}
+
+	/* Markdown artifacts: same container chrome as iframe artifacts but
+	   body is inline rendered markdown. Expanded by default — prose is
+	   meant to be read inline, not gated behind a toggle. */
+	div :global(.artifact-md) {
+		background: var(--color-bg-subtle);
+	}
+	div :global(.artifact-md .artifact-toolbar) {
+		border-bottom: 1px solid var(--color-border);
+	}
+	/* Reset the label's margin-right:auto inside .artifact-md so the
+	   "Markdown" badge sits next to the title on the left. */
+	div :global(.artifact-md .artifact-label) {
+		margin-right: 0;
+	}
+	div :global(.artifact-md-title) {
+		font-size: 0.75rem;
+		color: var(--color-text);
+		font-weight: 500;
+		margin-right: auto;
+	}
+	div :global(.artifact-md-body) {
+		padding: 0.75rem 1rem;
+	}
+	div :global(.artifact-md-body > :first-child) {
+		margin-top: 0;
+	}
+	div :global(.artifact-md-body > :last-child) {
+		margin-bottom: 0;
+	}
+
+	/* Small chip shown under inline markdown-type artifacts so the user
+	   can see it was persisted. Intentionally NOT a link — the markdown
+	   is already rendered in-chat, clicking the badge and jumping to
+	   /app/artifacts broke the user's mental model. */
+	div :global(.artifact-saved-chip) {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-size: 0.6875rem;
+		color: var(--color-text-subtle);
+		background: var(--color-bg-subtle);
+		border: 1px solid var(--color-border);
+		border-radius: 999px;
+		padding: 0.125rem 0.625rem;
+		margin-top: 0.5rem;
 	}
 
 	div :global(.artifact-btn) {

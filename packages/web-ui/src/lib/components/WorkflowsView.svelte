@@ -311,9 +311,9 @@
 
 								<!-- Timestamp -->
 								<div class="flex justify-between text-[10px] text-text-subtle">
-									<span>{t('workflow.started')}: {new Date(selectedRun.started_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' })}</span>
+									<span>{t('workflow.started')}: {new Date(selectedRun.started_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
 									{#if selectedRun.completed_at}
-										<span>{t('workflow.completed')}: {new Date(selectedRun.completed_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' })}</span>
+										<span>{t('workflow.completed')}: {new Date(selectedRun.completed_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
 									{/if}
 								</div>
 							{/if}

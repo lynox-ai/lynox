@@ -10,6 +10,7 @@ interface TaskCreateInput {
   priority?: TaskPriority | undefined;
   assignee?: string | undefined;
   due_date?: string | undefined;
+  run_at?: string | undefined;
   scope?: string | undefined;
   tags?: string[] | undefined;
   parent_task_id?: string | undefined;
@@ -45,6 +46,29 @@ function formatTaskLine(t: { id: string; title: string; priority: string; status
   return `[${t.priority.toUpperCase()}] ${t.id} ${t.title}${assign}${scope}${due} [${t.status}]`;
 }
 
+// Catches an LLM output failure mode where the model emits an escaped close-quote
+// mid-string, causing the intended next JSON keys to land inside `description`
+// (or `title`) as literal text (e.g. `...strategy.","schedule":"0 2 * * 4"`).
+// Strict schema validation can't catch this — the JSON parses fine, the string
+// just contains garbage.
+//
+// Pattern: close-quote + comma + open-quote + known task_create key + close-quote
+// + colon + value-start. Value-start covers strings (`"`), arrays (`[`),
+// numbers (`0-9`), and booleans (`t`/`f`) — `tags` smuggles as `","tags":[...]`
+// so the value-side has to be permissive. Specific enough on the key-side to
+// keep false positives away from legitimate prose. JSON keys are always
+// double-quoted in real payloads, so the single-quote branch was dead weight.
+const EMBEDDED_TASK_PARAMS_PATTERN =
+  /"\s*,\s*"(schedule|priority|assignee|due_date|parent_task_id|watch_url|watch_interval_minutes|pipeline_id|scope|tags|title)"\s*:\s*["[\dtf]/i;
+
+function detectEmbeddedParams(field: string, value: string | undefined): string | null {
+  if (!value) return null;
+  const match = value.match(EMBEDDED_TASK_PARAMS_PATTERN);
+  if (!match) return null;
+  const paramName = match[1];
+  return `Error: ${field} contains what looks like escaped JSON fragments of other task_create parameters (matched: "${paramName}"). These must be passed as separate top-level parameters, not embedded inside ${field}. Retry the call with schedule, priority, assignee, tags, etc. as their own fields.`;
+}
+
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   definition: {
     name: 'task_create',
@@ -57,11 +81,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         description: { type: 'string', description: 'Task description' },
         priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'], description: 'Priority level. Default: medium' },
         assignee: { type: 'string', description: 'Who is responsible: "user" (the human), "lynox" (the agent), or a custom name. Default: unassigned.' },
-        due_date: { type: 'string', description: 'Due date in YYYY-MM-DD format' },
+        due_date: { type: 'string', description: 'Soft deadline (YYYY-MM-DD). Does NOT trigger execution. For one-shot future execution use run_at.' },
+        run_at: { type: 'string', description: 'ISO 8601 datetime for one-shot future execution (e.g. "2026-04-25T09:00:00"). Use this for "tomorrow at 9am", "in 2 hours", "next Monday morning". Without it, lynox-assignee tasks fire immediately. Mutually exclusive with schedule.' },
         scope: { type: 'string', description: 'Scope as "type:id" (e.g., "client:acme"). Default: current project scope.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tags for categorization' },
         parent_task_id: { type: 'string', description: 'Parent task ID for subtasks' },
-        schedule: { type: 'string', description: 'Cron schedule for recurring tasks. Standard cron (e.g. \'0 8 * * *\' for daily at 8am) or shorthand (\'30m\', \'1h\', \'6h\', \'1d\').' },
+        schedule: { type: 'string', description: 'Cron schedule for recurring tasks. Standard cron (e.g. \'0 8 * * *\' for daily at 8am) or shorthand (\'30m\', \'1h\', \'6h\', \'1d\'). For a one-shot future task use run_at instead.' },
         watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
         watch_interval_minutes: { type: 'number', description: 'How often to check the watched URL (in minutes). Default: 60.' },
         pipeline_id: { type: 'string', description: 'ID of a stored workflow/pipeline to execute on this schedule.' },
@@ -72,6 +97,10 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   handler: async (input: TaskCreateInput, agent: IAgent): Promise<string> => {
     const managerRef = agent.toolContext.taskManager;
     if (!managerRef) return 'Error: Task manager not available.';
+
+    const embeddedErr = detectEmbeddedParams('description', input.description)
+      ?? detectEmbeddedParams('title', input.title);
+    if (embeddedErr) return embeddedErr;
 
     let scopeType = 'context';
     let scopeId = '';
@@ -130,6 +159,14 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           watchIntervalMinutes: intervalMinutes,
         });
         return `Watch task created: ${formatTaskLine(task)} — watching ${input.watch_url} every ${String(intervalMinutes)}min`;
+      }
+
+      if (input.run_at) {
+        if (Number.isNaN(Date.parse(input.run_at))) {
+          return `Error: invalid run_at "${input.run_at}". Use ISO 8601 datetime (e.g. "2026-04-25T09:00:00").`;
+        }
+        const task = managerRef.create({ ...baseParams, nextRunAt: input.run_at });
+        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task)}`;
       }
 
       const task = managerRef.create(baseParams);

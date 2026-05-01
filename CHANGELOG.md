@@ -1,5 +1,188 @@
 # Changelog
 
+## 1.3.7 — 2026-04-28
+
+### Added
+
+- **Spawn input validation** — `spawn_agent` now hard-caps caller-supplied values: max 10 agents per call, `max_turns` 1–50 (integer), `max_budget_usd` 0–50, `name` 1–64 chars (no control characters), `task` 1–16 K. JSON-schema mirrors the runtime checks; `additionalProperties: false` on the top level. Defensive floor in `estimateSpawnCost` so a malformed `max_turns` cannot return a negative estimate that would credit the session-budget counter (#198, #201).
+- **Canary build CI** — Pushes to `feat/**`, `fix/**`, or `canary/**` publish two docker tags (`branch-<slug>` and `sha-<short>`) without ever touching a running instance. Pairs with managed-side canary pinning (lynox-pro #87) so a single instance can be held on a pre-release branch image while the fleet stays on `:latest` (#203).
+- **GreenMail adversarial mailbox fixtures** — broadens mail integration coverage for malformed/edge-case messages (#192).
+
+### Changed
+
+- **Realistic spawn cost estimate** — `estimateSpawnCost` now models output as `OUTPUT_FILL_RATIO (0.3) × model.maxOutput` per turn (was naive worst-case ×1.0), and the default per-spawn iteration cap drops from 20 to 10. A typical 3-Sonnet-researcher fan-out estimates ≈ $2.52 instead of $15+, so legitimate patterns no longer trip the session ceiling (#197).
+- **Mail tool hardening** — per-tool rate limits + per-recipient dedup in send paths (#188); persisted default mailbox is preserved when its provider fails to load (#187); Gmail OAuth watcher tightens cursor + provider lifecycle (#185); body decoder accepts more charsets (#189); address-list parser hardened with documented flag semantics (#191).
+- **Google Workspace auth** — service-account token cache (#184) + coalesced concurrent refreshes (#182) — fewer round-trips on bursty access patterns.
+- **Engine HTTP secret always set** — startup now ensures `LYNOX_HTTP_SECRET` is materialised before any handler comes up, eliminating the rare "secret missing" failure mode (#190).
+- **Recoverable tool errors stay inline** — a tool error that the agent can retry no longer fires the global toast; it lives where it happened, in the chat thread (#195).
+- **Spawn estimator + iteration cap as named constants** — `SPAWN_OUTPUT_FILL_RATIO`, `DEFAULT_SPAWN_MAX_TURNS`, single source of truth so the upfront estimator and runtime cap can never drift (#197, #202).
+
+### Fixed
+
+- **KG entity misclassification** — single-source-of-truth stopwords + a v2 post-filter at extraction time reject generic nouns and price expressions that the v1 regex+free-text pipeline was persisting; eval on 300 cases at 97.7 % precision / 94.6 % recall (#193).
+- **Gmail envelope batching** — fewer Gmail API calls on first-page render via metadata batch fetch (#186).
+- **GitHub Deployments tracking restored** — `release.yml` records a Deployment object after the pro-dispatch succeeds; the Deployments page froze at v1.3.3 after #142 dropped the production environment gate, this puts the visual record back without re-introducing a blocking reviewer step (#196).
+
+### Internal
+
+- Spawn JSDocs trimmed (no incident anecdotes); 3-researcher estimate test tightened to a narrow band around the documented expectation; `OUTPUT_FILL_RATIO` renamed `SPAWN_OUTPUT_FILL_RATIO` for prefix consistency (#201, #202).
+- `.gitignore`: bench-models results excluded (#183).
+
+### lynox-pro
+
+- **Per-instance canary pinning** — `pinned_tag` column on managed instances; fleet rollout (`startRollout`) skips pinned instances and records the skipped set on the rollout row for audit; new `PATCH /admin/instances/:id/pinned-tag` endpoint to set or clear the pin; `updateOne` refuses to deploy when the new tag would diverge from an existing pin, forcing the operator to update the pin first. End-to-end-validated on staging control plane (lynox-pro #87).
+- `pnpm/action-setup` bumped 4 → 6 to fix transient CI (lynox-pro #17).
+
+## 1.3.6 — 2026-04-27
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.4 (delete this block before saving):
+
+Core:
+- chore(mail): remove google_gmail tool + security hardening (PR4/4 reopen) (#180)
+- fix(mail): persist default mailbox + UI toggle (PR3/4 reopen) (#179)
+- feat(mail): OAuth-Gmail as first-class provider + boot migration (PR2/4 reopen) (#178)
+- feat(mail): add auth_type foundation for multi-provider mailboxes (#174)
+- docs(google-workspace): clarify project permission + Internal vs External (#172)
+- fix(google-oauth): callback works under engine API CSP, idempotent on reload (#173)
+- feat(mistral): startup health check surfaces 401/402/429 to stderr + Bugsink (#171)
+- fix(ui): replace disabled-Modell-dropdown with info card on Managed EU (#170)
+- fix(voice): diagnostic TTS error toasts (replace generic "Vorlesen fehlgeschlagen") (#169)
+- fix(voice): mark non-Paul voices experimental + add non-EN hint (#168)
+- fix(prompts,config): stop answered-prompt stack + spurious 403 on save (#167)
+- fix(prompts): permission timeout overflow + KEY_NAME placeholder (#166)
+- fix(markdown): heading edge-cases + visible mermaid render errors (#165)
+- fix(ui): v1.3.5 moderate polish bundle (#164)
+- fix(ui): v1.3.5 trivial polish bundle (#162)
+
+Pro:
+- chore: update google_gmail references to unified mail tools (#84)
+- chore(release): v1.3.4 (#83)
+-->
+## 1.3.4 — 2026-04-24
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.3 (delete this block before saving):
+
+Core:
+- feat(web-search): explicit query formulation guidance for the agent (#159)
+- feat(observability): engine-level attribution for web search (#158)
+- feat(kg): default to v2 extractor + admin cleanup endpoint (#150)
+- feat(tasks): flexible schedule + run_at, kill title duplication (#149)
+- fix(web-ui): expose voice controls on mobile/touch (#148)
+- fix(web-ui): clamp wide markdown content + iOS safe-area in StatusBar (#147)
+- fix(web-search): stop mapping topic "it" to SearXNG categories=it (#152)
+- feat(agent): strict JSON Schema validation at tool dispatch (#153)
+- feat(web-search): Haiku-based post-provider reranker (opt-in) (#157)
+- fix(task): guard against escaped JSON params inside description (#151)
+- fix(searxng): widen general engine pool for query reliability (#154)
+- chore(ci): collapse stale approval-gate comment block on dispatch-pro-release (#143)
+- chore(ci): drop production environment gate on dispatch-pro-release (#142)
+
+Pro:
+
+-->
+## 1.3.3 — 2026-04-23
+
+### Added
+
+- **API Store: declarative response shaping + OpenAPI bootstrap** (#140). Profiles can now carry a `response_shape` that deterministically projects, reduces, and caps verbose JSON responses before they enter the LLM history — path-based whitelisting, reducers (`avg`/`peak`/`avg+peak`/`count`/`first_n`/`last_n`), and array/string/body caps. `api_setup` gains `bootstrap` (OpenAPI 3.x URL → draft profile) and `refine` (additive patch for guidelines/avoid/notes/endpoints/shape/rate_limit). Fully opt-in: hostnames without a profile or without `response_shape` behave identically to prior releases.
+- **Markdown artifact download + print-to-PDF** (#138). `.md` artifacts now carry a download button and a browser-side print-to-PDF action.
+- **Mobile/PWA polish** (#96). Settings page gets a version + legal footer, mobile-only items are hidden when the app is running as a PWA or on narrow viewports, and the stale-bundle toast gets a one-click "reload now" action.
+
+### Fixed
+
+- **Empty user bubbles on thread resume** (#129). Agent-synthesized user turns (e.g. tool_result carriers for `ask_user`) no longer render as blank grey bubbles when a thread is reloaded.
+- **409 queue instead of failed bubble** (#130). When iOS Safari backgrounds the PWA, SSE drops, and the next send hits the server's in-progress run, the bubble now shows as queued ("Agent arbeitet noch am vorherigen Schritt — deine Nachricht wartet…") and polls `/run` every 3s for up to 6 min before giving up. Stop and thread-switch cleanly cancel the poll loop via a shared `AbortController`.
+- **Orphan tool_use / tool_result sanitization on history load** (#135). Unpaired tool blocks are dropped so the model doesn't stall on malformed history.
+- **Abbreviation splitting in markdown** (#136). Strings like "z.B." no longer trigger a paragraph break.
+- **Session-expired copy on 401** (#137). 401 on `/run` now shows "session expired, please log in again" and bounces to `/login`, instead of the misleading "API key invalid".
+- **Entity detail panel closes on Escape** (#139). KG side panel now follows the same dismiss pattern as other overlays.
+
+## 1.3.2 — 2026-04-22
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.1 (delete this block before saving):
+
+Core:
+- fix: chat resume preserves user turns; artifact chip static; md export (#127)
+
+Pro:
+- feat(managed): per-instance update endpoint for canary rollouts (#79)
+- chore(release): v1.3.1 (#78)
+-->
+## 1.3.1 — 2026-04-22
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.0 (delete this block before saving):
+
+Core:
+- feat(agent): annotate non-retryable tool errors so the model stops grinding (#125)
+- feat: markdown artifact template + researcher-role Sonnet default (#124)
+- feat(web-ui): show live sub-agent delegation in Context sidebar (#123)
+- fix: voice TTS reads CHF, numbers-with-x, times, and #refs as noise (#122)
+- fix(spawn): advertise only the roles that actually exist (#121)
+- fix(voice): expand "N/mo" price patterns to natural phrasing (#120)
+- fix(voice): don't mangle English arrows with German "dann" (#119)
+- feat(spawn): stream sub-agent progress to the parent UI (#118)
+- fix(voice): handle slashes, <N, arrow prosody, and DE Die pronunciation (#117)
+- fix: voice TTS reads tables and arrow symbols as noise (#116)
+- fix: voice TTS playback accelerates and garbles on longer replies (#115)
+- fix: prevent agent context-drift on short followups (#114)
+- feat(kg): add v2 entity extractor behind LYNOX_KG_EXTRACTOR flag (#113)
+
+Pro:
+- fix(managed): refuse sync-env when secret preserve would leak sentinel (#77)
+- chore(ci): add one-shot admin-credit-grant workflow (#76)
+- feat(managed): add POST /admin/customers/:id/credit endpoint (#75)
+- feat(managed): add POST /admin/instances/:id/sync-env endpoint (#74)
+- feat(managed): enable KG extractor v2 by default on managed instances (#73)
+- chore(release): v1.3.0 (#72)
+-->
 ## 1.3.0 — 2026-04-21
 
 Two themes ship together: a user-facing **Usage Dashboard** that

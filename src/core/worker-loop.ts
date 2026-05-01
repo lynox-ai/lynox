@@ -283,7 +283,7 @@ export class WorkerLoop {
       });
     };
 
-    const prompt = task.description
+    const prompt = task.description && task.description.trim() !== task.title.trim()
       ? `Task: ${task.title}\n\n${task.description}`
       : `Task: ${task.title}`;
 

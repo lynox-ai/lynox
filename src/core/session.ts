@@ -34,6 +34,7 @@ import {
   DATASTORE_PROMPT_SUFFIX,
   CRM_PROMPT_SUFFIX,
   DEVELOPER_PROMPT_SUFFIX,
+  currentDateContext,
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
@@ -353,9 +354,9 @@ export class Session {
       const langName = { de: 'German', en: 'English', fr: 'French', it: 'Italian', es: 'Spanish', nl: 'Dutch', pt: 'Portuguese', sv: 'Swedish' }[this.engine.config.language] ?? this.engine.config.language;
       basePrompt += `\n\n**Language override**: Respond in ${langName}. The user has explicitly set this preference.`;
     }
-    const effectivePrompt = this.agentOverrides.systemPromptSuffix
+    const effectivePrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
-      : basePrompt;
+      : basePrompt) + currentDateContext();
     const promptHash = hashPrompt(effectivePrompt);
 
     // Record run start
@@ -384,10 +385,19 @@ export class Session {
 
     const usageBefore = { ...this.usage };
 
-    // Knowledge Graph retrieval (mandatory)
-    // Skip for multimodal — KG retrieval operates on text queries only
+    // Knowledge Graph retrieval
+    // Skip for multimodal — KG retrieval operates on text queries only.
+    // Skip for short clarifications (1-2 words, ≤ 20 chars) — a follow-up
+    // like "bexio" or "yes please" has no semantic specificity, so top-K
+    // retrieval surfaces whatever has the weakest match in memory
+    // (typically stale status/learnings) and the LLM anchors to that.
+    // The 2026-04-21 drift incident was exactly this cascade. Prior-turn
+    // context stays visible to the LLM via conversation history; no extra
+    // grounding is needed for a clarification.
     const knowledgeLayer = this.engine.getKnowledgeLayer();
-    if (knowledgeLayer && !isMultimodal) {
+    const { isShortClarification } = await import('./short-input-heuristic.js');
+    const skipShortInputRetrieval = typeof task === 'string' && isShortClarification(task);
+    if (knowledgeLayer && !isMultimodal && !skipShortInputRetrieval) {
       try {
         const result = await knowledgeLayer.retrieve(task, this.engine.getActiveScopes(), {
           topK: 8,
@@ -400,6 +410,10 @@ export class Session {
       } catch {
         this.agent.setKnowledgeContext('');
       }
+    } else if (skipShortInputRetrieval) {
+      // Clear any prior turn's retrieved context so stale memory can't
+      // bleed forward as still-relevant grounding.
+      this.agent.setKnowledgeContext('');
     }
 
     try {
@@ -856,9 +870,9 @@ export class Session {
     if (userConfig.experience === 'developer') {
       basePrompt += DEVELOPER_PROMPT_SUFFIX;
     }
-    const systemPrompt = this.agentOverrides.systemPromptSuffix
+    const systemPrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
-      : basePrompt;
+      : basePrompt) + currentDateContext();
 
     // Apply hook-based tool filtering (for Pro extensions)
     let effectiveTools = tools;

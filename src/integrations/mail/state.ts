@@ -12,8 +12,8 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { getLynoxDir } from '../../core/config.js';
 import { ensureDirSync } from '../../core/atomic-write.js';
-import type { MailAccountConfig, MailAccountType, MailEnvelope, MailPresetSlug } from './provider.js';
-import { isValidAccountType } from './provider.js';
+import type { MailAccountConfig, MailAccountType, MailAuthType, MailEnvelope, MailPresetSlug } from './provider.js';
+import { isValidAccountType, isValidAuthType } from './provider.js';
 
 function defaultDbPath(): string {
   return join(getLynoxDir(), 'mail-state.db');
@@ -87,6 +87,30 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_followups_account ON mail_followups(account_id);
    CREATE INDEX IF NOT EXISTS idx_followups_thread ON mail_followups(thread_key);
    CREATE INDEX IF NOT EXISTS idx_followups_status_reminder ON mail_followups(status, reminder_at);`,
+
+  // v5: Multi-auth-type foundation. Adds auth_type so OAuth-based mailboxes
+  // (Gmail OAuth, Microsoft OAuth in Phase 1b+) can coexist with IMAP/SMTP
+  // accounts in the same registry. Existing rows backfill to 'imap'.
+  //
+  // The IMAP-specific columns stay NOT NULL in this migration — relaxing
+  // them requires a full table rebuild and will land alongside the first
+  // OAuth provider implementation (PR2).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (5);
+
+   ALTER TABLE mail_accounts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'imap';
+   ALTER TABLE mail_accounts ADD COLUMN oauth_provider_key TEXT;`,
+
+  // v6: Persisted default mailbox. Before this migration, the default lived
+  // in InMemoryMailRegistry and was clobbered on every restart by whichever
+  // provider was registered first (created_at order). With multiple
+  // mailboxes (OAuth-Gmail + IMAP), that flipped the user's default
+  // unpredictably — the visible symptom of the unification bug.
+  //
+  // Application-level invariant: at most one row has is_default=1.
+  // setDefaultAccount() enforces this in a single transaction.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
+
+   ALTER TABLE mail_accounts ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export interface MailStateDbOptions {
@@ -118,6 +142,9 @@ interface AccountRow {
   smtp_secure: number;
   type: string;
   persona_prompt: string | null;
+  auth_type: string;
+  oauth_provider_key: string | null;
+  is_default: number;
   created_at: string;
   updated_at: string;
 }
@@ -199,6 +226,9 @@ function rowToFollowup(row: FollowupRow): MailFollowup {
 
 function rowToAccount(row: AccountRow): MailAccountConfig {
   const type: MailAccountType = isValidAccountType(row.type) ? row.type : 'personal';
+  // Older rows (pre-v5) backfill to 'imap' via the migration default; guard
+  // against any unexpected value just in case a hand-edited DB exists.
+  const authType: MailAuthType = isValidAuthType(row.auth_type) ? row.auth_type : 'imap';
   return {
     id: row.id,
     displayName: row.display_name,
@@ -206,9 +236,11 @@ function rowToAccount(row: AccountRow): MailAccountConfig {
     preset: row.preset as MailPresetSlug,
     imap: { host: row.imap_host, port: row.imap_port, secure: row.imap_secure === 1 },
     smtp: { host: row.smtp_host, port: row.smtp_port, secure: row.smtp_secure === 1 },
-    auth: 'app-password',
+    authType,
+    oauthProviderKey: row.oauth_provider_key ?? undefined,
     type,
     personaPrompt: row.persona_prompt ?? undefined,
+    isDefault: row.is_default === 1,
   };
 }
 
@@ -373,8 +405,8 @@ export class MailStateDb {
   upsertAccount(account: MailAccountConfig): void {
     this.db
       .prepare(
-        `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, auth_type, oauth_provider_key, is_default, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
          ON CONFLICT(id) DO UPDATE SET
            display_name = excluded.display_name,
            address = excluded.address,
@@ -387,6 +419,8 @@ export class MailStateDb {
            smtp_secure = excluded.smtp_secure,
            type = excluded.type,
            persona_prompt = excluded.persona_prompt,
+           auth_type = excluded.auth_type,
+           oauth_provider_key = excluded.oauth_provider_key,
            updated_at = datetime('now')`,
       )
       .run(
@@ -402,7 +436,42 @@ export class MailStateDb {
         account.smtp.secure ? 1 : 0,
         account.type,
         account.personaPrompt ?? null,
+        account.authType,
+        account.oauthProviderKey ?? null,
+        account.isDefault ? 1 : 0,
       );
+  }
+
+  /**
+   * Mark `id` as the only default account in a single transaction. Pass null
+   * to clear the default entirely (e.g. when the last account is removed).
+   * Returns true when the row exists and was set; false otherwise.
+   *
+   * Existence is checked BEFORE clearing the previous default so a typo on
+   * `setDefaultAccount('missing')` no longer wipes out the user's current
+   * choice. Either the targeted row exists and we promote it, or nothing
+   * changes.
+   */
+  setDefaultAccount(id: string | null): boolean {
+    const txn = this.db.transaction((targetId: string | null) => {
+      if (targetId !== null) {
+        const exists = this.db.prepare('SELECT 1 FROM mail_accounts WHERE id = ?').get(targetId);
+        if (!exists) return false;
+      }
+      this.db.prepare('UPDATE mail_accounts SET is_default = 0').run();
+      if (targetId === null) return true;
+      this.db.prepare('UPDATE mail_accounts SET is_default = 1 WHERE id = ?').run(targetId);
+      return true;
+    });
+    return txn(id);
+  }
+
+  /** Return the id of the currently-default account, or null if none. */
+  defaultAccountId(): string | null {
+    const row = this.db
+      .prepare<[], { id: string }>('SELECT id FROM mail_accounts WHERE is_default = 1 LIMIT 1')
+      .get();
+    return row?.id ?? null;
   }
 
   /** Remove an account row (without touching dedup state — caller decides). */

@@ -30,6 +30,8 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import { maskSecretPatterns } from './secret-store.js';
+import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
+import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -182,7 +184,10 @@ export class Agent implements IAgent {
   }
 
   loadMessages(messages: BetaMessageParam[]): void {
-    this.messages = messages;
+    // Rehydrated histories can have drifted tool_use/tool_result pairs
+    // (partial persist, rolled-back run). Anthropic 400s on unpaired blocks,
+    // so normalise at the single entry point for external history.
+    this.messages = sanitizeToolPairs(messages);
   }
 
   abort(): void {
@@ -253,13 +258,15 @@ export class Agent implements IAgent {
     try {
       return await this._loop();
     } catch (err: unknown) {
-      // Always roll back to keep message history consistent — a partial
-      // loop may have pushed assistant(tool_use) without a matching
-      // user(tool_result), which would cause a 400 on the next API call.
-      this.messages.length = snapshot;
       if (this.abortController.signal.aborted) {
+        // Keep the user message so the next turn carries its context.
+        // Drop only partial assistant content (e.g. tool_use without a
+        // matching tool_result) which would cause a 400 on the next call.
+        this.messages.length = snapshot + 1;
         return '';
       }
+      // Non-abort error: full rollback to keep history consistent.
+      this.messages.length = snapshot;
       throw err;
     } finally {
       // Drain fire-and-forget memory extraction so the stream isn't orphaned (avoids 499)
@@ -667,7 +674,7 @@ export class Agent implements IAgent {
       return {
         type: 'tool_result',
         tool_use_id: tc.id,
-        content: `Tool not found: ${tc.name}`,
+        content: annotateNonRetryable(`Tool not found: ${tc.name}`),
         is_error: true,
       };
     }
@@ -755,6 +762,20 @@ export class Agent implements IAgent {
       }
     }
 
+    // Schema-level input validation. Catches unknown keys, missing required
+    // fields, type mismatches, and enum violations before the handler runs.
+    // Returning the error as a tool_result lets the agent self-correct and
+    // retry the call with proper arguments on the next turn.
+    const validation = validateToolInput(tool.definition.input_schema, processedInput);
+    if (!validation.ok) {
+      return {
+        type: 'tool_result',
+        tool_use_id: tc.id,
+        content: `Input validation failed for tool "${tc.name}":\n${formatValidationErrors(validation.errors)}\n\nRetry with valid input matching the tool schema.`,
+        is_error: true,
+      };
+    }
+
     const timer = measureTool(tc.name);
     channels.toolStart.publish({ name: tc.name, agent: this.name });
 
@@ -787,7 +808,8 @@ export class Agent implements IAgent {
       }
 
       const duration = timer.end();
-      const rawInput = JSON.stringify(tc.input).slice(0, 2000);
+      const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
+      const rawInput = JSON.stringify(auditInput).slice(0, 2000);
       const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput });
 
@@ -802,15 +824,22 @@ export class Agent implements IAgent {
     } catch (err: unknown) {
       const duration = timer.end();
       const cause = err instanceof Error ? err : new Error(String(err));
-      const message = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
-      const toolError = new Error(`Tool ${tc.name} failed: ${message}`, { cause });
-      const rawErrInput = JSON.stringify(tc.input).slice(0, 2000);
+      const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
+      const message = annotateNonRetryable(rawMessage);
+      const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
+      const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput });
 
       if (this.onStream) {
+        // Tool-level error: surface inline via tool_result (UI renders it red on
+        // the tool block) and let the agent loop see is_error: true to self-
+        // recover. Do NOT emit a separate `error` stream event — that's reserved
+        // for fatal agent-level failures (iteration limit, _callAPI throws) that
+        // terminate the run. Emitting it here triggers the UI's global toast
+        // even when the agent recovers, leaving "Etwas ist schiefgelaufen" stuck
+        // next to a still-streaming response.
         await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, isError: true });
-        await this.onStream({ type: 'error', message: toolError.message, agent: this.name });
       }
       return {
         type: 'tool_result',
@@ -821,6 +850,45 @@ export class Agent implements IAgent {
     }
   }
 
+}
+
+/**
+ * Patterns that indicate a tool failed in a way that retrying with a
+ * different model, different effort, or different budget will NOT help.
+ * Matching a known pattern adds a `[NON_RETRYABLE config error]` prefix
+ * plus an explicit "do not retry" hint, so the model reading the
+ * tool_result learns to fix the input (or ask the user) instead of
+ * grinding through retries until the spawn budget is gone.
+ *
+ * Known triggers (as of 2026-04-22):
+ *  - `Unknown role` / `Unknown model profile`  — spawn_agent validation
+ *  - `Max spawn depth exceeded`                — spawn_agent guard
+ *  - `invalid_type`, `required`                — zod / schema validation
+ *  - `is not a function`, `is not defined`     — programmer errors
+ *
+ * Extend carefully: any pattern added here teaches the model that the
+ * matched error shape is TERMINAL. False positives cost more than false
+ * negatives — better to let the model retry a transient error than to
+ * label a real transient as non-retryable.
+ */
+const NON_RETRYABLE_PATTERNS: readonly RegExp[] = [
+  /^Unknown role "/,
+  /^Unknown model profile "/,
+  /^Max spawn depth \(\d+\) exceeded/,
+  /^Tool not found:/,           // agent.ts: tool name absent from registry
+  /^Tool \S+ not found/,        // generic "Tool <name> not found" shape
+  /\binvalid_type\b/,            // zod / schema validation
+  /\bUnrecognized key\(s\) in object\b/,
+];
+
+function annotateNonRetryable(message: string): string {
+  if (message.startsWith('[NON_RETRYABLE')) return message;
+  for (const pattern of NON_RETRYABLE_PATTERNS) {
+    if (pattern.test(message)) {
+      return `[NON_RETRYABLE config error — do not retry with a different model; fix the input or ask the user] ${message}`;
+    }
+  }
+  return message;
 }
 
 function extractText(content: BetaContentBlock[]): string {

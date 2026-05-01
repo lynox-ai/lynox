@@ -41,6 +41,7 @@
 		hasCredentials: boolean;
 		isDefault: boolean;
 		type: MailAccountType;
+		authType: 'imap' | 'oauth_google' | 'oauth_microsoft';
 		persona: string;
 		receiveOnly: boolean;
 	}
@@ -289,6 +290,31 @@
 		}
 	}
 
+	async function setDefaultAccount(id: string) {
+		try {
+			const res = await fetch(`${getApiBase()}/mail/accounts/${encodeURIComponent(id)}/default`, {
+				method: 'POST',
+			});
+			if (!res.ok) {
+				const err = (await res.json().catch(() => ({}))) as { error?: string };
+				addToast(err.error ?? 'Failed to set default', 'error');
+				return;
+			}
+			addToast('Default mailbox updated', 'success');
+			await loadAll();
+		} catch {
+			addToast('Failed to set default', 'error');
+		}
+	}
+
+	function authTypeLabel(authType: AccountView['authType']): string {
+		switch (authType) {
+			case 'oauth_google': return 'Gmail (OAuth)';
+			case 'oauth_microsoft': return 'Outlook (OAuth)';
+			case 'imap': return 'IMAP/SMTP';
+		}
+	}
+
 	/** Standard provider domains — if the address domain doesn't match, it's a custom/Workspace domain. */
 	const PROVIDER_DOMAINS: Record<string, string> = {
 		gmail: 'gmail.com', icloud: 'icloud.com', fastmail: 'fastmail.com',
@@ -351,7 +377,10 @@
 								{#if account.isDefault}
 									<span class="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent-text">DEFAULT</span>
 								{/if}
-								{#if !account.hasCredentials}
+								<span class="rounded bg-bg-subtle px-1.5 py-0.5 text-[10px] font-medium text-text-subtle" title={account.authType}>
+									{authTypeLabel(account.authType)}
+								</span>
+								{#if account.authType === 'imap' && !account.hasCredentials}
 									<span class="rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">NEEDS PASSWORD</span>
 								{/if}
 							</div>
@@ -364,14 +393,27 @@
 								</div>
 							{/if}
 						</div>
-						<button
-							type="button"
-							class="ml-3 rounded border border-border px-2 py-1 text-xs text-text-muted hover:border-danger hover:text-danger"
-							onclick={() => deleteAccount(account.id)}
-							data-testid="mail-delete-{account.id}"
-						>
-							Delete
-						</button>
+						<div class="ml-3 flex items-center gap-2">
+							{#if !account.isDefault}
+								<button
+									type="button"
+									class="rounded border border-border px-2 py-1 text-xs text-text-muted hover:border-accent hover:text-accent-text"
+									onclick={() => setDefaultAccount(account.id)}
+									data-testid="mail-default-{account.id}"
+									title="Make this the default mailbox for tools that don't name an account"
+								>
+									Set default
+								</button>
+							{/if}
+							<button
+								type="button"
+								class="rounded border border-border px-2 py-1 text-xs text-text-muted hover:border-danger hover:text-danger"
+								onclick={() => deleteAccount(account.id)}
+								data-testid="mail-delete-{account.id}"
+							>
+								Delete
+							</button>
+						</div>
 					</div>
 				{/each}
 			</div>

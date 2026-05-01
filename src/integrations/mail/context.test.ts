@@ -78,33 +78,33 @@ vi.mock('nodemailer', () => {
 const GMAIL_ACCOUNT: MailAccountConfig = {
   id: 'rafael-gmail',
   displayName: 'Rafael',
-  address: 'rafael@gmail.com',
+  address: 'user@gmail.com',
   preset: 'gmail',
   imap: { host: 'imap.gmail.com', port: 993, secure: true },
   smtp: { host: 'smtp.gmail.com', port: 465, secure: true },
-  auth: 'app-password',
+  authType: 'imap',
   type: 'personal',
 };
 
 const ICLOUD_ACCOUNT: MailAccountConfig = {
   id: 'rafael-icloud',
   displayName: 'iCloud',
-  address: 'rafael@icloud.com',
+  address: 'user@icloud.com',
   preset: 'icloud',
   imap: { host: 'imap.mail.me.com', port: 993, secure: true },
   smtp: { host: 'smtp.mail.me.com', port: 587, secure: false },
-  auth: 'app-password',
+  authType: 'imap',
   type: 'personal',
 };
 
 const INPUT_GMAIL: AddAccountInput = {
   config: GMAIL_ACCOUNT,
-  credentials: { user: 'rafael@gmail.com', pass: 'app-password-gmail' },
+  credentials: { user: 'user@gmail.com', pass: 'app-password-gmail' },
 };
 
 const INPUT_ICLOUD: AddAccountInput = {
   config: ICLOUD_ACCOUNT,
-  credentials: { user: 'rafael@icloud.com', pass: 'app-password-icloud' },
+  credentials: { user: 'user@icloud.com', pass: 'app-password-icloud' },
 };
 
 // ── Test fixtures ──────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ describe('MailContext — addAccount', () => {
     await ctx.addAccount({
       ...INPUT_GMAIL,
       config: { ...GMAIL_ACCOUNT, displayName: 'New Name' },
-      credentials: { user: 'rafael@gmail.com', pass: 'rotated-password' },
+      credentials: { user: 'user@gmail.com', pass: 'rotated-password' },
     });
 
     expect(spy).toHaveBeenCalledTimes(1);
@@ -247,6 +247,47 @@ describe('MailContext — testAccount', () => {
   });
 });
 
+describe('MailContext — default reconciliation', () => {
+  it('preserves the persisted default when its provider fails to register on init', async () => {
+    // First boot: add Gmail (becomes default) and iCloud, close.
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+    await ctx.close();
+
+    // Simulate revoked Gmail credentials by removing them from the vault
+    // while the persisted account row + is_default flag remain in the DB.
+    backend.delete('MAIL_ACCOUNT_RAFAEL_GMAIL');
+
+    // Second boot: a fresh context against the same stateDb + backend.
+    const ctx2 = new MailContext(stateDb, backend);
+    await ctx2.init();
+
+    // Persisted choice survives: Gmail still flagged as default in the DB.
+    // The in-memory registry only carries iCloud (the registered survivor).
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+    expect(ctx2.registry.list()).toEqual(['rafael-icloud']);
+
+    await ctx2.close();
+  });
+
+  it('promotes the persisted default and never picks a fallback when its provider does register', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+    ctx.setDefault('rafael-icloud');
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+    await ctx.close();
+
+    const ctx2 = new MailContext(stateDb, backend);
+    await ctx2.init();
+
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+    expect(ctx2.registry.default()).toBe('rafael-icloud');
+
+    await ctx2.close();
+  });
+});
+
 describe('MailContext — listAccounts (safe view)', () => {
   it('excludes credentials and marks the default account', async () => {
     await ctx.addAccount(INPUT_GMAIL);
@@ -301,7 +342,7 @@ describe('MailContext — MailHooks', () => {
       const envelopes = [{
         uid: 1, messageId: '<in@x>', folder: 'INBOX', threadKey: '<in@x>',
         inReplyTo: undefined, from: [{ address: 'sender@example.com' }],
-        to: [{ address: 'rafael@gmail.com' }], cc: [], replyTo: [],
+        to: [{ address: 'user@gmail.com' }], cc: [], replyTo: [],
         subject: 'Hi', date: new Date(), flags: [], snippet: '',
         hasAttachments: false, attachmentCount: 0, sizeBytes: 100,
         isAutoReply: false,
@@ -382,4 +423,384 @@ describe('MailContext — MailError surface', () => {
     // Equivalent check: constructing a MailError with the same code works
     expect(() => { throw new MailError(result.code as 'not_found', result.error ?? ''); }).toThrow(MailError);
   });
+});
+
+// ── OAuth-Gmail boot migration (PR2) ─────────────────────────────────────
+//
+// When MailContext is constructed with an authenticated GoogleAuth, init()
+// auto-creates a placeholder mail_accounts row so users who connected Gmail
+// via OAuth before the unification refactor see their mailbox without
+// re-authorizing. Idempotent — the second init() must not insert again.
+
+describe('MailContext — OAuth-Gmail boot migration', () => {
+  const realFetch = globalThis.fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it('inserts an oauth_google row + registers OAuthGmailProvider on first init', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user@example.com' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('test-token'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctxWithAuth = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctxWithAuth.init();
+      const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0]?.address).toBe('user@example.com');
+      expect(accounts[0]?.id).toBe('gmail-user-example.com');
+      expect(accounts[0]?.preset).toBe('gmail');
+      expect(ctxWithAuth.registry.list()).toContain('gmail-user-example.com');
+    } finally {
+      await ctxWithAuth.close();
+    }
+  });
+
+  it('is idempotent — second engine boot does not insert a duplicate row', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user@example.com' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx1 = new MailContext(stateDb, backend, undefined, {}, auth);
+    await ctx1.init();
+    await ctx1.close();
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
+      expect(accounts).toHaveLength(1);
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('skips migration when GoogleAuth is not authenticated', async () => {
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(false),
+      getAccessToken: vi.fn(),
+      hasScope: vi.fn(),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toHaveLength(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('coexists with IMAP accounts in the same registry', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user@example.com' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    // Pre-seed an IMAP row + creds so init() registers both
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+
+    const ctxBoth = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctxBoth.init();
+      // Both providers present
+      expect(ctxBoth.registry.list()).toContain('rafael-gmail');             // IMAP
+      expect(ctxBoth.registry.list()).toContain('gmail-user-example.com'); // OAuth
+    } finally {
+      await ctxBoth.close();
+    }
+  });
+
+  it('survives a profile-fetch failure — migration retries on next boot', async () => {
+    fetchMock.mockResolvedValue(new Response('server error', { status: 500 }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      // No row created — but no crash either
+      expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toHaveLength(0);
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('replaces a stale row when the user reconnected with a different Google account', async () => {
+    // Pre-seed a row from a previous OAuth identity
+    stateDb.upsertAccount({
+      id: 'gmail-old-rafael-brandfusion-ch',
+      displayName: 'old-user@example.com',
+      address: 'old-user@example.com',
+      preset: 'gmail',
+      imap: { host: '', port: 0, secure: true },
+      smtp: { host: '', port: 0, secure: true },
+      authType: 'oauth_google',
+      oauthProviderKey: 'GOOGLE_OAUTH_TOKENS',
+      type: 'personal',
+    });
+    // Live profile now reports a different mailbox
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'new-user@example.com' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0]?.address).toBe('new-user@example.com');
+      // Stale id is gone
+      expect(stateDb.getAccount('gmail-old-rafael-brandfusion-ch')).toBe(null);
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('preserves email special chars in slug so plus/dot variants do not collide', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user+spam@example.com' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctx2.init();
+      const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
+      expect(accounts).toHaveLength(1);
+      // The `+` is preserved so `rafael+spam@x` and `rafael.spam@x` get distinct ids
+      // (`@` still collapses to `-` since it isn't a typical id char).
+      expect(accounts[0]?.id).toBe('gmail-user+spam-example.com');
+    } finally {
+      await ctx2.close();
+    }
+  });
+});
+
+// ── Persisted default flag (PR3) ─────────────────────────────────────────
+//
+// The DEFAULT badge no longer flips when providers register in different
+// order. is_default lives in mail_accounts; init() restores it; addAccount()
+// no longer silently demotes a previous default; setDefault() is the
+// explicit user-driven switch.
+
+describe('MailContext — persisted default flag', () => {
+  it('init() promotes the row marked is_default=1 in the DB', async () => {
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    stateDb.upsertAccount(ICLOUD_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+    backend.set('MAIL_ACCOUNT_RAFAEL_ICLOUD', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+
+    // Mark iCloud as the explicit default — even though gmail is older
+    stateDb.setDefaultAccount('rafael-icloud');
+
+    const ctx2 = new MailContext(stateDb, backend);
+    try {
+      await ctx2.init();
+      expect(ctx2.registry.default()).toBe('rafael-icloud');
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('init() falls back to first registered + persists when no default is set', async () => {
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    stateDb.upsertAccount(ICLOUD_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+    backend.set('MAIL_ACCOUNT_RAFAEL_ICLOUD', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+
+    const ctx2 = new MailContext(stateDb, backend);
+    try {
+      await ctx2.init();
+      // Gmail is older (registered first); becomes fallback default
+      expect(ctx2.registry.default()).toBe('rafael-gmail');
+      expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('addAccount() does not overwrite an existing default', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    expect(ctx.registry.default()).toBe('rafael-gmail');
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+
+    await ctx.addAccount(INPUT_ICLOUD);
+    // The first-added account stays default — this is the bug we're fixing.
+    expect(ctx.registry.default()).toBe('rafael-gmail');
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+  });
+
+  it('setDefault() updates DB + registry; throws for unknown id', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+
+    ctx.setDefault('rafael-icloud');
+    expect(ctx.registry.default()).toBe('rafael-icloud');
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+
+    expect(() => ctx.setDefault('missing')).toThrow(MailError);
+  });
+
+  it('removeAccount() promotes a sibling when removing the default', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+    ctx.setDefault('rafael-gmail');
+
+    await ctx.removeAccount('rafael-gmail');
+    // Fallback to the only remaining account, persisted
+    expect(ctx.registry.default()).toBe('rafael-icloud');
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+
+    await ctx.removeAccount('rafael-icloud');
+    expect(ctx.registry.default()).toBe(null);
+    expect(stateDb.defaultAccountId()).toBe(null);
+  });
+
+  it('OAuth boot migration claims the default when no other row holds it', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      emailAddress: 'user@example.com',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch;
+
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+
+    try {
+      const ctxBoot = new MailContext(stateDb, backend, undefined, {}, auth);
+      try {
+        await ctxBoot.init();
+        // OAuth row was the first to exist → claims default
+        expect(ctxBoot.registry.default()).toBe('gmail-user-example.com');
+        expect(stateDb.defaultAccountId()).toBe('gmail-user-example.com');
+      } finally {
+        await ctxBoot.close();
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+// ── Persisted default flag (PR3) ─────────────────────────────────────────
+//
+// The DEFAULT badge no longer flips when providers register in different
+// order. is_default lives in mail_accounts; init() restores it; addAccount()
+// no longer silently demotes a previous default; setDefault() is the
+// explicit user-driven switch.
+
+describe('MailContext — persisted default flag', () => {
+  it('init() promotes the row marked is_default=1 in the DB', async () => {
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    stateDb.upsertAccount(ICLOUD_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+    backend.set('MAIL_ACCOUNT_RAFAEL_ICLOUD', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+
+    // Mark iCloud as the explicit default — even though gmail is older
+    stateDb.setDefaultAccount('rafael-icloud');
+
+    const ctx2 = new MailContext(stateDb, backend);
+    try {
+      await ctx2.init();
+      expect(ctx2.registry.default()).toBe('rafael-icloud');
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('init() falls back to first registered + persists when no default is set', async () => {
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    stateDb.upsertAccount(ICLOUD_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+    backend.set('MAIL_ACCOUNT_RAFAEL_ICLOUD', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+
+    const ctx2 = new MailContext(stateDb, backend);
+    try {
+      await ctx2.init();
+      // Gmail is older (registered first); becomes fallback default
+      expect(ctx2.registry.default()).toBe('rafael-gmail');
+      expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('addAccount() does not overwrite an existing default', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    expect(ctx.registry.default()).toBe('rafael-gmail');
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+
+    await ctx.addAccount(INPUT_ICLOUD);
+    // The first-added account stays default — this is the bug we're fixing.
+    expect(ctx.registry.default()).toBe('rafael-gmail');
+    expect(stateDb.defaultAccountId()).toBe('rafael-gmail');
+  });
+
+  it('setDefault() updates DB + registry; throws for unknown id', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+
+    ctx.setDefault('rafael-icloud');
+    expect(ctx.registry.default()).toBe('rafael-icloud');
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+
+    expect(() => ctx.setDefault('missing')).toThrow(MailError);
+  });
+
+  it('removeAccount() promotes a sibling when removing the default', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+    ctx.setDefault('rafael-gmail');
+
+    await ctx.removeAccount('rafael-gmail');
+    // Fallback to the only remaining account, persisted
+    expect(ctx.registry.default()).toBe('rafael-icloud');
+    expect(stateDb.defaultAccountId()).toBe('rafael-icloud');
+
+    await ctx.removeAccount('rafael-icloud');
+    expect(ctx.registry.default()).toBe(null);
+    expect(stateDb.defaultAccountId()).toBe(null);
+  });
+
 });

@@ -20,6 +20,7 @@ import { loadConfig } from '../core/config.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
+import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -85,6 +86,8 @@ function requiresAdmin(method: string, pathname: string): boolean {
   if (pathname.startsWith('/api/migration') && pathname !== '/api/migration/preview') return true;
   // WhatsApp credential mutations are admin-scope; read-only status stays user-scope.
   if ((method === 'POST' || method === 'DELETE') && pathname === '/api/whatsapp/credentials') return true;
+  // KG cleanup is destructive (deletes entities + their relations) — admin only.
+  if (method === 'POST' && pathname === '/api/kg/cleanup') return true;
   return false;
 }
 const RATE_WINDOW_MS = 60_000;
@@ -194,7 +197,10 @@ export class LynoxHTTPApi {
   private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
   // Pending prompts now stored in PromptStore (SQLite) — no in-memory Maps
-  private readonly runningSessions = new Set<string>();
+  // Per-session run tracking. `streamAlive=false` after the SSE connection
+  // closes; if a pending prompt is then blocking the previous run, a fresh
+  // /run can take it over instead of 409-looping forever (Bug 3).
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void }>();
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
@@ -378,6 +384,15 @@ export class LynoxHTTPApi {
   }
 
   async start(port: number): Promise<void> {
+    // Web UI mode binds to 0.0.0.0 — without a secret, the engine API would
+    // be reachable unauthenticated from any container network neighbour.
+    // Auto-generate one (persisted to ~/.lynox/http-secret) so the bearer
+    // path always gates the API. API-only mode falls through to its
+    // localhost bind without a secret as before.
+    if (this.webUiHandler && !process.env['LYNOX_HTTP_SECRET']) {
+      const { ensureHttpSecret } = await import('../core/engine-init.js');
+      ensureHttpSecret();
+    }
     const secret = process.env['LYNOX_HTTP_SECRET'];
 
     const trustProxy = process.env['LYNOX_TRUST_PROXY'] === 'true';
@@ -479,6 +494,11 @@ export class LynoxHTTPApi {
       if (secret && !useTls) {
         process.stderr.write(`⚠ Warning: HTTP API exposed without TLS (LYNOX_ALLOW_PLAIN_HTTP=true). Use a reverse proxy.\n`);
       }
+      // Fire-and-forget Mistral account health check. Surfaces 401 (key
+      // invalid), 402 (no credits), 429 (rate-limited) into stderr +
+      // Bugsink so operators see the problem in the logs instead of
+      // first hearing about it via a "Vorlesen fehlgeschlagen" report.
+      void import('../core/mistral-health-check.js').then(({ reportMistralAccountHealth }) => reportMistralAccountHealth());
     });
 
     // Rate limit GC
@@ -955,6 +975,27 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
 
+      // Stale-run takeover: a previous /run whose SSE stream has already
+      // closed and which is parked on a pending prompt would otherwise lock
+      // this session forever — the client polled /run on reconnect, got 409
+      // every time, and the prompt-wait never resolved (Bug 3: "forever
+      // thinking" after disconnect + reload + new message). When the slot
+      // matches that pattern, hand control to the new request.
+      const promptStoreEarly = this.engine?.getPromptStore();
+      const existingSlot = this.runningSessions.get(sessionId);
+      if (existingSlot && !existingSlot.streamAlive && promptStoreEarly?.getPending(sessionId)) {
+        existingSlot.takeover();
+        // Wait for the previous handler's `finally` to clear the slot.
+        // Realistic drain after takeover() is sub-100 ms (one tick to
+        // resolve waitForSettled, then session.run unwinds); the 1 s cap
+        // bounds worker-tying if the previous handler is unexpectedly slow
+        // to unwind. Falls through to a 409 if the slot still hasn't drained.
+        const drainStart = Date.now();
+        while (this.runningSessions.has(sessionId) && Date.now() - drainStart < 1000) {
+          await new Promise<void>((r) => setTimeout(r, 25));
+        }
+      }
+
       // Guard: reject concurrent runs on the same session
       if (this.runningSessions.has(sessionId)) {
         errorResponse(res, 409, 'A run is already in progress for this session');
@@ -1119,6 +1160,10 @@ export class LynoxHTTPApi {
         clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         aborted = true;
+        // Mark this run's stream as dead so a fresh /run on the same session
+        // can take it over if the agent is parked on a pending prompt.
+        const slot = this.runningSessions.get(sessionId);
+        if (slot) slot.streamAlive = false;
         // If a prompt is pending, do NOT abort the session —
         // the agent loop stays alive polling SQLite for an answer.
         // The user can reconnect and answer the prompt.
@@ -1129,7 +1174,15 @@ export class LynoxHTTPApi {
       });
 
       // Run
-      this.runningSessions.add(sessionId);
+      // Takeover hook: a future /run for this session can call this to free
+      // the slot when our SSE stream is dead and we're stuck on a prompt.
+      const takeover = (): void => {
+        const pending = promptStore?.getPending(sessionId);
+        if (pending) promptStore?.expirePrompt(pending.id);
+        sessionAbortController.abort();
+        session.abort();
+      };
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover });
       try {
         const result = await session.run(task, runOptions);
         if (!aborted) {
@@ -1462,12 +1515,10 @@ export class LynoxHTTPApi {
       const fromSeq = Math.max(parseInt(url.searchParams.get('fromSeq') ?? '0', 10) || 0, 0);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '10000', 10) || 10000, 1), 50000);
       const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
-      const messages = records.map(r => ({
-        seq: r.seq,
-        role: r.role,
-        content: JSON.parse(r.content_json) as unknown,
-        created_at: r.created_at,
-      }));
+      // Apply render projection: merge tool-result carriers into preceding
+      // tool-use blocks, strip safety wrappers for display, flatten into the
+      // UI-ready shape that mirrors the client's ChatMessage.
+      const messages = projectMessages(records);
       jsonResponse(res, 200, { messages });
     }));
 
@@ -1663,18 +1714,29 @@ export class LynoxHTTPApi {
     });
 
     this.staticRoutes.set('PUT /api/config', async (_req, res, _params, body) => {
-      const { readUserConfig, saveUserConfig, reloadConfig } = await import('../core/config.js');
+      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       const parsed = LynoxUserConfigSchema.safeParse(body);
       if (!parsed.success) {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
-      // Managed mode: block provider/credential changes (lynox provides the LLM)
-      // Starter (BYOK) mode: provider changes are allowed (customer brings own key)
+      // Managed mode: block provider/credential changes (lynox provides the LLM).
+      // Starter (BYOK) mode: provider changes are allowed (customer brings own key).
+      // Compare incoming values against the *effective* env-merged config — the
+      // Web UI re-sends every field on every save (including locked ones it
+      // received from GET), so a no-op write of `provider` or `default_tier`
+      // would otherwise look like an attempted change and block unrelated
+      // updates (e.g. flipping experience level).
       if (process.env['LYNOX_MANAGED_MODE'] === 'managed' || process.env['LYNOX_MANAGED_MODE'] === 'managed_pro' || process.env['LYNOX_MANAGED_MODE'] === 'eu') {
         const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'gcp_project_id', 'gcp_region', 'openai_model_id', 'default_tier'];
-        const attempted = LOCKED_FIELDS.filter(f => f in (parsed.data as Record<string, unknown>));
+        const effective = loadConfig() as Record<string, unknown>;
+        const update = parsed.data as Record<string, unknown>;
+        const attempted = LOCKED_FIELDS.filter((f) => {
+          if (!(f in update)) return false;
+          // No-op write (same value as effective config) → allow.
+          return JSON.stringify(update[f]) !== JSON.stringify(effective[f]);
+        });
         if (attempted.length > 0) {
           errorResponse(res, 403, `Managed EU instance: cannot change ${attempted.join(', ')}`);
           return;
@@ -1934,9 +1996,22 @@ export class LynoxHTTPApi {
       const title = typeof b['title'] === 'string' ? b['title'] : undefined;
       const description = typeof b['description'] === 'string' ? b['description'] : undefined;
       const assignee = typeof b['assignee'] === 'string' ? b['assignee'] : undefined;
+      const scheduleCron = typeof b['scheduleCron'] === 'string' && b['scheduleCron'].length > 0 ? b['scheduleCron'] : undefined;
+      const runAt = typeof b['runAt'] === 'string' && b['runAt'].length > 0 ? b['runAt'] : undefined;
+      const dueDate = typeof b['dueDate'] === 'string' && b['dueDate'].length > 0 ? b['dueDate'] : undefined;
       if (!title) { errorResponse(res, 400, 'Missing required field: title'); return; }
-      const task = taskManager.create({ title, description: description ?? title, assignee });
-      jsonResponse(res, 201, task);
+      if (runAt && Number.isNaN(Date.parse(runAt))) {
+        errorResponse(res, 400, 'Invalid runAt: must be ISO 8601 datetime'); return;
+      }
+      try {
+        const baseParams = { title, description, assignee, dueDate };
+        const task = scheduleCron
+          ? taskManager.createScheduled({ ...baseParams, scheduleCron })
+          : taskManager.create({ ...baseParams, ...(runAt ? { nextRunAt: runAt } : {}) });
+        jsonResponse(res, 201, task);
+      } catch (e) {
+        errorResponse(res, 400, e instanceof Error ? e.message : 'Failed to create task');
+      }
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/tasks/:id', async (_req, res, params, body) => {
@@ -2794,7 +2869,26 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // Render the post-callback redirect page. Uses meta-refresh (not inline JS,
+      // which the engine API CSP `default-src 'none'` blocks; not a 302, which would
+      // continue the cross-site redirect chain Google → callback → settings where
+      // SameSite=Strict session cookies wouldn't be sent). Meta-refresh from this
+      // same-origin page navigates with cookies intact.
+      const sendSuccessRedirect = (): void => {
+        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/integrations`;
+        const escaped = target.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${escaped}"><title>Connected</title></head><body><p>Google connected. Returning to settings…</p><p><a href="${escaped}">Click here if not redirected.</a></p></body></html>`);
+      };
+
       if (!code || !state || state !== this._googleOAuthState) {
+        // Idempotency: if the user reloads the callback URL after a successful
+        // exchange, the state slot is already cleared but the engine is already
+        // authenticated. Render the same success page instead of a confusing error.
+        if (code && state && google.isAuthenticated()) {
+          sendSuccessRedirect();
+          return;
+        }
         res.writeHead(400, { 'Content-Type': 'text/html' });
         res.end('<html><body><h1>Error</h1><p>Invalid callback — missing code or state mismatch.</p></body></html>');
         return;
@@ -2804,12 +2898,7 @@ export class LynoxHTTPApi {
         await google.exchangeRedirectCode(code, this._googleRedirectUri ?? '');
         this._googleOAuthState = undefined;
         this._googleRedirectUri = undefined;
-        // Navigate back via JS — a 302 would continue the cross-site redirect chain
-        // (Google → callback → settings), so the sameSite:strict session cookie still
-        // wouldn't be sent. A JS navigation starts a fresh same-site context.
-        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/integrations`;
-        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>window.location.replace(${JSON.stringify(target)})</script></body></html>`);
+        sendSuccessRedirect();
       } catch (err: unknown) {
         const msg = (err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
@@ -2904,6 +2993,20 @@ export class LynoxHTTPApi {
       if (!kg) { jsonResponse(res, 200, { entityCount: 0, relationCount: 0, memoryCount: 0, communityCount: 0 }); return; }
       const stats = await kg.stats();
       jsonResponse(res, 200, stats);
+    });
+
+    // Admin: purge legacy mis-extracted entities (stopwords + pricing fragments).
+    // Pre-v2 extractor wrote rows like "in" (person), "tools" (location),
+    // "39/mo" (project). v2 prevents new ones; this endpoint cleans the past.
+    // ?dryRun=true previews without deleting.
+    this.staticRoutes.set('POST /api/kg/cleanup', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!requireService(res, kg, 'Knowledge graph')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const dryRun = url.searchParams.get('dryRun') === 'true';
+      const { cleanupBadEntities } = await import('../core/kg-cleanup.js');
+      const result = cleanupBadEntities(kg.getDb(), { dryRun });
+      jsonResponse(res, 200, { dryRun, ...result });
     });
 
     // ── Mail (provider-agnostic IMAP/SMTP + app-password) ──
@@ -3103,6 +3206,22 @@ export class LynoxHTTPApi {
       const removed = await ctx!.removeAccount(params['id']!);
       if (!removed) { errorResponse(res, 404, `Account "${params['id']}" not found`); return; }
       jsonResponse(res, 200, { ok: true });
+    }));
+
+    // Set the default mailbox. Persists `is_default=1` on the target row and
+    // updates the in-memory registry so subsequent tool calls fall back to
+    // this account when none is explicitly named.
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/mail/accounts/:id/default', async (_req, res, params) => {
+      const ctx = engine.getMailContext();
+      if (!requireService(res, ctx, 'Mail integration')) return;
+      try {
+        ctx!.setDefault(params['id']!);
+        jsonResponse(res, 200, { ok: true, accounts: ctx!.listAccounts() });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const status = msg.includes('not registered') ? 404 : 400;
+        errorResponse(res, status, msg);
+      }
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities', async (req, res) => {

@@ -15,6 +15,11 @@ import {
 } from '../provider.js';
 import type { MailContext } from '../context.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
+import {
+  checkMailRateLimit,
+  checkRecipientDedup,
+  recordMailSend,
+} from './rate-limit.js';
 
 /**
  * Recipient count above which mail_send forces explicit confirmation with
@@ -79,17 +84,37 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
       },
     },
     requiresConfirmation: true,
+    redactInputForAudit: (input: MailSendToolInput) => {
+      const { body: _body, ...rest } = input;
+      return { ...rest, body_chars: typeof input.body === 'string' ? input.body.length : 0 };
+    },
     handler: async (input: MailSendToolInput, agent: IAgent): Promise<string> => {
       try {
         if (!input.to) return 'mail_send error: "to" is required';
         if (!input.subject) return 'mail_send error: "subject" is required';
         if (!input.body) return 'mail_send error: "body" is required';
 
+        // Cross-session rate-limit check. Fires before any side effect
+        // (provider lookup, secret scan, prompt). Block-message is the
+        // tool result so the agent can choose to wait or escalate.
+        const rateBlock = checkMailRateLimit('mail_send');
+        if (rateBlock) return rateBlock;
+
         // Fail-safe: refuse to send when no interactive prompt is available
         // (autonomous/background mode). The permission-guard already blocks
         // mail_send in autonomous mode, but this is the belt-and-braces.
         if (!agent.promptUser) {
           return 'mail_send error: sending requires interactive user confirmation, which is not available in this mode.';
+        }
+
+        // Block credential exfiltration via mail body. The deleted google_gmail
+        // tool had this; the unified mail_send needs it too. Without this, an
+        // agent that quotes a Bearer token or API key into a reply body would
+        // ship it cleartext over SMTP/Gmail with no recipient-side safeguard.
+        const { detectSecretInContent } = await import('../../../tools/builtin/http.js');
+        const secretMatch = detectSecretInContent(input.body);
+        if (secretMatch) {
+          return `mail_send blocked: body appears to contain a ${secretMatch}. Sending secrets via email is not allowed — strip the credential and retry.`;
         }
 
         const provider = resolveProvider(registry, input.account);
@@ -108,11 +133,19 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
         const bcc = parseAddressList(input.bcc);
         if (to.length === 0) return 'mail_send error: "to" did not parse to any valid addresses';
 
+        // Per-recipient dedup window — same (recipients, subject) within
+        // the configured window is rejected. Catches retry storms and
+        // approval-fatigue chains where the agent re-issues the same
+        // outbound after a transient error.
+        const allRecipients = [...to, ...cc, ...bcc];
+        const dedupBlock = checkRecipientDedup(allRecipients, input.subject);
+        if (dedupBlock) return dedupBlock;
+
         // Mass-send guard — count unique recipients across to+cc+bcc.
         // Above threshold, the confirmation prompt becomes mandatory and
         // lists every recipient so the user sees exactly who gets it.
         const uniqueRecipients = new Set<string>();
-        for (const a of [...to, ...cc, ...bcc]) {
+        for (const a of allRecipients) {
           uniqueRecipients.add(a.address.toLowerCase());
         }
         const isMassSend = uniqueRecipients.size > MASS_SEND_THRESHOLD;
@@ -152,6 +185,11 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
         if (bcc.length > 0) sendInput.bcc = bcc;
 
         const result = await provider.send(sendInput);
+
+        // Register dedup AFTER successful send. If send threw or was
+        // cancelled the agent can legitimately retry without hitting the
+        // window.
+        recordMailSend(allRecipients, input.subject);
 
         // Optional follow-up registration — fires only on successful send
         let followupNote = '';

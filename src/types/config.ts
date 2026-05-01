@@ -148,6 +148,15 @@ export interface LynoxUserConfig {
   default_tier?: ModelTier | undefined;
   /** Maximum allowed model tier. StepHints and pipeline steps requesting a higher tier are clamped. Managed hosting sets 'sonnet'. */
   max_tier?: ModelTier | undefined;
+  /**
+   * Account-level plan tier, independent of LLM model tier. Controls
+   * capability gating rather than model selection: e.g. the `researcher`
+   * role accepts an explicit `model: 'opus'` override only when
+   * `account_tier === 'pro'`; other tiers silently downgrade to Sonnet.
+   * Defaults to `'standard'` (Starter/Managed). Set to `'pro'` on
+   * Managed-Pro instances via env `LYNOX_ACCOUNT_TIER=pro` or config.
+   */
+  account_tier?: 'standard' | 'pro' | undefined;
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;
   max_session_cost_usd?: number | undefined;
@@ -190,6 +199,12 @@ export interface LynoxUserConfig {
   max_http_requests_per_hour?: number | undefined;
   /** Max HTTP requests per day (across sessions). */
   max_http_requests_per_day?: number | undefined;
+  /** Max mail sends per hour, per tool (mail_send / mail_reply). Default 50. */
+  max_mail_sends_per_hour?: number | undefined;
+  /** Max mail sends per day, per tool (mail_send / mail_reply). Default 200. */
+  max_mail_sends_per_day?: number | undefined;
+  /** Per-recipient dedup window in seconds — same (recipients, subject) within this window is rejected. Default 60. */
+  mail_dedup_window_sec?: number | undefined;
   /** Enable automatic memory extraction from responses. Default: true */
   memory_extraction?: boolean | undefined;
   /** Memory temporal decay half-life in days. Default: 90 */

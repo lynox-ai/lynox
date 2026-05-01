@@ -379,6 +379,23 @@ describe('WorkerLoop', () => {
     expect(session.run).toHaveBeenCalledWith('Task: Daily Report');
   });
 
+  it('does not duplicate the title when description equals title', async () => {
+    // Older clients (and the previous HTTP API) sent description = title for
+    // tasks created without a separate body. The prompt MUST NOT then render
+    // "Task: X\n\nX" — the agent reads the same line twice.
+    const task = makeTask({ description: 'Daily Report' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Ok.');
+    const engine = makeEngine({ taskManager: tm, session });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(session.run).toHaveBeenCalledWith('Task: Daily Report');
+  });
+
   // ---- 13. resolveTaskInput resolves pending input ----
 
   it('resolveTaskInput returns false when no task is active', () => {
