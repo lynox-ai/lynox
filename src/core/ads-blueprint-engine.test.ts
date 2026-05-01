@@ -356,10 +356,13 @@ describe('runBlueprint', () => {
       area: 'pmax_theme_coverage_gap', severity: 'MEDIUM', source: 'deterministic',
       text: 'PMax-Themen ohne AG …', confidence: 0.75,
       evidence: {
+        // All three themes are 'actionable' so the uncertain default-deny
+        // doesn't fire; the only reason keramik + selber are skipped is
+        // because the strategist brief lists them in hold_themes.
         themes: [
-          { token: 'glas', clusters: 29, sample: ['glasflasche'] },
-          { token: 'keramik', clusters: 15, sample: ['keramik'], category: 'uncertain' },
-          { token: 'selber', clusters: 11, sample: ['selber bauen'], category: 'uncertain' },
+          { token: 'glas', clusters: 29, sample: ['glasflasche'], category: 'actionable' },
+          { token: 'keramik', clusters: 15, sample: ['keramik'], category: 'actionable' },
+          { token: 'selber', clusters: 11, sample: ['selber bauen'], category: 'actionable' },
         ],
         existing_asset_groups: [],
       },
@@ -472,7 +475,13 @@ describe('runBlueprint', () => {
     expect(JSON.parse(updated.payload_json).final_url).toBe(chosenUrl);
   });
 
-  it('Phase B: Theme-AG with category=uncertain gets a theme-uncertainty review marker', () => {
+  it('uncertain themes are NOT auto-built; they surface as theme_uncertain_intent_pending finding', () => {
+    // Architecture change (post AquaNatura cycle 14): uncertain category
+    // themes were previously auto-built with a theme-uncertainty review
+    // marker that the operator had to dismiss. Now they're suppressed
+    // entirely — the agent must validate intent via DataForSEO and propose
+    // explicitly. This eliminates the dismiss-pick dance and pushes intent
+    // judgment to the layer that has the data (the agent).
     seedCustomerAndAccount(store);
     const r = store.createAuditRun({ adsAccountId: ACCOUNT, mode: 'BOOTSTRAP' });
     store.completeAuditRun(r.run_id);
@@ -485,7 +494,6 @@ describe('runBlueprint', () => {
         { landingPageUrl: 'https://acme-shop.example/',                  clicks: 300, conversions: 9 },
       ],
     });
-    // Audit-tool would write category onto each theme; simulate that here.
     store.insertFinding({
       runId: r.run_id, adsAccountId: ACCOUNT,
       area: 'pmax_theme_coverage_gap', severity: 'MEDIUM', source: 'deterministic',
@@ -502,17 +510,19 @@ describe('runBlueprint', () => {
     runBlueprint(store, ACCOUNT);
 
     const ags = store.listBlueprintEntities(r.run_id, { entityType: 'asset_group', kind: 'NEW' });
-    expect(ags).toHaveLength(2);
-    const byTheme = new Map(ags.map(a => [JSON.parse(a.payload_json).theme_token as string, a]));
-    // kefir: actionable + slug match → no review marker.
-    expect(JSON.parse(byTheme.get('kefir')!.needs_review_json)).toEqual([]);
-    // fermenten: uncertain → at least a theme-uncertainty review marker.
-    const fReviews = JSON.parse(byTheme.get('fermenten')!.needs_review_json) as Array<{ field: string; reason: string; candidates: Array<{ value: string }> }>;
-    const themeReview = fReviews.find(r => r.reason === 'uncertain_theme_classification');
-    expect(themeReview).toBeDefined();
-    expect(themeReview!.field).toBe('_status');
-    const candidateValues = themeReview!.candidates.map(c => c.value).sort();
-    expect(candidateValues).toEqual(['KEEP', '__DROP__']);
+    expect(ags).toHaveLength(1);
+    const tokens = ags.map(a => JSON.parse(a.payload_json).theme_token as string);
+    expect(tokens).toEqual(['kefir']);
+
+    // The uncertain theme is surfaced as an explicit agent-action finding.
+    const pendingFindings = store.listFindings(r.run_id, { area: 'theme_uncertain_intent_pending' });
+    expect(pendingFindings).toHaveLength(1);
+    const evidence = JSON.parse(pendingFindings[0]!.evidence_json) as {
+      themes: Array<{ token: string; classification_reason: string; suggested_dataforseo_seed: string }>;
+    };
+    expect(evidence.themes).toHaveLength(1);
+    expect(evidence.themes[0]!.token).toBe('fermenten');
+    expect(evidence.themes[0]!.suggested_dataforseo_seed).toBe('fermenten');
   });
 
   it('Theme-AG: clear slug match → no review marker; ambiguous → review marker on asset_group', () => {

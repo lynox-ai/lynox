@@ -185,12 +185,20 @@ export function runBlueprint(
   // spending PMax campaign. Idempotent under re-runs because deterministic
   // entities get cleared before persist below.
   //
-  // Strategist-brief hard-constraint: when the brief lists `hold_themes`,
-  // we filter those tokens out BEFORE they become NEW asset_groups. This
-  // closes the AquaNatura cycle 14 gap — brief said "do not build keramik
-  // and selber yet" and the blueprint built them anyway because the brief
-  // was advisory prose, not a constraint. The skipped themes get a
-  // deterministic finding in the audit so they're traceable.
+  // Two suppression layers run BEFORE generation:
+  //   1. Default-deny on uncertain category — see generateThemeExpansionProposals.
+  //      The skipped themes get a `theme_uncertain_intent_pending` finding
+  //      so the agent has an explicit to-do (validate intent via DataForSEO,
+  //      propose explicitly via ads_blueprint_entity_propose if buyer
+  //      intent confirmed).
+  //   2. Strategist-brief hold_themes hard-constraint — when the brief
+  //      explicitly lists tokens to hold (premature for current account
+  //      state), we filter those before they become NEW asset_groups.
+  //      This closes the AquaNatura cycle 14 gap.
+  const uncertainSkipped = collectUncertainThemes(store, run.run_id);
+  if (uncertainSkipped.length > 0) {
+    persistUncertainThemesFinding(store, run, uncertainSkipped);
+  }
   const briefHoldThemes = readBriefHoldThemes(store, run.run_id);
   const allThemeExpansions = generateThemeExpansionProposals(store, run, customer);
   const themeExpansions = briefHoldThemes.size === 0
@@ -766,6 +774,17 @@ function generateThemeExpansionProposals(
   const themes = evidence.themes ?? [];
   if (themes.length === 0) return [];
 
+  // Default-deny uncertain themes: don't auto-build asset_groups for clusters
+  // the audit's classifier flagged as 'uncertain'. The agent must validate
+  // intent (DataForSEO main_intent + CPC + sample interpretation) and only
+  // then explicitly propose the AG via ads_blueprint_entity_propose. The
+  // suppressed themes are surfaced as a `theme_uncertain_intent_pending`
+  // finding so the agent has a concrete to-do list. This closes the
+  // AquaNatura cycle 14 gap where keramik (em-keramik / Hund-Zecken /
+  // informational) and selber (DIY / non-buyer / CHF 0.13 CPC) auto-shipped
+  // and had to be dismissed via operator picks.
+  const actionableThemes = themes.filter(t => t.category !== 'uncertain');
+
   // Pick host PMax campaign by highest spend in the snapshot.
   const pmaxCampaigns = store.getSnapshotRows<{ campaign_name: string | null; channel_type: string | null; cost_micros: number | null }>(
     'ads_campaigns', run.ads_account_id, { runId: run.run_id },
@@ -783,11 +802,8 @@ function generateThemeExpansionProposals(
   const lpSummary = aggregateLpPerformance(lpRows);
 
   const customerSlug = customer.customer_id;
-  return themes.slice(0, MAX_THEME_EXPANSIONS).map(t => {
+  return actionableThemes.slice(0, MAX_THEME_EXPANSIONS).map(t => {
     const { url: finalUrl, review: urlReview } = pickFinalUrlForTheme(t.token, lpSummary);
-    const themeReview = t.category === 'uncertain'
-      ? buildThemeUncertaintyReview(t.token, t.classification_reason)
-      : null;
     return {
       theme: t.token,
       clusters: t.clusters,
@@ -796,12 +812,11 @@ function generateThemeExpansionProposals(
       sampleClusters: t.sample ?? [],
       finalUrl,
       urlReview,
-      themeReview,
+      themeReview: null,
       rationale: `Theme-Coverage-Gap: "${t.token}" hat ${t.clusters} PMax-Search-Cluster ohne passende Asset-Group. ` +
         `Neuer Asset-Group-Vorschlag (Status PAUSED) für ${customerSlug}` +
         (finalUrl ? ` mit themen-spezifischer LP "${finalUrl}"` : ' (LP-Mapping fehlgeschlagen, manuell setzen)') +
         (urlReview ? ' — Operator-Review nötig (URL-Pick mehrdeutig).' : '') +
-        (themeReview ? ' — Operator-Review nötig (Theme-Klassifikation unsicher).' : '') +
         `; nach Import + 14d Lernfenster Performance prüfen.`,
     };
   });
@@ -897,27 +912,6 @@ function pickFinalUrlForToken(
 function pickFinalUrlForTheme(theme: string, lps: readonly LpPerformance[]):
   { url: string | null; review: BlueprintReviewItem | null } {
   return pickFinalUrlForToken(theme, lps, 'theme');
-}
-
-/** Phase B: ask the operator to keep or drop a theme-AG when the
- *  classifier rated the source token 'uncertain'. The "drop" choice
- *  is encoded by writing the value `'__DROP__'` into the entity's
- *  `_status` payload field; ads_emit_csv treats that as a paused
- *  drop-candidate (no CSV row). The "keep" choice clears the marker
- *  without changing the payload. */
-function buildThemeUncertaintyReview(
-  themeToken: string, reason: string | undefined,
-): BlueprintReviewItem {
-  const why = reason ? ` Klassifikator: ${reason}` : '';
-  return {
-    field: '_status',
-    reason: 'uncertain_theme_classification',
-    prompt: `Theme-Asset-Group "${themeToken}": Klassifikation unsicher.${why} Behalten oder verwerfen?`,
-    candidates: [
-      { value: 'KEEP', label: `Behalten — Theme-AG für "${themeToken}" anlegen` },
-      { value: '__DROP__', label: `Verwerfen — kein AG für "${themeToken}"` },
-    ],
-  };
 }
 
 function buildUrlReview(
@@ -1326,5 +1320,69 @@ function persistHeldThemesFinding(
     confidence: 1,
     source: 'deterministic',
     evidence: { held_themes: heldThemes },
+  });
+}
+
+/** Read the audit's pmax_theme_coverage_gap finding and return any theme
+ *  classified as 'uncertain'. These are NOT auto-built into asset_groups
+ *  — the agent must validate intent and decide explicitly. */
+interface UncertainTheme {
+  token: string;
+  clusters: number;
+  sample: string[];
+  classificationReason: string;
+}
+function collectUncertainThemes(store: AdsDataStore, runId: number): UncertainTheme[] {
+  const findings = store.listFindings(runId, { area: 'pmax_theme_coverage_gap' });
+  if (findings.length === 0) return [];
+  let evidence: { themes?: Array<{
+    token: string; clusters: number; sample?: string[];
+    category?: string; classification_reason?: string;
+  }> } = {};
+  try { evidence = JSON.parse(findings[0]!.evidence_json); } catch { return []; }
+  const themes = evidence.themes ?? [];
+  return themes
+    .filter(t => t.category === 'uncertain')
+    .map(t => ({
+      token: t.token,
+      clusters: t.clusters,
+      sample: t.sample ?? [],
+      classificationReason: t.classification_reason ?? '',
+    }));
+}
+
+/** Persist an agent-action finding for each uncertain theme. The agent
+ *  reading this should: (1) call DataForSEO related_keywords for the token,
+ *  (2) check main_intent + CPC + sample interpretation, (3) propose via
+ *  ads_blueprint_entity_propose ONLY when buyer intent is confirmed.
+ *  Otherwise add the token to the strategist brief's hold_themes for next
+ *  cycle. */
+function persistUncertainThemesFinding(
+  store: AdsDataStore, run: AdsAuditRunRow, uncertain: readonly UncertainTheme[],
+): void {
+  store.insertFinding({
+    runId: run.run_id,
+    adsAccountId: run.ads_account_id,
+    area: 'theme_uncertain_intent_pending',
+    severity: 'MEDIUM',
+    text:
+      `${uncertain.length} Theme-Cluster mit unklarem Buyer-Intent werden NICHT auto-emittiert: ` +
+      `${uncertain.map(t => `"${t.token}" (${t.clusters} Cluster)`).join(', ')}. ` +
+      `Der Agent muss vor dem nächsten Emit per DataForSEO related_keywords ` +
+      `(main_intent + CPC + Sample-Interpretation) prüfen, ob Buyer-Intent vorliegt. ` +
+      `Wenn ja: via ads_blueprint_entity_propose mit korrekter Final-URL und ` +
+      `passendem asset_group_name explizit vorschlagen. Wenn nein: Token in den ` +
+      `Strategist-Brief hold_themes-Liste aufnehmen, damit das Cycle-Counter sauber durchläuft.`,
+    confidence: 1,
+    source: 'deterministic',
+    evidence: {
+      themes: uncertain.map(t => ({
+        token: t.token,
+        clusters: t.clusters,
+        sample: t.sample,
+        classification_reason: t.classificationReason,
+        suggested_dataforseo_seed: t.token,
+      })),
+    },
   });
 }
