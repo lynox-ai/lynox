@@ -127,7 +127,7 @@ export type ThinkingMode =
 
 export type ThinkingHint = ThinkingMode['type'];
 
-export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 // === Step Hints (LLM-driven per-step configuration) ===
 

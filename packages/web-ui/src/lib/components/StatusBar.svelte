@@ -237,8 +237,10 @@
 
 	<span class="text-border">|</span>
 
-	<!-- Today's Cost -->
-	<a href="/app/activity?tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<!-- Today's Cost — points to the usage dashboard, not the raw run log. -->
+	<!-- Budget + per-model + voice split lives under ?tab=usage; history is a -->
+	<!-- separate tab for users who want the per-run timeline. -->
+	<a href="/app/activity?tab=usage" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		{formatCost(todayCost)} {t('status.today')}
 	</a>
 

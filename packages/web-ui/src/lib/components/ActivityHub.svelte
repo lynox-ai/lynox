@@ -7,21 +7,23 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import HistoryView from './HistoryView.svelte';
 	import TasksView from './TasksView.svelte';
+	import UsageDashboard from './UsageDashboard.svelte';
 
 	let { onrerun }: { onrerun?: (task: string) => void } = $props();
 
-	let tab = $state<'dashboard' | 'history' | 'tasks'>('dashboard');
+	let tab = $state<'dashboard' | 'usage' | 'history' | 'tasks'>('dashboard');
 
 	$effect(() => {
 		const p = $page.url.searchParams.get('tab');
-		if (p === 'history' || p === 'tasks') tab = p;
+		if (p === 'usage' || p === 'history' || p === 'tasks') tab = p;
 		else tab = 'dashboard';
 	});
 
 	const tabs = [
 		{ id: 'dashboard' as const, labelKey: 'hub.activity.dashboard' },
-		{ id: 'history' as const, labelKey: 'hub.activity.history' },
-		{ id: 'tasks' as const, labelKey: 'hub.activity.tasks' },
+		{ id: 'usage' as const,     labelKey: 'hub.activity.usage' },
+		{ id: 'history' as const,   labelKey: 'hub.activity.history' },
+		{ id: 'tasks' as const,     labelKey: 'hub.activity.tasks' },
 	];
 
 	// ── Dashboard data ──────────────────────────────────
@@ -286,6 +288,14 @@
 						</div>
 					{/if}
 				{/if}
+			</div>
+		{:else if tab === 'usage'}
+			<!-- Reuses the same UsageDashboard component that Settings → Budget & Usage
+			     renders. Two entry points, one surface — status bar "$X today" link
+			     points here too so the most-clicked cost path lands on the dashboard
+			     instead of the raw run history. -->
+			<div class="p-6 max-w-3xl mx-auto">
+				<UsageDashboard />
 			</div>
 		{:else if tab === 'history'}
 			<HistoryView {onrerun} />
