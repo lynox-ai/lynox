@@ -32,7 +32,7 @@ jobs:
           echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         id: build
         with:
           context: .
@@ -42,7 +42,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/lynox-ai/lynox:scan-staging
           format: table
@@ -50,7 +50,7 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
