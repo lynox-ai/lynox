@@ -18,7 +18,8 @@ cliproxyapi
 coverage/
 tests/performance/results.json
 tests/performance/*.log
-scripts/bench-models/results/
+scripts/bench-models/results/*
+!scripts/bench-models/results/.gitkeep
 tests/fixtures/voice/*.webm
 tests/fixtures/voice/*.wav
 tests/fixtures/voice/*.mp3
