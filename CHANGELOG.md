@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.3.7 — 2026-04-28
+
+### Added
+
+- **Spawn input validation** — `spawn_agent` now hard-caps caller-supplied values: max 10 agents per call, `max_turns` 1–50 (integer), `max_budget_usd` 0–50, `name` 1–64 chars (no control characters), `task` 1–16 K. JSON-schema mirrors the runtime checks; `additionalProperties: false` on the top level. Defensive floor in `estimateSpawnCost` so a malformed `max_turns` cannot return a negative estimate that would credit the session-budget counter (#198, #201).
+- **Canary build CI** — Pushes to `feat/**`, `fix/**`, or `canary/**` publish two docker tags (`branch-<slug>` and `sha-<short>`) without ever touching a running instance. Pairs with managed-side canary pinning (lynox-pro #87) so a single instance can be held on a pre-release branch image while the fleet stays on `:latest` (#203).
+- **GreenMail adversarial mailbox fixtures** — broadens mail integration coverage for malformed/edge-case messages (#192).
+
+### Changed
+
+- **Realistic spawn cost estimate** — `estimateSpawnCost` now models output as `OUTPUT_FILL_RATIO (0.3) × model.maxOutput` per turn (was naive worst-case ×1.0), and the default per-spawn iteration cap drops from 20 to 10. A typical 3-Sonnet-researcher fan-out estimates ≈ $2.52 instead of $15+, so legitimate patterns no longer trip the session ceiling (#197).
+- **Mail tool hardening** — per-tool rate limits + per-recipient dedup in send paths (#188); persisted default mailbox is preserved when its provider fails to load (#187); Gmail OAuth watcher tightens cursor + provider lifecycle (#185); body decoder accepts more charsets (#189); address-list parser hardened with documented flag semantics (#191).
+- **Google Workspace auth** — service-account token cache (#184) + coalesced concurrent refreshes (#182) — fewer round-trips on bursty access patterns.
+- **Engine HTTP secret always set** — startup now ensures `LYNOX_HTTP_SECRET` is materialised before any handler comes up, eliminating the rare "secret missing" failure mode (#190).
+- **Recoverable tool errors stay inline** — a tool error that the agent can retry no longer fires the global toast; it lives where it happened, in the chat thread (#195).
+- **Spawn estimator + iteration cap as named constants** — `SPAWN_OUTPUT_FILL_RATIO`, `DEFAULT_SPAWN_MAX_TURNS`, single source of truth so the upfront estimator and runtime cap can never drift (#197, #202).
+
+### Fixed
+
+- **KG entity misclassification** — single-source-of-truth stopwords + a v2 post-filter at extraction time reject generic nouns and price expressions that the v1 regex+free-text pipeline was persisting; eval on 300 cases at 97.7 % precision / 94.6 % recall (#193).
+- **Gmail envelope batching** — fewer Gmail API calls on first-page render via metadata batch fetch (#186).
+- **GitHub Deployments tracking restored** — `release.yml` records a Deployment object after the pro-dispatch succeeds; the Deployments page froze at v1.3.3 after #142 dropped the production environment gate, this puts the visual record back without re-introducing a blocking reviewer step (#196).
+
+### Internal
+
+- Spawn JSDocs trimmed (no incident anecdotes); 3-researcher estimate test tightened to a narrow band around the documented expectation; `OUTPUT_FILL_RATIO` renamed `SPAWN_OUTPUT_FILL_RATIO` for prefix consistency (#201, #202).
+- `.gitignore`: bench-models results excluded (#183).
+
+### lynox-pro
+
+- **Per-instance canary pinning** — `pinned_tag` column on managed instances; fleet rollout (`startRollout`) skips pinned instances and records the skipped set on the rollout row for audit; new `PATCH /admin/instances/:id/pinned-tag` endpoint to set or clear the pin; `updateOne` refuses to deploy when the new tag would diverge from an existing pin, forcing the operator to update the pin first. End-to-end-validated on staging control plane (lynox-pro #87).
+- `pnpm/action-setup` bumped 4 → 6 to fix transient CI (lynox-pro #17).
+
 ## 1.3.6 — 2026-04-27
 
 ### Added

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fixMarkdownPreprocessing } from './markdown-preprocess.js';
+import { fixMarkdownPreprocessing, repairCodeFences } from './markdown-preprocess.js';
 
 describe('fixMarkdownPreprocessing', () => {
 	describe('heading normalisation (regression for v1.3.5)', () => {
@@ -68,5 +68,62 @@ describe('fixMarkdownPreprocessing', () => {
 			const input = '```ts\nconst x = "Hello.World";\n```';
 			expect(fixMarkdownPreprocessing(input)).toBe(input);
 		});
+	});
+});
+
+describe('repairCodeFences', () => {
+	it('leaves balanced fences untouched', () => {
+		const input = '```ts\nconst x = 1;\n```';
+		expect(repairCodeFences(input)).toBe(input);
+	});
+
+	it('leaves text without any fence untouched', () => {
+		expect(repairCodeFences('Hello\n\nworld')).toBe('Hello\n\nworld');
+	});
+
+	it('appends closing fence when content after the unclosed fence looks like real code', () => {
+		const input = '```ts\nconst x = 1;\nconst y = 2;';
+		expect(repairCodeFences(input)).toBe(input + '\n```');
+	});
+
+	it('strips opening fence when content inside looks like markdown (heading + bold)', () => {
+		const input = '```markdown\n## Overview\n\n**Budget:** CHF 10/day';
+		const out = repairCodeFences(input);
+		expect(out).not.toMatch(/^```/);
+		expect(out).toContain('## Overview');
+		expect(out).toContain('**Budget:**');
+	});
+
+	it('strips opening fence when content inside is a markdown table', () => {
+		const input = '```\n| Page | Keyword |\n|---|---|\n| Home | foo |\n\n**Note:** see above';
+		const out = repairCodeFences(input);
+		expect(out).not.toMatch(/^```/);
+		expect(out).toContain('| Page | Keyword |');
+	});
+
+	it('preserves content before the unclosed fence', () => {
+		const input = 'Intro paragraph.\n\n```\n## A\n\n**b** list\n- one\n- two';
+		const out = repairCodeFences(input);
+		expect(out.startsWith('Intro paragraph.')).toBe(true);
+		expect(out).not.toContain('```');
+	});
+
+	it('still appends closing fence when there is just one weak markdown signal', () => {
+		const input = '```\n# Just a comment\n  let x = 1;\n  let y = 2;';
+		// Only one heading-ish line + 4-space indented code → not enough markdown signal
+		expect(repairCodeFences(input)).toBe(input + '\n```');
+	});
+
+	it('does not strip the opening fence when the content is short and codey', () => {
+		const input = '```\nconst x = 1;\nconst y = 2;';
+		expect(repairCodeFences(input)).toBe(input + '\n```');
+	});
+
+	it('handles a single trailing fence (closing without opening) by appending another', () => {
+		// Treat as odd-count: one fence on its own. The "after" content is empty,
+		// so it doesn't look markdown → append a second fence.
+		const input = '```';
+		const out = repairCodeFences(input);
+		expect(out).toBe(input + '\n```');
 	});
 });

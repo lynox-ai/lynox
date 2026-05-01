@@ -258,13 +258,15 @@ export class Agent implements IAgent {
     try {
       return await this._loop();
     } catch (err: unknown) {
-      // Always roll back to keep message history consistent — a partial
-      // loop may have pushed assistant(tool_use) without a matching
-      // user(tool_result), which would cause a 400 on the next API call.
-      this.messages.length = snapshot;
       if (this.abortController.signal.aborted) {
+        // Keep the user message so the next turn carries its context.
+        // Drop only partial assistant content (e.g. tool_use without a
+        // matching tool_result) which would cause a 400 on the next call.
+        this.messages.length = snapshot + 1;
         return '';
       }
+      // Non-abort error: full rollback to keep history consistent.
+      this.messages.length = snapshot;
       throw err;
     } finally {
       // Drain fire-and-forget memory extraction so the stream isn't orphaned (avoids 499)
