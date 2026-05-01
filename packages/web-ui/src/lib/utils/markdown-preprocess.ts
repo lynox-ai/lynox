@@ -28,3 +28,45 @@ export function fixMarkdownPreprocessing(md: string): string {
 		}).join('\n');
 	}).join('');
 }
+
+/**
+ * Repair an odd number of code fences. When the LLM leaves a fence open,
+ * naively appending a closing fence drags the entire remainder into a
+ * `<pre><code>` — which renders the response as raw markdown source and
+ * blows up the chat container width. We do better:
+ *
+ * - If the content after the unclosed fence contains markdown structure
+ *   (ATX headings, table rows, bold, list markers), the opening fence was
+ *   almost certainly the LLM wrapping its answer in ```markdown / ```md.
+ *   Strip the opening fence and let marked render it as prose.
+ * - Otherwise (looks like real code), append a closing fence so the rest
+ *   doesn't fall off the parser's state.
+ *
+ * Counts only fences that are alone on a line (`^```\w*\s*$`), matching
+ * marked's recognition rule.
+ */
+export function repairCodeFences(md: string): string {
+	const validFence = /^```\w*\s*$/gm;
+	const fences = [...md.matchAll(validFence)];
+	if (fences.length % 2 === 0) return md;
+
+	const lastOpen = fences[fences.length - 1];
+	if (!lastOpen || lastOpen.index === undefined) return md + '\n```';
+	const after = md.slice(lastOpen.index + lastOpen[0].length);
+	if (looksLikeMarkdown(after)) {
+		return md.slice(0, lastOpen.index) + after;
+	}
+	return md + '\n```';
+}
+
+/** Heuristic: does this string contain enough markdown structure that
+ *  rendering it as prose is more useful than as a code block? */
+function looksLikeMarkdown(s: string): boolean {
+	let signals = 0;
+	if (/^#{1,6}\s+\S/m.test(s)) signals++;          // ATX heading
+	if (/^\s*\|.*\|\s*$/m.test(s)) signals++;         // table row
+	if (/\*\*[^*\n]+\*\*/.test(s)) signals++;          // bold
+	if (/^\s*[-*+]\s+\S/m.test(s)) signals++;          // bullet list
+	if (/^\s*\d+\.\s+\S/m.test(s)) signals++;          // numbered list
+	return signals >= 2;
+}

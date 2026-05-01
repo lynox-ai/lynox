@@ -242,6 +242,20 @@ export class PromptStore {
     return result.changes;
   }
 
+  /** Expire a single pending prompt by id. Used when a /run handler is
+   * superseded by a fresh /run for the same session: the previous run is
+   * stuck on `waitForSettled`, so the only way to drain it is to mark its
+   * prompt expired and let the wait resolve. Idempotent. Returns true only
+   * the first time the prompt transitions out of 'pending'. */
+  expirePrompt(promptId: string): boolean {
+    const result = this.db
+      .prepare(`UPDATE pending_prompts SET status = 'expired' WHERE id = ? AND status = 'pending'`)
+      .run(promptId);
+    const changed = result.changes > 0;
+    if (changed) this._emitSettled(promptId);
+    return changed;
+  }
+
   // ── Wait ────────────────────────────────────────────────────────────────
 
   /** Resolve when the prompt is answered, expired, or the signal aborts.

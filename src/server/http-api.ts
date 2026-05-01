@@ -197,7 +197,10 @@ export class LynoxHTTPApi {
   private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
   // Pending prompts now stored in PromptStore (SQLite) — no in-memory Maps
-  private readonly runningSessions = new Set<string>();
+  // Per-session run tracking. `streamAlive=false` after the SSE connection
+  // closes; if a pending prompt is then blocking the previous run, a fresh
+  // /run can take it over instead of 409-looping forever (Bug 3).
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void }>();
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
@@ -972,6 +975,27 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
 
+      // Stale-run takeover: a previous /run whose SSE stream has already
+      // closed and which is parked on a pending prompt would otherwise lock
+      // this session forever — the client polled /run on reconnect, got 409
+      // every time, and the prompt-wait never resolved (Bug 3: "forever
+      // thinking" after disconnect + reload + new message). When the slot
+      // matches that pattern, hand control to the new request.
+      const promptStoreEarly = this.engine?.getPromptStore();
+      const existingSlot = this.runningSessions.get(sessionId);
+      if (existingSlot && !existingSlot.streamAlive && promptStoreEarly?.getPending(sessionId)) {
+        existingSlot.takeover();
+        // Wait for the previous handler's `finally` to clear the slot.
+        // Realistic drain after takeover() is sub-100 ms (one tick to
+        // resolve waitForSettled, then session.run unwinds); the 1 s cap
+        // bounds worker-tying if the previous handler is unexpectedly slow
+        // to unwind. Falls through to a 409 if the slot still hasn't drained.
+        const drainStart = Date.now();
+        while (this.runningSessions.has(sessionId) && Date.now() - drainStart < 1000) {
+          await new Promise<void>((r) => setTimeout(r, 25));
+        }
+      }
+
       // Guard: reject concurrent runs on the same session
       if (this.runningSessions.has(sessionId)) {
         errorResponse(res, 409, 'A run is already in progress for this session');
@@ -1136,6 +1160,10 @@ export class LynoxHTTPApi {
         clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         aborted = true;
+        // Mark this run's stream as dead so a fresh /run on the same session
+        // can take it over if the agent is parked on a pending prompt.
+        const slot = this.runningSessions.get(sessionId);
+        if (slot) slot.streamAlive = false;
         // If a prompt is pending, do NOT abort the session —
         // the agent loop stays alive polling SQLite for an answer.
         // The user can reconnect and answer the prompt.
@@ -1146,7 +1174,15 @@ export class LynoxHTTPApi {
       });
 
       // Run
-      this.runningSessions.add(sessionId);
+      // Takeover hook: a future /run for this session can call this to free
+      // the slot when our SSE stream is dead and we're stuck on a prompt.
+      const takeover = (): void => {
+        const pending = promptStore?.getPending(sessionId);
+        if (pending) promptStore?.expirePrompt(pending.id);
+        sessionAbortController.abort();
+        session.abort();
+      };
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover });
       try {
         const result = await session.run(task, runOptions);
         if (!aborted) {
