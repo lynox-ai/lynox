@@ -148,6 +148,29 @@ describe('PromptStore', () => {
       const outcome = await wait;
       expect(outcome.status).toBe('expired');
     });
+
+    it('expirePrompt settles a single in-flight wait with expired and frees the session slot', async () => {
+      const id = store.insertAskUser('s1', 'q');
+      const wait = store.waitForSettled(id);
+      expect(store.expirePrompt(id)).toBe(true);
+      const outcome = await wait;
+      expect(outcome.status).toBe('expired');
+      // Slot is free again — a fresh prompt for the same session must insert.
+      expect(() => store.insertAskUser('s1', 'q2')).not.toThrow();
+    });
+
+    it('expirePrompt is idempotent', () => {
+      const id = store.insertAskUser('s1', 'q');
+      expect(store.expirePrompt(id)).toBe(true);
+      expect(store.expirePrompt(id)).toBe(false);
+    });
+
+    it('expirePrompt is a no-op for an already-answered prompt', () => {
+      const id = store.insertAskUser('s1', 'q');
+      store.answerUser(id, 'a');
+      expect(store.expirePrompt(id)).toBe(false);
+      expect(store.getById(id)?.status).toBe('answered');
+    });
   });
 
   describe('getPending', () => {

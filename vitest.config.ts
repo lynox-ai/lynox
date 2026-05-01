@@ -2,7 +2,8 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'tests/**/*.test.ts', 'packages/*/src/**/*.test.ts'],
+    globalSetup: ['./scripts/vitest-global-setup.ts'],
     testTimeout: 10_000,
     pool: 'forks',
     coverage: {
