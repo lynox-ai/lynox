@@ -331,12 +331,21 @@ export class WorkerLoop {
       throw new Error(`Pipeline ${task.pipeline_id} not found`);
     }
 
-    const rawManifest = JSON.parse(manifestJson) as unknown;
+    let rawManifest: unknown;
+    try {
+      rawManifest = JSON.parse(manifestJson);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Pipeline ${task.pipeline_id} manifest JSON is corrupt: ${msg}`);
+    }
     const config = this.engine.getUserConfig();
 
-    // DB-persisted manifests can be from older schema versions or partially
-    // stored — revalidate before running so a malformed `agents` field surfaces
-    // as a typed error instead of a deep stack-trace from computePhases.
+    // Defense-in-depth: DB-persisted manifests can be from older schema
+    // versions or partially stored. We revalidate at this WorkerLoop
+    // boundary so a malformed `agents` field surfaces as a typed
+    // validateManifest error and gets routed through Bugsink +
+    // recordTaskRun like any other task failure, instead of crashing deep
+    // in computePhases.
     const { runManifest, validateManifest } = await import('../orchestrator/runner.js');
     const manifest = validateManifest(rawManifest);
     const state = await runManifest(manifest, config, { runHistory });

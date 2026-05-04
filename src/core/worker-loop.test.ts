@@ -524,4 +524,70 @@ describe('WorkerLoop', () => {
     void promptPromise;
     void promptResolve;
   });
+
+  // ---- pipeline path: validateManifest boundary ----
+  //
+  // Drive executePipeline directly. Routing via tick() → executeTask →
+  // fire-and-forget makes the async chain hard to await deterministically
+  // (two sequential dynamic imports plus a bugsink capture chain in the
+  // outer catch). Direct invocation locks the new validation contract:
+  // invalid manifests reject with typed errors before reaching
+  // computePhases. The outer catch in executeTask is unchanged and
+  // already exercised by the standard task-failure tests above.
+  it('executePipeline rejects a malformed persisted manifest with a typed error', async () => {
+    vi.useRealTimers();
+    const task = makeTask({
+      id: 'pipe-task-1',
+      pipeline_id: 'pipeline-bad',
+      task_type: 'pipeline',
+    });
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager()),
+      getUserConfig: vi.fn(() => ({})),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => null),
+        getPipelineRunManifest: vi.fn(() =>
+          JSON.stringify({
+            manifest_version: '1.0',
+            name: 'bad-manifest',
+            triggered_by: 'test',
+            agents: [], // ← rejected by validateManifest's .min(1)
+            gate_points: [],
+            on_failure: 'stop',
+          }),
+        ),
+      })),
+    } as unknown as Engine;
+    const router = makeNotificationRouter(false);
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    await expect(
+      (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+        .executePipeline(task),
+    ).rejects.toThrow(/agents/i);
+  });
+
+  it('executePipeline rejects corrupt manifest JSON with a clear error', async () => {
+    vi.useRealTimers();
+    const task = makeTask({
+      id: 'pipe-task-2',
+      pipeline_id: 'pipeline-corrupt',
+      task_type: 'pipeline',
+    });
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager()),
+      getUserConfig: vi.fn(() => ({})),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => null),
+        getPipelineRunManifest: vi.fn(() => '{this is not valid json'),
+      })),
+    } as unknown as Engine;
+    const router = makeNotificationRouter(false);
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    await expect(
+      (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+        .executePipeline(task),
+    ).rejects.toThrow(/manifest JSON is corrupt/);
+  });
 });
