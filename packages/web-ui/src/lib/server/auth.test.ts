@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
 	createSessionToken,
@@ -9,6 +9,10 @@ import {
 
 const SECRET = 'a'.repeat(64);
 const OTHER_SECRET = 'b'.repeat(64);
+
+afterEach(() => {
+	vi.useRealTimers();
+});
 
 describe('createSessionToken / verifySessionToken — roundtrip', () => {
 	it('verifies a token signed with the same secret', () => {
@@ -22,40 +26,82 @@ describe('createSessionToken / verifySessionToken — roundtrip', () => {
 	});
 
 	it('produces tokens in the documented `<nonce>.<ts>.<sig>` shape', () => {
-		const tok = createSessionToken(SECRET);
-		const parts = tok.split('.');
-		expect(parts).toHaveLength(3);
-		expect(parts[0]!).toMatch(/^[0-9a-f]{16}$/); // 8-byte hex nonce
-		expect(parts[1]!).toMatch(/^\d+$/); // unix timestamp
-		expect(parts[2]!).toMatch(/^[0-9a-f]{64}$/); // sha256 hex
+		// Sample 20× — a single-sample regex assertion could pass by luck if
+		// nonce randomness ever degenerated. The full shape must hold across
+		// every call.
+		const SHAPE = /^[0-9a-f]{16}\.\d+\.[0-9a-f]{64}$/;
+		const nonces = new Set<string>();
+		for (let i = 0; i < 20; i++) {
+			const tok = createSessionToken(SECRET);
+			expect(tok).toMatch(SHAPE);
+			nonces.add(tok.split('.')[0]!);
+		}
+		// 20 distinct 8-byte nonces — collision probability is ~10^-15, so
+		// any duplicate here is a regression in the RNG path, not bad luck.
+		expect(nonces.size).toBe(20);
 	});
 
 	it('rejects a token with a tampered signature', () => {
 		const tok = createSessionToken(SECRET);
 		const parts = tok.split('.');
-		const flipped = parts[2]!.slice(0, -1) + (parts[2]!.endsWith('0') ? '1' : '0');
-		const tampered = `${parts[0]!}.${parts[1]!}.${flipped}`;
+		// Flip the low bit of the last hex char deterministically — guaranteed
+		// to stay in [0-9a-f] (XOR within the hex range) and to differ from
+		// the original sig regardless of what character it ends in.
+		const lastChar = parts[2]!.slice(-1);
+		const flippedChar = (parseInt(lastChar, 16) ^ 1).toString(16);
+		const tampered = `${parts[0]!}.${parts[1]!}.${parts[2]!.slice(0, -1)}${flippedChar}`;
 		expect(verifySessionToken(tampered, SECRET)).toBe(false);
 	});
 
 	it('rejects a token with a tampered timestamp', () => {
 		const tok = createSessionToken(SECRET);
 		const parts = tok.split('.');
-		const tampered = `${parts[0]!}.${(parseInt(parts[1]!, 10) + 1).toString()}.${parts[2]!}`;
+		// Use a clearly different ts (not +1) so the rejection is unambiguously
+		// caused by HMAC mismatch on the changed payload — a +1 delta keeps
+		// the test in the noise floor of "what does ts validation actually
+		// check?".
+		const tampered = `${parts[0]!}.${(parseInt(parts[1]!, 10) + 12345).toString()}.${parts[2]!}`;
 		expect(verifySessionToken(tampered, SECRET)).toBe(false);
 	});
 
 	it('rejects an expired token (timestamp > SESSION_MAX_AGE_S in the past)', () => {
-		// Hand-forge a token with an old timestamp using the same algorithm.
-		// This is the cookie-mint recipe — exercising it here doubles as a
-		// regression sentinel against algorithm drift between createSessionToken
-		// and verifySessionToken.
+		// Use fake timers so the boundary is deterministic — relying on real
+		// Date.now() with a 60s "safety margin" silently breaks if
+		// SESSION_MAX_AGE_S is ever shortened or CI is slow.
+		const fixedNow = 1_777_900_000_000; // arbitrary fixed instant
+		vi.useFakeTimers();
+		vi.setSystemTime(fixedNow);
+
 		const key = createHmac('sha256', 'lynox-session').update(SECRET).digest();
-		const oldTs = Math.floor(Date.now() / 1000) - SESSION_MAX_AGE_S - 60;
+		const oldTs = Math.floor(fixedNow / 1000) - SESSION_MAX_AGE_S - 1;
 		const payload = `aaaaaaaaaaaaaaaa.${oldTs.toString()}`;
 		const sig = createHmac('sha256', key).update(payload).digest('hex');
 		const expired = `${payload}.${sig}`;
 		expect(verifySessionToken(expired, SECRET)).toBe(false);
+	});
+
+	it('locks the expiry boundary at exactly SESSION_MAX_AGE_S', () => {
+		// Pin the inequality direction: a token with ts = now - SESSION_MAX_AGE_S
+		// is still valid (boundary inclusive); ts - 1 is rejected. An off-by-one
+		// in the verifier (`>=` flipping to `>`) would invalidate every
+		// 30-day-old session cookie a day early — silent on prod until users
+		// notice. This test catches it pre-merge.
+		const fixedNow = 1_777_900_000_000;
+		vi.useFakeTimers();
+		vi.setSystemTime(fixedNow);
+
+		const key = createHmac('sha256', 'lynox-session').update(SECRET).digest();
+		const mintAt = (ts: number): string => {
+			const payload = `0123456789abcdef.${ts.toString()}`;
+			const sig = createHmac('sha256', key).update(payload).digest('hex');
+			return `${payload}.${sig}`;
+		};
+		const nowS = Math.floor(fixedNow / 1000);
+
+		// At the exact boundary: still valid.
+		expect(verifySessionToken(mintAt(nowS - SESSION_MAX_AGE_S), SECRET)).toBe(true);
+		// One second past: rejected.
+		expect(verifySessionToken(mintAt(nowS - SESSION_MAX_AGE_S - 1), SECRET)).toBe(false);
 	});
 
 	it('rejects malformed tokens (wrong part count)', () => {
@@ -82,9 +128,8 @@ describe('createSessionToken / verifySessionToken — roundtrip', () => {
 	});
 
 	it('cross-process roundtrip — a forged token using the documented HMAC chain verifies', () => {
-		// Sentinel: any external minter (smoke scripts, Lucia's CP-side cookie
-		// signing, the staging-cookie-forge recipe in
-		// reference_session_cookie_mint.md) builds the cookie via:
+		// Sentinel: any external minter (smoke scripts, CP-side cookie signing,
+		// staging cookie forging) builds the cookie via:
 		//   key  = HMAC-SHA256('lynox-session', LYNOX_HTTP_SECRET).digest()
 		//   sig  = HMAC-SHA256(key, '<nonce>.<ts>').hex()
 		// If verifySessionToken changes the derive/sign chain in any way that
