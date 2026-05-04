@@ -48,6 +48,13 @@ export async function runManifest(
     throw new Error(`Pipeline nesting exceeds max depth (${MAX_PIPELINE_DEPTH})`);
   }
 
+  if (!Array.isArray(manifest.agents) || manifest.agents.length === 0) {
+    throw new Error(
+      `Manifest "${manifest.name ?? '(unnamed)'}" has no agents — refusing to run. ` +
+      `Pass it through validateManifest() before runManifest() to surface schema errors.`,
+    );
+  }
+
   const runId = randomUUID();
   const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');
 

@@ -19,6 +19,18 @@ const MANIFEST: Manifest = {
   on_failure: 'stop',
 };
 
+describe('runManifest — empty manifest guard', () => {
+  it('throws a clear error when agents is missing', async () => {
+    const bad = { ...MANIFEST, agents: undefined as unknown as Manifest['agents'] };
+    await expect(runManifest(bad, CONFIG)).rejects.toThrow(/no agents/);
+  });
+
+  it('throws a clear error when agents is empty', async () => {
+    const bad: Manifest = { ...MANIFEST, agents: [] };
+    await expect(runManifest(bad, CONFIG)).rejects.toThrow(/no agents/);
+  });
+});
+
 describe('runManifest — happy path', () => {
   it('completes all steps and returns completed status', async () => {
     const mockResponses = new Map([

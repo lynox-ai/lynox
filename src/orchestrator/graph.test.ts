@@ -94,6 +94,18 @@ describe('detectCycle', () => {
 });
 
 describe('computePhases', () => {
+  it('returns empty graph for undefined steps', () => {
+    const result = computePhases(undefined);
+    expect(result.phases).toEqual([]);
+    expect(result.stepOrder).toEqual([]);
+  });
+
+  it('returns empty graph for empty steps array', () => {
+    const result = computePhases([]);
+    expect(result.phases).toEqual([]);
+    expect(result.stepOrder).toEqual([]);
+  });
+
   it('linear A→B→C: 3 phases of 1', () => {
     const result = computePhases([step('a'), step('b', ['a']), step('c', ['b'])]);
     expect(result.phases).toHaveLength(3);

@@ -331,10 +331,14 @@ export class WorkerLoop {
       throw new Error(`Pipeline ${task.pipeline_id} not found`);
     }
 
-    const manifest = JSON.parse(manifestJson) as import('../orchestrator/types.js').Manifest;
+    const rawManifest = JSON.parse(manifestJson) as unknown;
     const config = this.engine.getUserConfig();
 
-    const { runManifest } = await import('../orchestrator/runner.js');
+    // DB-persisted manifests can be from older schema versions or partially
+    // stored — revalidate before running so a malformed `agents` field surfaces
+    // as a typed error instead of a deep stack-trace from computePhases.
+    const { runManifest, validateManifest } = await import('../orchestrator/runner.js');
+    const manifest = validateManifest(rawManifest);
     const state = await runManifest(manifest, config, { runHistory });
 
     const success = state.status === 'completed';

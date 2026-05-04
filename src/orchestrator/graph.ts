@@ -87,7 +87,13 @@ export function detectCycle(adjacency: Map<string, Set<string>>): string[] | nul
  * Compute parallel execution phases using Kahn's algorithm.
  * Phase 0 = steps with no dependencies, etc.
  */
-export function computePhases(steps: ManifestStep[]): GraphAnalysis {
+export function computePhases(steps: ManifestStep[] | undefined): GraphAnalysis {
+  // A persisted-then-replayed pipeline manifest can land here with no agents
+  // (DB JSON stripped/legacy/empty), and `steps.map` would NPE deep in the
+  // worker loop. Empty graph is the only sensible answer for empty input.
+  if (!steps || steps.length === 0) {
+    return { phases: [], stepOrder: [] };
+  }
   const ids = new Set(steps.map(s => s.id));
   const adj = buildDependencyGraph(steps);
 
