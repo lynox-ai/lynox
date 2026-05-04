@@ -151,6 +151,30 @@ describe('Agent', () => {
       });
       expect(agent.getThinking()).toEqual({ type: 'enabled', budget_tokens: 8000 });
     });
+
+    it('keeps adaptive thinking on non-Haiku models', () => {
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        thinking: { type: 'adaptive' },
+      });
+      expect(agent.getThinking()).toEqual({ type: 'adaptive' });
+    });
+
+    it('forces thinking=disabled and strips effort on custom-proxy providers', () => {
+      // Same gate as Haiku but for the other capability tier — OpenAI/custom
+      // proxies don't speak Anthropic's thinking/effort vocabulary, so both
+      // fields must be stripped before the request leaves the agent.
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        provider: 'custom',
+        thinking: { type: 'enabled', budget_tokens: 4096 },
+        effort: 'high',
+      });
+      expect(agent.getThinking()).toEqual({ type: 'disabled' });
+      expect(agent.getEffort()).toBeUndefined();
+    });
   });
 
   // -- send() --
