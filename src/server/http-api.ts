@@ -1034,11 +1034,28 @@ export class LynoxHTTPApi {
         // sees a friendly message instead of a raw provider 400.
         const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
         const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
+        const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
+        // Allowlist matches what Anthropic vision accepts AND what the frontend
+        // resize path produces. Anything else here is either client tampering
+        // or an unsupported format that we should reject before forwarding.
+        const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
         for (const file of files) {
           if (typeof file.data !== 'string') {
             errorResponse(res, 400, `Invalid file: ${typeof file.name === 'string' ? file.name : 'unknown'}`); return;
           }
-          const isImage = typeof file.type === 'string' && file.type.startsWith('image/');
+          // Sanitize file.name before any interpolation: it's user-controlled
+          // (POST body), and naive interpolation into the LLM prompt as
+          // `[File: ${name}]\n${text}` lets a crafted name break out of the
+          // header line via embedded newlines and inject pseudo-system text.
+          const safeName = (typeof file.name === 'string' ? file.name : 'unknown')
+            .replace(/[\r\n\x00-\x1f]/g, ' ')
+            .slice(0, 256);
+          const rawType = typeof file.type === 'string' ? file.type : '';
+          const isImage = rawType.startsWith('image/');
+          if (isImage && !ALLOWED_IMAGE_TYPES.has(rawType)) {
+            errorResponse(res, 415, `Unsupported image type: ${rawType}. Use JPEG, PNG, GIF, or WebP.`);
+            return;
+          }
           const limit = isImage ? MAX_IMAGE_B64_BYTES : MAX_FILE_B64_BYTES;
           if (file.data.length > limit) {
             const sizeMb = (file.data.length / (1024 * 1024)).toFixed(1);
@@ -1050,11 +1067,16 @@ export class LynoxHTTPApi {
             return;
           }
           if (isImage) {
-            content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
+            content.push({ type: 'image', source: { type: 'base64', media_type: rawType, data: file.data } });
           } else {
-            // Non-image files: decode and include as text
-            const text = Buffer.from(file.data, 'base64').toString('utf-8');
-            content.push({ type: 'text', text: `[File: ${file.name}]\n${text}` });
+            // Non-image files: decode and include as text. Cap the decoded
+            // size so a 10 MB base64 can't push ~7.5 MB of arbitrary text
+            // straight into the model context.
+            const decoded = Buffer.from(file.data, 'base64').toString('utf-8');
+            const text = decoded.length > MAX_TEXT_FILE_DECODED_CHARS
+              ? `${decoded.slice(0, MAX_TEXT_FILE_DECODED_CHARS)}\n[…truncated, ${String(decoded.length - MAX_TEXT_FILE_DECODED_CHARS)} chars omitted]`
+              : decoded;
+            content.push({ type: 'text', text: `[File: ${safeName}]\n${text}` });
           }
         }
         content.push({ type: 'text', text: taskText });

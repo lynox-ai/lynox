@@ -508,12 +508,10 @@
 			return;
 		}
 
-		const needsConvert = file.type.startsWith('image/') && !SUPPORTED_IMAGE_TYPES.has(file.type);
-		if (needsConvert || file.type.startsWith('image/')) {
-			// Convert all images via Canvas — downscale to long-edge cap and
-			// re-encode as JPEG (or keep PNG for transparency-bearing types) so
-			// users can drop in 12 MP phone photos without hitting Anthropic's
-			// 5 MB base64 limit.
+		if (file.type.startsWith('image/')) {
+			// Downscale to Anthropic's vision long-edge target before upload —
+			// keeps 12 MP phone photos under the 5 MB base64 cap without hitting
+			// the network with bytes that the server-side resize would discard.
 			const img = new Image();
 			const url = URL.createObjectURL(file);
 			img.onload = () => {
@@ -524,9 +522,13 @@
 				const canvas = document.createElement('canvas');
 				canvas.width = Math.round(w0 * scale);
 				canvas.height = Math.round(h0 * scale);
-				canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
-				// PNG preserves alpha (transparency-bearing screenshots/logos);
-				// every other supported type re-encodes as JPEG for size.
+				const ctx = canvas.getContext('2d');
+				if (!ctx) {
+					URL.revokeObjectURL(url);
+					addToast(t('common.error'), 'error');
+					return;
+				}
+				ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 				const keepPng = file.type === 'image/png';
 				const outType = keepPng ? 'image/png' : 'image/jpeg';
 				const dataUrl = keepPng
