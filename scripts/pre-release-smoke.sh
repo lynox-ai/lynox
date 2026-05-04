@@ -7,9 +7,10 @@
 #   2. Reads the target instance's live LYNOX_HTTP_SECRET from its tenant
 #      container via the existing CP SSH chain (postgres → tenant SSH key →
 #      tenant host → /opt/lynox/tenants/<id>/.env).
-#   3. Mints a session cookie locally on the CP using the documented HMAC
-#      chain (see packages/web-ui/src/lib/server/auth.ts and
-#      reference_session_cookie_mint.md).
+#   3. Mints a session cookie locally on the CP using the same HMAC chain
+#      as packages/web-ui/src/lib/server/auth.ts: the cookie is
+#      `<nonce>.<ts>.<HMAC-SHA256(HMAC-SHA256('lynox-session', SECRET), payload)>`.
+#      The shared secret never leaves the staging boundary.
 #   4. Hits the four critical paths the original v1.3.8 incident slipped past:
 #         a) GET  /api/health                 → expect 200, captures version
 #         b) GET  /api/threads with cookie    → expect 200 (auth wired up)
@@ -63,6 +64,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Validate INSTANCE_SUBDOMAIN before it crosses the SSH boundary into a
+# psql `WHERE subdomain='...'` clause on the staging CP. Restricting to the
+# DNS-label charset closes the SQL-injection vector and matches what
+# Hetzner/Cloudflare would allow as a real subdomain anyway.
+if ! [[ "$INSTANCE_SUBDOMAIN" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  echo "error: --instance must be a DNS label (a-z, 0-9, '-'), got: $INSTANCE_SUBDOMAIN" >&2
+  exit 2
+fi
+
 ENGINE_HOST="${INSTANCE_SUBDOMAIN}.lynox.cloud"
 BASE_URL="https://${ENGINE_HOST}"
 
@@ -110,7 +120,10 @@ step "2/4  forge cookie + GET /api/threads"
 # the staging boundary. The CP has the postgres + SSH plumbing already.
 # shellcheck disable=SC2029  # local expansion of INSTANCE_SUBDOMAIN/BASE_URL/VERBOSE is intentional — we want them set on the remote shell.
 COOKIE_TEST_OUTPUT=$(ssh "$CP_TARGET" "INSTANCE_SUBDOMAIN='${INSTANCE_SUBDOMAIN}' BASE_URL='${BASE_URL}' VERBOSE='${VERBOSE_BODIES}' bash -se" <<'REMOTE'
-set -eu
+# pipefail catches `docker compose exec ... | cut` masking psql errors as
+# "instance not found"; INT/TERM/HUP coverage stops a Ctrl-C from leaving
+# the tenant SSH key on /tmp.
+set -euo pipefail
 
 # Find docker-compose file (prod CP uses docker-compose.yml, staging uses staging.yml)
 COMPOSE=""
@@ -127,12 +140,22 @@ TENANT_HOST_ID=$(echo "$DBROW" | cut -d'|' -f2)
 HOSTING_MODE=$(echo "$DBROW" | cut -d'|' -f3)
 [[ -n "$INSTANCE_ID" ]] || { echo "ERR instance '$INSTANCE_SUBDOMAIN' not found" >&2; exit 1; }
 
-# Resolve engine .env path + SSH key based on hosting mode
+# Resolve engine .env path + SSH key based on hosting mode. Use mktemp for
+# every file so a concurrent smoke run + a hostile shell user on the CP
+# can't squat on a predictable name and read the auth'd response bodies.
 TMPKEY=$(mktemp /tmp/_smoke_key.XXXXXX); chmod 600 "$TMPKEY"
-KH=/tmp/_smoke_kh.$$
-trap 'shred -u "$TMPKEY" 2>/dev/null || rm -f "$TMPKEY"; rm -f "$KH"' EXIT
+KH=$(mktemp /tmp/_smoke_kh.XXXXXX)
+THREADS_RESP=$(mktemp /tmp/_smoke_threads.XXXXXX)
+SESS_RESP=$(mktemp /tmp/_smoke_sess.XXXXXX)
+trap '
+  shred -u "$TMPKEY" 2>/dev/null || rm -f "$TMPKEY"
+  rm -f "$KH" "$THREADS_RESP" "$SESS_RESP"
+' EXIT INT TERM HUP
 
 if [[ "$HOSTING_MODE" == "tenant_host" ]]; then
+  # Two queries instead of one — `psql -t -A -F'|'` collapses multi-line
+  # values (ssh_private_key has embedded newlines) into a shape `cut -d'|'`
+  # cannot disambiguate. The ~500ms second-call cost is acceptable here.
   docker compose -f "$COMPOSE" exec -T postgres psql -U managed -d lynox_managed -t -A < /dev/null -c \
     "SELECT ssh_private_key FROM managed_tenant_hosts WHERE id='$TENANT_HOST_ID';" > "$TMPKEY"
   HOST_IP=$(docker compose -f "$COMPOSE" exec -T postgres psql -U managed -d lynox_managed -t -A < /dev/null -c \
@@ -167,43 +190,43 @@ print(f'{payload}.{sig}')
 
 # /api/threads — emit only the status sentinel; bodies stay on the
 # staging boundary unless VERBOSE=1 (set by --verbose / LYNOX_SMOKE_VERBOSE).
-THREADS_HTTP=$(curl -s -o /tmp/_threads_resp -w '%{http_code}' --max-time 10 \
+THREADS_HTTP=$(curl -s -o "$THREADS_RESP" -w '%{http_code}' --max-time 10 \
   -H "Cookie: lynox_session=$TOKEN" "${BASE_URL}/api/threads?limit=5")
 echo "THREADS_HTTP=$THREADS_HTTP"
-[[ "$VERBOSE" == "1" ]] && echo "THREADS_BODY_HEAD=$(head -c 200 /tmp/_threads_resp)"
+[[ "$VERBOSE" == "1" ]] && echo "THREADS_BODY_HEAD=$(head -c 200 "$THREADS_RESP")"
 
 # /api/sessions (POST creates new session)
-SESS_HTTP=$(curl -s -o /tmp/_sess_resp -w '%{http_code}' --max-time 10 \
+SESS_HTTP=$(curl -s -o "$SESS_RESP" -w '%{http_code}' --max-time 10 \
   -X POST -H "Cookie: lynox_session=$TOKEN" -H "Content-Type: application/json" \
   -d '{}' "${BASE_URL}/api/sessions")
 echo "SESS_HTTP=$SESS_HTTP"
-SESSION_ID=$(python3 -c "
-import json
+SESSION_ID=$(SESS_RESP="$SESS_RESP" python3 -c "
+import json, os
 try:
-    print(json.load(open('/tmp/_sess_resp')).get('sessionId',''))
+    print(json.load(open(os.environ['SESS_RESP'])).get('sessionId',''))
 except Exception:
     print('')
 ")
 echo "SESSION_ID=$SESSION_ID"
 
-# /api/sessions/<id>/run — bounded SSE, just look for at least one event.
-# We don't echo the SSE body even on success — the LLM reply could contain
-# anything depending on what the staging engine dragged from history.
+# /api/sessions/<id>/run — bounded SSE. We don't echo the SSE body even on
+# success — the LLM reply could contain anything depending on what the
+# staging engine dragged from history. The success sentinel is a positive
+# event type (text/tool/done); `event: error` or `event: aborted` would
+# otherwise let a server-side failure pass Step 4 silently.
 if [[ -n "$SESSION_ID" ]]; then
   RUN_OUT=$(curl -s --max-time 30 \
     -X POST -H "Cookie: lynox_session=$TOKEN" -H "Content-Type: application/json" \
     -d '{"task":"reply with the single word: pong"}' \
     "${BASE_URL}/api/sessions/${SESSION_ID}/run" \
-    | head -c 4096)
-  if echo "$RUN_OUT" | grep -qE '^event:'; then
+    | head -c 4096 || true)
+  if echo "$RUN_OUT" | grep -qE '^event: (text|tool_call|tool_result|done|turn_end)'; then
     echo "RUN_SSE=ok"
   else
     echo "RUN_SSE=fail"
     [[ "$VERBOSE" == "1" ]] && echo "RUN_OUT_HEAD=$(echo "$RUN_OUT" | head -c 300)"
   fi
 fi
-
-rm -f /tmp/_threads_resp /tmp/_sess_resp
 REMOTE
 )
 
