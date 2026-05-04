@@ -37,7 +37,10 @@ const STUB_MIN_WORDS = 3;
 // it to detect "this sentence was longer before strip" and apply the
 // word-count filter only to those sentences. Cleaned out at end of pipeline.
 // U+E000 is in the Unicode Private Use Area — never appears in real text.
+// `M_RE` is the hoisted marker-regex (avoids `new RegExp(M, 'g')` allocations
+// inside `dropStubs` per surviving sentence and inside the final hygiene pass).
 const M = '';
+const M_RE = //g;
 
 interface Labels {
   readonly tableSummary: (n: number) => string;
@@ -156,7 +159,7 @@ export function prepareForSpeech(input: string, lang: Lang | 'auto'): string {
   // Phase 4 — assemble + drop stubs + final hygiene.
   let s = out.join(' ');
   s = dropStubs(s);
-  s = s.replace(new RegExp(M, 'g'), '');
+  s = s.replace(M_RE, '');
   s = s.replace(/\s+([.,;:!?])/g, '$1');
   s = s.replace(/([.,;:!?])\1+/g, '$1');
   s = s.replace(/\.\s*\./g, '.');
@@ -171,16 +174,19 @@ export function prepareForSpeech(input: string, lang: Lang | 'auto'): string {
  * DE could insert " und " into an English list. Asymmetric cost → asymmetric
  * default.
  *
- * Umlauts only count when paired with at least one DE stopword. A single
- * umlaut'd proper noun in EN text ("Visit Müller now") would otherwise flip
- * detection to DE on its own.
+ * Umlaut counting is two-tier: ≥2 umlauts count on their own (terse DE input
+ * like "Prüfung läuft" has no stopwords but is unambiguously German); a
+ * single umlaut only counts when paired with a DE stopword (so a single
+ * umlaut'd proper noun in EN text — "Visit Müller now" — does not flip
+ * detection to DE).
  */
 function detectLang(text: string): Lang {
   const s = text.slice(0, 2000);
   const deStopwords = s.match(/\b(?:der|die|das|und|ist|nicht|für|werden|sind|mit|auch|eine?|oder)\b/gi)
     ?.length ?? 0;
   const umlauts = s.match(/[äöüÄÖÜß]/g)?.length ?? 0;
-  const de = deStopwords + (deStopwords > 0 ? umlauts : 0);
+  const umlautContribution = (deStopwords > 0 || umlauts >= 2) ? umlauts : 0;
+  const de = deStopwords + umlautContribution;
   const en = s.match(/\b(?:the|and|is|are|of|to|for|with|that|this|from|have|has)\b/gi)
     ?.length ?? 0;
   return de > en ? 'de' : 'en';
@@ -229,9 +235,12 @@ function stripInline(s: string): string {
   // Unspeakable token shapes.
   t = t.replace(/\b[A-Fa-f0-9]{8,}\b/g, M);                    // hex IDs / hashes
   // Long opaque tokens (UUID, JWT, base64, API keys). Requires a "shape
-  // signal" — a digit OR a hyphen/underscore inside — to avoid swallowing
-  // long German compound nouns like "Donaudampfschifffahrtsgesellschaft".
-  t = t.replace(/\b(?=[\w-]{24,}\b)[\w-]*[\d_-][\w-]*\b/g, M);
+  // signal" — a digit OR an underscore inside — to avoid swallowing long
+  // natural-language compounds: German nouns like
+  // "Donaudampfschifffahrtsgesellschaft" (no shape signal at all) and
+  // hyphenated English phrases like "state-of-the-art-implementation"
+  // (hyphens alone don't count, since real prose uses them too).
+  t = t.replace(/\b(?=[\w-]{24,}\b)[\w-]*[\d_][\w-]*\b/g, M);
   t = t.replace(/\{[^{}\n]*\}/g, M);                           // inline JSON-ish
 
   // Em/en dash → comma. Language-agnostic — both DE and EN want a clause break.
@@ -270,7 +279,7 @@ function dropStubs(s: string): string {
     .filter((seg) => {
       const tail = seg.replace(/[\s.!?,;:]+$/, '');
       if (!tail.endsWith(M)) return true;
-      const cleaned = seg.replace(new RegExp(M, 'g'), '');
+      const cleaned = seg.replace(M_RE, '');
       const words = cleaned.match(/\p{L}[\p{L}\p{N}'-]*/gu) ?? [];
       return words.length >= STUB_MIN_WORDS;
     })

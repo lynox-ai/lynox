@@ -270,6 +270,14 @@ describe('inline strip', () => {
     expect(out).toContain(word);
   });
 
+  it('does NOT strip long hyphenated English compounds (hyphens are not a shape signal)', () => {
+    // 30-letter hyphenated phrase — opaque-token shape signal must require
+    // a digit or underscore, not just a hyphen, otherwise prose vanishes.
+    const phrase = 'state-of-the-art-implementation';
+    const out = prepareForSpeech(`We built a ${phrase} for the team.`, 'en');
+    expect(out).toContain(phrase);
+  });
+
   it('strips inline JSON-ish braces', () => {
     const out = prepareForSpeech('Result: {"foo": 1, "bar": 2} arrived.', 'en');
     expect(out).not.toContain('{');
@@ -420,6 +428,13 @@ describe("'auto' lang detection", () => {
     // DE stopword, so this stays EN.
     const md = 'Visit Müller and check the list now.\n\n- A\n- B\n- C\n- D';
     expect(prepareForSpeech(md, 'auto')).toContain('List with 4 items');
+  });
+
+  it('detects DE for terse umlaut-only input without DE stopwords', () => {
+    // ≥2 umlauts on their own count as DE evidence — short replies like
+    // "Prüfung läuft" have no stopwords but are unambiguously German.
+    const md = 'Prüfung läuft.\n\n- A\n- B\n- C\n- D';
+    expect(prepareForSpeech(md, 'auto')).toContain('Liste mit 4 Einträgen');
   });
 });
 
