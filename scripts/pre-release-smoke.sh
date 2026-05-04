@@ -192,7 +192,7 @@ echo "SESSION_ID=$SESSION_ID"
 if [[ -n "$SESSION_ID" ]]; then
   RUN_OUT=$(curl -s --max-time 30 \
     -X POST -H "Cookie: lynox_session=$TOKEN" -H "Content-Type: application/json" \
-    -d '{"task":"reply with the single word: pong","effort":"low"}' \
+    -d '{"task":"reply with the single word: pong"}' \
     "${BASE_URL}/api/sessions/${SESSION_ID}/run" \
     | head -c 4096)
   if echo "$RUN_OUT" | grep -qE '^event:'; then
