@@ -1029,12 +1029,27 @@ export class LynoxHTTPApi {
       let task: string | unknown[];
       if (files.length > 0) {
         const content: unknown[] = [];
-        const MAX_FILE_B64_LEN = 10 * 1024 * 1024; // ~7.5 MB decoded
+        // Anthropic's vision endpoint enforces ≤5 MB on the base64 payload itself
+        // (not the decoded bytes). Reject earlier with a typed error so the user
+        // sees a friendly message instead of a raw provider 400.
+        const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
+        const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
         for (const file of files) {
-          if (typeof file.data !== 'string' || file.data.length > MAX_FILE_B64_LEN) {
-            errorResponse(res, 413, `File too large: ${typeof file.name === 'string' ? file.name : 'unknown'}`); return;
+          if (typeof file.data !== 'string') {
+            errorResponse(res, 400, `Invalid file: ${typeof file.name === 'string' ? file.name : 'unknown'}`); return;
           }
-          if (file.type.startsWith('image/')) {
+          const isImage = typeof file.type === 'string' && file.type.startsWith('image/');
+          const limit = isImage ? MAX_IMAGE_B64_BYTES : MAX_FILE_B64_BYTES;
+          if (file.data.length > limit) {
+            const sizeMb = (file.data.length / (1024 * 1024)).toFixed(1);
+            const limitMb = (limit / (1024 * 1024)).toFixed(0);
+            const reason = isImage
+              ? `Image too large: ${sizeMb} MB exceeds ${limitMb} MB Anthropic vision limit. Resize or compress before uploading.`
+              : `File too large: ${sizeMb} MB exceeds ${limitMb} MB limit.`;
+            errorResponse(res, 413, reason);
+            return;
+          }
+          if (isImage) {
             content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
           } else {
             // Non-image files: decode and include as text

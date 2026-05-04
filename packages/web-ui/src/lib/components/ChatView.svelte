@@ -493,6 +493,12 @@
 	const changesetLoading = $derived(getChangesetLoading());
 
 	const UNSUPPORTED_FORMATS = new Set(['image/heic', 'image/heif']);
+	// Anthropic resizes images server-side to 1568px on the long edge for vision
+	// processing; sending anything larger just wastes bytes against the 5 MB
+	// payload cap. JPEG q=0.85 is the standard quality/size sweet spot.
+	const IMAGE_MAX_LONG_EDGE = 1568;
+	const IMAGE_JPEG_QUALITY = 0.85;
+	const IMAGE_MAX_B64_BYTES = 5 * 1024 * 1024;
 
 	function addFile(file: File) {
 		// HEIC/HEIF can't be decoded by most browsers
@@ -504,20 +510,37 @@
 
 		const needsConvert = file.type.startsWith('image/') && !SUPPORTED_IMAGE_TYPES.has(file.type);
 		if (needsConvert || file.type.startsWith('image/')) {
-			// Convert all images via Canvas (ensures compatible format)
+			// Convert all images via Canvas — downscale to long-edge cap and
+			// re-encode as JPEG (or keep PNG for transparency-bearing types) so
+			// users can drop in 12 MP phone photos without hitting Anthropic's
+			// 5 MB base64 limit.
 			const img = new Image();
 			const url = URL.createObjectURL(file);
 			img.onload = () => {
+				const w0 = img.naturalWidth;
+				const h0 = img.naturalHeight;
+				const longEdge = Math.max(w0, h0);
+				const scale = longEdge > IMAGE_MAX_LONG_EDGE ? IMAGE_MAX_LONG_EDGE / longEdge : 1;
 				const canvas = document.createElement('canvas');
-				canvas.width = img.naturalWidth;
-				canvas.height = img.naturalHeight;
-				canvas.getContext('2d')!.drawImage(img, 0, 0);
-				const outType = SUPPORTED_IMAGE_TYPES.has(file.type) ? file.type : 'image/png';
-				const dataUrl = canvas.toDataURL(outType);
+				canvas.width = Math.round(w0 * scale);
+				canvas.height = Math.round(h0 * scale);
+				canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
+				// PNG preserves alpha (transparency-bearing screenshots/logos);
+				// every other supported type re-encodes as JPEG for size.
+				const keepPng = file.type === 'image/png';
+				const outType = keepPng ? 'image/png' : 'image/jpeg';
+				const dataUrl = keepPng
+					? canvas.toDataURL('image/png')
+					: canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY);
 				const base64 = dataUrl.split(',')[1] ?? '';
+				URL.revokeObjectURL(url);
+				if (base64.length > IMAGE_MAX_B64_BYTES) {
+					const mb = (base64.length / (1024 * 1024)).toFixed(1);
+					addToast(`Bild zu groß (${mb} MB nach Komprimierung). Bitte vorher verkleinern.`, 'error', 6000);
+					return;
+				}
 				const ext = outType.split('/')[1] ?? 'png';
 				pendingFiles = [...pendingFiles, { name: file.name.replace(/\.\w+$/, `.${ext}`), type: outType, data: base64 }];
-				URL.revokeObjectURL(url);
 			};
 			img.onerror = () => { URL.revokeObjectURL(url); addToast(t('common.error'), 'error'); };
 			img.src = url;
