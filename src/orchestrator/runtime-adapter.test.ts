@@ -220,3 +220,42 @@ describe('spawnInline with role', () => {
     expect(agentConfig['maxIterations']).toBe(10);
   });
 });
+
+describe('spawnInline thinking gating', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  it('forces thinking=disabled on Haiku DAG steps regardless of step hint', async () => {
+    // Haiku 4.5 has no extended-thinking support — Anthropic returns 400 for
+    // any thinking shape. Both default and explicit-enabled paths must drop
+    // thinking entirely on Haiku.
+    const step: ManifestStep = {
+      id: 'h-step', agent: 'h-step', runtime: 'inline',
+      model: 'haiku', thinking: 'enabled',
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['thinking']).toEqual({ type: 'disabled' });
+  });
+
+  it('uses adaptive thinking for non-Haiku DAG step with no hint', async () => {
+    const step: ManifestStep = {
+      id: 's-step', agent: 's-step', runtime: 'inline', model: 'sonnet',
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['thinking']).toEqual({ type: 'adaptive' });
+  });
+
+  it('honors explicit thinking=enabled on non-Haiku step', async () => {
+    const step: ManifestStep = {
+      id: 's-step', agent: 's-step', runtime: 'inline',
+      model: 'sonnet', thinking: 'enabled',
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['thinking']).toEqual({ type: 'enabled', budget_tokens: 10_000 });
+  });
+});
