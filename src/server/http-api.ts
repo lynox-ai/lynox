@@ -16,6 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { SessionStore } from '../core/session-store.js';
@@ -2189,6 +2190,11 @@ export class LynoxHTTPApi {
       const voiceFromConfig = readUserConfig().tts_voice;
       const voice = voiceFromRequest ?? (typeof voiceFromConfig === 'string' && voiceFromConfig.length > 0 ? voiceFromConfig : undefined);
       const model = b && typeof b['model'] === 'string' ? b['model'] : undefined;
+      // Caller-provided source language for text-prep (Web UI passes user's
+      // UI locale). Falls back to 'auto' — leaf runs a stopword vote.
+      const langRaw = b && typeof b['lang'] === 'string' ? b['lang'] : undefined;
+      const lang: Lang | 'auto' | undefined =
+        langRaw === 'de' || langRaw === 'en' || langRaw === 'auto' ? langRaw : undefined;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
       // tested up to 2 687 chars; 10 k gives headroom for long replies without
@@ -2217,6 +2223,7 @@ export class LynoxHTTPApi {
       }, {
         ...(voice ? { voice } : {}),
         ...(model ? { model } : {}),
+        ...(lang ? { lang } : {}),
       });
 
       if (meta) {

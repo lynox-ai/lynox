@@ -12,6 +12,13 @@
  * facade (per PRD: "fallback is browser Web Speech API, not another cloud vendor").
  */
 
+/**
+ * Source-text language for the Markdown → spoken-text pre-processor.
+ * Lives here (not in `text-prep.ts`) so the entire speak public surface —
+ * options + provider interface + language tag — is in one file.
+ */
+export type Lang = 'de' | 'en';
+
 export interface SpeakOpts {
   readonly voice?: string | undefined;
   readonly model?: string | undefined;
@@ -21,6 +28,13 @@ export interface SpeakOpts {
 
 export interface RichSpeakOpts extends SpeakOpts {
   readonly skipTextPrep?: boolean | undefined;
+  /**
+   * Source-text language for the Markdown → spoken-text pre-processor.
+   * Determines table/list summary labels and the list joiner. `'auto'`
+   * (or omitted) runs a stopword vote that defaults to `'en'` on tie.
+   * Web UI / Telegram callers should pass the user's UI locale.
+   */
+  readonly lang?: Lang | 'auto' | undefined;
 }
 
 export type AudioChunkCallback = (chunk: Uint8Array) => void;

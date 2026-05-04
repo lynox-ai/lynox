@@ -1,262 +1,416 @@
 /**
  * Markdown → spoken-text sanitizer.
  *
- * Raw assistant replies are Markdown. Reading them verbatim through a TTS
- * engine produces "asterisk-asterisk" for bold, URLs read character-by-character,
- * code fences as noise. This module flattens Markdown to a spoken-friendly
- * form, preserving punctuation for prosody.
+ * Block-first pipeline. Markdown is segmented into semantic blocks, each
+ * block is handled by an appropriate strategy (drop / summarize / speak),
+ * and only the speak-blocks pass through inline cleanup. The pipeline is
+ * intentionally language-thin: every speakable token — link labels, list
+ * items, paragraphs — flows through identical rules regardless of language.
+ * The only language-aware pieces are the labels for table/list summaries,
+ * the list joiner, and a small symbol-word map for trend arrows in tables.
  *
- * Phase 0 finding (voice-tts.md, 2026-04-16): prosody scales with input length.
- * Short replies read flatter than long ones because the model plans intonation
- * over the whole input. Preferring spoken connectors over terse bullet lists
- * partially offsets this.
+ * Phases:
+ *   1. Segment Markdown into Block[] (line-classified, no full Markdown AST).
+ *   2. Per-block strategy:
+ *        code, hr, blank          → drop
+ *        table (≤5 rows, 2-3 col) → row-by-row spoken; else summary
+ *        list  (>3 items)         → "[Liste mit N Einträgen]" / "[List with N items]"
+ *        list  (≤3 items)         → comma+conjunction joined sentence
+ *        heading                  → speak as own sentence
+ *        quote, paragraph         → speak inline-stripped
+ *   3. Inline-strip per speak block: links, URLs, inline code, HTML,
+ *      Markdown markers, IDs/hashes, JSON-ish, residual brackets, em-dash.
+ *   4. Stub-drop + hygiene: sub-sentences that originally contained a
+ *      stripped element and now hold <STUB_MIN_WORDS speakable words are
+ *      dropped (catches "Mehr unter." after a bare URL got stripped),
+ *      then whitespace and punctuation are normalized.
  */
 
+import type { Lang } from './types.js';
+
+const LIST_MAX = 3;
+const TABLE_MAX_ROWS = 5;
+const STUB_MIN_WORDS = 3;
+
+// Strip-marker: a sentinel character spliced in where a non-speakable element
+// (URL, image, inline code, opaque ID) gets removed. The stub-drop pass uses
+// it to detect "this sentence was longer before strip" and apply the
+// word-count filter only to those sentences. Cleaned out at end of pipeline.
+// U+E000 is in the Unicode Private Use Area — never appears in real text.
+const M = '';
+
+interface Labels {
+  readonly tableSummary: (n: number) => string;
+  readonly listSummary: (n: number) => string;
+  readonly listJoiner: string;
+  readonly symbols: ReadonlyMap<string, string>;
+}
+
+const SYMBOLS_DE: ReadonlyMap<string, string> = new Map([
+  ['↑', 'steigend'], ['↗', 'steigend'],
+  ['↓', 'fallend'], ['↘', 'fallend'],
+  ['→', 'stabil'],
+  ['✓', 'ja'], ['✅', 'ja'],
+  ['✗', 'nein'], ['❌', 'nein'],
+]);
+
+const SYMBOLS_EN: ReadonlyMap<string, string> = new Map([
+  ['↑', 'rising'], ['↗', 'rising'],
+  ['↓', 'falling'], ['↘', 'falling'],
+  ['→', 'flat'],
+  ['✓', 'yes'], ['✅', 'yes'],
+  ['✗', 'no'], ['❌', 'no'],
+]);
+
+const LABELS: Record<Lang, Labels> = {
+  de: {
+    tableSummary: (n: number): string => `Tabelle mit ${String(n)} Zeilen, siehe Bildschirm.`,
+    listSummary: (n: number): string => `Liste mit ${String(n)} Einträgen, siehe Bildschirm.`,
+    listJoiner: ' und ',
+    symbols: SYMBOLS_DE,
+  },
+  en: {
+    tableSummary: (n: number): string => `Table with ${String(n)} rows, see screen.`,
+    listSummary: (n: number): string => `List with ${String(n)} items, see screen.`,
+    listJoiner: ' and ',
+    symbols: SYMBOLS_EN,
+  },
+};
+
+type BlockKind = 'paragraph' | 'list' | 'table' | 'code' | 'heading' | 'quote' | 'hr' | 'blank';
+interface Block { readonly kind: BlockKind; readonly lines: readonly string[] }
+
 /**
- * Flatten Markdown-ish assistant output into text a TTS can read cleanly.
+ * Flatten Markdown into TTS-friendly text.
+ *
+ * `lang` is required: callers know the user's UI language (Web UI, Telegram)
+ * or the assistant reply's locale. `'auto'` is an escape-hatch for paths
+ * where context is genuinely missing (HTTP API without an explicit param);
+ * it runs a cheap stopword vote that defaults to EN on tie / empty input.
+ *
  * Pure function. No throws. Empty input returns empty string.
  */
-export function prepareForSpeech(input: string): string {
+export function prepareForSpeech(input: string, lang: Lang | 'auto'): string {
   if (!input) return '';
-  let text = input;
+  const resolved: Lang = lang === 'auto' ? detectLang(input) : lang;
+  const L = LABELS[resolved];
 
-  // Detect language context ONCE — the arrow-connector choice below and
-  // the sentence-initial "Die" fix at the end both depend on it, and
-  // scanning twice would duplicate work.
-  const deContext = hasGermanMarkers(text);
+  const blocks = segmentBlocks(input);
 
-  // Arrows — language-dependent connector. In German a comma (`A, B`)
-  // reads abrupt on small voices, so DE chains get " dann " (≈ /daːn/,
-  // "then"). English would pronounce "dann" as /dæn/ (the name "Dan"),
-  // which is worse than the plain comma — so EN falls back to ", ".
-  // ASCII forms (`<->`, `<=>`, `->`, `<-`, `=>`, `<=`) ordered longest
-  // first so `<->` isn't partially eaten by `<-`.
-  const arrowConnector = deContext ? ' dann ' : ', ';
-  text = text.replace(/\s*(?:→|←|↔|⇒|⇐|⇔)\s*/g, arrowConnector);
-  text = text.replace(/\s*(?:<->|<=>|->|<-|=>|<=)\s*/g, arrowConnector);
-
-  // Em-dash — is a Markdown/prose separator; TTS reads it as "em dash"
-  // or inserts a jarring long pause. A comma gives a normal clause break.
-  text = text.replace(/\s*—\s*/g, ', ');
-
-  // Less-than + digit (e.g. "<4h", "<100ms") — strip the "<" so TTS reads
-  // the quantity naturally instead of choking on the bracket. We lose the
-  // "less than" nuance, but preserving a readable quantity is more important.
-  text = text.replace(/<(\s?\d)/g, '$1');
-
-  text = text.replace(/```[\s\S]*?```/g, '. ');
-  text = text.replace(/`([^`]*)`/g, '$1');
-  text = text.replace(/`+/g, '');
-
-  text = text.replace(/!\[[^\]]*\]\([^)]*\)/g, ' ');
-
-  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-
-  text = text.replace(/https?:\/\/\S+/g, ' ');
-
-  // Price/rate-per-unit expansion. "39/mo" reads as "thirty-nine slash mo"
-  // on Voxtral — expand to the natural phrasing a human would say. Language-
-  // aware: "pro Monat" in DE context, "per month" otherwise. Handles the
-  // English (mo/yr/d/h), German (Monat/Jahr/Tag/Stunde), and long-form
-  // (month/year/day/hour) variants. Ordered longest-first so "/month" is
-  // not partially eaten by "/mo". Runs BEFORE the generic slash rule so
-  // the unit abbreviations get the expanded form instead of just ", ".
-  const perMonth = deContext ? ' pro Monat' : ' per month';
-  const perYear  = deContext ? ' pro Jahr'  : ' per year';
-  const perDay   = deContext ? ' pro Tag'   : ' per day';
-  const perHour  = deContext ? ' pro Stunde': ' per hour';
-  text = text.replace(/(\d)\s*\/\s*(?:month|Monat|mo)\b/gi, `$1${perMonth}`);
-  text = text.replace(/(\d)\s*\/\s*(?:year|Jahr|yr)\b/gi, `$1${perYear}`);
-  text = text.replace(/(\d)\s*\/\s*(?:day|Tag|d)\b/gi, `$1${perDay}`);
-  text = text.replace(/(\d)\s*\/\s*(?:hour|Stunde|h)\b/gi, `$1${perHour}`);
-
-  // CHF currency name expansion in DE context. "CHF 79" reads as "C H F
-  // seventy-nine" by the EN voice speaking German text. Expand to the
-  // full name so prosody is natural. EN context leaves the ISO code
-  // alone — most English speakers recognize it.
-  if (deContext) {
-    text = text.replace(/CHF\s*(\d+(?:[.,]\d+)?)/g, '$1 Schweizer Franken');
-  }
-
-  // Multiplier expansion. "1×", "1.5×", "10x" etc. read as "nits" or
-  // "by" on the Voxtral voice. Convert to the spoken word. Language-aware.
-  // Unicode × first (unambiguous); ASCII `x` requires a word boundary
-  // afterwards so "Linux", "2xl" (size), "box" don't match.
-  const timesWord = deContext ? 'mal' : 'times';
-  text = text.replace(/(\d+(?:\.\d+)?)\s*×/g, `$1 ${timesWord} `);
-  text = text.replace(/(\d+(?:\.\d+)?)x\b/g, `$1 ${timesWord} `);
-
-  // Generic slash between word-tokens (e.g. "Wachstum/SLA", "EU/US",
-  // "customer/invoice") — convert to ", " so TTS treats them as a list.
-  // Two passes: letter on the left (letter-first cases), and digit on the
-  // left with letter on the right ("Q2/March"). Digit/digit is intentionally
-  // NOT matched so dates (04/21), fractions (1/2), and version ranges
-  // (3.9/3.10) pass through unchanged. URLs stripped earlier.
-  text = text.replace(/(\p{L})\s*\/\s*([\p{L}\p{N}])/gu, '$1, $2');
-  text = text.replace(/(\p{N})\s*\/\s*(\p{L})/gu, '$1, $2');
-
-  // Time HH:MM → "HH Uhr MM" in DE context. EN voices render "22:55"
-  // naturally as "twenty-two fifty-five"; German speakers say
-  // "zweiundzwanzig Uhr fünfundfünfzig". Requires 2-digit minutes so
-  // ratios like "3:1" pass through.
-  if (deContext) {
-    text = text.replace(/\b(\d{1,2}):(\d{2})\b/g, '$1 Uhr $2');
-  }
-
-  text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
-
-  // Issue/PR references like "#42" read as "hash 42" by TTS. Expand to
-  // the spoken word. Runs AFTER the Markdown header strip above (which
-  // requires `#` followed by space), so `#42` is the remaining case.
-  // Does not match hashtags (letters after #) — those usually read fine.
-  const numberWord = deContext ? 'Nummer' : 'number';
-  text = text.replace(/#(\d+)/g, `${numberWord} $1`);
-
-  text = text.replace(/(\*\*|__)(.+?)\1/g, '$2');
-  text = text.replace(/(?<![*_])[*_]([^*_\n]+)[*_](?![*_])/g, '$1');
-
-  text = text.replace(/^\s*>\s?/gm, '');
-
-  text = text.replace(/<[^>]+>/g, ' ');
-
-  // Horizontal rules (---, ***, ___ on their own line) read as "dash dash
-  // dash" in TTS — drop standalone occurrences. Anchored to full line so
-  // em-dashes mid-sentence stay untouched.
-  text = text.replace(/^\s*([-*_])\1{2,}\s*$/gm, '');
-
-  text = flattenTables(text);
-  text = flattenLists(text);
-
-  text = text.replace(/\r\n/g, '\n');
-  text = text.replace(/\n{2,}/g, '. ');
-  text = text.replace(/\n/g, ' ');
-  text = text.replace(/\s+/g, ' ');
-  text = text.replace(/\s+([,.;:!?])/g, '$1');
-  text = text.replace(/\.{2,}/g, '.');
-  text = text.replace(/([,.;:!?]){2,}/g, '$1');
-
-  if (deContext) text = tweakGermanPronunciation(text);
-
-  return text.trim();
-}
-
-/**
- * Cheap language heuristic: true if the text shows unambiguous German
- * signals. Used to gate every rule that could misbehave on English or
- * mixed content — an "arrow → dann" collapse in EN would make the voice
- * say "Dan", and a "Die → Dee" rewrite on an English movie title would
- * just be wrong.
- *
- * Stopword list intentionally excludes "die"/"das" — those are the tokens
- * we may transform, and counting them as DE evidence would let English
- * sentences containing them trigger the rewrite.
- */
-function hasGermanMarkers(text: string): boolean {
-  return (
-    /[äöüÄÖÜß]/.test(text) ||
-    /\b(?:der|und|ist|nicht|eine?|mit|für|auch|werden|sind|nach|sehr|oder)\b/i.test(text)
-  );
-}
-
-/**
- * Tiny pronunciation adjustments for DE text being read by an EN voice
- * (Voxtral's TTS catalog is EN-only as of Phase 0). Caller must already
- * have verified DE context via `hasGermanMarkers`. Today this only rewrites
- * sentence-initial "Die" → "Dee" — the EN voice otherwise reads "Die" as
- * /daɪ/ (as in "to die"). "Dee" reads as /diː/, close to the DE /diː/
- * pronunciation. Extend cautiously: every rule added here reshapes the
- * visible spoken text and can misfire on mixed-language content.
- */
-function tweakGermanPronunciation(text: string): string {
-  // Replace "Die" only at sentence boundaries (start of text or after
-  // terminal punctuation), so mid-sentence "die" doesn't accidentally
-  // match and the English "Die Hard" never mutates.
-  return text.replace(/(^|[.!?]\s+)Die\b/g, '$1Dee');
-}
-
-/**
- * Collapse bullet/numbered lists into comma- and "und"-joined sentences so TTS
- * prosody doesn't lurch at every bullet. Non-list lines pass through untouched.
- */
-function flattenLists(text: string): string {
-  const lines = text.split('\n');
   const out: string[] = [];
-  let runStart = -1;
+  for (const b of blocks) {
+    switch (b.kind) {
+      case 'code':
+      case 'hr':
+      case 'blank':
+        continue;
 
-  const flushRun = (endExclusive: number): void => {
-    if (runStart < 0) return;
-    const items = lines
-      .slice(runStart, endExclusive)
-      .map((l) => l.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').trim())
-      .filter((l) => l.length > 0);
-    if (items.length > 0) out.push(joinItems(items));
-    runStart = -1;
-  };
+      case 'table': {
+        // First two lines are the header row + GFM separator (already
+        // verified during segmentation). Speakable rows start at index 2.
+        const dataRows = b.lines.slice(2)
+          .map(parseTableCells)
+          .filter((r) => r.length > 0);
+        const spoken = speakTable(dataRows, L);
+        if (spoken) out.push(spoken);
+        continue;
+      }
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? '';
-    if (/^\s*(?:[-*+]|\d+[.)])\s+/.test(line)) {
-      if (runStart < 0) runStart = i;
-    } else {
-      flushRun(i);
-      out.push(line);
+      case 'list': {
+        const items = b.lines
+          .map((l) => l.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').trim())
+          .map(stripInline)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        if (items.length === 0) continue;
+        if (items.length > LIST_MAX) {
+          out.push(L.listSummary(items.length));
+        } else {
+          out.push(joinListItems(items, L.listJoiner));
+        }
+        continue;
+      }
+
+      case 'heading': {
+        const raw = b.lines.join(' ').replace(/^\s{0,3}#{1,6}\s+/, '');
+        const t = stripInline(raw).trim();
+        if (t) out.push(/[.!?]$/.test(t) ? t : `${t}.`);
+        continue;
+      }
+
+      case 'quote': {
+        const raw = b.lines.map((l) => l.replace(/^\s*>\s?/, '')).join(' ');
+        const t = stripInline(raw).trim();
+        if (t) out.push(t);
+        continue;
+      }
+
+      case 'paragraph': {
+        const t = stripInline(b.lines.join(' ')).trim();
+        if (t) out.push(t);
+        continue;
+      }
     }
   }
-  flushRun(lines.length);
-  return out.join('\n');
-}
 
-function joinItems(items: string[]): string {
-  if (items.length === 1) return ensureSentenceEnd(items[0]!);
-  const last = items[items.length - 1]!;
-  const rest = items.slice(0, -1).map(stripTrailingPunct);
-  return `${rest.join(', ')} und ${stripTrailingPunct(last)}.`;
-}
-
-function stripTrailingPunct(s: string): string {
-  return s.replace(/[.,;:!?]+$/, '').trim();
-}
-
-function ensureSentenceEnd(s: string): string {
-  return /[.!?]$/.test(s.trim()) ? s.trim() : `${s.trim()}.`;
+  // Phase 4 — assemble + drop stubs + final hygiene.
+  let s = out.join(' ');
+  s = dropStubs(s);
+  s = s.replace(new RegExp(M, 'g'), '');
+  s = s.replace(/\s+([.,;:!?])/g, '$1');
+  s = s.replace(/([.,;:!?])\1+/g, '$1');
+  s = s.replace(/\.\s*\./g, '.');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
 }
 
 /**
- * Collapse Markdown pipe-tables into TTS-friendly sentences. A table is
- * detected by the canonical GFM shape: a pipe-bearing header row directly
- * followed by a separator row whose cells are only dashes/colons. 2-column
- * tables are typically key/value layouts — spoken as `"key: value."` lines,
- * dropping the visually-convenient header row because it adds no prosody.
- * Wider tables fall back to comma-joined rows preceded by the header.
- * Non-table lines pass through untouched.
+ * Cheap symmetric language vote. Counts distinctive stopwords for both
+ * languages; whichever wins, wins. Defaults to 'en' on tie / empty input —
+ * mistaking DE for EN only swaps two label strings, while mistaking EN for
+ * DE could insert " und " into an English list. Asymmetric cost → asymmetric
+ * default.
+ *
+ * Umlauts only count when paired with at least one DE stopword. A single
+ * umlaut'd proper noun in EN text ("Visit Müller now") would otherwise flip
+ * detection to DE on its own.
  */
-function flattenTables(text: string): string {
-  const lines = text.split('\n');
-  const out: string[] = [];
+function detectLang(text: string): Lang {
+  const s = text.slice(0, 2000);
+  const deStopwords = s.match(/\b(?:der|die|das|und|ist|nicht|für|werden|sind|mit|auch|eine?|oder)\b/gi)
+    ?.length ?? 0;
+  const umlauts = s.match(/[äöüÄÖÜß]/g)?.length ?? 0;
+  const de = deStopwords + (deStopwords > 0 ? umlauts : 0);
+  const en = s.match(/\b(?:the|and|is|are|of|to|for|with|that|this|from|have|has)\b/gi)
+    ?.length ?? 0;
+  return de > en ? 'de' : 'en';
+}
+
+/**
+ * Inline cleanup. Order matters: containers (link/image/code) are stripped
+ * before bare markers so labels survive container removal. Anything that
+ * isn't speech is replaced by a NUL marker (`M`) so `dropStubs` can later
+ * detect "this sentence had stripped content and is now too short to be
+ * worth speaking". Markers are removed at the end of the pipeline.
+ */
+function stripInline(s: string): string {
+  let t = s;
+
+  // Containers — replace with marker so stubs are detectable downstream.
+  t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, M);                  // images
+  t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');               // links: keep label
+  // Bare URLs: keep any trailing sentence punctuation OR closing bracket
+  // outside the marker, so "Visit https://x.com." keeps its period and
+  // "Look at (https://x.com) here" keeps the closing paren (matched by
+  // the surrounding `(` and collapsed by the bracket-marker rule below).
+  t = t.replace(/https?:\/\/\S+/g, (matched) => {
+    const trail = matched.match(/[.,;:!?)\]]+$/);
+    return trail ? `${M}${trail[0]}` : M;
+  });
+  // Collapse parentheses or square brackets that wrap a marker only — the
+  // visible content inside was unspeakable (URL/image), so the brackets
+  // themselves carry no information. Runs after URL strip so the marker
+  // is in place. Replaces with a single marker so dropStubs still detects
+  // the strip.
+  t = t.replace(/[(\[]\s*\s*[)\]]/g, M);
+  t = t.replace(/`[^`]*`/g, M);                                // inline code
+
+  // Inline HTML tags — strip silently.
+  t = t.replace(/<[^>]+>/g, '');
+
+  // Inline Markdown markers (bold/italic/strike/underscore-italic).
+  t = t.replace(/(\*\*|__|~~)(.+?)\1/g, '$2');
+  t = t.replace(/(?<![*_~])[*_~]([^*_~\n]+)[*_~](?![*_~])/g, '$1');
+
+  // Issue/PR refs: drop "#" but keep number — speakable + informative.
+  // No "Nummer"/"number" word inserted — TTS reads bare digits idiomatically.
+  t = t.replace(/#(\d+)\b/g, '$1');
+
+  // Unspeakable token shapes.
+  t = t.replace(/\b[A-Fa-f0-9]{8,}\b/g, M);                    // hex IDs / hashes
+  // Long opaque tokens (UUID, JWT, base64, API keys). Requires a "shape
+  // signal" — a digit OR a hyphen/underscore inside — to avoid swallowing
+  // long German compound nouns like "Donaudampfschifffahrtsgesellschaft".
+  t = t.replace(/\b(?=[\w-]{24,}\b)[\w-]*[\d_-][\w-]*\b/g, M);
+  t = t.replace(/\{[^{}\n]*\}/g, M);                           // inline JSON-ish
+
+  // Em/en dash → comma. Language-agnostic — both DE and EN want a clause break.
+  t = t.replace(/\s*[—–]\s*/g, ', ');
+
+  // Arrows in prose → comma. Tables map ↑↓→ to language-specific words
+  // before this code runs on the cell, so prose-only here. ASCII arrows
+  // MUST be replaced before the `[<>|]` strip below, otherwise the `>`/`<`
+  // gets eaten and `->` collapses to a stray dash.
+  t = t.replace(/\s*[→←↔⇒⇐⇔↗↘]\s*/g, ', ');
+  t = t.replace(/\s*(?:<->|<=>|->|<-|=>|<=)\s*/g, ', ');
+
+  // Residual brackets and pipes (e.g. orphan "|" from broken tables).
+  t = t.replace(/[<>|]/g, '');
+
+  // Local punctuation hygiene (final pass runs again at end of pipeline).
+  t = t.replace(/\s+([.,;:!?])/g, '$1');
+  t = t.replace(/([.,;:!?]){2,}/g, '$1');
+  t = t.replace(/\s+/g, ' ').trim();
+  return t;
+}
+
+/**
+ * Drop sub-sentences left behind by inline-strip. A sentence is dropped iff
+ *   1. its tail-most token (ignoring trailing punctuation) is a strip marker
+ *      — i.e. the stripped element was the OBJECT of a trailing preposition
+ *      ("More at <URL>." / "Mehr unter <URL>."), AND
+ *   2. fewer than STUB_MIN_WORDS speakable words remain.
+ * Mid-sentence strips ("Result: {json} arrived.") are kept — surrounding
+ * words still form a coherent utterance. Sentences without any marker
+ * always pass through, so terse natural sentences like "Hi Jane." survive.
+ */
+function dropStubs(s: string): string {
+  return s
+    .split(/(?<=[.!?])\s+/)
+    .filter((seg) => {
+      const tail = seg.replace(/[\s.!?,;:]+$/, '');
+      if (!tail.endsWith(M)) return true;
+      const cleaned = seg.replace(new RegExp(M, 'g'), '');
+      const words = cleaned.match(/\p{L}[\p{L}\p{N}'-]*/gu) ?? [];
+      return words.length >= STUB_MIN_WORDS;
+    })
+    .join(' ');
+}
+
+function joinListItems(items: readonly string[], joiner: string): string {
+  if (items.length === 1) return ensureEnd(items[0] ?? '');
+  const last = stripTrailingPunct(items[items.length - 1] ?? '');
+  const rest = items.slice(0, -1).map(stripTrailingPunct);
+  return `${rest.join(', ')}${joiner}${last}.`;
+}
+
+function stripTrailingPunct(s: string): string { return s.replace(/[.,;:!?]+$/, '').trim(); }
+function ensureEnd(s: string): string { return /[.!?]$/.test(s.trim()) ? s.trim() : `${s.trim()}.`; }
+
+/**
+ * Decide how to render a Markdown table. Drops empty tables. Speaks 2- and
+ * 3-column tables row-by-row up to TABLE_MAX_ROWS — 2-col uses "key: value",
+ * 3-col uses comma-joined cells (the header is dropped in both cases — it's
+ * label scaffolding, not speakable content). Anything wider or longer
+ * collapses to a single summary sentence so the listener gets the count
+ * without enduring a row recital.
+ */
+function speakTable(rows: readonly string[][], L: Labels): string {
+  if (rows.length === 0) return '';
+  if (rows.length > TABLE_MAX_ROWS) return L.tableSummary(rows.length);
+  const cols = rows[0]?.length ?? 0;
+  if (cols < 2 || cols > 3) return L.tableSummary(rows.length);
+
+  const sentences: string[] = [];
+  for (const r of rows) {
+    const cells = r.map((c) => stripInline(mapSymbols(c, L)).trim());
+    if (cells.length === 2) {
+      const a = cells[0] ?? '';
+      const b = cells[1] ?? '';
+      if (a && b) sentences.push(`${a}: ${b}.`);
+      continue;
+    }
+    const joined = cells.filter((c) => c.length > 0).join(', ');
+    if (joined) sentences.push(`${joined}.`);
+  }
+  return sentences.join(' ');
+}
+
+function mapSymbols(cell: string, L: Labels): string {
+  let t = cell;
+  for (const [sym, word] of L.symbols) {
+    t = t.split(sym).join(word);
+  }
+  return t;
+}
+
+// ----- block segmentation -----
+
+function segmentBlocks(input: string): Block[] {
+  const lines = input.replace(/\r\n/g, '\n').split('\n');
+  const blocks: Block[] = [];
   let i = 0;
   while (i < lines.length) {
     const line = lines[i] ?? '';
-    const next = i + 1 < lines.length ? lines[i + 1] ?? '' : '';
-    if (isTableRow(line) && isTableSeparator(next)) {
-      const header = parseTableCells(line);
-      i += 2;
-      const rows: string[][] = [];
-      while (i < lines.length && isTableRow(lines[i] ?? '')) {
-        rows.push(parseTableCells(lines[i] ?? ''));
-        i++;
-      }
-      out.push(speakTable(header, rows));
+
+    if (line.trim() === '') {
+      blocks.push({ kind: 'blank', lines: [line] });
+      i++;
       continue;
     }
-    out.push(line);
+
+    if (/^\s*```/.test(line)) {
+      const start = i;
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i] ?? '')) i++;
+      if (i < lines.length) i++; // consume closing fence
+      blocks.push({ kind: 'code', lines: lines.slice(start, i) });
+      continue;
+    }
+
+    if (/^\s{0,3}([-*_])\1{2,}\s*$/.test(line)) {
+      blocks.push({ kind: 'hr', lines: [line] });
+      i++;
+      continue;
+    }
+
+    if (/^\s{0,3}#{1,6}\s/.test(line)) {
+      blocks.push({ kind: 'heading', lines: [line] });
+      i++;
+      continue;
+    }
+
+    if (isTableRow(line) && isTableSeparator(lines[i + 1] ?? '')) {
+      const start = i;
+      i += 2;
+      while (i < lines.length && isTableRow(lines[i] ?? '')) i++;
+      blocks.push({ kind: 'table', lines: lines.slice(start, i) });
+      continue;
+    }
+
+    if (/^\s*>/.test(line)) {
+      const start = i;
+      while (i < lines.length && /^\s*>/.test(lines[i] ?? '')) i++;
+      blocks.push({ kind: 'quote', lines: lines.slice(start, i) });
+      continue;
+    }
+
+    if (/^\s*(?:[-*+]|\d+[.)])\s/.test(line)) {
+      const start = i;
+      while (i < lines.length && /^\s*(?:[-*+]|\d+[.)])\s/.test(lines[i] ?? '')) i++;
+      blocks.push({ kind: 'list', lines: lines.slice(start, i) });
+      continue;
+    }
+
+    // Paragraph — extends until blank or any structural-start.
+    const start = i;
     i++;
+    while (
+      i < lines.length &&
+      (lines[i] ?? '').trim() !== '' &&
+      !isStructuralStart(lines[i] ?? '', lines[i + 1] ?? '')
+    ) i++;
+    blocks.push({ kind: 'paragraph', lines: lines.slice(start, i) });
   }
-  return out.join('\n');
+  return blocks;
+}
+
+function isStructuralStart(line: string, next: string): boolean {
+  if (/^\s*```/.test(line)) return true;
+  if (/^\s{0,3}([-*_])\1{2,}\s*$/.test(line)) return true;
+  if (/^\s{0,3}#{1,6}\s/.test(line)) return true;
+  if (/^\s*>/.test(line)) return true;
+  if (/^\s*(?:[-*+]|\d+[.)])\s/.test(line)) return true;
+  if (isTableRow(line) && isTableSeparator(next)) return true;
+  return false;
 }
 
 function isTableRow(line: string): boolean {
   if (!line.includes('|')) return false;
-  return parseTableCells(line).length >= 2;
+  const cells = parseTableCells(line);
+  // ≥2 cells AND at least one non-empty — an all-blank pipe-row isn't a
+  // semantic table row.
+  return cells.length >= 2 && cells.some((c) => c.length > 0);
 }
 
 function isTableSeparator(line: string): boolean {
@@ -269,32 +423,8 @@ function isTableSeparator(line: string): boolean {
 
 function parseTableCells(line: string): string[] {
   const stripped = line.trim().replace(/^\|/, '').replace(/\|$/, '');
-  return stripped
-    .split('|')
-    .map((c) => c.trim())
-    .filter((c) => c.length > 0);
-}
-
-function speakTable(header: string[], rows: string[][]): string {
-  if (rows.length === 0) {
-    return header.length > 0 ? `${header.join(', ')}.` : '';
-  }
-  // 2-col: speak each row as "a: b." — drop the header row, it's
-  // visual-only ("Metric | Value") and adds no semantic weight.
-  if (header.length === 2) {
-    return rows
-      .map((r) => {
-        if (r.length >= 2) {
-          const [first, ...rest] = r;
-          return `${first ?? ''}: ${rest.join(' ')}.`;
-        }
-        return r.length === 1 ? `${r[0] ?? ''}.` : '';
-      })
-      .filter((s) => s.length > 0)
-      .join(' ');
-  }
-  // N-col: header + rows each as comma-joined sentence.
-  const sentences = [`${header.join(', ')}.`];
-  for (const r of rows) if (r.length > 0) sentences.push(`${r.join(', ')}.`);
-  return sentences.join(' ');
+  // Empty cells are kept so column count stays stable (a 2-col table with
+  // an empty value cell is still a 2-col table — speakTable decides per-row
+  // whether to skip).
+  return stripped.split('|').map((c) => c.trim());
 }

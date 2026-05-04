@@ -21,6 +21,7 @@ export {
 } from './speak/index.js';
 
 export type {
+  Lang,
   SpeakOpts,
   RichSpeakOpts,
   SpeakResult,

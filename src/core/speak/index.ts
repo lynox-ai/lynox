@@ -32,6 +32,7 @@ import { mistralVoxtralTtsProvider, hasMistralVoxtralTts } from './mistral-voxtr
 import { prepareForSpeech } from './text-prep.js';
 
 export type {
+  Lang,
   SpeakOpts,
   RichSpeakOpts,
   SpeakResult,
@@ -98,7 +99,8 @@ function toInternalOpts(opts: RichSpeakOpts): SpeakOpts {
 }
 
 function prepText(text: string, opts: RichSpeakOpts): string {
-  return opts.skipTextPrep ? text : prepareForSpeech(text);
+  if (opts.skipTextPrep) return text;
+  return prepareForSpeech(text, opts.lang ?? 'auto');
 }
 
 function hasSpeakableContent(s: string): boolean {
