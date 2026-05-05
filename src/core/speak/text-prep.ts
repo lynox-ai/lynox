@@ -205,20 +205,28 @@ function stripInline(s: string): string {
   // Containers — replace with marker so stubs are detectable downstream.
   t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, M);                  // images
   t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');               // links: keep label
-  // Bare URLs: keep any trailing sentence punctuation OR closing bracket
-  // outside the marker, so "Visit https://x.com." keeps its period and
-  // "Look at (https://x.com) here" keeps the closing paren (matched by
-  // the surrounding `(` and collapsed by the bracket-marker rule below).
-  t = t.replace(/https?:\/\/\S+/g, (matched) => {
-    const trail = matched.match(/[.,;:!?)\]]+$/);
+  // Bare URLs: keep any trailing sentence punctuation outside the marker
+  // so stub-drop sees a marker-tail and "Visit https://x.com." keeps its
+  // period. Closing brackets (`)`, `]`) are NOT preserved here — there's
+  // no opener to match (paired wrapping like "(https://x.com)" is handled
+  // by the bracket-collapse below), so keeping them just leaks an orphan
+  // `)`/`]` into the spoken output if the URL appeared bare with a
+  // trailing close-paren but no opener.
+  t = t.replace(/https?:\/\/[^\s)\]]+/g, (matched) => {
+    const trail = matched.match(/[.,;:!?]+$/);
     return trail ? `${M}${trail[0]}` : M;
   });
-  // Collapse parentheses or square brackets that wrap a marker only — the
-  // visible content inside was unspeakable (URL/image), so the brackets
-  // themselves carry no information. Runs after URL strip so the marker
-  // is in place. Replaces with a single marker so dropStubs still detects
-  // the strip.
-  t = t.replace(/[(\[]\s*\s*[)\]]/g, M);
+  // Collapse `(MARKER)` and `[MARKER]` (matched openers/closers) into a
+  // single marker. The visible content inside was unspeakable (URL/image)
+  // so the brackets carry no information. Alternation — not a character
+  // class — so mixed pairs like `(MARKER]` don't accidentally collapse.
+  t = t.replace(/\(\s*\s*\)|\[\s*\s*\]/g, M);
+  // Orphan close-bracket adjacent to a marker — residue from a bare
+  // URL preceded by no opener (e.g. "see https://x.com)."). The general
+  // residual `[<>|]` strip below intentionally excludes `)`/`]` since
+  // those are common natural punctuation, so handle the marker-adjacent
+  // case explicitly here.
+  t = t.replace(new RegExp(`[)\\]]+`, "g"), M);
   t = t.replace(/`[^`]*`/g, M);                                // inline code
 
   // Inline HTML tags — strip silently.
@@ -233,7 +241,7 @@ function stripInline(s: string): string {
   t = t.replace(/#(\d+)\b/g, '$1');
 
   // Unspeakable token shapes.
-  t = t.replace(/\b[A-Fa-f0-9]{8,}\b/g, M);                    // hex IDs / hashes
+  t = t.replace(/\b(?=[A-Fa-f0-9]{8,}\b)[0-9]*[A-Fa-f][A-Fa-f0-9]*\b/g, M);                    // hex IDs / hashes
   // Long opaque tokens (UUID, JWT, base64, API keys). Requires a "shape
   // signal" — a digit OR an underscore inside — to avoid swallowing long
   // natural-language compounds: German nouns like
@@ -328,7 +336,7 @@ function speakTable(rows: readonly string[][], L: Labels): string {
 function mapSymbols(cell: string, L: Labels): string {
   let t = cell;
   for (const [sym, word] of L.symbols) {
-    t = t.split(sym).join(word);
+    if (t.includes(sym)) t = t.split(sym).join(` ${word} `);
   }
   return t;
 }

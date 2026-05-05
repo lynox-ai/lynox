@@ -76,6 +76,14 @@ describe('lists', () => {
     const md = 'Schritte:\n\n1. Build\n2. Test\n3. Deploy';
     expect(prepareForSpeech(md, 'de')).toBe('Schritte: Build, Test und Deploy.');
   });
+
+  it('strips Markdown markers and link wrappers from list items', () => {
+    // List items go through stripInline; bold markers, link syntax, and
+    // bare URLs must be cleaned the same way as in paragraph text. A
+    // regression here would silently break formatted bullets.
+    const md = '- **Build** the demo\n- See [our docs](https://docs.example.com) carefully\n- Run the tests';
+    expect(prepareForSpeech(md, 'en')).toBe('Build the demo, See our docs carefully and Run the tests.');
+  });
 });
 
 describe('tables', () => {
@@ -197,6 +205,27 @@ describe('tables', () => {
     expect(out).toContain('Deploy: Anna');
     expect(out).toContain('Review: Jane');
     expect(out).not.toContain('|');
+  });
+
+  it('strips URLs and link syntax inside table cells', () => {
+    // Table cells go through stripInline (per cell), so URLs and
+    // [label](url) wrappers must be cleaned the same as in paragraphs.
+    // The link label survives the wrapper strip; a cell that is JUST a
+    // bare URL collapses to a marker, and the row gets dropped by
+    // stub-drop downstream (no speakable content left). The first row
+    // here proves the label-survival path; the table emits one sentence.
+    const md = [
+      '| Resource | Where |',
+      '|---|---|',
+      '| Docs | [our guide](https://docs.example.com) |',
+      '| Source | the public https://github.com/example/repo mirror |',
+    ].join('\n');
+    const out = prepareForSpeech(md, 'en');
+    expect(out).toContain('Docs: our guide');
+    expect(out).toContain('Source: the public');
+    expect(out).toContain('mirror');
+    expect(out).not.toContain('https');
+    expect(out).not.toContain('[');
   });
 });
 
@@ -419,6 +448,14 @@ describe("'auto' lang detection", () => {
     // Numbers and symbols only — neither DE nor EN markers fire.
     const md = '- 1\n- 2\n- 3\n- 4';
     expect(prepareForSpeech(md, 'auto')).toContain('List with 4 items');
+  });
+
+  it('returns empty for actually empty input under auto', () => {
+    // The truly empty case must short-circuit cleanly without running
+    // detectLang at all — the function contract is "empty in, empty out"
+    // regardless of lang. Whitespace-only input behaves the same.
+    expect(prepareForSpeech('', 'auto')).toBe('');
+    expect(prepareForSpeech('   \n  \t  ', 'auto')).toBe('');
   });
 
   it('does NOT flip to DE for a single umlaut in EN content (proper-noun guard)', () => {
