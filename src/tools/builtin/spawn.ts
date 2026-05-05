@@ -10,6 +10,7 @@ import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget, resetSessionCost } from '../../core/session-budget.js';
 import { escapeXml } from '../../core/data-boundary.js';
+import { withCurrentTimePrefix } from '../../core/prompts.js';
 
 const SPAWN_TIMEOUT = 10 * 60 * 1000;
 const MAX_SPAWN_DEPTH = 5;
@@ -231,7 +232,8 @@ async function executeThinker(
   // Track child for abort propagation
   activeChildAgents.add(childAgent);
   try {
-    const result = await childAgent.send(task);
+    // Same per-turn time anchor as top-level chat / pipeline steps.
+    const result = await childAgent.send(withCurrentTimePrefix(task));
     return { result, childRunId: childAgent.currentRunId };
   } finally {
     activeChildAgents.delete(childAgent);

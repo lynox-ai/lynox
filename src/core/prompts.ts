@@ -137,20 +137,31 @@ export function currentDateContext(): string {
 /**
  * Prepend a precise current-time marker to the next user message. Lives
  * outside the cached system prompt so we get wallclock-accuracy without
- * invalidating Anthropic's prompt cache. Format is intentionally simple
- * so the model treats it as a metadata header it can read but not echo.
+ * invalidating Anthropic's prompt cache. Wired into Session.run() AND
+ * the orchestrator + spawn paths so any code that schedules a time-
+ * sensitive task — top-level chat, pipeline step, spawned sub-agent —
+ * anchors on the same wallclock.
  *
  * Caller passes whatever shape `agent.send()` accepts — string or a
  * multimodal content array — and gets the same shape back with the time
- * prefix attached. Multimodal arrays get a leading text block.
+ * prefix attached. Already-prefixed inputs pass through unchanged so a
+ * future double-decorator (e.g. Telegram pre-prepending) doesn't end up
+ * with two markers.
  */
+const NOW_MARKER_PREFIX = '[Now:';
+
 export function withCurrentTimePrefix(userMessage: string | unknown[]): string | unknown[] {
   const isoNow = new Date().toISOString();
-  const marker = `[Now: ${isoNow}]`;
+  const marker = `${NOW_MARKER_PREFIX} ${isoNow}]`;
   if (typeof userMessage === 'string') {
+    if (userMessage.startsWith(NOW_MARKER_PREFIX)) return userMessage;
     return `${marker}\n\n${userMessage}`;
   }
   if (Array.isArray(userMessage)) {
+    const first = userMessage[0] as { type?: unknown; text?: unknown } | undefined;
+    if (first?.type === 'text' && typeof first.text === 'string' && first.text.startsWith(NOW_MARKER_PREFIX)) {
+      return userMessage;
+    }
     return [{ type: 'text' as const, text: marker }, ...userMessage];
   }
   return userMessage;

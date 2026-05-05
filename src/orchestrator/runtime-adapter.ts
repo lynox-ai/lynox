@@ -9,6 +9,7 @@ import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
+import { withCurrentTimePrefix } from '../core/prompts.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_pipeline']);
 
@@ -257,7 +258,10 @@ export async function spawnViaAgent(
     agent.abort();
   }, timeoutMs);
   try {
-    const result = await agent.send(JSON.stringify(stepContext));
+    // Sub-agent gets the same per-turn time anchor as top-level chat,
+    // so a pipeline step that schedules "in 5 min" via run_at lands at
+    // wallclock + 5 min, not session-start + 5 min.
+    const result = await agent.send(withCurrentTimePrefix(JSON.stringify(stepContext)));
     if (timedOut) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
@@ -366,7 +370,7 @@ export async function spawnInline(
   }, timeoutMs);
 
   try {
-    const result = await agent.send(JSON.stringify({ task: step.task, context: stepContext }));
+    const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task: step.task, context: stepContext })));
     if (timedOut) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }

@@ -372,14 +372,21 @@ describe('spawn_agent tool', () => {
     expect(toolNames).toEqual(['bash']);
   });
 
-  it('context is prepended to task', async () => {
+  it('context is prepended to task (and the spawn path adds a [Now] time anchor)', async () => {
     const agent = makeAgent();
     await spawnAgentTool.handler(
       { agents: [{ name: 'ctx', task: 'Analyze this', context: 'The codebase uses TypeScript.' }] },
       agent,
     );
 
-    expect(mockSend).toHaveBeenCalledWith('<context>The codebase uses TypeScript.</context>\n\nAnalyze this');
+    // Spawned children get the per-turn time anchor on their first user
+    // message so a sub-agent that schedules "in 5 min" lands at wallclock
+    // + 5 min, not session-start + 5 min. See prompts.ts:withCurrentTimePrefix.
+    expect(mockSend).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\[Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\n\n<context>The codebase uses TypeScript\.<\/context>\n\nAnalyze this$/,
+      ),
+    );
   });
 
   it('isolated_memory removes memory from child', async () => {
