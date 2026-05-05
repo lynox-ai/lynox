@@ -1,5 +1,66 @@
 # Changelog
 
+## 1.3.9 — 2026-05-05
+
+### Added
+
+- **Pipeline status v2** — sticky prompt anchor + persistent pipeline-status bar in the chat composer. Two-layer design: PromptAnchor handles ask_user / ask_secret prompts surfacing above the input, PipelineProgress shows DAG step state. Default-on; library consumers can opt out via `configure({ pipelineStatusV2: false })`. (#236, #240, #245)
+- **`ask_user` from pipeline sub-agents** — pipeline steps can now invoke `ask_user` and `ask_secret`; the prompt routes back through the parent session's SSE stream tagged with the originating step. Autonomous runs continue to strip these tools at the validator. (#244)
+- **`task_update` schedule fields** — `run_at` and `schedule` fields are now mutable, enabling rescheduling without delete-and-recreate ("verschiebe das auf in 10 minuten"). (#243)
+- **`build_sha` in `/api/health`** — runtime-visible commit hash for deploy verification, image-tag rollouts, and stale-bundle detection. (#238)
+
+### Changed
+
+- **STT default lands transcripts in the input box** — voice transcription now defaults to review-then-send instead of auto-send. Users can flip the toggle in the status bar; setting persists. (#237)
+- **Right sidebar (ContextPanel) hidden by default** while it's being reworked. Library consumers can opt in via `configure({ contextPanelEnabled: true })`. (#249)
+- **Mic button always visible** regardless of input state or auto-send toggle. Voice is a primary capability and shouldn't disappear behind state. (#249)
+
+### Fixed
+
+- **Per-turn time injected into every user message** — agent now sees wallclock-accurate `[Now: <iso>; user local <local> <tz>]` instead of relying on the hour-truncated cached value, fixing the 2026-05-05 incident where "in 5 min" tasks landed in the past. Cache-safe (lives in user message, not system prefix). (#242, #246, #248)
+- **Scheduled times present in user's local timezone** — agent reply renders "14:00 Uhr" (CEST) instead of "12:00 Uhr" (UTC) when user is in Europe/Zurich. Tool inputs (`run_at`, `schedule`) stay UTC-encoded; the disambiguation is now spelled out in the system prompt with a worked example. (#246, #248)
+- **Stale-bundle recovery for warm tabs and PWA cold-start** — StatusBar toast fires when the bundle's baked SHA differs from `/api/health.build_sha` (catches same-version different-build deploys). Inline `<script>` in `app.html` runs before any chunk loads to recover iOS PWA cold-starts whose cached chunks 404 against the new server. (#251, #252)
+- **Per-turn time marker no longer leaks into rendered chat bubbles** — the `[Now: ...]` context for the LLM was visible verbatim in the user's message bubble after thread replay. Stripped at render time; voice messages also regain their mic-icon visualisation. (#250)
+- **STT mic stayed hidden when text was in the input + auto-send off** — the symmetric case to PR #241 (which fixed auto-send-on with text). Drop the per-mode gate entirely. (#249)
+- **Vite envPrefix widened to `PUBLIC_*`** — `import.meta.env.PUBLIC_*` was silently undefined, breaking the canary flag. (#239)
+- **Generic placeholders for IMAP account id + display name** — the form previously hardcoded "rafael-gmail" / "Rafael — Gmail" for every tenant. Now reads "my-gmail" / "My Gmail". (#247)
+- **Haiku no longer requested with extended thinking** — model rejects both manual and adaptive thinking modes; force-disabled regardless of caller config. (#231)
+- **Image upload capped at Anthropic's 5 MB vision limit** — the base64 payload itself, not the decoded bytes. Returns a typed 413 with a friendly message instead of the raw provider 400. (#230)
+- **Orchestrator phase computation guard** — protects against malformed persisted manifests that would otherwise hang in `computePhases`. (#229)
+- **Agent message preserved on abort** — user message no longer lost from history when an agent run is aborted mid-stream. (PR carry-over from #228)
+
+### Pro / Managed
+
+- **Fleet rollout hardening** — sequential rollouts (`BATCH_SIZE=1`) by default, warmup gate refuses fleet rollouts within 60 s of CP restart, rollout health check verifies version match (not just HTTP 200), and non-semver `:staging` rollouts compare against `build_sha` instead of mismatching the version-string check. (#90, #91, #92, #94)
+
+<!-- Reference — raw commits since v1.3.8 (delete this block before saving):
+
+Core (in PR order):
+- feat(web-ui): persistent pipeline status + sticky prompt anchor (#236)
+- feat(web-ui): land STT transcript in input box, not auto-send (#237)
+- feat(engine): expose build_sha in /api/health for rollout verification (#238)
+- fix(web-ui): widen Vite envPrefix to include PUBLIC_* (#239)
+- refactor(web-ui): drop PipelineStatusBar — two-layer design (#240)
+- fix(web-ui): keep STT mic available with text in input when auto-send is on (#241)
+- fix(core): inject precise current time per turn (cache-safe) (#242)
+- feat(tools): task_update can reschedule via run_at + schedule (#243)
+- feat(orchestrator): ask_user inside pipeline steps (#244)
+- feat(web-ui): default pipeline-status-v2 on, retire canary plumbing (#245)
+- fix(core): present scheduled times in user's local timezone, not UTC (#246)
+- fix(web-ui): use generic placeholders for mail account id + display name (#247)
+- fix(core): clarify storage=UTC vs display=local in time-aware prompts (#248)
+- fix(web-ui): hide right sidebar by default + keep mic always visible (#249)
+- fix(web-ui): strip per-turn [Now:…] marker from rendered chat bubbles (#250)
+- fix(web-ui): toast on stale-bundle SHA mismatch, not just version (#251)
+- fix(web-ui): cold-start stale-bundle guard for mobile PWA (#252)
+
+Pro:
+- fix(managed): rollout health check verifies version match, not just 200 (#90)
+- fix(managed): default rollouts to sequential (BATCH_SIZE=1) (#91)
+- fix(managed): refuse fleet rollouts when CP has been up <60s (warmup gate) (#92)
+- fix(managed): verify build_sha for non-semver rollouts (#94)
+-->
+
 ## 1.3.8 — 2026-05-01
 
 ### Added
