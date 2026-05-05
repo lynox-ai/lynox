@@ -327,7 +327,7 @@ describe('TaskManager', () => {
         title: 'Daily run',
         pipelineId: 'pipe-1',
         scheduleCron: '0 9 * * *',
-      })).toThrow(/only 'autonomous' pipelines can run on a cron/);
+      })).toThrow(/only 'autonomous' pipelines/);
     });
 
     it('accepts scheduling a cron task for an autonomous pipeline', () => {
@@ -342,8 +342,6 @@ describe('TaskManager', () => {
     });
 
     it('does not block when no lookup is wired (defensive default)', () => {
-      // setPipelineModeLookup(undefined) is the default for tests / headless CLI;
-      // the WorkerLoop hard gate at execution time is the backstop.
       setPipelineModeLookup(undefined);
       expect(() => tm.create({
         title: 'Daily run',
@@ -354,8 +352,26 @@ describe('TaskManager', () => {
 
     it('does not block tasks without a schedule', () => {
       setPipelineModeLookup(() => 'interactive');
-      // Manual (no cron) invocation of an interactive pipeline is fine.
-      expect(() => tm.create({ title: 'Manual', pipelineId: 'pipe-1' })).not.toThrow();
+      expect(() => tm.create({ title: 'Manual', pipelineId: 'pipe-1', assignee: 'user' })).not.toThrow();
+    });
+
+    it('rejects interactive pipeline with explicit nextRunAt', () => {
+      setPipelineModeLookup(() => 'interactive');
+      expect(() => tm.create({
+        title: 'Schedule once',
+        pipelineId: 'pipe-1',
+        nextRunAt: new Date(Date.now() + 60_000).toISOString(),
+      })).toThrow(/'autonomous'/);
+    });
+
+    it('rejects interactive pipeline auto-triggered via assignee=lynox', () => {
+      setPipelineModeLookup(() => 'interactive');
+      // No schedule supplied, but assignee=lynox sets nextRunAt=now under the hood.
+      expect(() => tm.create({
+        title: 'Auto run',
+        pipelineId: 'pipe-1',
+        assignee: 'lynox',
+      })).toThrow(/'autonomous'/);
     });
   });
 });

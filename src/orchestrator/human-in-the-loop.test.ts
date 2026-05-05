@@ -33,9 +33,20 @@ describe('stepUsesHumanInTheLoopTool', () => {
     expect(stepUsesHumanInTheLoopTool(mkStep('vote', 'Use ask_user to ask which tagline.')))
       .toBe('ask_user');
   });
-  it('returns null when no HITL tool referenced', () => {
+  it('returns undefined when no HITL tool referenced', () => {
     expect(stepUsesHumanInTheLoopTool(mkStep('analyze', 'Analyze sentiment of the input.')))
-      .toBeNull();
+      .toBeUndefined();
+  });
+  it('does not match substrings via word boundaries', () => {
+    expect(stepUsesHumanInTheLoopTool(mkStep('a', 'count ask_users in the table.')))
+      .toBeUndefined();
+    expect(stepUsesHumanInTheLoopTool(mkStep('b', 'fask_user is a typo.')))
+      .toBeUndefined();
+    expect(stepUsesHumanInTheLoopTool(mkStep('c', 'task_user is a different identifier.')))
+      .toBeUndefined();
+  });
+  it('handles undefined task gracefully', () => {
+    expect(stepUsesHumanInTheLoopTool({ id: 'x', task: '' })).toBeUndefined();
   });
 });
 

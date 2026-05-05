@@ -28,4 +28,27 @@ describe('PromptBudget', () => {
     const b = new PromptBudget(0);
     expect(() => b.consume()).toThrow(PromptBudgetExceededError);
   });
+
+  it('refund() releases a slot', () => {
+    const b = new PromptBudget(1);
+    b.consume();
+    b.refund();
+    expect(b.usedCount).toBe(0);
+    expect(b.remaining).toBe(1);
+    // Still usable.
+    expect(() => b.consume()).not.toThrow();
+  });
+
+  it('refund() floors at 0 (cannot go negative)', () => {
+    const b = new PromptBudget(1);
+    b.refund();
+    expect(b.usedCount).toBe(0);
+  });
+
+  it('rejected consume() does not increment the count', () => {
+    const b = new PromptBudget(1);
+    b.consume();
+    try { b.consume(); } catch { /* expected */ }
+    expect(b.usedCount).toBe(1); // not 2
+  });
 });

@@ -1,42 +1,22 @@
 import type { InlinePipelineStep, PipelineMode } from '../types/index.js';
 
-/**
- * Tools that can only run while a live, prompt-capable session exists.
- *
- * Why: each of these calls back into the parent session's `promptUser` /
- * `promptSecret` to ask the user something. In an autonomous (cron / API
- * triggered) run there is no chat session, so the call would either throw
- * or — worse — silently hang. The save-time validator and scheduler use
- * this set to enforce the contract before runtime.
- */
 export const HUMAN_IN_THE_LOOP_TOOLS = ['ask_user', 'ask_secret', 'ask_human'] as const;
 
 const HITL_SET = new Set<string>(HUMAN_IN_THE_LOOP_TOOLS);
 
-/**
- * Best-effort scan of a pipeline step for human-in-the-loop tool references.
- * Pipelines today don't carry an explicit per-step tool surface — sub-agents
- * inherit a shared core set — so we look at the step's textual fields.
- *
- * False-positives are conservative: a step that mentions ask_user in a task
- * description is treated as needing interactive mode. That's the right
- * default — the operator can override `mode` explicitly.
- */
-export function stepUsesHumanInTheLoopTool(step: InlinePipelineStep): string | null {
+// Word-boundary so `ask_users` / `task_user` don't match. `_` is a word char,
+// so `\b` anchors cleanly around each tool name.
+const HITL_REGEXES: ReadonlyArray<readonly [string, RegExp]> =
+  HUMAN_IN_THE_LOOP_TOOLS.map((name) => [name, new RegExp(`\\b${name}\\b`)] as const);
+
+export function stepUsesHumanInTheLoopTool(step: InlinePipelineStep): string | undefined {
   const haystack = step.task ?? '';
-  for (const tool of HUMAN_IN_THE_LOOP_TOOLS) {
-    if (haystack.includes(tool)) return tool;
+  for (const [name, re] of HITL_REGEXES) {
+    if (re.test(haystack)) return name;
   }
-  return null;
+  return undefined;
 }
 
-/**
- * Infer a pipeline mode for legacy stored pipelines that have no mode field.
- * If any step references a human-in-the-loop tool → 'interactive'; else
- * 'autonomous'. The caller is expected to log a one-shot warn for the
- * 'interactive' branch so operators can flip pipelines that were intended
- * as cron jobs and silently broken before this PR.
- */
 export function inferPipelineMode(steps: InlinePipelineStep[]): PipelineMode {
   for (const step of steps) {
     if (stepUsesHumanInTheLoopTool(step)) return 'interactive';
@@ -50,10 +30,6 @@ export interface AutonomousValidationIssue {
   message: string;
 }
 
-/**
- * Walk every step's textual surface and flag uses of human-in-the-loop
- * tools. Returns one issue per offending step (the first match per step).
- */
 export function findAutonomousViolations(steps: InlinePipelineStep[]): AutonomousValidationIssue[] {
   const issues: AutonomousValidationIssue[] = [];
   for (const step of steps) {
@@ -69,7 +45,6 @@ export function findAutonomousViolations(steps: InlinePipelineStep[]): Autonomou
   return issues;
 }
 
-/** Public helper used by the validator + scheduler. */
 export function isHumanInTheLoopTool(name: string): boolean {
   return HITL_SET.has(name);
 }

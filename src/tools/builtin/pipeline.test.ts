@@ -371,6 +371,30 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
     expect(result).toContain('Error: Pipeline "nonexistent-id" not found');
   });
 
+  it('refuses an interactive pipeline run from a non-prompt-capable agent', async () => {
+    // Agent with no promptUser callback (e.g. headless / autonomous worker).
+    const agent = makePipelineAgent();
+    const pipelineId = 'interactive-stored';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'asks',
+      goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'interactive',
+    });
+    const result = await runPipelineTool.handler(
+      { pipeline_id: pipelineId },
+      agent,
+    );
+    expect(result).toMatch(/requires a live chat session/);
+  });
+
   it('returns error when pipeline already executed', async () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();
@@ -696,6 +720,33 @@ describe('getPipeline — legacy mode backfill', () => {
     expect(planned?.mode).toBe('interactive');
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]![0]).toMatch(/legacy pipeline/);
+    warnSpy.mockRestore();
+  });
+
+  it('legacy migration warns at most once per pipeline id', () => {
+    // After the first read the pipeline is cached in memory, so subsequent
+    // calls hit the in-memory branch and never trigger backfill again. The
+    // warnedLegacyIds Set still guarantees idempotency if the cache misses
+    // (e.g. process restart with same DB).
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const pipelineId = 'legacy-pipeline-3';
+    const legacyPlanned = {
+      id: pipelineId,
+      name: 'legacy-3',
+      goal: 'g',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+    };
+    const fakeRunHistory = {
+      getPlannedPipeline: () => ({ id: pipelineId, manifest_json: JSON.stringify(legacyPlanned) }),
+    };
+    getPipeline(pipelineId, fakeRunHistory as never);
+    getPipeline(pipelineId, fakeRunHistory as never);
+    getPipeline(pipelineId, fakeRunHistory as never);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();
   });
 });

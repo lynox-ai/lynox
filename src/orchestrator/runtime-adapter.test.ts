@@ -329,6 +329,42 @@ describe('buildSubAgentPromptCallbacks', () => {
     // Parent only called once — budget rejected before delegating
     expect(parent).toHaveBeenCalledTimes(1);
   });
+
+  it('refunds budget if parent prompt rejects (e.g. abort)', async () => {
+    const budget = new PromptBudget(1);
+    const parent = vi.fn(async () => { throw new Error('aborted'); });
+    const cbs = buildSubAgentPromptCallbacks(step, { parentPromptUser: parent, promptBudget: budget });
+    await expect(cbs.promptUser!('Q1')).rejects.toThrow('aborted');
+    // Slot returned — caller can ask again instead of being blocked by the cap.
+    expect(budget.usedCount).toBe(0);
+    expect(budget.remaining).toBe(1);
+  });
+
+  it('refunds budget on promptTabs / promptSecret rejection too', async () => {
+    const budget = new PromptBudget(2);
+    const tabsParent = vi.fn(async () => { throw new Error('x'); });
+    const secretParent = vi.fn(async () => { throw new Error('y'); });
+    const cbs = buildSubAgentPromptCallbacks(step, {
+      parentPromptTabs: tabsParent,
+      parentPromptSecret: secretParent,
+      promptBudget: budget,
+    });
+    await expect(cbs.promptTabs!([{ question: 'q' }])).rejects.toThrow('x');
+    await expect(cbs.promptSecret!('name', 'p')).rejects.toThrow('y');
+    expect(budget.usedCount).toBe(0);
+  });
+
+  it('consumes budget on promptTabs success', async () => {
+    const budget = new PromptBudget(2);
+    const cbs = buildSubAgentPromptCallbacks(step, {
+      parentPromptTabs: vi.fn(async () => ['ok']),
+      parentPromptSecret: vi.fn(async () => true),
+      promptBudget: budget,
+    });
+    await cbs.promptTabs!([{ question: 'q' }]);
+    await cbs.promptSecret!('n', 'p');
+    expect(budget.usedCount).toBe(2);
+  });
 });
 
 describe('spawnInline + parentPrompt propagation', () => {
@@ -353,16 +389,21 @@ describe('spawnInline + parentPrompt propagation', () => {
     expect(parentPromptUser).toHaveBeenCalledWith('Q', ['a', 'b'], expect.objectContaining({ stepId: 'pick', stepTask: 'choose' }));
   });
 
-  it('strips ask_user from sub-agent tools when no parentPromptUser', async () => {
-    const toolsWithAskUser: ToolEntry[] = [
+  it('strips all human-in-the-loop tools when no parentPromptUser', async () => {
+    const toolsWithHitl: ToolEntry[] = [
       ...mockParentTools,
       { definition: { name: 'ask_user', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'q' },
+      { definition: { name: 'ask_secret', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 's' },
+      { definition: { name: 'ask_human', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'h' },
     ];
     const step: ManifestStep = { id: 'autonomous-step', agent: 'autonomous-step', runtime: 'inline', task: 'work alone' };
-    await spawnInline(step, {}, mockConfig, toolsWithAskUser);
-    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    await spawnInline(step, {}, mockConfig, toolsWithHitl);
+    const lastCall = vi.mocked(Agent).mock.calls.at(-1)!;
+    const agentConfig = lastCall[0] as unknown as Record<string, unknown>;
     const tools = agentConfig['tools'] as ToolEntry[];
     expect(tools.find(t => t.definition.name === 'ask_user')).toBeUndefined();
+    expect(tools.find(t => t.definition.name === 'ask_secret')).toBeUndefined();
+    expect(tools.find(t => t.definition.name === 'ask_human')).toBeUndefined();
   });
 
   it('keeps ask_user in sub-agent tools when parentPromptUser is present', async () => {

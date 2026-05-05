@@ -78,21 +78,6 @@ export class TaskManager {
       throw new Error(`Invalid due_date format: ${params.dueDate}. Use YYYY-MM-DD.`);
     }
 
-    // Reject scheduled (cron) pipelines whose mode is not 'autonomous'.
-    // The pipeline lookup is injected to avoid a tools→core import cycle;
-    // when wired (Engine.init) the validator runs synchronously here. When
-    // unwired (test fixtures, headless CLI) the check is a no-op and the
-    // WorkerLoop hard gate at execution time is the backstop.
-    if (params.scheduleCron && params.pipelineId && pipelineModeLookup) {
-      const mode = pipelineModeLookup(params.pipelineId);
-      if (mode && mode !== 'autonomous') {
-        throw new Error(
-          `Cannot schedule pipeline "${params.pipelineId}": mode is '${mode}', but only 'autonomous' pipelines can run on a cron. ` +
-          `Remove ask_user/ask_secret steps or invoke the pipeline manually from a chat session.`,
-        );
-      }
-    }
-
     // Auto-trigger: if assigned to lynox with no explicit schedule/watch,
     // set nextRunAt = now so WorkerLoop picks it up immediately.
     let resolvedNextRunAt = params.nextRunAt;
@@ -100,6 +85,23 @@ export class TaskManager {
     if (params.assignee === 'lynox' && !params.scheduleCron && !params.watchConfig && !params.nextRunAt) {
       resolvedNextRunAt = new Date().toISOString();
       resolvedTaskType = resolvedTaskType ?? 'manual';
+    }
+
+    // Reject any pipeline destined for background execution (cron, explicit
+    // nextRunAt, or lynox auto-trigger above) whose mode is not 'autonomous'.
+    // All three paths detach execution from the calling session and end up at
+    // WorkerLoop, where ask_user has no live session to route back to. When
+    // the lookup is unwired (tests / headless CLI) the WorkerLoop hard gate
+    // is the backstop.
+    const willRunInBackground = Boolean(params.scheduleCron) || Boolean(resolvedNextRunAt);
+    if (willRunInBackground && params.pipelineId && pipelineModeLookup) {
+      const mode = pipelineModeLookup(params.pipelineId);
+      if (mode && mode !== 'autonomous') {
+        throw new Error(
+          `Cannot schedule pipeline "${params.pipelineId}": mode is '${mode}', but only 'autonomous' pipelines run via WorkerLoop (cron / nextRunAt / assignee=lynox). ` +
+          `Remove ask_user/ask_secret steps or invoke the pipeline manually from a chat session.`,
+        );
+      }
     }
 
     this.history.insertTask({

@@ -68,14 +68,14 @@ export async function runManifest(
     );
   }
 
-  // Allocate a per-run prompt budget if the parent session provided prompt
-  // callbacks. Sub-pipelines (depth > 0) inherit the existing budget so the
-  // cap is *per top-level run*, not per sub-pipeline. Runs without callbacks
-  // (autonomous) skip the budget entirely.
-  if (options.parentPrompt && !options.parentPrompt.promptBudget) {
+  // Per-run prompt budget. Allocated only at the top-level run (depth === 0)
+  // so sub-pipelines share the parent's cap; autonomous runs (no parent
+  // prompt callbacks) skip budgeting entirely.
+  let parentPrompt = options.parentPrompt;
+  if (parentPrompt && !parentPrompt.promptBudget && depth === 0) {
     const limit = config.pipeline_prompt_budget ?? DEFAULT_PROMPT_BUDGET;
     const budget = options.promptBudget ?? new PromptBudget(limit);
-    options.parentPrompt = { ...options.parentPrompt, promptBudget: budget };
+    parentPrompt = { ...parentPrompt, promptBudget: budget };
   }
 
   const runId = randomUUID();
@@ -99,11 +99,18 @@ export async function runManifest(
 
   options.hooks?.onRunStart?.();
 
+  // Effective options carry the (possibly-augmented) parentPrompt so
+  // executeStep / spawners pick up the per-run budget without mutating the
+  // caller's options.
+  const effectiveOptions: RunManifestOptions = parentPrompt === options.parentPrompt
+    ? options
+    : { ...options, parentPrompt };
+
   const mode = getExecutionMode(manifest);
   if (mode === 'parallel') {
-    await runParallel(manifest, state, config, agentsDir, options);
+    await runParallel(manifest, state, config, agentsDir, effectiveOptions);
   } else {
-    await runSequential(manifest, state, config, agentsDir, options);
+    await runSequential(manifest, state, config, agentsDir, effectiveOptions);
   }
 
   if (state.status === 'running') {
@@ -247,7 +254,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.parentPrompt?.promptBudget);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {

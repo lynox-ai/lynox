@@ -39,6 +39,15 @@ export class PromptBudget {
     this.used += 1;
   }
 
+  /**
+   * Release a previously-consumed slot. Used when the parent prompt
+   * rejects/aborts before the user actually saw it — a flaky network must
+   * not drain the cap.
+   */
+  refund(): void {
+    if (this.used > 0) this.used -= 1;
+  }
+
   get usedCount(): number { return this.used; }
   get remaining(): number { return Math.max(0, this.limit - this.used); }
 }

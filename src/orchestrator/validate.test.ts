@@ -274,6 +274,13 @@ describe('assertPipelineModeIsValid (save-time gate)', () => {
     )).toThrow(/ask_secret/);
   });
 
+  it('throws for ask_human in autonomous pipelines', () => {
+    expect(() => assertPipelineModeIsValid(
+      [mkStep('escalate', 'ask_human for review')],
+      'autonomous',
+    )).toThrow(/ask_human/);
+  });
+
   it('aggregates multiple violations into one error', () => {
     let caught: unknown;
     try {

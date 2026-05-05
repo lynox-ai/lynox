@@ -6,6 +6,8 @@ import type { Manifest, AgentOutput, RunState, RunHooks } from '../../orchestrat
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import type { ToolContext } from '../../core/tool-context.js';
 
 const MAX_STEPS = 20;
 const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
@@ -21,6 +23,7 @@ const executedStates = new Map<string, { manifest: Manifest; state: RunState }>(
 
 /** Track pipeline IDs we've already warned about during legacy-mode migration. */
 const warnedLegacyIds = new Set<string>();
+const WARNED_LEGACY_MAX = 1024;
 
 /**
  * Backfill defaults on a (possibly-legacy) PlannedPipeline read from disk.
@@ -32,10 +35,13 @@ function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipel
   if (planned.mode === undefined) {
     planned.mode = inferPipelineMode(planned.steps);
     if (planned.mode === 'interactive' && !warnedLegacyIds.has(planned.id)) {
+      // Bound the dedup set so a long-lived process can't grow it without
+      // bound on environments with many distinct legacy pipelines.
+      if (warnedLegacyIds.size >= WARNED_LEGACY_MAX) warnedLegacyIds.clear();
       warnedLegacyIds.add(planned.id);
-      // One-shot warn so operators can flip pipelines that were intended as
-      // cron jobs but happen to contain ask_user. They were silently broken
-      // before this PR.
+      // One-shot warn: legacy pipeline that references ask_user_* tools
+      // is auto-labelled interactive; warn so operators flip ones that
+      // were meant for cron.
       console.warn(
         `[pipeline] legacy pipeline "${planned.id}" auto-labelled mode='interactive' ` +
         `because it references human-in-the-loop tools. ` +
@@ -369,14 +375,21 @@ interface PipelineDeps {
   tools: ToolEntry[];
   streamHandler: StreamHandler | null;
   runHistory: RunHistory | null;
-  toolContext?: import('../../types/index.js').ToolContext | undefined;
-  parentPrompt?: import('../../orchestrator/runtime-adapter.js').SubAgentPromptHandles | undefined;
+  toolContext?: ToolContext | undefined;
+  parentPrompt?: SubAgentPromptHandles | undefined;
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
   const planned = getPipeline(input.pipeline_id!, deps.runHistory);
   if (!planned) {
     return `Error: Pipeline "${input.pipeline_id}" not found.`;
+  }
+
+  // Interactive pipelines need a live prompt-capable session. Refuse with a
+  // clear error rather than running steps that will throw "ask_user is not
+  // set" deep in the run.
+  if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
+    return `Error: Pipeline "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
@@ -591,4 +604,5 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
 export function _resetPipelineStore(): void {
   pipelineStore.clear();
   executedStates.clear();
+  warnedLegacyIds.clear();
 }

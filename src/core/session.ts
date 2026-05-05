@@ -15,6 +15,10 @@ import type {
   ThinkingMode,
   TabQuestion,
   IAgent,
+  PromptUserFn,
+  PromptTabsFn,
+  PromptSecretFn,
+  PromptMeta,
 } from '../types/index.js';
 import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW, getModelId, clampTier } from '../types/index.js';
 import { getActiveProvider } from './llm-client.js';
@@ -64,9 +68,9 @@ export interface SessionOptions {
   autonomy?: import('../types/index.js').AutonomyLevel | undefined;
   briefing?: string | undefined;
   onStream?: StreamHandler | undefined;
-  promptUser?: import('../types/agent.js').PromptUserFn | undefined;
-  promptTabs?: import('../types/agent.js').PromptTabsFn | undefined;
-  promptSecret?: import('../types/agent.js').PromptSecretFn | undefined;
+  promptUser?: PromptUserFn | undefined;
+  promptTabs?: PromptTabsFn | undefined;
+  promptSecret?: PromptSecretFn | undefined;
   tenantId?: string | undefined;
   messages?: BetaMessageParam[] | undefined;
   systemPromptSuffix?: string | undefined;
@@ -99,9 +103,9 @@ export class Session {
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   private _isCompacting = false;
   onStream: StreamHandler | null = null;
-  private _promptUser: import('../types/agent.js').PromptUserFn | null = null;
-  private _promptTabs: import('../types/agent.js').PromptTabsFn | null = null;
-  private _promptSecret: import('../types/agent.js').PromptSecretFn | null = null;
+  private _promptUser: PromptUserFn | null = null;
+  private _promptTabs: PromptTabsFn | null = null;
+  private _promptSecret: PromptSecretFn | null = null;
   private _tenantId: string | null = null;
   private _skipMemoryExtractionOverride: boolean | null = null;
 
@@ -177,41 +181,41 @@ export class Session {
 
   // ── User interaction callbacks ──
 
-  get promptUser(): import('../types/agent.js').PromptUserFn | null {
+  get promptUser(): PromptUserFn | null {
     return this._promptUser;
   }
 
-  set promptUser(fn: import('../types/agent.js').PromptUserFn | null) {
+  set promptUser(fn: PromptUserFn | null) {
     this._promptUser = fn;
     if (this.agent) {
       this.agent.promptUser = fn
-        ? (q: string, opts?: string[], meta?: import('../types/agent.js').PromptMeta) => fn(q, opts, meta)
+        ? (q: string, opts?: string[], meta?: PromptMeta) => fn(q, opts, meta)
         : undefined;
     }
   }
 
-  get promptTabs(): import('../types/agent.js').PromptTabsFn | null {
+  get promptTabs(): PromptTabsFn | null {
     return this._promptTabs;
   }
 
-  set promptTabs(fn: import('../types/agent.js').PromptTabsFn | null) {
+  set promptTabs(fn: PromptTabsFn | null) {
     this._promptTabs = fn;
     if (this.agent) {
       this.agent.promptTabs = fn
-        ? (qs: TabQuestion[], meta?: import('../types/agent.js').PromptMeta) => fn(qs, meta)
+        ? (qs: TabQuestion[], meta?: PromptMeta) => fn(qs, meta)
         : undefined;
     }
   }
 
-  get promptSecret(): import('../types/agent.js').PromptSecretFn | null {
+  get promptSecret(): PromptSecretFn | null {
     return this._promptSecret;
   }
 
-  set promptSecret(fn: import('../types/agent.js').PromptSecretFn | null) {
+  set promptSecret(fn: PromptSecretFn | null) {
     this._promptSecret = fn;
     if (this.agent) {
       this.agent.promptSecret = fn
-        ? (name: string, prompt: string, keyType?: string, meta?: import('../types/agent.js').PromptMeta) => fn(name, prompt, keyType, meta)
+        ? (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => fn(name, prompt, keyType, meta)
         : undefined;
     }
   }
@@ -894,13 +898,13 @@ export class Session {
       memory: engine.getMemory() ?? undefined,
       onStream: streamHandler,
       promptUser: this._promptUser
-        ? (q: string, opts?: string[], meta?: import('../types/agent.js').PromptMeta) => this._promptUser!(q, opts, meta)
+        ? (q: string, opts?: string[], meta?: PromptMeta) => this._promptUser!(q, opts, meta)
         : undefined,
       promptTabs: this._promptTabs
-        ? (qs: TabQuestion[], meta?: import('../types/agent.js').PromptMeta) => this._promptTabs!(qs, meta)
+        ? (qs: TabQuestion[], meta?: PromptMeta) => this._promptTabs!(qs, meta)
         : undefined,
       promptSecret: this._promptSecret
-        ? (name: string, prompt: string, keyType?: string, meta?: import('../types/agent.js').PromptMeta) => this._promptSecret!(name, prompt, keyType, meta)
+        ? (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => this._promptSecret!(name, prompt, keyType, meta)
         : undefined,
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,

@@ -8,6 +8,7 @@ import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '.
 import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
+import type { PromptBudget } from './prompt-budget.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_pipeline']);
 
@@ -25,7 +26,7 @@ export interface SubAgentPromptHandles {
   parentPromptUser?: PromptUserFn | undefined;
   parentPromptTabs?: PromptTabsFn | undefined;
   parentPromptSecret?: PromptSecretFn | undefined;
-  promptBudget?: import('./prompt-budget.js').PromptBudget | undefined;
+  promptBudget?: PromptBudget | undefined;
 }
 
 /**
@@ -45,30 +46,49 @@ export function buildSubAgentPromptCallbacks(
   if (!parent) return {};
   const meta: PromptMeta = { stepId: step.id, stepTask: step.task };
   const budget = parent.promptBudget;
+  // Budget is checked up-front (so a saturated budget rejects without ever
+  // touching the parent), then refunded if the parent rejects/aborts —
+  // a flaky network can't drain the cap without the user actually seeing
+  // a prompt.
   return {
     promptUser: parent.parentPromptUser
       ? async (q, opts, m) => {
           if (budget) budget.consume();
-          return parent.parentPromptUser!(q, opts, { ...meta, ...m });
+          try {
+            return await parent.parentPromptUser!(q, opts, { ...meta, ...m });
+          } catch (err) {
+            if (budget) budget.refund();
+            throw err;
+          }
         }
       : undefined,
     promptTabs: parent.parentPromptTabs
       ? async (qs, m) => {
           if (budget) budget.consume();
-          return parent.parentPromptTabs!(qs, { ...meta, ...m });
+          try {
+            return await parent.parentPromptTabs!(qs, { ...meta, ...m });
+          } catch (err) {
+            if (budget) budget.refund();
+            throw err;
+          }
         }
       : undefined,
     promptSecret: parent.parentPromptSecret
       ? async (n, p, k, m) => {
           if (budget) budget.consume();
-          return parent.parentPromptSecret!(n, p, k, { ...meta, ...m });
+          try {
+            return await parent.parentPromptSecret!(n, p, k, { ...meta, ...m });
+          } catch (err) {
+            if (budget) budget.refund();
+            throw err;
+          }
         }
       : undefined,
   };
 }
 
-/** Drop human-in-the-loop tools from a tool list. Used when the sub-agent has no parent prompt callback. */
 export function stripHumanInTheLoopTools(tools: ToolEntry[]): ToolEntry[] {
+  if (!tools.some(t => isHumanInTheLoopTool(t.definition.name))) return tools;
   return tools.filter(t => !isHumanInTheLoopTool(t.definition.name));
 }
 
@@ -383,7 +403,6 @@ export async function spawnPipeline(
   parentTools: ToolEntry[],
   depth: number,
   parentPrompt?: SubAgentPromptHandles | undefined,
-  parentPromptBudget?: import('./prompt-budget.js').PromptBudget | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -424,7 +443,6 @@ export async function spawnPipeline(
     parentTools,
     depth: depth + 1,
     parentPrompt,
-    promptBudget: parentPromptBudget,
   });
 
   // Aggregate results

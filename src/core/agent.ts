@@ -16,6 +16,9 @@ import type {
   SecretStoreLike,
   ChangesetManagerLike,
   LLMProvider,
+  PromptUserFn,
+  PromptTabsFn,
+  PromptSecretFn,
 } from '../types/index.js';
 import { getBetasForProvider, CHARS_PER_TOKEN, getContextWindow, getDefaultMaxTokens, getMaxContinuations } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
@@ -52,9 +55,9 @@ export class Agent implements IAgent {
   readonly memory: IMemory | null;
   readonly tools: ToolEntry[];
   onStream: StreamHandler | null;
-  promptUser?: import('../types/agent.js').PromptUserFn | undefined;
-  promptTabs?: import('../types/agent.js').PromptTabsFn | undefined;
-  promptSecret?: import('../types/agent.js').PromptSecretFn | undefined;
+  promptUser?: PromptUserFn | undefined;
+  promptTabs?: PromptTabsFn | undefined;
+  promptSecret?: PromptSecretFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   readonly spawnDepth: number;
