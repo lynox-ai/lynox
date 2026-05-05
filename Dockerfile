@@ -139,6 +139,16 @@ RUN chmod +x /entrypoint-webui.sh
 
 USER lynox
 
+# Git SHA the engine was built from. Surfaced via /api/health so UpdateManager
+# can verify the running container actually swapped to the new image after a
+# rollout — package.json `version` (PKG_VERSION) is unchanged between two
+# tagged builds against the same release commit (e.g. `staging` floats), so
+# version-equality alone can't catch a stalled `docker compose pull`.
+# Defaults empty so dev images don't bake in a stale SHA; CI always passes one
+# via --build-arg BUILD_SHA=$GITHUB_SHA.
+ARG BUILD_SHA=
+ENV BUILD_SHA=${BUILD_SHA}
+
 ENV NODE_ENV=production
 ENV LYNOX_HTTP_PORT=3000
 

@@ -38,6 +38,11 @@ jobs:
           context: .
           load: true
           tags: ghcr.io/lynox-ai/lynox:scan-staging
+          # Same build-args as the push step below so trivy scans the same
+          # layers we ship and the gha cache is shared between both invocations.
+          build-args: |
+            PUBLIC_LYNOX_UI_PIPELINE_STATUS_V2=1
+            BUILD_SHA=${{ steps.meta.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -62,6 +67,7 @@ jobs:
             org.opencontainers.image.created=${{ steps.meta.outputs.created }}
           build-args: |
             PUBLIC_LYNOX_UI_PIPELINE_STATUS_V2=1
+            BUILD_SHA=${{ steps.meta.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
