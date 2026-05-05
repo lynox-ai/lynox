@@ -4,8 +4,8 @@ interface WebUIConfig {
 }
 
 let apiBase = $state('/api');
-// On by default since 2026-05-05. Library consumers can opt out via
-// configure({ pipelineStatusV2: false }) if they need the legacy chrome.
+// On by default. Library consumers can opt out via
+// configure({ pipelineStatusV2: false }) for the legacy chrome.
 let pipelineStatusV2 = $state(true);
 
 export function configure(opts: Partial<WebUIConfig>): void {
