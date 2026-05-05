@@ -67,6 +67,19 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	response.headers.set('X-Frame-Options', 'SAMEORIGIN');
 	response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
 	response.headers.set('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
+	// HTML pages must NEVER be cached. Without this, iOS WKWebView (PWA + Safari)
+	// picks a heuristic max-age and keeps serving the stale `index.html` even
+	// after a `location.reload()` or `location.replace(?_v=…)` — the toast in
+	// PR #251 and the cold-start guard in PR #252 both bypass-fail because
+	// they trigger a network request that iOS satisfies from its own cache.
+	// Hashed `_app/immutable/*.{js,css}` assets are safe to cache forever
+	// (different filename per build); only the HTML driver document needs
+	// no-store. Caught after rafael.lynox.cloud canary v1.3.10 by Rafael —
+	// his iPhone PWA was stuck reloading to the same cached HTML.
+	const ct = response.headers.get('Content-Type') ?? '';
+	if (ct.startsWith('text/html')) {
+		response.headers.set('Cache-Control', 'no-store, must-revalidate');
+	}
 	response.headers.set(
 		'Content-Security-Policy',
 		[

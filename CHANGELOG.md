@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.11 — 2026-05-05
+
+### Fixed
+
+- **iOS PWA serving stale HTML indefinitely** — root cause of the symptoms Rafael caught canarying v1.3.10: tapping the "Update verfügbar" toast didn't actually load the new bundle, voice messages reloaded the page in a flicker without sending, and the iOS-audio fix from v1.3.10 never took effect on his iPhone PWA because he was still running pre-v1.3.10 code. The HTML response was missing `Cache-Control` entirely, so iOS WKWebView picked a heuristic max-age and kept serving the same cached `index.html` — `location.reload()` and `location.replace(?_v=…)` both got satisfied from cache. Hooks now set `Cache-Control: no-store, must-revalidate` on `text/html` responses (hashed `_app/immutable/*` assets are unaffected — they remain long-cacheable since the filename changes per build). The StatusBar stale-bundle toast also switched its handler from bare `location.reload()` to `location.replace(?_v=<sha>)` matching the cold-start guard, so users with currently-cached HTML can still recover via the toast. After this lands, one final close+reopen of the iPhone PWA picks up the no-store header; from then on, all future updates apply smoothly with no manual gesture. (#255)
+
 ## 1.3.10 — 2026-05-05
 
 ### Fixed

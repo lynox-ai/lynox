@@ -158,7 +158,17 @@
 		staleBundleNotified = true;
 		addToast(t('status.stale_bundle'), 'info', 30_000, {
 			label: t('status.stale_bundle_action'),
-			handler: () => { location.reload(); },
+			// Bare `location.reload()` is honoured by Chrome but iOS WKWebView
+			// (PWA + Safari) often serves the same cached HTML — Rafael hit this
+			// when canarying v1.3.10. Match the cold-start guard's pattern:
+			// `location.replace` with a cache-bust query param forces iOS to
+			// treat it as a new resource. Combined with the no-store HTML
+			// Cache-Control added in v1.3.11 hooks, this is belt-and-suspenders.
+			handler: () => {
+				const url = new URL(location.href);
+				url.searchParams.set('_v', engineSha.slice(0, 8));
+				location.replace(url.toString());
+			},
 		});
 	}
 
