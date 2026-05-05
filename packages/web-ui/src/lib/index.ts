@@ -29,7 +29,6 @@ export { default as ChangesetReview } from './components/ChangesetReview.svelte'
 export { default as ToastContainer } from './components/ToastContainer.svelte';
 export { default as MobileAccess } from './components/MobileAccess.svelte';
 export { default as MigrationWizard } from './components/MigrationWizard.svelte';
-export { default as PipelineStatusBar } from './components/PipelineStatusBar.svelte';
 export { default as PromptAnchor } from './components/PromptAnchor.svelte';
 
 // Toast
@@ -55,7 +54,6 @@ export {
 	getMessages,
 	getIsStreaming,
 	getPendingPermission,
-	getActiveRun,
 	getPendingPrompt,
 	getRunStartedAt,
 	getRunPromptCount,
@@ -86,7 +84,6 @@ export type {
 	ContextBudget,
 	ChangesetFileInfo,
 	RunOptions,
-	ActiveRun,
 	PendingPromptHead,
 	PromptKind,
 } from './stores/chat.svelte.js';

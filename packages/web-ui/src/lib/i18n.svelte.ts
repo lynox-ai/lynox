@@ -349,11 +349,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.prompt_timeout_left': { de: 'Verbleibende Zeit', en: 'Time remaining' },
 	'chat.batch_mode': { de: 'Fragen beantworten', en: 'Answer questions' },
 
-	// Pipeline status v2 — sticky top bar + prompt anchor
-	'pipeline.status_step': { de: 'Schritt {n}/{total}', en: 'Step {n} of {total}' },
-	'pipeline.waiting_on_user': { de: 'Lynox wartet auf deine Antwort', en: 'Lynox is waiting on your reply' },
-	'pipeline.jump_to_question': { de: 'zur Frage springen', en: 'jump to question' },
-	'pipeline.untitled': { de: 'Pipeline', en: 'Pipeline' },
+	// Pipeline status v2 — prompt anchor (sticky bar above the chat input)
 	'prompt_anchor.answer': { de: 'Antworten', en: 'Answer' },
 	'prompt_anchor.question_n': { de: 'Frage {n}', en: 'Question {n}' },
 	'prompt_anchor.run_for': { de: 'Run läuft seit {duration}', en: 'Running for {duration}' },

@@ -1,125 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-	findActiveRun,
 	formatRunElapsed,
 	prefersReducedMotion,
 	scrollBehaviorForMotion,
 	selectPendingPromptHead,
 } from './pipeline-status.js';
 import type {
-	ChatMessage,
 	PermissionPrompt,
-	PipelineInfo,
 	TabsPrompt,
 } from '../stores/chat.svelte.js';
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-function pipeline(overrides: Partial<PipelineInfo> = {}): PipelineInfo {
-	return {
-		pipelineId: 'p-1',
-		name: 'Test Pipeline',
-		steps: [
-			{ id: 'a', task: 'Step A', status: 'completed' },
-			{ id: 'b', task: 'Step B', status: 'running' },
-			{ id: 'c', task: 'Step C', status: 'pending' },
-		],
-		...overrides,
-	};
-}
-
-function userMsg(): ChatMessage {
-	return { role: 'user', content: 'hi' };
-}
-
-function assistantMsg(p?: PipelineInfo): ChatMessage {
-	const m: ChatMessage = { role: 'assistant', content: '' };
-	if (p) m.pipeline = p;
-	return m;
-}
-
-// ---------------------------------------------------------------------------
-// findActiveRun — covers acceptance gate 1 (rehydration after refresh) +
-// gate 2 (thread switch). Both reduce to "given the persisted message
-// array, do we surface the right run shape?".
-// ---------------------------------------------------------------------------
-
-describe('findActiveRun', () => {
-	it('returns null on empty messages', () => {
-		expect(findActiveRun([])).toBeNull();
-	});
-
-	it('returns null when no message owns a pipeline', () => {
-		expect(findActiveRun([userMsg(), assistantMsg()])).toBeNull();
-	});
-
-	it('returns null when the latest pipeline is fully done (all completed)', () => {
-		const done = pipeline({
-			steps: [
-				{ id: 'a', task: 'A', status: 'completed' },
-				{ id: 'b', task: 'B', status: 'completed' },
-			],
-		});
-		expect(findActiveRun([userMsg(), assistantMsg(done)])).toBeNull();
-	});
-
-	it('returns null when the latest pipeline is fully done with skips', () => {
-		const done = pipeline({
-			steps: [
-				{ id: 'a', task: 'A', status: 'completed' },
-				{ id: 'b', task: 'B', status: 'skipped' },
-				{ id: 'c', task: 'C', status: 'failed' },
-			],
-		});
-		expect(findActiveRun([userMsg(), assistantMsg(done)])).toBeNull();
-	});
-
-	it('rehydrates an in-flight run from the persisted message array', () => {
-		// Acceptance gate 1: refresh mid-pipeline restores the bar.
-		// Persisted messages → findActiveRun → populated shape.
-		const messages = [userMsg(), assistantMsg(pipeline()), userMsg()];
-		const run = findActiveRun(messages);
-		expect(run).not.toBeNull();
-		expect(run?.pipelineId).toBe('p-1');
-		expect(run?.totalSteps).toBe(3);
-		// First non-completed/non-skipped step is index 1 ('b', running).
-		expect(run?.currentStepIdx).toBe(1);
-	});
-
-	it('picks the latest pipeline-bearing message when multiple exist', () => {
-		const old = pipeline({ pipelineId: 'p-old', name: 'Old' });
-		const fresh = pipeline({ pipelineId: 'p-fresh', name: 'Fresh' });
-		expect(findActiveRun([assistantMsg(old), assistantMsg(fresh)])?.pipelineId).toBe('p-fresh');
-	});
-
-	it('does not surface an older non-terminal pipeline once a newer terminal pipeline exists', () => {
-		// Race: old run was active, new run finished cleanly. The bar must NOT
-		// re-surface the older one (would confuse the user about which run is live).
-		const old = pipeline({ pipelineId: 'p-old', steps: [{ id: 'a', task: 'A', status: 'running' }] });
-		const newDone = pipeline({ pipelineId: 'p-new', steps: [{ id: 'a', task: 'A', status: 'completed' }] });
-		expect(findActiveRun([assistantMsg(old), assistantMsg(newDone)])).toBeNull();
-	});
-
-	it('falls back to last step index when somehow all steps are completed/skipped but predicate is bypassed', () => {
-		// Defensive: shouldn't happen at runtime (stillRunning would short-circuit),
-		// but the helper is tested for its index calculation in isolation.
-		const allRunning = pipeline({
-			steps: [
-				{ id: 'a', task: 'A', status: 'pending' },
-				{ id: 'b', task: 'B', status: 'pending' },
-			],
-		});
-		expect(findActiveRun([assistantMsg(allRunning)])?.currentStepIdx).toBe(0);
-	});
-
-	it('thread-switch race-guard: empty messages array (post-resumeThread clear) returns null', () => {
-		// Acceptance gate 2: switching to thread B (which clears messages
-		// before fetching) must NOT show thread A's status bar. Empty → null.
-		expect(findActiveRun([])).toBeNull();
-	});
-});
 
 // ---------------------------------------------------------------------------
 // selectPendingPromptHead — covers gate 3 (multi-prompt, head-of-queue).
