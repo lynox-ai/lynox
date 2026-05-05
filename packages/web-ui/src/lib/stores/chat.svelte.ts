@@ -4,7 +4,7 @@ import { t } from '../i18n.svelte.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
-import { findActiveRun, selectPendingPromptHead } from '../utils/pipeline-status.js';
+import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 
 // ---------------------------------------------------------------------------
 // Follow-up parsing (mirrors core telegram-formatter logic)
@@ -311,10 +311,11 @@ let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: strin
 let secretPromptGeneration = $state(0);
 
 // Pipeline-status-v2: track when the active run started + how many prompts
-// it has fired. Both are read by PipelineStatusBar and PromptAnchor.
-// runStartedAt is set on `pipeline_start`; cleared by newChat / resumeThread.
-// runPromptCount increments each time a pending* var transitions null→non-null
-// while a run is active.
+// it has fired. Both are read by PromptAnchor for the run-duration counter
+// and the multi-prompt counter respectively. runStartedAt is set on
+// `pipeline_start` and cleared by newChat / resumeThread; runPromptCount
+// increments each time a pending* var transitions null→non-null while a
+// run is active.
 let runStartedAt = $state<number | null>(null);
 let runPromptCount = $state(0);
 let chatError = $state<string | null>(null);
@@ -1476,25 +1477,6 @@ export function getPendingTabsPrompt() {
 }
 
 /**
- * Pipeline-status-v2 — minimal shape for the sticky status bar.
- *
- * Picks the most-recent message that owns a pipeline whose run hasn't
- * finished (any step still pending or running). Returns null otherwise,
- * which is what makes PipelineStatusBar disappear at the terminal state.
- */
-export interface ActiveRun {
-	pipelineId: string;
-	name: string;
-	steps: PipelineStepInfo[];
-	currentStepIdx: number;
-	totalSteps: number;
-}
-
-export function getActiveRun(): ActiveRun | null {
-	return findActiveRun(messages);
-}
-
-/**
  * Unified head-of-queue prompt for the active session. The three legacy
  * pendingX vars stay as separate state (their reply paths differ); this
  * just returns the first non-null in priority order: secret > permission
@@ -1659,9 +1641,9 @@ export async function resumeThread(threadId: string): Promise<void> {
 	pendingPermission = null;
 	pendingTabsPrompt = null;
 	// Without this reset, a secret prompt persisted from thread A would
-	// leak into the new visible PromptAnchor / PipelineStatusBar in thread B
-	// (newChat resets it; resumeThread originally didn't because no surface
-	// rendered it independently). See PR #236 review.
+	// leak into the new visible PromptAnchor in thread B (newChat resets
+	// it; resumeThread originally didn't because no surface rendered it
+	// independently). See PR #236 review.
 	pendingSecretPrompt = null;
 	pendingChangeset = null;
 	changesetLoading = false;

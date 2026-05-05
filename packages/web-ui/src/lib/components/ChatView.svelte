@@ -38,7 +38,6 @@
 		getSessionId,
 		compactNow,
 		getIsCompacting,
-		getActiveRun,
 		getPendingPrompt,
 		getRunStartedAt,
 		getRunPromptCount,
@@ -56,7 +55,6 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
-	import PipelineStatusBar from './PipelineStatusBar.svelte';
 	import PromptAnchor from './PromptAnchor.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
@@ -1106,12 +1104,12 @@
 		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
 	);
 
-	// pipeline-status-v2 — flag-gated. activeRun is non-null iff the latest
-	// message's pipeline still has pending/running steps. waitingOnUser is true
-	// when any pending* prompt exists for the active session, regardless of
-	// which prompt type it is (permission / tabs / secret).
+	// pipeline-status-v2 — flag-gated. waitingOnUser drives the 🤚 step state
+	// in the inline PipelineProgress DAG and the PromptAnchor above the
+	// chat input. The earlier sticky top bar was dropped — its only purpose
+	// was to survive the inline DAG re-render bug, which is the wrong place
+	// to fix it (Sprint F context-render-hygiene owns that fix).
 	const pipelineStatusV2 = $derived(getPipelineStatusV2());
-	const activeRun = $derived(pipelineStatusV2 ? getActiveRun() : null);
 	const pendingPromptHead = $derived(pipelineStatusV2 ? getPendingPrompt() : null);
 	const waitingOnUser = $derived(pendingPromptHead !== null);
 	const runStartedAt = $derived(getRunStartedAt());
@@ -1315,13 +1313,6 @@
 {/snippet}
 
 <div class="flex h-full flex-col">
-	<!-- Pipeline-status-v2 (flag-gated): always-visible bar above the message
-	     list while a pipeline run is in flight. Survives the inline
-	     PipelineProgress re-render bug because it reads from getActiveRun(). -->
-	{#if pipelineStatusV2 && activeRun}
-		<PipelineStatusBar run={activeRun} waitingOnUser={waitingOnUser} pendingPromptKind={pendingPromptHead?.kind ?? null} />
-	{/if}
-
 	<!-- Messages -->
 	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if messages.length === 0 && !isStreaming}

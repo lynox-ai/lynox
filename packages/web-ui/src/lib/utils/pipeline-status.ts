@@ -6,46 +6,11 @@
  */
 
 import type {
-	ChatMessage,
 	PendingPromptHead,
 	PermissionPrompt,
-	PipelineStepInfo,
 	PromptKind,
 	TabsPrompt,
 } from '../stores/chat.svelte.js';
-import type { ActiveRun } from '../stores/chat.svelte.js';
-
-/**
- * Walk messages from newest to oldest and return the latest run that hasn't
- * reached a terminal state (= some step is still pending or running).
- *
- * Returns null when no message owns a pipeline, or when the latest pipeline-
- * carrying message is fully done. The "newest first" walk is what makes the
- * status bar disappear at the terminal step rather than re-surfacing the
- * previous run.
- */
-export function findActiveRun(messages: ChatMessage[]): ActiveRun | null {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const p = messages[i]?.pipeline;
-		if (!p) continue;
-		const stillRunning = p.steps.some(
-			(s: PipelineStepInfo) => s.status === 'pending' || s.status === 'running',
-		);
-		if (!stillRunning) return null;
-		let cur = p.steps.findIndex(
-			(s: PipelineStepInfo) => s.status !== 'completed' && s.status !== 'skipped',
-		);
-		if (cur < 0) cur = Math.max(p.steps.length - 1, 0);
-		return {
-			pipelineId: p.pipelineId,
-			name: p.name,
-			steps: p.steps,
-			currentStepIdx: cur,
-			totalSteps: p.steps.length,
-		};
-	}
-	return null;
-}
 
 /**
  * Collapse the three legacy pendingX vars into the unified head shape the
@@ -105,9 +70,8 @@ export function formatRunElapsed(
 }
 
 /**
- * `prefers-reduced-motion` query — extracted so jump-to-prompt can be
- * unit-tested without spinning up a real browser. Both PipelineStatusBar
- * and PromptAnchor route their scrollIntoView through this.
+ * `prefers-reduced-motion` query — extracted so PromptAnchor's
+ * scrollIntoView can be unit-tested without spinning up a real browser.
  */
 export function prefersReducedMotion(win: { matchMedia?: (q: string) => MediaQueryList } | undefined = typeof window !== 'undefined' ? window : undefined): boolean {
 	if (!win?.matchMedia) return false;
