@@ -60,6 +60,8 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
             org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+          build-args: |
+            PUBLIC_LYNOX_UI_PIPELINE_STATUS_V2=1
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
