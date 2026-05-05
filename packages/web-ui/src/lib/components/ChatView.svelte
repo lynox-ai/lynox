@@ -1302,6 +1302,46 @@
 	}
 </script>
 
+{#snippet micButton()}
+	<!-- Touch: hold to record, release to send. Mouse: click to toggle.
+	     Rendered both alone (input empty) and alongside the send button
+	     when auto-send mode is on (input non-empty), since dictation in
+	     auto-send mode bypasses the input box. -->
+	<button
+		onclick={() => {
+			if (recordingStartedByTouch) return;
+			if (recording) { stopRecording(); } else { void startRecording(); }
+		}}
+		onpointerdown={(e) => {
+			if (e.pointerType !== 'touch') return;
+			e.preventDefault();
+			recordingStartedByTouch = true;
+			void startRecording();
+		}}
+		onpointerup={() => {
+			if (recordingStartedByTouch) {
+				recordingStartedByTouch = false;
+				stopRecording();
+			}
+		}}
+		onpointerleave={() => {
+			if (recordingStartedByTouch) {
+				recordingStartedByTouch = false;
+				stopRecording();
+			}
+		}}
+		oncontextmenu={(e) => e.preventDefault()}
+		disabled={!ready}
+		class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
+		aria-label={t('chat.voice_input')}
+		title="{t('chat.voice_input')} ({t('shortcut.voice_record')})"
+	>
+		<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+		</svg>
+	</button>
+{/snippet}
+
 {#snippet speakButton(msgKey: string, msgContent: string)}
 	{#if ttsAvailable && !isStreaming}
 		{@const speakState = getSpeakState()}
@@ -2190,6 +2230,14 @@
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
 					</button>
 				{:else if inputText.trim() || pendingFiles.length > 0 || pendingPermission}
+					<!-- Auto-send mode: dictation bypasses the input box entirely
+					     and posts to the agent directly, so the mic should be
+					     available even when there's typed text. The typed text
+					     stays in the input untouched while the dictated message
+					     auto-sends as its own turn. -->
+					{#if isVoiceAutoSendEnabled()}
+						{@render micButton()}
+					{/if}
 					<button
 						onclick={handleSend}
 						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
@@ -2199,40 +2247,7 @@
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
 					</button>
 				{:else}
-					<!-- Touch: hold to record, release to send. Mouse: click to toggle. -->
-					<button
-						onclick={() => {
-							if (recordingStartedByTouch) return;
-							if (recording) { stopRecording(); } else { void startRecording(); }
-						}}
-						onpointerdown={(e) => {
-							if (e.pointerType !== 'touch') return;
-							e.preventDefault();
-							recordingStartedByTouch = true;
-							void startRecording();
-						}}
-						onpointerup={() => {
-							if (recordingStartedByTouch) {
-								recordingStartedByTouch = false;
-								stopRecording();
-							}
-						}}
-						onpointerleave={() => {
-							if (recordingStartedByTouch) {
-								recordingStartedByTouch = false;
-								stopRecording();
-							}
-						}}
-						oncontextmenu={(e) => e.preventDefault()}
-						disabled={!ready}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
-						aria-label={t('chat.voice_input')}
-						title="{t('chat.voice_input')} ({t('shortcut.voice_record')})"
-					>
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
-						</svg>
-					</button>
+					{@render micButton()}
 				{/if}
 			{/if}
 		</div>
