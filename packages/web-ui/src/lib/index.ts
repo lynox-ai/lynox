@@ -117,6 +117,9 @@ export type { Artifact, ArtifactMeta, ArtifactType } from './stores/artifacts.sv
 export { setContext, clearContext, getContext, closePanel } from './stores/context-panel.svelte.js';
 export type { ContextType, ContextInfo } from './stores/context-panel.svelte.js';
 
+// Voice auto-send
+export { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from './stores/voice-autosend.svelte.js';
+
 // Push Notifications
 export {
   initNotifications,
