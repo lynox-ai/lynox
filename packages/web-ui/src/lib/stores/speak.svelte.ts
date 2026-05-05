@@ -34,6 +34,7 @@
  */
 
 import { getApiBase } from '../config.svelte.js';
+import { getLocale } from '../i18n.svelte.js';
 import { addToast } from './toast.svelte.js';
 
 export type SpeakState = 'idle' | 'synthesizing' | 'playing';
@@ -174,10 +175,15 @@ export async function playSpeech(text: string, key: string): Promise<SpeakError 
 
 	let res: Response;
 	try {
+		// Pass the UI locale so the server-side text-prep picks the right
+		// label set ("Tabelle mit N" vs "Table with N") and list joiner.
+		// The user's UI language is the truthful signal here — falling back
+		// to a stopword vote on every request would be slower and wrong on
+		// short replies (e.g. "Ok.").
 		res = await fetch(`${getApiBase()}/speak`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ text }),
+			body: JSON.stringify({ text, lang: getLocale() }),
 			signal: ctrl.signal,
 		});
 	} catch {
