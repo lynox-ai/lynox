@@ -17,6 +17,36 @@
 		<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
 
 		<title>lynox</title>
+
+		<!--
+			Cold-start stale-bundle guard. Runs BEFORE SvelteKit hydrates so
+			it works even when cached chunk hashes 404 against the new
+			deploy (the case that broke Roland's PWA + Rafael's voice send
+			on 2026-05-05). The placeholder is replaced server-side by
+			hooks.server.ts; in dev / non-CI builds it stays as the literal
+			string and the script no-ops.
+		-->
+		<script>
+			(function () {
+				var bundleSha = '__LYNOX_BUILD_SHA__';
+				if (!bundleSha || bundleSha.indexOf('__LYNOX_') === 0) return;
+				try {
+					fetch('/api/health', { cache: 'no-store', credentials: 'same-origin' })
+						.then(function (r) { return r.ok ? r.json() : null; })
+						.then(function (d) {
+							if (!d || typeof d.build_sha !== 'string' || !d.build_sha) return;
+							if (d.build_sha === bundleSha) return;
+							if (window.__lynoxStaleReloadFired) return;
+							window.__lynoxStaleReloadFired = true;
+							var url = new URL(location.href);
+							url.searchParams.set('_v', d.build_sha.slice(0, 8));
+							location.replace(url.toString());
+						})
+						.catch(function () { /* offline: keep working */ });
+				} catch (e) { /* ancient browser: noop */ }
+			})();
+		</script>
+
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

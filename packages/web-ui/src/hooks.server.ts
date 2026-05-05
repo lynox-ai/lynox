@@ -42,6 +42,25 @@ const handleAuth: Handle = async ({ event, resolve }) => {
 	redirect(303, '/login');
 };
 
+/**
+ * Bake the engine's BUILD_SHA into every served HTML page via a
+ * placeholder substitution. The inline cold-start guard in app.html
+ * compares this against /api/health.build_sha BEFORE any SvelteKit
+ * chunk loads — the only way to recover an iOS PWA whose cached
+ * index.html references chunk hashes that 404 against the new server
+ * (the warm-tab StatusBar toast can't help if its own chunk 404s).
+ *
+ * Empty in local dev → the inline script no-ops (see the placeholder
+ * sentinel check there).
+ */
+const HTML_BUILD_SHA = process.env['BUILD_SHA'] ?? '';
+const handleBuildShaInjection: Handle = async ({ event, resolve }) => {
+	return resolve(event, {
+		transformPageChunk: ({ html }) =>
+			HTML_BUILD_SHA ? html.replace('__LYNOX_BUILD_SHA__', HTML_BUILD_SHA) : html,
+	});
+};
+
 const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	const response = await resolve(event);
 	response.headers.set('X-Content-Type-Options', 'nosniff');
@@ -67,4 +86,4 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	return response;
 };
 
-export const handle = sequence(handleAuth, handleSecurityHeaders);
+export const handle = sequence(handleAuth, handleBuildShaInjection, handleSecurityHeaders);
