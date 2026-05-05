@@ -590,4 +590,46 @@ describe('WorkerLoop', () => {
         .executePipeline(task),
     ).rejects.toThrow(/manifest JSON is corrupt/);
   });
+
+  // Hard gate at execution time: WorkerLoop only runs autonomous pipelines.
+  // An interactive pipeline that somehow got onto a schedule (legacy data,
+  // sync from another instance) must be rejected at the boundary so it
+  // can't hang waiting for a non-existent live session.
+  it('executePipeline refuses an interactive PlannedPipeline', async () => {
+    vi.useRealTimers();
+    const task = makeTask({
+      id: 'pipe-interactive',
+      pipeline_id: 'pipeline-interactive',
+      task_type: 'pipeline',
+    });
+    const interactivePlanned = JSON.stringify({
+      id: 'pipeline-interactive',
+      name: 'asks-user',
+      goal: 'pick a tagline',
+      steps: [{ id: 'q', task: 'ask_user which option' }],
+      reasoning: 'interactive',
+      estimatedCost: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'interactive',
+    });
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager()),
+      getUserConfig: vi.fn(() => ({})),
+      getRunHistory: vi.fn(() => ({
+        // Pipeline lookup goes through getPlannedPipeline (manifest_json blob).
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-interactive', manifest_json: interactivePlanned })),
+        getPipelineRunManifest: vi.fn(() => null),
+      })),
+    } as unknown as Engine;
+    const router = makeNotificationRouter(false);
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    await expect(
+      (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+        .executePipeline(task),
+    ).rejects.toThrow(/only runs 'autonomous' pipelines/);
+  });
 });

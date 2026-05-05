@@ -4,6 +4,8 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import { storePipeline } from './pipeline.js';
 import { getErrorMessage, logErrorChain } from '../../core/utils.js';
 import { randomUUID } from 'node:crypto';
+import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -188,7 +190,13 @@ export const promoteProcessTool: ToolEntry<PromoteInput> = {
         executed: false,
         executionMode: 'tracked',
         template: true, // Promoted processes are always reusable templates
+        // Captured processes don't carry ask_user/ask_secret today; default
+        // by step inspection so a future change keeps the contract honest.
+        mode: inferPipelineMode(pipelineSteps),
       };
+
+      // Save-time gate — same as plan_task.
+      assertPlannedPipelineIsValid(planned);
 
       storePipeline(pipelineId, planned);
       _runHistory.updateProcessPromotion(record.id, pipelineId);

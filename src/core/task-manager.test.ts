@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
-import { TaskManager } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup } from './task-manager.js';
 
 describe('TaskManager', () => {
   let dir: string;
@@ -313,6 +313,65 @@ describe('TaskManager', () => {
       const tasks = history.getTasks();
       expect(tasks[0]!.priority).toBe('urgent');
       expect(tasks[tasks.length - 1]!.priority).toBe('low');
+    });
+  });
+
+  describe('scheduler refusal of non-autonomous pipelines', () => {
+    afterEach(() => {
+      setPipelineModeLookup(undefined);
+    });
+
+    it('rejects scheduling a cron task for an interactive pipeline', () => {
+      setPipelineModeLookup(() => 'interactive');
+      expect(() => tm.create({
+        title: 'Daily run',
+        pipelineId: 'pipe-1',
+        scheduleCron: '0 9 * * *',
+      })).toThrow(/only 'autonomous' pipelines/);
+    });
+
+    it('accepts scheduling a cron task for an autonomous pipeline', () => {
+      setPipelineModeLookup(() => 'autonomous');
+      const task = tm.create({
+        title: 'Daily run',
+        pipelineId: 'pipe-1',
+        scheduleCron: '0 9 * * *',
+      });
+      expect(task.title).toBe('Daily run');
+      expect(task.schedule_cron).toBe('0 9 * * *');
+    });
+
+    it('does not block when no lookup is wired (defensive default)', () => {
+      setPipelineModeLookup(undefined);
+      expect(() => tm.create({
+        title: 'Daily run',
+        pipelineId: 'pipe-1',
+        scheduleCron: '0 9 * * *',
+      })).not.toThrow();
+    });
+
+    it('does not block tasks without a schedule', () => {
+      setPipelineModeLookup(() => 'interactive');
+      expect(() => tm.create({ title: 'Manual', pipelineId: 'pipe-1', assignee: 'user' })).not.toThrow();
+    });
+
+    it('rejects interactive pipeline with explicit nextRunAt', () => {
+      setPipelineModeLookup(() => 'interactive');
+      expect(() => tm.create({
+        title: 'Schedule once',
+        pipelineId: 'pipe-1',
+        nextRunAt: new Date(Date.now() + 60_000).toISOString(),
+      })).toThrow(/'autonomous'/);
+    });
+
+    it('rejects interactive pipeline auto-triggered via assignee=lynox', () => {
+      setPipelineModeLookup(() => 'interactive');
+      // No schedule supplied, but assignee=lynox sets nextRunAt=now under the hood.
+      expect(() => tm.create({
+        title: 'Auto run',
+        pipelineId: 'pipe-1',
+        assignee: 'lynox',
+      })).toThrow(/'autonomous'/);
     });
   });
 });

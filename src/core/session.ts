@@ -15,6 +15,10 @@ import type {
   ThinkingMode,
   TabQuestion,
   IAgent,
+  PromptUserFn,
+  PromptTabsFn,
+  PromptSecretFn,
+  PromptMeta,
 } from '../types/index.js';
 import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW, getModelId, clampTier } from '../types/index.js';
 import { getActiveProvider } from './llm-client.js';
@@ -64,9 +68,9 @@ export interface SessionOptions {
   autonomy?: import('../types/index.js').AutonomyLevel | undefined;
   briefing?: string | undefined;
   onStream?: StreamHandler | undefined;
-  promptUser?: ((question: string, options?: string[]) => Promise<string>) | undefined;
-  promptTabs?: ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
-  promptSecret?: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
+  promptUser?: PromptUserFn | undefined;
+  promptTabs?: PromptTabsFn | undefined;
+  promptSecret?: PromptSecretFn | undefined;
   tenantId?: string | undefined;
   messages?: BetaMessageParam[] | undefined;
   systemPromptSuffix?: string | undefined;
@@ -99,9 +103,9 @@ export class Session {
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   private _isCompacting = false;
   onStream: StreamHandler | null = null;
-  private _promptUser: ((question: string, options?: string[]) => Promise<string>) | null = null;
-  private _promptTabs: ((questions: TabQuestion[]) => Promise<string[]>) | null = null;
-  private _promptSecret: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null = null;
+  private _promptUser: PromptUserFn | null = null;
+  private _promptTabs: PromptTabsFn | null = null;
+  private _promptSecret: PromptSecretFn | null = null;
   private _tenantId: string | null = null;
   private _skipMemoryExtractionOverride: boolean | null = null;
 
@@ -177,41 +181,41 @@ export class Session {
 
   // ── User interaction callbacks ──
 
-  get promptUser(): ((question: string, options?: string[]) => Promise<string>) | null {
+  get promptUser(): PromptUserFn | null {
     return this._promptUser;
   }
 
-  set promptUser(fn: ((question: string, options?: string[]) => Promise<string>) | null) {
+  set promptUser(fn: PromptUserFn | null) {
     this._promptUser = fn;
     if (this.agent) {
       this.agent.promptUser = fn
-        ? (q: string, opts?: string[]) => fn(q, opts)
+        ? (q: string, opts?: string[], meta?: PromptMeta) => fn(q, opts, meta)
         : undefined;
     }
   }
 
-  get promptTabs(): ((questions: TabQuestion[]) => Promise<string[]>) | null {
+  get promptTabs(): PromptTabsFn | null {
     return this._promptTabs;
   }
 
-  set promptTabs(fn: ((questions: TabQuestion[]) => Promise<string[]>) | null) {
+  set promptTabs(fn: PromptTabsFn | null) {
     this._promptTabs = fn;
     if (this.agent) {
       this.agent.promptTabs = fn
-        ? (qs: TabQuestion[]) => fn(qs)
+        ? (qs: TabQuestion[], meta?: PromptMeta) => fn(qs, meta)
         : undefined;
     }
   }
 
-  get promptSecret(): ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null {
+  get promptSecret(): PromptSecretFn | null {
     return this._promptSecret;
   }
 
-  set promptSecret(fn: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | null) {
+  set promptSecret(fn: PromptSecretFn | null) {
     this._promptSecret = fn;
     if (this.agent) {
       this.agent.promptSecret = fn
-        ? (name: string, prompt: string, keyType?: string) => fn(name, prompt, keyType)
+        ? (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => fn(name, prompt, keyType, meta)
         : undefined;
     }
   }
@@ -894,13 +898,13 @@ export class Session {
       memory: engine.getMemory() ?? undefined,
       onStream: streamHandler,
       promptUser: this._promptUser
-        ? (q: string, opts?: string[]) => this._promptUser!(q, opts)
+        ? (q: string, opts?: string[], meta?: PromptMeta) => this._promptUser!(q, opts, meta)
         : undefined,
       promptTabs: this._promptTabs
-        ? (qs: TabQuestion[]) => this._promptTabs!(qs)
+        ? (qs: TabQuestion[], meta?: PromptMeta) => this._promptTabs!(qs, meta)
         : undefined,
       promptSecret: this._promptSecret
-        ? (name: string, prompt: string, keyType?: string) => this._promptSecret!(name, prompt, keyType)
+        ? (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => this._promptSecret!(name, prompt, keyType, meta)
         : undefined,
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,

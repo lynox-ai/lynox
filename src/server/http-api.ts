@@ -22,7 +22,7 @@ import { getActiveProvider } from '../core/llm-client.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
-import type { StreamEvent } from '../types/index.js';
+import type { StreamEvent, PromptMeta } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 
@@ -1127,13 +1127,16 @@ export class LynoxHTTPApi {
       let hasActivePendingPrompt = false;
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
-      session.promptUser = async (question: string, options?: string[]): Promise<string> => {
+      session.promptUser = async (question: string, options?: string[], meta?: PromptMeta): Promise<string> => {
         if (!promptStore) return 'n'; // fallback if store unavailable
         const promptId = promptStore.insertAskUser(sessionId, question, options);
         hasActivePendingPrompt = true;
-        // Best-effort SSE notification (client may not be connected)
+        // Best-effort SSE notification (client may not be connected).
         if (!aborted && !res.writableEnded) {
-          const data = JSON.stringify({ promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS });
+          const data = JSON.stringify({
+            promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS,
+            step_id: meta?.stepId, step_task: meta?.stepTask,
+          });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
         const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
@@ -1151,12 +1154,15 @@ export class LynoxHTTPApi {
       // Legacy clients fall back to the sequential agent-handler loop that
       // still uses session.promptUser per question.
       if (tabsCapable) {
-        session.promptTabs = async (questions): Promise<string[]> => {
+        session.promptTabs = async (questions, meta?: PromptMeta): Promise<string[]> => {
           if (!promptStore) return [];
           const promptId = promptStore.insertAskUserTabs(sessionId, questions);
           hasActivePendingPrompt = true;
           if (!aborted && !res.writableEnded) {
-            const data = JSON.stringify({ promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS });
+            const data = JSON.stringify({
+              promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS,
+              step_id: meta?.stepId, step_task: meta?.stepTask,
+            });
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
           }
           const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
@@ -1178,12 +1184,15 @@ export class LynoxHTTPApi {
       }
 
       // Wire promptSecret — secret value never enters SSE, only the prompt metadata
-      session.promptSecret = async (name: string, prompt: string, keyType?: string): Promise<boolean> => {
+      session.promptSecret = async (name: string, prompt: string, keyType?: string, meta?: PromptMeta): Promise<boolean> => {
         if (!promptStore) return false;
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
         hasActivePendingPrompt = true;
         if (!aborted && !res.writableEnded) {
-          const data = JSON.stringify({ promptId, name, prompt, key_type: keyType });
+          const data = JSON.stringify({
+            promptId, name, prompt, key_type: keyType,
+            step_id: meta?.stepId, step_task: meta?.stepTask,
+          });
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);

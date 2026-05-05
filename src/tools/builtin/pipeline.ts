@@ -5,6 +5,9 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../orchestrator/types.js';
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import type { ToolContext } from '../../core/tool-context.js';
 
 const MAX_STEPS = 20;
 const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
@@ -17,6 +20,37 @@ const pipelineStore = new Map<string, PlannedPipeline>();
 
 // Store last executed state per pipeline for retry
 const executedStates = new Map<string, { manifest: Manifest; state: RunState }>();
+
+/** Track pipeline IDs we've already warned about during legacy-mode migration. */
+const warnedLegacyIds = new Set<string>();
+const WARNED_LEGACY_MAX = 1024;
+
+/**
+ * Backfill defaults on a (possibly-legacy) PlannedPipeline read from disk.
+ * Mutates and returns the input.
+ */
+function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipeline {
+  planned.executionMode ??= 'orchestrated';
+  planned.template ??= false;
+  if (planned.mode === undefined) {
+    planned.mode = inferPipelineMode(planned.steps);
+    if (planned.mode === 'interactive' && !warnedLegacyIds.has(planned.id)) {
+      // Bound the dedup set so a long-lived process can't grow it without
+      // bound on environments with many distinct legacy pipelines.
+      if (warnedLegacyIds.size >= WARNED_LEGACY_MAX) warnedLegacyIds.clear();
+      warnedLegacyIds.add(planned.id);
+      // One-shot warn: legacy pipeline that references ask_user_* tools
+      // is auto-labelled interactive; warn so operators flip ones that
+      // were meant for cron.
+      console.warn(
+        `[pipeline] legacy pipeline "${planned.id}" auto-labelled mode='interactive' ` +
+        `because it references human-in-the-loop tools. ` +
+        `If this was intended for cron/scheduled runs, remove the ask_user step or it will fail at execution.`,
+      );
+    }
+  }
+  return planned;
+}
 
 /** Get a pipeline by ID (supports prefix matching, falls back to SQLite) */
 export function getPipeline(id: string, runHistory?: RunHistory | null): PlannedPipeline | undefined {
@@ -32,9 +66,7 @@ export function getPipeline(id: string, runHistory?: RunHistory | null): Planned
     if (row) {
       try {
         const planned = JSON.parse(row.manifest_json) as PlannedPipeline;
-        // Backfill defaults for older records missing new fields
-        planned.executionMode ??= 'orchestrated';
-        planned.template ??= false;
+        backfillPlannedPipelineDefaults(planned);
         pipelineStore.set(planned.id, planned); // cache in memory
         return planned;
       } catch { /* ignore parse errors */ }
@@ -297,6 +329,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentToolContext: deps.toolContext,
       hooks,
       runHistory: deps.runHistory ?? undefined,
+      parentPrompt: deps.parentPrompt,
     });
 
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
@@ -342,13 +375,21 @@ interface PipelineDeps {
   tools: ToolEntry[];
   streamHandler: StreamHandler | null;
   runHistory: RunHistory | null;
-  toolContext?: import('../../types/index.js').ToolContext | undefined;
+  toolContext?: ToolContext | undefined;
+  parentPrompt?: SubAgentPromptHandles | undefined;
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
   const planned = getPipeline(input.pipeline_id!, deps.runHistory);
   if (!planned) {
     return `Error: Pipeline "${input.pipeline_id}" not found.`;
+  }
+
+  // Interactive pipelines need a live prompt-capable session. Refuse with a
+  // clear error rather than running steps that will throw "ask_user is not
+  // set" deep in the run.
+  if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
+    return `Error: Pipeline "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
@@ -366,6 +407,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         parentTools: deps.tools,
         hooks,
         runHistory: deps.runHistory ?? undefined,
+        parentPrompt: deps.parentPrompt,
       });
 
       executedStates.set(planned.id, { manifest: prev.manifest, state });
@@ -412,6 +454,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentToolContext: deps.toolContext,
       hooks,
       runHistory: deps.runHistory ?? undefined,
+      parentPrompt: deps.parentPrompt,
     });
 
     executedStates.set(planned.id, { manifest, state });
@@ -521,6 +564,20 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
 
     const pipelineToolContext = agent.toolContext;
 
+    // run_pipeline is always called from a chat session; inherit the parent
+    // agent's prompt callbacks so sub-agents can route ask_user/ask_secret
+    // back through the live SSE stream. Stored autonomous pipelines that
+    // somehow get invoked here will still be rejected at executePipelineById
+    // / WorkerLoop boundaries; for inline runs the contract is "always
+    // interactive" by definition.
+    const parentPrompt = (agent.promptUser || agent.promptTabs || agent.promptSecret)
+      ? {
+          parentPromptUser: agent.promptUser,
+          parentPromptTabs: agent.promptTabs,
+          parentPromptSecret: agent.promptSecret,
+        }
+      : undefined;
+
     if (input.pipeline_id) {
       return executePipelineById(input, {
         config: pipelineConfig,
@@ -528,6 +585,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         streamHandler: pipelineStreamHandler,
         runHistory: pipelineRunHistory,
         toolContext: pipelineToolContext,
+        parentPrompt,
       });
     }
 
@@ -537,6 +595,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         streamHandler: pipelineStreamHandler,
         runHistory: pipelineRunHistory,
         toolContext: pipelineToolContext,
+        parentPrompt,
       });
   },
 };
@@ -545,4 +604,5 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
 export function _resetPipelineStore(): void {
   pipelineStore.clear();
   executedStates.clear();
+  warnedLegacyIds.clear();
 }

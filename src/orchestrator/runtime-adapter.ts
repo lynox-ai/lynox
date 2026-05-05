@@ -2,10 +2,13 @@ import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/message
 import { Agent } from '../core/agent.js';
 import { MODEL_MAP, getModelId, clampTier } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
+import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from './types.js';
 import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
+import { isHumanInTheLoopTool } from './human-in-the-loop.js';
+import type { PromptBudget } from './prompt-budget.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_pipeline']);
 
@@ -14,6 +17,80 @@ const INLINE_CORE_TOOLS = new Set([
   'bash', 'read_file', 'write_file', 'http', 'ask_user',
   'data_store_query', 'data_store_insert', 'knowledge_search',
 ]);
+
+/**
+ * Per-pipeline-run sub-agent prompt callbacks + budget tracking.
+ * Stitched together by `runManifest` and forwarded into spawners.
+ */
+export interface SubAgentPromptHandles {
+  parentPromptUser?: PromptUserFn | undefined;
+  parentPromptTabs?: PromptTabsFn | undefined;
+  parentPromptSecret?: PromptSecretFn | undefined;
+  promptBudget?: PromptBudget | undefined;
+}
+
+/**
+ * Build the per-step Agent prompt callbacks. Wraps the parent callbacks so
+ * each prompt is tagged with the originating step's id + task. Returns
+ * undefined for callbacks the parent didn't provide (autonomous run).
+ *
+ * If a PromptBudget is attached, every successful prompt consumes one slot;
+ * once the budget is exhausted the wrapper throws PromptBudgetExceededError
+ * which surfaces back to the sub-agent as a tool error — the agent learns
+ * to plan within the budget on the next turn.
+ */
+export function buildSubAgentPromptCallbacks(
+  step: ManifestStep,
+  parent: SubAgentPromptHandles | undefined,
+): { promptUser?: PromptUserFn | undefined; promptTabs?: PromptTabsFn | undefined; promptSecret?: PromptSecretFn | undefined } {
+  if (!parent) return {};
+  const meta: PromptMeta = { stepId: step.id, stepTask: step.task };
+  const budget = parent.promptBudget;
+  // Budget is checked up-front (so a saturated budget rejects without ever
+  // touching the parent), then refunded if the parent rejects/aborts —
+  // a flaky network can't drain the cap without the user actually seeing
+  // a prompt.
+  return {
+    promptUser: parent.parentPromptUser
+      ? async (q, opts, m) => {
+          if (budget) budget.consume();
+          try {
+            return await parent.parentPromptUser!(q, opts, { ...meta, ...m });
+          } catch (err) {
+            if (budget) budget.refund();
+            throw err;
+          }
+        }
+      : undefined,
+    promptTabs: parent.parentPromptTabs
+      ? async (qs, m) => {
+          if (budget) budget.consume();
+          try {
+            return await parent.parentPromptTabs!(qs, { ...meta, ...m });
+          } catch (err) {
+            if (budget) budget.refund();
+            throw err;
+          }
+        }
+      : undefined,
+    promptSecret: parent.parentPromptSecret
+      ? async (n, p, k, m) => {
+          if (budget) budget.consume();
+          try {
+            return await parent.parentPromptSecret!(n, p, k, { ...meta, ...m });
+          } catch (err) {
+            if (budget) budget.refund();
+            throw err;
+          }
+        }
+      : undefined,
+  };
+}
+
+export function stripHumanInTheLoopTools(tools: ToolEntry[]): ToolEntry[] {
+  if (!tools.some(t => isHumanInTheLoopTool(t.definition.name))) return tools;
+  return tools.filter(t => !isHumanInTheLoopTool(t.definition.name));
+}
 
 /** Active pipeline step agents — aborted on ESC interrupt. */
 const activePipelineAgents = new Set<Agent>();
@@ -104,6 +181,7 @@ export async function spawnViaAgent(
   runId: string,
   preApproval?: PreApprovalSet | undefined,
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
+  parentPrompt?: SubAgentPromptHandles | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -126,12 +204,22 @@ export async function spawnViaAgent(
     );
   }
 
+  // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
+  // Belt-and-suspenders default: the validator already rejects autonomous
+  // pipelines that need them, but a registry drift here would silently throw
+  // "ask_user: agent.promptUser is not set" deep in the run.
+  if (!parentPrompt?.parentPromptUser) {
+    tools = stripHumanInTheLoopTools(tools);
+  }
+
   // Resolve thinking from step hint, fallback to adaptive
   const thinking: ThinkingMode = step.thinking === 'enabled'
     ? { type: 'enabled', budget_tokens: 10_000 }
     : step.thinking === 'disabled'
       ? { type: 'disabled' }
       : { type: 'adaptive' };
+
+  const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
 
   const agent = new Agent({
     name: step.agent,
@@ -150,6 +238,9 @@ export async function spawnViaAgent(
     openaiModelId: config.openai_model_id,
     preApproval,
     autonomy,
+    promptUser: promptCallbacks.promptUser,
+    promptTabs: promptCallbacks.promptTabs,
+    promptSecret: promptCallbacks.promptSecret,
     onStream: (event: StreamEvent) => {
       if (event.type === 'turn_end') {
         tokensIn += event.usage.input_tokens;
@@ -189,6 +280,7 @@ export async function spawnInline(
   preApproval?: PreApprovalSet | undefined,
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   parentToolContext?: ToolContext | undefined,
+  parentPrompt?: SubAgentPromptHandles | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -210,7 +302,13 @@ export async function spawnInline(
     ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
     : null;
   const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => INLINE_CORE_TOOLS.has(t.definition.name));
-  const tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
+  let tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
+  // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
+  // Belt-and-suspenders: validator/scheduler should already block this path,
+  // but a registry drift here would silently throw at tool dispatch time.
+  if (!parentPrompt?.parentPromptUser) {
+    tools = stripHumanInTheLoopTools(tools);
+  }
   // Resolve thinking: step hint > adaptive default. Haiku 4.5 has no
   // extended-thinking support — force disabled regardless of step hint to
   // avoid Anthropic 400 "model does not support" errors.
@@ -227,6 +325,8 @@ export async function spawnInline(
   }
   const effort = step.effort ?? resolved?.effort ?? config.effort_level ?? 'medium';
   const maxIter = 10;
+
+  const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
 
   const agent = new Agent({
     name: step.id,
@@ -246,6 +346,9 @@ export async function spawnInline(
     toolContext: parentToolContext,
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: modelTier === 'opus' ? 10 : 2, maxIterations: maxIter },
+    promptUser: promptCallbacks.promptUser,
+    promptTabs: promptCallbacks.promptTabs,
+    promptSecret: promptCallbacks.promptSecret,
     onStream: (event: StreamEvent) => {
       if (event.type === 'turn_end') {
         tokensIn += event.usage.input_tokens;
@@ -299,6 +402,7 @@ export async function spawnPipeline(
   config: LynoxUserConfig,
   parentTools: ToolEntry[],
   depth: number,
+  parentPrompt?: SubAgentPromptHandles | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -338,6 +442,7 @@ export async function spawnPipeline(
   const state = await runManifest(subManifest, config, {
     parentTools,
     depth: depth + 1,
+    parentPrompt,
   });
 
   // Aggregate results

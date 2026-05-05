@@ -4,7 +4,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
-import type { TabQuestion } from './agent.js';
+import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
@@ -22,9 +22,9 @@ export interface AgentConfig {
   memory?:          IMemory | undefined;
   onStream?:        StreamHandler | undefined;
   workerPool?:      IWorkerPool | undefined;
-  promptUser?:      ((question: string, options?: string[]) => Promise<string>) | undefined;
-  promptTabs?:      ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
-  promptSecret?:    ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
+  promptUser?:      PromptUserFn | undefined;
+  promptTabs?:      PromptTabsFn | undefined;
+  promptSecret?:    PromptSecretFn | undefined;
   maxIterations?:      number | undefined;
   continuationPrompt?: string | undefined;
   excludeTools?:       string[] | undefined;
@@ -213,6 +213,8 @@ export interface LynoxUserConfig {
   pipeline_context_limit?: number | undefined;
   /** Pipeline step result truncation limit in bytes. Default: 51200 */
   pipeline_step_result_limit?: number | undefined;
+  /** Per-pipeline-run interactive prompt budget (ask_user / ask_secret). Default: 5 */
+  pipeline_prompt_budget?: number | undefined;
   /** Memory extraction input truncation limit in chars. Default: 16000 */
   memory_extraction_limit?: number | undefined;
   /** HTTP response body size limit in bytes. Default: 100000 */

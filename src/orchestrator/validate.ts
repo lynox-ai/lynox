@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { validateGraph } from './graph.js';
 import type { Manifest } from './types.js';
+import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
+import { findAutonomousViolations } from './human-in-the-loop.js';
 
 const ConditionOperators = ['lt', 'gt', 'eq', 'neq', 'gte', 'lte', 'exists', 'not_exists', 'contains'] as const;
 
@@ -92,4 +94,40 @@ export function validateManifest(raw: unknown): Manifest {
 export function loadManifestFile(filePath: string): Manifest {
   const raw: unknown = JSON.parse(readFileSync(filePath, 'utf-8'));
   return validateManifest(raw);
+}
+
+/**
+ * Error thrown when a pipeline marked autonomous references human-in-the-loop
+ * tools. Carries the per-step issues so the caller can surface a precise
+ * error message in API responses / save dialogs.
+ */
+export class AutonomousPipelineViolation extends Error {
+  constructor(public readonly issues: ReadonlyArray<{ stepId: string; tool: string; message: string }>) {
+    super(
+      issues.length === 1
+        ? issues[0]!.message
+        : `Pipeline marked autonomous but ${issues.length} steps reference human-in-the-loop tools:\n` +
+          issues.map(i => `  - ${i.message}`).join('\n'),
+    );
+    this.name = 'AutonomousPipelineViolation';
+  }
+}
+
+/**
+ * Save-time gate: throw AutonomousPipelineViolation if `mode === 'autonomous'`
+ * and any step references ask_user / ask_secret / ask_human. Interactive
+ * pipelines are unrestricted.
+ *
+ * Called by plan_task, promote_process, the future Workflows editor save
+ * endpoint, and again at WorkerLoop scheduler-registration time.
+ */
+export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: PipelineMode): void {
+  if (mode === 'interactive') return;
+  const issues = findAutonomousViolations(steps);
+  if (issues.length > 0) throw new AutonomousPipelineViolation(issues);
+}
+
+/** Convenience overload that takes a stored PlannedPipeline. */
+export function assertPlannedPipelineIsValid(planned: PlannedPipeline): void {
+  assertPipelineModeIsValid(planned.steps, planned.mode);
 }

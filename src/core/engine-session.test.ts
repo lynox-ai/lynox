@@ -221,6 +221,7 @@ vi.mock('./task-manager.js', () => ({
     // @ts-expect-error mock constructor
     this.getWeekSummary = vi.fn().mockReturnValue({ overdue: [], dueToday: [], dueThisWeek: [], inProgress: [] });
   }),
+  setPipelineModeLookup: vi.fn(),
 }));
 
 vi.mock('./artifact-store.js', () => ({

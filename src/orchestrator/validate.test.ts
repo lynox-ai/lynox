@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { validateManifest } from './validate.js';
+import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation } from './validate.js';
+import type { InlinePipelineStep, PlannedPipeline } from '../types/index.js';
 
 const validManifest = {
   manifest_version: '1.0',
@@ -227,5 +228,101 @@ describe('validateManifest — v1.1', () => {
       ],
     });
     expect(result.manifest_version).toBe('1.0');
+  });
+});
+
+describe('assertPipelineModeIsValid (save-time gate)', () => {
+  const mkStep = (id: string, task: string): InlinePipelineStep => ({ id, task });
+
+  it('passes when mode is interactive (no restrictions)', () => {
+    expect(() => assertPipelineModeIsValid(
+      [mkStep('vote', 'ask_user which option')],
+      'interactive',
+    )).not.toThrow();
+  });
+
+  it('passes when mode is autonomous and no HITL tools referenced', () => {
+    expect(() => assertPipelineModeIsValid(
+      [mkStep('a', 'http GET /report'), mkStep('b', 'summarize the response')],
+      'autonomous',
+    )).not.toThrow();
+  });
+
+  it('throws AutonomousPipelineViolation with per-step issues for ask_user', () => {
+    let caught: unknown;
+    try {
+      assertPipelineModeIsValid(
+        [mkStep('safe', 'compute'), mkStep('vote', 'ask_user which tagline')],
+        'autonomous',
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AutonomousPipelineViolation);
+    const violation = caught as AutonomousPipelineViolation;
+    expect(violation.issues).toHaveLength(1);
+    expect(violation.issues[0]).toMatchObject({ stepId: 'vote', tool: 'ask_user' });
+    expect(violation.message).toContain('vote');
+    expect(violation.message).toContain('ask_user');
+    expect(violation.message).toContain('autonomous');
+  });
+
+  it('throws for ask_secret in autonomous pipelines', () => {
+    expect(() => assertPipelineModeIsValid(
+      [mkStep('grab', 'ask_secret api_key from user')],
+      'autonomous',
+    )).toThrow(/ask_secret/);
+  });
+
+  it('throws for ask_human in autonomous pipelines', () => {
+    expect(() => assertPipelineModeIsValid(
+      [mkStep('escalate', 'ask_human for review')],
+      'autonomous',
+    )).toThrow(/ask_human/);
+  });
+
+  it('aggregates multiple violations into one error', () => {
+    let caught: unknown;
+    try {
+      assertPipelineModeIsValid(
+        [mkStep('a', 'ask_user'), mkStep('b', 'ask_secret')],
+        'autonomous',
+      );
+    } catch (err) {
+      caught = err;
+    }
+    const violation = caught as AutonomousPipelineViolation;
+    expect(violation.issues).toHaveLength(2);
+    expect(violation.message).toMatch(/2 steps/);
+  });
+});
+
+describe('assertPlannedPipelineIsValid', () => {
+  const basePipeline: Omit<PlannedPipeline, 'mode' | 'steps'> = {
+    id: 'p1',
+    name: 'test',
+    goal: 'goal',
+    reasoning: 'r',
+    estimatedCost: 0,
+    createdAt: new Date().toISOString(),
+    executed: false,
+    executionMode: 'tracked',
+    template: false,
+  };
+
+  it('rejects autonomous pipeline that calls ask_user', () => {
+    expect(() => assertPlannedPipelineIsValid({
+      ...basePipeline,
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      mode: 'autonomous',
+    })).toThrow(AutonomousPipelineViolation);
+  });
+
+  it('accepts interactive pipeline with ask_user', () => {
+    expect(() => assertPlannedPipelineIsValid({
+      ...basePipeline,
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      mode: 'interactive',
+    })).not.toThrow();
   });
 });

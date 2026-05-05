@@ -3,6 +3,8 @@ import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline, ModelTier,
 import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { startTrackedPlan } from '../../core/plan-tracker.js';
+import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -166,7 +168,12 @@ function convertToPipeline(summary: string, phases: PlanPhase[], historicalAvg?:
     executed: false,
     executionMode: 'tracked',
     template: false,
+    mode: inferPipelineMode(pipelineSteps),
   };
+
+  // Save-time gate. plan_task is the canonical save path for pipelines today;
+  // future Workflows-editor save endpoints should call this gate too.
+  assertPlannedPipelineIsValid(planned);
 
   storePipeline(pipelineId, planned);
   return pipelineId;

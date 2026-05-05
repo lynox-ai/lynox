@@ -1,7 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
-import type { TaskRecord, TaskStatus, TaskPriority, MemoryScopeRef } from '../types/index.js';
+import type { TaskRecord, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
+
+/**
+ * Optional injection point: returns the PipelineMode for a saved pipeline ID,
+ * or null if unknown. Keeps task-manager free of a direct import on
+ * tools/builtin/pipeline.ts (which would create a cycle through orchestrator).
+ *
+ * Engine wires this at startup; tests / headless CLI can leave it unset.
+ */
+type PipelineModeLookup = (pipelineId: string) => PipelineMode | null | undefined;
+let pipelineModeLookup: PipelineModeLookup | undefined;
+
+/** Wire the pipeline-mode lookup. Called by Engine bootstrap. */
+export function setPipelineModeLookup(fn: PipelineModeLookup | undefined): void {
+  pipelineModeLookup = fn;
+}
 
 export interface TaskCreateParams {
   title: string;
@@ -70,6 +85,23 @@ export class TaskManager {
     if (params.assignee === 'lynox' && !params.scheduleCron && !params.watchConfig && !params.nextRunAt) {
       resolvedNextRunAt = new Date().toISOString();
       resolvedTaskType = resolvedTaskType ?? 'manual';
+    }
+
+    // Reject any pipeline destined for background execution (cron, explicit
+    // nextRunAt, or lynox auto-trigger above) whose mode is not 'autonomous'.
+    // All three paths detach execution from the calling session and end up at
+    // WorkerLoop, where ask_user has no live session to route back to. When
+    // the lookup is unwired (tests / headless CLI) the WorkerLoop hard gate
+    // is the backstop.
+    const willRunInBackground = Boolean(params.scheduleCron) || Boolean(resolvedNextRunAt);
+    if (willRunInBackground && params.pipelineId && pipelineModeLookup) {
+      const mode = pipelineModeLookup(params.pipelineId);
+      if (mode && mode !== 'autonomous') {
+        throw new Error(
+          `Cannot schedule pipeline "${params.pipelineId}": mode is '${mode}', but only 'autonomous' pipelines run via WorkerLoop (cron / nextRunAt / assignee=lynox). ` +
+          `Remove ask_user/ask_secret steps or invoke the pipeline manually from a chat session.`,
+        );
+      }
     }
 
     this.history.insertTask({
