@@ -571,7 +571,7 @@
 							type="text"
 							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
 							bind:value={formId}
-							placeholder="rafael-gmail"
+							placeholder="my-gmail"
 							data-testid="mail-id-input"
 						/>
 					</label>
@@ -581,7 +581,7 @@
 							type="text"
 							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
 							bind:value={formDisplayName}
-							placeholder="Rafael — Gmail"
+							placeholder="My Gmail"
 							data-testid="mail-display-name-input"
 						/>
 					</label>
