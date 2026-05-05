@@ -310,12 +310,9 @@ let pendingTabsPrompt = $state<TabsPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
 let secretPromptGeneration = $state(0);
 
-// Pipeline-status-v2: track when the active run started + how many prompts
-// it has fired. Both are read by PromptAnchor for the run-duration counter
-// and the multi-prompt counter respectively. runStartedAt is set on
-// `pipeline_start` and cleared by newChat / resumeThread; runPromptCount
-// increments each time a pending* var transitions null→non-null while a
-// run is active.
+// Pipeline-status-v2 PromptAnchor inputs. Both reset on newChat /
+// resumeThread; runStartedAt is set on `pipeline_start`; runPromptCount
+// increments on each pending* null→non-null transition while a run is active.
 let runStartedAt = $state<number | null>(null);
 let runPromptCount = $state(0);
 let chatError = $state<string | null>(null);

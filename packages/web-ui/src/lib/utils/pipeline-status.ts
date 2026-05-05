@@ -85,11 +85,10 @@ export function scrollBehaviorForMotion(reduced: boolean): ScrollBehavior {
 
 /**
  * Resolve the inline prompt form to scroll to. Permission and secret prompts
- * can be visible simultaneously (different SSE events, separate state vars),
- * so the bare `[data-pending-prompt]` first-match would race the kind that
- * `selectPendingPromptHead` prioritises (secret > permission > tabs). The
- * helpers route through this so the bar/anchor focus the form whose kind
- * matches the active head.
+ * can be visible simultaneously (independent SSE events / state vars), so
+ * the bare `[data-pending-prompt]` first-match would race the kind that
+ * `selectPendingPromptHead` prioritises (secret > permission > tabs).
+ * PromptAnchor's [Antworten] jump uses this so the scroll target matches.
  */
 export function findPromptFormByKind(
 	doc: Document | undefined,

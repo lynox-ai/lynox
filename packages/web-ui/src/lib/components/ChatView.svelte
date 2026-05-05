@@ -1104,11 +1104,9 @@
 		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
 	);
 
-	// pipeline-status-v2 — flag-gated. waitingOnUser drives the 🤚 step state
-	// in the inline PipelineProgress DAG and the PromptAnchor above the
-	// chat input. The earlier sticky top bar was dropped — its only purpose
-	// was to survive the inline DAG re-render bug, which is the wrong place
-	// to fix it (Sprint F context-render-hygiene owns that fix).
+	// pipeline-status-v2 — the earlier sticky top bar was dropped because
+	// it papered over the inline DAG re-render bug rather than fixing it
+	// (Sprint F context-render-hygiene owns the actual fix).
 	const pipelineStatusV2 = $derived(getPipelineStatusV2());
 	const pendingPromptHead = $derived(pipelineStatusV2 ? getPendingPrompt() : null);
 	const waitingOnUser = $derived(pendingPromptHead !== null);
