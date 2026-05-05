@@ -39,6 +39,7 @@ import {
   CRM_PROMPT_SUFFIX,
   DEVELOPER_PROMPT_SUFFIX,
   currentDateContext,
+  withCurrentTimePrefix,
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
@@ -421,7 +422,13 @@ export class Session {
     }
 
     try {
-      const result = await this.agent.send(task);
+      // Per-turn precise current time. Lives in the user message (not the
+      // cached system prompt) so the model always sees wallclock-accurate
+      // time for "in 5 min" / "now" reasoning without invalidating the
+      // hourly prompt-cache window. Caught after a 2026-05-05 incident
+      // where a session-start timestamp ~41 min stale caused the agent to
+      // schedule an "in 5 min" task in the past.
+      const result = await this.agent.send(withCurrentTimePrefix(task));
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
       if (!this._briefingConsumed && this.briefing) {

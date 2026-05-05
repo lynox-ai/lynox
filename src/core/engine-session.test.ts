@@ -376,13 +376,18 @@ describe('Engine + Session (Orchestrator)', () => {
   // -- run() --
 
   describe('run()', () => {
-    it('delegates to agent.send()', async () => {
+    it('delegates to agent.send() with a per-turn current-time prefix', async () => {
       const { session } = await createEngineAndSession();
 
       mockSend.mockResolvedValueOnce('agent response');
       const result = await session.run('Hello');
       expect(result).toBe('agent response');
-      expect(mockSend).toHaveBeenCalledWith('Hello');
+      // Session prepends a `[Now: <iso>]` marker to every user message so the
+      // model sees wallclock-accurate time even when the cached system prompt
+      // is hour-truncated. See prompts.ts:withCurrentTimePrefix.
+      expect(mockSend).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\n\nHello$/),
+      );
     });
 
     it('session always has an agent after construction', async () => {
