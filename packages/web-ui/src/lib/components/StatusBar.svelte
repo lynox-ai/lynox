@@ -72,10 +72,11 @@
 			engineOk = healthRes?.ok ?? false;
 			if (healthRes?.ok) {
 				try {
-					const data = (await healthRes.json()) as { version?: unknown };
+					const data = (await healthRes.json()) as { version?: unknown; build_sha?: unknown };
 					if (typeof data.version === 'string' && data.version.length > 0) {
 						engineVersion = data.version;
-						maybeNotifyStaleBundle(data.version);
+						const sha = typeof data.build_sha === 'string' ? data.build_sha : '';
+						maybeNotifyStaleBundle(data.version, sha);
 					}
 				} catch { /* non-JSON body — ignore */ }
 			}
@@ -132,16 +133,28 @@
 		panelOpen = false;
 	}
 
-	// Stale-bundle detection — the build-time web-ui version baked in by Vite.
-	// After a deploy, returning users may still be running yesterday's JS
-	// against a newer engine; drifted response shapes silently break things
-	// (thread list, SSE events). One toast per session is enough — a reload
-	// either clears the cache or confirms the user has intentionally pinned.
+	// Stale-bundle detection — the build-time web-ui version + git SHA baked
+	// in by Vite. After a deploy, returning users may still be running
+	// yesterday's JS against a newer engine; drifted response shapes silently
+	// break things (thread list, SSE events, lazy-loaded route chunks → 404,
+	// "voice message reloads but doesn't send" — see bug 2026-05-05).
+	//
+	// We compare on EITHER axis. Most patches don't bump `version` but every
+	// rebuild has a new SHA, and chunk hashes drift with every build, so the
+	// SHA arm catches the realistic case where two same-version deploys
+	// produce incompatible bundles. One toast per session — a reload either
+	// clears the cache or confirms the user has intentionally pinned.
 	const BUILT_VERSION: string = typeof __LYNOX_WEB_UI_VERSION__ === 'string' ? __LYNOX_WEB_UI_VERSION__ : '';
+	const BUILT_SHA: string = typeof __LYNOX_BUILD_SHA__ === 'string' ? __LYNOX_BUILD_SHA__ : '';
 	let staleBundleNotified = false;
-	function maybeNotifyStaleBundle(engineV: string): void {
+	function maybeNotifyStaleBundle(engineV: string, engineSha: string): void {
 		if (staleBundleNotified) return;
-		if (!BUILT_VERSION || BUILT_VERSION === engineV) return;
+		const versionMismatch = !!BUILT_VERSION && BUILT_VERSION !== engineV;
+		// Only fire the SHA arm when both sides have a SHA — local dev
+		// builds without BUILD_SHA and engines started without BUILD_SHA env
+		// would otherwise toast on every poll.
+		const shaMismatch = !!BUILT_SHA && !!engineSha && BUILT_SHA !== engineSha;
+		if (!versionMismatch && !shaMismatch) return;
 		staleBundleNotified = true;
 		addToast(t('status.stale_bundle'), 'info', 30_000, {
 			label: t('status.stale_bundle_action'),
