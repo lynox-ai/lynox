@@ -8,7 +8,7 @@
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
-	import { getApiBase } from '../config.svelte.js';
+	import { getApiBase, getContextPanelEnabled } from '../config.svelte.js';
 	import StatusBar from './StatusBar.svelte';
 	import SetupBanner from './SetupBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
@@ -558,8 +558,10 @@
 						{@render children()}
 					</div>
 
-					<!-- Context Panel (right sidebar, auto-fills from chat context) -->
-					<ContextPanel />
+					<!-- Context Panel (right sidebar). Default-off while reworked; library consumers can opt in via configure({ contextPanelEnabled: true }). -->
+					{#if getContextPanelEnabled()}
+						<ContextPanel />
+					{/if}
 				</div>
 			</main>
 		</div>
