@@ -35,12 +35,6 @@ RUN pnpm run build
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS build-webui
 WORKDIR /app
 
-# Vite bakes PUBLIC_* env vars at build time. Declare each canary flag as an
-# ARG so the parent build (CI / staging.yml) can flip them via --build-arg
-# without code changes. Default-empty keeps the prod tag flag-off.
-ARG PUBLIC_LYNOX_UI_PIPELINE_STATUS_V2=
-ENV PUBLIC_LYNOX_UI_PIPELINE_STATUS_V2=${PUBLIC_LYNOX_UI_PIPELINE_STATUS_V2}
-
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 COPY packages/web-ui/package.json packages/web-ui/package.json
