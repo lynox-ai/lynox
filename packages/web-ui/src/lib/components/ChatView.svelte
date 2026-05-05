@@ -1319,7 +1319,7 @@
 	     list while a pipeline run is in flight. Survives the inline
 	     PipelineProgress re-render bug because it reads from getActiveRun(). -->
 	{#if pipelineStatusV2 && activeRun}
-		<PipelineStatusBar run={activeRun} waitingOnUser={waitingOnUser} />
+		<PipelineStatusBar run={activeRun} waitingOnUser={waitingOnUser} pendingPromptKind={pendingPromptHead?.kind ?? null} />
 	{/if}
 
 	<!-- Messages -->
@@ -1824,7 +1824,7 @@
 	<!-- Batch mode: all questions as form. Drives off either pendingTabsPrompt
 	     (v2, one-shot reply) or pendingPermission (v1, sequential fallback). -->
 	{#if inBatchMode && (pendingPermission || pendingTabsPrompt)}
-		<div role="dialog" aria-label={t('chat.batch_mode')} tabindex="-1" data-pending-prompt class="border-t border-border bg-bg-subtle px-4 py-3"
+		<div role="dialog" aria-label={t('chat.batch_mode')} tabindex="-1" data-pending-prompt data-prompt-kind="tabs" class="border-t border-border bg-bg-subtle px-4 py-3"
 			onkeydown={(e) => { if (e.key === 'Escape') answerPrompt('__dismissed__'); }}>
 			<div class="max-w-3xl mx-auto space-y-1">
 				{#each batchQuestions as q, i}
@@ -1928,7 +1928,7 @@
 		{@const opts = pendingPermission.options ?? []}
 		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
 		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
-		<div data-pending-prompt tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
+		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-2">
 				<div class="flex items-start gap-2">
 					{#if isPermissionGuard}
@@ -1975,7 +1975,7 @@
 
 	<!-- Secure Secret Prompt -->
 	{#if pendingSecret}
-		<div data-pending-prompt tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
+		<div data-pending-prompt data-prompt-kind="secret" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-3">
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>

@@ -10,6 +10,7 @@ import type {
 	PendingPromptHead,
 	PermissionPrompt,
 	PipelineStepInfo,
+	PromptKind,
 	TabsPrompt,
 } from '../stores/chat.svelte.js';
 import type { ActiveRun } from '../stores/chat.svelte.js';
@@ -116,4 +117,24 @@ export function prefersReducedMotion(win: { matchMedia?: (q: string) => MediaQue
 /** ScrollBehavior the components should use given the current motion preference. */
 export function scrollBehaviorForMotion(reduced: boolean): ScrollBehavior {
 	return reduced ? 'auto' : 'smooth';
+}
+
+/**
+ * Resolve the inline prompt form to scroll to. Permission and secret prompts
+ * can be visible simultaneously (different SSE events, separate state vars),
+ * so the bare `[data-pending-prompt]` first-match would race the kind that
+ * `selectPendingPromptHead` prioritises (secret > permission > tabs). The
+ * helpers route through this so the bar/anchor focus the form whose kind
+ * matches the active head.
+ */
+export function findPromptFormByKind(
+	doc: Document | undefined,
+	kind: PromptKind | null,
+): HTMLElement | null {
+	if (!doc) return null;
+	if (kind) {
+		const el = doc.querySelector<HTMLElement>(`[data-pending-prompt][data-prompt-kind="${kind}"]`);
+		if (el) return el;
+	}
+	return doc.querySelector<HTMLElement>('[data-pending-prompt]');
 }

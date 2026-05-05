@@ -1658,6 +1658,11 @@ export async function resumeThread(threadId: string): Promise<void> {
 	streamingToolName = null;
 	pendingPermission = null;
 	pendingTabsPrompt = null;
+	// Without this reset, a secret prompt persisted from thread A would
+	// leak into the new visible PromptAnchor / PipelineStatusBar in thread B
+	// (newChat resets it; resumeThread originally didn't because no surface
+	// rendered it independently). See PR #236 review.
+	pendingSecretPrompt = null;
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;

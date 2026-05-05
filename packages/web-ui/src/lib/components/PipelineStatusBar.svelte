@@ -1,14 +1,18 @@
 <script lang="ts">
 	import { t } from '../i18n.svelte.js';
-	import type { ActiveRun } from '../stores/chat.svelte.js';
-	import { prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
+	import type { ActiveRun, PromptKind } from '../stores/chat.svelte.js';
+	import { findPromptFormByKind, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 
 	interface Props {
 		run: ActiveRun;
 		waitingOnUser: boolean;
+		/** Kind of the active head-of-queue prompt, used to route the
+		 *  "zur Frage springen" jump to the correct inline form when permission
+		 *  and secret prompts coexist. null when no prompt is pending. */
+		pendingPromptKind?: PromptKind | null;
 	}
 
-	let { run, waitingOnUser }: Props = $props();
+	let { run, waitingOnUser, pendingPromptKind = null }: Props = $props();
 
 	const currentStep = $derived(run.steps[run.currentStepIdx]);
 	const stepLabel = $derived(t('pipeline.status_step')
@@ -19,7 +23,7 @@
 
 	function jumpToPrompt(): void {
 		if (typeof document === 'undefined') return;
-		const el = document.querySelector<HTMLElement>('[data-pending-prompt]');
+		const el = findPromptFormByKind(document, pendingPromptKind);
 		if (!el) return;
 		el.scrollIntoView({ behavior: scrollBehaviorForMotion(prefersReducedMotion()), block: 'center' });
 		el.focus({ preventScroll: true });

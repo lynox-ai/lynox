@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { t } from '../i18n.svelte.js';
 	import type { PendingPromptHead } from '../stores/chat.svelte.js';
-	import { formatRunElapsed, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
+	import { findPromptFormByKind, formatRunElapsed, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 
 	interface Props {
 		prompt: PendingPromptHead;
@@ -35,7 +35,7 @@
 
 	function expandInlinePrompt(): void {
 		if (typeof document === 'undefined') return;
-		const el = document.querySelector<HTMLElement>('[data-pending-prompt]');
+		const el = findPromptFormByKind(document, prompt.kind);
 		if (!el) return;
 		el.scrollIntoView({ behavior: scrollBehaviorForMotion(prefersReducedMotion()), block: 'center' });
 		el.focus({ preventScroll: true });
