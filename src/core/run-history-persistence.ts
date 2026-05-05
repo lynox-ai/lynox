@@ -529,6 +529,8 @@ export function updateTask(db: Database.Database, id: string, params: {
   dueDate?: string | undefined;
   tags?: string | undefined;
   completedAt?: string | undefined;
+  nextRunAt?: string | undefined;
+  scheduleCron?: string | undefined;
 }): boolean {
   const sets: string[] = [];
   const values: unknown[] = [];
@@ -540,6 +542,11 @@ export function updateTask(db: Database.Database, id: string, params: {
   if (params.dueDate !== undefined) { sets.push('due_date = ?'); values.push(params.dueDate || null); }
   if (params.tags !== undefined) { sets.push('tags = ?'); values.push(params.tags || null); }
   if (params.completedAt !== undefined) { sets.push('completed_at = ?'); values.push(params.completedAt || null); }
+  // Empty string clears the column. Lets the agent un-schedule a one-shot
+  // task without deleting it (e.g. cancel a reminder while keeping the
+  // task open for later).
+  if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
+  if (params.scheduleCron !== undefined) { sets.push('schedule_cron = ?'); values.push(params.scheduleCron || null); }
   if (sets.length === 0) return false;
   sets.push("updated_at = datetime('now')");
   values.push(id);

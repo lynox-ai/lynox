@@ -45,6 +45,13 @@ export interface TaskUpdateParams {
   assignee?: string | undefined;
   dueDate?: string | undefined;
   tags?: string[] | undefined;
+  /** Reschedule a one-shot task. ISO 8601. Empty string clears the
+   *  schedule (un-schedule without deleting). Mutually exclusive with
+   *  scheduleCron. */
+  nextRunAt?: string | undefined;
+  /** Reschedule a recurring task. Standard cron or shorthand (e.g. '30m').
+   *  Empty string clears the schedule. Mutually exclusive with nextRunAt. */
+  scheduleCron?: string | undefined;
 }
 
 export interface WeekSummary {
@@ -164,6 +171,24 @@ export class TaskManager {
       throw new Error(`Invalid priority: ${params.priority}`);
     }
 
+    // Errors here surface to the LLM through the tool layer where the
+    // field names are `run_at` / `schedule`, so the messages reference
+    // those (not the camelCase param names) — otherwise the agent gets
+    // an unactionable hint pointing at internal naming.
+    if (params.nextRunAt !== undefined && params.scheduleCron !== undefined
+        && params.nextRunAt !== '' && params.scheduleCron !== '') {
+      throw new Error('run_at and schedule are mutually exclusive — pass only one (or "" to clear).');
+    }
+    // Date.parse is the same loose validator task_create uses, so the
+    // create + update paths share their error surface. Tightening to a
+    // strict ISO regex is a cross-cutting follow-up.
+    if (params.nextRunAt && Number.isNaN(Date.parse(params.nextRunAt))) {
+      throw new Error(`Invalid run_at: ${params.nextRunAt}. Use ISO 8601 datetime.`);
+    }
+    if (params.scheduleCron && !isValidCron(params.scheduleCron)) {
+      throw new Error(`Invalid schedule: ${params.scheduleCron}. Use cron (e.g. '0 9 * * *') or shorthand ('30m', '1h', '1d').`);
+    }
+
     const updateParams: {
       title?: string | undefined;
       description?: string | undefined;
@@ -173,6 +198,8 @@ export class TaskManager {
       dueDate?: string | undefined;
       tags?: string | undefined;
       completedAt?: string | undefined;
+      nextRunAt?: string | undefined;
+      scheduleCron?: string | undefined;
     } = {};
 
     if (params.title !== undefined) updateParams.title = params.title;
@@ -182,6 +209,32 @@ export class TaskManager {
     if (params.assignee !== undefined) updateParams.assignee = params.assignee;
     if (params.dueDate !== undefined) updateParams.dueDate = params.dueDate ? params.dueDate.slice(0, 10) : '';
     if (params.tags !== undefined) updateParams.tags = params.tags ? JSON.stringify(params.tags) : '';
+
+    // Schedule fields move as a pair: both nextRunAt and scheduleCron
+    // are kept consistent so the worker-loop ("next_run_at <= now") and
+    // the recurring re-fire path (recordTaskRun → nextOccurrence) never
+    // disagree on a task's intent. Empty-string clears wipe BOTH so an
+    // agent typing "cancel the schedule" can't leave a stale value
+    // behind; setting one positive clears the other (a one-shot drops
+    // any prior cron, a new cron drops any prior one-shot run_at).
+    if (params.nextRunAt !== undefined) {
+      // Normalise positive values to ISO so SQLite's lexicographic
+      // `next_run_at <= now` comparison stays monotonic.
+      updateParams.nextRunAt = params.nextRunAt ? new Date(params.nextRunAt).toISOString() : '';
+      if (params.scheduleCron === undefined) {
+        updateParams.scheduleCron = '';
+      }
+    }
+    if (params.scheduleCron !== undefined) {
+      updateParams.scheduleCron = params.scheduleCron;
+      if (params.nextRunAt === undefined) {
+        // Positive cron → recompute the next fire from it.
+        // Empty cron → clear next_run_at too (full un-schedule).
+        updateParams.nextRunAt = params.scheduleCron
+          ? nextOccurrence(params.scheduleCron).toISOString()
+          : '';
+      }
+    }
 
     if (params.status === 'completed' && task.status !== 'completed') {
       updateParams.completedAt = new Date().toISOString();

@@ -1531,6 +1531,8 @@ export class RunHistory {
     dueDate?: string | undefined;
     tags?: string | undefined;
     completedAt?: string | undefined;
+    nextRunAt?: string | undefined;
+    scheduleCron?: string | undefined;
   }): boolean {
     return persistence.updateTask(this.db, id, params);
   }
