@@ -248,11 +248,14 @@ export class LynoxHTTPApi {
     // means "version-only verification, no SHA gate". UpdateManager reads
     // this for non-semver rollouts (`:staging`, `:latest`) where PKG_VERSION
     // alone can't distinguish two builds.
-    const buildSha = process.env['BUILD_SHA'];
+    // Trim guards against whitespace-only env values (a CI typo or a
+    // misconfigured docker-compose file) that would otherwise surface as a
+    // non-null garbage SHA and force every rollout into the rollback path.
+    const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
     const data: Record<string, unknown> = {
       status: 'ok',
       version: PKG_VERSION,
-      build_sha: buildSha && buildSha.length > 0 ? buildSha : null,
+      build_sha: buildSha.length > 0 ? buildSha : null,
       uptime_s: Math.floor(process.uptime()),
       process: {
         memory_used_mb: Math.round(mem.heapUsed / (1024 * 1024)),
