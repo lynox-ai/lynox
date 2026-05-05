@@ -4,11 +4,9 @@ interface WebUIConfig {
 }
 
 let apiBase = $state('/api');
-// Off by default. Flipped on for canary via configure({ pipelineStatusV2: true })
-// or via the PUBLIC_LYNOX_UI_PIPELINE_STATUS_V2 env (resolved by the host bundle —
-// SvelteKit standalone reads it at build time, library consumers pass it through
-// configure()).
-let pipelineStatusV2 = $state(false);
+// On by default since 2026-05-05. Library consumers can opt out via
+// configure({ pipelineStatusV2: false }) if they need the legacy chrome.
+let pipelineStatusV2 = $state(true);
 
 export function configure(opts: Partial<WebUIConfig>): void {
 	if (opts.apiBase !== undefined) apiBase = opts.apiBase;
