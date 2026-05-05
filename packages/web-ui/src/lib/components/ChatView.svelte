@@ -2229,25 +2229,24 @@
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
 					</button>
-				{:else if inputText.trim() || pendingFiles.length > 0 || pendingPermission}
-					<!-- Auto-send mode: dictation bypasses the input box entirely
-					     and posts to the agent directly, so the mic should be
-					     available even when there's typed text. The typed text
-					     stays in the input untouched while the dictated message
-					     auto-sends as its own turn. -->
-					{#if isVoiceAutoSendEnabled()}
-						{@render micButton()}
-					{/if}
-					<button
-						onclick={handleSend}
-						disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
-						class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
-						aria-label={t('chat.send')}
-					>
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
-					</button>
 				{:else}
+					<!-- Mic stays visible regardless of input state and auto-send
+					     toggle. In auto-send mode the dictated message bypasses
+					     the input box and posts directly. In review mode it
+					     appends/replaces the input text. Either way the user
+					     should never lose access to voice input just because
+					     they typed something. -->
 					{@render micButton()}
+					{#if inputText.trim() || pendingFiles.length > 0 || pendingPermission}
+						<button
+							onclick={handleSend}
+							disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
+							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
+							aria-label={t('chat.send')}
+						>
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+						</button>
+					{/if}
 				{/if}
 			{/if}
 		</div>
