@@ -70,6 +70,37 @@ describe('withCurrentTimePrefix', () => {
     expect(withCurrentTimePrefix(already)).toBe(already);
   });
 
+  it('appends user-local time + IANA tz when timezone is provided (string path)', () => {
+    // Bug 2026-05-05: agent presented "11:20 Uhr" verbatim from the UTC
+    // marker. With the tz arg, the marker now also surfaces the user's
+    // wallclock so the model can render times in their local zone.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-05T11:20:50.123Z'));
+    const out = withCurrentTimePrefix('hi', 'Europe/Zurich') as string;
+    // Europe/Zurich in May is UTC+2 (CEST) → 13:20:50.
+    expect(out).toBe('[Now: 2026-05-05T11:20:50.123Z; user local 2026-05-05 13:20:50 Europe/Zurich]\n\nhi');
+  });
+
+  it('appends user-local time on multimodal content arrays too', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-05T11:20:50.123Z'));
+    const imageBlock = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'xxx' } };
+    const out = withCurrentTimePrefix([imageBlock], 'America/New_York') as Array<unknown>;
+    // America/New_York in May is UTC-4 (EDT) → 07:20:50.
+    expect(out[0]).toEqual({ type: 'text', text: '[Now: 2026-05-05T11:20:50.123Z; user local 2026-05-05 07:20:50 America/New_York]' });
+    expect(out[1]).toEqual(imageBlock);
+  });
+
+  it('falls back to UTC-only marker when timezone is invalid (no throw)', () => {
+    // Defensive: a malformed tz like 'Mars/Olympus' must not break the run.
+    // Intl.DateTimeFormat would throw RangeError on construction; we catch
+    // and fall back to the UTC-only marker shape.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-05T11:20:50.123Z'));
+    const out = withCurrentTimePrefix('hi', 'Mars/Olympus') as string;
+    expect(out).toBe('[Now: 2026-05-05T11:20:50.123Z]\n\nhi');
+  });
+
   it('returns unrecognised input shapes unchanged (defensive)', () => {
     // agent.send is typed `string | unknown[]`. A buggy caller handing
     // a plain object / null / undefined shouldn't throw — we want the

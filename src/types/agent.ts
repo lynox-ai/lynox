@@ -45,4 +45,6 @@ export interface IAgent {
   readonly isolation?: IsolationConfig | undefined;
   readonly autonomy?: AutonomyLevel | undefined;
   readonly toolContext: import('../core/tool-context.js').ToolContext;
+  /** IANA timezone for the human user, propagated to sub-agents so scheduled times render in the user's wallclock. Mutable so the host can refresh it per request. */
+  userTimezone?: string | undefined;
 }

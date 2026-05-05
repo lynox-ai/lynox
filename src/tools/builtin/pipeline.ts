@@ -330,6 +330,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       hooks,
       runHistory: deps.runHistory ?? undefined,
       parentPrompt: deps.parentPrompt,
+      userTimezone: deps.userTimezone,
     });
 
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
@@ -377,6 +378,7 @@ interface PipelineDeps {
   runHistory: RunHistory | null;
   toolContext?: ToolContext | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;
+  userTimezone?: string | undefined;
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
@@ -455,6 +457,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       hooks,
       runHistory: deps.runHistory ?? undefined,
       parentPrompt: deps.parentPrompt,
+      userTimezone: deps.userTimezone,
     });
 
     executedStates.set(planned.id, { manifest, state });
@@ -586,6 +589,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         runHistory: pipelineRunHistory,
         toolContext: pipelineToolContext,
         parentPrompt,
+        userTimezone: agent.userTimezone,
       });
     }
 
@@ -596,6 +600,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         runHistory: pipelineRunHistory,
         toolContext: pipelineToolContext,
         parentPrompt,
+        userTimezone: agent.userTimezone,
       });
   },
 };

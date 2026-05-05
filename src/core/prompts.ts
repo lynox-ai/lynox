@@ -131,7 +131,7 @@ export function currentDateContext(): string {
   const now = new Date();
   const iso = now.toISOString().slice(0, 13) + ':00:00Z';
   const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
-  return `\n\n**Now (hour-precision)**: ${iso} (${weekday} UTC). For sub-hour scheduling ("in 5 min", "now"), use the precise \`[Now: …Z]\` line at the start of each user message instead — that's wallclock-accurate while this hour-truncated value can lag by up to 59 minutes.`;
+  return `\n\n**Now (hour-precision)**: ${iso} (${weekday} UTC). For sub-hour scheduling ("in 5 min", "now"), use the precise \`[Now: …Z]\` line at the start of each user message instead — that's wallclock-accurate while this hour-truncated value can lag by up to 59 minutes. When the marker contains a \`user local …\` clause, ALWAYS present times to the user in that local timezone (e.g. "Die Erinnerung kommt um 13:20 Uhr"), never the UTC value.`;
 }
 
 /**
@@ -150,9 +150,38 @@ export function currentDateContext(): string {
  */
 const NOW_MARKER_PREFIX = '[Now:';
 
-export function withCurrentTimePrefix(userMessage: string | unknown[]): string | unknown[] {
-  const isoNow = new Date().toISOString();
-  const marker = `${NOW_MARKER_PREFIX} ${isoNow}]`;
+/**
+ * Format a Date in the given IANA timezone as `YYYY-MM-DD HH:MM:SS`.
+ * Returns `null` for invalid timezone strings — caller falls back to the
+ * UTC-only marker rather than throwing or shipping a busted prefix.
+ */
+function formatLocalTime(d: Date, tz: string): string | null {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+    const get = (k: string): string => parts.find(p => p.type === k)?.value ?? '';
+    const year = get('year');
+    if (!year) return null;
+    return `${year}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+  } catch {
+    return null;
+  }
+}
+
+export function withCurrentTimePrefix(
+  userMessage: string | unknown[],
+  userTimezone?: string | undefined,
+): string | unknown[] {
+  const now = new Date();
+  const isoNow = now.toISOString();
+  const local = userTimezone ? formatLocalTime(now, userTimezone) : null;
+  const marker = local
+    ? `${NOW_MARKER_PREFIX} ${isoNow}; user local ${local} ${userTimezone}]`
+    : `${NOW_MARKER_PREFIX} ${isoNow}]`;
   if (typeof userMessage === 'string') {
     if (userMessage.startsWith(NOW_MARKER_PREFIX)) return userMessage;
     return `${marker}\n\n${userMessage}`;

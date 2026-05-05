@@ -183,6 +183,7 @@ export async function spawnViaAgent(
   preApproval?: PreApprovalSet | undefined,
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   parentPrompt?: SubAgentPromptHandles | undefined,
+  userTimezone?: string | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -242,6 +243,7 @@ export async function spawnViaAgent(
     promptUser: promptCallbacks.promptUser,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
+    userTimezone,
     onStream: (event: StreamEvent) => {
       if (event.type === 'turn_end') {
         tokensIn += event.usage.input_tokens;
@@ -261,7 +263,7 @@ export async function spawnViaAgent(
     // Sub-agent gets the same per-turn time anchor as top-level chat,
     // so a pipeline step that schedules "in 5 min" via run_at lands at
     // wallclock + 5 min, not session-start + 5 min.
-    const result = await agent.send(withCurrentTimePrefix(JSON.stringify(stepContext)));
+    const result = await agent.send(withCurrentTimePrefix(JSON.stringify(stepContext), userTimezone));
     if (timedOut) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
@@ -285,6 +287,7 @@ export async function spawnInline(
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   parentToolContext?: ToolContext | undefined,
   parentPrompt?: SubAgentPromptHandles | undefined,
+  userTimezone?: string | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -353,6 +356,7 @@ export async function spawnInline(
     promptUser: promptCallbacks.promptUser,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
+    userTimezone,
     onStream: (event: StreamEvent) => {
       if (event.type === 'turn_end') {
         tokensIn += event.usage.input_tokens;
@@ -370,7 +374,7 @@ export async function spawnInline(
   }, timeoutMs);
 
   try {
-    const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task: step.task, context: stepContext })));
+    const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task: step.task, context: stepContext }), userTimezone));
     if (timedOut) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
@@ -407,6 +411,7 @@ export async function spawnPipeline(
   parentTools: ToolEntry[],
   depth: number,
   parentPrompt?: SubAgentPromptHandles | undefined,
+  userTimezone?: string | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -447,6 +452,7 @@ export async function spawnPipeline(
     parentTools,
     depth: depth + 1,
     parentPrompt,
+    userTimezone,
   });
 
   // Aggregate results

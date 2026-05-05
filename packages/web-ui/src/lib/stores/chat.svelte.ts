@@ -563,6 +563,12 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	}
 	if (runOptions?.effort) payload['effort'] = runOptions.effort;
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
+	// User's local IANA timezone — server threads it into the per-turn
+	// `[Now: …]` marker so scheduled times render in user wallclock, not UTC.
+	try {
+		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		if (tz) payload['tz'] = tz;
+	} catch { /* extremely old browsers — skip silently, server falls back to UTC */ }
 
 	let res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
 		method: 'POST',

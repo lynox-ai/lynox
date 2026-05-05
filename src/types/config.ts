@@ -55,6 +55,8 @@ export interface AgentConfig {
   openaiModelId?:      string | undefined;
   /** Auth mode for OpenAI provider. 'google-vertex' uses GOOGLE_APPLICATION_CREDENTIALS to generate OAuth tokens. */
   openaiAuth?:         'static' | 'google-vertex' | undefined;
+  /** IANA timezone (e.g. 'Europe/Zurich') for the human user. Threaded through the per-turn `[Now: …]` marker so the model presents scheduled times in the user's wallclock, not UTC. */
+  userTimezone?:       string | undefined;
 }
 
 /** Minimal interface to avoid circular deps between agent and changeset module */

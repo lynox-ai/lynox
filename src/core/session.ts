@@ -109,6 +109,7 @@ export class Session {
   private _promptSecret: PromptSecretFn | null = null;
   private _tenantId: string | null = null;
   private _skipMemoryExtractionOverride: boolean | null = null;
+  private _userTimezone: string | null = null;
 
   // Per-session config (copied from engine.config at creation, mutated independently)
   private _registryVersion = 0;
@@ -228,6 +229,25 @@ export class Session {
 
   set tenantId(id: string | null) {
     this._tenantId = id;
+  }
+
+  /**
+   * IANA timezone of the human user (e.g. 'Europe/Zurich'). Set per request
+   * by the HTTP-API /run handler from the client's
+   * `Intl.DateTimeFormat().resolvedOptions().timeZone`. Threaded into the
+   * per-turn `[Now: …]` marker so the model presents scheduled times in the
+   * user's local wallclock instead of UTC.
+   */
+  get userTimezone(): string | null {
+    return this._userTimezone;
+  }
+
+  set userTimezone(tz: string | null) {
+    this._userTimezone = tz;
+    // Push to the live Agent so sub-agent / pipeline paths that read
+    // `parentAgent.userTimezone` see the latest value without recreating
+    // the agent (cheap, mutable field).
+    if (this.agent) this.agent.userTimezone = tz ?? undefined;
   }
 
   // ── Core execution ──
@@ -425,7 +445,7 @@ export class Session {
       // Per-turn precise time, outside the hour-truncated cached system
       // prompt so the model gets wallclock-accuracy without breaking
       // Anthropic's prompt cache.
-      const result = await this.agent.send(withCurrentTimePrefix(task));
+      const result = await this.agent.send(withCurrentTimePrefix(task, this._userTimezone ?? undefined));
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
       if (!this._briefingConsumed && this.briefing) {
@@ -926,6 +946,7 @@ export class Session {
       activeScopes: engine.getActiveScopes().length > 0 ? engine.getActiveScopes() : undefined,
       changesetManager: this._changesetManager ?? undefined,
       toolContext,
+      userTimezone: this._userTimezone ?? undefined,
     });
 
     // Respect memory_extraction config (default: true)

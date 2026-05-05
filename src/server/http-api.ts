@@ -1036,6 +1036,17 @@ export class LynoxHTTPApi {
         ? { ...(runEffort ? { effort: runEffort } : {}), ...(runThinking ? { thinking: runThinking } : {}) }
         : undefined;
 
+      // User's IANA timezone for the per-turn `[Now: …]` marker. The client
+      // sends `Intl.DateTimeFormat().resolvedOptions().timeZone` per /run.
+      // Capped to a sane length and sanitised — Intl.DateTimeFormat's `timeZone`
+      // option ignores garbage anyway, but we filter here to keep the marker
+      // readable and avoid leaking arbitrary client strings into the prompt.
+      const rawTz = typeof b?.['tz'] === 'string' ? b['tz'] : '';
+      const sanitisedTz = rawTz.length > 0 && rawTz.length <= 64 && /^[A-Za-z0-9_+\-/]+$/.test(rawTz)
+        ? rawTz
+        : '';
+      if (sanitisedTz) session.userTimezone = sanitisedTz;
+
       // Build multimodal content if files are attached
       const files = Array.isArray(b?.['files']) ? b['files'] as { name: string; type: string; data: string }[] : [];
       let task: string | unknown[];
