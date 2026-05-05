@@ -80,6 +80,13 @@ let audioContext: AudioContext | null = null;
 const activeSources = new Set<AudioBufferSourceNode>();
 let abortCtrl: AbortController | null = null;
 let objectUrl: string | null = null;
+// Per-utterance token. Bumped on every playSpeech / stopSpeech so the
+// `ended` listener on a previous utterance's final source bails when a
+// newer playback has already taken over. Without this, stop()ing the
+// old source dispatches `ended` AFTER state has flipped to 'synthesizing'
+// for the new run, and the listener resets it back to 'idle' mid-play
+// (since `audioContext === ctx` is unchanged when we keep the context).
+let runToken = 0;
 
 // FIFO queue for `playSpeechQueued` callers (auto-speak per-block playback).
 // When the current playback ends, the next entry is dequeued and played.
@@ -119,6 +126,9 @@ export function maybeShowPrivacyHint(translatedHint: string): void {
 }
 
 export function stopSpeech(): void {
+	// Invalidate any pending `ended` listeners from the previous run. The
+	// listener checks the run token against this updated value and bails.
+	runToken++;
 	if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; }
 	if (audioEl) {
 		audioEl.pause();
@@ -192,10 +202,19 @@ function primeAudio(): AudioContext | null {
 	const Ctor = getAudioCtxCtor();
 	if (!Ctor) return null;
 	if (!audioContext) {
+		// new AudioContext() can throw on locked-down WebViews + when the
+		// page exceeds the per-origin context limit (rare; we never create
+		// more than one).
 		try { audioContext = new Ctor(); } catch { return null; }
 	}
+	// resume() is only honoured by iOS while a user-gesture flag is on the
+	// call stack. Auto-speak chains land here from a microtask, so a
+	// rejection here means "iOS won't let me un-suspend right now". Catch
+	// the rejection so `state` doesn't strand at 'synthesizing' / 'playing'
+	// when no audio will actually come out — the playSpeech path checks
+	// `audioContext.state` after this returns and surfaces 'blocked'.
 	if (audioContext.state === 'suspended') {
-		void audioContext.resume();
+		audioContext.resume().catch(() => { /* iOS auto-suspend gate */ });
 	}
 	return audioContext;
 }
@@ -211,8 +230,10 @@ export async function playSpeech(text: string, key: string): Promise<SpeakError 
 	activeKey = key;
 
 	// iOS-safe: prime the AudioContext SYNCHRONOUSLY before any await.
-	// See `primeAudio` for the gesture-flag rationale.
-	primeAudio();
+	// See `primeAudio` for the gesture-flag rationale. Return value is
+	// the (now-running) context — checked again post-fetch in
+	// `playViaWebAudio` to detect iOS auto-suspend rejections.
+	void primeAudio();
 
 	const ctrl = new AbortController();
 	abortCtrl = ctrl;
@@ -254,6 +275,19 @@ async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortCont
 	// `primeAudio` already created + resumed this context inside the user-gesture
 	// stack at the top of `playSpeech`. Don't recreate or re-resume here — that
 	// extra resume() awaited from outside the gesture is exactly what iOS rejects.
+
+	// If the context is still suspended after the fetch round-trip, primeAudio's
+	// `resume()` was rejected (typical when iOS auto-suspended an idle context
+	// and the current playback chain is firing from a microtask, not a click).
+	// Surface as 'blocked' instead of stranding state at 'synthesizing'.
+	if (ctx.state === 'suspended') {
+		resetOnError();
+		return { code: 'blocked' };
+	}
+
+	// Snapshot the run token so the final-source `ended` listener can tell
+	// whether it's firing for THIS utterance or a stale stopped one.
+	const myRun = ++runToken;
 
 	let nextStartTime = 0;
 	let started = false;
@@ -335,8 +369,11 @@ async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortCont
 	// Last scheduled buffer: fire the end-of-playback hook when it finishes.
 	// Don't null/close the context — keep it alive for the next playSpeech
 	// (auto-speak chains this without a user gesture, so reusing a running
-	// context is the only path on iOS).
+	// context is the only path on iOS). Bail if a newer run has taken over —
+	// stop() on the cancelled source still dispatches `ended` and would
+	// otherwise reset the new run's state.
 	finalSource.addEventListener('ended', () => {
+		if (runToken !== myRun) return;
 		if (audioContext !== ctx) return;
 		state = 'idle';
 		activeKey = null;
