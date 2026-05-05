@@ -14,6 +14,15 @@ const FOLLOW_UP_RE = /<follow_ups>\s*([\s\S]*?)\s*<\/follow_ups>/;
 const MAX_FOLLOW_UPS = 4;
 const MAX_LABEL_LENGTH = 40;
 
+/** Resolved once per module load — the user's tz doesn't change mid-tab. Server falls back to UTC if `''`. */
+const USER_TIMEZONE: string = (() => {
+	try {
+		return Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
+	} catch {
+		return '';
+	}
+})();
+
 function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[]; cleanText: string } {
 	const match = FOLLOW_UP_RE.exec(text);
 	if (!match) return { suggestions: [], cleanText: text };
@@ -565,10 +574,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
 	// User's local IANA timezone — server threads it into the per-turn
 	// `[Now: …]` marker so scheduled times render in user wallclock, not UTC.
-	try {
-		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-		if (tz) payload['tz'] = tz;
-	} catch { /* extremely old browsers — skip silently, server falls back to UTC */ }
+	if (USER_TIMEZONE) payload['tz'] = USER_TIMEZONE;
 
 	let res = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
 		method: 'POST',

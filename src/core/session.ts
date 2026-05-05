@@ -243,6 +243,7 @@ export class Session {
   }
 
   set userTimezone(tz: string | null) {
+    if (this._userTimezone === tz) return;
     this._userTimezone = tz;
     // Push to the live Agent so sub-agent / pipeline paths that read
     // `parentAgent.userTimezone` see the latest value without recreating

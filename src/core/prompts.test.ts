@@ -87,8 +87,29 @@ describe('withCurrentTimePrefix', () => {
     const imageBlock = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'xxx' } };
     const out = withCurrentTimePrefix([imageBlock], 'America/New_York') as Array<unknown>;
     // America/New_York in May is UTC-4 (EDT) → 07:20:50.
+    expect(out).toHaveLength(2);
     expect(out[0]).toEqual({ type: 'text', text: '[Now: 2026-05-05T11:20:50.123Z; user local 2026-05-05 07:20:50 America/New_York]' });
     expect(out[1]).toEqual(imageBlock);
+  });
+
+  it('handles winter DST correctly (CET, UTC+1)', () => {
+    // Earlier test pinned summer (CEST, UTC+2). Winter case ensures the
+    // formatter actually re-derives the offset from the date rather than
+    // from any cached/pinned value — DST regressions surface here.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-15T11:20:50.123Z'));
+    const out = withCurrentTimePrefix('hi', 'Europe/Zurich') as string;
+    expect(out).toBe('[Now: 2026-01-15T11:20:50.123Z; user local 2026-01-15 12:20:50 Europe/Zurich]\n\nhi');
+  });
+
+  it('routes empty-string tz through the UTC-only path', () => {
+    // The web-ui sends '' when Intl is somehow missing; the http-api
+    // sanitiser also emits '' for invalid input. Either should land on
+    // the UTC-only marker shape — never throw, never invoke the formatter.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-05T11:20:50.123Z'));
+    const out = withCurrentTimePrefix('hi', '') as string;
+    expect(out).toBe('[Now: 2026-05-05T11:20:50.123Z]\n\nhi');
   });
 
   it('falls back to UTC-only marker when timezone is invalid (no throw)', () => {
