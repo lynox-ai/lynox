@@ -131,7 +131,12 @@ export function currentDateContext(): string {
   const now = new Date();
   const iso = now.toISOString().slice(0, 13) + ':00:00Z';
   const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
-  return `\n\n**Now (hour-precision)**: ${iso} (${weekday} UTC). For sub-hour scheduling ("in 5 min", "now"), use the precise \`[Now: …Z]\` line at the start of each user message instead — that's wallclock-accurate while this hour-truncated value can lag by up to 59 minutes. When the marker contains a \`user local …\` clause, ALWAYS present times to the user in that local timezone (e.g. "Die Erinnerung kommt um 13:20 Uhr"), never the UTC value.`;
+  return `\n\n**Now (hour-precision)**: ${iso} (${weekday} UTC). For sub-hour scheduling ("in 5 min", "now"), use the precise \`[Now: …Z]\` line at the start of each user message instead — that's wallclock-accurate while this hour-truncated value can lag by up to 59 minutes.
+
+**Time-of-day rule (storage vs. display).** When the marker contains a \`user local …\` clause:
+- **Tool inputs are ALWAYS UTC ISO 8601.** \`task_create.run_at\`, \`task_update.run_at\`, \`due_date\`, \`schedule\` (cron is UTC), and any other ISO field — compute by adding the offset to the user's request, then write the value with a \`Z\` suffix. Example with \`[Now: 2026-05-05T11:55:00Z; user local 2026-05-05 13:55:00 Europe/Zurich]\` and "in 5 minutes" → \`run_at: "2026-05-05T12:00:00Z"\` (NOT \`14:00:00Z\` — that would be the local clock written as UTC, off by the tz offset).
+- **Replies to the user are ALWAYS in the local clock.** "Die Erinnerung kommt um 14:00 Uhr" — never echo the \`Z\` value verbatim. The user thinks in their wallclock; UTC is an internal storage detail.
+- The two values must agree: if your reply says "14:00", the stored ISO must be the UTC equivalent of 14:00 in the user's tz, not the literal string "14:00".`;
 }
 
 /**

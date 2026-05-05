@@ -29,6 +29,17 @@ describe('currentDateContext', () => {
     const ctx = currentDateContext();
     expect(ctx).toMatch(/per-turn|user message|\[Now/i);
   });
+
+  it('disambiguates UTC-storage from local-display', () => {
+    // Live test 2026-05-05 caught the inverse of the original bug: agent
+    // displayed 14:00 Uhr (correct CEST) but ALSO wrote run_at as
+    // "2026-05-05T14:00Z" — interpreting the local clock as UTC, off by
+    // the tz offset. The system prompt has to call out that storage stays
+    // UTC while display stays local; otherwise the model conflates them.
+    const ctx = currentDateContext();
+    expect(ctx).toMatch(/UTC.*storage|storage.*UTC|tool inputs.*UTC|run_at.*UTC/i);
+    expect(ctx).toMatch(/replies?.*local|local.*replies?|present.*local|local.*clock/i);
+  });
 });
 
 describe('withCurrentTimePrefix', () => {
