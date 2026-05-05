@@ -50,6 +50,7 @@
 	import { getApiBase, getPipelineStatusV2 } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
+	import { stripNowMarker } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { formatCountdown } from '../utils/time.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -1533,6 +1534,7 @@
 		<div class="mx-auto max-w-3xl space-y-5">
 			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.role === 'user'}
+					{@const userText = stripNowMarker(msg.content)}
 					<div class="flex justify-end items-start gap-1.5">
 						{#if msg.queued}
 							<button
@@ -1545,13 +1547,13 @@
 							</button>
 						{/if}
 						<button
-							onclick={() => { if (msg.failed) { sendMessage(msg.content); msg.failed = false; } else { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); } }}
+							onclick={() => { if (msg.failed) { sendMessage(userText); msg.failed = false; } else { navigator.clipboard.writeText(userText); addToast(t('common.copied'), 'success', 1500); } }}
 							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
-							{#if hasVoicePrefix(msg.content)}
-								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(msg.content)}
+							{#if hasVoicePrefix(userText)}
+								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(userText)}
 							{:else}
-								{msg.content}
+								{userText}
 							{/if}
 							{#if msg.failed}
 								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-danger/70 mt-1">{t('chat.send_failed')}</span>
