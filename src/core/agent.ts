@@ -109,9 +109,11 @@ export class Agent implements IAgent {
 
   /** Override effort for the next run without recreating the agent. */
   setEffort(level: EffortLevel | undefined): void { this.effort = level; }
+  getEffort(): EffortLevel | undefined { return this.effort; }
 
   /** Override thinking mode for the next run without recreating the agent. */
   setThinking(mode: ThinkingMode): void { this.thinking = mode; }
+  getThinking(): ThinkingMode { return this.thinking; }
 
   constructor(config: AgentConfig) {
     this.name = config.name;
@@ -136,7 +138,10 @@ export class Agent implements IAgent {
     this.mcpServers = activeProvider === 'anthropic' ? config.mcpServers : undefined;
     const isHaiku = this.model.includes('haiku');
     const requestedThinking = config.thinking ?? { type: 'adaptive' };
-    this.thinking = (isHaiku && requestedThinking.type === 'adaptive') || this.isCustomProxy
+    // Haiku 4.5 has no extended-thinking support (manual or adaptive) — sending
+    // either shape returns "model does not support" 400 from Anthropic. Force
+    // disabled regardless of what the caller requested.
+    this.thinking = isHaiku || this.isCustomProxy
       ? { type: 'disabled' }
       : requestedThinking;
     this.effort = (isHaiku || this.isCustomProxy) ? undefined : (config.effort ?? 'high');

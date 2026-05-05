@@ -211,22 +211,19 @@ export async function spawnInline(
     : null;
   const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => INLINE_CORE_TOOLS.has(t.definition.name));
   const tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
-  // Resolve thinking: step hint > Haiku-specific default > adaptive
-  // Haiku gets explicit thinking budget (improves tool-call reliability)
+  // Resolve thinking: step hint > adaptive default. Haiku 4.5 has no
+  // extended-thinking support — force disabled regardless of step hint to
+  // avoid Anthropic 400 "model does not support" errors.
   const isHaikuStep = model.includes('haiku');
   let thinking: ThinkingMode;
-  if (step.thinking) {
-    thinking = step.thinking === 'enabled'
-      ? { type: 'enabled', budget_tokens: isHaikuStep ? 4096 : 10_000 }
-      : step.thinking === 'disabled'
-        ? { type: 'disabled' }
-        : isHaikuStep
-          ? { type: 'enabled', budget_tokens: 4096 }
-          : { type: 'adaptive' };
+  if (isHaikuStep) {
+    thinking = { type: 'disabled' };
+  } else if (step.thinking === 'enabled') {
+    thinking = { type: 'enabled', budget_tokens: 10_000 };
+  } else if (step.thinking === 'disabled') {
+    thinking = { type: 'disabled' };
   } else {
-    thinking = isHaikuStep
-      ? { type: 'enabled', budget_tokens: 4096 }
-      : { type: 'adaptive' };
+    thinking = { type: 'adaptive' };
   }
   const effort = step.effort ?? resolved?.effort ?? config.effort_level ?? 'medium';
   const maxIter = 10;

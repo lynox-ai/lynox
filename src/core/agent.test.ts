@@ -110,6 +110,73 @@ describe('Agent', () => {
     vi.clearAllMocks();
   });
 
+  // -- Haiku capability gates --
+
+  describe('Haiku capability gates', () => {
+    it('forces thinking=disabled on Haiku even when manual thinking is requested', () => {
+      // Haiku 4.5 has no extended-thinking support — Anthropic returns 400
+      // for any thinking shape (manual or adaptive). The agent must ignore
+      // the requested shape and force disabled.
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-haiku-4-5-20251001',
+        thinking: { type: 'enabled', budget_tokens: 4096 },
+      });
+      expect(agent.getThinking()).toEqual({ type: 'disabled' });
+    });
+
+    it('forces thinking=disabled on Haiku when adaptive thinking is requested', () => {
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-haiku-4-5-20251001',
+        thinking: { type: 'adaptive' },
+      });
+      expect(agent.getThinking()).toEqual({ type: 'disabled' });
+    });
+
+    it('strips effort on Haiku regardless of config', () => {
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-haiku-4-5-20251001',
+        effort: 'high',
+      });
+      expect(agent.getEffort()).toBeUndefined();
+    });
+
+    it('keeps requested thinking on non-Haiku models', () => {
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        thinking: { type: 'enabled', budget_tokens: 8000 },
+      });
+      expect(agent.getThinking()).toEqual({ type: 'enabled', budget_tokens: 8000 });
+    });
+
+    it('keeps adaptive thinking on non-Haiku models', () => {
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        thinking: { type: 'adaptive' },
+      });
+      expect(agent.getThinking()).toEqual({ type: 'adaptive' });
+    });
+
+    it('forces thinking=disabled and strips effort on custom-proxy providers', () => {
+      // Same gate as Haiku but for the other capability tier — OpenAI/custom
+      // proxies don't speak Anthropic's thinking/effort vocabulary, so both
+      // fields must be stripped before the request leaves the agent.
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        provider: 'custom',
+        thinking: { type: 'enabled', budget_tokens: 4096 },
+        effort: 'high',
+      });
+      expect(agent.getThinking()).toEqual({ type: 'disabled' });
+      expect(agent.getEffort()).toBeUndefined();
+    });
+  });
+
   // -- send() --
 
   describe('send()', () => {
