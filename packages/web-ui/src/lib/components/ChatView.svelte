@@ -38,13 +38,17 @@
 		getSessionId,
 		compactNow,
 		getIsCompacting,
+		getActiveRun,
+		getPendingPrompt,
+		getRunStartedAt,
+		getRunPromptCount,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
 		type ToolCallInfo,
 	} from '../stores/chat.svelte.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
-	import { getApiBase } from '../config.svelte.js';
+	import { getApiBase, getPipelineStatusV2 } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
@@ -52,6 +56,8 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
+	import PipelineStatusBar from './PipelineStatusBar.svelte';
+	import PromptAnchor from './PromptAnchor.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -1100,6 +1106,17 @@
 		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
 	);
 
+	// pipeline-status-v2 — flag-gated. activeRun is non-null iff the latest
+	// message's pipeline still has pending/running steps. waitingOnUser is true
+	// when any pending* prompt exists for the active session, regardless of
+	// which prompt type it is (permission / tabs / secret).
+	const pipelineStatusV2 = $derived(getPipelineStatusV2());
+	const activeRun = $derived(pipelineStatusV2 ? getActiveRun() : null);
+	const pendingPromptHead = $derived(pipelineStatusV2 ? getPendingPrompt() : null);
+	const waitingOnUser = $derived(pendingPromptHead !== null);
+	const runStartedAt = $derived(getRunStartedAt());
+	const runPromptCount = $derived(getRunPromptCount());
+
 	// Per-session artifact shelf. Populated from the shared artifacts store,
 	// filtered to the current thread. Kick a load on mount and again when the
 	// session changes so the shelf is ready without needing a prior visit to
@@ -1298,6 +1315,13 @@
 {/snippet}
 
 <div class="flex h-full flex-col">
+	<!-- Pipeline-status-v2 (flag-gated): always-visible bar above the message
+	     list while a pipeline run is in flight. Survives the inline
+	     PipelineProgress re-render bug because it reads from getActiveRun(). -->
+	{#if pipelineStatusV2 && activeRun}
+		<PipelineStatusBar run={activeRun} waitingOnUser={waitingOnUser} />
+	{/if}
+
 	<!-- Messages -->
 	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if messages.length === 0 && !isStreaming}
@@ -1776,7 +1800,7 @@
 	{#if activePipeline && isStreaming && pipelineRunning}
 		<div class="border-t border-border bg-bg-subtle px-4 py-2">
 			<div class="max-w-3xl mx-auto">
-				<PipelineProgress pipeline={activePipeline} />
+				<PipelineProgress pipeline={activePipeline} waitingOnUser={waitingOnUser} />
 			</div>
 		</div>
 	{/if}
@@ -1800,7 +1824,7 @@
 	<!-- Batch mode: all questions as form. Drives off either pendingTabsPrompt
 	     (v2, one-shot reply) or pendingPermission (v1, sequential fallback). -->
 	{#if inBatchMode && (pendingPermission || pendingTabsPrompt)}
-		<div role="dialog" aria-label={t('chat.batch_mode')} tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3"
+		<div role="dialog" aria-label={t('chat.batch_mode')} tabindex="-1" data-pending-prompt class="border-t border-border bg-bg-subtle px-4 py-3"
 			onkeydown={(e) => { if (e.key === 'Escape') answerPrompt('__dismissed__'); }}>
 			<div class="max-w-3xl mx-auto space-y-1">
 				{#each batchQuestions as q, i}
@@ -1904,7 +1928,7 @@
 		{@const opts = pendingPermission.options ?? []}
 		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
 		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
-		<div class="border-t border-border bg-bg-subtle px-4 py-3">
+		<div data-pending-prompt tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-2">
 				<div class="flex items-start gap-2">
 					{#if isPermissionGuard}
@@ -1951,7 +1975,7 @@
 
 	<!-- Secure Secret Prompt -->
 	{#if pendingSecret}
-		<div class="border-t border-border bg-bg-subtle px-4 py-3">
+		<div data-pending-prompt tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl mx-auto space-y-3">
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
@@ -2058,6 +2082,14 @@
 				</button>
 			</div>
 		</div>
+	{/if}
+
+	<!-- Pipeline-status-v2 prompt anchor (flag-gated): one-line bar directly
+	     above the input, visible regardless of scroll position. The inline
+	     prompt forms above are still authoritative for replies — this is a
+	     locator, not a parallel reply path. -->
+	{#if pipelineStatusV2 && pendingPromptHead}
+		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
 	{/if}
 
 	<!-- Input -->

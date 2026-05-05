@@ -4,6 +4,7 @@ import { t } from '../i18n.svelte.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
+import { findActiveRun, selectPendingPromptHead } from '../utils/pipeline-status.js';
 
 // ---------------------------------------------------------------------------
 // Follow-up parsing (mirrors core telegram-formatter logic)
@@ -308,6 +309,14 @@ let pendingPermission = $state<PermissionPrompt | null>(null);
 let pendingTabsPrompt = $state<TabsPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
 let secretPromptGeneration = $state(0);
+
+// Pipeline-status-v2: track when the active run started + how many prompts
+// it has fired. Both are read by PipelineStatusBar and PromptAnchor.
+// runStartedAt is set on `pipeline_start`; cleared by newChat / resumeThread.
+// runPromptCount increments each time a pending* var transitions null→non-null
+// while a run is active.
+let runStartedAt = $state<number | null>(null);
+let runPromptCount = $state(0);
 let chatError = $state<string | null>(null);
 let chatErrorDetail = $state<string | null>(null);
 let authError = $state(false);
@@ -968,6 +977,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'prompt':
+			if (!pendingPermission) runPromptCount++;
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
 				options: data['options'] as string[] | undefined,
@@ -980,6 +990,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const questions = Array.isArray(data['questions']) ? (data['questions'] as TabsPromptQuestion[]) : [];
 			const promptId = typeof data['promptId'] === 'string' ? data['promptId'] : '';
 			if (!promptId || questions.length === 0) break; // malformed, ignore
+			if (!pendingTabsPrompt) runPromptCount++;
 			pendingTabsPrompt = {
 				promptId,
 				questions,
@@ -998,6 +1009,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'secret_prompt':
+			if (!pendingSecretPrompt) runPromptCount++;
 			pendingSecretPrompt = {
 				name: String(data['name'] ?? ''),
 				prompt: String(data['prompt'] ?? ''),
@@ -1073,6 +1085,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					status: 'pending' as const,
 				})),
 			};
+			runStartedAt = Date.now();
+			runPromptCount = 0;
 			break;
 		}
 		case 'pipeline_progress': {
@@ -1460,6 +1474,55 @@ export function getPendingPermission() {
 export function getPendingTabsPrompt() {
 	return pendingTabsPrompt;
 }
+
+/**
+ * Pipeline-status-v2 — minimal shape for the sticky status bar.
+ *
+ * Picks the most-recent message that owns a pipeline whose run hasn't
+ * finished (any step still pending or running). Returns null otherwise,
+ * which is what makes PipelineStatusBar disappear at the terminal state.
+ */
+export interface ActiveRun {
+	pipelineId: string;
+	name: string;
+	steps: PipelineStepInfo[];
+	currentStepIdx: number;
+	totalSteps: number;
+}
+
+export function getActiveRun(): ActiveRun | null {
+	return findActiveRun(messages);
+}
+
+/**
+ * Unified head-of-queue prompt for the active session. The three legacy
+ * pendingX vars stay as separate state (their reply paths differ); this
+ * just returns the first non-null in priority order: secret > permission
+ * > tabs. PromptAnchor renders the question text; the existing inline
+ * forms still drive the answer.
+ */
+export type PromptKind = 'permission' | 'tabs' | 'secret';
+
+export interface PendingPromptHead {
+	kind: PromptKind;
+	question: string;
+	promptId?: string;
+	options?: string[];
+}
+
+export function getPendingPrompt(): PendingPromptHead | null {
+	return selectPendingPromptHead(pendingPermission, pendingTabsPrompt, pendingSecretPrompt);
+}
+
+/** Epoch ms when the active pipeline run started. null when no run. */
+export function getRunStartedAt(): number | null {
+	return runStartedAt;
+}
+
+/** How many prompts the active run has fired (used for "Frage N" counter). */
+export function getRunPromptCount(): number {
+	return runPromptCount;
+}
 export function getChatError() {
 	return chatError;
 }
@@ -1562,6 +1625,8 @@ export function newChat() {
 	messageQueue = [];
 	sessionModel = null;
 	contextBudget = null;
+	runStartedAt = null;
+	runPromptCount = 0;
 	clearContext();
 	persistChatNow();
 }
@@ -1598,6 +1663,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 	skipExtraction = false;
 	messageQueue = [];
 	contextBudget = null;
+	runStartedAt = null;
+	runPromptCount = 0;
 	clearContext();
 	persistChatNow();
 
