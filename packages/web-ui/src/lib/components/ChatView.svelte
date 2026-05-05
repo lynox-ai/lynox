@@ -64,6 +64,7 @@
 	import { playSpeech, playSpeechQueued, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
+	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick } from 'svelte';
 
@@ -697,10 +698,30 @@
 							}
 						}
 
-						// Replace placeholder with final text and send to AI
+						// Replace placeholder with final text. Default lands the
+						// transcript in the chat input for review/edit — Whisper /
+						// Voxtral are materially less accurate for non-English, so
+						// auto-sending hides mis-transcriptions until after the LLM
+						// has already paid for them. Power users opt back into the
+						// old auto-send via the StatusBar toggle.
 						removePlaceholder(placeholderIdx);
-						if (finalText.trim()) {
-							await sendMessage(`🎤 ${finalText.trim()}`);
+						const trimmed = finalText.trim();
+						if (trimmed) {
+							if (isVoiceAutoSendEnabled()) {
+								await sendMessage(`🎤 ${trimmed}`);
+							} else {
+								inputText = trimmed;
+								void tick().then(() => {
+									if (!textareaEl) return;
+									textareaEl.style.height = 'auto';
+									textareaEl.style.height = textareaEl.scrollHeight + 'px';
+									textareaEl.focus();
+									// Cursor at end so the user can keep dictating or
+									// finish the message naturally.
+									const len = textareaEl.value.length;
+									textareaEl.setSelectionRange(len, len);
+								});
+							}
 						}
 					} catch {
 						removePlaceholder(placeholderIdx);

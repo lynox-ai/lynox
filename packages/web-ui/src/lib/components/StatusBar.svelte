@@ -4,14 +4,17 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
 	import { getContextBudget, getSessionModel, getAuthError } from '../stores/chat.svelte.js';
-	import { ensureVoiceInfoProbed, isTtsAvailable } from '../stores/voice-info.svelte.js';
+	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled, toggleAutoSpeak } from '../stores/autospeak.svelte.js';
+	import { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from '../stores/voice-autosend.svelte.js';
 	import { getSpeakState } from '../stores/speak.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 
 	void ensureVoiceInfoProbed();
 	const ttsAvailable = $derived(isTtsAvailable());
+	const sttAvailable = $derived(getSttProvider() !== null);
 	const autoSpeakOn = $derived(isAutoSpeakEnabled());
+	const autoSendOn = $derived(isVoiceAutoSendEnabled());
 	const speakState = $derived(getSpeakState());
 
 	type Indicator = 'none' | 'minor' | 'major' | 'critical' | 'unknown';
@@ -198,6 +201,26 @@
 	{/if}
 {/snippet}
 
+{#snippet voiceAutoSendBtn()}
+	{#if sttAvailable}
+		<button
+			onclick={toggleVoiceAutoSend}
+			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSendOn ? 'text-accent-text' : 'text-text-subtle'}"
+			title={autoSendOn ? t('status.autosend_on') : t('status.autosend_off')}
+			aria-label={autoSendOn ? t('status.autosend_on') : t('status.autosend_off')}
+			aria-pressed={autoSendOn}
+		>
+			{#if autoSendOn}
+				<!-- Paper airplane: voice goes straight to the agent. -->
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+			{:else}
+				<!-- Pencil-square: voice lands in the input for review/edit. -->
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+			{/if}
+		</button>
+	{/if}
+{/snippet}
+
 <!-- Mobile: minimal engine indicator + auto-speak toggle -->
 <div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2 pb-[env(safe-area-inset-bottom)]">
 	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors">
@@ -209,6 +232,7 @@
 		<span class="text-border mx-1">|</span>
 		{formatCost(todayCost)}
 	</button>
+	{@render voiceAutoSendBtn()}
 	{@render autoSpeakBtn()}
 </div>
 
@@ -252,6 +276,9 @@
 	</a>
 
 	<span class="text-border">|</span>
+
+	<!-- Voice auto-send toggle — hidden when no STT provider is available -->
+	{@render voiceAutoSendBtn()}
 
 	<!-- Auto-speak toggle — hidden entirely when no TTS provider is available -->
 	{@render autoSpeakBtn()}
