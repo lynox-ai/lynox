@@ -21,7 +21,8 @@ vi.mock('../core/roles.js', () => ({
 }));
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, resolveModel } from './runtime-adapter.js';
+import { spawnInline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, type SubAgentPromptHandles } from './runtime-adapter.js';
+import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import type { ManifestStep } from './types.js';
 
 const mockConfig = { api_key: 'test-key' } as unknown as LynoxUserConfig;
@@ -280,5 +281,102 @@ describe('spawnInline thinking gating', () => {
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
     expect(agentConfig['thinking']).toEqual({ type: 'disabled' });
+  });
+});
+
+describe('stripHumanInTheLoopTools', () => {
+  it('drops ask_user / ask_secret entries', () => {
+    const tools: ToolEntry[] = [
+      { definition: { name: 'bash', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'ok' },
+      { definition: { name: 'ask_user', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'q' },
+      { definition: { name: 'ask_secret', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 's' },
+    ];
+    const stripped = stripHumanInTheLoopTools(tools);
+    expect(stripped.map(t => t.definition.name)).toEqual(['bash']);
+  });
+});
+
+describe('buildSubAgentPromptCallbacks', () => {
+  const step: ManifestStep = { id: 'vote', agent: 'vote', runtime: 'inline', task: 'Welche Tagline?' };
+
+  it('returns empty object when parent has no callbacks', () => {
+    expect(buildSubAgentPromptCallbacks(step, undefined)).toEqual({});
+  });
+
+  it('tags promptUser calls with stepId + stepTask meta', async () => {
+    const parent = vi.fn(async () => 'green');
+    const handles: SubAgentPromptHandles = { parentPromptUser: parent };
+    const cbs = buildSubAgentPromptCallbacks(step, handles);
+    const answer = await cbs.promptUser!('Pick one', ['red', 'green']);
+    expect(answer).toBe('green');
+    expect(parent).toHaveBeenCalledWith('Pick one', ['red', 'green'], { stepId: 'vote', stepTask: 'Welche Tagline?' });
+  });
+
+  it('lets the caller override step meta', async () => {
+    const parent = vi.fn(async () => 'ok');
+    const cbs = buildSubAgentPromptCallbacks(step, { parentPromptUser: parent });
+    await cbs.promptUser!('Pick', undefined, { stepId: 'override', stepTask: 'X' });
+    expect(parent).toHaveBeenCalledWith('Pick', undefined, { stepId: 'override', stepTask: 'X' });
+  });
+
+  it('consumes prompt budget when set', async () => {
+    const budget = new PromptBudget(1);
+    const parent = vi.fn(async () => 'ok');
+    const cbs = buildSubAgentPromptCallbacks(step, { parentPromptUser: parent, promptBudget: budget });
+    await cbs.promptUser!('Q1');
+    expect(budget.usedCount).toBe(1);
+    await expect(cbs.promptUser!('Q2')).rejects.toBeInstanceOf(PromptBudgetExceededError);
+    // Parent only called once — budget rejected before delegating
+    expect(parent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('spawnInline + parentPrompt propagation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  it('propagates parentPromptUser to the spawned Agent', async () => {
+    const parentPromptUser = vi.fn(async () => 'answer');
+    const step: ManifestStep = { id: 'pick', agent: 'pick', runtime: 'inline', task: 'choose' };
+    await spawnInline(
+      step, {}, mockConfig, mockParentTools, undefined, undefined, undefined,
+      { parentPromptUser },
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(typeof agentConfig['promptUser']).toBe('function');
+
+    // Invoking the wrapped callback should delegate to parent + tag meta.
+    const wrapped = agentConfig['promptUser'] as (q: string, opts?: string[]) => Promise<string>;
+    await wrapped('Q', ['a', 'b']);
+    expect(parentPromptUser).toHaveBeenCalledWith('Q', ['a', 'b'], expect.objectContaining({ stepId: 'pick', stepTask: 'choose' }));
+  });
+
+  it('strips ask_user from sub-agent tools when no parentPromptUser', async () => {
+    const toolsWithAskUser: ToolEntry[] = [
+      ...mockParentTools,
+      { definition: { name: 'ask_user', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'q' },
+    ];
+    const step: ManifestStep = { id: 'autonomous-step', agent: 'autonomous-step', runtime: 'inline', task: 'work alone' };
+    await spawnInline(step, {}, mockConfig, toolsWithAskUser);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    const tools = agentConfig['tools'] as ToolEntry[];
+    expect(tools.find(t => t.definition.name === 'ask_user')).toBeUndefined();
+  });
+
+  it('keeps ask_user in sub-agent tools when parentPromptUser is present', async () => {
+    const toolsWithAskUser: ToolEntry[] = [
+      ...mockParentTools,
+      { definition: { name: 'ask_user', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'q' },
+    ];
+    const step: ManifestStep = { id: 'interactive', agent: 'interactive', runtime: 'inline', task: 'ask' };
+    await spawnInline(
+      step, {}, mockConfig, toolsWithAskUser, undefined, undefined, undefined,
+      { parentPromptUser: vi.fn(async () => 'answer') },
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    const tools = agentConfig['tools'] as ToolEntry[];
+    expect(tools.find(t => t.definition.name === 'ask_user')).toBeDefined();
   });
 });

@@ -461,9 +461,18 @@ export class Engine {
 
     // Wire task manager if run history is available
     if (this.runHistory) {
-      const { TaskManager } = await import('./task-manager.js');
+      const { TaskManager, setPipelineModeLookup } = await import('./task-manager.js');
       this._taskManager = new TaskManager(this.runHistory);
       this._toolContext.taskManager = this._taskManager;
+      // Wire the pipeline-mode lookup so TaskManager can refuse to schedule
+      // interactive pipelines on a cron. Lazy-imported to avoid a
+      // tools→core static cycle (pipeline.ts → orchestrator → core).
+      const runHistoryRef = this.runHistory;
+      const { getPipeline } = await import('../tools/builtin/pipeline.js');
+      setPipelineModeLookup((pipelineId: string) => {
+        const planned = getPipeline(pipelineId, runHistoryRef);
+        return planned?.mode ?? null;
+      });
     }
 
     // Initialize DataStore (best-effort — never fail init)

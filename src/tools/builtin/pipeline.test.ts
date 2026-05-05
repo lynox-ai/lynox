@@ -25,6 +25,7 @@ vi.mock('../../orchestrator/validate.js', () => ({
 import {
   runPipelineTool,
   storePipeline,
+  getPipeline,
   _resetPipelineStore,
 } from './pipeline.js';
 import type { IAgent } from '../../types/index.js';
@@ -609,5 +610,92 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
     );
 
     expect(result).toContain('No previous execution found');
+  });
+});
+
+describe('getPipeline — legacy mode backfill', () => {
+  beforeEach(() => {
+    _resetPipelineStore();
+  });
+
+  it('reads back the mode that was stored', () => {
+    const pipelineId = 'modetest-1';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'modetest',
+      goal: 'g',
+      steps: [{ id: 'a', task: 'compute' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'autonomous',
+    });
+    expect(getPipeline(pipelineId)?.mode).toBe('autonomous');
+  });
+
+  it('mode survives in-memory storage roundtrip', () => {
+    const pipelineId = 'modetest-2';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'modetest',
+      goal: 'g',
+      steps: [{ id: 'q', task: 'ask_user' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'interactive',
+    });
+    expect(getPipeline(pipelineId)?.mode).toBe('interactive');
+  });
+
+  it('legacy SQLite row missing mode is auto-labelled by step inspection', () => {
+    const pipelineId = 'legacy-pipeline-1';
+    const legacyPlanned = {
+      id: pipelineId,
+      name: 'legacy',
+      goal: 'g',
+      steps: [{ id: 'a', task: 'no human stuff' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      // No `mode`, no `executionMode`, no `template` — full legacy row.
+    };
+    const fakeRunHistory = {
+      getPlannedPipeline: () => ({ id: pipelineId, manifest_json: JSON.stringify(legacyPlanned) }),
+    };
+    const planned = getPipeline(pipelineId, fakeRunHistory as never);
+    expect(planned?.mode).toBe('autonomous');
+    expect(planned?.executionMode).toBe('orchestrated');
+    expect(planned?.template).toBe(false);
+  });
+
+  it('legacy row with ask_user step is auto-labelled interactive (with warn)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const pipelineId = 'legacy-pipeline-2';
+    const legacyPlanned = {
+      id: pipelineId,
+      name: 'legacy-2',
+      goal: 'g',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+    };
+    const fakeRunHistory = {
+      getPlannedPipeline: () => ({ id: pipelineId, manifest_json: JSON.stringify(legacyPlanned) }),
+    };
+    const planned = getPipeline(pipelineId, fakeRunHistory as never);
+    expect(planned?.mode).toBe('interactive');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![0]).toMatch(/legacy pipeline/);
+    warnSpy.mockRestore();
   });
 });

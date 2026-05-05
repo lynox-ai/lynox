@@ -39,6 +39,15 @@ export interface PipelineResult {
 
 export type PipelineExecutionMode = 'tracked' | 'orchestrated';
 
+/**
+ * Pipeline interaction mode.
+ * - 'interactive' allows human-in-the-loop tools (ask_user, ask_secret) and
+ *   only runs from a live chat session.
+ * - 'autonomous' bans those tools at save time and is the only mode the
+ *   scheduler / WorkerLoop will run on a cron / API trigger.
+ */
+export type PipelineMode = 'interactive' | 'autonomous';
+
 export interface PlannedPipeline {
   id: string;
   name: string;
@@ -52,6 +61,13 @@ export interface PlannedPipeline {
   executionMode: PipelineExecutionMode;
   /** Template pipelines can be re-executed (for scheduling) */
   template: boolean;
+  /**
+   * Interaction contract.
+   * - 'interactive' = sub-agents may call ask_user / ask_secret; requires a live chat session.
+   * - 'autonomous' = no human-in-the-loop tools; eligible for cron / WorkerLoop.
+   * Defaulted on read for legacy entries (see `tools/builtin/pipeline.ts#getPipeline`).
+   */
+  mode: PipelineMode;
 }
 
 // === Process Capture ===

@@ -1,7 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
-import type { TaskRecord, TaskStatus, TaskPriority, MemoryScopeRef } from '../types/index.js';
+import type { TaskRecord, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
+
+/**
+ * Optional injection point: returns the PipelineMode for a saved pipeline ID,
+ * or null if unknown. Keeps task-manager free of a direct import on
+ * tools/builtin/pipeline.ts (which would create a cycle through orchestrator).
+ *
+ * Engine wires this at startup; tests / headless CLI can leave it unset.
+ */
+type PipelineModeLookup = (pipelineId: string) => PipelineMode | null | undefined;
+let pipelineModeLookup: PipelineModeLookup | undefined;
+
+/** Wire the pipeline-mode lookup. Called by Engine bootstrap. */
+export function setPipelineModeLookup(fn: PipelineModeLookup | undefined): void {
+  pipelineModeLookup = fn;
+}
 
 export interface TaskCreateParams {
   title: string;
@@ -61,6 +76,21 @@ export class TaskManager {
 
     if (params.dueDate && !/^\d{4}-\d{2}-\d{2}/.test(params.dueDate)) {
       throw new Error(`Invalid due_date format: ${params.dueDate}. Use YYYY-MM-DD.`);
+    }
+
+    // Reject scheduled (cron) pipelines whose mode is not 'autonomous'.
+    // The pipeline lookup is injected to avoid a tools→core import cycle;
+    // when wired (Engine.init) the validator runs synchronously here. When
+    // unwired (test fixtures, headless CLI) the check is a no-op and the
+    // WorkerLoop hard gate at execution time is the backstop.
+    if (params.scheduleCron && params.pipelineId && pipelineModeLookup) {
+      const mode = pipelineModeLookup(params.pipelineId);
+      if (mode && mode !== 'autonomous') {
+        throw new Error(
+          `Cannot schedule pipeline "${params.pipelineId}": mode is '${mode}', but only 'autonomous' pipelines can run on a cron. ` +
+          `Remove ask_user/ask_secret steps or invoke the pipeline manually from a chat session.`,
+        );
+      }
     }
 
     // Auto-trigger: if assigned to lynox with no explicit schedule/watch,

@@ -8,12 +8,13 @@ import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, type SubAgentPromptHandles } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from './types.js';
 import { GateRejectedError, GateExpiredError } from './types.js';
 import type { RunHistory } from '../core/run-history.js';
+import { PromptBudget, DEFAULT_PROMPT_BUDGET } from './prompt-budget.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -29,6 +30,18 @@ export interface RunManifestOptions {
   runHistory?: RunHistory | undefined;
   parentRunId?: string | undefined;
   autonomy?: import('../types/index.js').AutonomyLevel | undefined;
+  /**
+   * Parent session's prompt callbacks. When provided, sub-agents in this run
+   * inherit the ability to call ask_user / ask_secret; their prompts are
+   * tagged with the originating step's id + task. Omit for autonomous runs.
+   */
+  parentPrompt?: SubAgentPromptHandles | undefined;
+  /**
+   * Per-run prompt budget. When omitted, a fresh PromptBudget is created from
+   * the parent's existing budget (sub-pipelines inherit) or from the user
+   * config / default. Pipelines without parentPrompt skip budgeting entirely.
+   */
+  promptBudget?: PromptBudget | undefined;
 }
 
 const MAX_PIPELINE_DEPTH = 3;
@@ -53,6 +66,16 @@ export async function runManifest(
       `Manifest "${manifest.name ?? '(unnamed)'}" has no agents — refusing to run. ` +
       `Pass it through validateManifest() before runManifest() to surface schema errors.`,
     );
+  }
+
+  // Allocate a per-run prompt budget if the parent session provided prompt
+  // callbacks. Sub-pipelines (depth > 0) inherit the existing budget so the
+  // cap is *per top-level run*, not per sub-pipeline. Runs without callbacks
+  // (autonomous) skip the budget entirely.
+  if (options.parentPrompt && !options.parentPrompt.promptBudget) {
+    const limit = config.pipeline_prompt_budget ?? DEFAULT_PROMPT_BUDGET;
+    const budget = options.promptBudget ?? new PromptBudget(limit);
+    options.parentPrompt = { ...options.parentPrompt, promptBudget: budget };
   }
 
   const runId = randomUUID();
@@ -224,7 +247,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.parentPrompt?.promptBudget);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -237,7 +260,7 @@ async function executeStep(
       const stepModel = resolveModelForCost(step, 'sonnet');
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -246,7 +269,7 @@ async function executeStep(
       const stepModel = resolveModelForCost(step, agentDef.defaultTier);
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(costUsd - stepEstimate); // correct estimate to actual
     }

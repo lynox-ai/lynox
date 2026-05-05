@@ -11,15 +11,31 @@ export interface TabQuestion {
   options?: string[] | undefined;
 }
 
+/**
+ * Optional metadata threaded through prompt callbacks so the surfacing
+ * layer (HTTP API SSE, MCP, CLI) can tag the prompt with the originating
+ * pipeline step. Sub-agent spawners populate this when a pipeline step
+ * triggers ask_user / ask_secret; the main-agent ask_user path leaves it
+ * undefined.
+ */
+export interface PromptMeta {
+  stepId?: string | undefined;
+  stepTask?: string | undefined;
+}
+
+export type PromptUserFn = (question: string, options?: string[], meta?: PromptMeta) => Promise<string>;
+export type PromptTabsFn = (questions: TabQuestion[], meta?: PromptMeta) => Promise<string[]>;
+export type PromptSecretFn = (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => Promise<boolean>;
+
 export interface IAgent {
   readonly name:   string;
   readonly model:  string;
   readonly memory: IMemory | null;
   readonly tools:  ToolEntry[];
   onStream:        StreamHandler | null;
-  promptUser?: ((question: string, options?: string[]) => Promise<string>) | undefined;
-  promptTabs?: ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
-  promptSecret?: ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
+  promptUser?: PromptUserFn | undefined;
+  promptTabs?: PromptTabsFn | undefined;
+  promptSecret?: PromptSecretFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   readonly spawnDepth?: number | undefined;
