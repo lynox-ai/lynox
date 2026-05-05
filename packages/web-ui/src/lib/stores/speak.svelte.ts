@@ -69,7 +69,15 @@ let state = $state<SpeakState>('idle');
 let activeKey = $state<string | null>(null);
 
 let audioEl: HTMLAudioElement | null = null;
+// Long-lived AudioContext, reused across playbacks. iOS Safari refuses to
+// play audio from a context that wasn't constructed inside a synchronous
+// click handler — and after the fetch await in `playSpeech`, the user-gesture
+// flag is gone. So we lazy-create on the first synchronous prime() call and
+// keep the same context alive for all subsequent playbacks. `stopSpeech`
+// cancels in-flight sources via the activeSources Set instead of closing
+// the context.
 let audioContext: AudioContext | null = null;
+const activeSources = new Set<AudioBufferSourceNode>();
 let abortCtrl: AbortController | null = null;
 let objectUrl: string | null = null;
 
@@ -117,12 +125,16 @@ export function stopSpeech(): void {
 		audioEl.src = '';
 		audioEl = null;
 	}
-	if (audioContext) {
-		// Closing an AudioContext implicitly stops every scheduled buffer source —
-		// no need to track + stop them individually.
-		try { void audioContext.close(); } catch { /* already closed */ }
-		audioContext = null;
+	// Stop in-flight buffer sources but DO NOT close the AudioContext —
+	// closing it would force re-creation on the next playSpeech, which
+	// iOS only permits inside a synchronous click handler. By keeping the
+	// same context alive we can keep playing audio for the whole session
+	// even on auto-speak (where the second-and-later play calls are not
+	// on a user-gesture stack).
+	for (const src of activeSources) {
+		try { src.stop(); src.disconnect(); } catch { /* already stopped */ }
 	}
+	activeSources.clear();
 	if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
 	// Manual stop → drop any auto-speak items the user no longer wants.
 	playbackQueue.length = 0;
@@ -161,6 +173,34 @@ function getAudioCtxCtor(): typeof AudioContext | null {
 }
 
 /**
+ * iOS-safe AudioContext priming. Must be called SYNCHRONOUSLY from a user
+ * gesture (click/tap) — we hoist this to the top of `playSpeech` so it
+ * runs before the fetch await, while the gesture flag is still on the
+ * call stack. `resume()` is dispatched without await so the gesture is
+ * preserved through the call (awaiting a microtask works on Chrome but
+ * not iOS Safari). Idempotent: subsequent calls with an already-running
+ * context are a no-op; if the context auto-suspended (long idle, tab
+ * blur), we attempt to resume.
+ *
+ * Pre-2026-05-05 the AudioContext was created inside `playViaWebAudio`,
+ * after the fetch await — that worked on desktop Chrome but iOS silently
+ * muted it because the gesture flag was already consumed. This fix
+ * unblocks both the per-message speak button and auto-speak playback on
+ * iOS PWA / Safari.
+ */
+function primeAudio(): AudioContext | null {
+	const Ctor = getAudioCtxCtor();
+	if (!Ctor) return null;
+	if (!audioContext) {
+		try { audioContext = new Ctor(); } catch { return null; }
+	}
+	if (audioContext.state === 'suspended') {
+		void audioContext.resume();
+	}
+	return audioContext;
+}
+
+/**
  * Start TTS for `text`. Playback begins as soon as audio data is decodable
  * (~100 ms after first chunk on Web Audio path). Returns null on success or
  * a `SpeakError` the caller surfaces via i18n.
@@ -169,6 +209,10 @@ export async function playSpeech(text: string, key: string): Promise<SpeakError 
 	stopSpeech();
 	state = 'synthesizing';
 	activeKey = key;
+
+	// iOS-safe: prime the AudioContext SYNCHRONOUSLY before any await.
+	// See `primeAudio` for the gesture-flag rationale.
+	primeAudio();
 
 	const ctrl = new AbortController();
 	abortCtrl = ctrl;
@@ -199,21 +243,17 @@ export async function playSpeech(text: string, key: string): Promise<SpeakError 
 		return { code: 'http', status: res.status };
 	}
 
-	return getAudioCtxCtor()
+	return audioContext
 		? playViaWebAudio(res.body, ctrl)
 		: playViaBlob(res.body, ctrl);
 }
 
 async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<SpeakError | null> {
-	const Ctor = getAudioCtxCtor();
-	if (!Ctor) return playViaBlob(body, ctrl);
-
-	const ctx = new Ctor();
-	audioContext = ctx;
-	// Chrome's autoplay policy lands fresh contexts in `suspended` unless the
-	// originating click bubbled synchronously into the constructor. We're
-	// already async (awaited fetch) before this point, so explicitly resume.
-	try { await ctx.resume(); } catch { /* ignore — playback may still work */ }
+	const ctx = audioContext;
+	if (!ctx) return playViaBlob(body, ctrl);
+	// `primeAudio` already created + resumed this context inside the user-gesture
+	// stack at the top of `playSpeech`. Don't recreate or re-resume here — that
+	// extra resume() awaited from outside the gesture is exactly what iOS rejects.
 
 	let nextStartTime = 0;
 	let started = false;
@@ -237,6 +277,10 @@ async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortCont
 		}
 		src.start(nextStartTime);
 		nextStartTime += buf.duration;
+		// Track for cancellation by `stopSpeech` (which no longer closes the
+		// context). Auto-remove on natural end so the Set doesn't leak.
+		activeSources.add(src);
+		src.addEventListener('ended', () => activeSources.delete(src));
 		lastSource = src;
 	};
 
@@ -289,15 +333,16 @@ async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortCont
 	}
 
 	// Last scheduled buffer: fire the end-of-playback hook when it finishes.
-	finalSource.onended = () => {
+	// Don't null/close the context — keep it alive for the next playSpeech
+	// (auto-speak chains this without a user gesture, so reusing a running
+	// context is the only path on iOS).
+	finalSource.addEventListener('ended', () => {
 		if (audioContext !== ctx) return;
-		audioContext = null;
 		state = 'idle';
 		activeKey = null;
 		abortCtrl = null;
-		try { void ctx.close(); } catch { /* already closed */ }
 		drainQueue();
-	};
+	});
 
 	return null;
 }
@@ -353,10 +398,11 @@ async function playViaBlob(body: ReadableStream<Uint8Array>, ctrl: AbortControll
 
 function resetOnError(): void {
 	if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
-	if (audioContext) {
-		try { void audioContext.close(); } catch { /* already closed */ }
-		audioContext = null;
+	// Stop in-flight sources but keep the AudioContext alive — see stopSpeech.
+	for (const src of activeSources) {
+		try { src.stop(); src.disconnect(); } catch { /* already stopped */ }
 	}
+	activeSources.clear();
 	audioEl = null;
 	abortCtrl = null;
 	state = 'idle';

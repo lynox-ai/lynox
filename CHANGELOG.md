@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.10 — 2026-05-05
+
+### Fixed
+
+- **iOS TTS audio playback** — the speak button (per-message + auto-speak) returned audio chunks from the server but stayed silent on iOS PWA / Safari. Root cause: `AudioContext` was constructed AFTER `await fetch('/api/speak')`, so the user-gesture flag was already consumed by the time iOS WebKit decided whether to allow audio. Now the context is created + resumed synchronously at the top of `playSpeech`, before any await, and reused across the session (instead of close-and-recreate per call). Active source nodes are tracked in a Set so `stopSpeech` can cancel without closing the context. Caught on canary verification of v1.3.9 by Rafael — affects every iOS user. (#253)
+
 ## 1.3.9 — 2026-05-05
 
 ### Added
