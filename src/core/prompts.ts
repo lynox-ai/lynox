@@ -120,14 +120,51 @@ The user is a developer. Adjust your communication style:
 - For setup instructions, include both UI and CLI/config options`;
 
 /**
- * Hour-truncated current datetime + weekday.
- * Hour granularity keeps prompt caching effective (cache breaks hourly, not per minute).
+ * Hour-truncated current datetime + weekday for the cached system prompt.
+ * Hour granularity keeps Anthropic prompt caching effective (the cache key
+ * breaks hourly, not per minute). For sub-hour precision the agent reads
+ * the per-turn `[Now: …Z]` prefix injected by `withCurrentTimePrefix` —
+ * that line lives in the user message so it never invalidates the cached
+ * system prefix.
  */
 export function currentDateContext(): string {
   const now = new Date();
   const iso = now.toISOString().slice(0, 13) + ':00:00Z';
   const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
-  return `\n\n**Now**: ${iso} (${weekday} UTC). Use this when computing future timestamps for \`run_at\` ("tomorrow 9am" → next day's date at 09:00, "in 2h" → now + 2 hours).`;
+  return `\n\n**Now (hour-precision)**: ${iso} (${weekday} UTC). For sub-hour scheduling ("in 5 min", "now"), use the precise \`[Now: …Z]\` line at the start of each user message instead — that's wallclock-accurate while this hour-truncated value can lag by up to 59 minutes.`;
+}
+
+/**
+ * Prepend a precise current-time marker to the next user message. Lives
+ * outside the cached system prompt so we get wallclock-accuracy without
+ * invalidating Anthropic's prompt cache. Wired into Session.run() AND
+ * the orchestrator + spawn paths so any code that schedules a time-
+ * sensitive task — top-level chat, pipeline step, spawned sub-agent —
+ * anchors on the same wallclock.
+ *
+ * Caller passes whatever shape `agent.send()` accepts — string or a
+ * multimodal content array — and gets the same shape back with the time
+ * prefix attached. Already-prefixed inputs pass through unchanged so a
+ * future double-decorator (e.g. Telegram pre-prepending) doesn't end up
+ * with two markers.
+ */
+const NOW_MARKER_PREFIX = '[Now:';
+
+export function withCurrentTimePrefix(userMessage: string | unknown[]): string | unknown[] {
+  const isoNow = new Date().toISOString();
+  const marker = `${NOW_MARKER_PREFIX} ${isoNow}]`;
+  if (typeof userMessage === 'string') {
+    if (userMessage.startsWith(NOW_MARKER_PREFIX)) return userMessage;
+    return `${marker}\n\n${userMessage}`;
+  }
+  if (Array.isArray(userMessage)) {
+    const first = userMessage[0] as { type?: unknown; text?: unknown } | undefined;
+    if (first?.type === 'text' && typeof first.text === 'string' && first.text.startsWith(NOW_MARKER_PREFIX)) {
+      return userMessage;
+    }
+    return [{ type: 'text' as const, text: marker }, ...userMessage];
+  }
+  return userMessage;
 }
 
 export const SYSTEM_PROMPT = `You are lynox — a digital coworker that learns the user's business. You explore systems, understand processes, analyze data, and automate what repeats. Cycle: Explore → Understand → Automate → Act proactively.

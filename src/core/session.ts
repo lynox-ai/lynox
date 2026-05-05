@@ -39,6 +39,7 @@ import {
   CRM_PROMPT_SUFFIX,
   DEVELOPER_PROMPT_SUFFIX,
   currentDateContext,
+  withCurrentTimePrefix,
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
@@ -421,7 +422,10 @@ export class Session {
     }
 
     try {
-      const result = await this.agent.send(task);
+      // Per-turn precise time, outside the hour-truncated cached system
+      // prompt so the model gets wallclock-accuracy without breaking
+      // Anthropic's prompt cache.
+      const result = await this.agent.send(withCurrentTimePrefix(task));
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
       if (!this._briefingConsumed && this.briefing) {
