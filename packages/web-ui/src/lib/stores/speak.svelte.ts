@@ -152,15 +152,13 @@ function isIosSafari(): boolean {
 	return true;
 }
 
-// 44-byte zero-data WAV (8 kHz, mono, 8-bit). Used to prime the iOS video
-// element synchronously inside the user-gesture stack: a play() attempt
-// with this src is enough for iOS to mark the element "user-activated",
-// after which we can swap src to the real MP3 blob and call play() again
-// outside the gesture. WAV chosen over MP3 because the header structure
-// is fully validatable (no codec parser quirks across iOS versions) and
-// 44 bytes inlines cheaply. Hex of the bytes is in the generator comment.
-const SILENT_PLACEHOLDER_DATA_URL =
-	'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+// 44-byte zero-data WAV at /silent.wav (8 kHz, mono, 8-bit, 0 audio bytes).
+// Static asset rather than `data:` URL because the app's CSP
+// (`media-src 'self' blob:` in hooks.server.ts) blocks `data:` for media —
+// iOS would reject the prime silently and the gesture-priming step would
+// no-op without a Console hint. Same-origin static path passes CSP and
+// caches across pages.
+const SILENT_PLACEHOLDER_URL = '/silent.wav';
 
 function destroyVideoEl(): void {
 	if (!videoEl) return;
@@ -274,8 +272,9 @@ function primeAudio(): AudioContext | null {
 
 /**
  * iOS Safari priming: create a hidden `<video playsinline>` and call
- * play() on a 100ms silent MP3 SYNCHRONOUSLY inside the user-gesture
- * stack. This consumes the gesture flag against the video element, after
+ * play() on a 44-byte silent WAV (`/silent.wav`) SYNCHRONOUSLY inside
+ * the user-gesture stack. This consumes the gesture flag against the
+ * video element, after
  * which iOS treats it as user-activated for the rest of its lifetime —
  * we can swap `src` and call `play()` again from a microtask without
  * iOS rejecting it. Without this prime, `playViaVideoElement` runs into
@@ -298,7 +297,7 @@ function primeVideoElement(): HTMLVideoElement | null {
 	v.preload = 'auto';
 	v.muted = false;
 	v.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
-	v.src = SILENT_PLACEHOLDER_DATA_URL;
+	v.src = SILENT_PLACEHOLDER_URL;
 	document.body.appendChild(v);
 	videoEl = v;
 	v.play().catch(() => { /* placeholder play may reject; gesture still primed */ });
@@ -400,6 +399,13 @@ async function playViaVideoElement(body: ReadableStream<Uint8Array>, ctrl: Abort
 	video.onended = () => {
 		if (videoEl !== video) return;
 		if (objectUrl === url) { URL.revokeObjectURL(url); objectUrl = null; }
+		// Tear the element down so the next playSpeech re-primes a fresh
+		// one inside its user-gesture stack — keeping the old element alive
+		// across utterances would let primeVideoElement's `if (videoEl)
+		// return videoEl` short-circuit, and there's no benefit to that
+		// since stopSpeech (called at the top of every playSpeech) would
+		// destroy it anyway.
+		destroyVideoEl();
 		state = 'idle';
 		activeKey = null;
 		abortCtrl = null;
