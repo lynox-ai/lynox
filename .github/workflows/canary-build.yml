@@ -74,6 +74,10 @@ jobs:
           context: .
           load: true
           tags: ghcr.io/lynox-ai/lynox:scan-canary
+          # Same build-args as the push step below so trivy scans the same
+          # layers we ship and the gha cache is shared.
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -98,6 +102,8 @@ jobs:
             org.opencontainers.image.created=${{ steps.meta.outputs.created }}
             org.opencontainers.image.source=https://github.com/lynox-ai/lynox
             lynox.canary.branch=${{ github.ref_name }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

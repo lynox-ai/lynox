@@ -242,9 +242,17 @@ export class LynoxHTTPApi {
     const threadStore = this.engine?.getThreadStore();
     const threadCount = threadStore ? threadStore.listThreads({ limit: 200 }).length : 0;
 
+    // BUILD_SHA is baked into the production Dockerfile via --build-arg.
+    // Empty in dev images and any locally-built container that didn't pass
+    // the arg, so we expose it as `build_sha: null` in those cases — null
+    // means "version-only verification, no SHA gate". UpdateManager reads
+    // this for non-semver rollouts (`:staging`, `:latest`) where PKG_VERSION
+    // alone can't distinguish two builds.
+    const buildSha = process.env['BUILD_SHA'];
     const data: Record<string, unknown> = {
       status: 'ok',
       version: PKG_VERSION,
+      build_sha: buildSha && buildSha.length > 0 ? buildSha : null,
       uptime_s: Math.floor(process.uptime()),
       process: {
         memory_used_mb: Math.round(mem.heapUsed / (1024 * 1024)),

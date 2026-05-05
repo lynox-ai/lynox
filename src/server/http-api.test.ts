@@ -195,6 +195,21 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as { status: string };
       expect(body.status).toBe('ok');
     });
+
+    it('exposes build_sha (null when BUILD_SHA env is unset)', async () => {
+      // The field must always be present so UpdateManager doesn't have to
+      // distinguish "old engine that never exposed it" from "engine that
+      // ran without a SHA injected at build time" — both are null, both
+      // mean "version-only verification" (= pre-PR-#90 behaviour).
+      // The non-null path is a single-line projection of process.env.BUILD_SHA
+      // and is exercised end-to-end by the staging-engine-redeploy CI flow,
+      // which is the only place where the env actually gets set.
+      const res = await fetch(`${baseUrl}/health`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { build_sha: string | null };
+      expect(body).toHaveProperty('build_sha');
+      expect(body.build_sha).toBeNull();
+    });
   });
 
   describe('auth', () => {
