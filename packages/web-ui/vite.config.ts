@@ -17,6 +17,13 @@ const pkg = JSON.parse(
 	readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf-8'),
 ) as { version: string };
 
+// BUILD_SHA detects the more common case: the package.json `version` is the
+// same across two deploys (most patches don't bump it) but immutable chunk
+// hashes differ. Without per-build comparison the StatusBar toast misses
+// these. CI passes BUILD_SHA via Dockerfile build-arg; falls back to empty
+// string in local dev (in which case the SHA arm of the comparison is a no-op).
+const BUILD_SHA = process.env['BUILD_SHA'] ?? '';
+
 export default defineConfig({
 	plugins: [
 		tailwindcss(),
@@ -32,6 +39,7 @@ export default defineConfig({
 	envPrefix: ['VITE_', 'PUBLIC_'],
 	define: {
 		__LYNOX_WEB_UI_VERSION__: JSON.stringify(pkg.version),
+		__LYNOX_BUILD_SHA__: JSON.stringify(BUILD_SHA),
 	},
 	server: {
 		allowedHosts: true,

@@ -35,6 +35,12 @@ RUN pnpm run build
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS build-webui
 WORKDIR /app
 
+# Bake the build SHA into the web-ui bundle so the running client can detect
+# a stale-cache mismatch against the engine's /api/health.build_sha. CI passes
+# this via --build-arg BUILD_SHA=$GITHUB_SHA in staging.yml.
+ARG BUILD_SHA=
+ENV BUILD_SHA=${BUILD_SHA}
+
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 COPY packages/web-ui/package.json packages/web-ui/package.json
