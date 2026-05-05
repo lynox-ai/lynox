@@ -710,16 +710,14 @@
 							if (isVoiceAutoSendEnabled()) {
 								await sendMessage(`🎤 ${trimmed}`);
 							} else {
-								inputText = trimmed;
+								// Append rather than replace so a typed prefix isn't
+								// clobbered when the user dictates after typing.
+								const existing = inputText.trimEnd();
+								inputText = existing ? `${existing} ${trimmed}` : trimmed;
 								void tick().then(() => {
 									if (!textareaEl) return;
-									textareaEl.style.height = 'auto';
-									textareaEl.style.height = textareaEl.scrollHeight + 'px';
+									autoResize({ target: textareaEl } as unknown as Event);
 									textareaEl.focus();
-									// Cursor at end so the user can keep dictating or
-									// finish the message naturally.
-									const len = textareaEl.value.length;
-									textareaEl.setSelectionRange(len, len);
 								});
 							}
 						}

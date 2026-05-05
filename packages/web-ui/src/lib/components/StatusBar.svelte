@@ -221,7 +221,7 @@
 	{/if}
 {/snippet}
 
-<!-- Mobile: minimal engine indicator + auto-speak toggle -->
+<!-- Mobile: minimal engine indicator + voice auto-send + auto-speak toggles -->
 <div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2 pb-[env(safe-area-inset-bottom)]">
 	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
