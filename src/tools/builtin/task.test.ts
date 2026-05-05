@@ -338,7 +338,7 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Error');
-      expect(result).toContain('Invalid nextRunAt');
+      expect(result).toContain('Invalid run_at');
     });
 
     it('rejects passing both run_at and schedule simultaneously', async () => {
@@ -362,6 +362,88 @@ describe('Task Tools', () => {
       );
       const updated = tm.list().find((t) => t.id === task.id);
       expect(updated?.next_run_at).toBe('2026-05-06T14:30:00.000Z');
+      expect(updated?.schedule_cron).toBeFalsy();
+    });
+
+    it('switching run_at -> schedule recomputes next_run_at (inverse direction)', async () => {
+      // Symmetric to the cron-clear test above: a one-shot moved onto a
+      // recurring cadence must drop its old run_at and pick up the next
+      // fire computed from the new cron.
+      const task = tm.create({ title: 'Was one-shot', assignee: 'lynox', run_at: '2026-05-06T09:00:00Z' });
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, schedule: '0 14 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain('Task updated');
+      const updated = tm.list().find((t) => t.id === task.id);
+      expect(updated?.schedule_cron).toBe('0 14 * * *');
+      // The new next_run_at must NOT be the original one-shot value —
+      // worker would otherwise fire at the stale time before the cron
+      // schedule kicks in.
+      expect(updated?.next_run_at).toBeTruthy();
+      expect(updated?.next_run_at).not.toBe('2026-05-06T09:00:00.000Z');
+    });
+
+    it('rejects an invalid cron schedule with a clear error (symmetric to invalid run_at)', async () => {
+      const task = tm.create({ title: 'Bad cron' });
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, schedule: 'not-a-cron' },
+        makeAgent(),
+      );
+      expect(result).toContain('Error');
+      expect(result).toContain('Invalid schedule');
+    });
+
+    it('clears schedule when an empty string is passed (un-schedule, also clears next_run_at)', async () => {
+      // Pre-PR semantic gap: clearing scheduleCron alone left the stale
+      // next_run_at, so the worker would fire the recurring task one
+      // last time and only THEN fall into the completion branch. Now
+      // both fields move together.
+      const task = tm.createScheduled({ title: 'Stop firing', scheduleCron: '0 9 * * *' });
+      expect(task.next_run_at).toBeTruthy();
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, schedule: '' },
+        makeAgent(),
+      );
+      expect(result).toContain('Task updated');
+      const updated = tm.list().find((t) => t.id === task.id);
+      expect(updated?.schedule_cron).toBeFalsy();
+      expect(updated?.next_run_at).toBeFalsy();
+    });
+
+    it('completion short-circuits before any reschedule fields are applied', async () => {
+      // Pin the precedence in case an agent sends both at once. The
+      // tool routes status='completed' through TaskManager.complete()
+      // which IGNORES run_at/schedule. If a future caller wanted to
+      // reschedule a completed task they have to reopen it first.
+      // (Note: TaskManager.create() takes `nextRunAt`, not `run_at` —
+      // `run_at` is the tool-layer field name. Hence the camelCase here.)
+      const task = tm.create({ title: 'Done plus reschedule', assignee: 'lynox', nextRunAt: '2026-05-06T09:00:00.000Z' });
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, status: 'completed', run_at: '2026-05-06T14:30:00Z' },
+        makeAgent(),
+      );
+      expect(result).toContain('Task completed');
+      const updated = tm.list().find((t) => t.id === task.id);
+      expect(updated?.status).toBe('completed');
+      // Completion runs through `complete()`, not `update()`, so run_at
+      // stays at its original value (not the requested 14:30).
+      expect(updated?.next_run_at).toBe('2026-05-06T09:00:00.000Z');
+    });
+
+    // Pre-PR: clearing run_at alone disabled the task silently when it
+    // had a recurring cron — worker stopped firing because next_run_at
+    // was null but cron was still in the row. The clear-both semantic
+    // means run_at: '' fully un-schedules.
+    it('clears run_at + schedule together when run_at is set to empty string', async () => {
+      const task = tm.createScheduled({ title: 'Stop me too', scheduleCron: '0 9 * * *' });
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, run_at: '' },
+        makeAgent(),
+      );
+      expect(result).toContain('Task updated');
+      const updated = tm.list().find((t) => t.id === task.id);
+      expect(updated?.next_run_at).toBeFalsy();
       expect(updated?.schedule_cron).toBeFalsy();
     });
   });
