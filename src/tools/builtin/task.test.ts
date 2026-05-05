@@ -281,6 +281,89 @@ describe('Task Tools', () => {
       );
       expect(result).toContain('not found');
     });
+
+    // 2026-05-05 incident: agent typed "in 5 min", server time was hour-stale,
+    // tried task_update to fix the schedule, found no run_at field on the
+    // tool, fell back to delete-and-recreate (and forgot to delete) → two
+    // tasks. These tests pin the rescheduling contract.
+    it('reschedules a one-shot task via run_at', async () => {
+      const task = tm.create({ title: 'Reminder', assignee: 'lynox', run_at: '2026-05-06T09:00:00Z' });
+      // TaskManager normalises every input via `new Date(...).toISOString()`
+      // so SQLite's lexicographic `next_run_at <= now` comparison stays
+      // monotonic even if the agent submits two slightly different ISO
+      // shapes (e.g. with vs. without milliseconds). Tests assert against
+      // the normalised form.
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, run_at: '2026-05-06T14:30:00Z' },
+        makeAgent(),
+      );
+      expect(result).toContain('Task updated');
+      expect(result).toContain('2026-05-06T14:30:00.000Z');
+      const updated = tm.list().find((t) => t.id === task.id);
+      expect(updated?.next_run_at).toBe('2026-05-06T14:30:00.000Z');
+    });
+
+    it('reschedules a recurring task via schedule (recomputes next_run_at)', async () => {
+      const task = tm.createScheduled({ title: 'Daily', scheduleCron: '0 9 * * *' });
+      const before = task.next_run_at;
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, schedule: '0 14 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain('Task updated');
+      const updated = tm.list().find((t) => t.id === task.id);
+      expect(updated?.schedule_cron).toBe('0 14 * * *');
+      expect(updated?.next_run_at).toBeTruthy();
+      // The next-run timestamp must change — otherwise the worker keeps
+      // firing at the old time despite the schedule edit.
+      expect(updated?.next_run_at).not.toBe(before);
+    });
+
+    it('clears run_at when an empty string is passed (un-schedule, keep open)', async () => {
+      const task = tm.create({ title: 'Cancel reminder', assignee: 'lynox', run_at: '2026-05-06T09:00:00Z' });
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, run_at: '' },
+        makeAgent(),
+      );
+      expect(result).toContain('Task updated');
+      const updated = tm.list().find((t) => t.id === task.id);
+      expect(updated?.next_run_at).toBeFalsy();
+      expect(updated?.status).toBe('open');
+    });
+
+    it('rejects an invalid run_at with a clear error', async () => {
+      const task = tm.create({ title: 'Bad reschedule' });
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, run_at: 'not-a-date' },
+        makeAgent(),
+      );
+      expect(result).toContain('Error');
+      expect(result).toContain('Invalid nextRunAt');
+    });
+
+    it('rejects passing both run_at and schedule simultaneously', async () => {
+      const task = tm.create({ title: 'Conflict' });
+      const result = await taskUpdateTool.handler(
+        { task_id: task.id, run_at: '2026-05-06T09:00:00Z', schedule: '0 9 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain('Error');
+      expect(result).toMatch(/mutually exclusive|only one/i);
+    });
+
+    it('switching schedule -> run_at clears the cron (and vice versa)', async () => {
+      // Without this clear, a task with both fields set would re-fire on
+      // the old recurring cadence even after the agent thinks it moved
+      // it to a one-shot run. Pin the implicit-clear contract.
+      const task = tm.createScheduled({ title: 'Was recurring', scheduleCron: '0 9 * * *' });
+      await taskUpdateTool.handler(
+        { task_id: task.id, run_at: '2026-05-06T14:30:00Z' },
+        makeAgent(),
+      );
+      const updated = tm.list().find((t) => t.id === task.id);
+      expect(updated?.next_run_at).toBe('2026-05-06T14:30:00.000Z');
+      expect(updated?.schedule_cron).toBeFalsy();
+    });
   });
 
   describe('task_list', () => {

@@ -30,6 +30,13 @@ export interface TaskUpdateParams {
   assignee?: string | undefined;
   dueDate?: string | undefined;
   tags?: string[] | undefined;
+  /** Reschedule a one-shot task. ISO 8601. Empty string clears the
+   *  schedule (un-schedule without deleting). Mutually exclusive with
+   *  scheduleCron. */
+  nextRunAt?: string | undefined;
+  /** Reschedule a recurring task. Standard cron or shorthand (e.g. '30m').
+   *  Empty string clears the schedule. Mutually exclusive with nextRunAt. */
+  scheduleCron?: string | undefined;
 }
 
 export interface WeekSummary {
@@ -132,6 +139,17 @@ export class TaskManager {
       throw new Error(`Invalid priority: ${params.priority}`);
     }
 
+    if (params.nextRunAt !== undefined && params.scheduleCron !== undefined
+        && params.nextRunAt !== '' && params.scheduleCron !== '') {
+      throw new Error('nextRunAt and scheduleCron are mutually exclusive — pass only one (or empty strings to clear).');
+    }
+    if (params.nextRunAt && Number.isNaN(Date.parse(params.nextRunAt))) {
+      throw new Error(`Invalid nextRunAt: ${params.nextRunAt}. Use ISO 8601 datetime.`);
+    }
+    if (params.scheduleCron && !isValidCron(params.scheduleCron)) {
+      throw new Error(`Invalid cron expression: ${params.scheduleCron}`);
+    }
+
     const updateParams: {
       title?: string | undefined;
       description?: string | undefined;
@@ -141,6 +159,8 @@ export class TaskManager {
       dueDate?: string | undefined;
       tags?: string | undefined;
       completedAt?: string | undefined;
+      nextRunAt?: string | undefined;
+      scheduleCron?: string | undefined;
     } = {};
 
     if (params.title !== undefined) updateParams.title = params.title;
@@ -150,6 +170,26 @@ export class TaskManager {
     if (params.assignee !== undefined) updateParams.assignee = params.assignee;
     if (params.dueDate !== undefined) updateParams.dueDate = params.dueDate ? params.dueDate.slice(0, 10) : '';
     if (params.tags !== undefined) updateParams.tags = params.tags ? JSON.stringify(params.tags) : '';
+
+    if (params.nextRunAt !== undefined) {
+      // Empty string clears; otherwise normalise to ISO so downstream
+      // (worker-loop's `next_run_at <= now` comparison) gets a value the
+      // SQLite `<=` ordering can compare lexicographically.
+      updateParams.nextRunAt = params.nextRunAt ? new Date(params.nextRunAt).toISOString() : '';
+      // Setting nextRunAt implicitly clears scheduleCron, and vice versa.
+      // The mutually-exclusive guard above means this branch only runs
+      // when the OTHER value isn't being set in this same call.
+      if (params.scheduleCron === undefined && params.nextRunAt) {
+        updateParams.scheduleCron = '';
+      }
+    }
+    if (params.scheduleCron !== undefined) {
+      updateParams.scheduleCron = params.scheduleCron;
+      if (params.nextRunAt === undefined && params.scheduleCron) {
+        // For a recurring task, recompute nextRunAt from the new cron.
+        updateParams.nextRunAt = nextOccurrence(params.scheduleCron).toISOString();
+      }
+    }
 
     if (params.status === 'completed' && task.status !== 'completed') {
       updateParams.completedAt = new Date().toISOString();

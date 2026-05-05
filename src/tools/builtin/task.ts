@@ -29,6 +29,8 @@ interface TaskUpdateInput {
   title?: string | undefined;
   description?: string | undefined;
   tags?: string[] | undefined;
+  run_at?: string | undefined;
+  schedule?: string | undefined;
 }
 
 interface TaskListInput {
@@ -181,7 +183,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
 export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
   definition: {
     name: 'task_update',
-    description: 'Update task status, priority, assignee, due date, or other fields.',
+    description: 'Update task fields including its execution schedule. Use `run_at` to reschedule a one-shot task ("move it to tomorrow 9am") or `schedule` to switch a recurring cadence — preferred over delete-and-recreate.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -194,6 +196,8 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         title: { type: 'string', description: 'New title' },
         description: { type: 'string', description: 'New description' },
         tags: { type: 'array', items: { type: 'string' }, description: 'New tags (replaces existing)' },
+        run_at: { type: 'string', description: 'Reschedule a one-shot task to a new ISO 8601 datetime ("2026-04-25T09:00:00"). Empty string un-schedules (keeps task open). Mutually exclusive with `schedule` — switches the task off any recurring cadence.' },
+        schedule: { type: 'string', description: 'Reschedule a recurring task to a new cron (\'0 8 * * *\') or shorthand (\'30m\', \'1h\', \'1d\'). Empty string clears recurrence. Mutually exclusive with `run_at`. Recomputes the next run automatically.' },
       },
       required: ['task_id'],
     },
@@ -217,9 +221,19 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         assignee: input.assignee,
         dueDate: input.due_date,
         tags: input.tags,
+        nextRunAt: input.run_at,
+        scheduleCron: input.schedule,
       });
       if (!task) return `Task not found: ${input.task_id}`;
-      return `Task updated: ${formatTaskLine(task)}`;
+      // Surface the new schedule when it changed so the agent can confirm
+      // the reschedule landed (mirrors the create path's "scheduled for …"
+      // string, which the LLM is already trained to read back).
+      const scheduleNote = task.next_run_at
+        ? ` — next run: ${task.next_run_at}`
+        : task.schedule_cron
+          ? ` — schedule: ${task.schedule_cron}`
+          : '';
+      return `Task updated: ${formatTaskLine(task)}${scheduleNote}`;
     } catch (e: unknown) {
       logErrorChain('task_update', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
