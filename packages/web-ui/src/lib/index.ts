@@ -29,13 +29,15 @@ export { default as ChangesetReview } from './components/ChangesetReview.svelte'
 export { default as ToastContainer } from './components/ToastContainer.svelte';
 export { default as MobileAccess } from './components/MobileAccess.svelte';
 export { default as MigrationWizard } from './components/MigrationWizard.svelte';
+export { default as PipelineStatusBar } from './components/PipelineStatusBar.svelte';
+export { default as PromptAnchor } from './components/PromptAnchor.svelte';
 
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';
 export type { Toast } from './stores/toast.svelte.js';
 
 // Config
-export { configure, getApiBase } from './config.svelte.js';
+export { configure, getApiBase, getPipelineStatusV2 } from './config.svelte.js';
 
 // i18n
 export { t, setLocale, getLocale, initLocale } from './i18n.svelte.js';
@@ -53,6 +55,10 @@ export {
 	getMessages,
 	getIsStreaming,
 	getPendingPermission,
+	getActiveRun,
+	getPendingPrompt,
+	getRunStartedAt,
+	getRunPromptCount,
 	getChatError,
 	getAuthError,
 	clearError,
@@ -80,6 +86,9 @@ export type {
 	ContextBudget,
 	ChangesetFileInfo,
 	RunOptions,
+	ActiveRun,
+	PendingPromptHead,
+	PromptKind,
 } from './stores/chat.svelte.js';
 
 // Thread store

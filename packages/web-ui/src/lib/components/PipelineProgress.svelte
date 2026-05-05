@@ -3,9 +3,13 @@
 
 	interface Props {
 		pipeline: PipelineInfo;
+		/** When true, the currently-running step is parked on a user prompt.
+		 *  The step renders in the violet/blue waiting-on-user style with a
+		 *  🤚 marker, distinct from "compute is happening" orange. */
+		waitingOnUser?: boolean;
 	}
 
-	let { pipeline }: Props = $props();
+	let { pipeline, waitingOnUser = false }: Props = $props();
 
 	// Compute phases from dependency graph (same Kahn's logic as the engine)
 	function computePhases(steps: PipelineStepInfo[]): PipelineStepInfo[][] {
@@ -92,17 +96,21 @@
 			<!-- Phase steps (parallel = side by side) -->
 			<div class="flex gap-1.5 {phase.length === 1 ? 'justify-center' : ''}">
 				{#each phase as step (step.id)}
+					{@const isWaiting = step.status === 'running' && waitingOnUser}
 					<div
 						class="flex-1 min-w-0 rounded-[var(--radius-sm)] border px-2.5 md:px-2 py-1.5 md:py-1 text-sm md:text-xs transition-colors
 							{step.status === 'completed' ? 'border-success/30 bg-success/5' :
 							 step.status === 'failed' ? 'border-danger/30 bg-danger/5' :
+							 isWaiting ? 'border-accent/40 bg-accent/10' :
 							 step.status === 'running' ? 'border-warning/30 bg-warning/5' :
 							 step.status === 'skipped' ? 'border-border bg-bg-muted' :
 							 'border-border bg-bg'}"
 					>
 						<div class="flex items-center gap-1.5">
 							<!-- Status indicator -->
-							{#if step.status === 'running'}
+							{#if isWaiting}
+								<span aria-hidden="true" class="text-xs md:text-[10px] flex-shrink-0">🤚</span>
+							{:else if step.status === 'running'}
 								<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse flex-shrink-0"></span>
 							{:else if step.status === 'completed'}
 								<span class="text-success flex-shrink-0 text-xs md:text-[10px] font-bold">{statusIcon('completed')}</span>
