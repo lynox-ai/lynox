@@ -42,6 +42,13 @@ export interface RunManifestOptions {
    * config / default. Pipelines without parentPrompt skip budgeting entirely.
    */
   promptBudget?: PromptBudget | undefined;
+  /**
+   * IANA timezone for the human user. Forwarded to each pipeline sub-agent so
+   * times the agent surfaces (e.g. `task_create run_at`) reference the user's
+   * wallclock instead of UTC. Read by the pipeline tool from
+   * `parentAgent.userTimezone`.
+   */
+  userTimezone?: string | undefined;
 }
 
 const MAX_PIPELINE_DEPTH = 3;
@@ -254,7 +261,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -267,7 +274,7 @@ async function executeStep(
       const stepModel = resolveModelForCost(step, 'sonnet');
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -276,7 +283,7 @@ async function executeStep(
       const stepModel = resolveModelForCost(step, agentDef.defaultTier);
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(costUsd - stepEstimate); // correct estimate to actual
     }

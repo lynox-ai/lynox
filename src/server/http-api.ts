@@ -105,6 +105,9 @@ const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
 const TLS_KEY = process.env['LYNOX_TLS_KEY'] ?? '';
+/** IANA timezone allowlist. Covers all current zones (`America/Argentina/Buenos_Aires`, `Etc/GMT+12`, …) without admitting newlines, brackets or quotes that could break out of the per-turn `[Now: …]` marker on the prompt boundary. */
+const TZ_PATTERN = /^[A-Za-z0-9_+\-/]+$/;
+const TZ_MAX_LENGTH = 64;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1035,6 +1038,15 @@ export class LynoxHTTPApi {
       const runOptions = runEffort || runThinking
         ? { ...(runEffort ? { effort: runEffort } : {}), ...(runThinking ? { thinking: runThinking } : {}) }
         : undefined;
+
+      // User's IANA timezone for the per-turn `[Now: …]` marker. The client
+      // sends `Intl.DateTimeFormat().resolvedOptions().timeZone` per /run.
+      // Allowlist is strict so the value can't break out of the marker.
+      const rawTz = typeof b?.['tz'] === 'string' ? b['tz'] : '';
+      const sanitisedTz = rawTz.length > 0 && rawTz.length <= TZ_MAX_LENGTH && TZ_PATTERN.test(rawTz)
+        ? rawTz
+        : '';
+      if (sanitisedTz) session.userTimezone = sanitisedTz;
 
       // Build multimodal content if files are attached
       const files = Array.isArray(b?.['files']) ? b['files'] as { name: string; type: string; data: string }[] : [];

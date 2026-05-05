@@ -86,6 +86,8 @@ export class Agent implements IAgent {
   readonly activeScopes: import('../types/index.js').MemoryScopeRef[] | undefined;
   readonly isolation: import('../types/index.js').IsolationConfig | undefined;
   readonly toolContext: ToolContext;
+  /** Mutable so Session can update per-request without recreating the agent — sub-agent paths still inherit a snapshot. */
+  userTimezone: string | undefined;
   private readonly changesetManager: ChangesetManagerLike | undefined;
   private readonly costGuard: CostGuard | null;
   private knowledgeContext: string | undefined;
@@ -167,6 +169,7 @@ export class Agent implements IAgent {
     this.activeScopes = config.activeScopes;
     this.isolation = config.isolation;
     this.toolContext = config.toolContext ?? createToolContext({});
+    this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
     this.costGuard = config.costGuard
       ? new CostGuard(config.costGuard, config.model)

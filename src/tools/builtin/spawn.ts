@@ -227,13 +227,14 @@ async function executeThinker(
     gcpRegion: userConfig.gcp_region,
     openaiModelId: profile?.model_id,
     openaiAuth: profile?.auth,
+    userTimezone: parentAgent.userTimezone,
   });
 
   // Track child for abort propagation
   activeChildAgents.add(childAgent);
   try {
     // Same per-turn time anchor as top-level chat / pipeline steps.
-    const result = await childAgent.send(withCurrentTimePrefix(task));
+    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
     return { result, childRunId: childAgent.currentRunId };
   } finally {
     activeChildAgents.delete(childAgent);
