@@ -372,6 +372,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.voice_processing': { de: 'Wird verarbeitet…', en: 'Processing…' },
 	'chat.attach_file': { de: 'Datei anhängen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
+	'chat.voice_stop': { de: 'Aufnahme stoppen und senden', en: 'Stop recording and send' },
 	'chat.transcribing': { de: 'Wird transkribiert…', en: 'Transcribing…' },
 	'chat.voice_privacy_hint': {
 		de: 'Sprachnachrichten werden zur Transkription an Mistral (Paris, EU) gesendet. Der Anbieter speichert keine Audiodaten. Dein Verbrauch zählt wie bei Text-Eingaben zu deinem inkludierten Limit.',

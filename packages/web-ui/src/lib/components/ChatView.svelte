@@ -242,13 +242,21 @@
 	onMount(() => {
 		void loadDisplayName();
 		loadOnboardingState();
-		// Release the persistent mic stream when the user leaves the page.
-		// Component teardown (return below) covers SvelteKit route changes;
-		// beforeunload covers tab close / refresh / app backgrounding.
+		// Release the persistent mic stream the moment the user is no longer
+		// looking at this page. setTimeout-based idle release pauses when the
+		// tab is backgrounded on iOS, so without these explicit hooks the
+		// privacy indicator stays on after switching apps. Hooks fire in
+		// order of "user moved on": tab → background, navigate to another
+		// route, refresh, close.
 		const onUnload = () => releaseMicNow();
+		const onVisibilityChange = () => {
+			if (document.visibilityState === 'hidden') releaseMicNow();
+		};
 		window.addEventListener('beforeunload', onUnload);
+		document.addEventListener('visibilitychange', onVisibilityChange);
 		return () => {
 			window.removeEventListener('beforeunload', onUnload);
+			document.removeEventListener('visibilitychange', onVisibilityChange);
 			releaseMicNow();
 		};
 	});
@@ -595,45 +603,29 @@
 	// hold-to-record was racy (async getUserMedia vs pointerup, double-fire
 	// from synthesised click) and produced empty captures.
 	//
-	// MediaStream lifecycle: allocated lazily on the first tap, persisted at
-	// module scope, released after MIC_IDLE_RELEASE_MS of no recording or on
-	// component teardown / page unload. Re-creating the stream per recording
-	// drove iOS Safari into a stuck audio-session state where every session
-	// past the second handed MediaRecorder a header-only WebM (~60 bytes).
-	// Persisting eliminates that path entirely. The privacy indicator stays
-	// on while the stream is alive — that's honest about real state and
-	// matches what voice apps (Whisper, Discord, etc.) do.
+	// Recording UI: the button itself is the indicator (red bg + soft pulse +
+	// timer badge). The chat input stays visible underneath; no parallel
+	// "recording mode" UI swap. Tap the same button to stop + transcribe.
 	//
-	// Analyser branch: only on desktop. On iOS, `createMediaStreamSource`
-	// also corrupts MediaRecorder output, so we replace the live waveform
-	// with CSS-animated placeholder bars (still pulses, looks alive, no
-	// audio data flowing through an AudioContext that would taint the
-	// recorder).
+	// MediaStream lifecycle: allocated lazily on the first tap, persisted at
+	// module scope, released on (a) MIC_IDLE_RELEASE_MS of no recording,
+	// (b) component teardown, (c) `beforeunload`, (d) `visibilitychange` to
+	// hidden, (e) SvelteKit `afterNavigate`. Re-creating the stream per
+	// recording drove iOS Safari into a stuck audio-session state where every
+	// session past the second handed MediaRecorder a header-only WebM (~60
+	// bytes). Persisting eliminates that path entirely.
+	//
+	// No AnalyserNode / waveform: the analyser path corrupts MediaRecorder
+	// output on iOS, and a CSS-only placeholder looked weird. The pulsing
+	// red mic button alone is the recording-active signal.
 	let mediaRecorder: MediaRecorder | null = null;
-	let waveformBars = $state<number[]>(new Array(24).fill(3));
-	let waveformRaf: number | null = null;
 	let recordingDiscarded = false;
 	let isStartingRecording = $state(false);
 	// Persistent mic resources — reused across recordings within the session.
 	let micStream: MediaStream | null = null;
 	let micAudioCtx: AudioContext | null = null;
-	let micAnalyser = $state<AnalyserNode | null>(null);
 	let micReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 	const MIC_IDLE_RELEASE_MS = 60_000;
-
-	function updateWaveform() {
-		if (!micAnalyser || !recording) return;
-		const data = new Uint8Array(micAnalyser.frequencyBinCount);
-		micAnalyser.getByteFrequencyData(data);
-		const step = Math.floor(data.length / 24);
-		const bars: number[] = [];
-		for (let i = 0; i < 24; i++) {
-			const val = data[i * step] ?? 0;
-			bars.push(Math.max(3, Math.round((val / 255) * 28)));
-		}
-		waveformBars = bars;
-		waveformRaf = requestAnimationFrame(updateWaveform);
-	}
 
 	async function ensureMicStream(): Promise<MediaStream> {
 		// A pending release means we're inside the idle window — cancel it
@@ -647,15 +639,6 @@
 		}
 		const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 		micStream = stream;
-		if (!isIosSafari()) {
-			const ctx = new AudioContext();
-			micAudioCtx = ctx;
-			const source = ctx.createMediaStreamSource(stream);
-			const analyser = ctx.createAnalyser();
-			analyser.fftSize = 128;
-			source.connect(analyser);
-			micAnalyser = analyser;
-		}
 		return stream;
 	}
 
@@ -677,16 +660,13 @@
 			void micAudioCtx.close();
 			micAudioCtx = null;
 		}
-		micAnalyser = null;
 	}
 
 	function cleanupRecording() {
 		recording = false;
 		recordingSeconds = 0;
 		if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
-		if (waveformRaf) { cancelAnimationFrame(waveformRaf); waveformRaf = null; }
 		mediaRecorder = null;
-		waveformBars = new Array(24).fill(3);
 		// Don't tear down the stream here — schedule an idle release so a
 		// subsequent quick re-tap reuses the same audio session.
 		scheduleMicRelease();
@@ -824,7 +804,6 @@
 			recordingSeconds = 0;
 			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
 			mediaRecorder = recorder;
-			if (micAnalyser) waveformRaf = requestAnimationFrame(updateWaveform);
 		} catch (err) {
 			if (err instanceof DOMException && err.name === 'NotAllowedError') {
 				addToast(t('chat.mic_denied'), 'error');
@@ -1251,10 +1230,13 @@
 	$effect(() => { focusInput(); });
 	// Re-focus after SvelteKit navigation (goto('/app') resets focus). Also
 	// the only path that clears leftover input — placeholder cycling must not.
+	// Releases the persistent mic stream too, since changing route / chat
+	// session is the user's "I'm done with voice for now" signal.
 	afterNavigate(() => {
 		inputText = '';
 		focusInput();
 		stopSpeech();
+		releaseMicNow();
 	});
 
 	// Slash commands handled client-side (navigate instead of sending to agent)
@@ -1408,19 +1390,27 @@
 	<!-- Tap-to-toggle on every device. Hold-to-record was racy on touch
 	     (async getUserMedia vs pointerup, plus the synthesised click that
 	     fires after pointerup re-entered startRecording). One canonical
-	     handler, one source of truth, no double-fire. -->
+	     handler, one source of truth, no double-fire.
+	     While recording: the button itself becomes the recording indicator
+	     (red pulse + timer badge). Tap stops + transcribes. The chat input
+	     stays visible and functional underneath — no parallel UI mode. -->
 	<button
 		onclick={() => {
 			if (recording) { stopRecording(); } else { void startRecording(); }
 		}}
 		disabled={!ready || isStartingRecording}
-		class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none"
-		aria-label={t('chat.voice_input')}
-		title={t('chat.voice_input')}
+		class="relative shrink-0 h-11 w-11 flex items-center justify-center rounded-full transition-all select-none disabled:opacity-30 {recording ? 'bg-danger text-white shadow-[0_0_0_4px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] mic-recording-pulse' : 'text-text-subtle hover:text-text active:bg-accent/20 active:text-accent'}"
+		aria-label={recording ? t('chat.voice_stop') : t('chat.voice_input')}
+		title={recording ? t('chat.voice_stop') : t('chat.voice_input')}
 	>
 		<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 			<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
 		</svg>
+		{#if recording}
+			<span class="absolute -top-1 -right-1 min-w-[20px] h-[18px] rounded-full bg-bg border border-danger px-1 text-[10px] font-mono tabular-nums text-danger flex items-center justify-center leading-none">
+				{recordingSeconds}s
+			</span>
+		{/if}
 	</button>
 {/snippet}
 
@@ -2252,42 +2242,6 @@
 					<span class="text-sm text-text-subtle">{t('chat.transcribing')}</span>
 				</div>
 				<div class="shrink-0 h-11 w-11"></div>
-			{:else if recording}
-				<!-- Recording state: [🗑  ● 0:03 ━━━━━]  [➤] -->
-				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2">
-					<button onclick={discardRecording} class="text-text-subtle hover:text-danger transition-colors shrink-0" aria-label="Discard">
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
-					</button>
-					<span class="h-2 w-2 rounded-full bg-danger animate-pulse shrink-0"></span>
-					<span class="text-xs font-mono text-text-subtle tabular-nums shrink-0">{recordingSeconds}s</span>
-					<!-- Recording bars: live waveform driven by AnalyserNode on
-					     desktop; CSS-animated Siri-style placeholder on iOS where
-					     attaching an analyser to the MediaStream corrupts the
-					     MediaRecorder output. Either way the user sees motion. -->
-					<div class="flex-1 flex items-center justify-center gap-[2px] h-8">
-						{#each waveformBars as height, i}
-							{#if micAnalyser}
-								<div
-									class="w-[3px] rounded-full bg-accent/70 transition-all duration-75"
-									style="height: {height}px;"
-								></div>
-							{:else}
-								<div
-									class="recording-bar w-[3px] rounded-full bg-accent/70"
-									style:animation-delay="{(i * 70) % 840}ms"
-								></div>
-							{/if}
-						{/each}
-					</div>
-				</div>
-				<!-- Send button during recording -->
-				<button
-					onclick={stopRecording}
-					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
-					aria-label={t('chat.send')}
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
-				</button>
 			{:else}
 				<!-- Normal: 📎  [Nachricht eingeben...]  ➤ -->
 				<button
@@ -2487,16 +2441,18 @@
 		color: var(--color-text, #e8e8f0);
 	}
 
-	/* CSS-only Siri-style recording bars for iOS Safari, where the audio
-	   analyser path is disabled. Each bar gets a different animation-delay
-	   via inline style so the wave looks lively without an AudioContext. */
-	.recording-bar {
-		height: 24px;
-		transform-origin: center;
-		animation: recording-bar-pulse 1.2s ease-in-out infinite;
+	/* Mic-button recording state: soft outward pulse + subtle breathing
+	   scale. Tighter and more "this is recording" than the old flashing
+	   waveform; the timer badge over the icon does the precision. */
+	.mic-recording-pulse {
+		animation: mic-recording-breath 1.6s ease-in-out infinite;
 	}
-	@keyframes recording-bar-pulse {
-		0%, 100% { transform: scaleY(0.18); }
-		50% { transform: scaleY(1); }
+	@keyframes mic-recording-breath {
+		0%, 100% {
+			box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-danger) 18%, transparent);
+		}
+		50% {
+			box-shadow: 0 0 0 8px color-mix(in srgb, var(--color-danger) 6%, transparent);
+		}
 	}
 </style>
