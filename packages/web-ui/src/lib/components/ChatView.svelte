@@ -52,6 +52,7 @@
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
+	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -238,7 +239,27 @@
 		} catch { /* non-critical */ }
 	}
 
-	onMount(() => { void loadDisplayName(); loadOnboardingState(); });
+	onMount(() => {
+		void loadDisplayName();
+		loadOnboardingState();
+		// Release the persistent mic stream the moment the user is no longer
+		// looking at this page. setTimeout-based idle release pauses when the
+		// tab is backgrounded on iOS, so without these explicit hooks the
+		// privacy indicator stays on after switching apps. Hooks fire in
+		// order of "user moved on": tab → background, navigate to another
+		// route, refresh, close.
+		const onUnload = () => releaseMicNow();
+		const onVisibilityChange = () => {
+			if (document.visibilityState === 'hidden') releaseMicNow();
+		};
+		window.addEventListener('beforeunload', onUnload);
+		document.addEventListener('visibilitychange', onVisibilityChange);
+		return () => {
+			window.removeEventListener('beforeunload', onUnload);
+			document.removeEventListener('visibilitychange', onVisibilityChange);
+			releaseMicNow();
+		};
+	});
 
 	// Mask any secret-like patterns (API keys, tokens) that might leak into display
 	const SECRET_PATTERNS = [
@@ -575,59 +596,90 @@
 		pendingFiles = pendingFiles.filter((_, i) => i !== idx);
 	}
 
+	// Voice input architecture (v2):
+	//
+	// State machine: idle → starting → recording → processing → idle.
+	// Mic button is a strict tap-to-toggle on every device — pointerdown/up
+	// hold-to-record was racy (async getUserMedia vs pointerup, double-fire
+	// from synthesised click) and produced empty captures.
+	//
+	// Recording UI: the button itself is the indicator (red bg + soft pulse +
+	// timer badge). The chat input stays visible underneath; no parallel
+	// "recording mode" UI swap. Tap the same button to stop + transcribe.
+	//
+	// MediaStream lifecycle: allocated lazily on the first tap, persisted at
+	// module scope, released on (a) MIC_IDLE_RELEASE_MS of no recording,
+	// (b) component teardown, (c) `beforeunload`, (d) `visibilitychange` to
+	// hidden, (e) SvelteKit `afterNavigate`. Re-creating the stream per
+	// recording drove iOS Safari into a stuck audio-session state where every
+	// session past the second handed MediaRecorder a header-only WebM (~60
+	// bytes). Persisting eliminates that path entirely.
+	//
+	// No AnalyserNode / waveform: the analyser path corrupts MediaRecorder
+	// output on iOS, and a CSS-only placeholder looked weird. The pulsing
+	// red mic button alone is the recording-active signal.
 	let mediaRecorder: MediaRecorder | null = null;
-	let audioAnalyser: AnalyserNode | null = null;
-	let waveformBars = $state<number[]>(new Array(24).fill(3));
-	let waveformRaf: number | null = null;
-	let recordingDiscarded = false;
-	let activeAudioCtx: AudioContext | null = null;
-	let activeStream: MediaStream | null = null;
-	let recordingStartedByTouch = false;
+	let isStartingRecording = $state(false);
+	// Persistent mic resources — reused across recordings within the session.
+	let micStream: MediaStream | null = null;
+	let micReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+	const MIC_IDLE_RELEASE_MS = 60_000;
 
-	function updateWaveform() {
-		if (!audioAnalyser || !recording) return;
-		const data = new Uint8Array(audioAnalyser.frequencyBinCount);
-		audioAnalyser.getByteFrequencyData(data);
-		const step = Math.floor(data.length / 24);
-		const bars: number[] = [];
-		for (let i = 0; i < 24; i++) {
-			const val = data[i * step] ?? 0;
-			bars.push(Math.max(3, Math.round((val / 255) * 28)));
+	async function ensureMicStream(): Promise<MediaStream> {
+		// A pending release means we're inside the idle window — cancel it
+		// and return the still-live stream.
+		if (micReleaseTimer) {
+			clearTimeout(micReleaseTimer);
+			micReleaseTimer = null;
 		}
-		waveformBars = bars;
-		waveformRaf = requestAnimationFrame(updateWaveform);
+		if (micStream && micStream.getAudioTracks().some((t) => t.readyState === 'live')) {
+			return micStream;
+		}
+		const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+		micStream = stream;
+		return stream;
+	}
+
+	function scheduleMicRelease(): void {
+		// No stream to release (e.g. cleanupRecording fired after the
+		// component already tore down the mic on afterNavigate) → don't
+		// arm a no-op timer that would just expire and call releaseMicNow
+		// against null state.
+		if (!micStream) return;
+		if (micReleaseTimer) return;
+		micReleaseTimer = setTimeout(releaseMicNow, MIC_IDLE_RELEASE_MS);
+	}
+
+	function releaseMicNow(): void {
+		if (micReleaseTimer) {
+			clearTimeout(micReleaseTimer);
+			micReleaseTimer = null;
+		}
+		if (micStream) {
+			micStream.getTracks().forEach((t) => t.stop());
+			micStream = null;
+		}
 	}
 
 	function cleanupRecording() {
 		recording = false;
 		recordingSeconds = 0;
 		if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
-		if (waveformRaf) { cancelAnimationFrame(waveformRaf); waveformRaf = null; }
-		audioAnalyser = null;
-		if (activeAudioCtx) { void activeAudioCtx.close(); activeAudioCtx = null; }
-		if (activeStream) { activeStream.getTracks().forEach((track) => track.stop()); activeStream = null; }
 		mediaRecorder = null;
-		waveformBars = new Array(24).fill(3);
+		// Don't tear down the stream here — schedule an idle release so a
+		// subsequent quick re-tap reuses the same audio session.
+		scheduleMicRelease();
 	}
 
 	async function startRecording() {
-		if (recording) return;
-		recordingDiscarded = false;
+		if (recording || isStartingRecording) return;
+		isStartingRecording = true;
 		try {
 			if (!navigator.mediaDevices?.getUserMedia) {
 				addToast(t('chat.mic_requires_https'), 'error');
 				return;
 			}
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			activeStream = stream;
-
-			const audioCtx = new AudioContext();
-			activeAudioCtx = audioCtx;
-			const source = audioCtx.createMediaStreamSource(stream);
-			const analyser = audioCtx.createAnalyser();
-			analyser.fftSize = 128;
-			source.connect(analyser);
-			audioAnalyser = analyser;
+			const stream = await ensureMicStream();
 
 			const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
 				: MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4'
@@ -641,14 +693,24 @@
 
 			recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 			recorder.onstop = async () => {
-				const discarded = recordingDiscarded;
 				cleanupRecording();
-				if (discarded) return;
+
+				const blob = new Blob(chunks, { type: actualMime });
+
+				// iOS Safari sometimes hands back a header-only WebM blob (~60
+				// bytes, no audio frames) on second-and-later MediaRecorder
+				// runs after a clean stop+cleanup cycle — confirmed 2026-05-06
+				// when consecutive captures all returned a 60-byte body that
+				// Mistral refused with "Transcription failed". Bail before we
+				// burn a transcribe call on data we can already see is empty.
+				if (blob.size < 1024) {
+					addToast(t('chat.voice_too_short'), 'error');
+					return;
+				}
 
 				// Show placeholder bubble immediately with live transcription
 				const placeholderIdx = pushPlaceholder(`🎤 ${t('chat.voice_processing')}`);
 
-				const blob = new Blob(chunks, { type: actualMime });
 				const reader = new FileReader();
 				reader.onload = async () => {
 					const base64 = (reader.result as string).split(',')[1] ?? '';
@@ -728,29 +790,29 @@
 				reader.readAsDataURL(blob);
 			};
 
-			recorder.start();
+			// Timeslice (1s): forces periodic dataavailable events instead of a
+			// single one at stop. iOS Safari's audio session occasionally drops
+			// the final-only data event on second-and-later recordings; with a
+			// timeslice the chunks accumulate as audio flows, so even a glitched
+			// session still hands us populated chunks.
+			recorder.start(1000);
 			recording = true;
 			recordingSeconds = 0;
 			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
 			mediaRecorder = recorder;
-			waveformRaf = requestAnimationFrame(updateWaveform);
 		} catch (err) {
 			if (err instanceof DOMException && err.name === 'NotAllowedError') {
 				addToast(t('chat.mic_denied'), 'error');
 			} else {
 				addToast(t('chat.mic_unavailable'), 'error');
 			}
+		} finally {
+			isStartingRecording = false;
 		}
 	}
 
 	function stopRecording() {
 		if (!recording || !mediaRecorder) return;
-		mediaRecorder.stop();
-	}
-
-	function discardRecording() {
-		if (!recording || !mediaRecorder) return;
-		recordingDiscarded = true;
 		mediaRecorder.stop();
 	}
 
@@ -1144,17 +1206,28 @@
 		if (currentSessionId) void loadArtifacts();
 	});
 
-	// Auto-focus textarea and clear leftover input when chat is empty (new chat or initial load)
+	// Focus the textarea when the empty-state lands; clearing leftover text
+	// belongs to the navigation path (afterNavigate below) — NOT to the
+	// reactive effect, because messages.length transiently flips 0→1→0 every
+	// time we push/remove a voice-transcribe placeholder, and clearing the
+	// input there silently wipes a freshly-dictated transcript before tick().
 	function focusInput() {
 		if (messages.length === 0 && !isStreaming && textareaEl) {
-			inputText = '';
-			if (textareaEl) textareaEl.style.height = 'auto';
+			textareaEl.style.height = 'auto';
 			void tick().then(() => textareaEl?.focus());
 		}
 	}
 	$effect(() => { focusInput(); });
-	// Re-focus after SvelteKit navigation (goto('/app') resets focus)
-	afterNavigate(() => { focusInput(); stopSpeech(); });
+	// Re-focus after SvelteKit navigation (goto('/app') resets focus). Also
+	// the only path that clears leftover input — placeholder cycling must not.
+	// Releases the persistent mic stream too, since changing route / chat
+	// session is the user's "I'm done with voice for now" signal.
+	afterNavigate(() => {
+		inputText = '';
+		focusInput();
+		stopSpeech();
+		releaseMicNow();
+	});
 
 	// Slash commands handled client-side (navigate instead of sending to agent)
 	const SLASH_ROUTES: Record<string, string> = {
@@ -1304,43 +1377,56 @@
 </script>
 
 {#snippet micButton()}
-	<!-- Touch: hold to record, release to send. Mouse: click to toggle.
-	     Rendered both alone (input empty) and alongside the send button
-	     when auto-send mode is on (input non-empty), since dictation in
-	     auto-send mode bypasses the input box. -->
+	<!-- Tap-to-toggle on every device. Hold-to-record was racy on touch
+	     (async getUserMedia vs pointerup, plus the synthesised click that
+	     fires after pointerup re-entered startRecording). One canonical
+	     handler, one source of truth, no double-fire.
+	     While recording: the button itself becomes the recording indicator
+	     (red pulse + timer badge). Tap stops + transcribes. The chat input
+	     stays visible and functional underneath — no parallel UI mode. -->
 	<button
 		onclick={() => {
-			if (recordingStartedByTouch) return;
 			if (recording) { stopRecording(); } else { void startRecording(); }
 		}}
-		onpointerdown={(e) => {
-			if (e.pointerType !== 'touch') return;
-			e.preventDefault();
-			recordingStartedByTouch = true;
-			void startRecording();
-		}}
-		onpointerup={() => {
-			if (recordingStartedByTouch) {
-				recordingStartedByTouch = false;
-				stopRecording();
-			}
-		}}
-		onpointerleave={() => {
-			if (recordingStartedByTouch) {
-				recordingStartedByTouch = false;
-				stopRecording();
-			}
-		}}
-		oncontextmenu={(e) => e.preventDefault()}
-		disabled={!ready}
-		class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
-		aria-label={t('chat.voice_input')}
-		title="{t('chat.voice_input')} ({t('shortcut.voice_record')})"
+		disabled={!ready || isStartingRecording}
+		class="relative shrink-0 h-11 w-11 flex items-center justify-center rounded-full transition-all select-none disabled:opacity-30 {recording ? 'bg-danger text-white shadow-[0_0_0_4px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] mic-recording-pulse' : 'text-text-subtle hover:text-text active:bg-accent/20 active:text-accent'}"
+		aria-label={recording ? t('chat.voice_stop') : t('chat.voice_input')}
+		title={recording ? t('chat.voice_stop') : t('chat.voice_input')}
 	>
 		<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 			<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
 		</svg>
+		{#if recording}
+			<span class="absolute -top-1 -right-1 min-w-[20px] h-[18px] rounded-full bg-bg border border-danger px-1 text-[10px] font-mono tabular-nums text-danger flex items-center justify-center leading-none">
+				{recordingSeconds}s
+			</span>
+		{/if}
 	</button>
+{/snippet}
+
+{#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined)}
+	<!-- Inline footer: usage stats on the left, action icons (speak +
+	     copy) on the right. Right-alignment of the tappable buttons puts
+	     them in the thumb sweep zone for right-handed mobile users — the
+	     stats column is read-only, the icons are the actual touch targets. -->
+	<div class="flex items-center gap-2 mt-2">
+		{#if usage && !isStreaming}
+			<span class="text-[11px] font-mono text-text-subtle truncate">{formatUsage(usage)}</span>
+		{/if}
+		<div class="ml-auto flex items-center gap-1">
+			{@render speakButton(msgKey, msgContent)}
+			{#if !hasArtifact}
+				<button
+					onclick={() => { navigator.clipboard.writeText(msgContent); addToast(t('common.copied'), 'success', 1500); }}
+					class="text-text-subtle hover:text-text transition-colors p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
+					title={t('common.copy')}
+					aria-label={t('common.copy')}
+				>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+				</button>
+			{/if}
+		</div>
+	</div>
 {/snippet}
 
 {#snippet speakButton(msgKey: string, msgContent: string)}
@@ -1355,7 +1441,7 @@
 					if (err) addToast(formatSpeakError(err), 'error');
 				});
 			}}
-			class="text-text-subtle hover:text-text transition-all p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted {active ? 'opacity-100' : 'opacity-0 group-hover/copy:opacity-100 focus:opacity-100'}"
+			class="text-text-subtle hover:text-text transition-all p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
 			title={active ? (speakState === 'playing' ? t('chat.stop_speaking') : t('chat.speak_synthesizing')) : t('chat.speak')}
 			aria-label={active ? t('chat.stop_speaking') : t('chat.speak')}
 		>
@@ -1642,22 +1728,8 @@
 								{/if}
 							{:else if gBlock.type === 'text' && gBlock.text}
 								{@const hasArtifact = gBlock.text.includes('```html') && (gBlock.text.includes('<!DOCTYPE') || gBlock.text.includes('<html'))}
-								<div class="relative group/copy">
-									<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
-									<div class="absolute top-0 right-0 flex gap-1">
-										{@render speakButton(`msg-${msgIdx}`, msg.content)}
-										{#if !hasArtifact}
-											<button
-												onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
-												class="opacity-0 group-hover/copy:opacity-100 focus:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
-												title={t('common.copy')}
-												aria-label={t('common.copy')}
-											>
-												<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
-											</button>
-										{/if}
-									</div>
-								</div>
+								<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
+								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
 						{/if}
 						{/each}
 						<!-- Fallback for legacy messages without blocks -->
@@ -1676,26 +1748,9 @@
 							{/each}
 							{#if msg.content}
 								{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
-								<div class="relative group/copy">
-									<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
-									<div class="absolute top-0 right-0 flex gap-1">
-										{@render speakButton(`msg-${msgIdx}`, msg.content)}
-										{#if !hasArtifact}
-											<button
-												onclick={() => { navigator.clipboard.writeText(msg.content); addToast(t('common.copied'), 'success', 1500); }}
-												class="opacity-0 group-hover/copy:opacity-100 focus:opacity-100 text-text-subtle hover:text-text transition-opacity p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
-												title={t('common.copy')}
-												aria-label={t('common.copy')}
-											>
-												<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
-											</button>
-										{/if}
-									</div>
-								</div>
+								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
+								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
 							{/if}
-						{/if}
-						{#if msg.usage && !isStreaming && msgIdx !== messages.length - 1}
-							<p class="text-[11px] font-mono text-text-subtle mt-1">{formatUsage(msg.usage)}</p>
 						{/if}
 					</div>
 				{/if}
@@ -1710,12 +1765,6 @@
 
 			{#if messages.length > 0}
 				<div class="flex items-center gap-3 flex-wrap">
-					{#if messages[messages.length - 1]?.usage && !isStreaming}
-						{@const lastUsage = messages[messages.length - 1].usage}
-						{#if lastUsage}
-							<span class="text-[11px] font-mono text-text-subtle">{formatUsage(lastUsage)}</span>
-						{/if}
-					{/if}
 					{#if hasToolCalls}
 						<button onclick={toggleAllToolCalls} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">
 							{toolCallsExpanded ? t('chat.collapse_all') : t('chat.expand_all')}
@@ -2171,32 +2220,6 @@
 					<span class="text-sm text-text-subtle">{t('chat.transcribing')}</span>
 				</div>
 				<div class="shrink-0 h-11 w-11"></div>
-			{:else if recording}
-				<!-- Recording state: [🗑  ● 0:03 ━━━━━]  [➤] -->
-				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-danger/30 bg-bg px-3 py-2">
-					<button onclick={discardRecording} class="text-text-subtle hover:text-danger transition-colors shrink-0" aria-label="Discard">
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
-					</button>
-					<span class="h-2 w-2 rounded-full bg-danger animate-pulse shrink-0"></span>
-					<span class="text-xs font-mono text-text-subtle tabular-nums shrink-0">{recordingSeconds}s</span>
-					<!-- Live waveform bars -->
-					<div class="flex-1 flex items-center justify-center gap-[2px] h-8">
-						{#each waveformBars as height}
-							<div
-								class="w-[3px] rounded-full bg-accent/70 transition-all duration-75"
-								style="height: {height}px;"
-							></div>
-						{/each}
-					</div>
-				</div>
-				<!-- Send button during recording -->
-				<button
-					onclick={stopRecording}
-					class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 transition-all"
-					aria-label={t('chat.send')}
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
-				</button>
 			{:else}
 				<!-- Normal: 📎  [Nachricht eingeben...]  ➤ -->
 				<button
@@ -2239,7 +2262,13 @@
 					     should never lose access to voice input just because
 					     they typed something. -->
 					{@render micButton()}
-					{#if inputText.trim() || pendingFiles.length > 0 || pendingPermission}
+					<!-- Hide the regular send button while recording: on mobile
+					     it sits a thumb-width away from the mic, and a stop-tap
+					     misaim would post whatever's still in the input box
+					     instead of stopping the recording. The mic button itself
+					     finalises the recording, so a separate send isn't needed
+					     during that state. -->
+					{#if !recording && (inputText.trim() || pendingFiles.length > 0 || pendingPermission)}
 						<button
 							onclick={handleSend}
 							disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
@@ -2394,5 +2423,20 @@
 	}
 	:global(.prompt-chip:hover .prompt-chip-text) {
 		color: var(--color-text, #e8e8f0);
+	}
+
+	/* Mic-button recording state: soft outward pulse + subtle breathing
+	   scale. Tighter and more "this is recording" than the old flashing
+	   waveform; the timer badge over the icon does the precision. */
+	.mic-recording-pulse {
+		animation: mic-recording-breath 1.6s ease-in-out infinite;
+	}
+	@keyframes mic-recording-breath {
+		0%, 100% {
+			box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-danger) 18%, transparent);
+		}
+		50% {
+			box-shadow: 0 0 0 8px color-mix(in srgb, var(--color-danger) 6%, transparent);
+		}
 	}
 </style>

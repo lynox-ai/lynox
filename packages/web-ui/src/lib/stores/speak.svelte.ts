@@ -35,6 +35,7 @@
 
 import { getApiBase } from '../config.svelte.js';
 import { getLocale } from '../i18n.svelte.js';
+import { isIosSafari } from '../utils/ios-safari.js';
 import { addToast } from './toast.svelte.js';
 
 export type SpeakState = 'idle' | 'synthesizing' | 'playing';
@@ -69,6 +70,16 @@ let state = $state<SpeakState>('idle');
 let activeKey = $state<string | null>(null);
 
 let audioEl: HTMLAudioElement | null = null;
+// iOS Safari path: `<video playsinline>` carries the audio because Web
+// Audio + `<audio>` both inherit Safari's default AVAudioSession Ambient
+// category, which is silent when the device is muted/in Focus mode and
+// auto-suspends mid-fetch. Video media elements escape that category in
+// every iOS version we support (18+). Lifecycle mirrors `audioEl`: created
+// inside the click gesture, primed with a tiny silent data URL so iOS
+// records the play() attempt, then re-played with the real MP3 blob once
+// the SSE stream completes. Hidden 1×1 in document.body — required for
+// iOS to honour play() on a video element (detached elements get clamped).
+let videoEl: HTMLVideoElement | null = null;
 // Long-lived AudioContext, reused across playbacks. iOS Safari refuses to
 // play audio from a context that wasn't constructed inside a synchronous
 // click handler — and after the fetch await in `playSpeech`, the user-gesture
@@ -125,6 +136,25 @@ export function maybeShowPrivacyHint(translatedHint: string): void {
 	} catch { /* localStorage unavailable — skip silently */ }
 }
 
+// 44-byte zero-data WAV at /silent.wav (8 kHz, mono, 8-bit, 0 audio bytes).
+// Static asset rather than `data:` URL because the app's CSP
+// (`media-src 'self' blob:` in hooks.server.ts) blocks `data:` for media —
+// iOS would reject the prime silently and the gesture-priming step would
+// no-op without a Console hint. Same-origin static path passes CSP and
+// caches across pages.
+const SILENT_PLACEHOLDER_URL = '/silent.wav';
+
+function destroyVideoEl(): void {
+	if (!videoEl) return;
+	try {
+		videoEl.pause();
+		videoEl.removeAttribute('src');
+		videoEl.load();
+		videoEl.remove();
+	} catch { /* already detached */ }
+	videoEl = null;
+}
+
 export function stopSpeech(): void {
 	// Invalidate any pending `ended` listeners from the previous run. The
 	// listener checks the run token against this updated value and bails.
@@ -135,6 +165,7 @@ export function stopSpeech(): void {
 		audioEl.src = '';
 		audioEl = null;
 	}
+	destroyVideoEl();
 	// Stop in-flight buffer sources but DO NOT close the AudioContext —
 	// closing it would force re-creation on the next playSpeech, which
 	// iOS only permits inside a synchronous click handler. By keeping the
@@ -199,6 +230,10 @@ function getAudioCtxCtor(): typeof AudioContext | null {
  * iOS PWA / Safari.
  */
 function primeAudio(): AudioContext | null {
+	// iOS Safari skips the Web Audio path entirely — see `isIosSafari` and
+	// `primeVideoElement` for why. Returning null here makes `playSpeech`
+	// dispatch to `playViaVideoElement`.
+	if (isIosSafari()) return null;
 	const Ctor = getAudioCtxCtor();
 	if (!Ctor) return null;
 	if (!audioContext) {
@@ -220,6 +255,40 @@ function primeAudio(): AudioContext | null {
 }
 
 /**
+ * iOS Safari priming: create a hidden `<video playsinline>` and call
+ * play() on a 44-byte silent WAV (`/silent.wav`) SYNCHRONOUSLY inside
+ * the user-gesture stack. This consumes the gesture flag against the
+ * video element, after
+ * which iOS treats it as user-activated for the rest of its lifetime —
+ * we can swap `src` and call `play()` again from a microtask without
+ * iOS rejecting it. Without this prime, `playViaVideoElement` runs into
+ * the same auto-suspend / silent-output problem as Web Audio + `<audio>`.
+ *
+ * Element is appended to document.body because iOS clamps detached media
+ * elements (off-DOM `<video>` will not actually emit sound). Hidden via
+ * 1×1 + opacity:0 + pointer-events:none so the page layout is unaffected.
+ *
+ * The `play()` returns a Promise; we deliberately don't await it (would
+ * lose the gesture). Catching the rejection keeps the promise chain
+ * unhandled-rejection-clean. This is fire-and-forget by design.
+ */
+function primeVideoElement(): HTMLVideoElement | null {
+	if (typeof document === 'undefined') return null;
+	if (videoEl) return videoEl;
+	const v = document.createElement('video');
+	v.setAttribute('playsinline', '');
+	v.setAttribute('webkit-playsinline', '');
+	v.preload = 'auto';
+	v.muted = false;
+	v.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
+	v.src = SILENT_PLACEHOLDER_URL;
+	document.body.appendChild(v);
+	videoEl = v;
+	v.play().catch(() => { /* placeholder play may reject; gesture still primed */ });
+	return v;
+}
+
+/**
  * Start TTS for `text`. Playback begins as soon as audio data is decodable
  * (~100 ms after first chunk on Web Audio path). Returns null on success or
  * a `SpeakError` the caller surfaces via i18n.
@@ -229,11 +298,15 @@ export async function playSpeech(text: string, key: string): Promise<SpeakError 
 	state = 'synthesizing';
 	activeKey = key;
 
-	// iOS-safe: prime the AudioContext SYNCHRONOUSLY before any await.
-	// See `primeAudio` for the gesture-flag rationale. Return value is
-	// the (now-running) context — checked again post-fetch in
-	// `playViaWebAudio` to detect iOS auto-suspend rejections.
-	void primeAudio();
+	// iOS-safe: prime the playback target SYNCHRONOUSLY before any await.
+	// On iOS Safari we prime a `<video playsinline>` element instead of
+	// the AudioContext (which iOS clamps to silent / auto-suspends). On
+	// every other browser we prime the AudioContext as before.
+	if (isIosSafari()) {
+		primeVideoElement();
+	} else {
+		void primeAudio();
+	}
 
 	const ctrl = new AbortController();
 	abortCtrl = ctrl;
@@ -264,9 +337,88 @@ export async function playSpeech(text: string, key: string): Promise<SpeakError 
 		return { code: 'http', status: res.status };
 	}
 
+	// Dispatch on platform, not on the side-effect of `primeVideoElement`.
+	// If the iOS prime ever fails (no document, locked-down WebView), we'd
+	// rather surface that as the `blocked` toast from playViaVideoElement
+	// than silently fall through to playViaBlob without gesture priming.
+	if (isIosSafari()) return playViaVideoElement(res.body, ctrl);
 	return audioContext
 		? playViaWebAudio(res.body, ctrl)
 		: playViaBlob(res.body, ctrl);
+}
+
+/**
+ * iOS Safari path: collect the SSE MP3 chunks into one blob, then swap
+ * the (already-primed) video element's `src` to that blob and call play()
+ * a second time. The first play() in `primeVideoElement` consumed the
+ * user-gesture; iOS lets us re-trigger play() on the same element later
+ * without a fresh gesture. Higher latency than Web Audio (we wait for the
+ * full stream) but bypasses the AVAudioSession Ambient + auto-suspend
+ * issues that silently kill Web Audio output on iOS Safari.
+ */
+async function playViaVideoElement(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<SpeakError | null> {
+	const video = videoEl;
+	if (!video) {
+		resetOnError();
+		return { code: 'blocked' };
+	}
+	// Snapshot the run token: rapid stop+restart can land a second
+	// playSpeech that destroys this element and creates a new one mid-
+	// stream-collect, and we must not mutate `videoEl` / `objectUrl` /
+	// `state` for a run that's been superseded. Mirrors playViaWebAudio.
+	const myRun = ++runToken;
+
+	const mp3Parts: Uint8Array[] = [];
+	let synthFailed = false;
+
+	try {
+		for await (const frame of parseSseFrames(body)) {
+			if (ctrl.signal.aborted || runToken !== myRun) return null;
+			if (frame.error) { synthFailed = true; break; }
+			if (frame.chunk) mp3Parts.push(base64ToBytes(frame.chunk));
+			if (frame.done) break;
+		}
+	} catch {
+		if (ctrl.signal.aborted || runToken !== myRun) return null;
+		resetOnError();
+		return { code: 'stream' };
+	}
+
+	if (ctrl.signal.aborted || runToken !== myRun) return null;
+	if (synthFailed) { resetOnError(); return { code: 'synth' }; }
+	if (mp3Parts.length === 0) { resetOnError(); return { code: 'empty' }; }
+
+	const blob = new Blob(mp3Parts as BlobPart[], { type: 'audio/mpeg' });
+	const url = URL.createObjectURL(blob);
+	objectUrl = url;
+
+	video.onended = () => {
+		if (videoEl !== video || runToken !== myRun) return;
+		if (objectUrl === url) { URL.revokeObjectURL(url); objectUrl = null; }
+		// Tear the element down so the next playSpeech re-primes a fresh
+		// one inside its user-gesture stack — keeping the old element alive
+		// across utterances would let primeVideoElement's `if (videoEl)
+		// return videoEl` short-circuit, and there's no benefit to that
+		// since stopSpeech (called at the top of every playSpeech) would
+		// destroy it anyway.
+		destroyVideoEl();
+		state = 'idle';
+		activeKey = null;
+		abortCtrl = null;
+		drainQueue();
+	};
+	video.onerror = () => { if (videoEl === video && runToken === myRun) resetOnError(); };
+
+	video.src = url;
+	state = 'playing';
+	try {
+		await video.play();
+	} catch {
+		if (runToken !== myRun) return null;
+		resetOnError();
+		return { code: 'blocked' };
+	}
+	return null;
 }
 
 async function playViaWebAudio(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<SpeakError | null> {
@@ -441,6 +593,7 @@ function resetOnError(): void {
 	}
 	activeSources.clear();
 	audioEl = null;
+	destroyVideoEl();
 	abortCtrl = null;
 	state = 'idle';
 	activeKey = null;
