@@ -35,6 +35,7 @@
 
 import { getApiBase } from '../config.svelte.js';
 import { getLocale } from '../i18n.svelte.js';
+import { isIosSafari } from '../utils/ios-safari.js';
 import { addToast } from './toast.svelte.js';
 
 export type SpeakState = 'idle' | 'synthesizing' | 'playing';
@@ -133,23 +134,6 @@ export function maybeShowPrivacyHint(translatedHint: string): void {
 		addToast(translatedHint, 'info', PRIVACY_HINT_DURATION_MS);
 		localStorage.setItem(PRIVACY_HINT_KEY, '1');
 	} catch { /* localStorage unavailable — skip silently */ }
-}
-
-/**
- * iOS Safari (Mobile Safari + Safari standalone PWA) routes Web Audio +
- * `<audio>` through AVAudioSessionCategoryAmbient, which respects the
- * mute switch + Focus mode and aggressively auto-suspends contexts
- * during long awaits. `<video playsinline>` escapes that category and is
- * the canonical iOS workaround. Excludes Chrome/Firefox/Edge on iOS —
- * those are wrappers around WKWebView with their own native audio session
- * configs and do not need this path. Tested confirmed on iOS 18.7 Safari.
- */
-function isIosSafari(): boolean {
-	if (typeof navigator === 'undefined') return false;
-	const ua = navigator.userAgent;
-	if (!/iPhone|iPad|iPod/.test(ua)) return false;
-	if (/CriOS|FxiOS|EdgiOS|OPiOS|YaBrowser|GSA/.test(ua)) return false;
-	return true;
 }
 
 // 44-byte zero-data WAV at /silent.wav (8 kHz, mono, 8-bit, 0 audio bytes).

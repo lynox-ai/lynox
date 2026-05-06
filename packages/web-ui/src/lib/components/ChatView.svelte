@@ -52,6 +52,7 @@
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
+	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -621,13 +622,23 @@
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 			activeStream = stream;
 
-			const audioCtx = new AudioContext();
-			activeAudioCtx = audioCtx;
-			const source = audioCtx.createMediaStreamSource(stream);
-			const analyser = audioCtx.createAnalyser();
-			analyser.fftSize = 128;
-			source.connect(analyser);
-			audioAnalyser = analyser;
+			// Waveform analyser is desktop-only. On iOS Safari, attaching the
+			// MediaStream to an AudioContext via createMediaStreamSource
+			// degrades MediaRecorder output on every session past the second:
+			// the recorder hands back a header-only WebM (~60 bytes) because
+			// the audio data is being consumed by the analyser node. Confirmed
+			// 2026-05-06 across two staging deploys. iOS users get a static
+			// "Aufnahme..." indicator instead of bars; the UX is fine, the
+			// reliability win is large.
+			if (!isIosSafari()) {
+				const audioCtx = new AudioContext();
+				activeAudioCtx = audioCtx;
+				const source = audioCtx.createMediaStreamSource(stream);
+				const analyser = audioCtx.createAnalyser();
+				analyser.fftSize = 128;
+				source.connect(analyser);
+				audioAnalyser = analyser;
+			}
 
 			const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
 				: MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4'
