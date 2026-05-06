@@ -337,7 +337,11 @@ export async function playSpeech(text: string, key: string): Promise<SpeakError 
 		return { code: 'http', status: res.status };
 	}
 
-	if (videoEl) return playViaVideoElement(res.body, ctrl);
+	// Dispatch on platform, not on the side-effect of `primeVideoElement`.
+	// If the iOS prime ever fails (no document, locked-down WebView), we'd
+	// rather surface that as the `blocked` toast from playViaVideoElement
+	// than silently fall through to playViaBlob without gesture priming.
+	if (isIosSafari()) return playViaVideoElement(res.body, ctrl);
 	return audioContext
 		? playViaWebAudio(res.body, ctrl)
 		: playViaBlob(res.body, ctrl);
@@ -354,25 +358,33 @@ export async function playSpeech(text: string, key: string): Promise<SpeakError 
  */
 async function playViaVideoElement(body: ReadableStream<Uint8Array>, ctrl: AbortController): Promise<SpeakError | null> {
 	const video = videoEl;
-	if (!video) return playViaBlob(body, ctrl);
+	if (!video) {
+		resetOnError();
+		return { code: 'blocked' };
+	}
+	// Snapshot the run token: rapid stop+restart can land a second
+	// playSpeech that destroys this element and creates a new one mid-
+	// stream-collect, and we must not mutate `videoEl` / `objectUrl` /
+	// `state` for a run that's been superseded. Mirrors playViaWebAudio.
+	const myRun = ++runToken;
 
 	const mp3Parts: Uint8Array[] = [];
 	let synthFailed = false;
 
 	try {
 		for await (const frame of parseSseFrames(body)) {
-			if (ctrl.signal.aborted) return null;
+			if (ctrl.signal.aborted || runToken !== myRun) return null;
 			if (frame.error) { synthFailed = true; break; }
 			if (frame.chunk) mp3Parts.push(base64ToBytes(frame.chunk));
 			if (frame.done) break;
 		}
 	} catch {
-		if (ctrl.signal.aborted) return null;
+		if (ctrl.signal.aborted || runToken !== myRun) return null;
 		resetOnError();
 		return { code: 'stream' };
 	}
 
-	if (ctrl.signal.aborted) return null;
+	if (ctrl.signal.aborted || runToken !== myRun) return null;
 	if (synthFailed) { resetOnError(); return { code: 'synth' }; }
 	if (mp3Parts.length === 0) { resetOnError(); return { code: 'empty' }; }
 
@@ -381,7 +393,7 @@ async function playViaVideoElement(body: ReadableStream<Uint8Array>, ctrl: Abort
 	objectUrl = url;
 
 	video.onended = () => {
-		if (videoEl !== video) return;
+		if (videoEl !== video || runToken !== myRun) return;
 		if (objectUrl === url) { URL.revokeObjectURL(url); objectUrl = null; }
 		// Tear the element down so the next playSpeech re-primes a fresh
 		// one inside its user-gesture stack — keeping the old element alive
@@ -395,13 +407,14 @@ async function playViaVideoElement(body: ReadableStream<Uint8Array>, ctrl: Abort
 		abortCtrl = null;
 		drainQueue();
 	};
-	video.onerror = () => { if (videoEl === video) resetOnError(); };
+	video.onerror = () => { if (videoEl === video && runToken === myRun) resetOnError(); };
 
 	video.src = url;
 	state = 'playing';
 	try {
 		await video.play();
 	} catch {
+		if (runToken !== myRun) return null;
 		resetOnError();
 		return { code: 'blocked' };
 	}

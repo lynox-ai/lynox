@@ -619,11 +619,9 @@
 	// output on iOS, and a CSS-only placeholder looked weird. The pulsing
 	// red mic button alone is the recording-active signal.
 	let mediaRecorder: MediaRecorder | null = null;
-	let recordingDiscarded = false;
 	let isStartingRecording = $state(false);
 	// Persistent mic resources — reused across recordings within the session.
 	let micStream: MediaStream | null = null;
-	let micAudioCtx: AudioContext | null = null;
 	let micReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 	const MIC_IDLE_RELEASE_MS = 60_000;
 
@@ -643,6 +641,11 @@
 	}
 
 	function scheduleMicRelease(): void {
+		// No stream to release (e.g. cleanupRecording fired after the
+		// component already tore down the mic on afterNavigate) → don't
+		// arm a no-op timer that would just expire and call releaseMicNow
+		// against null state.
+		if (!micStream) return;
 		if (micReleaseTimer) return;
 		micReleaseTimer = setTimeout(releaseMicNow, MIC_IDLE_RELEASE_MS);
 	}
@@ -655,10 +658,6 @@
 		if (micStream) {
 			micStream.getTracks().forEach((t) => t.stop());
 			micStream = null;
-		}
-		if (micAudioCtx) {
-			void micAudioCtx.close();
-			micAudioCtx = null;
 		}
 	}
 
@@ -675,7 +674,6 @@
 	async function startRecording() {
 		if (recording || isStartingRecording) return;
 		isStartingRecording = true;
-		recordingDiscarded = false;
 		try {
 			if (!navigator.mediaDevices?.getUserMedia) {
 				addToast(t('chat.mic_requires_https'), 'error');
@@ -695,9 +693,7 @@
 
 			recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 			recorder.onstop = async () => {
-				const discarded = recordingDiscarded;
 				cleanupRecording();
-				if (discarded) return;
 
 				const blob = new Blob(chunks, { type: actualMime });
 
@@ -817,12 +813,6 @@
 
 	function stopRecording() {
 		if (!recording || !mediaRecorder) return;
-		mediaRecorder.stop();
-	}
-
-	function discardRecording() {
-		if (!recording || !mediaRecorder) return;
-		recordingDiscarded = true;
 		mediaRecorder.stop();
 	}
 

@@ -13,10 +13,31 @@
  *
  * Both patches are confirmed effective on iOS 18.7 Safari (2026-05-06).
  */
+// UA never changes within a tab session; cache the result so the three
+// hot gates (TTS prime, MediaRecorder lifecycle, recording UI) skip the
+// regex on every call. Reset to null only for tests via `__resetIosSafariCache`.
+let cachedResult: boolean | null = null;
+
 export function isIosSafari(): boolean {
-	if (typeof navigator === 'undefined') return false;
+	if (cachedResult !== null) return cachedResult;
+	if (typeof navigator === 'undefined') {
+		cachedResult = false;
+		return false;
+	}
 	const ua = navigator.userAgent;
-	if (!/iPhone|iPad|iPod/.test(ua)) return false;
-	if (/CriOS|FxiOS|EdgiOS|OPiOS|YaBrowser|GSA/.test(ua)) return false;
+	if (!/iPhone|iPad|iPod/.test(ua)) {
+		cachedResult = false;
+		return false;
+	}
+	if (/CriOS|FxiOS|EdgiOS|OPiOS|YaBrowser|GSA/.test(ua)) {
+		cachedResult = false;
+		return false;
+	}
+	cachedResult = true;
 	return true;
+}
+
+/** Test-only escape hatch — production code never calls this. */
+export function __resetIosSafariCache(): void {
+	cachedResult = null;
 }
