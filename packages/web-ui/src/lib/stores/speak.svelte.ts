@@ -411,12 +411,27 @@ async function playViaVideoElement(body: ReadableStream<Uint8Array>, ctrl: Abort
 
 	video.src = url;
 	state = 'playing';
+	// iOS Safari occasionally rejects the very first play() of a session
+	// even though our prime should have established user activation. The
+	// usual cause is the prime's silent.wav not having loaded by the time
+	// `playSpeech` returns from its fetch await. Retry once after a beat —
+	// by then the silent.wav request has finished and the activation
+	// settles, and the second play() resolves. Confirmed 2026-05-06 from
+	// Rafael's HARs: identical SSE response failed→succeeded across two
+	// taps, no server-side change.
 	try {
 		await video.play();
 	} catch {
 		if (runToken !== myRun) return null;
-		resetOnError();
-		return { code: 'blocked' };
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		if (runToken !== myRun) return null;
+		try {
+			await video.play();
+		} catch {
+			if (runToken !== myRun) return null;
+			resetOnError();
+			return { code: 'blocked' };
+		}
 	}
 	return null;
 }

@@ -242,6 +242,14 @@
 	onMount(() => {
 		void loadDisplayName();
 		loadOnboardingState();
+		// Pre-warm the iOS Safari TTS prime asset. The first Speak tap
+		// synchronously sets `<video>.src = '/silent.wav'` and calls play()
+		// — but if /silent.wav isn't in the HTTP cache yet, the play() race
+		// completes before the data arrives and iOS never marks the element
+		// "user-activated". The actual MP3-blob play() seconds later is then
+		// rejected and the user gets a "blocked" toast. Fetching the asset
+		// at mount means it's served from cache by the time the user taps.
+		void fetch('/silent.wav', { cache: 'force-cache' }).catch(() => { /* offline / non-iOS users: no harm */ });
 		// Release the persistent mic stream the moment the user is no longer
 		// looking at this page. setTimeout-based idle release pauses when the
 		// tab is backgrounded on iOS, so without these explicit hooks the
