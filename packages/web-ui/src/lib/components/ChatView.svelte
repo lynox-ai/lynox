@@ -689,16 +689,13 @@
 									updatePlaceholder(placeholderIdx, `🎤 ${segments.join(' ')}`);
 								} else if (data.done && data.text) {
 									finalText = data.text;
-									console.log('[stt-debug] SSE done frame received, finalText=', JSON.stringify(finalText));
 								} else if (data.error) {
-									console.log('[stt-debug] SSE error frame:', data.error);
 									removePlaceholder(placeholderIdx);
 									addToast(t('chat.transcribe_failed'), 'error');
 									return;
 								}
 							}
 						}
-						console.log('[stt-debug] SSE loop exited, finalText=', JSON.stringify(finalText));
 
 						// Replace placeholder with final text. Default lands the
 						// transcript in the chat input for review/edit — Whisper /
@@ -708,29 +705,20 @@
 						// old auto-send via the StatusBar toggle.
 						removePlaceholder(placeholderIdx);
 						const trimmed = finalText.trim();
-						const autosendOn = isVoiceAutoSendEnabled();
-						console.log('[stt-debug] post-loop trimmed=', JSON.stringify(trimmed), 'autosendOn=', autosendOn);
 						if (trimmed) {
-							if (autosendOn) {
-								console.log('[stt-debug] autosend ON, calling sendMessage');
+							if (isVoiceAutoSendEnabled()) {
 								await sendMessage(`🎤 ${trimmed}`);
-								console.log('[stt-debug] sendMessage returned');
 							} else {
 								// Append rather than replace so a typed prefix isn't
 								// clobbered when the user dictates after typing.
 								const existing = inputText.trimEnd();
-								const before = inputText;
 								inputText = existing ? `${existing} ${trimmed}` : trimmed;
-								console.log('[stt-debug] autosend OFF, inputText before=', JSON.stringify(before), 'after=', JSON.stringify(inputText));
 								void tick().then(() => {
-									console.log('[stt-debug] post-tick inputText=', JSON.stringify(inputText), 'textareaEl=', !!textareaEl, 'textareaEl.value=', textareaEl?.value);
 									if (!textareaEl) return;
 									autoResize({ target: textareaEl } as unknown as Event);
 									textareaEl.focus();
 								});
 							}
-						} else {
-							console.log('[stt-debug] trimmed empty, doing nothing');
 						}
 					} catch {
 						removePlaceholder(placeholderIdx);
@@ -1156,17 +1144,25 @@
 		if (currentSessionId) void loadArtifacts();
 	});
 
-	// Auto-focus textarea and clear leftover input when chat is empty (new chat or initial load)
+	// Focus the textarea when the empty-state lands; clearing leftover text
+	// belongs to the navigation path (afterNavigate below) — NOT to the
+	// reactive effect, because messages.length transiently flips 0→1→0 every
+	// time we push/remove a voice-transcribe placeholder, and clearing the
+	// input there silently wipes a freshly-dictated transcript before tick().
 	function focusInput() {
 		if (messages.length === 0 && !isStreaming && textareaEl) {
-			inputText = '';
-			if (textareaEl) textareaEl.style.height = 'auto';
+			textareaEl.style.height = 'auto';
 			void tick().then(() => textareaEl?.focus());
 		}
 	}
 	$effect(() => { focusInput(); });
-	// Re-focus after SvelteKit navigation (goto('/app') resets focus)
-	afterNavigate(() => { focusInput(); stopSpeech(); });
+	// Re-focus after SvelteKit navigation (goto('/app') resets focus). Also
+	// the only path that clears leftover input — placeholder cycling must not.
+	afterNavigate(() => {
+		inputText = '';
+		focusInput();
+		stopSpeech();
+	});
 
 	// Slash commands handled client-side (navigate instead of sending to agent)
 	const SLASH_ROUTES: Record<string, string> = {
