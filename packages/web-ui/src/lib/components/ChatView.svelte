@@ -239,7 +239,19 @@
 		} catch { /* non-critical */ }
 	}
 
-	onMount(() => { void loadDisplayName(); loadOnboardingState(); });
+	onMount(() => {
+		void loadDisplayName();
+		loadOnboardingState();
+		// Release the persistent mic stream when the user leaves the page.
+		// Component teardown (return below) covers SvelteKit route changes;
+		// beforeunload covers tab close / refresh / app backgrounding.
+		const onUnload = () => releaseMicNow();
+		window.addEventListener('beforeunload', onUnload);
+		return () => {
+			window.removeEventListener('beforeunload', onUnload);
+			releaseMicNow();
+		};
+	});
 
 	// Mask any secret-like patterns (API keys, tokens) that might leak into display
 	const SECRET_PATTERNS = [
@@ -576,19 +588,43 @@
 		pendingFiles = pendingFiles.filter((_, i) => i !== idx);
 	}
 
+	// Voice input architecture (v2):
+	//
+	// State machine: idle → starting → recording → processing → idle.
+	// Mic button is a strict tap-to-toggle on every device — pointerdown/up
+	// hold-to-record was racy (async getUserMedia vs pointerup, double-fire
+	// from synthesised click) and produced empty captures.
+	//
+	// MediaStream lifecycle: allocated lazily on the first tap, persisted at
+	// module scope, released after MIC_IDLE_RELEASE_MS of no recording or on
+	// component teardown / page unload. Re-creating the stream per recording
+	// drove iOS Safari into a stuck audio-session state where every session
+	// past the second handed MediaRecorder a header-only WebM (~60 bytes).
+	// Persisting eliminates that path entirely. The privacy indicator stays
+	// on while the stream is alive — that's honest about real state and
+	// matches what voice apps (Whisper, Discord, etc.) do.
+	//
+	// Analyser branch: only on desktop. On iOS, `createMediaStreamSource`
+	// also corrupts MediaRecorder output, so we replace the live waveform
+	// with CSS-animated placeholder bars (still pulses, looks alive, no
+	// audio data flowing through an AudioContext that would taint the
+	// recorder).
 	let mediaRecorder: MediaRecorder | null = null;
-	let audioAnalyser: AnalyserNode | null = null;
 	let waveformBars = $state<number[]>(new Array(24).fill(3));
 	let waveformRaf: number | null = null;
 	let recordingDiscarded = false;
-	let activeAudioCtx: AudioContext | null = null;
-	let activeStream: MediaStream | null = null;
-	let recordingStartedByTouch = false;
+	let isStartingRecording = $state(false);
+	// Persistent mic resources — reused across recordings within the session.
+	let micStream: MediaStream | null = null;
+	let micAudioCtx: AudioContext | null = null;
+	let micAnalyser = $state<AnalyserNode | null>(null);
+	let micReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+	const MIC_IDLE_RELEASE_MS = 60_000;
 
 	function updateWaveform() {
-		if (!audioAnalyser || !recording) return;
-		const data = new Uint8Array(audioAnalyser.frequencyBinCount);
-		audioAnalyser.getByteFrequencyData(data);
+		if (!micAnalyser || !recording) return;
+		const data = new Uint8Array(micAnalyser.frequencyBinCount);
+		micAnalyser.getByteFrequencyData(data);
 		const step = Math.floor(data.length / 24);
 		const bars: number[] = [];
 		for (let i = 0; i < 24; i++) {
@@ -599,46 +635,73 @@
 		waveformRaf = requestAnimationFrame(updateWaveform);
 	}
 
+	async function ensureMicStream(): Promise<MediaStream> {
+		// A pending release means we're inside the idle window — cancel it
+		// and return the still-live stream.
+		if (micReleaseTimer) {
+			clearTimeout(micReleaseTimer);
+			micReleaseTimer = null;
+		}
+		if (micStream && micStream.getAudioTracks().some((t) => t.readyState === 'live')) {
+			return micStream;
+		}
+		const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+		micStream = stream;
+		if (!isIosSafari()) {
+			const ctx = new AudioContext();
+			micAudioCtx = ctx;
+			const source = ctx.createMediaStreamSource(stream);
+			const analyser = ctx.createAnalyser();
+			analyser.fftSize = 128;
+			source.connect(analyser);
+			micAnalyser = analyser;
+		}
+		return stream;
+	}
+
+	function scheduleMicRelease(): void {
+		if (micReleaseTimer) return;
+		micReleaseTimer = setTimeout(releaseMicNow, MIC_IDLE_RELEASE_MS);
+	}
+
+	function releaseMicNow(): void {
+		if (micReleaseTimer) {
+			clearTimeout(micReleaseTimer);
+			micReleaseTimer = null;
+		}
+		if (micStream) {
+			micStream.getTracks().forEach((t) => t.stop());
+			micStream = null;
+		}
+		if (micAudioCtx) {
+			void micAudioCtx.close();
+			micAudioCtx = null;
+		}
+		micAnalyser = null;
+	}
+
 	function cleanupRecording() {
 		recording = false;
 		recordingSeconds = 0;
 		if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
 		if (waveformRaf) { cancelAnimationFrame(waveformRaf); waveformRaf = null; }
-		audioAnalyser = null;
-		if (activeAudioCtx) { void activeAudioCtx.close(); activeAudioCtx = null; }
-		if (activeStream) { activeStream.getTracks().forEach((track) => track.stop()); activeStream = null; }
 		mediaRecorder = null;
 		waveformBars = new Array(24).fill(3);
+		// Don't tear down the stream here — schedule an idle release so a
+		// subsequent quick re-tap reuses the same audio session.
+		scheduleMicRelease();
 	}
 
 	async function startRecording() {
-		if (recording) return;
+		if (recording || isStartingRecording) return;
+		isStartingRecording = true;
 		recordingDiscarded = false;
 		try {
 			if (!navigator.mediaDevices?.getUserMedia) {
 				addToast(t('chat.mic_requires_https'), 'error');
 				return;
 			}
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			activeStream = stream;
-
-			// Waveform analyser is desktop-only. On iOS Safari, attaching the
-			// MediaStream to an AudioContext via createMediaStreamSource
-			// degrades MediaRecorder output on every session past the second:
-			// the recorder hands back a header-only WebM (~60 bytes) because
-			// the audio data is being consumed by the analyser node. Confirmed
-			// 2026-05-06 across two staging deploys. iOS users get a static
-			// "Aufnahme..." indicator instead of bars; the UX is fine, the
-			// reliability win is large.
-			if (!isIosSafari()) {
-				const audioCtx = new AudioContext();
-				activeAudioCtx = audioCtx;
-				const source = audioCtx.createMediaStreamSource(stream);
-				const analyser = audioCtx.createAnalyser();
-				analyser.fftSize = 128;
-				source.connect(analyser);
-				audioAnalyser = analyser;
-			}
+			const stream = await ensureMicStream();
 
 			const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
 				: MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4'
@@ -761,13 +824,15 @@
 			recordingSeconds = 0;
 			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
 			mediaRecorder = recorder;
-			waveformRaf = requestAnimationFrame(updateWaveform);
+			if (micAnalyser) waveformRaf = requestAnimationFrame(updateWaveform);
 		} catch (err) {
 			if (err instanceof DOMException && err.name === 'NotAllowedError') {
 				addToast(t('chat.mic_denied'), 'error');
 			} else {
 				addToast(t('chat.mic_unavailable'), 'error');
 			}
+		} finally {
+			isStartingRecording = false;
 		}
 	}
 
@@ -1340,38 +1405,18 @@
 </script>
 
 {#snippet micButton()}
-	<!-- Touch: hold to record, release to send. Mouse: click to toggle.
-	     Rendered both alone (input empty) and alongside the send button
-	     when auto-send mode is on (input non-empty), since dictation in
-	     auto-send mode bypasses the input box. -->
+	<!-- Tap-to-toggle on every device. Hold-to-record was racy on touch
+	     (async getUserMedia vs pointerup, plus the synthesised click that
+	     fires after pointerup re-entered startRecording). One canonical
+	     handler, one source of truth, no double-fire. -->
 	<button
 		onclick={() => {
-			if (recordingStartedByTouch) return;
 			if (recording) { stopRecording(); } else { void startRecording(); }
 		}}
-		onpointerdown={(e) => {
-			if (e.pointerType !== 'touch') return;
-			e.preventDefault();
-			recordingStartedByTouch = true;
-			void startRecording();
-		}}
-		onpointerup={() => {
-			if (recordingStartedByTouch) {
-				recordingStartedByTouch = false;
-				stopRecording();
-			}
-		}}
-		onpointerleave={() => {
-			if (recordingStartedByTouch) {
-				recordingStartedByTouch = false;
-				stopRecording();
-			}
-		}}
-		oncontextmenu={(e) => e.preventDefault()}
-		disabled={!ready}
-		class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none touch-none"
+		disabled={!ready || isStartingRecording}
+		class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full text-text-subtle hover:text-text active:bg-accent/20 active:text-accent disabled:opacity-30 transition-all select-none"
 		aria-label={t('chat.voice_input')}
-		title="{t('chat.voice_input')} ({t('shortcut.voice_record')})"
+		title={t('chat.voice_input')}
 	>
 		<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 			<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
@@ -2215,13 +2260,23 @@
 					</button>
 					<span class="h-2 w-2 rounded-full bg-danger animate-pulse shrink-0"></span>
 					<span class="text-xs font-mono text-text-subtle tabular-nums shrink-0">{recordingSeconds}s</span>
-					<!-- Live waveform bars -->
+					<!-- Recording bars: live waveform driven by AnalyserNode on
+					     desktop; CSS-animated Siri-style placeholder on iOS where
+					     attaching an analyser to the MediaStream corrupts the
+					     MediaRecorder output. Either way the user sees motion. -->
 					<div class="flex-1 flex items-center justify-center gap-[2px] h-8">
-						{#each waveformBars as height}
-							<div
-								class="w-[3px] rounded-full bg-accent/70 transition-all duration-75"
-								style="height: {height}px;"
-							></div>
+						{#each waveformBars as height, i}
+							{#if micAnalyser}
+								<div
+									class="w-[3px] rounded-full bg-accent/70 transition-all duration-75"
+									style="height: {height}px;"
+								></div>
+							{:else}
+								<div
+									class="recording-bar w-[3px] rounded-full bg-accent/70"
+									style:animation-delay="{(i * 70) % 840}ms"
+								></div>
+							{/if}
 						{/each}
 					</div>
 				</div>
@@ -2430,5 +2485,18 @@
 	}
 	:global(.prompt-chip:hover .prompt-chip-text) {
 		color: var(--color-text, #e8e8f0);
+	}
+
+	/* CSS-only Siri-style recording bars for iOS Safari, where the audio
+	   analyser path is disabled. Each bar gets a different animation-delay
+	   via inline style so the wave looks lively without an AudioContext. */
+	.recording-bar {
+		height: 24px;
+		transform-origin: center;
+		animation: recording-bar-pulse 1.2s ease-in-out infinite;
+	}
+	@keyframes recording-bar-pulse {
+		0%, 100% { transform: scaleY(0.18); }
+		50% { transform: scaleY(1); }
 	}
 </style>
