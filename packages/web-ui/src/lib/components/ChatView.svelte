@@ -61,7 +61,7 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { playSpeech, playSpeechQueued, stopSpeech, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
+	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
@@ -1261,6 +1261,15 @@
 		const task = inputText.trim();
 		if (!task && pendingFiles.length === 0) return;
 
+		// iOS TTS gesture-prime: handleSend is always a user-gesture entry
+		// (Send button click or Enter on desktop). If the assistant's
+		// reply triggers auto-speak, that fires from a microtask outside
+		// any gesture and can't establish iOS' user-activation latch on
+		// its own. Pre-priming the persistent video element here means the
+		// later playSpeech reuses an already-activated element. Safe no-op
+		// on non-iOS and when already primed.
+		primeIosTts();
+
 		// Handle slash commands as navigation
 		const slashRoute = SLASH_ROUTES[task.toLowerCase()];
 		if (slashRoute) {
@@ -1397,6 +1406,13 @@
 	     stays visible and functional underneath — no parallel UI mode. -->
 	<button
 		onclick={() => {
+			// Prime the iOS TTS element on this gesture too: the voice →
+			// auto-send → assistant → auto-speak chain bypasses handleSend
+			// entirely (sendMessage is called directly), so without this the
+			// auto-speak of the assistant reply would land outside any
+			// gesture and iOS rejects the silent.wav play(). Safe no-op on
+			// non-iOS and when already primed.
+			primeIosTts();
 			if (recording) { stopRecording(); } else { void startRecording(); }
 		}}
 		disabled={!ready || isStartingRecording}

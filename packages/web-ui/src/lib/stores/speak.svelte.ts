@@ -165,7 +165,20 @@ export function stopSpeech(): void {
 		audioEl.src = '';
 		audioEl = null;
 	}
-	destroyVideoEl();
+	// Pause the persistent iOS video element but DO NOT destroy it. Once
+	// activated by a user gesture, the element retains its "user-activated"
+	// state across plays as long as the instance lives — auto-speak (which
+	// fires outside any gesture) depends on that latch. Destroying it would
+	// force `primeVideoElement` to run again on the next playSpeech, and if
+	// that happens to be from auto-speak, the new element never reaches a
+	// gesture and play() rejects. Persistent element + reset src instead.
+	if (videoEl) {
+		try {
+			videoEl.pause();
+			videoEl.removeAttribute('src');
+			videoEl.load();
+		} catch { /* element already detached or in a weird state */ }
+	}
 	// Stop in-flight buffer sources but DO NOT close the AudioContext —
 	// closing it would force re-creation on the next playSpeech, which
 	// iOS only permits inside a synchronous click handler. By keeping the
@@ -289,6 +302,22 @@ function primeVideoElement(): HTMLVideoElement | null {
 }
 
 /**
+ * Public, idempotent entry point for callers that have a fresh user
+ * gesture and want to pre-activate the iOS TTS video element BEFORE the
+ * actual playSpeech call (which may not be in a gesture stack — auto-
+ * speak fires from a microtask when an assistant block arrives, not from
+ * a click). Calling this from `handleSend` (always a gesture) means the
+ * element is created and play()'d on the silent.wav while activation is
+ * available; auto-speak's later playSpeech then reuses the already-
+ * activated element via the persistent `videoEl` reference. Safe no-op
+ * on non-iOS browsers and when already primed.
+ */
+export function primeIosTts(): void {
+	if (!isIosSafari()) return;
+	primeVideoElement();
+}
+
+/**
  * Start TTS for `text`. Playback begins as soon as audio data is decodable
  * (~100 ms after first chunk on Web Audio path). Returns null on success or
  * a `SpeakError` the caller surfaces via i18n.
@@ -395,13 +424,12 @@ async function playViaVideoElement(body: ReadableStream<Uint8Array>, ctrl: Abort
 	video.onended = () => {
 		if (videoEl !== video || runToken !== myRun) return;
 		if (objectUrl === url) { URL.revokeObjectURL(url); objectUrl = null; }
-		// Tear the element down so the next playSpeech re-primes a fresh
-		// one inside its user-gesture stack — keeping the old element alive
-		// across utterances would let primeVideoElement's `if (videoEl)
-		// return videoEl` short-circuit, and there's no benefit to that
-		// since stopSpeech (called at the top of every playSpeech) would
-		// destroy it anyway.
-		destroyVideoEl();
+		// Don't destroy the element — keep its "user-activated" state alive
+		// for the next play. Especially important for auto-speak, which
+		// fires queued plays outside a fresh user gesture. `drainQueue` ->
+		// playSpeech -> stopSpeech only pauses, then this same element is
+		// re-`src`-ed by playViaVideoElement and play() succeeds because
+		// activation is still latched.
 		state = 'idle';
 		activeKey = null;
 		abortCtrl = null;
