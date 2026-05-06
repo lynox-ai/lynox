@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.3.12 — 2026-05-06
+
+### Added
+
+<!-- new features -->
+
+### Changed
+
+<!-- existing features touched -->
+
+### Fixed
+
+<!-- bug fixes -->
+
+<!-- Reference — raw commits since v1.3.11 (delete this block before saving):
+
+Core:
+- fix(web-ui): warm silent.wav + retry iOS TTS first play() (#257)
+- fix(web-ui): use <video playsinline> for TTS on iOS Safari (#256)
+
+Pro:
+
+-->
 ## 1.3.11 — 2026-05-05
 
 ### Fixed
