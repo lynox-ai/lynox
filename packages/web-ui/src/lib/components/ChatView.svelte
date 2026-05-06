@@ -645,10 +645,22 @@
 				cleanupRecording();
 				if (discarded) return;
 
+				const blob = new Blob(chunks, { type: actualMime });
+
+				// iOS Safari sometimes hands back a header-only WebM blob (~60
+				// bytes, no audio frames) on second-and-later MediaRecorder
+				// runs after a clean stop+cleanup cycle — confirmed 2026-05-06
+				// when consecutive captures all returned a 60-byte body that
+				// Mistral refused with "Transcription failed". Bail before we
+				// burn a transcribe call on data we can already see is empty.
+				if (blob.size < 1024) {
+					addToast(t('chat.voice_too_short'), 'error');
+					return;
+				}
+
 				// Show placeholder bubble immediately with live transcription
 				const placeholderIdx = pushPlaceholder(`🎤 ${t('chat.voice_processing')}`);
 
-				const blob = new Blob(chunks, { type: actualMime });
 				const reader = new FileReader();
 				reader.onload = async () => {
 					const base64 = (reader.result as string).split(',')[1] ?? '';
@@ -728,7 +740,12 @@
 				reader.readAsDataURL(blob);
 			};
 
-			recorder.start();
+			// Timeslice (1s): forces periodic dataavailable events instead of a
+			// single one at stop. iOS Safari's audio session occasionally drops
+			// the final-only data event on second-and-later recordings; with a
+			// timeslice the chunks accumulate as audio flows, so even a glitched
+			// session still hands us populated chunks.
+			recorder.start(1000);
 			recording = true;
 			recordingSeconds = 0;
 			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);

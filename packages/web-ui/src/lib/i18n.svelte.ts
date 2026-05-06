@@ -367,6 +367,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.mic_requires_https': { de: 'Spracheingabe benötigt HTTPS. Greife über https:// oder localhost zu.', en: 'Voice input requires HTTPS. Access via https:// or localhost.' },
 	'chat.whisper_unavailable': { de: 'Transkription nicht verfügbar. Whisper ist auf dem Server nicht installiert.', en: 'Transcription not available. Whisper is not installed on the server.' },
 	'chat.transcribe_failed': { de: 'Transkription fehlgeschlagen. Versuche es nochmal.', en: 'Transcription failed. Please try again.' },
+	'chat.voice_too_short': { de: 'Aufnahme zu kurz oder leer. Halte den Mic-Button gedrückt und sprich.', en: 'Recording too short or empty. Hold the mic button and speak.' },
 	'chat.use_keyboard_dictation': { de: 'Tipp: Nutze die Diktierfunktion deiner Tastatur (🎙️) für schnellste Spracheingabe.', en: 'Tip: Use your keyboard dictation (🎙️) for the fastest voice input.' },
 	'chat.voice_processing': { de: 'Wird verarbeitet…', en: 'Processing…' },
 	'chat.attach_file': { de: 'Datei anhängen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
