@@ -12,14 +12,28 @@ import { join } from 'node:path';
 import { Engine } from '../../src/core/engine.js';
 
 let tmp: string;
-let priorFlag: string | undefined;
-let priorHome: string | undefined;
+let priorEnv: Record<string, string | undefined>;
 let engine: Engine | null = null;
+
+const INBOX_ENV_VARS = [
+  'LYNOX_FEATURE_UNIFIED_INBOX',
+  'LYNOX_HOME',
+  'LYNOX_INBOX_LLM_REGION',
+  'LYNOX_INBOX_MISTRAL_API_KEY',
+  'LYNOX_INBOX_SENSITIVE_MODE',
+  'LYNOX_INBOX_FOLDER_BLACKLIST',
+  'LYNOX_INBOX_DISABLED_ACCOUNTS',
+  'LYNOX_INBOX_PRIVACY_ACK',
+  'LYNOX_INBOX_REQUIRE_PRIVACY_ACK',
+];
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'lynox-inbox-flag-'));
-  priorFlag = process.env['LYNOX_FEATURE_UNIFIED_INBOX'];
-  priorHome = process.env['LYNOX_HOME'];
+  priorEnv = {};
+  for (const k of INBOX_ENV_VARS) {
+    priorEnv[k] = process.env[k];
+    if (k !== 'LYNOX_HOME') delete process.env[k];
+  }
   process.env['LYNOX_HOME'] = tmp;
 });
 
@@ -28,10 +42,11 @@ afterEach(async () => {
     await engine.shutdown().catch(() => {});
     engine = null;
   }
-  if (priorFlag === undefined) delete process.env['LYNOX_FEATURE_UNIFIED_INBOX'];
-  else process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = priorFlag;
-  if (priorHome === undefined) delete process.env['LYNOX_HOME'];
-  else process.env['LYNOX_HOME'] = priorHome;
+  for (const k of INBOX_ENV_VARS) {
+    const v = priorEnv[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -69,5 +84,41 @@ describe('Engine boot — unified-inbox flag', () => {
     // After shutdown the engine's inbox handle is cleared (idempotent).
     expect(engine.getInboxRuntime()).toBeNull();
     engine = null;
+  });
+
+  it('LYNOX_INBOX_LLM_REGION=eu requires a Mistral API key to bootstrap', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    process.env['LYNOX_INBOX_LLM_REGION'] = 'eu';
+    // No MISTRAL_API_KEY set — bootstrapInbox throws and engine swallows.
+    engine = new Engine({});
+    await engine.init();
+    expect(engine.getInboxRuntime()).toBeNull();
+  });
+
+  it('LYNOX_INBOX_LLM_REGION=eu + MISTRAL_API_KEY bootstraps the runtime', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    process.env['LYNOX_INBOX_LLM_REGION'] = 'eu';
+    process.env['LYNOX_INBOX_MISTRAL_API_KEY'] = 'test-eu-key';
+    engine = new Engine({});
+    await engine.init();
+    expect(engine.getInboxRuntime()).not.toBeNull();
+  });
+
+  it('LYNOX_INBOX_REQUIRE_PRIVACY_ACK=1 without ack refuses to bootstrap (US default)', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] = '1';
+    // ack not set
+    engine = new Engine({});
+    await engine.init();
+    expect(engine.getInboxRuntime()).toBeNull();
+  });
+
+  it('LYNOX_INBOX_REQUIRE_PRIVACY_ACK=1 + PRIVACY_ACK=1 bootstraps the runtime', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] = '1';
+    process.env['LYNOX_INBOX_PRIVACY_ACK'] = '1';
+    engine = new Engine({});
+    await engine.init();
+    expect(engine.getInboxRuntime()).not.toBeNull();
   });
 });

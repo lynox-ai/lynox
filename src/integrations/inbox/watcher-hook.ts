@@ -107,29 +107,30 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       // matching once the watcher hook gains header forwarding.
     });
     if (rule) {
-      const itemId = opts.state.insertItem({
-        tenantId: opts.tenantId,
-        accountId,
-        channel: 'email',
-        threadKey,
-        bucket: rule.bucket,
-        confidence: 1,
-        reasonDe: `Regel: ${rule.matcherKind} = ${rule.matcherValue}`,
-        classifiedAt: new Date(),
-        classifierVersion: `rule:${rule.id}`,
-      });
-      opts.state.appendAudit({
-        tenantId: opts.tenantId,
-        itemId,
-        action: 'rule_applied',
-        actor: 'rule_engine',
-        payloadJson: JSON.stringify({
-          rule_id: rule.id,
-          matcher_kind: rule.matcherKind,
-          matcher_value: rule.matcherValue,
-          action: rule.action,
-        }),
-      });
+      opts.state.insertItemWithAudit(
+        {
+          tenantId: opts.tenantId,
+          accountId,
+          channel: 'email',
+          threadKey,
+          bucket: rule.bucket,
+          confidence: 1,
+          reasonDe: `Regel: ${rule.matcherKind} = ${rule.matcherValue}`,
+          classifiedAt: new Date(),
+          classifierVersion: `rule:${rule.id}`,
+        },
+        {
+          tenantId: opts.tenantId,
+          action: 'rule_applied',
+          actor: 'rule_engine',
+          payloadJson: JSON.stringify({
+            rule_id: rule.id,
+            matcher_kind: rule.matcherKind,
+            matcher_value: rule.matcherValue,
+            action: rule.action,
+          }),
+        },
+      );
       return;
     }
 
@@ -139,28 +140,29 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //    allow → send raw, audit that user opted in
     const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
     if (sensitive.isSensitive && sensitiveMode === 'skip') {
-      const itemId = opts.state.insertItem({
-        tenantId: opts.tenantId,
-        accountId,
-        channel: 'email',
-        threadKey,
-        bucket: 'requires_user',
-        confidence: 0,
-        reasonDe: reasonForCategories(sensitive.categories),
-        classifiedAt: new Date(),
-        classifierVersion: 'sensitive-prefilter',
-      });
-      opts.state.appendAudit({
-        tenantId: opts.tenantId,
-        itemId,
-        action: 'classified',
-        actor: 'rule_engine',
-        payloadJson: JSON.stringify({
-          sensitive_categories: sensitive.categories,
-          sensitive_mode: 'skip',
-          skipped_llm: true,
-        }),
-      });
+      opts.state.insertItemWithAudit(
+        {
+          tenantId: opts.tenantId,
+          accountId,
+          channel: 'email',
+          threadKey,
+          bucket: 'requires_user',
+          confidence: 0,
+          reasonDe: reasonForCategories(sensitive.categories),
+          classifiedAt: new Date(),
+          classifierVersion: 'sensitive-prefilter',
+        },
+        {
+          tenantId: opts.tenantId,
+          action: 'classified',
+          actor: 'rule_engine',
+          payloadJson: JSON.stringify({
+            sensitive_categories: sensitive.categories,
+            sensitive_mode: 'skip',
+            skipped_llm: true,
+          }),
+        },
+      );
       return;
     }
 

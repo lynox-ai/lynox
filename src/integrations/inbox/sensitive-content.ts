@@ -66,19 +66,37 @@ const OTP_DIGIT_RE = /\b\d{4}(?:[-\s]?\d{2,4})?\b/;
 
 const PASSWORD_RESET_RE = /\b(?:reset\s*(?:your)?\s*password|passwort\s*zurücksetzen|password\s*reset|magic\s*link|sign[-\s]?in\s*link|login\s*link|anmelde[-\s]?link)\b/i;
 
-/** Secret-prefix patterns from common providers. */
-const SECRET_PREFIX_RES: ReadonlyArray<RegExp> = [
-  /\bsk-[A-Za-z0-9_-]{16,}\b/,                  // Anthropic / OpenAI style
+/**
+ * Secret-prefix patterns from common providers. Exported (read-only) so
+ * `scrubErrorMessage` in `runner.ts` can reuse the same set when sanitising
+ * SDK error strings.
+ */
+export const SECRET_PREFIX_RES: ReadonlyArray<RegExp> = [
+  /\bsk-[A-Za-z0-9_-]{16,}\b/,                  // Anthropic / OpenAI dash-style
+  /\b(?:sk|rk|whsec|pk)_(?:(?:live|test|acct)_)?[A-Za-z0-9]{16,}\b/, // Stripe-style underscore keys (live/test/connect-account/webhook-secret)
   /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/,           // Slack
   /\bgh[pousr]_[A-Za-z0-9]{16,}\b/,             // GitHub PATs
   /\bAKIA[0-9A-Z]{16}\b/,                       // AWS access key
   /\bya29\.[A-Za-z0-9_-]{20,}\b/,               // Google OAuth refresh token
-  /\bBearer\s+[A-Za-z0-9._-]{20,}\b/,           // Generic bearer tokens
+  /\bBearer\s+\S{8,}\b/,                        // Generic bearer tokens (8+ chars — catches short opaque tokens too)
   /\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\b/, // JWT (3 segments)
 ];
 
-/** Loose IBAN shape (country code + 2 check digits + 11..30 alnum). */
-const IBAN_RE = /\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g;
+/**
+ * Global variants of every SECRET_PREFIX_RES pattern — precomputed at
+ * module load so the hot-path mask loop does not allocate a fresh
+ * RegExp per inbound mail.
+ */
+const SECRET_PREFIX_RES_G: ReadonlyArray<RegExp> = SECRET_PREFIX_RES.map(
+  (re) => new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`),
+);
+
+/**
+ * Loose IBAN shape (country code + 2 check digits + 11..30 alnum).
+ * Case-insensitive (`i` flag) — lowercase IBANs in body text are common
+ * and the older case-sensitive variant let them through.
+ */
+const IBAN_RE = /\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/gi;
 
 /** Plausible credit-card digit groups (13..19 digits w/ optional spaces/dashes). */
 const CARD_RE = /\b(?:\d[ -]?){13,19}\b/g;
@@ -136,54 +154,66 @@ export function analyzeSensitiveContent(input: DetectInput): SensitiveAnalysis {
   const haystack = `${input.subject}\n${input.body}`;
   if (OTP_KEYWORD_RE.test(haystack) && OTP_DIGIT_RE.test(haystack)) {
     found.add('otp_or_2fa');
-    const before = maskedSubject + maskedBody;
-    maskedSubject = maskedSubject.replace(DIGIT_RUN_RE, '[REDACTED:OTP]');
-    maskedBody = maskedBody.replace(DIGIT_RUN_RE, '[REDACTED:OTP]');
-    redactions += countReplacements(before, maskedSubject + maskedBody);
+    maskedSubject = maskedSubject.replace(DIGIT_RUN_RE, () => {
+      redactions++;
+      return '[REDACTED:OTP]';
+    });
+    maskedBody = maskedBody.replace(DIGIT_RUN_RE, () => {
+      redactions++;
+      return '[REDACTED:OTP]';
+    });
   }
 
   if (PASSWORD_RESET_RE.test(haystack)) {
     found.add('password_reset');
     // Redact reset/magic-link URLs — the keyword phrase itself is fine.
-    const before = maskedSubject + maskedBody;
-    maskedSubject = maskedSubject.replace(RESET_LINK_RE, '[REDACTED:RESET-LINK]');
-    maskedBody = maskedBody.replace(RESET_LINK_RE, '[REDACTED:RESET-LINK]');
-    redactions += countReplacements(before, maskedSubject + maskedBody);
+    maskedSubject = maskedSubject.replace(RESET_LINK_RE, () => {
+      redactions++;
+      return '[REDACTED:RESET-LINK]';
+    });
+    maskedBody = maskedBody.replace(RESET_LINK_RE, () => {
+      redactions++;
+      return '[REDACTED:RESET-LINK]';
+    });
   }
 
-  for (const re of SECRET_PREFIX_RES) {
-    const reG = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-    if (re.test(haystack)) {
-      found.add('api_key_or_secret');
-      const before = maskedSubject + maskedBody;
-      maskedSubject = maskedSubject.replace(reG, '[REDACTED:SECRET]');
-      maskedBody = maskedBody.replace(reG, '[REDACTED:SECRET]');
-      redactions += countReplacements(before, maskedSubject + maskedBody);
-    }
+  for (let i = 0; i < SECRET_PREFIX_RES.length; i++) {
+    if (!SECRET_PREFIX_RES[i]!.test(haystack)) continue;
+    found.add('api_key_or_secret');
+    maskedSubject = maskedSubject.replace(SECRET_PREFIX_RES_G[i]!, () => {
+      redactions++;
+      return '[REDACTED:SECRET]';
+    });
+    maskedBody = maskedBody.replace(SECRET_PREFIX_RES_G[i]!, () => {
+      redactions++;
+      return '[REDACTED:SECRET]';
+    });
   }
 
   // IBAN: shape match + at least one letter to avoid pure-digit false positives.
-  const ibanMatches = [...haystack.matchAll(IBAN_RE)].filter((m) => /[A-Z]/.test(m[0]));
+  const ibanMatches = [...haystack.matchAll(IBAN_RE)].filter((m) => /[A-Za-z]/.test(m[0]));
   if (ibanMatches.length > 0) {
     found.add('iban');
-    const before = maskedSubject + maskedBody;
     for (const m of ibanMatches) {
+      const inSubject = maskedSubject.split(m[0]).length - 1;
+      const inBody = maskedBody.split(m[0]).length - 1;
+      redactions += inSubject + inBody;
       maskedSubject = maskedSubject.split(m[0]).join('[REDACTED:IBAN]');
       maskedBody = maskedBody.split(m[0]).join('[REDACTED:IBAN]');
     }
-    redactions += countReplacements(before, maskedSubject + maskedBody);
   }
 
   // Credit card: shape + Luhn-valid.
   const cardCandidates = [...haystack.matchAll(CARD_RE)].filter((m) => luhnValid(m[0]));
   if (cardCandidates.length > 0) {
     found.add('credit_card');
-    const before = maskedSubject + maskedBody;
     for (const m of cardCandidates) {
+      const inSubject = maskedSubject.split(m[0]).length - 1;
+      const inBody = maskedBody.split(m[0]).length - 1;
+      redactions += inSubject + inBody;
       maskedSubject = maskedSubject.split(m[0]).join('[REDACTED:CARD]');
       maskedBody = maskedBody.split(m[0]).join('[REDACTED:CARD]');
     }
-    redactions += countReplacements(before, maskedSubject + maskedBody);
   }
 
   if (found.size === 0) {
@@ -202,11 +232,29 @@ export function detectSensitiveContent(input: DetectInput): SensitiveDetection {
   return { isSensitive: out.isSensitive, categories: out.categories };
 }
 
-function countReplacements(before: string, after: string): number {
-  // [REDACTED:...] markers are the only growth source after replace; count them.
-  const beforeMarkers = (before.match(/\[REDACTED:/g) ?? []).length;
-  const afterMarkers = (after.match(/\[REDACTED:/g) ?? []).length;
-  return Math.max(0, afterMarkers - beforeMarkers);
+/**
+ * Sanitize a free-text error message before persisting it to the audit
+ * log or forwarding it to Bugsink. Strips every secret-prefix pattern
+ * (Stripe, OpenAI, Slack, AWS, JWT, etc.) plus URL query strings, then
+ * caps at 200 chars. SDK errors usually do not echo the request body,
+ * but a chatty future SDK cannot leak prompt content into audit logs
+ * or downstream Bugsink reports through this path.
+ *
+ * Lives next to SECRET_PREFIX_RES so the pattern set and the scrubber
+ * cannot drift — and both the runner and the Mistral caller can import
+ * it without creating a module cycle.
+ */
+export function scrubErrorMessage(input: string): string {
+  if (!input) return '';
+  let out = input;
+  // Strip every known secret prefix BEFORE truncating so a 200-char cap
+  // never accidentally clips off the redaction marker.
+  for (let i = 0; i < SECRET_PREFIX_RES.length; i++) {
+    out = out.replace(SECRET_PREFIX_RES_G[i]!, '[REDACTED:SECRET]');
+  }
+  return out
+    .replace(/\?[^\s]+/g, '?[REDACTED-QUERY]')
+    .slice(0, 200);
 }
 
 /** German user-facing reason for the audit-log + UI. */

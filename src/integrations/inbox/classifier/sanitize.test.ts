@@ -73,4 +73,25 @@ describe('sanitizeHeader', () => {
   it('replaces newlines inside subjects with single space', () => {
     expect(sanitizeHeader('Subject\nwith\rline\r\nbreaks')).toBe('Subject with line breaks');
   });
+
+  it('strips Unicode TAGS-plane code points (ASCII Smuggler injection vector)', () => {
+    // U+E0048 ('TAG LATIN CAPITAL LETTER H'), U+E0049 ('I') — non-BMP,
+    // invisible in any client; Haiku/Mistral read them as text.
+    const TAG_H = String.fromCodePoint(0xE0048);
+    const TAG_I = String.fromCodePoint(0xE0049);
+    const sneaky = `Subject ${TAG_H}${TAG_I} normal`;
+    expect(sanitizeHeader(sneaky)).toBe('Subject normal');
+  });
+});
+
+describe('sanitizeBody — Unicode TAGS plane', () => {
+  it('strips TAGS-plane code points from the body', () => {
+    const TAG_H = String.fromCodePoint(0xE0048);
+    const TAG_I = String.fromCodePoint(0xE0049);
+    const sneaky = `Hi${TAG_H}${TAG_I}, please act normal.`;
+    const out = sanitizeBody(sneaky).body;
+    expect(out).not.toContain(TAG_H);
+    expect(out).not.toContain(TAG_I);
+    expect(out).toContain('please act normal');
+  });
 });
