@@ -30,6 +30,10 @@ export const MAX_BODY_CHARS = 8_000;
  *   U+2060–U+206F   word joiner + invisible separators
  *   U+FEFF          BOM (anywhere)
  *   U+FFF9–U+FFFB   interlinear annotation anchors
+ *   U+E0000–U+E007F TAGS plane — the ASCII-Smuggler prompt-injection
+ *                    payload uses these invisible code points to
+ *                    smuggle instructions past visual review (Haiku
+ *                    reads them as text)
  */
 // Built at module load via String.fromCharCode so the source file stays pure
 // ASCII — literal hidden characters in source would defeat the very thing we
@@ -53,6 +57,14 @@ const HIDDEN_CHAR_RE: RegExp = (() => {
   }
   return new RegExp(`[${parts.join('')}]`, 'g');
 })();
+
+/**
+ * TAGS plane (U+E0000–U+E007F) covers code points outside the BMP, which
+ * `String.fromCharCode` cannot represent. Constructed via the regex
+ * `u`-flag literal so the source stays ASCII while still catching the
+ * "ASCII Smuggler" attack class.
+ */
+const TAG_PLANE_RE: RegExp = /[\u{E0000}-\u{E007F}]/gu;
 
 /**
  * Strip the most attack-relevant HTML constructs. The provider already gives
@@ -96,7 +108,9 @@ export function sanitizeBody(input: string | undefined | null): SanitizeResult {
   if (!input) return { body: '', truncated: false, originalLength: 0 };
 
   const originalLength = input.length;
-  const stripped = stripHtml(input).replace(HIDDEN_CHAR_RE, '');
+  const stripped = stripHtml(input)
+    .replace(HIDDEN_CHAR_RE, '')
+    .replace(TAG_PLANE_RE, '');
   const normalized = normalizeWhitespace(stripped);
   if (normalized.length <= MAX_BODY_CHARS) {
     return { body: normalized, truncated: false, originalLength };
@@ -118,6 +132,7 @@ export function sanitizeHeader(input: string | undefined | null, maxLen = 500): 
   return input
     .replace(/\r\n?/g, ' ')
     .replace(HIDDEN_CHAR_RE, '')
+    .replace(TAG_PLANE_RE, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLen);

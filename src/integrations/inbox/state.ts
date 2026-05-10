@@ -265,6 +265,21 @@ export class InboxStateDb {
     return existing.id;
   }
 
+  /**
+   * Atomic insert-item + append-audit in a single transaction. Halves the
+   * SQLite fsync cost on the watcher's hot path (each call previously did
+   * two separate prepared-statement runs and two journal flushes per mail).
+   * Returns the item id (post-INSERT-OR-IGNORE-fallback, see `insertItem`).
+   */
+  insertItemWithAudit(item: InboxItemInput, audit: Omit<InboxAuditInput, 'itemId'>): string {
+    const txn = this.db.transaction(() => {
+      const id = this.insertItem(item);
+      this.appendAudit({ ...audit, itemId: id });
+      return id;
+    });
+    return txn();
+  }
+
   getItem(id: string): InboxItem | null {
     const row = this.db
       .prepare<[string], ItemRow>('SELECT * FROM inbox_items WHERE id = ?')

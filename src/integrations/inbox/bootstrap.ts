@@ -18,7 +18,7 @@ import {
   wrapAnthropicAsLLMCaller,
 } from './classifier/llm.js';
 import { createMistralEuLLMCaller } from './classifier/llm-mistral.js';
-import { type ClassifierQueue } from './classifier/queue.js';
+import type { ClassifierQueue } from './classifier/queue.js';
 import { InboxContactResolver } from './contact-resolver.js';
 import { InboxCostBudget, type InboxCostBudgetOptions } from './cost-budget.js';
 import { InboxRulesLoader } from './rules-loader.js';
