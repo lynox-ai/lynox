@@ -190,7 +190,8 @@ export class Engine {
     }
     this.config = config;
     // Always create standard Anthropic client in constructor.
-    // For bedrock, init() will load the SDK and recreate.
+    // For non-Anthropic providers (vertex / openai-compat / Mistral) init()
+    // rebuilds the client with the right SDK once user config is loaded.
     this.client = createLLMClient({
       apiKey: this.userConfig.api_key,
       apiBaseURL: this.userConfig.api_base_url,
@@ -748,7 +749,7 @@ export class Engine {
 
     // Register managed hosting usage hook (env-gated — only on EU instances)
     // Fatal: if LYNOX_MANAGED_MODE is set but hook fails, engine must not start
-    // (otherwise EU customer uses Bedrock for free without usage tracking)
+    // (otherwise the managed customer uses Mistral for free without usage tracking)
     if (process.env['LYNOX_MANAGED_MODE']) {
       const { createManagedHook } = await import('./managed-hook.js');
       this.registerHooks(createManagedHook());

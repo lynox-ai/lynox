@@ -98,17 +98,17 @@ const _MAX_CONTINUATIONS: Record<string, number> = {
   'haiku':   5,
 };
 
-/** Look up context window size. Normalizes Bedrock model IDs automatically. */
+/** Look up context window size. Normalizes provider-prefixed model IDs automatically. */
 export function getContextWindow(model: string): number {
   return _CONTEXT_WINDOW[model] ?? _CONTEXT_WINDOW[normalizeModelId(model)] ?? 200_000;
 }
 
-/** Look up default max output tokens. Normalizes Bedrock model IDs automatically. */
+/** Look up default max output tokens. Normalizes provider-prefixed model IDs automatically. */
 export function getDefaultMaxTokens(model: string): number {
   return _DEFAULT_MAX_TOKENS[model] ?? _DEFAULT_MAX_TOKENS[normalizeModelId(model)] ?? 16_000;
 }
 
-/** Look up max continuation attempts. Normalizes Bedrock model IDs automatically. */
+/** Look up max continuation attempts. Normalizes provider-prefixed model IDs automatically. */
 export function getMaxContinuations(model: string): number {
   return _MAX_CONTINUATIONS[model] ?? _MAX_CONTINUATIONS[normalizeModelId(model)] ?? 10;
 }

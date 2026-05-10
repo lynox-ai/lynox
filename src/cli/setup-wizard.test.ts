@@ -43,7 +43,7 @@ function mockReadline(answers: string[]): ReturnType<typeof createInterface> {
 }
 
 // New answer sequence (provider + credentials wizard):
-// 1. Provider selection (1=Anthropic, 2=Bedrock, 3=Custom)
+// 1. Provider selection (1=Anthropic, 2=Vertex, 3=Custom)
 // 2. API key (for Anthropic) or region/URL (for others)
 // (Encryption = always on, Accuracy = always sonnet — no prompts)
 
