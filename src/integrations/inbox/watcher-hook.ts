@@ -1,0 +1,137 @@
+// === Inbox watcher hook — turns inbound MailEnvelopes into queue payloads ===
+//
+// Engine wiring (a separate concern, not in this commit) plugs the returned
+// function in as `MailHooks.onInboundMail`. Per inbound mail the hook runs
+// three checks before deciding what to do:
+//
+//   1. Already classified for this (account, thread)?  -> skip (re-classify
+//      is Phase 3+ scope).
+//   2. Matches a user-confirmed inbox_rules row?       -> write the item +
+//      audit directly with `actor: 'rule_engine'`. No LLM cost.
+//   3. Otherwise                                       -> enqueue for the
+//      classifier runner.
+//
+// Phase 1a uses `env.snippet` as the body fed to the classifier. The
+// snippet is provider-truncated (~200 chars) so the LLM gets less context
+// than the full body would; classification quality is acceptable for the
+// canary cohort, and full-body fetching can land alongside the read-pane
+// integration in Phase 2.
+
+import type { MailEnvelope } from '../mail/provider.js';
+import type { ClassifierPromptInput } from './classifier/index.js';
+import type { InboxRulesLoader } from './rules-loader.js';
+import type { InboxQueuePayload } from './runner.js';
+import type { InboxStateDb } from './state.js';
+
+/**
+ * Resolves an accountId to the bits the classifier prompt needs (address +
+ * display name as trusted system context). Engine wiring backs this with
+ * `MailStateDb.getAccount(id)`; tests pass a plain Map.
+ */
+export interface AccountResolver {
+  resolve(accountId: string): { address: string; displayName: string } | null;
+}
+
+export interface HookQueue {
+  enqueue(payload: InboxQueuePayload): boolean;
+}
+
+export interface InboxClassifierHookOptions {
+  state: InboxStateDb;
+  rules: InboxRulesLoader;
+  queue: HookQueue;
+  accounts: AccountResolver;
+  /** Single tenant override; falls back to the repository default. */
+  tenantId?: string | undefined;
+}
+
+export type OnInboundMailHook = (accountId: string, env: MailEnvelope) => Promise<void>;
+
+/**
+ * Build the per-mail hook. Pure factory — no global state, safe to call
+ * multiple times if a future test or engine variant needs it.
+ */
+export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnInboundMailHook {
+  return async (accountId, env) => {
+    const account = opts.accounts.resolve(accountId);
+    if (!account) return; // unknown account — nothing to do
+
+    const fromAddress = env.from[0]?.address ?? '';
+    if (!fromAddress) return; // no sender, no classification
+
+    const fromDisplayName = env.from[0]?.name;
+    const subject = env.subject;
+    const threadKey = resolveThreadKey(env);
+
+    // 1. Skip duplicate work — Phase 1a always inserts on miss; re-classify on
+    //    new replies is Phase 3+.
+    const existing = opts.state.findItemByThread(accountId, threadKey);
+    if (existing) return;
+
+    // 2. User-confirmed rule short-circuits the LLM.
+    const rule = opts.rules.match({
+      accountId,
+      tenantId: opts.tenantId,
+      from: fromAddress,
+      subject,
+      // listId left undefined — full RFC 2919 List-Id requires raw headers
+      // which the watcher does not pass through. List-Id rules will start
+      // matching once the watcher hook gains header forwarding.
+    });
+    if (rule) {
+      const itemId = opts.state.insertItem({
+        tenantId: opts.tenantId,
+        accountId,
+        channel: 'email',
+        threadKey,
+        bucket: rule.bucket,
+        confidence: 1,
+        reasonDe: `Regel: ${rule.matcherKind} = ${rule.matcherValue}`,
+        classifiedAt: new Date(),
+        classifierVersion: `rule:${rule.id}`,
+      });
+      opts.state.appendAudit({
+        tenantId: opts.tenantId,
+        itemId,
+        action: 'rule_applied',
+        actor: 'rule_engine',
+        payloadJson: JSON.stringify({
+          rule_id: rule.id,
+          matcher_kind: rule.matcherKind,
+          matcher_value: rule.matcherValue,
+          action: rule.action,
+        }),
+      });
+      return;
+    }
+
+    // 3. Enqueue for the classifier — backpressure (queue full) drops the
+    //    mail back to the unclassified pool; the watcher's next tick retries.
+    const classifierInput: ClassifierPromptInput = {
+      accountAddress: account.address,
+      accountDisplayName: account.displayName,
+      subject,
+      fromAddress,
+      fromDisplayName,
+      body: env.snippet,
+    };
+    const payload: InboxQueuePayload = {
+      accountId,
+      threadKey,
+      classifierInput,
+    };
+    if (opts.tenantId !== undefined) payload.tenantId = opts.tenantId;
+    opts.queue.enqueue(payload);
+  };
+}
+
+/**
+ * Stable per-channel key for an envelope. Prefers the provider's threading
+ * decision, falls back to the Message-ID, and finally synthesises one from
+ * the (folder, uid) pair so dedup never collapses unrelated mails.
+ */
+function resolveThreadKey(env: MailEnvelope): string {
+  if (env.threadKey) return env.threadKey;
+  if (env.messageId) return `imap:${env.messageId}`;
+  return `imap:${env.folder}:${String(env.uid)}`;
+}
