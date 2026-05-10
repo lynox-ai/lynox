@@ -19,6 +19,14 @@ function defaultDbPath(): string {
   return join(getLynoxDir(), 'mail-state.db');
 }
 
+/**
+ * Reserved id prefixes that must not appear in `mail_accounts.id`. The
+ * inbox tables (v9+) treat the same string as a polymorphic discriminator
+ * (channel detection in `inbox/watcher-hook.ts`), so a mail account with
+ * a reserved prefix would silently misclassify its items.
+ */
+const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = ['whatsapp:', 'telegram:'];
+
 const MIGRATIONS: string[] = [
   // v1: Initial schema — Message-ID dedup table
   `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
@@ -582,10 +590,20 @@ export class MailStateDb {
   }
 
   /**
-   * Insert or update a mail account. Idempotent on the id.
+   * Insert or update a mail account. Idempotent on the id. Reserved
+   * channel prefixes (`whatsapp:`, `telegram:`) are rejected — those
+   * namespaces belong to inbox_items polymorphic account_id values
+   * introduced in migration v9 and must not collide with real mail
+   * account ids.
    * Returns the persisted shape.
    */
   upsertAccount(account: MailAccountConfig): void {
+    if (RESERVED_ACCOUNT_PREFIXES.some((p) => account.id.startsWith(p))) {
+      throw new Error(
+        `mail_accounts.id '${account.id}' uses a reserved channel prefix; `
+        + `those are reserved for inbox_items polymorphic account ids.`,
+      );
+    }
     this.db
       .prepare(
         `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, auth_type, oauth_provider_key, is_default, created_at, updated_at)

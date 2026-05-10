@@ -72,11 +72,26 @@ describe('waMessageToInboxInput — filtering', () => {
     expect(waMessageToInboxInput(msg({ isEcho: true }), contact(), OPTS)).toBeNull();
   });
 
-  it('returns null for voice / image / document kinds (Phase 1b+)', () => {
-    expect(waMessageToInboxInput(msg({ kind: 'voice', text: null }), contact(), OPTS)).toBeNull();
-    expect(waMessageToInboxInput(msg({ kind: 'image', text: null }), contact(), OPTS)).toBeNull();
-    expect(waMessageToInboxInput(msg({ kind: 'document', text: null }), contact(), OPTS)).toBeNull();
-    expect(waMessageToInboxInput(msg({ kind: 'reaction', text: null }), contact(), OPTS)).toBeNull();
+  it('returns null for every non-text kind (Phase 1b+ scope)', () => {
+    // Every kind from the MessageKind union except 'text' should be
+    // filtered. If a new kind is added to the union, this test fails
+    // until the adapter is updated — by design.
+    const nonText: ReadonlyArray<WhatsAppMessage['kind']> = [
+      'voice',
+      'image',
+      'document',
+      'location',
+      'contact',
+      'sticker',
+      'reaction',
+      'unsupported',
+    ];
+    for (const kind of nonText) {
+      expect(
+        waMessageToInboxInput(msg({ kind, text: null }), contact(), OPTS),
+        `kind=${kind} must be filtered`,
+      ).toBeNull();
+    }
   });
 
   it('returns null for empty text body', () => {
