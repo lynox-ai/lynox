@@ -1206,6 +1206,19 @@
 	const runStartedAt = $derived(getRunStartedAt());
 	const runPromptCount = $derived(getRunPromptCount());
 
+	// Pre-compute prompt-gate signals once so the textarea's per-keystroke
+	// re-render doesn't re-walk the whole ternary chain.
+	const tabsPromptActive = $derived(!!pendingTabsPrompt && !inBatchMode);
+	const permissionPromptActive = $derived(!!pendingPermission && !inBatchMode);
+	const inputGateDisabled = $derived(!!pendingSecret || tabsPromptActive || (!ready && !pendingPermission));
+	const placeholderText = $derived(
+		pendingSecret ? t('chat.placeholder_secret')
+		: tabsPromptActive ? t('chat.placeholder_tabs')
+		: permissionPromptActive ? t('chat.placeholder_answer')
+		: isStreaming ? t('chat.placeholder_streaming')
+		: t('chat.placeholder'),
+	);
+
 	// Per-session artifact shelf. Populated from the shared artifacts store,
 	// filtered to the current thread. Kick a load on mount and again when the
 	// session changes so the shelf is ready without needing a prior visit to
@@ -2210,11 +2223,11 @@
 		</div>
 	{/if}
 
-	<!-- Pipeline-status-v2 prompt anchor (flag-gated): one-line bar directly
-	     above the input, visible regardless of scroll position. The inline
-	     prompt forms above are still authoritative for replies — this is a
-	     locator, not a parallel reply path. -->
-	{#if pipelineStatusV2 && pendingPromptHead}
+	<!-- Only render for the brief tabs-prompt window before `inBatchMode`
+	     flips. Other prompt kinds always have their own inline form below,
+	     so showing the anchor too gives the user two visually-equivalent
+	     reply surfaces — and the [Antworten] button is only a scroll-locator. -->
+	{#if pipelineStatusV2 && pendingPromptHead && pendingPromptHead.kind === 'tabs' && !inBatchMode}
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
 	{/if}
 
@@ -2266,9 +2279,9 @@
 						onkeydown={handleKeydown}
 						oninput={autoResize}
 						onpaste={handlePaste}
-						placeholder={pendingPermission && !inBatchMode ? t('chat.placeholder_answer') : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
+						placeholder={placeholderText}
 						rows="1"
-						disabled={!ready && !pendingPermission}
+						disabled={inputGateDisabled}
 						class="flex-1 resize-none border-0 bg-transparent px-4 py-2.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
 					></textarea>
 				</div>
@@ -2298,7 +2311,7 @@
 					{#if !recording && (inputText.trim() || pendingFiles.length > 0 || pendingPermission)}
 						<button
 							onclick={handleSend}
-							disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
+							disabled={(!inputText.trim() && pendingFiles.length === 0) || inputGateDisabled || !!pendingChangeset}
 							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
 							aria-label={t('chat.send')}
 						>
