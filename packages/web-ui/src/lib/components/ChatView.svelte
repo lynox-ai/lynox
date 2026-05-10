@@ -318,7 +318,7 @@
 
 	type GroupedBlock =
 		| { type: 'text'; text: string }
-		| { type: 'tools'; action: string; subjects: string[]; toolName: string }
+		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'step_done'; stepId: string; summary: string };
 
@@ -398,14 +398,18 @@
 					continue;
 				}
 
-				// Regular tool call — group by action, dedup subjects
+				// Regular tool call — group by action, dedup subjects. Track the
+				// "worst" status across the group so a single still-running call
+				// keeps the row in the running state while the rest are done.
 				const label = toolCallLabel(tc);
 				if (!label) continue;
 				const last = result[result.length - 1];
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
+					if (tc.status === 'error') last.status = 'error';
+					else if (tc.status === 'running' && last.status !== 'error') last.status = 'running';
 				} else {
-					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name });
+					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status });
 				}
 			}
 		}
@@ -1712,11 +1716,23 @@
 								</div>
 							{:else if gBlock.type === 'tools'}
 								{@const toolDef = getToolIcon(gBlock.toolName)}
-								<div class="flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 border-l-2 border-border pl-3 py-1 md:py-0.5">
-									<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 {toolDef.color}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										{#each toolDef.paths as p}<path stroke-linecap="round" stroke-linejoin="round" d={p} />{/each}
-									</svg>
+								{@const isRunning = gBlock.status === 'running'}
+								{@const isError = gBlock.status === 'error'}
+								<div class="flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 border-l-2 {isError ? 'border-danger/40' : isRunning ? 'border-warning/40' : 'border-border'} pl-3 py-1 md:py-0.5">
+									{#if isRunning}
+										<svg class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 animate-spin text-warning" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+											<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+											<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+										</svg>
+									{:else}
+										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 {toolDef.color}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+											{#each toolDef.paths as p}<path stroke-linecap="round" stroke-linejoin="round" d={p} />{/each}
+										</svg>
+									{/if}
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
+									{#if !isRunning}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}">{isError ? '✗' : '✓'}</span>
+									{/if}
 								</div>
 								{#if gBlock.toolName === 'spawn_agent' && msg.spawn}
 									{@const sp = msg.spawn}
