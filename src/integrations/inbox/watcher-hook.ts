@@ -51,6 +51,18 @@ export interface InboxClassifierHookOptions {
    *   allow — send raw to the LLM (only for trusted EU/self-hosted)
    */
   sensitiveMode?: SensitiveMode | undefined;
+  /**
+   * Folder names whose mails are skipped entirely (Banking, Privat,
+   * Healthcare). Case-insensitive exact match against env.folder. The
+   * mail is acknowledged (existing dedup runs) but never classified.
+   */
+  folderBlacklist?: ReadonlySet<string> | undefined;
+  /**
+   * Account ids whose mails are skipped. Useful for excluding a
+   * sensitive mailbox (lawyer / health / etc.) without disabling the
+   * whole inbox feature. Engine wiring populates from env.
+   */
+  disabledAccounts?: ReadonlySet<string> | undefined;
 }
 
 export type OnInboundMailHook = (accountId: string, env: MailEnvelope) => Promise<void>;
@@ -61,7 +73,14 @@ export type OnInboundMailHook = (accountId: string, env: MailEnvelope) => Promis
  */
 export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnInboundMailHook {
   const sensitiveMode: SensitiveMode = opts.sensitiveMode ?? 'skip';
+  const folderBlacklistLower = opts.folderBlacklist
+    ? new Set([...opts.folderBlacklist].map((f) => f.toLowerCase()))
+    : undefined;
+  const disabledAccounts = opts.disabledAccounts;
   return async (accountId, env) => {
+    if (disabledAccounts?.has(accountId)) return;
+    if (folderBlacklistLower?.has(env.folder.toLowerCase())) return;
+
     const account = opts.accounts.resolve(accountId);
     if (!account) return; // unknown account — nothing to do
 

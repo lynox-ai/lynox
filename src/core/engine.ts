@@ -632,14 +632,30 @@ export class Engine {
               ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
               ?? process.env['MISTRAL_API_KEY']
               ?? undefined;
+            // Folder blacklist: comma-separated env, case-insensitive match.
+            // Use case: "Banking, Privat, Healthcare" — those folders' mails
+            // never reach the inbox classifier path at all.
+            const folderBlacklistRaw = process.env['LYNOX_INBOX_FOLDER_BLACKLIST'] ?? '';
+            const folderBlacklist = new Set(
+              folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
+            );
+            // Per-account opt-out: comma-separated mail_account ids.
+            const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
+            const disabledAccounts = new Set(
+              disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
+            );
             const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
               mailStateDb: stateDb,
               anthropicClient: this.client,
               crm: this._crm,
               sensitiveMode,
               llmRegion,
+              requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
+              privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
             };
             if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
+            if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
+            if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
             const runtime = bootstrapInbox(bootOpts);
             // MailHooks fires `onInboundMail` per envelope from wrappedHandler
             // (`mail/context.ts:248`). Mutating the held reference works

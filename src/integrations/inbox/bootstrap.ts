@@ -79,9 +79,44 @@ export interface BootstrapInboxOptions {
    */
   llmRegion?: 'us' | 'eu' | undefined;
   mistralApiKey?: string | undefined;
+  /** Folder names whose mails skip the inbox entirely. */
+  folderBlacklist?: ReadonlySet<string> | undefined;
+  /** Account ids whose mails skip the inbox entirely. */
+  disabledAccounts?: ReadonlySet<string> | undefined;
+  /**
+   * When `llmRegion='us'` and this is true, bootstrap throws unless the
+   * caller has confirmed via `privacyAck=true` that the operator agreed
+   * to mail content leaving the EU. Engine wiring sets `requireUsAck`
+   * from `LYNOX_INBOX_REQUIRE_PRIVACY_ACK=1` and `privacyAck` from
+   * `LYNOX_INBOX_PRIVACY_ACK=1`.
+   */
+  requireUsAck?: boolean | undefined;
+  privacyAck?: boolean | undefined;
 }
 
 export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
+  const region = opts.llmRegion ?? 'us';
+  // Hard-fail when the operator opted into ack-enforcement but did not
+  // ack the US routing — the only safe production posture is explicit.
+  if (region === 'us' && opts.requireUsAck && !opts.privacyAck) {
+    throw new Error(
+      'bootstrapInbox: LYNOX_INBOX_LLM_REGION defaults to US (Anthropic). '
+      + 'Production-gating is on (LYNOX_INBOX_REQUIRE_PRIVACY_ACK=1) but '
+      + 'LYNOX_INBOX_PRIVACY_ACK=1 is not set. Either set the ack or '
+      + 'switch to LYNOX_INBOX_LLM_REGION=eu (Mistral).',
+    );
+  }
+  // Always emit a non-fatal warning so operators see the residency
+  // implication when the flag flips on with default routing.
+  if (region === 'us' && !opts.privacyAck) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[lynox] Inbox classifier routes via Anthropic US — mail snippets '
+      + 'leave the EU. Set LYNOX_INBOX_LLM_REGION=eu (Mistral) for '
+      + 'EU residency, or LYNOX_INBOX_PRIVACY_ACK=1 to silence this warning.',
+    );
+  }
+
   const state = new InboxStateDb(opts.mailStateDb.getConnection());
   const rules = new InboxRulesLoader(state);
   const contactResolver = opts.crm ? new InboxContactResolver(opts.crm) : null;
@@ -123,14 +158,17 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     },
   };
 
-  const hook = createInboxClassifierHook({
+  const hookOpts: Parameters<typeof createInboxClassifierHook>[0] = {
     state,
     rules,
     queue,
     accounts,
     tenantId: opts.tenantId,
     sensitiveMode: opts.sensitiveMode,
-  });
+  };
+  if (opts.folderBlacklist !== undefined) hookOpts.folderBlacklist = opts.folderBlacklist;
+  if (opts.disabledAccounts !== undefined) hookOpts.disabledAccounts = opts.disabledAccounts;
+  const hook = createInboxClassifierHook(hookOpts);
 
   return {
     state,

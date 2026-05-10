@@ -297,6 +297,37 @@ describe('createInboxClassifierHook — sensitiveMode = mask', () => {
   });
 });
 
+describe('createInboxClassifierHook — folder blacklist + per-account disable', () => {
+  it('skips a mail whose folder is in the blacklist (case-insensitive)', async () => {
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts,
+      folderBlacklist: new Set(['Banking', 'Privat']),
+    });
+    await hook(ACCOUNT.id, envelope({ folder: 'banking' }));
+    await hook(ACCOUNT.id, envelope({ folder: 'PRIVAT', threadKey: 'imap:t2' }));
+    expect(queueCalls).toHaveLength(0);
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('processes a mail in a folder NOT on the blacklist', async () => {
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts,
+      folderBlacklist: new Set(['Banking']),
+    });
+    await hook(ACCOUNT.id, envelope({ folder: 'INBOX' }));
+    expect(queueCalls).toHaveLength(1);
+  });
+
+  it('skips when accountId is in the disabled set', async () => {
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts,
+      disabledAccounts: new Set([ACCOUNT.id]),
+    });
+    await hook(ACCOUNT.id, envelope());
+    expect(queueCalls).toHaveLength(0);
+  });
+});
+
 describe('createInboxClassifierHook — sensitiveMode = allow', () => {
   it('sends the raw body to the classifier and tags the audit categories', async () => {
     const hook = createInboxClassifierHook({

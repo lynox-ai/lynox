@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
-import { buildInboxRunner, type InboxQueuePayload } from './runner.js';
+import { buildInboxRunner, scrubErrorMessage, type InboxQueuePayload } from './runner.js';
 import { InboxCostBudget } from './cost-budget.js';
 import type { LLMCaller } from './classifier/index.js';
 import type { MailAccountConfig } from '../mail/provider.js';
@@ -133,6 +133,29 @@ describe('buildInboxRunner — fail-closed dead-letter', () => {
     const payloadJson = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
     expect(payloadJson['dead_letter']).toBe(true);
     expect(payloadJson['error_message']).toBe('rate_limited');
+  });
+});
+
+describe('scrubErrorMessage', () => {
+  it('redacts Bearer tokens', () => {
+    const out = scrubErrorMessage('401 Unauthorized: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4eHgifQ.sig');
+    expect(out).not.toContain('eyJ');
+    expect(out).toContain('Bearer [REDACTED]');
+  });
+
+  it('redacts URL query strings (which often carry tokens)', () => {
+    const out = scrubErrorMessage('Got 500 from https://api.example.com/v1?token=secret&id=42');
+    expect(out).not.toContain('token=secret');
+    expect(out).toContain('[REDACTED-QUERY]');
+  });
+
+  it('caps at 200 characters', () => {
+    const long = 'x'.repeat(500);
+    expect(scrubErrorMessage(long).length).toBe(200);
+  });
+
+  it('returns empty string on empty input', () => {
+    expect(scrubErrorMessage('')).toBe('');
   });
 });
 

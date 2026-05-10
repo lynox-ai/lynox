@@ -154,7 +154,11 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
         actor: 'classifier',
         payloadJson: JSON.stringify({
           dead_letter: true,
-          error_message: error.message,
+          // SDK errors usually do not echo the request body, but we cap
+          // length and strip Bearer tokens before persisting + reporting
+          // so a chatty future SDK cannot leak prompt content into audit
+          // logs or downstream Bugsink reports.
+          error_message: scrubErrorMessage(error.message),
         }),
       });
     },
@@ -165,4 +169,19 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
   if (policy.retryOnce !== undefined) queueOptions.retryOnce = policy.retryOnce;
 
   return new ClassifierQueue<InboxQueuePayload>(queueOptions);
+}
+
+/**
+ * Sanitize an error message before persisting it to the audit log or
+ * passing it to Bugsink. Hard-caps length and strips a few high-signal
+ * leak vectors (Bearer tokens, URL query strings that often carry
+ * tokens). Belt-and-suspenders — most SDKs already keep request bodies
+ * out of error messages.
+ */
+export function scrubErrorMessage(input: string): string {
+  if (!input) return '';
+  return input
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+    .replace(/\?[^\s]+/g, '?[REDACTED-QUERY]')
+    .slice(0, 200);
 }

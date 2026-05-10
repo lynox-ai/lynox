@@ -128,6 +128,29 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
   });
 
+  it('throws when requireUsAck=true and privacyAck is not set on US default', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    expect(() =>
+      bootstrapInbox({
+        mailStateDb: mail,
+        anthropicClient: client,
+        requireUsAck: true,
+      }),
+    ).toThrow(/PRIVACY_ACK/);
+  });
+
+  it('does not throw when ack is provided alongside requireUsAck', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    expect(() =>
+      bootstrapInbox({
+        mailStateDb: mail,
+        anthropicClient: client,
+        requireUsAck: true,
+        privacyAck: true,
+      }),
+    ).not.toThrow();
+  });
+
   it('llmRegion=eu requires mistralApiKey — throws otherwise', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     expect(() =>
