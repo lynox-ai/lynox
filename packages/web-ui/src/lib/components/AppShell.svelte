@@ -87,18 +87,12 @@
 		dragNode = null;
 	}
 
-	interface NavChild {
-		href: string;
-		labelKey: string;
-	}
-
 	interface NavItem {
 		href: string;
 		labelKey: string;
 		exact: boolean;
 		icon: string;
 		descKey?: string;
-		children?: NavChild[];
 		type?: 'threads';
 	}
 
@@ -125,77 +119,60 @@
 				descKey: 'nav.desc.chat', type: 'threads',
 			},
 		];
+		// Inbox: surfaced only when WhatsApp pilot flag is on. Will expand to
+		// email/SMS/iMessage once those channels land — keep gated until then so
+		// users don't click into an empty page.
 		if (whatsappEnabled) {
 			items.push({
-				href: '/app/whatsapp', labelKey: 'nav.whatsapp', exact: false, icon: 'whatsapp',
-				descKey: 'nav.desc.whatsapp',
+				href: '/app/whatsapp', labelKey: 'nav.inbox', exact: false, icon: 'whatsapp',
+				descKey: 'nav.desc.inbox',
 			});
 		}
 		items.push(
 			{
-				href: '/app/knowledge', labelKey: 'nav.knowledge', exact: false, icon: 'brain',
-			descKey: 'nav.desc.knowledge',
-			children: [
-				{ href: '/app/knowledge', labelKey: 'hub.knowledge.wissen' },
-				{ href: '/app/knowledge?tab=graph', labelKey: 'hub.knowledge.graph' },
-				{ href: '/app/knowledge?tab=insights', labelKey: 'hub.knowledge.insights' },
-			],
-		},
-		{
-			href: '/app/contacts', labelKey: 'nav.contacts', exact: false, icon: 'contacts',
-			descKey: 'nav.desc.contacts',
-		},
-		{
-			href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts',
-			descKey: 'nav.desc.artifacts',
-			children: [
-				{ href: '/app/artifacts', labelKey: 'hub.artifacts.gallery' },
-				{ href: '/app/artifacts?tab=files', labelKey: 'hub.artifacts.files' },
-			],
-		},
-		{
-			href: '/app/workflows', labelKey: 'nav.workflows', exact: false, icon: 'workflow',
-			descKey: 'nav.desc.workflows',
-			children: [
-				{ href: '/app/workflows', labelKey: 'hub.workflow.list' },
-				{ href: '/app/workflows?tab=analytics', labelKey: 'hub.workflow.analytics' },
-			],
-		},
-		{
-			href: '/app/activity', labelKey: 'nav.activity', exact: false, icon: 'clock',
-			descKey: 'nav.desc.activity',
-			children: [
-				{ href: '/app/activity?tab=history', labelKey: 'hub.activity.history' },
-				{ href: '/app/activity?tab=tasks', labelKey: 'hub.activity.tasks' },
-				{ href: '/app/activity', labelKey: 'hub.activity.dashboard' },
-			],
-		},
-	);
-	return items;
+				href: '/app/workflows', labelKey: 'nav.automation', exact: false, icon: 'workflow',
+				descKey: 'nav.desc.automation',
+			},
+			{
+				href: '/app/knowledge', labelKey: 'nav.intelligence', exact: false, icon: 'brain',
+				descKey: 'nav.desc.intelligence',
+			},
+			{
+				href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts',
+				descKey: 'nav.desc.artifacts',
+			},
+		);
+		return items;
 	});
 
-	const hasChildren = (item: NavItem) => item.children != null || item.type === 'threads';
+	const isThreadsItem = (item: NavItem) => item.type === 'threads';
 
 	function isActive(href: string, exact: boolean): boolean {
 		const path = $page.url.pathname;
 		return exact ? path === href : path.startsWith(href);
 	}
 
-	function isSubActive(childHref: string): boolean {
-		const url = $page.url;
-		const child = new URL(childHref, url.origin);
-		if (url.pathname !== child.pathname) return false;
-		// Match query params (e.g. ?tab=graph)
-		for (const [k, v] of child.searchParams) {
-			if (url.searchParams.get(k) !== v) return false;
+	// Light up the Automation/Intelligence parents when on routes that live
+	// inside them but have no top-level entry (Activity, Contacts).
+	const PARENT_OWNS: Record<string, string[]> = {
+		'/app/workflows': ['/app/activity'],
+		'/app/knowledge': ['/app/contacts'],
+	};
+
+	function isParentActive(item: NavItem): boolean {
+		if (isActive(item.href, item.exact)) return true;
+		const owned = PARENT_OWNS[item.href];
+		if (owned) {
+			const path = $page.url.pathname;
+			for (const p of owned) {
+				if (path === p || path.startsWith(p + '/')) return true;
+			}
 		}
-		// If child has no params, only match when current URL also has no tab param
-		if (!child.searchParams.has('tab') && url.searchParams.has('tab')) return false;
-		return true;
+		return false;
 	}
 
 	function handleNavClick(item: NavItem, e: MouseEvent) {
-		if (hasChildren(item)) {
+		if (isThreadsItem(item)) {
 			if (expandedSection === item.href) {
 				e.preventDefault();
 				expandedSection = null;
@@ -205,10 +182,6 @@
 		} else {
 			expandedSection = null;
 		}
-		sidebarOpen = false;
-	}
-
-	function handleSubClick() {
 		sidebarOpen = false;
 	}
 
@@ -249,9 +222,10 @@
 	onMount(() => {
 		void loadThreads();
 		stopVisibilityRefresh = startVisibilityRefresh();
-		const path = $page.url.pathname;
-		const match = nav.find(item => item.exact ? path === item.href : path.startsWith(item.href));
-		if (match && hasChildren(match)) {
+		// Auto-expand the threads list when landing on Chat — there's no
+		// hub-section dropdown anymore.
+		const match = nav.find(item => isThreadsItem(item) && isParentActive(item));
+		if (match) {
 			expandedSection = match.href;
 		}
 	});
@@ -307,7 +281,7 @@
 							href={item.href}
 							onclick={(e) => handleNavClick(item, e)}
 							class="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm transition-all
-							{isActive(item.href, item.exact)
+							{isParentActive(item)
 								? 'bg-accent/10 text-accent-text border-l-2 border-accent'
 								: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 						>
@@ -332,7 +306,7 @@
 									<span class="block text-xs text-text-subtle font-normal tracking-normal">{t(item.descKey)}</span>
 								{/if}
 							</div>
-							{#if hasChildren(item)}
+							{#if isThreadsItem(item)}
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
 									class="h-3 w-3 shrink-0 text-text-subtle transition-transform duration-150 {expandedSection === item.href ? 'rotate-90' : ''}"
@@ -341,7 +315,7 @@
 							{/if}
 						</a>
 
-						<!-- Sub-items: threads for Chat, static links for hubs -->
+						<!-- Sub-items: threads list (Chat only). Hub sub-tabs render inside the page. -->
 						{#if expandedSection === item.href && item.type === 'threads'}
 							<div transition:slide={{ duration: 150 }}>
 								{#if getThreads().length > 0}
@@ -423,27 +397,10 @@
 									</ul>
 								{/if}
 							</div>
-						{:else if expandedSection === item.href && item.children}
-							<ul transition:slide={{ duration: 150 }} class="mt-1 ml-5 space-y-0.5">
-								{#each item.children as child}
-									<li>
-										<a
-											href={child.href}
-											onclick={handleSubClick}
-											class="block px-2.5 py-1.5 text-xs rounded-[var(--radius-sm)] transition-all
-											{isSubActive(child.href)
-												? 'text-accent-text bg-accent/10'
-												: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
-										>
-											{t(child.labelKey)}
-										</a>
-									</li>
-								{/each}
-							</ul>
 						{/if}
-					</li>
-				{/each}
-			</ul>
+						</li>
+					{/each}
+				</ul>
 
 			<!-- Bottom: Settings + User -->
 			<div class="border-t border-border px-3 py-3" style="padding-bottom: env(safe-area-inset-bottom, 0.75rem);">
