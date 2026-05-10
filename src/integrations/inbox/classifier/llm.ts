@@ -40,12 +40,20 @@ export interface AnthropicLike {
       requestOptions?: { signal?: AbortSignal | undefined } | undefined,
     ): Promise<{
       content: ReadonlyArray<{ type: string; text?: string | undefined }>;
+      /** SDK reports per-call token usage. Used by InboxCostBudget at wiring time. */
+      usage?: { input_tokens?: number | undefined; output_tokens?: number | undefined } | undefined;
     }>;
   };
 }
 
 export interface WrapOptions {
   maxTokens?: number | undefined;
+  /**
+   * Fires after each successful classify call with the SDK-reported usage.
+   * Engine wiring uses this to feed `InboxCostBudget.recordUsage(...)`.
+   * Failures (thrown errors) do not invoke the callback.
+   */
+  onUsage?: ((usage: { inputTokens: number; outputTokens: number }) => void) | undefined;
 }
 
 /**
@@ -60,6 +68,7 @@ export function wrapAnthropicAsLLMCaller(
   options: WrapOptions = {},
 ): LLMCaller {
   const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const onUsage = options.onUsage;
   return async ({ system, user, signal }) => {
     const resp = await client.messages.create(
       {
@@ -75,6 +84,12 @@ export function wrapAnthropicAsLLMCaller(
       if (block.type === 'text' && typeof block.text === 'string') {
         parts.push(block.text);
       }
+    }
+    if (onUsage && resp.usage) {
+      onUsage({
+        inputTokens: resp.usage.input_tokens ?? 0,
+        outputTokens: resp.usage.output_tokens ?? 0,
+      });
     }
     return parts.join('');
   };
@@ -95,7 +110,8 @@ export function createHaikuLLMCaller(opts: HaikuCallerOptions = {}): LLMCaller {
   const provider: LLMProvider = opts.provider ?? 'anthropic';
   const client = createLLMClient(opts) as unknown as Anthropic;
   const modelId = opts.modelId ?? getModelId('haiku', provider);
-  return wrapAnthropicAsLLMCaller(client as unknown as AnthropicLike, modelId, {
-    maxTokens: opts.maxTokens,
-  });
+  const wrapOpts: WrapOptions = {};
+  if (opts.maxTokens !== undefined) wrapOpts.maxTokens = opts.maxTokens;
+  if (opts.onUsage !== undefined) wrapOpts.onUsage = opts.onUsage;
+  return wrapAnthropicAsLLMCaller(client as unknown as AnthropicLike, modelId, wrapOpts);
 }

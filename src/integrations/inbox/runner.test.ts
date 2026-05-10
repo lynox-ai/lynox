@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
 import { buildInboxRunner, type InboxQueuePayload } from './runner.js';
+import { InboxCostBudget } from './cost-budget.js';
 import type { LLMCaller } from './classifier/index.js';
 import type { MailAccountConfig } from '../mail/provider.js';
 
@@ -132,6 +133,39 @@ describe('buildInboxRunner — fail-closed dead-letter', () => {
     const payloadJson = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
     expect(payloadJson['dead_letter']).toBe(true);
     expect(payloadJson['error_message']).toBe('rate_limited');
+  });
+});
+
+describe('buildInboxRunner — budget circuit-breaker', () => {
+  it('skips the LLM call and writes a budget_exceeded item once budget is exhausted', async () => {
+    const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
+    const budget = new InboxCostBudget({ maxBudgetUSD: 0.0001 });
+    budget.recordUsage(1_000_000, 0); // $1 spend > $0.0001 cap → exceeded
+    const queue = buildInboxRunner({ state: inbox, llm, budget });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).not.toHaveBeenCalled();
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.bucket).toBe('requires_user');
+    expect(items[0]?.reasonDe).toContain('Tagesbudget');
+
+    const audit = inbox.listAuditForItem(items[0]!.id);
+    const payloadJson = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
+    expect(payloadJson['fail_reason']).toBe('budget_exceeded');
+  });
+
+  it('lets the LLM call through when the budget has headroom', async () => {
+    const llm: LLMCaller = vi.fn(async () =>
+      JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'k' }),
+    );
+    const budget = new InboxCostBudget({ maxBudgetUSD: 5 });
+    const queue = buildInboxRunner({ state: inbox, llm, budget });
+    queue.enqueue(payload());
+    await queue.drain();
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(inbox.listItems()[0]?.bucket).toBe('auto_handled');
   });
 });
 

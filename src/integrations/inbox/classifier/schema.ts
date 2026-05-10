@@ -23,7 +23,9 @@ export type FailReason =
   | 'schema_violation'
   | 'noise_bucket_returned'
   | 'reason_over_length'
-  | 'low_confidence';
+  | 'low_confidence'
+  /** Daily classifier budget (InboxCostBudget) was exhausted — no LLM call. */
+  | 'budget_exceeded';
 
 export interface ClassifierVerdict {
   bucket: InboxBucket;

@@ -73,4 +73,23 @@ describe('wrapAnthropicAsLLMCaller', () => {
       wrapAnthropicAsLLMCaller(client, 'm')({ system: 's', user: 'u' }),
     ).rejects.toThrow('rate_limited');
   });
+
+  it('forwards SDK-reported usage to the onUsage hook', async () => {
+    const create = vi.fn(async () => ({
+      content: [{ type: 'text', text: '{}' }],
+      usage: { input_tokens: 612, output_tokens: 88 },
+    }));
+    const client = { messages: { create } } as unknown as AnthropicLike;
+    const onUsage = vi.fn();
+    await wrapAnthropicAsLLMCaller(client, 'm', { onUsage })({ system: 's', user: 'u' });
+    expect(onUsage).toHaveBeenCalledWith({ inputTokens: 612, outputTokens: 88 });
+  });
+
+  it('does not call onUsage when the SDK omits the usage field', async () => {
+    const create = vi.fn(async () => ({ content: [{ type: 'text', text: '{}' }] }));
+    const client = { messages: { create } } as unknown as AnthropicLike;
+    const onUsage = vi.fn();
+    await wrapAnthropicAsLLMCaller(client, 'm', { onUsage })({ system: 's', user: 'u' });
+    expect(onUsage).not.toHaveBeenCalled();
+  });
 });

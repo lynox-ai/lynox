@@ -16,7 +16,14 @@
 // extra Needs-You item is a one-click archive.
 
 import { ClassifierQueue, type ClassifierQueueOptions } from './classifier/queue.js';
-import { classifyMail, type ClassifierPromptInput, type LLMCaller } from './classifier/index.js';
+import {
+  CLASSIFIER_VERSION,
+  classifyMail,
+  type ClassifierPromptInput,
+  type ClassifyResult,
+  type LLMCaller,
+} from './classifier/index.js';
+import type { InboxCostBudget } from './cost-budget.js';
 import type { InboxStateDb } from './state.js';
 
 /**
@@ -45,6 +52,13 @@ export interface BuildInboxRunnerOptions {
   policy?: InboxRunnerPolicy | undefined;
   /** Override the classifier-version stamp (e.g. for canary). */
   classifierVersionOverride?: string | undefined;
+  /**
+   * Optional daily cost budget. When set, the runner short-circuits to a
+   * fail-closed `requires_user` verdict (no LLM call) once the budget is
+   * exhausted. Engine wiring connects `budget.recordUsage` to the LLM
+   * caller's `onUsage` hook so the SDK-reported tokens flow back.
+   */
+  budget?: InboxCostBudget | undefined;
 }
 
 /**
@@ -55,12 +69,28 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
   const { state, llm } = opts;
   const policy = opts.policy ?? {};
 
+  const budget = opts.budget;
+  const versionStamp = opts.classifierVersionOverride ?? CLASSIFIER_VERSION;
+
   const queueOptions: ClassifierQueueOptions<InboxQueuePayload> = {
-    classify: (payload, ctx) =>
-      classifyMail(payload.classifierInput, llm, {
+    classify: async (payload, ctx) => {
+      // Circuit-breaker: budget exhausted → no LLM call, fail-closed verdict.
+      if (budget?.isExceeded()) {
+        const verdict: ClassifyResult = {
+          bucket: 'requires_user',
+          confidence: 0,
+          reasonDe: 'Tagesbudget für Klassifizierer erreicht — manuell prüfen.',
+          failReason: 'budget_exceeded',
+          classifierVersion: versionStamp,
+          bodyTruncated: false,
+        };
+        return verdict;
+      }
+      return classifyMail(payload.classifierInput, llm, {
         signal: ctx.signal,
         classifierVersion: opts.classifierVersionOverride,
-      }),
+      });
+    },
     onSuccess: (payload, result) => {
       const itemId = state.insertItem({
         tenantId: payload.tenantId,
