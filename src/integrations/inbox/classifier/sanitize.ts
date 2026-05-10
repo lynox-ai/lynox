@@ -59,12 +59,14 @@ const HIDDEN_CHAR_RE: RegExp = (() => {
 })();
 
 /**
- * TAGS plane (U+E0000–U+E007F) covers code points outside the BMP, which
- * `String.fromCharCode` cannot represent. Constructed via the regex
- * `u`-flag literal so the source stays ASCII while still catching the
- * "ASCII Smuggler" attack class.
+ * Invisible Unicode injection vectors LLMs read but humans cannot see.
+ * Combined into one `u`-flag regex so the source stays ASCII:
+ *
+ *   U+FE00–U+FE0F      Variation Selectors (BMP)
+ *   U+E0000–U+E007F    TAGS plane (ASCII Smuggler)
+ *   U+E0100–U+E01EF    Variation Selectors Supplement
  */
-const TAG_PLANE_RE: RegExp = /[\u{E0000}-\u{E007F}]/gu;
+const TAG_PLANE_RE: RegExp = /[\u{FE00}-\u{FE0F}\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 
 /**
  * Strip the most attack-relevant HTML constructs. The provider already gives

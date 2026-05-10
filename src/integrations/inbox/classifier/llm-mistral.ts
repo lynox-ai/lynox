@@ -81,8 +81,10 @@ export function createMistralEuLLMCaller(opts: MistralEuOptions): LLMCaller {
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
       // Strip secrets / query strings before logging — caps at 200 chars.
-      const snippet = scrubErrorMessage(text);
-      throw new Error(`Mistral ${String(resp.status)}: ${snippet || resp.statusText}`);
+      // statusText is server-controlled too; a misbehaving proxy/CDN could
+      // echo sensitive content there, so it goes through the same scrubber.
+      const snippet = scrubErrorMessage(text || resp.statusText);
+      throw new Error(`Mistral ${String(resp.status)}: ${snippet}`);
     }
     const json = (await resp.json()) as MistralResponse;
     if (onUsage && json.usage) {

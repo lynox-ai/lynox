@@ -73,12 +73,12 @@ const PASSWORD_RESET_RE = /\b(?:reset\s*(?:your)?\s*password|passwort\s*zurücks
  */
 export const SECRET_PREFIX_RES: ReadonlyArray<RegExp> = [
   /\bsk-[A-Za-z0-9_-]{16,}\b/,                  // Anthropic / OpenAI dash-style
-  /\b(?:sk|rk|whsec|pk|live)_(?:live|test)_[A-Za-z0-9]{16,}\b/, // Stripe-style underscore keys
+  /\b(?:sk|rk|whsec|pk)_(?:(?:live|test|acct)_)?[A-Za-z0-9]{16,}\b/, // Stripe-style underscore keys (live/test/connect-account/webhook-secret)
   /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/,           // Slack
   /\bgh[pousr]_[A-Za-z0-9]{16,}\b/,             // GitHub PATs
   /\bAKIA[0-9A-Z]{16}\b/,                       // AWS access key
   /\bya29\.[A-Za-z0-9_-]{20,}\b/,               // Google OAuth refresh token
-  /\bBearer\s+[A-Za-z0-9._-]{20,}\b/,           // Generic bearer tokens
+  /\bBearer\s+\S{8,}\b/,                        // Generic bearer tokens (8+ chars — catches short opaque tokens too)
   /\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\b/, // JWT (3 segments)
 ];
 
