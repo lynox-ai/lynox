@@ -6,24 +6,27 @@ on:
     paths-ignore: ['docs/**']
   workflow_dispatch:
 
-# Burst of merges (e.g. 4 squash-merges seconds apart) used to fan out into 4
-# parallel builds + 4 staging redeploys, with the final `:staging` tag racing
-# whoever finished last — so a slow first run could overwrite a fast later
-# one's image. Collapse to a single in-flight build per `main`: cancel any
-# pending/running run when a new one queues, so only the latest commit ships.
-concurrency:
-  group: staging-image
-  cancel-in-progress: true
-
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
+    # Burst of merges (e.g. 4 squash-merges seconds apart) used to fan out into
+    # 4 parallel builds + 4 staging redeploys, with the final `:staging` tag
+    # racing whoever finished last. Collapse to one in-flight build per `main`
+    # — cancel any pending/running build when a new one queues, so only the
+    # latest commit ships. Group is scoped to the trigger so a manual
+    # `workflow_dispatch` rerun (operator recovering a transient failure) is
+    # not racing a regular push, and vice versa.
+    concurrency:
+      group: staging-build-${{ github.event_name }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +66,10 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
 
+      # Only `:staging` is guaranteed to track main's tip — the per-SHA
+      # `:staging-<sha>` companion tag is sparse: any commit whose build was
+      # cancelled mid-burst won't have one. Treat `:staging-<sha>` as
+      # best-effort archival, never as a stable rollback target.
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -78,6 +85,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Separate job — deliberately NOT in the build's concurrency group, so a
+  # newer push that cancels an in-flight `build` cannot also cancel this
+  # dispatch once it's running. `needs: build` ensures we only fire on a
+  # build that completed successfully (i.e. actually pushed `:staging`).
+  # Trade-off: a 4-merge burst whose builds all somehow finish will produce
+  # 4 dispatches in close succession instead of 1. Pro's redeploy is
+  # idempotent (pull + recreate to whatever `:staging` currently points at),
+  # so duplicates only cost extra image pulls, not correctness.
+  dispatch:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
       # Trigger engine redeploy on staging.lynox.cloud in the pro repo.
       # Pro's staging-engine-redeploy.yml listens for this event and calls
       # the prod control plane admin API to `docker pull + recreate` the
@@ -88,7 +107,7 @@ jobs:
       - name: Dispatch engine redeploy to lynox-pro
         env:
           PRO_DISPATCH_TOKEN: ${{ secrets.PRO_DISPATCH_TOKEN }}
-          SHA: ${{ steps.meta.outputs.sha }}
+          SHA: ${{ needs.build.outputs.sha }}
         run: |
           curl -sSf -X POST \
             -H "Authorization: Bearer $PRO_DISPATCH_TOKEN" \
