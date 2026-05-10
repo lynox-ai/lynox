@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
-    && corepack enable && corepack prepare pnpm@latest --activate
+    && corepack enable && corepack prepare pnpm@10 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # Install only engine deps (web-ui has separate install)
@@ -41,7 +41,7 @@ WORKDIR /app
 ARG BUILD_SHA=
 ENV BUILD_SHA=${BUILD_SHA}
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@10 --activate
 
 COPY packages/web-ui/package.json packages/web-ui/package.json
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
@@ -59,7 +59,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
-    && corepack enable && corepack prepare pnpm@latest --activate
+    && corepack enable && corepack prepare pnpm@10 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \

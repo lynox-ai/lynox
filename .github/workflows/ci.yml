@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - uses: pnpm/action-setup@v6
-        with: { version: 'latest' }
+        with: { version: '10' }
       - run: pnpm install --frozen-lockfile
 
       # Dependency audit via osv-scanner. audit-ci was replaced 2026-04-15
