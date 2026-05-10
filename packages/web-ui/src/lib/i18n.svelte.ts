@@ -343,6 +343,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
+	'chat.permission_running': { de: 'Erlaubt — wird ausgeführt…', en: 'Allowed — running…' },
+	'chat.permission_denied_running': { de: 'Abgelehnt — wird beendet…', en: 'Denied — finishing up…' },
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
 	'chat.skipped': { de: 'Übersprungen', en: 'Skipped' },
 	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
