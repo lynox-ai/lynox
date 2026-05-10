@@ -108,10 +108,6 @@ function luhnValid(rawDigits: string): boolean {
   return sum % 10 === 0;
 }
 
-function pushIf(found: Set<SensitiveCategory>, cat: SensitiveCategory, hit: boolean): void {
-  if (hit) found.add(cat);
-}
-
 // ── Public API ─────────────────────────────────────────────────────────────
 
 export interface DetectInput {

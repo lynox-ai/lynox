@@ -109,7 +109,6 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   // Always emit a non-fatal warning so operators see the residency
   // implication when the flag flips on with default routing.
   if (region === 'us' && !opts.privacyAck) {
-    // eslint-disable-next-line no-console
     console.warn(
       '[lynox] Inbox classifier routes via Anthropic US — mail snippets '
       + 'leave the EU. Set LYNOX_INBOX_LLM_REGION=eu (Mistral) for '
