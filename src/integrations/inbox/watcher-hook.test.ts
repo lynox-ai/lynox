@@ -79,6 +79,7 @@ describe('createInboxClassifierHook — enqueue path', () => {
     const payload = queueCalls[0]!;
     expect(payload).toEqual({
       accountId: 'acct-1',
+      channel: 'email',
       threadKey: 'imap:thread-1',
       classifierInput: {
         accountAddress: 'me@acme.example',
