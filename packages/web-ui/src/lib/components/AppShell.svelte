@@ -119,9 +119,7 @@
 				descKey: 'nav.desc.chat', type: 'threads',
 			},
 		];
-		// Inbox: surfaced only when WhatsApp pilot flag is on. Will expand to
-		// email/SMS/iMessage once those channels land — keep gated until then so
-		// users don't click into an empty page.
+		// Gated: only WhatsApp is wired today; routing to an empty page would confuse users.
 		if (whatsappEnabled) {
 			items.push({
 				href: '/app/whatsapp', labelKey: 'nav.inbox', exact: false, icon: 'whatsapp',
@@ -152,8 +150,7 @@
 		return exact ? path === href : path.startsWith(href);
 	}
 
-	// Light up the Automation/Intelligence parents when on routes that live
-	// inside them but have no top-level entry (Activity, Contacts).
+	// Routes without their own sidebar entry highlight their parent.
 	const PARENT_OWNS: Record<string, string[]> = {
 		'/app/workflows': ['/app/activity'],
 		'/app/knowledge': ['/app/contacts'],
@@ -222,8 +219,7 @@
 	onMount(() => {
 		void loadThreads();
 		stopVisibilityRefresh = startVisibilityRefresh();
-		// Auto-expand the threads list when landing on Chat — there's no
-		// hub-section dropdown anymore.
+		// Threads list is the only expandable section; auto-open it on Chat routes.
 		const match = nav.find(item => isThreadsItem(item) && isParentActive(item));
 		if (match) {
 			expandedSection = match.href;

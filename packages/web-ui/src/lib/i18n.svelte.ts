@@ -5,7 +5,6 @@ let current = $state<Locale>('de');
 const translations: Record<string, Record<Locale, string>> = {
 	// Nav
 	'nav.chat': { de: 'Chat', en: 'Chat' },
-	'nav.knowledge': { de: 'Wissen', en: 'Knowledge' },
 	'nav.settings': { de: 'Einstellungen', en: 'Settings' },
 	'nav.logout': { de: 'Abmelden', en: 'Log out' },
 	'nav.new_chat': { de: 'Neuer Chat', en: 'New Chat' },
@@ -64,15 +63,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Nav (extended)
 	'nav.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'nav.desc.chat': { de: 'Dein KI-Assistent', en: 'Your AI assistant' },
-	'nav.desc.knowledge': { de: 'Was lynox sich merkt', en: 'What lynox remembers' },
 	'nav.desc.contacts': { de: 'Deine Kunden und Deals (Beta)', en: 'Your clients and deals (beta)' },
 	'nav.desc.artifacts': { de: 'Galerie aller Outputs', en: 'Gallery of all outputs' },
 	'nav.activity': { de: 'Aktivität', en: 'Activity' },
 	'nav.desc.activity': { de: 'Runs, Kosten, Aufgaben', en: 'Runs, costs, tasks' },
-	'nav.workflows': { de: 'Abläufe', en: 'Workflows' },
-	'nav.desc.workflows': { de: 'Pipelines und Automatisierungen', en: 'Pipelines and automations' },
-	'nav.whatsapp': { de: 'WhatsApp', en: 'WhatsApp' },
-	'nav.desc.whatsapp': { de: 'Kundennachrichten triagen', en: 'Triage customer messages' },
 	'nav.automation': { de: 'Automation', en: 'Automation' },
 	'nav.desc.automation': { de: 'Workflows, Vorschläge, Runs & Kosten', en: 'Workflows, suggestions, runs & costs' },
 	'nav.intelligence': { de: 'Intelligence', en: 'Intelligence' },
