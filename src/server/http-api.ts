@@ -3300,6 +3300,162 @@ export class LynoxHTTPApi {
       }
     }));
 
+    // ── /api/inbox/* (PRD-UNIFIED-INBOX Phase 1a) ───────────────────────────
+    //
+    // Pure handlers live in `integrations/inbox/api.ts`; these routes are
+    // thin: extract query/body, hand to the handler, write the envelope.
+    // Every route gates on `engine.getInboxRuntime()` being non-null —
+    // returns 503 when the `unified-inbox` feature flag is off.
+    const inboxDeps = (): null | import('../integrations/inbox/api.js').InboxApiDeps => {
+      const rt = engine.getInboxRuntime();
+      if (!rt) return null;
+      const deps: import('../integrations/inbox/api.js').InboxApiDeps = {
+        state: rt.state,
+        rules: rt.rules,
+      };
+      if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
+      return deps;
+    };
+    const sendInbox = (
+      res: ServerResponse,
+      response: { status: number; body: unknown },
+    ): void => {
+      if (response.body === null) {
+        res.statusCode = response.status;
+        res.end();
+      } else {
+        jsonResponse(res, response.status, response.body);
+      }
+    };
+
+    this.staticRoutes.set('GET /api/inbox/items', async (req, res) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleListItems } = await import('../integrations/inbox/api.js');
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const query: import('../integrations/inbox/api.js').ListItemsQuery = {};
+      const bucket = url.searchParams.get('bucket');
+      if (bucket !== null) query.bucket = bucket;
+      const limit = url.searchParams.get('limit');
+      if (limit !== null) query.limit = limit;
+      const offset = url.searchParams.get('offset');
+      if (offset !== null) query.offset = offset;
+      const tenantId = url.searchParams.get('tenantId');
+      if (tenantId !== null) query.tenantId = tenantId;
+      sendInbox(res, handleListItems(deps!, query));
+    });
+
+    this.staticRoutes.set('GET /api/inbox/counts', async (req, res) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetCounts } = await import('../integrations/inbox/api.js');
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const tenantId = url.searchParams.get('tenantId');
+      sendInbox(res, handleGetCounts(deps!, tenantId !== null ? { tenantId } : {}));
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetItem } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleGetItem(deps!, params['id']!));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/audit', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleListItemAudit } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleListItemAudit(deps!, params['id']!));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/inbox/items/:id/action', async (_req, res, params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const b = (body ?? {}) as Record<string, unknown>;
+      const { handleSetAction } = await import('../integrations/inbox/api.js');
+      const action = b['action'];
+      const at = typeof b['at'] === 'string' ? (b['at'] as string) : undefined;
+      const setActionBody: import('../integrations/inbox/api.js').SetActionBody = {
+        action: action as import('../integrations/inbox/api.js').SetActionBody['action'],
+      };
+      if (at !== undefined) setActionBody.at = at;
+      sendInbox(res, handleSetAction(deps!, params['id']!, setActionBody));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/inbox/items/:id/snooze', async (_req, res, params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const b = (body ?? {}) as Record<string, unknown>;
+      const { handleSetSnooze } = await import('../integrations/inbox/api.js');
+      const snoozeBody: import('../integrations/inbox/api.js').SetSnoozeBody = {
+        until: (b['until'] ?? null) as string | null,
+      };
+      if (typeof b['condition'] === 'string' || b['condition'] === null) {
+        snoozeBody.condition = b['condition'] as string | null;
+      }
+      if (typeof b['unsnoozeOnReply'] === 'boolean') {
+        snoozeBody.unsnoozeOnReply = b['unsnoozeOnReply'];
+      }
+      sendInbox(res, handleSetSnooze(deps!, params['id']!, snoozeBody));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/contacts/:email', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleResolveContact } = await import('../integrations/inbox/api.js');
+      // parseDynamicRoute does NOT decode URL params (verified vs.
+      // /api/crm/contacts/:name which also calls decodeURIComponent).
+      // Without this step every real address would arrive as `name%40host`
+      // and the contact lookup would always miss.
+      let email: string;
+      try {
+        email = decodeURIComponent(params['email']!);
+      } catch {
+        errorResponse(res, 400, 'invalid url-encoded email');
+        return;
+      }
+      sendInbox(res, handleResolveContact(deps!, email));
+    }));
+
+    this.staticRoutes.set('GET /api/inbox/rules', async (req, res) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleListRules } = await import('../integrations/inbox/api.js');
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const accountId = url.searchParams.get('accountId') ?? '';
+      const query: import('../integrations/inbox/api.js').ListRulesQuery = { accountId };
+      const tenantId = url.searchParams.get('tenantId');
+      if (tenantId !== null) query.tenantId = tenantId;
+      sendInbox(res, handleListRules(deps!, query));
+    });
+
+    this.staticRoutes.set('POST /api/inbox/rules', async (_req, res, _params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleCreateRule } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const ruleBody = {
+        accountId: typeof b['accountId'] === 'string' ? b['accountId'] : '',
+        matcherKind: b['matcherKind'] as import('../integrations/inbox/api.js').CreateRuleBody['matcherKind'],
+        matcherValue: typeof b['matcherValue'] === 'string' ? b['matcherValue'] : '',
+        bucket: b['bucket'] as import('../integrations/inbox/api.js').CreateRuleBody['bucket'],
+        action: b['action'] as import('../integrations/inbox/api.js').CreateRuleBody['action'],
+        source: b['source'] as import('../integrations/inbox/api.js').CreateRuleBody['source'],
+      };
+      const finalRuleBody: import('../integrations/inbox/api.js').CreateRuleBody =
+        typeof b['tenantId'] === 'string'
+          ? { ...ruleBody, tenantId: b['tenantId'] }
+          : ruleBody;
+      sendInbox(res, handleCreateRule(deps!, finalRuleBody));
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/inbox/rules/:id', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleDeleteRule } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleDeleteRule(deps!, params['id']!));
+    }));
+
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!kg) { jsonResponse(res, 200, { entities: [] }); return; }

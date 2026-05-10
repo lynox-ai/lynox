@@ -9,4 +9,5 @@ export * from './roles.js';
 export * from './pipeline.js';
 export * from './security.js';
 export * from './modes.js';
+export * from './inbox.js';
 export type { ToolContext, ToolCallCountProvider, ActiveTrackedPlan, TrackedStepResult } from '../core/tool-context.js';

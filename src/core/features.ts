@@ -11,13 +11,15 @@
 export type FeatureFlag =
   | 'plugins'
   | 'flat-file-memory'
-  | 'whatsapp-inbox';
+  | 'whatsapp-inbox'
+  | 'unified-inbox';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'plugins': 'LYNOX_FEATURE_PLUGINS',
   'flat-file-memory': 'LYNOX_FEATURE_FLAT_FILE_MEMORY',
   'whatsapp-inbox': 'LYNOX_FEATURE_WHATSAPP_INBOX',
+  'unified-inbox': 'LYNOX_FEATURE_UNIFIED_INBOX',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -25,6 +27,9 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   'flat-file-memory': true,
   // Phase-0 BYOK pilot. Off by default — flip to `true` when the feature graduates.
   'whatsapp-inbox': false,
+  // PRD-UNIFIED-INBOX Phase 1a foundation. Off by default — flip on when the
+  // /app/inbox UI ships in Phase 1b and the classifier has been piloted.
+  'unified-inbox': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags
