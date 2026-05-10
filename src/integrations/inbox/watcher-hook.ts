@@ -18,11 +18,22 @@
 // integration in Phase 2.
 
 import type { MailEnvelope } from '../mail/provider.js';
+import type { InboxChannel } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
 import { analyzeSensitiveContent, reasonForCategories, type SensitiveMode } from './sensitive-content.js';
 import type { InboxStateDb } from './state.js';
+
+/**
+ * Pseudo-accounts for non-mail channels carry an `<channel>:<id>` prefix
+ * in their accountId (e.g. `whatsapp:default`). Real mail account ids
+ * never start with `<channel>:` so the prefix check is unambiguous.
+ */
+function channelFromAccountId(accountId: string): InboxChannel {
+  if (accountId.startsWith('whatsapp:')) return 'whatsapp';
+  return 'email';
+}
 
 /**
  * Resolves an accountId to the bits the classifier prompt needs (address +
@@ -87,6 +98,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const fromAddress = env.from[0]?.address ?? '';
     if (!fromAddress) return; // no sender, no classification
 
+    const channel = channelFromAccountId(accountId);
+
     const fromDisplayName = env.from[0]?.name;
     const subject = env.subject;
     const threadKey = resolveThreadKey(env);
@@ -111,7 +124,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         {
           tenantId: opts.tenantId,
           accountId,
-          channel: 'email',
+          channel,
           threadKey,
           bucket: rule.bucket,
           confidence: 1,
@@ -144,7 +157,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         {
           tenantId: opts.tenantId,
           accountId,
-          channel: 'email',
+          channel,
           threadKey,
           bucket: 'requires_user',
           confidence: 0,
@@ -184,6 +197,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     };
     const payload: InboxQueuePayload = {
       accountId,
+      channel,
       threadKey,
       classifierInput,
     };

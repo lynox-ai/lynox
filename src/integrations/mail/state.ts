@@ -216,6 +216,80 @@ const MIGRATIONS: string[] = [
 
    CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_items_uniq_thread
      ON inbox_items(tenant_id, account_id, thread_key);`,
+
+  // v9: Relax inbox_items.account_id + inbox_rules.account_id FK on
+  // mail_accounts so the same tables can host WhatsApp items (account_id
+  // becomes a polymorphic string: real mail-account ids OR pseudo-account
+  // ids like 'whatsapp:<phoneNumberId>'). SQLite cannot drop a FK in
+  // place, so we use the canonical table-rebuild dance.
+  //
+  // CASCADE on mail_account delete is now an application invariant: the
+  // owning module is responsible for issuing the cleanup queries
+  // (deleteAccount cascades via explicit DELETE in this same file).
+  //
+  // PRAGMA foreign_keys = OFF is required because inbox_audit_log /
+  // inbox_drafts reference inbox_items via FK; dropping the table would
+  // otherwise trip the integrity check. We restore the pragma at the end
+  // of the migration string — the constructor's `foreign_keys = ON` call
+  // already runs BEFORE this migration, so the effective end state is on.
+  `PRAGMA foreign_keys = OFF;
+
+   INSERT OR IGNORE INTO schema_version (version) VALUES (9);
+
+   CREATE TABLE inbox_items_v9 (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     account_id TEXT NOT NULL,
+     channel TEXT NOT NULL,
+     thread_key TEXT NOT NULL,
+     bucket TEXT NOT NULL,
+     confidence REAL NOT NULL,
+     reason_de TEXT NOT NULL,
+     classified_at INTEGER NOT NULL,
+     classifier_version TEXT NOT NULL,
+     user_action TEXT,
+     user_action_at INTEGER,
+     draft_id TEXT,
+     snooze_until INTEGER,
+     snooze_condition TEXT,
+     unsnooze_on_reply INTEGER NOT NULL DEFAULT 1
+   );
+   INSERT INTO inbox_items_v9 SELECT * FROM inbox_items;
+   DROP TABLE inbox_items;
+   ALTER TABLE inbox_items_v9 RENAME TO inbox_items;
+
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_queue
+     ON inbox_items(tenant_id, bucket, classified_at DESC);
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_account
+     ON inbox_items(tenant_id, account_id);
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_thread
+     ON inbox_items(account_id, thread_key);
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_snooze
+     ON inbox_items(snooze_until) WHERE snooze_until IS NOT NULL;
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_items_uniq_thread
+     ON inbox_items(tenant_id, account_id, thread_key);
+
+   CREATE TABLE inbox_rules_v9 (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     account_id TEXT NOT NULL,
+     matcher_kind TEXT NOT NULL,
+     matcher_value TEXT NOT NULL,
+     bucket TEXT NOT NULL,
+     action TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     source TEXT NOT NULL
+   );
+   INSERT INTO inbox_rules_v9 SELECT * FROM inbox_rules;
+   DROP TABLE inbox_rules;
+   ALTER TABLE inbox_rules_v9 RENAME TO inbox_rules;
+
+   CREATE INDEX IF NOT EXISTS idx_inbox_rules_account
+     ON inbox_rules(tenant_id, account_id);
+   CREATE INDEX IF NOT EXISTS idx_inbox_rules_matcher
+     ON inbox_rules(account_id, matcher_kind, matcher_value);
+
+   PRAGMA foreign_keys = ON;`,
 ];
 
 export interface MailStateDbOptions {
@@ -583,10 +657,24 @@ export class MailStateDb {
     return row?.id ?? null;
   }
 
-  /** Remove an account row (without touching dedup state — caller decides). */
+  /**
+   * Remove an account row plus its dependent inbox rows. The v9 migration
+   * dropped the FK from inbox_items / inbox_rules onto mail_accounts to
+   * accommodate WhatsApp pseudo-accounts; cascade is now an application
+   * invariant we enforce here. Dedup state (processed_mail_messages,
+   * mail_followups) is left intact — caller decides whether to forget it.
+   */
   deleteAccount(id: string): boolean {
-    const result = this.db.prepare('DELETE FROM mail_accounts WHERE id = ?').run(id);
-    return result.changes > 0;
+    const txn = this.db.transaction(() => {
+      // Delete inbox-side dependents first so the FK chain
+      // (inbox_audit_log + inbox_drafts -> inbox_items, both still
+      // ON DELETE CASCADE) cleans up audits and drafts automatically.
+      this.db.prepare('DELETE FROM inbox_items WHERE account_id = ?').run(id);
+      this.db.prepare('DELETE FROM inbox_rules WHERE account_id = ?').run(id);
+      const result = this.db.prepare('DELETE FROM mail_accounts WHERE id = ?').run(id) as { changes: number };
+      return result.changes > 0;
+    });
+    return txn();
   }
 
   // ── Follow-ups ──────────────────────────────────────────────────────────

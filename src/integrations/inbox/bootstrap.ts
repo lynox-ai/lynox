@@ -153,6 +153,13 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
 
   const accounts: AccountResolver = {
     resolve: (id) => {
+      // WhatsApp pseudo-accounts have no row in mail_accounts; the
+      // accountId itself is `whatsapp:<phoneNumberId>` (set by the WA
+      // adapter). Surface a synthetic identity so the classifier prompt
+      // still gets a useful "account" line.
+      if (id.startsWith('whatsapp:')) {
+        return { address: id, displayName: 'WhatsApp' };
+      }
       const acct = opts.mailStateDb.getAccount(id);
       return acct ? { address: acct.address, displayName: acct.displayName } : null;
     },
