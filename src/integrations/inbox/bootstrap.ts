@@ -12,11 +12,13 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { CRM } from '../../core/crm.js';
 import { getModelId } from '../../types/index.js';
-import { type ClassifierQueue } from './classifier/queue.js';
+import type { LLMCaller } from './classifier/index.js';
 import {
   type AnthropicLike,
   wrapAnthropicAsLLMCaller,
 } from './classifier/llm.js';
+import { createMistralEuLLMCaller } from './classifier/llm-mistral.js';
+import { type ClassifierQueue } from './classifier/queue.js';
 import { InboxContactResolver } from './contact-resolver.js';
 import { InboxCostBudget, type InboxCostBudgetOptions } from './cost-budget.js';
 import { InboxRulesLoader } from './rules-loader.js';
@@ -49,7 +51,7 @@ export interface InboxRuntime {
 export interface BootstrapInboxOptions {
   /** Mail state DB whose connection (post-migration v7) we share. */
   mailStateDb: MailStateDb;
-  /** Anthropic-shaped client — typically `engine.client`. */
+  /** Anthropic-shaped client — typically `engine.client`. Used when llmFactory is not set. */
   anthropicClient: Anthropic;
   /** CRM enables sender enrichment via the contact resolver. */
   crm?: CRM | null | undefined;
@@ -67,6 +69,16 @@ export interface BootstrapInboxOptions {
    * `LYNOX_INBOX_SENSITIVE_MODE` (engine wiring reads + forwards).
    */
   sensitiveMode?: SensitiveMode | undefined;
+  /**
+   * EU-residency switch. When 'eu', the runtime uses Mistral via
+   * createMistralEuLLMCaller — no mail content leaves the EU. Default
+   * 'us' uses the Haiku/Anthropic path.
+   *
+   * When 'eu', `mistralApiKey` is required (engine wiring reads it from
+   * the secret store).
+   */
+  llmRegion?: 'us' | 'eu' | undefined;
+  mistralApiKey?: string | undefined;
 }
 
 export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
@@ -75,13 +87,27 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const contactResolver = opts.crm ? new InboxContactResolver(opts.crm) : null;
   const budget = new InboxCostBudget(opts.budget ?? {});
 
-  const llm = wrapAnthropicAsLLMCaller(
-    opts.anthropicClient as unknown as AnthropicLike,
-    opts.modelIdOverride ?? getModelId('haiku'),
-    {
-      onUsage: (usage) => budget.recordUsage(usage.inputTokens, usage.outputTokens),
-    },
-  );
+  const onUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
+    budget.recordUsage(usage.inputTokens, usage.outputTokens);
+  };
+  let llm: LLMCaller;
+  if (opts.llmRegion === 'eu') {
+    if (!opts.mistralApiKey) {
+      throw new Error('bootstrapInbox: llmRegion=eu requires mistralApiKey');
+    }
+    const mistralOpts: Parameters<typeof createMistralEuLLMCaller>[0] = {
+      apiKey: opts.mistralApiKey,
+      onUsage,
+    };
+    if (opts.modelIdOverride !== undefined) mistralOpts.modelId = opts.modelIdOverride;
+    llm = createMistralEuLLMCaller(mistralOpts);
+  } else {
+    llm = wrapAnthropicAsLLMCaller(
+      opts.anthropicClient as unknown as AnthropicLike,
+      opts.modelIdOverride ?? getModelId('haiku'),
+      { onUsage },
+    );
+  }
 
   const queue = buildInboxRunner({
     state,

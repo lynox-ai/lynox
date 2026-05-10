@@ -128,6 +128,48 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
   });
 
+  it('llmRegion=eu requires mistralApiKey — throws otherwise', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    expect(() =>
+      bootstrapInbox({ mailStateDb: mail, anthropicClient: client, llmRegion: 'eu' }),
+    ).toThrow(/mistralApiKey/);
+  });
+
+  it('llmRegion=eu wires the Mistral caller (no Anthropic call) when key is provided', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: '',
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify({
+          bucket: 'requires_user',
+          confidence: 0.85,
+          one_line_why_de: 'Kunde fragt zurück',
+        }) } }],
+        usage: { prompt_tokens: 200, completion_tokens: 30 },
+      }),
+      text: async () => '',
+    } as unknown as Response);
+    const create = vi.fn(); // must never be called when region=eu
+    const client = { messages: { create } } as unknown as Anthropic;
+    const runtime = bootstrapInbox({
+      mailStateDb: mail,
+      anthropicClient: client,
+      llmRegion: 'eu',
+      mistralApiKey: 'eu-key',
+    });
+    await runtime.hook(ACCOUNT.id, envelope());
+    await runtime.shutdown();
+
+    expect(create).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const url = fetchSpy.mock.calls[0]![0] as string;
+    expect(url).toContain('api.mistral.ai');
+    expect(runtime.state.listItems()[0]?.bucket).toBe('requires_user');
+    expect(runtime.budget.snapshot().spentUSD).toBeGreaterThan(0);
+    fetchSpy.mockRestore();
+  });
+
   it('LLM rejection cascades through retry to a fail-closed dead-letter item', async () => {
     const create = vi.fn(async () => {
       throw new Error('rate_limited');

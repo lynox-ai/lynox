@@ -621,12 +621,26 @@ export class Engine {
             // entirely (only safe with a strict DPA / self-hosted LLM).
             const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
             const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
-            const runtime = bootstrapInbox({
+            // EU residency: when LYNOX_INBOX_LLM_REGION=eu the runtime
+            // routes via Mistral (api.mistral.ai, EU-resident) instead of
+            // Haiku/Anthropic-US. Requires LYNOX_INBOX_MISTRAL_API_KEY
+            // (or MISTRAL_API_KEY) — bootstrap throws if missing so the
+            // operator can't accidentally fall back to a non-EU provider.
+            const llmRegion = process.env['LYNOX_INBOX_LLM_REGION'] === 'eu' ? 'eu' : 'us';
+            const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
+              ?? this.secretStore?.resolve('MISTRAL_API_KEY')
+              ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
+              ?? process.env['MISTRAL_API_KEY']
+              ?? undefined;
+            const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
               mailStateDb: stateDb,
               anthropicClient: this.client,
               crm: this._crm,
               sensitiveMode,
-            });
+              llmRegion,
+            };
+            if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
+            const runtime = bootstrapInbox(bootOpts);
             // MailHooks fires `onInboundMail` per envelope from wrappedHandler
             // (`mail/context.ts:248`). Mutating the held reference works
             // because the handler reads it on every invocation.
