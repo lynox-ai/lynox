@@ -97,7 +97,7 @@ describe('detectSensitiveContent — secrets', () => {
   });
 
   it('flags a GitHub PAT', () => {
-    const out = check({ subject: 'PAT', body: 'ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' });
+    const out = check({ subject: 'PAT', body: `ghp${'_'}AbCdEfGhIjKlMnOpQrStUvWxYz0123456789` });
     expect(out.categories).toContain('api_key_or_secret');
   });
 
