@@ -428,7 +428,7 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
     expect(inner(db).pragma('foreign_keys', { simple: true })).toBe(1);
   });
 
-  it('cascades inbox_items + inbox_drafts + inbox_audit_log when a mail_account is deleted', () => {
+  it('cascades inbox_items + inbox_drafts + inbox_audit_log + inbox_rules when a mail_account is deleted', () => {
     db.upsertAccount({
       id: 'acct-cascade',
       displayName: 'Cascade test',
@@ -460,6 +460,12 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
          VALUES (?, ?, ?, ?, ?, 1700000000002)`,
       )
       .run('audit-1', 'item-1', 'classified', 'classifier', '{}');
+    raw
+      .prepare(
+        `INSERT INTO inbox_rules (id, account_id, matcher_kind, matcher_value, bucket, action, created_at, source)
+         VALUES (?, ?, ?, ?, ?, ?, 1700000000003, ?)`,
+      )
+      .run('rule-1', 'acct-cascade', 'from', 'noreply@x', 'auto_handled', 'archive', 'on_demand');
 
     expect(db.deleteAccount('acct-cascade')).toBe(true);
 
@@ -472,9 +478,30 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
     const auditCount = raw
       .prepare(`SELECT COUNT(*) as c FROM inbox_audit_log WHERE item_id = 'item-1'`)
       .get() as { c: number };
+    const ruleCount = raw
+      .prepare(`SELECT COUNT(*) as c FROM inbox_rules WHERE account_id = 'acct-cascade'`)
+      .get() as { c: number };
     expect(itemCount.c).toBe(0);
     expect(draftCount.c).toBe(0);
     expect(auditCount.c).toBe(0);
+    expect(ruleCount.c).toBe(0);
+  });
+
+  it('rejects upsertAccount with a reserved channel prefix (whatsapp: / telegram:)', () => {
+    const base = {
+      displayName: 'Bad',
+      address: 'me@example.com',
+      preset: 'custom' as const,
+      imap: { host: 'i', port: 993, secure: true },
+      smtp: { host: 's', port: 465, secure: true },
+      authType: 'imap' as const,
+      type: 'personal' as const,
+      isDefault: false,
+    };
+    expect(() => db.upsertAccount({ id: 'whatsapp:foo', ...base })).toThrow(/reserved channel prefix/);
+    expect(() => db.upsertAccount({ id: 'telegram:foo', ...base })).toThrow(/reserved channel prefix/);
+    // Normal ids still pass.
+    expect(() => db.upsertAccount({ id: 'acct-normal', ...base })).not.toThrow();
   });
 
   it('accepts an inbox_items row with a non-mail account_id (v9 relaxed FK for WhatsApp pseudo-accounts)', () => {
