@@ -624,8 +624,11 @@ export class Engine {
             // because the handler reads it on every invocation.
             mailCtx.hooks.onInboundMail = runtime.hook;
             this._inboxRuntime = runtime;
-          } catch {
-            // Inbox init failed — non-critical, mail integration still works
+          } catch (err) {
+            // Surface the failure so a silently-disabled feature does not
+            // become a debugging black hole. Mail integration still works.
+            // eslint-disable-next-line no-console
+            console.error('[lynox] Inbox bootstrap failed — feature disabled:', err);
           }
         }
       }

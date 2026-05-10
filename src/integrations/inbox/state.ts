@@ -216,17 +216,27 @@ export class InboxStateDb {
 
   // ── Items ────────────────────────────────────────────────────────────────
 
+  /**
+   * Insert an item. Handles the watcher-hook dedup race (two mails on the
+   * same thread classify in parallel): the v8 UNIQUE index on
+   * `(tenant_id, account_id, thread_key)` collapses the second insert via
+   * ON CONFLICT DO NOTHING; we then return the existing row's id so audit
+   * entries still attach to the canonical item. Both racing callers see a
+   * single item, with two `classified` audit entries — informative rather
+   * than corrupting.
+   */
   insertItem(input: InboxItemInput): string {
     const id = nextId('inb');
     const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
     const unsnoozeOnReply = input.unsnoozeOnReply ?? true;
-    this.db
+    const result = this.db
       .prepare(
         `INSERT INTO inbox_items (
            id, tenant_id, account_id, channel, thread_key,
            bucket, confidence, reason_de, classified_at, classifier_version,
            unsnooze_on_reply
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (tenant_id, account_id, thread_key) DO NOTHING`,
       )
       .run(
         id,
@@ -240,8 +250,19 @@ export class InboxStateDb {
         input.classifiedAt.getTime(),
         input.classifierVersion,
         unsnoozeOnReply ? 1 : 0,
-      );
-    return id;
+      ) as { changes: number };
+    if (result.changes > 0) return id;
+    // Race lost — another job inserted first. Return that row's id.
+    const existing = this.db
+      .prepare<[string, string, string], { id: string }>(
+        `SELECT id FROM inbox_items
+         WHERE tenant_id = ? AND account_id = ? AND thread_key = ?`,
+      )
+      .get(tenantId, input.accountId, input.threadKey);
+    if (!existing) {
+      throw new Error('insertItem: ON CONFLICT fired but no existing row found');
+    }
+    return existing.id;
   }
 
   getItem(id: string): InboxItem | null {

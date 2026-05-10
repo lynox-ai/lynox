@@ -155,12 +155,16 @@ describe('handleSetSnooze', () => {
     expect(audit[0]?.action).toBe('snoozed');
   });
 
-  it('clears the snooze when until=null', () => {
+  it('clears the snooze when until=null and audits as undo (not as a fresh snooze)', () => {
     const id = insertItem();
     handleSetSnooze(deps, id, { until: '2026-05-15T00:00:00Z' });
     const r = handleSetSnooze(deps, id, { until: null });
     expect(r.status).toBe(200);
     expect(state.getItem(id)?.snoozeUntil).toBeUndefined();
+    const audit = state.listAuditForItem(id);
+    expect(audit.map((e) => e.action)).toEqual(['snoozed', 'undo']);
+    const undoPayload = JSON.parse(audit[1]!.payloadJson) as Record<string, unknown>;
+    expect(undoPayload['intent']).toBe('unsnooze');
   });
 
   it('rejects malformed until', () => {

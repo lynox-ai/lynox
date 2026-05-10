@@ -199,6 +199,23 @@ const MIGRATIONS: string[] = [
      ON inbox_rules(tenant_id, account_id);
    CREATE INDEX IF NOT EXISTS idx_inbox_rules_matcher
      ON inbox_rules(account_id, matcher_kind, matcher_value);`,
+
+  // v8: Defense-in-depth against the watcher-hook dedup race.
+  //
+  // The watcher hook checks `findItemByThread` before enqueuing the
+  // classifier, but the classify call is async — two mails arriving on the
+  // same thread back-to-back can both pass the check before either insert
+  // lands. Without a UNIQUE constraint we'd persist duplicate rows for the
+  // same (tenant_id, account_id, thread_key) tuple, breaking the Phase-1a
+  // "always insert on miss, never re-classify" contract.
+  //
+  // The matching INSERT-side change in `inbox/state.ts:insertItem` uses
+  // ON CONFLICT DO NOTHING and falls back to a SELECT so the runner sees a
+  // single canonical id regardless of which racing job won.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (8);
+
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_items_uniq_thread
+     ON inbox_items(tenant_id, account_id, thread_key);`,
 ];
 
 export interface MailStateDbOptions {

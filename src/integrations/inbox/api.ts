@@ -155,11 +155,15 @@ export function handleSetSnooze(deps: InboxApiDeps, id: string, body: SetSnoozeB
   const unsnoozeOnReply = body.unsnoozeOnReply ?? true;
   const ok = deps.state.setSnooze(id, until, condition, unsnoozeOnReply);
   if (!ok) return notFound('item');
+  // Clearing the snooze is logically an undo; logging 'snoozed' on a clear
+  // would corrupt the audit trail's meaning. Carry the prior intent in the
+  // payload so downstream consumers can distinguish set vs unsnooze.
   deps.state.appendAudit({
     itemId: id,
-    action: 'snoozed',
+    action: until === null ? 'undo' : 'snoozed',
     actor: 'user',
     payloadJson: JSON.stringify({
+      intent: until === null ? 'unsnooze' : 'snooze',
       until: until?.toISOString() ?? null,
       condition,
       unsnooze_on_reply: unsnoozeOnReply,

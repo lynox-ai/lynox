@@ -76,6 +76,20 @@ describe('InboxStateDb — items', () => {
     expect(inbox.findItemByThread('acct-1', 'never')).toBeNull();
   });
 
+  it('collapses a duplicate insert on (account_id, thread_key) and returns the existing id', () => {
+    // Simulates the watcher-hook dedup race: two parallel classify jobs
+    // for the same thread both reach insertItem after each passed the
+    // pre-check. The v8 UNIQUE index plus ON CONFLICT DO NOTHING make
+    // the second call a no-op that still returns the canonical id.
+    const first = insertSampleItem({ threadKey: 'race-1', bucket: 'requires_user' });
+    const second = insertSampleItem({ threadKey: 'race-1', bucket: 'auto_handled' });
+    expect(second).toBe(first);
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    // Original verdict wins; later racer cannot overwrite bucket via insert.
+    expect(items[0]?.bucket).toBe('requires_user');
+  });
+
   it('lists items newest-first and filters by bucket', () => {
     const a = insertSampleItem({ bucket: 'requires_user', classifiedAt: new Date('2026-05-01'), threadKey: 't1' });
     insertSampleItem({ bucket: 'auto_handled', classifiedAt: new Date('2026-05-02'), threadKey: 't2' });
