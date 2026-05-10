@@ -20,15 +20,33 @@ import type { MetaWebhookEvent, WhatsAppCredentials } from './types.js';
 import type { WhatsAppStateDb } from './state.js';
 import { createWhatsAppTool } from './tools/index.js';
 
+/**
+ * Callback the inbox-integration hooks in via `WhatsAppContext.setInboxBridge`.
+ * Fires for inbound text messages so the classifier path produces inbox_items
+ * (channel='whatsapp') alongside email items.
+ */
+export type WhatsAppInboxBridge = (event: MetaWebhookEvent) => Promise<void>;
+
 export class WhatsAppContext {
   private readonly stateDb: WhatsAppStateDb;
   private readonly vault: SecretVault | null;
   private client: WhatsAppClient | null = null;
+  private inboxBridge: WhatsAppInboxBridge | null = null;
 
   constructor(stateDb: WhatsAppStateDb, vault: SecretVault | null) {
     this.stateDb = stateDb;
     this.vault = vault;
     this.reload();
+  }
+
+  /**
+   * Engine wiring registers this when the unified-inbox flag is on so
+   * inbound WhatsApp text messages flow through the classifier path. The
+   * bridge fires fire-and-forget — failures are isolated from the
+   * persist-event flow.
+   */
+  setInboxBridge(bridge: WhatsAppInboxBridge | null): void {
+    this.inboxBridge = bridge;
   }
 
   /** Re-read credentials from env/vault and rebuild the client. Called after settings save. */
@@ -79,6 +97,7 @@ export class WhatsAppContext {
 
   /** Persist a webhook event. Voice-note transcription happens separately (see webhook.ts). */
   persistEvent(event: MetaWebhookEvent): { messageInserted: boolean } {
+    let result: { messageInserted: boolean };
     switch (event.type) {
       case 'message':
       case 'echo': {
@@ -86,13 +105,24 @@ export class WhatsAppContext {
           this.stateDb.upsertContact(event.contact);
         }
         const inserted = this.stateDb.upsertMessage(event.msg);
-        return { messageInserted: inserted };
+        result = { messageInserted: inserted };
+        break;
       }
       case 'status': {
         // Phase 0: status updates are informational only. Phase 1 surfaces them in the UI.
-        return { messageInserted: false };
+        result = { messageInserted: false };
+        break;
       }
     }
+    // Fire the inbox bridge fire-and-forget so a slow / failing classifier
+    // does not block the webhook ACK path. The bridge is responsible for
+    // filtering non-inbound / non-text kinds (see whatsapp-adapter.ts).
+    if (this.inboxBridge && result.messageInserted) {
+      void this.inboxBridge(event).catch((err: unknown) => {
+        console.error('[lynox] WhatsApp inbox bridge failed:', err);
+      });
+    }
+    return result;
   }
 
   tools(): ToolEntry[] {

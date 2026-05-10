@@ -29,6 +29,11 @@ export interface MediaFetchResult {
 export class WhatsAppClient {
   constructor(private readonly creds: WhatsAppCredentials) {}
 
+  /** Phone-Number-ID — used by the inbox bridge to build a stable accountId. */
+  get phoneNumberId(): string {
+    return this.creds.phoneNumberId;
+  }
+
   /**
    * Send a plain-text message to a contact. Caller is responsible for enforcing
    * approval flow. Pass `replyToMessageId` (the wa_id of the message being

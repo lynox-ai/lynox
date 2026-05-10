@@ -35,6 +35,8 @@ import type { InboxStateDb } from './state.js';
  */
 export interface InboxQueuePayload {
   accountId: string;
+  /** Channel discriminator — 'email' or 'whatsapp'. Default 'email' for legacy callers. */
+  channel?: 'email' | 'whatsapp' | undefined;
   threadKey: string;
   classifierInput: ClassifierPromptInput;
   /** Optional single tenant override; falls back to the repository default. */
@@ -110,7 +112,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
         {
           tenantId: payload.tenantId,
           accountId: payload.accountId,
-          channel: 'email',
+          channel: payload.channel ?? 'email',
           threadKey: payload.threadKey,
           bucket: result.bucket,
           confidence: result.confidence,
@@ -144,7 +146,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
         {
           tenantId: payload.tenantId,
           accountId: payload.accountId,
-          channel: 'email',
+          channel: payload.channel ?? 'email',
           threadKey: payload.threadKey,
           bucket: 'requires_user',
           confidence: 0,

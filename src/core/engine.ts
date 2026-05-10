@@ -699,6 +699,20 @@ export class Engine {
             this.registry.register(tool);
           }
           this._whatsappContext = waCtx;
+          // Bridge WhatsApp -> Inbox when both subsystems are up. The adapter
+          // filters non-inbound / non-text kinds; the inbox hook handles
+          // rule / sensitive / classifier routing the same as for email.
+          if (this._inboxRuntime) {
+            const { waMessageToInboxInput } = await import('../integrations/inbox/whatsapp-adapter.js');
+            const inboxHook = this._inboxRuntime.hook;
+            waCtx.setInboxBridge(async (event) => {
+              if (event.type !== 'message') return;
+              const phoneNumberId = waCtx.getClient()?.phoneNumberId ?? 'default';
+              const adapted = waMessageToInboxInput(event.msg, event.contact, { phoneNumberId });
+              if (!adapted) return;
+              await inboxHook(adapted.accountId, adapted.envelope);
+            });
+          }
         }
       } catch {
         // WhatsApp init failed — non-critical, continue without it
