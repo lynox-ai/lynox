@@ -118,6 +118,33 @@ describe('detectSensitiveContent — secrets', () => {
     });
     expect(out.categories).toContain('api_key_or_secret');
   });
+
+  it('flags a Stripe-style underscore live key', () => {
+    const out = check({ subject: 'Customer', body: 'sk_live_abcdefghijklmnopqrstuv expired' });
+    expect(out.categories).toContain('api_key_or_secret');
+  });
+
+  it('flags a Stripe-style underscore test key', () => {
+    const out = check({ subject: 'Test', body: 'sk_test_abcdefghijklmnopqrstuv' });
+    expect(out.categories).toContain('api_key_or_secret');
+  });
+
+  it('flags a Stripe webhook secret', () => {
+    const out = check({ subject: 'Webhook', body: 'whsec_test_abcdefghijklmnopqrstuv' });
+    expect(out.categories).toContain('api_key_or_secret');
+  });
+});
+
+describe('detectSensitiveContent — IBAN case-insensitivity', () => {
+  it('flags a lowercase IBAN', () => {
+    const out = check({ subject: 'Rechnung', body: 'Bitte überweisen auf ch9300762011623852957.' });
+    expect(out.categories).toContain('iban');
+  });
+
+  it('flags a mixed-case IBAN', () => {
+    const out = check({ subject: 'Pay', body: 'Account: Ch9300762011623852957 today' });
+    expect(out.categories).toContain('iban');
+  });
 });
 
 describe('detectSensitiveContent — IBAN / credit card', () => {

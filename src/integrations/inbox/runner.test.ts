@@ -137,16 +137,43 @@ describe('buildInboxRunner — fail-closed dead-letter', () => {
 });
 
 describe('scrubErrorMessage', () => {
-  it('redacts Bearer tokens', () => {
+  it('redacts Bearer tokens (full prefix + payload)', () => {
     const out = scrubErrorMessage('401 Unauthorized: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4eHgifQ.sig');
     expect(out).not.toContain('eyJ');
-    expect(out).toContain('Bearer [REDACTED]');
+    expect(out).not.toContain('Bearer eyJ');
+    expect(out).toContain('[REDACTED:SECRET]');
+  });
+
+  it('redacts bare JWT-shaped tokens (no Bearer prefix)', () => {
+    const out = scrubErrorMessage('payload: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c more');
+    expect(out).not.toContain('eyJ');
+    expect(out).toContain('[REDACTED:SECRET]');
+  });
+
+  it('redacts Stripe-style underscore keys', () => {
+    const out = scrubErrorMessage('err: sk_live_abcdefghijklmnopqrstuv expired');
+    expect(out).not.toContain('sk_live_');
+    expect(out).toContain('[REDACTED:SECRET]');
+  });
+
+  it('redacts an AWS access key', () => {
+    const out = scrubErrorMessage('AccessKey=AKIAIOSFODNN7EXAMPLE expired');
+    expect(out).not.toContain('AKIA');
+    expect(out).toContain('[REDACTED:SECRET]');
   });
 
   it('redacts URL query strings (which often carry tokens)', () => {
     const out = scrubErrorMessage('Got 500 from https://api.example.com/v1?token=secret&id=42');
     expect(out).not.toContain('token=secret');
     expect(out).toContain('[REDACTED-QUERY]');
+  });
+
+  it('redacts both a Bearer token and a query string in the same message', () => {
+    const out = scrubErrorMessage(
+      'GET https://api.example.com/v1?token=xyz failed: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c',
+    );
+    expect(out).not.toContain('eyJ');
+    expect(out).not.toContain('token=xyz');
   });
 
   it('caps at 200 characters', () => {

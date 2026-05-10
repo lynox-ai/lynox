@@ -5,15 +5,14 @@
 //   classifier  →  queue  →  onSuccess writes inbox_items + audit
 //                            onDeadLetter writes a fail-closed item
 //
-// Watcher-side wiring (next commit) constructs the queue once at startup
-// and pushes per-mail payloads into it. The queue here is generic over
-// `InboxQueuePayload` — the watcher hook builds those from MailEnvelopes,
-// cold-start builds them from a backfill iterator.
+// Engine wiring constructs the queue once at startup and pushes per-mail
+// payloads into it. The queue is generic over `InboxQueuePayload` — the
+// watcher hook builds those from MailEnvelopes, cold-start builds them
+// from a backfill iterator.
 //
-// Dead-letter policy: per PRD §Threat Model fail-closed default, a
-// classification failure that exhausts retries still surfaces to the user
-// as a `requires_user` item. A missed customer mail is unrepairable; an
-// extra Needs-You item is a one-click archive.
+// Dead-letter policy: classification failure that exhausts retries still
+// surfaces to the user as a `requires_user` item — a missed customer mail
+// is unrepairable; an extra Needs-You item is a one-click archive.
 
 import { ClassifierQueue, type ClassifierQueueOptions } from './classifier/queue.js';
 import {
@@ -23,6 +22,10 @@ import {
   type ClassifyResult,
   type LLMCaller,
 } from './classifier/index.js';
+// Re-exported from sensitive-content so both runner consumers and the
+// Mistral caller can pull the scrubber without creating a module cycle.
+export { scrubErrorMessage } from './sensitive-content.js';
+import { scrubErrorMessage as _scrubErrorMessage } from './sensitive-content.js';
 import type { InboxCostBudget } from './cost-budget.js';
 import type { InboxStateDb } from './state.js';
 
@@ -103,64 +106,66 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       });
     },
     onSuccess: (payload, result) => {
-      const itemId = state.insertItem({
-        tenantId: payload.tenantId,
-        accountId: payload.accountId,
-        channel: 'email',
-        threadKey: payload.threadKey,
-        bucket: result.bucket,
-        confidence: result.confidence,
-        reasonDe: result.reasonDe,
-        classifiedAt: new Date(),
-        classifierVersion: result.classifierVersion,
-      });
-      state.appendAudit({
-        tenantId: payload.tenantId,
-        itemId,
-        action: 'classified',
-        actor: 'classifier',
-        payloadJson: JSON.stringify({
+      state.insertItemWithAudit(
+        {
+          tenantId: payload.tenantId,
+          accountId: payload.accountId,
+          channel: 'email',
+          threadKey: payload.threadKey,
           bucket: result.bucket,
           confidence: result.confidence,
-          fail_reason: result.failReason,
-          body_truncated: result.bodyTruncated,
-          ...(payload.sensitive
-            ? {
-                sensitive_categories: payload.sensitive.categories,
-                sensitive_masked: payload.sensitive.masked,
-                sensitive_redactions: payload.sensitive.redactionCount,
-              }
-            : {}),
-        }),
-      });
+          reasonDe: result.reasonDe,
+          classifiedAt: new Date(),
+          classifierVersion: result.classifierVersion,
+        },
+        {
+          tenantId: payload.tenantId,
+          action: 'classified',
+          actor: 'classifier',
+          payloadJson: JSON.stringify({
+            bucket: result.bucket,
+            confidence: result.confidence,
+            fail_reason: result.failReason,
+            body_truncated: result.bodyTruncated,
+            ...(payload.sensitive
+              ? {
+                  sensitive_categories: payload.sensitive.categories,
+                  sensitive_masked: payload.sensitive.masked,
+                  sensitive_redactions: payload.sensitive.redactionCount,
+                }
+              : {}),
+          }),
+        },
+      );
     },
     onDeadLetter: (payload, error) => {
       // PRD fail-closed default: surface to Needs You so the user sees it.
-      const itemId = state.insertItem({
-        tenantId: payload.tenantId,
-        accountId: payload.accountId,
-        channel: 'email',
-        threadKey: payload.threadKey,
-        bucket: 'requires_user',
-        confidence: 0,
-        reasonDe: 'Klassifizierer-Aufruf fehlgeschlagen — manuell prüfen.',
-        classifiedAt: new Date(),
-        classifierVersion: `dead-letter:${error.name || 'Error'}`,
-      });
-      state.appendAudit({
-        tenantId: payload.tenantId,
-        itemId,
-        action: 'classified',
-        actor: 'classifier',
-        payloadJson: JSON.stringify({
-          dead_letter: true,
-          // SDK errors usually do not echo the request body, but we cap
-          // length and strip Bearer tokens before persisting + reporting
-          // so a chatty future SDK cannot leak prompt content into audit
-          // logs or downstream Bugsink reports.
-          error_message: scrubErrorMessage(error.message),
-        }),
-      });
+      state.insertItemWithAudit(
+        {
+          tenantId: payload.tenantId,
+          accountId: payload.accountId,
+          channel: 'email',
+          threadKey: payload.threadKey,
+          bucket: 'requires_user',
+          confidence: 0,
+          reasonDe: 'Klassifizierer-Aufruf fehlgeschlagen — manuell prüfen.',
+          classifiedAt: new Date(),
+          classifierVersion: `dead-letter:${error.name || 'Error'}`,
+        },
+        {
+          tenantId: payload.tenantId,
+          action: 'classified',
+          actor: 'classifier',
+          payloadJson: JSON.stringify({
+            dead_letter: true,
+            // SDK errors usually do not echo the request body, but we cap
+            // length and strip secret-prefix patterns before persisting +
+            // reporting so a chatty future SDK cannot leak prompt content
+            // into audit logs or downstream Bugsink reports.
+            error_message: _scrubErrorMessage(error.message),
+          }),
+        },
+      );
     },
   };
   if (policy.maxConcurrency !== undefined) queueOptions.maxConcurrency = policy.maxConcurrency;
@@ -171,17 +176,3 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
   return new ClassifierQueue<InboxQueuePayload>(queueOptions);
 }
 
-/**
- * Sanitize an error message before persisting it to the audit log or
- * passing it to Bugsink. Hard-caps length and strips a few high-signal
- * leak vectors (Bearer tokens, URL query strings that often carry
- * tokens). Belt-and-suspenders — most SDKs already keep request bodies
- * out of error messages.
- */
-export function scrubErrorMessage(input: string): string {
-  if (!input) return '';
-  return input
-    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\?[^\s]+/g, '?[REDACTED-QUERY]')
-    .slice(0, 200);
-}

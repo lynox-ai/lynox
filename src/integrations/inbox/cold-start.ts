@@ -12,8 +12,7 @@
 //   - cost-bound estimation surfaced at completion
 //
 // Cold-start does NOT own provider fetching — the caller passes an async
-// iterable, so this module stays decoupled from IMAP / Gmail specifics
-// and the watcher hook (separate commit) wires the actual fetcher.
+// iterable, so this module stays decoupled from IMAP / Gmail specifics.
 
 /**
  * Per-thread cost reference based on Haiku pricing as of 2026-05.

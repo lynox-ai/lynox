@@ -1,17 +1,15 @@
 // === Inbox HTTP handlers (pure) ===
 //
-// Pure async handlers for the `/api/inbox/*` surface. Each one takes a
-// `deps` object and a parsed input shape and returns a JSON-ready
-// `{status, body}` envelope. The actual route registration in
-// `src/server/http-api.ts` is wired in a follow-up PR — keeping the
-// handlers framework-free here means Phase-1a tests don't need to spin
-// up the full HTTP server, and the same handlers will plug into a
-// future REST OR an MCP-tool surface unchanged.
+// Framework-free async handlers for the `/api/inbox/*` surface. Each one
+// takes a `deps` object and a parsed input shape and returns a JSON-ready
+// `{status, body}` envelope. Keeping them off any HTTP framework means
+// tests don't need to spin up a server, and the same handlers can back
+// REST or an MCP-tool surface unchanged.
 //
-// Validation is shallow on purpose: zod-style schemas live one layer up
-// (the route adapter parses bodies before calling these). The handlers
-// only check the shape they cannot ignore — invalid bucket strings,
-// out-of-range pagination, missing required fields.
+// Validation is shallow on purpose: the route adapter parses bodies
+// before calling these. Handlers only check the shape they cannot
+// ignore — invalid bucket strings, out-of-range pagination, missing
+// required fields.
 
 import type {
   InboxBucket,

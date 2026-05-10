@@ -12,6 +12,7 @@
 // LYNOX_INBOX_LLM_REGION=eu (or a managed-tier check) the engine
 // constructs this caller instead of the default Haiku/Anthropic one.
 
+import { scrubErrorMessage } from '../sensitive-content.js';
 import type { LLMCaller } from './index.js';
 
 /** Default model — Mistral Small is the price/quality fit for classification. */
@@ -79,8 +80,8 @@ export function createMistralEuLLMCaller(opts: MistralEuOptions): LLMCaller {
     const resp = await fetchImpl(`${baseURL}/chat/completions`, init);
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      // Truncate to avoid leaking prompt content via verbose Mistral errors.
-      const snippet = text.slice(0, 200);
+      // Strip secrets / query strings before logging — caps at 200 chars.
+      const snippet = scrubErrorMessage(text);
       throw new Error(`Mistral ${String(resp.status)}: ${snippet || resp.statusText}`);
     }
     const json = (await resp.json()) as MistralResponse;

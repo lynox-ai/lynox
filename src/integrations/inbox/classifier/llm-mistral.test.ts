@@ -71,9 +71,11 @@ describe('createMistralEuLLMCaller', () => {
     ).rejects.toThrow(/Mistral 429: rate limit exceeded/);
   });
 
-  it('forwards an abort signal as the request signal', async () => {
+  it('forwards the abort signal identity (not a clone) as the request signal', async () => {
+    const controller = new AbortController();
+    let observed: AbortSignal | undefined;
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
-      expect(init?.signal).toBeDefined();
+      observed = init?.signal ?? undefined;
       return {
         ok: true,
         status: 200,
@@ -82,9 +84,22 @@ describe('createMistralEuLLMCaller', () => {
         text: async () => '',
       } as unknown as Response;
     }) as unknown as typeof fetch;
-    const controller = new AbortController();
     await createMistralEuLLMCaller({ apiKey: 'k', fetchImpl })({ system: 's', user: 'u', signal: controller.signal });
-    expect(fetchImpl).toHaveBeenCalled();
+    expect(observed).toBe(controller.signal);
+  });
+
+  it('does not call onUsage on a non-2xx response', async () => {
+    const onUsage = vi.fn();
+    const fetchImpl = fakeFetch({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      text: 'something broke',
+    });
+    await expect(
+      createMistralEuLLMCaller({ apiKey: 'k', onUsage, fetchImpl })({ system: 's', user: 'u' }),
+    ).rejects.toThrow();
+    expect(onUsage).not.toHaveBeenCalled();
   });
 
   it('honors modelId, baseURL, and maxTokens overrides', async () => {

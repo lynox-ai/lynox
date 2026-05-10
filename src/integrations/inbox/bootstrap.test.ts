@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import { MailStateDb } from '../mail/state.js';
 import { bootstrapInbox } from './bootstrap.js';
+import { ClassifierQueue } from './classifier/queue.js';
+import { InboxCostBudget } from './cost-budget.js';
+import { InboxRulesLoader } from './rules-loader.js';
+import { InboxStateDb } from './state.js';
 import type { CRM } from '../../core/crm.js';
 import type { MailAccountConfig, MailEnvelope } from '../mail/provider.js';
 
@@ -63,12 +67,32 @@ describe('bootstrapInbox — wiring', () => {
   it('returns a runtime bundle with all parts populated', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
-    expect(runtime.state).toBeDefined();
-    expect(runtime.rules).toBeDefined();
-    expect(runtime.budget).toBeDefined();
-    expect(runtime.queue).toBeDefined();
+    expect(runtime.state).toBeInstanceOf(InboxStateDb);
+    expect(runtime.rules).toBeInstanceOf(InboxRulesLoader);
+    expect(runtime.budget).toBeInstanceOf(InboxCostBudget);
+    expect(runtime.queue).toBeInstanceOf(ClassifierQueue);
     expect(runtime.hook).toBeInstanceOf(Function);
     expect(runtime.contactResolver).toBeNull(); // no CRM provided
+  });
+
+  it('emits a console.warn when llmRegion=us without an ack (default routing)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    bootstrapInbox({ mailStateDb: mail, anthropicClient: client }); // region='us' default
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = warn.mock.calls[0]![0] as string;
+    expect(message).toContain('Anthropic US');
+    expect(message).toContain('LYNOX_INBOX_LLM_REGION=eu');
+    expect(message).toContain('LYNOX_INBOX_PRIVACY_ACK=1');
+    warn.mockRestore();
+  });
+
+  it('stays silent when privacyAck is set on US routing', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    bootstrapInbox({ mailStateDb: mail, anthropicClient: client, privacyAck: true });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('attaches the contact resolver when a CRM is provided', () => {

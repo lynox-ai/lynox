@@ -5,8 +5,7 @@
 // reason-length cap) lives in `schema.ts`; this file is the orchestrator.
 //
 // The LLM call itself is injected so tests can run without network and so
-// the queue (next commit) can wrap it with a per-job AbortController +
-// 30-second timeout per the PRD's Architecture section.
+// the queue can wrap it with a per-job AbortController + timeout.
 
 import { buildClassifierPrompt, type ClassifierPromptInput } from './prompt.js';
 import { parseClassifierResponse, type ClassifierVerdict } from './schema.js';
@@ -20,10 +19,8 @@ export const CLASSIFIER_VERSION = 'haiku-2026-05';
 
 /**
  * Caller-provided LLM invoker. Returns the model's raw text reply.
- *
- * The default wiring (added in a follow-up commit) calls
- * `createLLMClient(...).messages.create({ model: getModelId('haiku'), ... })`.
- * Tests pass a stub.
+ * The default wiring builds a Haiku/Mistral caller via
+ * `wrapAnthropicAsLLMCaller` / `createMistralEuLLMCaller`; tests pass a stub.
  */
 export type LLMCaller = (args: {
   system: string;
