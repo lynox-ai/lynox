@@ -13,8 +13,8 @@ function makeCrm(overrides: Partial<{
 }
 
 const ROLAND: ContactRecord = {
-  name: 'Roland Beispiel',
-  email: 'roland@war.example',
+  name: 'Max Mustermann',
+  email: 'mustermann@example.com',
   company: 'War Industries',
   type: 'customer',
 };
@@ -37,17 +37,17 @@ describe('InboxContactResolver — lookup', () => {
   it('lowercases the email before querying', () => {
     const findContact = vi.fn(() => null);
     const crm = makeCrm({ findContact });
-    new InboxContactResolver(crm).resolve('Roland@WAR.example');
-    expect(findContact).toHaveBeenCalledWith({ email: 'roland@war.example' });
+    new InboxContactResolver(crm).resolve('Max@EXAMPLE.com');
+    expect(findContact).toHaveBeenCalledWith({ email: 'max@example.com' });
   });
 
   it('returns the normalized record when the CRM has a match', () => {
     const findContact = vi.fn(() => ROLAND);
     const crm = makeCrm({ findContact });
-    const out = new InboxContactResolver(crm).resolve('roland@war.example');
+    const out = new InboxContactResolver(crm).resolve('mustermann@example.com');
     expect(out).toEqual({
-      name: 'Roland Beispiel',
-      email: 'roland@war.example',
+      name: 'Max Mustermann',
+      email: 'mustermann@example.com',
       company: 'War Industries',
       type: 'customer',
       lastInteractionAt: undefined,
@@ -63,8 +63,8 @@ describe('InboxContactResolver — last interaction enrichment', () => {
       { date: '2026-05-01T10:00:00Z', summary: 'Pricing discussion' },
     ]);
     const crm = makeCrm({ findContact, getInteractions });
-    const out = new InboxContactResolver(crm).resolve('roland@war.example');
-    expect(getInteractions).toHaveBeenCalledWith('Roland Beispiel', 1);
+    const out = new InboxContactResolver(crm).resolve('mustermann@example.com');
+    expect(getInteractions).toHaveBeenCalledWith('Max Mustermann', 1);
     expect(out?.lastInteractionAt?.toISOString()).toBe('2026-05-01T10:00:00.000Z');
     expect(out?.lastInteractionSummary).toBe('Pricing discussion');
   });
@@ -73,7 +73,7 @@ describe('InboxContactResolver — last interaction enrichment', () => {
     const findContact = vi.fn(() => ROLAND);
     const getInteractions = vi.fn(() => [{ summary: 'note' }]);
     const crm = makeCrm({ findContact, getInteractions });
-    const out = new InboxContactResolver(crm).resolve('roland@war.example');
+    const out = new InboxContactResolver(crm).resolve('mustermann@example.com');
     expect(out?.lastInteractionAt).toBeUndefined();
     expect(out?.lastInteractionSummary).toBe('note');
   });

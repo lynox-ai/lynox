@@ -10,8 +10,8 @@ let loader: InboxRulesLoader;
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
-  displayName: 'Rafael',
-  address: 'rafael@example.com',
+  displayName: 'Me',
+  address: 'me@acme.example',
   preset: 'custom',
   imap: { host: 'i', port: 993, secure: true },
   smtp: { host: 's', port: 465, secure: true },
@@ -35,7 +35,7 @@ afterEach(() => {
 function input(overrides: Partial<RuleMatchInput> = {}): RuleMatchInput {
   return {
     accountId: 'acct-1',
-    from: 'roland@war.example',
+    from: 'mustermann@example.com',
     subject: 'Strategie-Termin nächste Woche',
     listId: undefined,
     ...overrides,

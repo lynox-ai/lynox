@@ -28,8 +28,8 @@ import type { MailAccountConfig, MailEnvelope } from '../../src/integrations/mai
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-smoke',
-  displayName: 'Rafael (brandfusion)',
-  address: 'rafael@brandfusion.ch',
+  displayName: 'Me (Acme)',
+  address: 'me@acme.example',
   preset: 'custom',
   imap: { host: 'i', port: 993, secure: true },
   smtp: { host: 's', port: 465, secure: true },
@@ -52,18 +52,18 @@ afterEach(() => {
 function envelope(overrides: Partial<MailEnvelope> = {}): MailEnvelope {
   return {
     uid: 1,
-    messageId: '<m1@war.example>',
+    messageId: '<m1@example.com>',
     folder: 'INBOX',
     threadKey: 'imap:thread-smoke',
     inReplyTo: undefined,
-    from: [{ address: 'roland@war.example', name: 'Roland Beispiel' }],
-    to: [{ address: 'rafael@brandfusion.ch' }],
+    from: [{ address: 'mustermann@example.com', name: 'Max Mustermann' }],
+    to: [{ address: 'me@acme.example' }],
     cc: [],
     replyTo: [],
     subject: 'Termin nächste Woche?',
     date: new Date('2026-05-10T09:00:00Z'),
     flags: [],
-    snippet: 'Hi Rafael, hast du Zeit am Mittwoch für ein Strategiegespräch?',
+    snippet: 'Hi Me, hast du Zeit am Mittwoch für ein Strategiegespräch?',
     hasAttachments: false,
     attachmentCount: 0,
     sizeBytes: 1024,
@@ -153,11 +153,11 @@ describe('Inbox Phase 1a — end-to-end smoke', () => {
     const client = { messages: { create } } as unknown as Anthropic;
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
 
-    // User-confirmed "always archive Roland's mails" rule
+    // User-confirmed "always archive Max's mails" rule
     runtime.state.insertRule({
       accountId: ACCOUNT.id,
       matcherKind: 'from',
-      matcherValue: 'roland@war.example',
+      matcherValue: 'mustermann@example.com',
       bucket: 'auto_handled',
       action: 'archive',
       source: 'on_demand',

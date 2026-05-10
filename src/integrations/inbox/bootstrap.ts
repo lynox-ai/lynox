@@ -26,6 +26,7 @@ import {
   type InboxRunnerPolicy,
 } from './runner.js';
 import { InboxStateDb } from './state.js';
+import type { SensitiveMode } from './sensitive-content.js';
 import {
   type AccountResolver,
   createInboxClassifierHook,
@@ -60,6 +61,12 @@ export interface BootstrapInboxOptions {
   modelIdOverride?: string | undefined;
   /** Single-tenant scope; defaults to InboxStateDb's `'default'` sentinel. */
   tenantId?: string | undefined;
+  /**
+   * How to handle mails the sensitive-content detector flags. Default is
+   * `'skip'` (block + audit, never reaches the LLM). Override via the env
+   * `LYNOX_INBOX_SENSITIVE_MODE` (engine wiring reads + forwards).
+   */
+  sensitiveMode?: SensitiveMode | undefined;
 }
 
 export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
@@ -96,6 +103,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     queue,
     accounts,
     tenantId: opts.tenantId,
+    sensitiveMode: opts.sensitiveMode,
   });
 
   return {

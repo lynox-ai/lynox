@@ -8,8 +8,8 @@ import type { InboxQueuePayload } from './runner.js';
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
-  displayName: 'Rafael (brandfusion)',
-  address: 'rafael@brandfusion.ch',
+  displayName: 'Me (Acme)',
+  address: 'me@acme.example',
   preset: 'custom',
   imap: { host: 'i', port: 993, secure: true },
   smtp: { host: 's', port: 465, secure: true },
@@ -55,14 +55,14 @@ function envelope(overrides: Partial<MailEnvelope> = {}): MailEnvelope {
     folder: 'INBOX',
     threadKey: 'imap:thread-1',
     inReplyTo: undefined,
-    from: [{ address: 'roland@war.example', name: 'Roland Beispiel' }],
+    from: [{ address: 'mustermann@example.com', name: 'Max Mustermann' }],
     to: [{ address: ACCOUNT.address }],
     cc: [],
     replyTo: [],
     subject: 'Termin nächste Woche?',
     date: new Date(),
     flags: [],
-    snippet: 'Hi Rafael, hast du Zeit am Mittwoch?',
+    snippet: 'Hi Me, hast du Zeit am Mittwoch?',
     hasAttachments: false,
     attachmentCount: 0,
     sizeBytes: 0,
@@ -81,12 +81,12 @@ describe('createInboxClassifierHook — enqueue path', () => {
       accountId: 'acct-1',
       threadKey: 'imap:thread-1',
       classifierInput: {
-        accountAddress: 'rafael@brandfusion.ch',
-        accountDisplayName: 'Rafael (brandfusion)',
+        accountAddress: 'me@acme.example',
+        accountDisplayName: 'Me (Acme)',
         subject: 'Termin nächste Woche?',
-        fromAddress: 'roland@war.example',
-        fromDisplayName: 'Roland Beispiel',
-        body: 'Hi Rafael, hast du Zeit am Mittwoch?',
+        fromAddress: 'mustermann@example.com',
+        fromDisplayName: 'Max Mustermann',
+        body: 'Hi Me, hast du Zeit am Mittwoch?',
       },
     });
     // No item written yet — queue's onSuccess does that asynchronously.
@@ -142,7 +142,7 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
     inbox.insertRule({
       accountId: ACCOUNT.id,
       matcherKind: 'from',
-      matcherValue: 'roland@war.example',
+      matcherValue: 'mustermann@example.com',
       bucket: 'auto_handled',
       action: 'archive',
       source: 'on_demand',
@@ -156,7 +156,7 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
     expect(items[0]).toMatchObject({
       bucket: 'auto_handled',
       confidence: 1,
-      reasonDe: 'Regel: from = roland@war.example',
+      reasonDe: 'Regel: from = mustermann@example.com',
       classifierVersion: expect.stringMatching(/^rule:rul_/),
     });
     const audit = inbox.listAuditForItem(items[0]!.id);
@@ -168,7 +168,7 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
     const auditPayload = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
     expect(auditPayload).toMatchObject({
       matcher_kind: 'from',
-      matcher_value: 'roland@war.example',
+      matcher_value: 'mustermann@example.com',
       action: 'archive',
     });
   });
@@ -201,5 +201,121 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
     await hook(ACCOUNT.id, envelope());
     expect(queueCalls).toHaveLength(1);
     expect(inbox.listItems()).toHaveLength(0);
+  });
+});
+
+describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
+  it('detects an OTP-shaped mail and skips the LLM, audit records the category', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(
+      ACCOUNT.id,
+      envelope({
+        subject: 'Your verification code',
+        snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+      }),
+    );
+    expect(queueCalls).toHaveLength(0);
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.bucket).toBe('requires_user');
+    expect(items[0]?.classifierVersion).toBe('sensitive-prefilter');
+    expect(items[0]?.reasonDe).toContain('OTP/2FA');
+
+    const audit = inbox.listAuditForItem(items[0]!.id);
+    expect(audit[0]?.actor).toBe('rule_engine');
+    const payloadJson = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
+    expect(payloadJson['skipped_llm']).toBe(true);
+    expect(payloadJson['sensitive_categories']).toContain('otp_or_2fa');
+  });
+
+  it('skips classification for an API-key disclosure', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(
+      ACCOUNT.id,
+      envelope({ subject: 'API key', snippet: 'Hier dein Key: sk-ant-api03-abcdefghijklmnopqr' }),
+    );
+    expect(queueCalls).toHaveLength(0);
+    expect(inbox.listItems()[0]?.classifierVersion).toBe('sensitive-prefilter');
+  });
+
+  it('rule short-circuit takes precedence over the sensitive pre-filter', async () => {
+    inbox.insertRule({
+      accountId: ACCOUNT.id,
+      matcherKind: 'from',
+      matcherValue: 'mustermann@example.com',
+      bucket: 'auto_handled',
+      action: 'archive',
+      source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    // Sensitive content present BUT rule matches first → archive path,
+    // no sensitive-prefilter audit category.
+    await hook(
+      ACCOUNT.id,
+      envelope({
+        subject: 'Your code',
+        snippet: 'OTP 482917',
+      }),
+    );
+    const items = inbox.listItems();
+    expect(items[0]?.bucket).toBe('auto_handled');
+    expect(items[0]?.classifierVersion).toMatch(/^rule:/);
+  });
+});
+
+describe('createInboxClassifierHook — sensitiveMode = mask', () => {
+  it('redacts the OTP digit run and enqueues the masked classifier input', async () => {
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts, sensitiveMode: 'mask',
+    });
+    await hook(
+      ACCOUNT.id,
+      envelope({
+        subject: 'Sicherheitscode',
+        snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+      }),
+    );
+    expect(queueCalls).toHaveLength(1);
+    const enqueued = queueCalls[0]!;
+    expect(enqueued.classifierInput.body).not.toContain('482917');
+    expect(enqueued.classifierInput.body).toContain('[REDACTED:OTP]');
+    expect(enqueued.sensitive).toMatchObject({
+      categories: ['otp_or_2fa'],
+      masked: true,
+    });
+    expect(enqueued.sensitive!.redactionCount).toBeGreaterThan(0);
+  });
+
+  it('falls through to a plain enqueue when nothing is sensitive', async () => {
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts, sensitiveMode: 'mask',
+    });
+    await hook(ACCOUNT.id, envelope({ snippet: 'Treffen wir uns am Mittwoch?' }));
+    const enqueued = queueCalls[0]!;
+    expect(enqueued.sensitive).toBeUndefined();
+    expect(enqueued.classifierInput.body).toBe('Treffen wir uns am Mittwoch?');
+  });
+});
+
+describe('createInboxClassifierHook — sensitiveMode = allow', () => {
+  it('sends the raw body to the classifier and tags the audit categories', async () => {
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts, sensitiveMode: 'allow',
+    });
+    await hook(
+      ACCOUNT.id,
+      envelope({ subject: 'Sicherheitscode', snippet: 'Code 482917' }),
+    );
+    expect(queueCalls).toHaveLength(1);
+    const enqueued = queueCalls[0]!;
+    // Raw — NOT redacted
+    expect(enqueued.classifierInput.body).toBe('Code 482917');
+    expect(enqueued.classifierInput.subject).toBe('Sicherheitscode');
+    // Tagged for audit
+    expect(enqueued.sensitive).toEqual({
+      categories: ['otp_or_2fa'],
+      masked: false,
+      redactionCount: 0,
+    });
   });
 });

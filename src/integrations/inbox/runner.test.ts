@@ -8,8 +8,8 @@ import type { MailAccountConfig } from '../mail/provider.js';
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
-  displayName: 'Rafael',
-  address: 'rafael@example.com',
+  displayName: 'Me',
+  address: 'me@acme.example',
   preset: 'custom',
   imap: { host: 'i', port: 993, secure: true },
   smtp: { host: 's', port: 465, secure: true },
@@ -36,12 +36,12 @@ function payload(overrides: Partial<InboxQueuePayload> = {}): InboxQueuePayload 
     accountId: 'acct-1',
     threadKey: 'imap:t1',
     classifierInput: {
-      accountAddress: 'rafael@example.com',
-      accountDisplayName: 'Rafael',
+      accountAddress: 'me@acme.example',
+      accountDisplayName: 'Me',
       subject: 'Termin?',
-      fromAddress: 'roland@war.example',
-      fromDisplayName: 'Roland',
-      body: 'Hi Rafael, hast du Zeit?',
+      fromAddress: 'mustermann@example.com',
+      fromDisplayName: 'Max',
+      body: 'Hi Me, hast du Zeit?',
     },
     ...overrides,
   };

@@ -6,12 +6,12 @@ function fakeLLM(reply: string): LLMCaller {
 }
 
 const baseInput = {
-  accountAddress: 'rafael@brandfusion.ch',
-  accountDisplayName: 'Rafael (brandfusion)',
+  accountAddress: 'me@acme.example',
+  accountDisplayName: 'Me (Acme)',
   subject: 'Vorschlag für nächste Woche',
-  fromAddress: 'roland@war.example',
-  fromDisplayName: 'Roland Beispiel',
-  body: 'Hi Rafael, hast du Zeit am Mittwoch für ein Strategie-Gespräch?',
+  fromAddress: 'mustermann@example.com',
+  fromDisplayName: 'Max Mustermann',
+  body: 'Hi Me, hast du Zeit am Mittwoch für ein Strategie-Gespräch?',
 };
 
 describe('classifyMail', () => {
@@ -40,8 +40,8 @@ describe('classifyMail', () => {
     expect(llm).toHaveBeenCalledTimes(1);
     const call = llm.mock.calls[0]![0];
     expect(call.system).toContain('lynox');
-    expect(call.user).toContain('Empfänger-Postfach: Rafael (brandfusion) <rafael@brandfusion.ch>');
-    expect(call.user).toContain('Absender: Roland Beispiel <roland@war.example>');
+    expect(call.user).toContain('Empfänger-Postfach: Me (Acme) <me@acme.example>');
+    expect(call.user).toContain('Absender: Max Mustermann <mustermann@example.com>');
     expect(call.user).toContain('<untrusted_data>');
     expect(call.user).toContain('</untrusted_data>');
     expect(call.user).toContain('Strategie-Gespräch');

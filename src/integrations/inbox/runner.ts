@@ -36,6 +36,17 @@ export interface InboxQueuePayload {
   classifierInput: ClassifierPromptInput;
   /** Optional single tenant override; falls back to the repository default. */
   tenantId?: string | undefined;
+  /**
+   * Set when the watcher hook detected sensitive content and either
+   * masked it or sent it through under the `allow` mode. The runner
+   * folds this into the classification audit's payload_json so the user
+   * can see what was redacted (or knowingly allowed).
+   */
+  sensitive?: {
+    categories: ReadonlyArray<string>;
+    masked: boolean;
+    redactionCount: number;
+  } | undefined;
 }
 
 /** Subset of ClassifierQueueOptions the wiring exposes — callbacks are owned. */
@@ -113,6 +124,13 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           confidence: result.confidence,
           fail_reason: result.failReason,
           body_truncated: result.bodyTruncated,
+          ...(payload.sensitive
+            ? {
+                sensitive_categories: payload.sensitive.categories,
+                sensitive_masked: payload.sensitive.masked,
+                sensitive_redactions: payload.sensitive.redactionCount,
+              }
+            : {}),
         }),
       });
     },

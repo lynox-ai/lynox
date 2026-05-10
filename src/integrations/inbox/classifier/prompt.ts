@@ -14,7 +14,7 @@ import { sanitizeBody, sanitizeHeader, type SanitizeResult } from './sanitize.js
 export interface ClassifierPromptInput {
   /** Mailbox the message arrived at — trusted system data. */
   accountAddress: string;
-  /** Friendly account name shown in the UI ("Rafael (brandfusion)"). */
+  /** Friendly account name shown in the UI (e.g. "Me (Acme)"). */
   accountDisplayName: string;
   /** Raw subject line, sanitized internally. */
   subject: string | undefined;

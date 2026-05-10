@@ -21,6 +21,7 @@ import type { MailEnvelope } from '../mail/provider.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
+import { analyzeSensitiveContent, reasonForCategories, type SensitiveMode } from './sensitive-content.js';
 import type { InboxStateDb } from './state.js';
 
 /**
@@ -43,6 +44,13 @@ export interface InboxClassifierHookOptions {
   accounts: AccountResolver;
   /** Single tenant override; falls back to the repository default. */
   tenantId?: string | undefined;
+  /**
+   * How to handle mails the sensitive-content detector flags:
+   *   skip  (default) — block, insert as requires_user, no LLM call
+   *   mask  — redact matched substrings, classify the masked version
+   *   allow — send raw to the LLM (only for trusted EU/self-hosted)
+   */
+  sensitiveMode?: SensitiveMode | undefined;
 }
 
 export type OnInboundMailHook = (accountId: string, env: MailEnvelope) => Promise<void>;
@@ -52,6 +60,7 @@ export type OnInboundMailHook = (accountId: string, env: MailEnvelope) => Promis
  * multiple times if a future test or engine variant needs it.
  */
 export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnInboundMailHook {
+  const sensitiveMode: SensitiveMode = opts.sensitiveMode ?? 'skip';
   return async (accountId, env) => {
     const account = opts.accounts.resolve(accountId);
     if (!account) return; // unknown account — nothing to do
@@ -105,15 +114,52 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       return;
     }
 
-    // 3. Enqueue for the classifier — backpressure (queue full) drops the
+    // 3. Sensitive-content pre-filter. Mode decides what happens:
+    //    skip  → block, audit categories, no LLM
+    //    mask  → redact matched substrings, classify the masked version
+    //    allow → send raw, audit that user opted in
+    const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
+    if (sensitive.isSensitive && sensitiveMode === 'skip') {
+      const itemId = opts.state.insertItem({
+        tenantId: opts.tenantId,
+        accountId,
+        channel: 'email',
+        threadKey,
+        bucket: 'requires_user',
+        confidence: 0,
+        reasonDe: reasonForCategories(sensitive.categories),
+        classifiedAt: new Date(),
+        classifierVersion: 'sensitive-prefilter',
+      });
+      opts.state.appendAudit({
+        tenantId: opts.tenantId,
+        itemId,
+        action: 'classified',
+        actor: 'rule_engine',
+        payloadJson: JSON.stringify({
+          sensitive_categories: sensitive.categories,
+          sensitive_mode: 'skip',
+          skipped_llm: true,
+        }),
+      });
+      return;
+    }
+
+    // 4. Enqueue for the classifier — backpressure (queue full) drops the
     //    mail back to the unclassified pool; the watcher's next tick retries.
+    //    For mode=mask we substitute the masked subject/body; for mode=allow
+    //    we send the raw envelope but tag the payload so audit records the
+    //    detected categories alongside the verdict.
+    const useMasked = sensitive.isSensitive && sensitiveMode === 'mask';
+    const promptSubject = useMasked ? sensitive.masked.subject : subject;
+    const promptBody = useMasked ? sensitive.masked.body : env.snippet;
     const classifierInput: ClassifierPromptInput = {
       accountAddress: account.address,
       accountDisplayName: account.displayName,
-      subject,
+      subject: promptSubject,
       fromAddress,
       fromDisplayName,
-      body: env.snippet,
+      body: promptBody,
     };
     const payload: InboxQueuePayload = {
       accountId,
@@ -121,6 +167,13 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       classifierInput,
     };
     if (opts.tenantId !== undefined) payload.tenantId = opts.tenantId;
+    if (sensitive.isSensitive) {
+      payload.sensitive = {
+        categories: sensitive.categories,
+        masked: useMasked,
+        redactionCount: useMasked ? sensitive.masked.redactionCount : 0,
+      };
+    }
     opts.queue.enqueue(payload);
   };
 }

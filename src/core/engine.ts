@@ -614,10 +614,18 @@ export class Engine {
         if (isFeatureEnabled('unified-inbox')) {
           try {
             const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
+            // Sensitive-content handling: skip / mask / allow. Default is
+            // 'skip' — sensitive mails (OTP, secrets, IBAN, card) never
+            // reach the LLM. Switch to 'mask' on EU/trusted providers to
+            // get classification on a redacted copy; 'allow' opts out
+            // entirely (only safe with a strict DPA / self-hosted LLM).
+            const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
+            const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
             const runtime = bootstrapInbox({
               mailStateDb: stateDb,
               anthropicClient: this.client,
               crm: this._crm,
+              sensitiveMode,
             });
             // MailHooks fires `onInboundMail` per envelope from wrappedHandler
             // (`mail/context.ts:248`). Mutating the held reference works

@@ -9,7 +9,7 @@ let inbox: InboxStateDb;
 const TEST_ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
   displayName: 'Rafael',
-  address: 'rafael@example.com',
+  address: 'me@acme.example',
   preset: 'custom',
   imap: { host: 'imap.example.com', port: 993, secure: true },
   smtp: { host: 'smtp.example.com', port: 465, secure: true },
