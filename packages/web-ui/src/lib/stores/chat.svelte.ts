@@ -634,6 +634,26 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// → server says 409). Show the message as queued, not failed, and poll until
 	// the previous run completes.
 	if (res.status === 409) {
+		// Fast-fail when we already know the engine is blocked on a prompt
+		// from this client. Polling for up to 6 min won't unblock anything —
+		// the run will only progress once the user answers, and a bare
+		// "Agent arbeitet noch — wartet…" banner with the actual prompt
+		// hidden somewhere is exactly the dead-end the user reported.
+		if (pendingPermission || pendingSecretPrompt || pendingTabsPrompt) {
+			if (messages[userMsgIdx]) {
+				messages[userMsgIdx]!.queued = false;
+				messages[userMsgIdx]!.failed = true;
+			}
+			if (messages[assistantIdx] && !messages[assistantIdx]!.content) {
+				messages.splice(assistantIdx, 1);
+			}
+			chatError = t('chat.error_blocked_by_prompt');
+			chatErrorDetail = null;
+			isStreaming = false;
+			streamingActivity = 'idle';
+			streamingToolName = null;
+			return;
+		}
 		if (messages[userMsgIdx]) {
 			messages[userMsgIdx]!.queued = true;
 			messages[userMsgIdx]!.failed = false;
