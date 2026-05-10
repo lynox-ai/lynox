@@ -1079,6 +1079,13 @@
 		}
 	});
 
+	// Belt-and-braces unmount cleanup: if the user navigates away during the
+	// 6 s confirmation window the pending setTimeout would otherwise still
+	// fire and write into a destroyed component's $state.
+	$effect(() => () => {
+		if (approvalInflightTimer) { clearTimeout(approvalInflightTimer); approvalInflightTimer = null; }
+	});
+
 	// Auto-speak per text-block. The chat store bumps `completedTextBlockGen`
 	// every time the assistant closes a text block — either because a tool
 	// call interrupts the writing or the turn ends. We pick that up here and
