@@ -6,6 +6,15 @@ on:
     paths-ignore: ['docs/**']
   workflow_dispatch:
 
+# Burst of merges (e.g. 4 squash-merges seconds apart) used to fan out into 4
+# parallel builds + 4 staging redeploys, with the final `:staging` tag racing
+# whoever finished last — so a slow first run could overwrite a fast later
+# one's image. Collapse to a single in-flight build per `main`: cancel any
+# pending/running run when a new one queues, so only the latest commit ships.
+concurrency:
+  group: staging-image
+  cancel-in-progress: true
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
