@@ -156,6 +156,7 @@ export class Engine {
   private _toolContext: ToolContext;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
+  private _inboxRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
   private _whatsappContext: import('../integrations/whatsapp/context.js').WhatsAppContext | null = null;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
@@ -605,6 +606,28 @@ export class Engine {
           this.registry.register(tool);
         }
         this._mailContext = mailCtx;
+
+        // PRD-UNIFIED-INBOX Phase 1a — wire the classifier hook on top of the
+        // mail context. Gated on the `unified-inbox` feature flag so the
+        // foundation can ride along in shipped binaries without surfacing
+        // until the UI lands in Phase 1b.
+        if (isFeatureEnabled('unified-inbox')) {
+          try {
+            const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
+            const runtime = bootstrapInbox({
+              mailStateDb: stateDb,
+              anthropicClient: this.client,
+              crm: this._crm,
+            });
+            // MailHooks fires `onInboundMail` per envelope from wrappedHandler
+            // (`mail/context.ts:248`). Mutating the held reference works
+            // because the handler reads it on every invocation.
+            mailCtx.hooks.onInboundMail = runtime.hook;
+            this._inboxRuntime = runtime;
+          } catch {
+            // Inbox init failed — non-critical, mail integration still works
+          }
+        }
       }
     } catch {
       // Mail init failed — non-critical, continue without it
@@ -825,6 +848,7 @@ export class Engine {
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
+  getInboxRuntime(): import('../integrations/inbox/bootstrap.js').InboxRuntime | null { return this._inboxRuntime; }
   getWhatsAppContext(): import('../integrations/whatsapp/context.js').WhatsAppContext | null { return this._whatsappContext; }
 
   /** Re-initialize Google Workspace integration after credentials change. */
@@ -965,6 +989,14 @@ export class Engine {
     if (this._workerLoop) {
       this._workerLoop.stop();
       this._workerLoop = null;
+    }
+
+    // Drain in-flight inbox classifier jobs so a late shutdown does not
+    // leave half-processed mails. drain() resolves immediately on an empty
+    // queue and within seconds otherwise (per-job timeout 30s).
+    if (this._inboxRuntime) {
+      try { await this._inboxRuntime.shutdown(); } catch { /* best-effort */ }
+      this._inboxRuntime = null;
     }
 
     // Stop prompt cleanup timer
