@@ -511,6 +511,14 @@
 	let batchMode = $state<'v1' | 'v2' | null>(null);
 	let batchTabsPromptId = $state<string | null>(null);
 	let batchFreetext = $state('');
+	// Transient "Allow/Deny was clicked, waiting for tool to start" state. The
+	// store clears `pendingPermission` immediately on click (so the inline
+	// form would otherwise vanish), leaving the user staring at a regular
+	// streaming spinner with no visible confirmation that their click was
+	// received. We hold the form open in an "in-flight" state for a few
+	// seconds so the click feels like it produced a result.
+	let approvalInflight = $state<{ question: string; answer: 'y' | 'n' } | null>(null);
+	let approvalInflightTimer: ReturnType<typeof setTimeout> | null = null;
 	let recordingSeconds = $state(0);
 	let recordingTimer: ReturnType<typeof setInterval> | null = null;
 	let transcribing = $state(false);
@@ -907,6 +915,17 @@
 		// and pushing the chat off-screen. Users only need the last answer
 		// to reconsider via the "edit" button below.
 		answeredPrompts = [{ question: pendingPermission.question, answer }];
+		// Permission-guard answers ('y'/'n') hand off to a tool that takes
+		// seconds to run. The store clears `pendingPermission` synchronously
+		// inside replyPermission(), so without this we'd swap straight from
+		// the prompt card to the streaming spinner with no acknowledgment
+		// that the click landed. Hold a transient confirmation in the same
+		// slot until the next assistant token streams or a short timeout.
+		if (answer === 'y' || answer === 'n') {
+			approvalInflight = { question: pendingPermission.question, answer };
+			if (approvalInflightTimer) clearTimeout(approvalInflightTimer);
+			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
+		}
 		selectedOptions = [];
 		promptAnswer = '';
 		replyPermission(answer);
@@ -1047,6 +1066,25 @@
 	const isStreaming = $derived(getIsStreaming());
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());
+
+	// Once the run is fully done — or a new prompt fires — the post-approval
+	// confirmation is stale. (We can't use streamToolName as a signal because
+	// the tool the user just authorised was already "running" while the
+	// permission prompt was open, so it's set before AND after the click.)
+	$effect(() => {
+		if (!approvalInflight) return;
+		if (!isStreaming || pendingPermission) {
+			if (approvalInflightTimer) { clearTimeout(approvalInflightTimer); approvalInflightTimer = null; }
+			approvalInflight = null;
+		}
+	});
+
+	// Belt-and-braces unmount cleanup: if the user navigates away during the
+	// 6 s confirmation window the pending setTimeout would otherwise still
+	// fire and write into a destroyed component's $state.
+	$effect(() => () => {
+		if (approvalInflightTimer) { clearTimeout(approvalInflightTimer); approvalInflightTimer = null; }
+	});
 
 	// Auto-speak per text-block. The chat store bumps `completedTextBlockGen`
 	// every time the assistant closes a text block — either because a tool
@@ -2058,6 +2096,34 @@
 						</button>
 					</div>
 				{/each}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Post-approval inflight confirmation (rendered in the permission slot
+	     after the click clears `pendingPermission` but before the tool result
+	     streams). Without this the form vanishes instantly and the user is
+	     left wondering whether the click registered. -->
+	{#if approvalInflight && !pendingPermission && !inBatchMode}
+		<div class="border-t border-border bg-bg-subtle px-4 py-3" role="status" aria-live="polite">
+			<div class="max-w-3xl mx-auto flex items-start gap-2">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mt-0.5 shrink-0 {approvalInflight.answer === 'y' ? 'text-success' : 'text-text-subtle'}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+					{#if approvalInflight.answer === 'y'}
+						<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+					{:else}
+						<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+					{/if}
+				</svg>
+				<div class="flex-1 min-w-0">
+					<div class="text-xs text-text-subtle truncate" title={approvalInflight.question}>{approvalInflight.question}</div>
+					<div class="flex items-center gap-2 text-sm text-text-muted mt-0.5">
+						<svg class="h-3.5 w-3.5 animate-spin text-accent shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+						</svg>
+						<span>{approvalInflight.answer === 'y' ? t('chat.permission_running') : t('chat.permission_denied_running')}</span>
+					</div>
+				</div>
 			</div>
 		</div>
 	{/if}

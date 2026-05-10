@@ -346,6 +346,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_blocked_by_prompt': { de: 'Beantworte zuerst die offene Anfrage oben — sie blockiert den Agenten.', en: 'Answer the open prompt above first — it is blocking the agent.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
+	'chat.permission_running': { de: 'Erlaubt — wird ausgeführt…', en: 'Allowed — running…' },
+	'chat.permission_denied_running': { de: 'Abgelehnt — wird beendet…', en: 'Denied — finishing up…' },
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
 	'chat.skipped': { de: 'Übersprungen', en: 'Skipped' },
 	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
