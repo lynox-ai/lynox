@@ -8,7 +8,7 @@ let inbox: InboxStateDb;
 
 const TEST_ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
-  displayName: 'Rafael',
+  displayName: 'Me',
   address: 'me@acme.example',
   preset: 'custom',
   imap: { host: 'imap.example.com', port: 993, secure: true },
@@ -218,7 +218,7 @@ describe('InboxStateDb — drafts', () => {
     const itemId = insertSampleItem();
     const id = inbox.insertDraft({
       itemId,
-      bodyMd: 'Hi Roland,\n\nDanke für die Nachricht.',
+      bodyMd: 'Hi Max,\n\nDanke für die Nachricht.',
       generatedAt: new Date('2026-05-10T12:30:00Z'),
       generatorVersion: 'gen-2026-05',
     });
@@ -226,7 +226,7 @@ describe('InboxStateDb — drafts', () => {
     expect(draft).toMatchObject({
       id,
       itemId,
-      bodyMd: 'Hi Roland,\n\nDanke für die Nachricht.',
+      bodyMd: 'Hi Max,\n\nDanke für die Nachricht.',
       generatorVersion: 'gen-2026-05',
       userEditsCount: 0,
       supersededBy: undefined,

@@ -3403,9 +3403,18 @@ export class LynoxHTTPApi {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleResolveContact } = await import('../integrations/inbox/api.js');
-      // The :email segment is URL-encoded; `parseDynamicRoute` already
-      // returns the decoded value, so pass it straight through.
-      sendInbox(res, handleResolveContact(deps!, params['email']!));
+      // parseDynamicRoute does NOT decode URL params (verified vs.
+      // /api/crm/contacts/:name which also calls decodeURIComponent).
+      // Without this step every real address would arrive as `name%40host`
+      // and the contact lookup would always miss.
+      let email: string;
+      try {
+        email = decodeURIComponent(params['email']!);
+      } catch {
+        errorResponse(res, 400, 'invalid url-encoded email');
+        return;
+      }
+      sendInbox(res, handleResolveContact(deps!, email));
     }));
 
     this.staticRoutes.set('GET /api/inbox/rules', async (req, res) => {

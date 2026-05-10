@@ -178,22 +178,22 @@ describe('handleSetSnooze', () => {
 });
 
 describe('handleResolveContact', () => {
-  const ROLAND: ContactRecord = { name: 'Roland', email: 'r@war' };
+  const MAX: ContactRecord = { name: 'Max Mustermann', email: 'max@acme.example' };
   const fakeCrm = (record: ContactRecord | null): CRM =>
     ({ findContact: () => record, getInteractions: () => [] }) as unknown as CRM;
 
   it('returns null when no resolver is configured', () => {
-    const r = handleResolveContact(deps, 'r@war');
+    const r = handleResolveContact(deps, 'max@acme.example');
     expect((r.body as { contact: unknown }).contact).toBeNull();
   });
 
   it('uses the resolver when present', () => {
     const depsWithResolver: InboxApiDeps = {
       state,
-      contactResolver: new InboxContactResolver(fakeCrm(ROLAND)),
+      contactResolver: new InboxContactResolver(fakeCrm(MAX)),
     };
-    const r = handleResolveContact(depsWithResolver, 'r@war');
-    expect((r.body as { contact: unknown }).contact).toMatchObject({ name: 'Roland' });
+    const r = handleResolveContact(depsWithResolver, 'max@acme.example');
+    expect((r.body as { contact: unknown }).contact).toMatchObject({ name: 'Max Mustermann' });
   });
 });
 
