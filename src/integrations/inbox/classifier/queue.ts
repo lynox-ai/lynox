@@ -183,7 +183,6 @@ export class ClassifierQueue<T> {
       await fn();
     } catch (err) {
       // Surface to stderr so the host operator sees something — never throw.
-      // eslint-disable-next-line no-console
       console.error(`[ClassifierQueue] ${label} callback threw:`, err);
     }
   }

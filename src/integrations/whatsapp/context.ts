@@ -119,7 +119,6 @@ export class WhatsAppContext {
     // filtering non-inbound / non-text kinds (see whatsapp-adapter.ts).
     if (this.inboxBridge && result.messageInserted) {
       void this.inboxBridge(event).catch((err: unknown) => {
-        // eslint-disable-next-line no-console
         console.error('[lynox] WhatsApp inbox bridge failed:', err);
       });
     }
