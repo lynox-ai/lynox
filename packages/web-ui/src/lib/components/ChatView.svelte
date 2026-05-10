@@ -335,6 +335,15 @@
 		return `${fence}artifact\n${header}${body}\n${fence}`;
 	}
 
+	// Precedence for the grouped tool-row status: error wins, running over
+	// done. Encoding it as a numeric rank keeps the rule explicit and makes
+	// the reducer below symmetric ("which member is worst?") rather than a
+	// chain of escalation-only branches.
+	const TOOL_STATUS_RANK: Record<ToolCallInfo['status'], number> = { done: 0, running: 1, error: 2 };
+	function worstStatus(a: ToolCallInfo['status'], b: ToolCallInfo['status']): ToolCallInfo['status'] {
+		return TOOL_STATUS_RANK[a] >= TOOL_STATUS_RANK[b] ? a : b;
+	}
+
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
 		const result: GroupedBlock[] = [];
@@ -406,8 +415,7 @@
 				const last = result[result.length - 1];
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
-					if (tc.status === 'error') last.status = 'error';
-					else if (tc.status === 'running' && last.status !== 'error') last.status = 'running';
+					last.status = worstStatus(last.status, tc.status);
 				} else {
 					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status });
 				}
