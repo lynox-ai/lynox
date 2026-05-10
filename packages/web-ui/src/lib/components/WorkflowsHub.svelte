@@ -107,10 +107,10 @@
 
 <div class="flex flex-col h-full">
 	<!-- Tab buttons -->
-	<div class="flex items-center gap-1 px-5 py-3 border-b border-border">
+	<div class="flex items-center gap-1 px-4 sm:px-5 py-3 border-b border-border overflow-x-auto scrollbar-none">
 		{#each tabs as t_item}
 			<button
-				class="px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-medium transition-colors
+				class="shrink-0 whitespace-nowrap px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-medium transition-colors
 					{tab === t_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
 				onclick={() => tab = t_item.id}
 			>
