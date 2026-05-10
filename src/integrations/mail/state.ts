@@ -687,6 +687,17 @@ export class MailStateDb {
     this.db.close();
   }
 
+  /**
+   * Underlying connection. Exposed so sibling modules in the same
+   * mail-state.db (e.g. `inbox/state.ts`) can share the FK-enabled,
+   * post-migration connection without re-opening the file. The MailStateDb
+   * instance retains lifecycle ownership — callers must not invoke
+   * `.close()` on the returned handle.
+   */
+  getConnection(): Database.Database {
+    return this.db;
+  }
+
   private _migrate(): void {
     const current = this._getVersion();
     for (let i = current; i < MIGRATIONS.length; i++) {
