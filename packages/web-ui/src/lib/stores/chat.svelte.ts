@@ -640,6 +640,13 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		// "Agent arbeitet noch — wartet…" banner with the actual prompt
 		// hidden somewhere is exactly the dead-end the user reported.
 		if (pendingPermission || pendingSecretPrompt || pendingTabsPrompt) {
+			// If a prior 409 poll loop is still running (re-entrant call before
+			// its finally block ran), cut it now so its tick doesn't flip
+			// `isStreaming` back on after we clear it below.
+			if (_queuePollController) {
+				_queuePollController.abort();
+				_queuePollController = null;
+			}
 			if (messages[userMsgIdx]) {
 				messages[userMsgIdx]!.queued = false;
 				messages[userMsgIdx]!.failed = true;
