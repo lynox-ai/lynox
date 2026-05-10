@@ -595,82 +595,92 @@ export class Engine {
     // googleAuth is passed through so OAuth-Gmail accounts coexist with IMAP
     // in the same registry. MailContext.init() runs a boot migration that
     // creates a Gmail row when the user has an existing OAuth connection.
+    let mailStateDb: import('../integrations/mail/state.js').MailStateDb | null = null;
     try {
       const { MailContext } = await import('../integrations/mail/context.js');
       const { MailStateDb } = await import('../integrations/mail/state.js');
+      // MailStateDb is vault-independent — it just opens the SQLite file.
+      // Created outside the vault guard so the inbox bootstrap below can
+      // share the connection even when no vault is configured (e.g. CI,
+      // test fixtures, browse-only mode).
+      mailStateDb = new MailStateDb();
       if (this.secretVault) {
-        const stateDb = new MailStateDb();
-        const mailCtx = new MailContext(stateDb, this.secretVault, undefined, {}, this._googleAuth);
+        const mailCtx = new MailContext(mailStateDb, this.secretVault, undefined, {}, this._googleAuth);
         await mailCtx.init();
         for (const tool of mailCtx.tools()) {
           this.registry.register(tool);
         }
         this._mailContext = mailCtx;
-
-        // PRD-UNIFIED-INBOX Phase 1a — wire the classifier hook on top of the
-        // mail context. Gated on the `unified-inbox` feature flag so the
-        // foundation can ride along in shipped binaries without surfacing
-        // until the UI lands in Phase 1b.
-        if (isFeatureEnabled('unified-inbox')) {
-          try {
-            const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
-            // Sensitive-content handling: skip / mask / allow. Default is
-            // 'skip' — sensitive mails (OTP, secrets, IBAN, card) never
-            // reach the LLM. Switch to 'mask' on EU/trusted providers to
-            // get classification on a redacted copy; 'allow' opts out
-            // entirely (only safe with a strict DPA / self-hosted LLM).
-            const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
-            const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
-            // EU residency: when LYNOX_INBOX_LLM_REGION=eu the runtime
-            // routes via Mistral (api.mistral.ai, EU-resident) instead of
-            // Haiku/Anthropic-US. Requires LYNOX_INBOX_MISTRAL_API_KEY
-            // (or MISTRAL_API_KEY) — bootstrap throws if missing so the
-            // operator can't accidentally fall back to a non-EU provider.
-            const llmRegion = process.env['LYNOX_INBOX_LLM_REGION'] === 'eu' ? 'eu' : 'us';
-            const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-              ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-              ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-              ?? process.env['MISTRAL_API_KEY']
-              ?? undefined;
-            // Folder blacklist: comma-separated env, case-insensitive match.
-            // Use case: "Banking, Privat, Healthcare" — those folders' mails
-            // never reach the inbox classifier path at all.
-            const folderBlacklistRaw = process.env['LYNOX_INBOX_FOLDER_BLACKLIST'] ?? '';
-            const folderBlacklist = new Set(
-              folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
-            );
-            // Per-account opt-out: comma-separated mail_account ids.
-            const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-            const disabledAccounts = new Set(
-              disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-            );
-            const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
-              mailStateDb: stateDb,
-              anthropicClient: this.client,
-              crm: this._crm,
-              sensitiveMode,
-              llmRegion,
-              requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
-              privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
-            };
-            if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
-            if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
-            if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
-            const runtime = bootstrapInbox(bootOpts);
-            // MailHooks fires `onInboundMail` per envelope from wrappedHandler
-            // (`mail/context.ts:248`). Mutating the held reference works
-            // because the handler reads it on every invocation.
-            mailCtx.hooks.onInboundMail = runtime.hook;
-            this._inboxRuntime = runtime;
-          } catch (err) {
-            // Surface the failure so a silently-disabled feature does not
-            // become a debugging black hole. Mail integration still works.
-            console.error('[lynox] Inbox bootstrap failed — feature disabled:', err);
-          }
-        }
       }
     } catch {
       // Mail init failed — non-critical, continue without it
+    }
+
+    // PRD-UNIFIED-INBOX Phase 1a — wire the classifier hook on top of the
+    // mail state DB (the MailContext is optional; without a vault we still
+    // bootstrap the inbox so classification works as soon as a vault lands).
+    // Gated on the `unified-inbox` feature flag so the foundation can ride
+    // along in shipped binaries without surfacing until the UI lands in
+    // Phase 1b.
+    if (mailStateDb && isFeatureEnabled('unified-inbox')) {
+      try {
+        const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
+        // Sensitive-content handling: skip / mask / allow. Default is
+        // 'skip' — sensitive mails (OTP, secrets, IBAN, card) never
+        // reach the LLM. Switch to 'mask' on EU/trusted providers to
+        // get classification on a redacted copy; 'allow' opts out
+        // entirely (only safe with a strict DPA / self-hosted LLM).
+        const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
+        const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
+        // EU residency: when LYNOX_INBOX_LLM_REGION=eu the runtime
+        // routes via Mistral (api.mistral.ai, EU-resident) instead of
+        // Haiku/Anthropic-US. Requires LYNOX_INBOX_MISTRAL_API_KEY
+        // (or MISTRAL_API_KEY) — bootstrap throws if missing so the
+        // operator can't accidentally fall back to a non-EU provider.
+        const llmRegion = process.env['LYNOX_INBOX_LLM_REGION'] === 'eu' ? 'eu' : 'us';
+        const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
+          ?? this.secretStore?.resolve('MISTRAL_API_KEY')
+          ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
+          ?? process.env['MISTRAL_API_KEY']
+          ?? undefined;
+        // Folder blacklist: comma-separated env, case-insensitive match.
+        // Use case: "Banking, Privat, Healthcare" — those folders' mails
+        // never reach the inbox classifier path at all.
+        const folderBlacklistRaw = process.env['LYNOX_INBOX_FOLDER_BLACKLIST'] ?? '';
+        const folderBlacklist = new Set(
+          folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
+        );
+        // Per-account opt-out: comma-separated mail_account ids.
+        const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
+        const disabledAccounts = new Set(
+          disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
+        );
+        const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
+          mailStateDb,
+          anthropicClient: this.client,
+          crm: this._crm,
+          sensitiveMode,
+          llmRegion,
+          requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
+          privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
+        };
+        if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
+        if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
+        if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
+        const runtime = bootstrapInbox(bootOpts);
+        // If a MailContext exists, wire the inbox hook into its hooks so
+        // the watcher fires it per envelope. When no vault is configured
+        // the MailContext is null — the runtime is still alive and the
+        // hook can be invoked manually (e.g. via the WhatsApp bridge).
+        if (this._mailContext) {
+          this._mailContext.hooks.onInboundMail = runtime.hook;
+        }
+        this._inboxRuntime = runtime;
+      } catch (err) {
+        // Surface the failure so a silently-disabled feature does not
+        // become a debugging black hole. Mail integration still works.
+        console.error('[lynox] Inbox bootstrap failed — feature disabled:', err);
+      }
     }
 
     // WhatsApp Business Cloud API integration (Coexistence Mode, BYOK Phase 0).
