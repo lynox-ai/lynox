@@ -343,6 +343,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.placeholder_secret': { de: 'Schlüssel oben eingeben — dann geht es weiter', en: 'Enter the key above to continue' },
 	'chat.placeholder_tabs': { de: 'Frage oben beantworten — dann geht es weiter', en: 'Answer the question above to continue' },
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
+	'chat.error_blocked_by_prompt': { de: 'Beantworte zuerst die offene Anfrage oben — sie blockiert den Agenten.', en: 'Answer the open prompt above first — it is blocking the agent.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
