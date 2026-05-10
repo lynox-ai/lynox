@@ -304,7 +304,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(6);
+    expect(row.v).toBe(7);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -400,5 +400,91 @@ describe('MailStateDb — setDefaultAccount', () => {
     db.setDefaultAccount('a');
     expect(db.setDefaultAccount(null)).toBe(true);
     expect(db.defaultAccountId()).toBe(null);
+  });
+});
+
+// ── Migration v7 smoke (Unified Inbox foundation) ─────────────────────────
+
+describe('MailStateDb — migration v7 (Unified Inbox)', () => {
+  function inner(state: MailStateDb): import('better-sqlite3').Database {
+    return (state as unknown as { db: import('better-sqlite3').Database }).db;
+  }
+
+  it('creates all five inbox tables', () => {
+    const tables = inner(db)
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'inbox_%' ORDER BY name`,
+      )
+      .all() as ReadonlyArray<{ name: string }>;
+    expect(tables.map((t) => t.name)).toEqual([
+      'inbox_audit_log',
+      'inbox_drafts',
+      'inbox_items',
+      'inbox_rules',
+    ]);
+  });
+
+  it('enables foreign_keys pragma so cascade chains fire', () => {
+    expect(inner(db).pragma('foreign_keys', { simple: true })).toBe(1);
+  });
+
+  it('cascades inbox_items + inbox_drafts + inbox_audit_log when a mail_account is deleted', () => {
+    db.upsertAccount({
+      id: 'acct-cascade',
+      displayName: 'Cascade test',
+      address: 'me@example.com',
+      preset: 'custom',
+      imap: { host: 'imap.example.com', port: 993, secure: true },
+      smtp: { host: 'smtp.example.com', port: 465, secure: true },
+      authType: 'imap',
+      type: 'personal',
+      isDefault: false,
+    });
+
+    const raw = inner(db);
+    raw
+      .prepare(
+        `INSERT INTO inbox_items (id, account_id, channel, thread_key, bucket, confidence, reason_de, classified_at, classifier_version)
+         VALUES (?, ?, ?, ?, ?, 0.9, ?, 1700000000000, 'haiku-2026-05')`,
+      )
+      .run('item-1', 'acct-cascade', 'email', 'imap:abc', 'requires_user', 'why');
+    raw
+      .prepare(
+        `INSERT INTO inbox_drafts (id, item_id, body_md, generated_at, generator_version, user_edits_count)
+         VALUES (?, ?, ?, 1700000000001, ?, 0)`,
+      )
+      .run('draft-1', 'item-1', 'Hi', 'gen-v1');
+    raw
+      .prepare(
+        `INSERT INTO inbox_audit_log (id, item_id, action, actor, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?, 1700000000002)`,
+      )
+      .run('audit-1', 'item-1', 'classified', 'classifier', '{}');
+
+    expect(db.deleteAccount('acct-cascade')).toBe(true);
+
+    const itemCount = raw
+      .prepare(`SELECT COUNT(*) as c FROM inbox_items WHERE account_id = 'acct-cascade'`)
+      .get() as { c: number };
+    const draftCount = raw
+      .prepare(`SELECT COUNT(*) as c FROM inbox_drafts WHERE item_id = 'item-1'`)
+      .get() as { c: number };
+    const auditCount = raw
+      .prepare(`SELECT COUNT(*) as c FROM inbox_audit_log WHERE item_id = 'item-1'`)
+      .get() as { c: number };
+    expect(itemCount.c).toBe(0);
+    expect(draftCount.c).toBe(0);
+    expect(auditCount.c).toBe(0);
+  });
+
+  it('rejects an inbox_items row whose account_id does not exist', () => {
+    expect(() => {
+      inner(db)
+        .prepare(
+          `INSERT INTO inbox_items (id, account_id, channel, thread_key, bucket, confidence, reason_de, classified_at, classifier_version)
+           VALUES ('orphan', 'never-existed', 'email', 'k', 'requires_user', 0.5, 'r', 0, 'v')`,
+        )
+        .run();
+    }).toThrow(/FOREIGN KEY/i);
   });
 });

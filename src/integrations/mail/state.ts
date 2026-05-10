@@ -111,6 +111,94 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
 
    ALTER TABLE mail_accounts ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;`,
+
+  // v7: Unified Inbox foundation (PRD-UNIFIED-INBOX Phase 1a).
+  //
+  // 5 new tables, channel-aware from day one. tenant_id is present everywhere
+  // for forward-compat with team-inbox (Phase 5+); single-user instances use
+  // the literal 'default' sentinel. ON DELETE CASCADE chains require the
+  // foreign_keys pragma which the constructor enables for new connections.
+  //
+  // Bucket / channel / actor values are validated at the application layer
+  // (consistent with auth_type / preset patterns above) — no CHECK constraints.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (7);
+
+   CREATE TABLE IF NOT EXISTS inbox_items (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     account_id TEXT NOT NULL,
+     channel TEXT NOT NULL,
+     thread_key TEXT NOT NULL,
+     bucket TEXT NOT NULL,
+     confidence REAL NOT NULL,
+     reason_de TEXT NOT NULL,
+     classified_at INTEGER NOT NULL,
+     classifier_version TEXT NOT NULL,
+     user_action TEXT,
+     user_action_at INTEGER,
+     draft_id TEXT,
+     snooze_until INTEGER,
+     snooze_condition TEXT,
+     unsnooze_on_reply INTEGER NOT NULL DEFAULT 1,
+     FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
+   );
+
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_queue
+     ON inbox_items(tenant_id, bucket, classified_at DESC);
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_account
+     ON inbox_items(tenant_id, account_id);
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_thread
+     ON inbox_items(account_id, thread_key);
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_snooze
+     ON inbox_items(snooze_until) WHERE snooze_until IS NOT NULL;
+
+   CREATE TABLE IF NOT EXISTS inbox_audit_log (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     item_id TEXT NOT NULL,
+     action TEXT NOT NULL,
+     actor TEXT NOT NULL,
+     payload_json TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     FOREIGN KEY (item_id) REFERENCES inbox_items(id) ON DELETE CASCADE
+   );
+
+   CREATE INDEX IF NOT EXISTS idx_inbox_audit_item ON inbox_audit_log(item_id);
+   CREATE INDEX IF NOT EXISTS idx_inbox_audit_tenant_created
+     ON inbox_audit_log(tenant_id, created_at DESC);
+
+   CREATE TABLE IF NOT EXISTS inbox_drafts (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     item_id TEXT NOT NULL,
+     body_md TEXT NOT NULL,
+     generated_at INTEGER NOT NULL,
+     generator_version TEXT NOT NULL,
+     user_edits_count INTEGER NOT NULL DEFAULT 0,
+     superseded_by TEXT,
+     FOREIGN KEY (item_id) REFERENCES inbox_items(id) ON DELETE CASCADE,
+     FOREIGN KEY (superseded_by) REFERENCES inbox_drafts(id) ON DELETE SET NULL
+   );
+
+   CREATE INDEX IF NOT EXISTS idx_inbox_drafts_item ON inbox_drafts(item_id);
+
+   CREATE TABLE IF NOT EXISTS inbox_rules (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     account_id TEXT NOT NULL,
+     matcher_kind TEXT NOT NULL,
+     matcher_value TEXT NOT NULL,
+     bucket TEXT NOT NULL,
+     action TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     source TEXT NOT NULL,
+     FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
+   );
+
+   CREATE INDEX IF NOT EXISTS idx_inbox_rules_account
+     ON inbox_rules(tenant_id, account_id);
+   CREATE INDEX IF NOT EXISTS idx_inbox_rules_matcher
+     ON inbox_rules(account_id, matcher_kind, matcher_value);`,
 ];
 
 export interface MailStateDbOptions {
@@ -264,6 +352,10 @@ export class MailStateDb {
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    // ON DELETE CASCADE chains added in v7 (inbox_*) require this. Older
+    // tables (mail_accounts, mail_followups) declare no FK constraints, so
+    // enabling the pragma is a no-op for them.
+    this.db.pragma('foreign_keys = ON');
     this._migrate();
   }
 
