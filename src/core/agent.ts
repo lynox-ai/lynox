@@ -922,7 +922,9 @@ function isRetryable(err: unknown): boolean {
     if (body?.type === 'overloaded_error' || body?.type === 'rate_limit_error' || body?.type === 'api_error') {
       return true;
     }
-    // AWS Bedrock transient errors (surfaced via Bedrock SDK as APIError)
+    // Legacy AWS-style transient error names — kept as defense-in-depth for
+    // OpenAI-compatible adapters that may proxy AWS-backed models. lynox
+    // itself uses Anthropic + Mistral (EU); no direct Bedrock integration.
     const msg = err.message ?? '';
     if (msg.includes('ThrottlingException') || msg.includes('TooManyRequestsException')
       || msg.includes('ServiceUnavailableException') || msg.includes('ModelTimeoutException')
