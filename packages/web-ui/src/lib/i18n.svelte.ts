@@ -1013,6 +1013,32 @@ const translations: Record<string, Record<Locale, string>> = {
 	'migration.threads': { de: 'Threads', en: 'Threads' },
 	'migration.memories': { de: 'Wissen', en: 'Knowledge' },
 	'migration.data_tables': { de: 'Datentabellen', en: 'Data Tables' },
+
+	// Inbox (Phase 1b UI — Decision Queue + 3 zones)
+	'inbox.title': { de: 'Inbox', en: 'Inbox' },
+	'inbox.zone_needs_you': { de: 'Braucht dich', en: 'Needs you' },
+	'inbox.zone_drafted': { de: 'Entwurf bereit', en: 'Drafted for you' },
+	'inbox.zone_handled': { de: 'Erledigt heute', en: 'Handled today' },
+	'inbox.empty_needs_you': { de: 'Nichts wartet auf dich. Klassifizierer hat Inbox-Zero erreicht.', en: 'Nothing waiting on you. Classifier has reached inbox-zero.' },
+	'inbox.empty_drafted': { de: 'Noch keine Entwürfe.', en: 'No drafts yet.' },
+	'inbox.empty_handled': { de: 'Heute wurden keine Mails automatisch erledigt.', en: 'No mails handled automatically today.' },
+	'inbox.unavailable': { de: 'Inbox ist nicht aktiviert. Setze LYNOX_FEATURE_UNIFIED_INBOX=1 und starte neu.', en: 'Inbox is not enabled. Set LYNOX_FEATURE_UNIFIED_INBOX=1 and restart.' },
+	'inbox.loading': { de: 'Lädt…', en: 'Loading…' },
+	'inbox.action_archive': { de: 'Archivieren', en: 'Archive' },
+	'inbox.action_snooze': { de: 'Snooze', en: 'Snooze' },
+	'inbox.action_reply': { de: 'Antwort entwerfen', en: 'Draft reply' },
+	'inbox.action_undo': { de: 'Rückgängig', en: 'Undo' },
+	'inbox.snooze_1h': { de: '1 Stunde', en: '1 hour' },
+	'inbox.snooze_today': { de: 'Heute Abend', en: 'Tonight' },
+	'inbox.snooze_tomorrow': { de: 'Morgen', en: 'Tomorrow' },
+	'inbox.snooze_week': { de: 'Nächste Woche', en: 'Next week' },
+	'inbox.snooze_cancel': { de: 'Snooze beenden', en: 'Unsnooze' },
+	'inbox.channel_email': { de: 'E-Mail', en: 'Email' },
+	'inbox.channel_whatsapp': { de: 'WhatsApp', en: 'WhatsApp' },
+	'inbox.archived_now': { de: 'Archiviert', en: 'Archived' },
+	'inbox.error_load': { de: 'Inbox konnte nicht geladen werden', en: 'Failed to load inbox' },
+	'inbox.error_action': { de: 'Aktion fehlgeschlagen', en: 'Action failed' },
+	'inbox.error_snooze': { de: 'Snooze fehlgeschlagen', en: 'Snooze failed' },
 };
 
 export function setLocale(locale: Locale): void {

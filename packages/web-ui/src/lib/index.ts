@@ -30,6 +30,7 @@ export { default as ToastContainer } from './components/ToastContainer.svelte';
 export { default as MobileAccess } from './components/MobileAccess.svelte';
 export { default as MigrationWizard } from './components/MigrationWizard.svelte';
 export { default as PromptAnchor } from './components/PromptAnchor.svelte';
+export { default as InboxView } from './components/InboxView.svelte';
 
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';
@@ -119,6 +120,27 @@ export type { ContextType, ContextInfo } from './stores/context-panel.svelte.js'
 
 // Voice auto-send
 export { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from './stores/voice-autosend.svelte.js';
+
+// Inbox store (Phase 1b)
+export {
+	loadInboxCounts,
+	loadInboxItems,
+	setItemAction,
+	setItemSnooze,
+	loadItemAudit,
+	getInboxCounts,
+	getInboxItems,
+	isInboxAvailable,
+	startInboxVisibilityRefresh,
+} from './stores/inbox.svelte.js';
+export type {
+	InboxItem,
+	InboxCounts,
+	InboxAuditEntry,
+	InboxBucket,
+	InboxChannel,
+	InboxUserAction,
+} from './stores/inbox.svelte.js';
 
 // Push Notifications
 export {
