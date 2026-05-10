@@ -2211,10 +2211,14 @@
 	{/if}
 
 	<!-- Pipeline-status-v2 prompt anchor (flag-gated): one-line bar directly
-	     above the input, visible regardless of scroll position. The inline
-	     prompt forms above are still authoritative for replies — this is a
-	     locator, not a parallel reply path. -->
-	{#if pipelineStatusV2 && pendingPromptHead}
+	     above the input, visible regardless of scroll position. Only render
+	     when the corresponding inline prompt form is NOT visible — otherwise
+	     the user sees two surfaces for the same prompt and clicks the wrong
+	     one (the [Antworten] button is just a scroll-locator, not a real
+	     answer button). The inline form sits in the same sticky footer, so
+	     it's almost always visible; the anchor's only legitimate role is
+	     covering the brief tabs-prompt window before `inBatchMode` flips. -->
+	{#if pipelineStatusV2 && pendingPromptHead && pendingPromptHead.kind === 'tabs' && !inBatchMode}
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
 	{/if}
 
@@ -2266,9 +2270,9 @@
 						onkeydown={handleKeydown}
 						oninput={autoResize}
 						onpaste={handlePaste}
-						placeholder={pendingPermission && !inBatchMode ? t('chat.placeholder_answer') : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
+						placeholder={pendingSecret ? t('chat.placeholder_secret') : pendingTabsPrompt && !inBatchMode ? t('chat.placeholder_tabs') : pendingPermission && !inBatchMode ? t('chat.placeholder_answer') : isStreaming ? t('chat.placeholder_streaming') : t('chat.placeholder')}
 						rows="1"
-						disabled={!ready && !pendingPermission}
+						disabled={!!pendingSecret || (!!pendingTabsPrompt && !inBatchMode) || (!ready && !pendingPermission)}
 						class="flex-1 resize-none border-0 bg-transparent px-4 py-2.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"
 					></textarea>
 				</div>
@@ -2298,7 +2302,7 @@
 					{#if !recording && (inputText.trim() || pendingFiles.length > 0 || pendingPermission)}
 						<button
 							onclick={handleSend}
-							disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingChangeset}
+							disabled={(!inputText.trim() && pendingFiles.length === 0) || (!ready && !pendingPermission) || !!pendingSecret || (!!pendingTabsPrompt && !inBatchMode) || !!pendingChangeset}
 							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
 							aria-label={t('chat.send')}
 						>

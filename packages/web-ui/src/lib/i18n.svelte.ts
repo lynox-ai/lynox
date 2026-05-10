@@ -340,6 +340,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.remove_queued': { de: 'Aus Queue entfernen', en: 'Remove from queue' },
 	'chat.placeholder_streaming': { de: 'Nächste Nachricht vorbereiten...', en: 'Prepare next message...' },
 	'chat.placeholder_answer': { de: 'Antwort eingeben...', en: 'Type your answer...' },
+	'chat.placeholder_secret': { de: 'Beantworte zuerst die Secret-Anfrage oben', en: 'Answer the secret prompt above first' },
+	'chat.placeholder_tabs': { de: 'Beantworte zuerst die Frage oben', en: 'Answer the question above first' },
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
