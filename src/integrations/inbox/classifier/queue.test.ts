@@ -103,8 +103,18 @@ describe('ClassifierQueue — basics', () => {
 
 describe('ClassifierQueue — concurrency', () => {
   it('caps concurrent classify calls at maxConcurrency', async () => {
-    const { classify, calls } = controllable();
-    const q = new ClassifierQueue({
+    // Snapshot activeCount on EVERY classify entry so that a regression
+    // letting 3 jobs start at once is caught even if waitFor stops at 2.
+    const observedActive: number[] = [];
+    let q: ClassifierQueue<string>;
+    const calls: Array<{ resolve: (r: ClassifyResult) => void }> = [];
+    const classify = vi.fn(async () => {
+      observedActive.push(q.activeCount);
+      return new Promise<ClassifyResult>((resolve) => {
+        calls.push({ resolve });
+      });
+    });
+    q = new ClassifierQueue({
       classify,
       onSuccess,
       onDeadLetter,
@@ -124,6 +134,9 @@ describe('ClassifierQueue — concurrency', () => {
     calls[2]!.resolve(verdict());
     await waitFor(() => onSuccess.mock.calls.length === 3);
     expect(onSuccess).toHaveBeenCalledTimes(3);
+    // Observed max ≤ maxConcurrency — catches a future bug where the
+    // semaphore lets a 3rd job start before one of the in-flight resolves.
+    expect(Math.max(...observedActive)).toBeLessThanOrEqual(2);
   });
 });
 

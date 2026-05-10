@@ -3309,7 +3309,10 @@ export class LynoxHTTPApi {
     const inboxDeps = (): null | import('../integrations/inbox/api.js').InboxApiDeps => {
       const rt = engine.getInboxRuntime();
       if (!rt) return null;
-      const deps: import('../integrations/inbox/api.js').InboxApiDeps = { state: rt.state };
+      const deps: import('../integrations/inbox/api.js').InboxApiDeps = {
+        state: rt.state,
+        rules: rt.rules,
+      };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       return deps;
     };

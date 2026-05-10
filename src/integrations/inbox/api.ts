@@ -21,11 +21,17 @@ import type {
   InboxUserAction,
 } from '../../types/index.js';
 import type { InboxContactResolver } from './contact-resolver.js';
+import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
 
 export interface InboxApiDeps {
   state: InboxStateDb;
   contactResolver?: InboxContactResolver | undefined;
+  /**
+   * When wired, rule-mutation handlers invalidate the loader's cache so the
+   * next inbound mail picks up the change without restarting the runtime.
+   */
+  rules?: InboxRulesLoader | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -222,11 +228,15 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     source: body.source,
     tenantId: body.tenantId,
   });
+  deps.rules?.invalidate(body.accountId, body.tenantId);
   return { status: 201, body: { id } };
 }
 
 export function handleDeleteRule(deps: InboxApiDeps, id: string): ApiResponse {
-  return deps.state.deleteRule(id)
-    ? { status: 204, body: null }
-    : notFound('rule');
+  if (!deps.state.deleteRule(id)) return notFound('rule');
+  // Cannot pinpoint the (tenant, account) of a deleted rule cheaply, so
+  // drop the entire rule cache. Rule mutations are user-triggered and
+  // infrequent; a coarse invalidation is acceptable.
+  deps.rules?.invalidateAll();
+  return { status: 204, body: null };
 }

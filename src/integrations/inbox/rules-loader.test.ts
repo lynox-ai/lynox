@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
 import { InboxRulesLoader, type RuleMatchInput } from './rules-loader.js';
@@ -124,5 +124,66 @@ describe('InboxRulesLoader — ordering and isolation', () => {
     });
     expect(loader.match(input({ accountId: 'acct-1', from: 'shared@x' }))).toBeNull();
     expect(loader.match(input({ accountId: 'acct-2', from: 'shared@x' }))).not.toBeNull();
+  });
+});
+
+describe('InboxRulesLoader — cache', () => {
+  it('reads rules from the DB on first match and serves later matches from cache', () => {
+    inbox.insertRule({
+      accountId: 'acct-1',
+      matcherKind: 'from',
+      matcherValue: 'a@x',
+      bucket: 'auto_handled',
+      action: 'archive',
+      source: 'on_demand',
+    });
+    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
+    expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
+    expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidate(accountId) drops only that entry from the cache', () => {
+    inbox.insertRule({
+      accountId: 'acct-1',
+      matcherKind: 'from',
+      matcherValue: 'a@x',
+      bucket: 'auto_handled',
+      action: 'archive',
+      source: 'on_demand',
+    });
+    inbox.insertRule({
+      accountId: 'acct-2',
+      matcherKind: 'from',
+      matcherValue: 'b@x',
+      bucket: 'auto_handled',
+      action: 'archive',
+      source: 'on_demand',
+    });
+    loader.match(input({ accountId: 'acct-1', from: 'a@x' }));
+    loader.match(input({ accountId: 'acct-2', from: 'b@x' }));
+    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    loader.invalidate('acct-1');
+    loader.match(input({ accountId: 'acct-1', from: 'a@x' }));
+    loader.match(input({ accountId: 'acct-2', from: 'b@x' }));
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith('acct-1', undefined);
+  });
+
+  it('invalidateAll() drops every entry', () => {
+    inbox.insertRule({
+      accountId: 'acct-1',
+      matcherKind: 'from',
+      matcherValue: 'a@x',
+      bucket: 'auto_handled',
+      action: 'archive',
+      source: 'on_demand',
+    });
+    loader.match(input({ from: 'a@x' }));
+    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    loader.invalidateAll();
+    loader.match(input({ from: 'a@x' }));
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

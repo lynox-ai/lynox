@@ -10,7 +10,6 @@
 // The classifier itself stays decoupled from the SDK — tests inject the
 // caller directly (see classifier/index.test.ts).
 
-import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, type LLMClientOptions } from '../../../core/llm-client.js';
 import { getModelId } from '../../../types/index.js';
 import type { LLMProvider } from '../../../types/index.js';
@@ -108,7 +107,7 @@ export interface HaikuCallerOptions extends LLMClientOptions, WrapOptions {
  */
 export function createHaikuLLMCaller(opts: HaikuCallerOptions = {}): LLMCaller {
   const provider: LLMProvider = opts.provider ?? 'anthropic';
-  const client = createLLMClient(opts) as unknown as Anthropic;
+  const client = createLLMClient(opts);
   const modelId = opts.modelId ?? getModelId('haiku', provider);
   const wrapOpts: WrapOptions = {};
   if (opts.maxTokens !== undefined) wrapOpts.maxTokens = opts.maxTokens;

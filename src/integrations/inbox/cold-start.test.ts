@@ -87,9 +87,19 @@ describe('runColdStart — thread cap', () => {
     expect(queue.enqueued.map((p) => p.threadKey)).toEqual(['t0', 't1', 't2']);
   });
 
-  it('uses the default thread cap when none provided', () => {
-    // Surface check on the constant rather than running 1001 yields.
-    expect(estimateCost(1000)).toBeGreaterThan(0);
+  it('falls back to the default 1000-thread cap when threadCap is omitted', async () => {
+    // Verify the default actually fires by feeding 1001 unique threads and
+    // confirming the report stops at 1000. Earlier the test only probed
+    // estimateCost — which never exercised the cap path.
+    const items = Array.from({ length: 1001 }, (_, i) => payload(`t${String(i)}`));
+    const report = await runColdStart({
+      accountId: 'acct-1',
+      fetchPayloads: () => iter(items),
+      queue: queue.obj,
+    });
+    expect(report.cappedAt).toBe(1000);
+    expect(report.uniqueThreads).toBe(1000);
+    expect(report.enqueued).toBe(1000);
   });
 });
 

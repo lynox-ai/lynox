@@ -127,4 +127,32 @@ describe('bootstrapInbox — wiring', () => {
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
     await runtime.shutdown();
   });
+
+  it('LLM rejection cascades through retry to a fail-closed dead-letter item', async () => {
+    const create = vi.fn(async () => {
+      throw new Error('rate_limited');
+    });
+    const client = { messages: { create } } as unknown as Anthropic;
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    await runtime.hook(ACCOUNT.id, envelope());
+    // Let the queue retry + dead-letter complete BEFORE drain (drain sets
+    // draining=true and the runner's retry loop intentionally skips retries
+    // when draining, which would mask the production retry behavior).
+    for (let i = 0; i < 50 && runtime.state.listItems().length === 0; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    await runtime.shutdown();
+
+    expect(create).toHaveBeenCalledTimes(2); // initial + one retry
+    const items = runtime.state.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.bucket).toBe('requires_user');
+    expect(items[0]?.confidence).toBe(0);
+    expect(items[0]?.classifierVersion).toMatch(/^dead-letter:/);
+    expect(items[0]?.reasonDe).toContain('Klassifizierer');
+
+    // No tokens were ever returned, so the budget stays at zero — the SDK
+    // failure path never invokes the onUsage hook.
+    expect(runtime.budget.snapshot().spentUSD).toBe(0);
+  });
 });
