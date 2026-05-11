@@ -19,6 +19,7 @@ import {
 } from './classifier/llm.js';
 import { createMistralEuLLMCaller } from './classifier/llm-mistral.js';
 import type { ClassifierQueue } from './classifier/queue.js';
+import { runColdStartForAccount } from './cold-start-adapter.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxContactResolver } from './contact-resolver.js';
 import { InboxCostBudget, type InboxCostBudgetOptions } from './cost-budget.js';
@@ -47,6 +48,8 @@ export interface InboxRuntime {
   coldStartTracker: ColdStartTracker;
   /** Wire as `MailHooks.onInboundMail` after MailContext construction. */
   hook: OnInboundMailHook;
+  /** Wire as `MailHooks.onAccountAdded` — fires a backfill pass on connect. */
+  onAccountAdded: NonNullable<import('../mail/context.js').MailHooks['onAccountAdded']>;
   shutdown(): Promise<void>;
 }
 
@@ -179,6 +182,23 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   if (opts.disabledAccounts !== undefined) hookOpts.disabledAccounts = opts.disabledAccounts;
   const hook = createInboxClassifierHook(hookOpts);
 
+  // Disabled accounts must not get a backfill — same opt-out as the
+  // live-watcher hook honours.
+  const disabledAccounts = opts.disabledAccounts;
+
+  const onAccountAdded: NonNullable<import('../mail/context.js').MailHooks['onAccountAdded']> =
+    async (accountId, provider) => {
+      if (disabledAccounts?.has(accountId)) return;
+      const adapterOpts: Parameters<typeof runColdStartForAccount>[0] = {
+        provider,
+        hook,
+        tracker: coldStartTracker,
+        state,
+      };
+      if (opts.tenantId !== undefined) adapterOpts.tenantId = opts.tenantId;
+      await runColdStartForAccount(adapterOpts);
+    };
+
   return {
     state,
     rules,
@@ -187,6 +207,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     queue,
     coldStartTracker,
     hook,
+    onAccountAdded,
     shutdown: () => queue.drain(),
   };
 }

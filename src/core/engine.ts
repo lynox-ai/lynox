@@ -675,6 +675,10 @@ export class Engine {
         // hook can be invoked manually (e.g. via the WhatsApp bridge).
         if (this._mailContext) {
           this._mailContext.hooks.onInboundMail = runtime.hook;
+          // Auto-trigger backfill on account-connect. The adapter gates
+          // re-runs via `state.hasAnyItemForAccount`, so a re-credential
+          // does not pull provider.list() again.
+          this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
         }
         this._inboxRuntime = runtime;
       } catch (err) {
