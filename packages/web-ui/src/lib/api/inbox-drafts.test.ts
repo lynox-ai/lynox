@@ -207,11 +207,26 @@ describe('generateDraft', () => {
 		if (!result.ok) expect(result.reason.kind).toBe('unavailable');
 	});
 
-	it('sends POST with no request body — server-side itemId in path is the only input', async () => {
+	it('sends POST with no request body when no opts are passed — server-side itemId in path is the only input', async () => {
 		installFetch(async () => jsonResponse({ bodyMd: 'x', generatorVersion: 'v', bodyTruncated: false }));
 		await generateDraft('/api', 'inb_1');
 		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
 		expect(init.body).toBeUndefined();
+	});
+
+	it('serializes tone + previousBodyMd into the POST body for the regenerate flow', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'tight', generatorVersion: 'v', bodyTruncated: false }));
+		await generateDraft('/api', 'inb_1', { tone: 'shorter', previousBodyMd: 'longer original draft' });
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+		expect(JSON.parse(init.body as string)).toEqual({ tone: 'shorter', previousBodyMd: 'longer original draft' });
+	});
+
+	it('omits previousBodyMd from the body when only tone is set', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'x', generatorVersion: 'v', bodyTruncated: false }));
+		await generateDraft('/api', 'inb_1', { tone: 'warmer' });
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(JSON.parse(init.body as string)).toEqual({ tone: 'warmer' });
 	});
 
 	it('maps status codes to discriminated failures', async () => {

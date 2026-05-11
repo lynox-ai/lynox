@@ -6,7 +6,9 @@
 		createDraftForOpenPane,
 		generateDraftForOpenPane,
 		getDraftPane,
+		regenerateDraftWithTone,
 		saveDraftBody,
+		type DraftTone,
 		type InboxItem,
 	} from '../stores/inbox.svelte.js';
 	import type { GenerateDraftFailure } from '../api/inbox-drafts.js';
@@ -130,7 +132,48 @@
 
 	// Derive UI labels once per locale change instead of per keystroke.
 	const sendPendingLabel = $derived(t('inbox.draft_send_pending'));
-	const regenPendingLabel = $derived(t('inbox.draft_regenerate_pending'));
+
+	// Tone-rewrite flow: the "Kürzer / Förmlicher / Wärmer / Regenerate"
+	// buttons replace the current draft with a fresh LLM variant. If the
+	// buffer is dirty (userEditsCount > 0 OR the buffer diverges from the
+	// last-saved body), we show an edit-loss confirmation per PRD §Draft
+	// Editor before discarding the user's edits.
+	let pendingTone = $state<DraftTone | null>(null);
+
+	function hasUserEdits(): boolean {
+		const pane = getDraftPane();
+		if (!pane?.draft) return false;
+		if (pane.draft.userEditsCount > 0) return true;
+		return buffer !== pane.persistedBody;
+	}
+
+	async function runToneRewrite(tone: DraftTone): Promise<void> {
+		// Flush any pending body save BEFORE generating so the rewrite
+		// sees the user's latest edits as the previous draft.
+		flushNow();
+		const result = await regenerateDraftWithTone(tone, buffer);
+		if (result.ok) return;
+		const hint = toastForGenerateFailure(result.reason);
+		if (!hint.silent) addToast(t(hint.key), hint.level);
+	}
+
+	function onToneClick(tone: DraftTone): void {
+		if (hasUserEdits()) {
+			pendingTone = tone;
+			return;
+		}
+		void runToneRewrite(tone);
+	}
+
+	function confirmTone(): void {
+		const tone = pendingTone;
+		pendingTone = null;
+		if (tone) void runToneRewrite(tone);
+	}
+
+	function cancelTone(): void {
+		pendingTone = null;
+	}
 </script>
 
 {#if getDraftPane() !== null}
@@ -211,14 +254,22 @@
 				{/if}
 			</div>
 
-			<footer class="px-5 pt-3 pb-2 border-t border-border flex items-center justify-between gap-2">
-				<button
-					type="button"
-					disabled
-					title={regenPendingLabel}
-					aria-label={regenPendingLabel}
-					class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-subtle cursor-not-allowed min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-				>{t('inbox.draft_regenerate')}</button>
+			<footer class="px-5 pt-3 pb-2 border-t border-border flex flex-wrap items-center justify-between gap-2">
+				<div class="flex flex-wrap items-center gap-1.5">
+					{#each [
+						{ tone: 'shorter', label: 'inbox.draft_tone_shorter' },
+						{ tone: 'formal', label: 'inbox.draft_tone_formal' },
+						{ tone: 'warmer', label: 'inbox.draft_tone_warmer' },
+						{ tone: 'regenerate', label: 'inbox.draft_regenerate' },
+					] as const as opt (opt.tone)}
+						<button
+							type="button"
+							onclick={() => onToneClick(opt.tone)}
+							disabled={pane.generating || pane.draft === null}
+							class="rounded-[var(--radius-sm)] border border-border bg-bg hover:border-border-hover hover:text-text px-3 py-1.5 text-[12px] text-text-muted min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
+						>{t(opt.label)}</button>
+					{/each}
+				</div>
 				<button
 					type="button"
 					disabled
@@ -229,4 +280,39 @@
 			</footer>
 		</div>
 	</div>
+
+	{#if pendingTone !== null}
+		<div
+			class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4"
+			role="presentation"
+			onclick={cancelTone}
+		>
+			<div
+				role="alertdialog"
+				aria-modal="true"
+				aria-labelledby="tone-confirm-title"
+				tabindex="-1"
+				onclick={(e) => e.stopPropagation()}
+				onkeydown={(e) => { if (e.key === 'Escape') cancelTone(); }}
+				class="bg-bg-subtle border border-border shadow-xl max-w-md w-full p-6 outline-none rounded-t-[var(--radius-lg)] sm:rounded-[var(--radius-lg)] pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+			>
+				<h2 id="tone-confirm-title" class="text-base font-medium tracking-tight mb-2">
+					{t('inbox.draft_tone_confirm_title')}
+				</h2>
+				<p class="text-[13px] text-text-muted mb-4">{t('inbox.draft_tone_confirm_body')}</p>
+				<div class="flex justify-end gap-2">
+					<button
+						type="button"
+						onclick={cancelTone}
+						class="rounded-[var(--radius-sm)] border border-border bg-bg hover:border-border-hover px-3 py-1.5 text-[12px] text-text-muted hover:text-text min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+					>{t('inbox.draft_tone_confirm_cancel')}</button>
+					<button
+						type="button"
+						onclick={confirmTone}
+						class="rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+					>{t('inbox.draft_tone_confirm_continue')}</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 {/if}

@@ -12,9 +12,12 @@ import {
 	generateDraft as apiGenerateDraft,
 	getItemDraft as apiGetItemDraft,
 	updateDraft as apiUpdateDraft,
+	type DraftTone,
 	type GenerateDraftFailure,
 	type InboxDraft,
 } from '../api/inbox-drafts.js';
+
+export type { DraftTone };
 import { getApiBase } from '../config.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -516,6 +519,52 @@ export async function generateDraftForOpenPane(): Promise<
 	const created = await apiCreateDraft(getApiBase(), itemId, {
 		bodyMd: result.draft.bodyMd,
 		generatorVersion: result.draft.generatorVersion,
+	});
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
+	if (!created) {
+		draftPane = { ...draftPane, generating: false };
+		addToast(t('inbox.draft_error_create'), 'error');
+		return { ok: false, reason: { kind: 'network' } };
+	}
+	draftPane = {
+		...draftPane,
+		draft: created,
+		generating: false,
+		persistedBody: created.bodyMd,
+	};
+	return { ok: true };
+}
+
+/**
+ * Regenerate the open pane's draft with a tone modifier. Sends the
+ * caller's `currentBuffer` as the previous draft body (so unsaved live
+ * edits feed into the rewrite). On success the new draft is persisted
+ * via the existing create path with `supersededDraftId` set to the
+ * outgoing draft — the supersede chain stays under one writer and the
+ * UI gets a fresh `userEditsCount: 0` row to mirror.
+ */
+export async function regenerateDraftWithTone(
+	tone: DraftTone,
+	currentBuffer: string,
+): Promise<{ ok: true } | { ok: false; reason: GenerateDraftFailure }> {
+	const pane = draftPane;
+	if (!pane || !pane.draft) return { ok: false, reason: { kind: 'aborted' } };
+	const itemId = pane.itemId;
+	const supersededId = pane.draft.id;
+	draftPane = { ...pane, generating: true };
+	const result = await apiGenerateDraft(getApiBase(), itemId, {
+		tone,
+		previousBodyMd: currentBuffer,
+	});
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
+	if (!result.ok) {
+		draftPane = { ...draftPane, generating: false };
+		return { ok: false, reason: result.reason };
+	}
+	const created = await apiCreateDraft(getApiBase(), itemId, {
+		bodyMd: result.draft.bodyMd,
+		generatorVersion: result.draft.generatorVersion,
+		supersededDraftId: supersededId,
 	});
 	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
 	if (!created) {

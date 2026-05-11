@@ -3470,11 +3470,19 @@ export class LynoxHTTPApi {
       sendInbox(res, handleUpdateDraft(deps!, params['id']!, updateBody));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/draft/generate', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/draft/generate', async (_req, res, params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGenerateDraft } = await import('../integrations/inbox/api.js');
-      sendInbox(res, await handleGenerateDraft(deps!, params['id']!));
+      const b = (body ?? {}) as Record<string, unknown>;
+      const generateBody: import('../integrations/inbox/api.js').GenerateDraftBody = {};
+      if (typeof b['tone'] === 'string') {
+        generateBody.tone = b['tone'] as import('../integrations/inbox/api.js').GenerateDraftBody['tone'];
+      }
+      if (typeof b['previousBodyMd'] === 'string') {
+        generateBody.previousBodyMd = b['previousBodyMd'];
+      }
+      sendInbox(res, await handleGenerateDraft(deps!, params['id']!, generateBody));
     }));
 
     this.staticRoutes.set('GET /api/inbox/rules', async (req, res) => {

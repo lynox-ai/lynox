@@ -115,4 +115,61 @@ describe('generateDraft', () => {
     });
     await expect(generateDraft(SAMPLE, llm)).rejects.toThrow('429');
   });
+
+  it('uses the tone-rewrite template when previousBodyMd + tone are both set', async () => {
+    let captured: { system: string; user: string } | null = null;
+    const llm: LLMCaller = async ({ system, user }) => {
+      captured = { system, user };
+      return 'shortened';
+    };
+    await generateDraft(
+      { ...SAMPLE, previousBodyMd: 'Hi Max,\n\nMittwoch 15 Uhr passt mir gut, danke!', tone: 'shorter' },
+      llm,
+    );
+    expect(captured).not.toBeNull();
+    expect(captured!.user).toContain('<previous_draft>');
+    expect(captured!.user).toContain('Mittwoch 15 Uhr passt mir gut');
+    expect(captured!.user).toContain('halbiere');
+  });
+
+  it('falls back to first-time generation when tone is set but previousBodyMd is missing', async () => {
+    let captured: { user: string } | null = null;
+    const llm: LLMCaller = async ({ user }) => {
+      captured = { user };
+      return 'x';
+    };
+    await generateDraft({ ...SAMPLE, tone: 'shorter' }, llm);
+    expect(captured).not.toBeNull();
+    expect(captured!.user).not.toContain('<previous_draft>');
+    expect(captured!.user).toContain('Schreibe jetzt den Antwortentwurf');
+  });
+
+  it('falls back to first-time generation when previousBodyMd is set but tone is missing', async () => {
+    let captured: { user: string } | null = null;
+    const llm: LLMCaller = async ({ user }) => {
+      captured = { user };
+      return 'x';
+    };
+    await generateDraft({ ...SAMPLE, previousBodyMd: 'previous draft' }, llm);
+    expect(captured).not.toBeNull();
+    expect(captured!.user).not.toContain('<previous_draft>');
+  });
+
+  it('honours each tone modifier with its own instruction', async () => {
+    const captured: string[] = [];
+    const llm: LLMCaller = async ({ user }) => {
+      captured.push(user);
+      return 'x';
+    };
+    for (const tone of ['shorter', 'formal', 'warmer', 'regenerate'] as const) {
+      await generateDraft(
+        { ...SAMPLE, previousBodyMd: 'draft', tone },
+        llm,
+      );
+    }
+    expect(captured[0]).toContain('halbiere');
+    expect(captured[1]).toContain('förmlicheren');
+    expect(captured[2]).toContain('wärmeren');
+    expect(captured[3]).toContain('alternative Antwort');
+  });
 });

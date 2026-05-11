@@ -306,11 +306,32 @@ function unprocessable(message: string): ApiResponse {
  */
 const MIN_BODY_FOR_GENERATION = 20;
 
+const VALID_TONES = ['shorter', 'formal', 'warmer', 'regenerate'] as const;
+type ValidTone = typeof VALID_TONES[number];
+function isValidTone(value: unknown): value is ValidTone {
+  return typeof value === 'string' && (VALID_TONES as ReadonlyArray<string>).includes(value);
+}
+
+/** Same defense-in-depth ceiling the per-field cap uses; rewrite prompts must not exceed it. */
+const MAX_PREVIOUS_BODY_BYTES = 256 * 1024;
+
+export interface GenerateDraftBody {
+  /** Tone modifier — only honoured together with `previousBodyMd`. */
+  tone?: 'shorter' | 'formal' | 'warmer' | 'regenerate' | undefined;
+  /** Caller-supplied previous draft (typically the live editor buffer). */
+  previousBodyMd?: string | undefined;
+}
+
 /**
  * Generate a draft body via the inbox LLM. Does NOT persist — the UI
  * follows up with `handleCreateDraft` to commit the resulting bodyMd
  * into `inbox_drafts`. This split lets the UI show a "regenerate"
  * affordance without polluting the supersede chain.
+ *
+ * When `body.tone` + `body.previousBodyMd` are both set, the generator
+ * rewrites the previous draft using the chosen tone modifier (the
+ * "Kürzer / Förmlicher / Wärmer / Regenerate" flow). Either field
+ * alone falls back to first-time generation.
  *
  * Returns 503 when the LLM caller is not wired (e.g. flag on but no
  * provider credentials). Returns 422 when the cached body is missing
@@ -320,8 +341,18 @@ const MIN_BODY_FOR_GENERATION = 20;
 export async function handleGenerateDraft(
   deps: InboxApiDeps,
   itemId: string,
+  body: GenerateDraftBody = {},
 ): Promise<ApiResponse> {
   if (!deps.llm) return unavailable('draft generator not configured');
+  if (body.tone !== undefined && !isValidTone(body.tone)) {
+    return bad(`invalid tone: ${String(body.tone)}`);
+  }
+  if (body.previousBodyMd !== undefined) {
+    if (typeof body.previousBodyMd !== 'string') return bad('previousBodyMd must be a string');
+    if (Buffer.byteLength(body.previousBodyMd, 'utf8') > MAX_PREVIOUS_BODY_BYTES) {
+      return tooLarge(`previousBodyMd exceeds ${MAX_PREVIOUS_BODY_BYTES} bytes`);
+    }
+  }
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
   // Phase-2 v1 supports the email channel only — WhatsApp body lookup
@@ -341,17 +372,17 @@ export async function handleGenerateDraft(
   // surfaces a generic greeting via empty fromAddress and relies on the
   // cached body's leading text. A future schema enhancement can
   // preserve From and feed it here.
-  const result = await generateDraft(
-    {
-      item: { id: item.id, reasonDe: item.reasonDe, channel: item.channel },
-      fromAddress: '',
-      accountAddress: account.address,
-      accountDisplayName: account.displayName,
-      subject: undefined,
-      body: cached.bodyMd,
-    },
-    deps.llm,
-  );
+  const input: Parameters<typeof generateDraft>[0] = {
+    item: { id: item.id, reasonDe: item.reasonDe, channel: item.channel },
+    fromAddress: '',
+    accountAddress: account.address,
+    accountDisplayName: account.displayName,
+    subject: undefined,
+    body: cached.bodyMd,
+  };
+  if (body.previousBodyMd !== undefined) input.previousBodyMd = body.previousBodyMd;
+  if (body.tone !== undefined) input.tone = body.tone;
+  const result = await generateDraft(input, deps.llm);
   return {
     status: 200,
     body: { bodyMd: result.bodyMd, generatorVersion: result.generatorVersion, bodyTruncated: result.bodyTruncated },

@@ -26,6 +26,17 @@ import { sanitizeBody, sanitizeHeader } from './classifier/sanitize.js';
  */
 export const GENERATOR_VERSION = 'haiku-2026-05';
 
+/**
+ * Tone modifier for the regenerate flow. The PRD names four:
+ *   - shorter / formal / warmer rewrite an existing draft on the same
+ *     content, applying a delta to length / register / warmth.
+ *   - regenerate is the modifier-less re-roll — same body, fresh draft.
+ *
+ * Absence of a tone means "first-time generation": no previous draft is
+ * passed; the prompt produces the initial scaffold from the cached body.
+ */
+export type DraftTone = 'shorter' | 'formal' | 'warmer' | 'regenerate';
+
 export interface GenerateDraftInput {
   /** The inbox item the user is responding to. */
   item: Pick<InboxItem, 'id' | 'reasonDe' | 'channel'>;
@@ -44,6 +55,10 @@ export interface GenerateDraftInput {
    * see, by design).
    */
   body: string;
+  /** When set, the prompt rewrites this draft using the `tone` modifier. */
+  previousBodyMd?: string | undefined;
+  /** Tone modifier — only honoured when `previousBodyMd` is also set. */
+  tone?: DraftTone | undefined;
 }
 
 export interface GenerateDraftOptions {
@@ -82,8 +97,28 @@ Vorspann, KEINE Erklärung — nur den Text, der direkt in den Editor \
 des Nutzers gehen soll.`;
 
 /**
+ * Tone-specific instruction line. Untrusted-data-isolation is unchanged —
+ * the tone is trusted system data, not user input from the mail body.
+ */
+function toneInstruction(tone: DraftTone): string {
+  switch (tone) {
+    case 'shorter':
+      return 'Schreibe den Entwurf neu — halte die Aussage und Höflichkeit, halbiere aber wo möglich die Länge. Streiche Füllwörter und doppelte Sätze.';
+    case 'formal':
+      return 'Schreibe den Entwurf neu in einem förmlicheren Register (Sehr geehrte/r …, Anredeform „Sie", knappe Sätze, kein Smalltalk).';
+    case 'warmer':
+      return 'Schreibe den Entwurf neu in einem wärmeren, persönlicheren Register. Behalte den fachlichen Inhalt, aber zeige menschliches Interesse.';
+    case 'regenerate':
+      return 'Verfasse eine alternative Antwort zum gleichen Sachverhalt — gleicher Inhalt, anderer Wortlaut.';
+  }
+}
+
+/**
  * Build the system + user message pair for one draft. Pure function —
- * no I/O. Tests can call it without spinning up the LLM caller.
+ * no I/O. Tests can call it without spinning up the LLM caller. When
+ * `previousBodyMd` + `tone` are set, the prompt asks the model to
+ * rewrite the previous draft with the chosen modifier; otherwise it
+ * produces a first-time scaffold from the cached body.
  */
 export function buildGeneratorPrompt(input: GenerateDraftInput): {
   system: string;
@@ -98,8 +133,14 @@ export function buildGeneratorPrompt(input: GenerateDraftInput): {
   const sanitized = sanitizeBody(input.body);
 
   const senderLine = fromName ? `${fromName} <${fromAddr}>` : fromAddr;
+  // The previous draft is trusted: the user authored it (or the model
+  // did and the user accepted it). It still goes inside an
+  // <previous_draft> block so the model's parser stays unambiguous,
+  // but the no-instructions rule does NOT apply to that block.
+  const previousBody = sanitizeBody(input.previousBodyMd ?? '');
+  const hasPrevious = input.previousBodyMd !== undefined && previousBody.body.length > 0 && input.tone !== undefined;
 
-  const user = [
+  const lines: string[] = [
     `Antwortendes Postfach: ${accountName} <${accountAddr}>`,
     `Empfänger der Antwort: ${senderLine}`,
     `Betreff der Original-Mail: ${subject || '(kein Betreff)'}`,
@@ -111,10 +152,22 @@ export function buildGeneratorPrompt(input: GenerateDraftInput): {
     sanitized.body || '(leerer Body)',
     '</untrusted_data>',
     '',
-    'Schreibe jetzt den Antwortentwurf.',
-  ].join('\n');
+  ];
 
-  return { system: SYSTEM_PROMPT, user, bodyTruncated: sanitized.truncated };
+  if (hasPrevious && input.tone) {
+    lines.push(
+      'Bisheriger Entwurf des Nutzers:',
+      '<previous_draft>',
+      previousBody.body,
+      '</previous_draft>',
+      '',
+      toneInstruction(input.tone),
+    );
+  } else {
+    lines.push('Schreibe jetzt den Antwortentwurf.');
+  }
+
+  return { system: SYSTEM_PROMPT, user: lines.join('\n'), bodyTruncated: sanitized.truncated };
 }
 
 /**

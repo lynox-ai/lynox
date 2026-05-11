@@ -91,20 +91,40 @@ export type GenerateDraftFailure =
 	| { kind: 'aborted' }
 	| { kind: 'network' };
 
+export type DraftTone = 'shorter' | 'formal' | 'warmer' | 'regenerate';
+
+export interface GenerateDraftOpts {
+	/** Tone modifier for the regenerate flow. Omit for first-time generation. */
+	tone?: DraftTone | undefined;
+	/** Previous draft body to rewrite — typically the live editor buffer. */
+	previousBodyMd?: string | undefined;
+}
+
 /**
  * Ask the backend to LLM-draft a reply for an item. Returns the
  * generated body + version stamp on success. Discriminated failures
  * let the caller decide between "fall back to manual starter" (503 /
  * 501 / 422) and "abort + toast" (404 / network).
+ *
+ * When `opts.tone` + `opts.previousBodyMd` are both set, the backend
+ * rewrites the previous draft with the chosen modifier — the
+ * Kürzer / Förmlicher / Wärmer / Regenerate flow.
  */
 export async function generateDraft(
 	apiBase: string,
 	itemId: string,
+	opts: GenerateDraftOpts = {},
 ): Promise<{ ok: true; draft: GeneratedDraft } | { ok: false; reason: GenerateDraftFailure }> {
 	try {
-		const res = await fetch(`${apiBase}/inbox/items/${encodeURIComponent(itemId)}/draft/generate`, {
-			method: 'POST',
-		});
+		const init: RequestInit = { method: 'POST' };
+		if (opts.tone !== undefined || opts.previousBodyMd !== undefined) {
+			init.headers = { 'Content-Type': 'application/json' };
+			const body: Record<string, string> = {};
+			if (opts.tone !== undefined) body['tone'] = opts.tone;
+			if (opts.previousBodyMd !== undefined) body['previousBodyMd'] = opts.previousBodyMd;
+			init.body = JSON.stringify(body);
+		}
+		const res = await fetch(`${apiBase}/inbox/items/${encodeURIComponent(itemId)}/draft/generate`, init);
 		if (res.ok) {
 			const data = (await res.json()) as Partial<GeneratedDraft>;
 			if (typeof data.bodyMd === 'string' && typeof data.generatorVersion === 'string') {
