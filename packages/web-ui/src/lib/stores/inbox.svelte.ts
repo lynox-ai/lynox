@@ -342,6 +342,62 @@ export function startInboxVisibilityRefresh(): () => void {
 	return () => document.removeEventListener('visibilitychange', handler);
 }
 
+interface MailAccountSummary {
+	id: string;
+	address?: string | undefined;
+}
+
+/**
+ * Trigger the cold-start backfill for every connected mail account. Used by
+ * the empty-state button when the unified-inbox flag was flipped on AFTER the
+ * accounts were already connected — `onAccountAdded` had no inbox runtime to
+ * dispatch to at that point so no backfill ever ran.
+ *
+ * Force-true bypasses the per-account `hasAnyItemForAccount` short-circuit so
+ * an operator can re-trigger even if a previous run partially populated the
+ * inbox. Progress shows up on the cold-start banner via the existing polling.
+ *
+ * Returns the number of accounts that were successfully scheduled. Empty
+ * arrays / fetch errors return 0 without throwing — the caller (a button
+ * click handler) renders an inline toast on 0.
+ */
+export async function runColdStartBackfillForAllAccounts(): Promise<number> {
+	let scheduled = 0;
+	try {
+		const accountsRes = await fetch(`${getApiBase()}/mail/accounts`);
+		if (!accountsRes.ok) {
+			addToast(t('inbox.cold_start_trigger_no_accounts'), 'error');
+			return 0;
+		}
+		const body = (await accountsRes.json()) as { accounts?: MailAccountSummary[] };
+		const accounts = Array.isArray(body.accounts) ? body.accounts : [];
+		if (accounts.length === 0) {
+			addToast(t('inbox.cold_start_trigger_no_accounts'), 'info');
+			return 0;
+		}
+		for (const account of accounts) {
+			if (typeof account.id !== 'string' || account.id.length === 0) continue;
+			const res = await fetch(`${getApiBase()}/inbox/cold-start/run`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ accountId: account.id, force: true }),
+			});
+			if (res.status === 202) scheduled += 1;
+		}
+	} catch {
+		// fall through; caller renders the toast on scheduled === 0
+	}
+	if (scheduled > 0) {
+		addToast(t('inbox.cold_start_trigger_scheduled'), 'success');
+		// Kick the snapshot once so the banner appears without waiting for the
+		// next poll tick.
+		void loadColdStart();
+	} else {
+		addToast(t('inbox.cold_start_trigger_failed'), 'error');
+	}
+	return scheduled;
+}
+
 /** Fetch a single cold-start snapshot. Returns true on a successful fetch. */
 export async function loadColdStart(): Promise<boolean> {
 	try {
