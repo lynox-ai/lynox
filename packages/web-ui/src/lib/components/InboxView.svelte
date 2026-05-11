@@ -12,6 +12,7 @@
 		loadInboxCounts,
 		loadInboxItems,
 		openDraftPane,
+		runColdStartBackfillForAllAccounts,
 		setItemAction,
 		setItemSnooze,
 		startColdStartPolling,
@@ -32,6 +33,7 @@
 	let openSnoozeFor = $state<string | null>(null);
 	let selectedItemId = $state<string | null>(null);
 	let helpOpen = $state(false);
+	let coldStartButtonBusy = $state(false);
 	// Gate items-fetch on counts-loaded so the $effect doesn't race onMount's
 	// initial load (without this the bucket gets fetched twice on mount).
 	let countsLoaded = $state(false);
@@ -318,6 +320,24 @@
 					{:else}{t('inbox.empty_handled')}
 					{/if}
 				</p>
+				{@const allEmpty = counts.requires_user === 0 && counts.draft_ready === 0 && counts.auto_handled === 0}
+				{#if allEmpty}
+					<div class="mt-3">
+						<button
+							type="button"
+							onclick={async () => {
+								coldStartButtonBusy = true;
+								try { await runColdStartBackfillForAllAccounts(); }
+								finally { coldStartButtonBusy = false; }
+							}}
+							disabled={coldStartButtonBusy}
+							class="text-[12px] px-3 py-1.5 rounded-[var(--radius-sm)] border border-border hover:bg-bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+						>
+							{coldStartButtonBusy ? t('inbox.cold_start_trigger_busy') : t('inbox.cold_start_trigger_button')}
+						</button>
+						<p class="text-[11px] text-text-subtle mt-1.5">{t('inbox.cold_start_trigger_hint')}</p>
+					</div>
+				{/if}
 			{:else}
 				<ul class="space-y-2" role="list">
 					{#each items as item (item.id)}
