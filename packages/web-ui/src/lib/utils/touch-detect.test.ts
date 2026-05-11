@@ -27,7 +27,7 @@ describe('isTouchPrimary', () => {
 	});
 
 	it('returns false when matchMedia is missing', () => {
-		installWindow(undefined);
+		__resetTouchPrimaryCache();
 		(globalThis as { window?: unknown }).window = {};
 		expect(isTouchPrimary()).toBe(false);
 	});

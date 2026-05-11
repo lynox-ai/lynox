@@ -45,6 +45,11 @@ describe('keyToInboxAction — guards', () => {
 		expect(keyToInboxAction(ev({ key: 'j', altKey: true }))).toBeNull();
 	});
 
+	it('ignores combos that pair Shift with another modifier', () => {
+		expect(keyToInboxAction(ev({ key: 'a', ctrlKey: true, shiftKey: true }))).toBeNull();
+		expect(keyToInboxAction(ev({ key: 'Escape', metaKey: true }))).toBeNull();
+	});
+
 	it('does not treat Shift alone as a modifier (capital letters still match)', () => {
 		expect(keyToInboxAction(ev({ key: 'A', shiftKey: true }))?.kind).toBe('archive');
 	});

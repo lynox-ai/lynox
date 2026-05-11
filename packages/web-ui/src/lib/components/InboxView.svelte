@@ -72,43 +72,49 @@
 		return getInboxItems(zone).filter((i) => !i.userAction);
 	}
 
-	function selectedIndex(): number {
-		if (selectedItemId === null) return -1;
-		return visibleItems().findIndex((i) => i.id === selectedItemId);
-	}
-
 	async function moveSelection(delta: 1 | -1): Promise<void> {
 		const items = visibleItems();
 		if (items.length === 0) {
 			selectedItemId = null;
 			return;
 		}
-		const current = selectedIndex();
-		const nextIdx = current === -1
+		const currentIdx = selectedItemId === null
+			? -1
+			: items.findIndex((i) => i.id === selectedItemId);
+		const nextIdx = currentIdx === -1
 			? (delta === 1 ? 0 : items.length - 1)
-			: Math.max(0, Math.min(items.length - 1, current + delta));
-		selectedItemId = items[nextIdx]?.id ?? null;
+			: Math.max(0, Math.min(items.length - 1, currentIdx + delta));
+		// Capture the resolved id BEFORE awaiting tick so a rapid second J/K
+		// can't redirect scrollIntoView to a stale target.
+		const targetId = items[nextIdx]?.id ?? null;
+		selectedItemId = targetId;
+		if (targetId === null) return;
 		await tick();
-		if (selectedItemId !== null && typeof document !== 'undefined') {
-			document
-				.querySelector(`[data-inbox-item-id="${selectedItemId}"]`)
-				?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-		}
+		if (typeof document === 'undefined') return;
+		// CSS.escape: the id comes from the API and is well-typed today, but
+		// a malformed upstream value containing `"` or `]` would otherwise
+		// corrupt the attribute selector. `behavior:'auto'` keeps rapid J/K
+		// from stacking smooth-scroll animations.
+		document
+			.querySelector(`[data-inbox-item-id="${CSS.escape(targetId)}"]`)
+			?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
 	}
 
 	async function archiveSelected(): Promise<void> {
-		const item = visibleItems().find((i) => i.id === selectedItemId);
+		const before = visibleItems();
+		const idx = selectedItemId === null
+			? -1
+			: before.findIndex((i) => i.id === selectedItemId);
+		if (idx === -1) return;
+		const item = before[idx];
 		if (!item) return;
-		const prevIdx = selectedIndex();
 		await setItemAction(item.id, 'archived');
 		// Step selection to the next sibling (or previous when at end), so
 		// J/K can keep rolling through the queue without re-targeting.
 		const after = visibleItems();
-		if (after.length === 0) {
-			selectedItemId = null;
-		} else {
-			selectedItemId = after[Math.min(prevIdx, after.length - 1)]?.id ?? null;
-		}
+		selectedItemId = after.length === 0
+			? null
+			: after[Math.min(idx, after.length - 1)]?.id ?? null;
 	}
 
 	function openSnoozeForSelected(): void {
@@ -131,6 +137,8 @@
 	}
 
 	function onKeyDown(event: KeyboardEvent): void {
+		// Block synthetic keydowns — only real user input can mutate the inbox.
+		if (!event.isTrusted) return;
 		if (shouldIgnoreShortcut(event.target)) return;
 		// Suppress shortcuts in the other zones — the actions are meaningless
 		// there. The help overlay (`?`) and `Esc` stay available everywhere.

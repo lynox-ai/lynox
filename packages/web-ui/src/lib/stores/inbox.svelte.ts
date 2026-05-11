@@ -196,19 +196,22 @@ export async function loadInboxItems(bucket: InboxBucket, limit = 50, offset = 0
 	} catch {
 		addToast(t('inbox.error_load'), 'error');
 	} finally {
-		loadingBucket = null;
+		// Only clear if we still own the slot — a faster zone switch can
+		// have already started a new load and reassigned loadingBucket.
+		if (loadingBucket === bucket) loadingBucket = null;
 	}
 }
 
 /**
  * Apply a user action (archive / reply / snooze / clear-to-unhandled).
  * Pass `null` to undo a prior action. Optimistic — rolls back on error.
+ * Returns true when the server accepted the action.
  */
 export async function setItemAction(
 	id: string,
 	action: InboxUserAction | null,
 	at?: Date | undefined,
-): Promise<void> {
+): Promise<boolean> {
 	const found = findItemAcrossBuckets(id);
 	const snapshot = found
 		? { userAction: found.item.userAction, userActionAt: found.item.userActionAt }
@@ -228,17 +231,18 @@ export async function setItemAction(
 			found.item.userAction = snapshot.userAction;
 			found.item.userActionAt = snapshot.userActionAt;
 		}
-		return;
+		return false;
 	}
 	// UNDO (action=null) needs a reload to find which bucket the item moved back to.
 	if (action === null) {
 		lastAction = null;
 		await Promise.all([loadInboxCounts(), loadInboxItems('requires_user')]);
 	} else if (found) {
-		itemsByBucket['requires_user'] = itemsByBucket['requires_user'].filter((i) => i.id !== id);
+		itemsByBucket[found.bucket] = itemsByBucket[found.bucket].filter((i) => i.id !== id);
 		if (action === 'archived') lastAction = { kind: 'archive', itemId: id };
 		await loadInboxCounts();
 	}
+	return true;
 }
 
 export async function setItemSnooze(
@@ -246,7 +250,8 @@ export async function setItemSnooze(
 	until: Date | null,
 	condition?: string | null,
 	unsnoozeOnReply = true,
-): Promise<void> {
+): Promise<boolean> {
+	const found = findItemAcrossBuckets(id);
 	const res = await fetch(`${getApiBase()}/inbox/items/${id}/snooze`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
@@ -258,26 +263,30 @@ export async function setItemSnooze(
 	});
 	if (!res.ok) {
 		addToast(t('inbox.error_snooze'), 'error');
-		return;
+		return false;
 	}
 	if (until !== null) {
 		lastAction = { kind: 'snooze', itemId: id };
 	} else {
 		lastAction = null;
 	}
-	itemsByBucket['requires_user'] = itemsByBucket['requires_user'].filter((i) => i.id !== id);
+	if (found) {
+		itemsByBucket[found.bucket] = itemsByBucket[found.bucket].filter((i) => i.id !== id);
+	}
 	await loadInboxCounts();
+	return true;
 }
 
 /**
  * Reverse the most recent undoable action (archive or snooze). No-op when
- * the slot is empty. The slot clears on success regardless of the inverse
- * request's outcome — repeated Z presses must not chain into older actions.
+ * the slot is empty. The slot survives an inverse failure so the user can
+ * press Z again once the network recovers — `setItem*` only mutates
+ * `lastAction` on its own success path, so a failed inverse leaves the
+ * original entry intact.
  */
 export async function undoLastAction(): Promise<void> {
 	const action = lastAction;
 	if (!action) return;
-	lastAction = null;
 	if (action.kind === 'archive') {
 		await setItemAction(action.itemId, null);
 	} else {
