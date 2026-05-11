@@ -1048,6 +1048,19 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.cold_start_failed_reason': { de: 'Aufbau abgebrochen: {error}', en: 'Setup failed: {error}' },
 	'inbox.cold_start_dismiss': { de: 'Banner ausblenden', en: 'Dismiss banner' },
 	'inbox.cold_start_aria_running': { de: 'Cold-Start läuft', en: 'Cold-start in progress' },
+	'inbox.shortcuts_hint': { de: '? für Tastaturkürzel', en: '? for keyboard shortcuts' },
+	'inbox.shortcuts_title': { de: 'Tastaturkürzel', en: 'Keyboard shortcuts' },
+	'inbox.shortcuts_intro': { de: 'Im Needs-You-Tab verfügbar — solange du nicht in einem Eingabefeld bist.', en: 'Available in the Needs-You tab — while you are not inside a text field.' },
+	'inbox.shortcuts_next': { de: 'Nächste Mail auswählen', en: 'Select next mail' },
+	'inbox.shortcuts_prev': { de: 'Vorherige Mail auswählen', en: 'Select previous mail' },
+	'inbox.shortcuts_archive': { de: 'Auswahl archivieren', en: 'Archive selection' },
+	'inbox.shortcuts_snooze': { de: 'Snooze-Menü öffnen', en: 'Open snooze menu' },
+	'inbox.shortcuts_undo': { de: 'Letzte Aktion rückgängig', en: 'Undo last action' },
+	'inbox.shortcuts_close': { de: 'Menü / Overlay schließen', en: 'Close menu / overlay' },
+	'inbox.shortcuts_help': { de: 'Diese Hilfe öffnen / schließen', en: 'Open / close this help' },
+	'inbox.shortcuts_pending': { de: 'Antworten (R) und Senden (⌘+Enter) folgen mit der Draft-Pane.', en: 'Reply (R) and send (⌘+Enter) arrive with the draft pane.' },
+	'inbox.shortcuts_close_button': { de: 'Schließen', en: 'Close' },
+	'inbox.undo_empty': { de: 'Nichts zum Rückgängigmachen', en: 'Nothing to undo' },
 };
 
 export function setLocale(locale: Locale): void {

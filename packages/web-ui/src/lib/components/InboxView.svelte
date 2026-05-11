@@ -1,9 +1,10 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import {
 		getInboxCounts,
 		getInboxItems,
+		getLastAction,
 		isInboxAvailable,
 		isLoading,
 		loadInboxCounts,
@@ -12,20 +13,29 @@
 		setItemSnooze,
 		startColdStartPolling,
 		startInboxVisibilityRefresh,
+		undoLastAction,
 		type InboxBucket,
 		type InboxItem,
 	} from '../stores/inbox.svelte.js';
-	import { accountShortLabel } from '../util/account-label.js';
+	import { addToast } from '../stores/toast.svelte.js';
+	import { accountShortLabel } from '../utils/account-label.js';
+	import { keyToInboxAction, shouldIgnoreShortcut } from '../utils/inbox-shortcuts.js';
+	import { isTouchPrimary } from '../utils/touch-detect.js';
 	import ColdStartBanner from './ColdStartBanner.svelte';
+	import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.svelte';
 
 	let zone = $state<InboxBucket>('requires_user');
 	let openSnoozeFor = $state<string | null>(null);
+	let selectedItemId = $state<string | null>(null);
+	let helpOpen = $state(false);
 	// Gate items-fetch on counts-loaded so the $effect doesn't race onMount's
 	// initial load (without this the bucket gets fetched twice on mount).
 	let countsLoaded = $state(false);
+	const touchPrimary = isTouchPrimary();
 
 	let cleanupVisibility: (() => void) | undefined;
 	let cleanupColdStart: (() => void) | undefined;
+	let cleanupKeyHandler: (() => void) | undefined;
 
 	onMount(async () => {
 		await loadInboxCounts();
@@ -34,19 +44,120 @@
 		// banner; the endpoint returns 503 + empty snapshot while disabled.
 		cleanupColdStart = startColdStartPolling();
 		cleanupVisibility = startInboxVisibilityRefresh();
+		// Skip the listener entirely on touch-primary devices — the help
+		// affordance is keyboard-only and the events would be dead weight.
+		if (!touchPrimary && typeof window !== 'undefined') {
+			window.addEventListener('keydown', onKeyDown);
+			cleanupKeyHandler = () => window.removeEventListener('keydown', onKeyDown);
+		}
 	});
 
 	onDestroy(() => {
 		cleanupVisibility?.();
 		cleanupColdStart?.();
+		cleanupKeyHandler?.();
 	});
 
 	$effect(() => {
 		if (!countsLoaded) return;
 		if (zone && isInboxAvailable()) {
 			void loadInboxItems(zone);
+			// Selection only makes sense for the Needs-You actionable list.
+			if (zone !== 'requires_user') selectedItemId = null;
+			openSnoozeFor = null;
 		}
 	});
+
+	function visibleItems(): InboxItem[] {
+		return getInboxItems(zone).filter((i) => !i.userAction);
+	}
+
+	function selectedIndex(): number {
+		if (selectedItemId === null) return -1;
+		return visibleItems().findIndex((i) => i.id === selectedItemId);
+	}
+
+	async function moveSelection(delta: 1 | -1): Promise<void> {
+		const items = visibleItems();
+		if (items.length === 0) {
+			selectedItemId = null;
+			return;
+		}
+		const current = selectedIndex();
+		const nextIdx = current === -1
+			? (delta === 1 ? 0 : items.length - 1)
+			: Math.max(0, Math.min(items.length - 1, current + delta));
+		selectedItemId = items[nextIdx]?.id ?? null;
+		await tick();
+		if (selectedItemId !== null && typeof document !== 'undefined') {
+			document
+				.querySelector(`[data-inbox-item-id="${selectedItemId}"]`)
+				?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		}
+	}
+
+	async function archiveSelected(): Promise<void> {
+		const item = visibleItems().find((i) => i.id === selectedItemId);
+		if (!item) return;
+		const prevIdx = selectedIndex();
+		await setItemAction(item.id, 'archived');
+		// Step selection to the next sibling (or previous when at end), so
+		// J/K can keep rolling through the queue without re-targeting.
+		const after = visibleItems();
+		if (after.length === 0) {
+			selectedItemId = null;
+		} else {
+			selectedItemId = after[Math.min(prevIdx, after.length - 1)]?.id ?? null;
+		}
+	}
+
+	function openSnoozeForSelected(): void {
+		const item = visibleItems().find((i) => i.id === selectedItemId);
+		if (!item) return;
+		openSnoozeFor = item.id;
+	}
+
+	async function undoOrHint(): Promise<void> {
+		if (getLastAction() === null) {
+			addToast(t('inbox.undo_empty'), 'info');
+			return;
+		}
+		await undoLastAction();
+	}
+
+	function closeOverlays(): void {
+		if (helpOpen) { helpOpen = false; return; }
+		if (openSnoozeFor !== null) { openSnoozeFor = null; return; }
+	}
+
+	function onKeyDown(event: KeyboardEvent): void {
+		if (shouldIgnoreShortcut(event.target)) return;
+		// Suppress shortcuts in the other zones — the actions are meaningless
+		// there. The help overlay (`?`) and `Esc` stay available everywhere.
+		const action = keyToInboxAction(event);
+		if (!action) return;
+		if (action.kind === 'toggle_help') {
+			event.preventDefault();
+			helpOpen = !helpOpen;
+			return;
+		}
+		if (action.kind === 'close') {
+			if (helpOpen || openSnoozeFor !== null) {
+				event.preventDefault();
+				closeOverlays();
+			}
+			return;
+		}
+		if (zone !== 'requires_user') return;
+		event.preventDefault();
+		switch (action.kind) {
+			case 'next': void moveSelection(1); break;
+			case 'prev': void moveSelection(-1); break;
+			case 'archive': void archiveSelected(); break;
+			case 'snooze': openSnoozeForSelected(); break;
+			case 'undo': void undoOrHint(); break;
+		}
+	}
 
 	function dateFormat(iso: string): string {
 		const d = new Date(iso);
@@ -87,6 +198,14 @@
 <div class="p-6 max-w-3xl mx-auto" role="region" aria-label={t('inbox.title')} aria-live="polite">
 	<div class="flex items-center justify-between mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('inbox.title')}</h1>
+		{#if !touchPrimary}
+			<button
+				type="button"
+				onclick={() => (helpOpen = true)}
+				class="text-[11px] text-text-subtle hover:text-text-muted font-mono"
+				aria-label={t('inbox.shortcuts_title')}
+			>{t('inbox.shortcuts_hint')}</button>
+		{/if}
 	</div>
 
 	{#if !isInboxAvailable()}
@@ -148,8 +267,10 @@
 					{#each items as item (item.id)}
 						<li
 							role="listitem"
+							data-inbox-item-id={item.id}
 							aria-label={`${zone === 'requires_user' ? t('inbox.zone_needs_you') : ''}: ${item.reasonDe}`}
-							class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 transition-colors"
+							aria-current={zone === 'requires_user' && selectedItemId === item.id ? 'true' : undefined}
+							class="rounded-[var(--radius-md)] border bg-bg-subtle px-4 py-3 transition-colors {zone === 'requires_user' && selectedItemId === item.id ? 'border-accent' : 'border-border'}"
 						>
 							<div class="flex items-start justify-between gap-3">
 								<div class="min-w-0 flex-1">
@@ -199,3 +320,6 @@
 		{/if}
 	{/if}
 </div>
+
+<KeyboardShortcutsHelp open={helpOpen} onClose={() => (helpOpen = false)} />
+

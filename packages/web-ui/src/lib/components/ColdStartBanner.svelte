@@ -15,7 +15,7 @@
 		type ColdStartActiveEntry,
 		type ColdStartRecentEntry,
 	} from '../stores/inbox.svelte.js';
-	import { accountShortLabel } from '../util/account-label.js';
+	import { accountShortLabel } from '../utils/account-label.js';
 
 	// String.prototype.replace interprets $&/$'/$`/$n in its second arg when it
 	// is a string. Wrapping the substitution in a function avoids that — error

@@ -105,6 +105,12 @@ let available = $state(true);
 let coldStart = $state<ColdStartSnapshot>(EMPTY_COLD_START);
 let dismissedColdStart = $state<Record<string, true>>({});
 
+export interface UndoableAction {
+	kind: 'archive' | 'snooze';
+	itemId: string;
+}
+let lastAction = $state<UndoableAction | null>(null);
+
 export function getInboxCounts(): InboxCounts {
 	return counts;
 }
@@ -143,6 +149,10 @@ export function getVisibleColdStartRecent(): ColdStartRecentEntry[] {
 
 export function dismissColdStartForAccount(accountId: string): void {
 	dismissedColdStart = { ...dismissedColdStart, [accountId]: true };
+}
+
+export function getLastAction(): UndoableAction | null {
+	return lastAction;
 }
 
 /** Load per-bucket counts. Returns false when the runtime is not wired (flag off). */
@@ -222,9 +232,11 @@ export async function setItemAction(
 	}
 	// UNDO (action=null) needs a reload to find which bucket the item moved back to.
 	if (action === null) {
+		lastAction = null;
 		await Promise.all([loadInboxCounts(), loadInboxItems('requires_user')]);
 	} else if (found) {
 		itemsByBucket['requires_user'] = itemsByBucket['requires_user'].filter((i) => i.id !== id);
+		if (action === 'archived') lastAction = { kind: 'archive', itemId: id };
 		await loadInboxCounts();
 	}
 }
@@ -248,8 +260,29 @@ export async function setItemSnooze(
 		addToast(t('inbox.error_snooze'), 'error');
 		return;
 	}
+	if (until !== null) {
+		lastAction = { kind: 'snooze', itemId: id };
+	} else {
+		lastAction = null;
+	}
 	itemsByBucket['requires_user'] = itemsByBucket['requires_user'].filter((i) => i.id !== id);
 	await loadInboxCounts();
+}
+
+/**
+ * Reverse the most recent undoable action (archive or snooze). No-op when
+ * the slot is empty. The slot clears on success regardless of the inverse
+ * request's outcome — repeated Z presses must not chain into older actions.
+ */
+export async function undoLastAction(): Promise<void> {
+	const action = lastAction;
+	if (!action) return;
+	lastAction = null;
+	if (action.kind === 'archive') {
+		await setItemAction(action.itemId, null);
+	} else {
+		await setItemSnooze(action.itemId, null);
+	}
 }
 
 export async function loadItemAudit(id: string): Promise<InboxAuditEntry[]> {

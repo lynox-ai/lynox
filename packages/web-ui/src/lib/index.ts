@@ -32,6 +32,7 @@ export { default as MigrationWizard } from './components/MigrationWizard.svelte'
 export { default as PromptAnchor } from './components/PromptAnchor.svelte';
 export { default as InboxView } from './components/InboxView.svelte';
 export { default as ColdStartBanner } from './components/ColdStartBanner.svelte';
+export { default as KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp.svelte';
 
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';
@@ -139,6 +140,8 @@ export {
 	getVisibleColdStartActive,
 	getVisibleColdStartRecent,
 	dismissColdStartForAccount,
+	getLastAction,
+	undoLastAction,
 } from './stores/inbox.svelte.js';
 export type {
 	InboxItem,
@@ -152,6 +155,7 @@ export type {
 	ColdStartActiveEntry,
 	ColdStartRecentEntry,
 	ColdStartSnapshot,
+	UndoableAction,
 } from './stores/inbox.svelte.js';
 
 // Push Notifications
