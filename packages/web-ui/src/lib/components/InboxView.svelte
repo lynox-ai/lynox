@@ -15,20 +15,24 @@
 		type InboxBucket,
 		type InboxItem,
 	} from '../stores/inbox.svelte.js';
+	import { accountShortLabel } from '../util/account-label.js';
 	import ColdStartBanner from './ColdStartBanner.svelte';
 
 	let zone = $state<InboxBucket>('requires_user');
 	let openSnoozeFor = $state<string | null>(null);
+	// Gate items-fetch on counts-loaded so the $effect doesn't race onMount's
+	// initial load (without this the bucket gets fetched twice on mount).
+	let countsLoaded = $state(false);
 
 	let cleanupVisibility: (() => void) | undefined;
 	let cleanupColdStart: (() => void) | undefined;
 
 	onMount(async () => {
 		await loadInboxCounts();
-		if (isInboxAvailable()) {
-			await loadInboxItems(zone);
-			cleanupColdStart = startColdStartPolling();
-		}
+		countsLoaded = true;
+		// Polling starts unconditionally so a late flag-flip still surfaces the
+		// banner; the endpoint returns 503 + empty snapshot while disabled.
+		cleanupColdStart = startColdStartPolling();
 		cleanupVisibility = startInboxVisibilityRefresh();
 	});
 
@@ -38,7 +42,7 @@
 	});
 
 	$effect(() => {
-		// Re-fetch when zone changes (only when feature is available).
+		if (!countsLoaded) return;
 		if (zone && isInboxAvailable()) {
 			void loadInboxItems(zone);
 		}
@@ -56,15 +60,6 @@
 
 	function channelLabel(c: InboxItem['channel']): string {
 		return c === 'whatsapp' ? t('inbox.channel_whatsapp') : t('inbox.channel_email');
-	}
-
-	function accountShortLabel(accountId: string): string {
-		// Account id is either a mail-account id (cuid-style) or a WA pseudo
-		// id `whatsapp:<phoneNumberId>`. Both are opaque to the UI — surface
-		// the trailing segment for visual disambiguation; the full address
-		// renders in the item's hover-tooltip via the `title` attribute.
-		const colonIdx = accountId.indexOf(':');
-		return colonIdx >= 0 ? accountId.slice(colonIdx + 1) : accountId;
 	}
 
 	function snoozePresets(): ReadonlyArray<{ label: string; deltaMs: number }> {

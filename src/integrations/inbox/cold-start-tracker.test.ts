@@ -96,6 +96,21 @@ describe('ColdStartTracker — complete + fail', () => {
     });
   });
 
+  it('uses now() as startedAt when complete() is called without a prior start', () => {
+    const t = freshTracker();
+    t.complete(report('acct-1', 1));
+    const snap = t.getSnapshot();
+    expect(snap.recent).toHaveLength(1);
+    expect(snap.recent[0]?.startedAt).toBe(snap.recent[0]?.finishedAt);
+  });
+
+  it('uses now() as startedAt when fail() is called without a prior start', () => {
+    const t = freshTracker();
+    t.fail('acct-1', 'boom');
+    const snap = t.getSnapshot();
+    expect(snap.recent[0]?.startedAt).toBe(snap.recent[0]?.finishedAt);
+  });
+
   it('isolates concurrent runs by accountId', () => {
     const t = freshTracker();
     t.start('acct-1');
@@ -135,5 +150,20 @@ describe('ColdStartTracker — recent TTL', () => {
     t.complete(report('acct-1', 5));
     advance(500);
     expect(t.getSnapshot().recent).toHaveLength(1);
+  });
+
+  it('clears multiple expired entries in a single getSnapshot pass', () => {
+    const tracker = freshTracker({ recentTtlMs: 1000 });
+    tracker.start('a');
+    tracker.complete(report('a', 1));
+    advance(100);
+    tracker.start('b');
+    tracker.complete(report('b', 2));
+    advance(100);
+    tracker.start('c');
+    tracker.complete(report('c', 3));
+    expect(tracker.getSnapshot().recent).toHaveLength(3);
+    advance(2000);
+    expect(tracker.getSnapshot().recent).toHaveLength(0);
   });
 });

@@ -15,10 +15,13 @@
 		type ColdStartActiveEntry,
 		type ColdStartRecentEntry,
 	} from '../stores/inbox.svelte.js';
+	import { accountShortLabel } from '../util/account-label.js';
 
-	function accountShortLabel(accountId: string): string {
-		const colonIdx = accountId.indexOf(':');
-		return colonIdx >= 0 ? accountId.slice(colonIdx + 1) : accountId;
+	// String.prototype.replace interprets $&/$'/$`/$n in its second arg when it
+	// is a string. Wrapping the substitution in a function avoids that — error
+	// payloads from the classifier can contain arbitrary content.
+	function fillPlaceholder(template: string, token: string, value: string): string {
+		return template.replace(token, () => value);
 	}
 
 	function progressPercent(entry: ColdStartActiveEntry): number {
@@ -43,22 +46,28 @@
 	function progressText(entry: ColdStartActiveEntry): string {
 		const progress = entry.progress;
 		if (progress === null) return t('inbox.cold_start_starting');
-		return t('inbox.cold_start_progress')
-			.replace('{enqueued}', String(progress.enqueued))
-			.replace('{total}', String(progress.uniqueThreads));
+		const withEnqueued = fillPlaceholder(
+			t('inbox.cold_start_progress'),
+			'{enqueued}',
+			String(progress.enqueued),
+		);
+		return fillPlaceholder(withEnqueued, '{total}', String(progress.uniqueThreads));
 	}
 
 	function recentText(entry: ColdStartRecentEntry): string {
 		if (entry.status === 'failed') {
 			return entry.error
-				? t('inbox.cold_start_failed_reason').replace('{error}', entry.error)
+				? fillPlaceholder(t('inbox.cold_start_failed_reason'), '{error}', entry.error)
 				: t('inbox.cold_start_failed');
 		}
 		const report = entry.report;
 		if (!report) return t('inbox.cold_start_complete_simple');
-		return t('inbox.cold_start_complete')
-			.replace('{threads}', String(report.uniqueThreads))
-			.replace('{cost}', formatCost(report.estimatedCostUSD));
+		const withThreads = fillPlaceholder(
+			t('inbox.cold_start_complete'),
+			'{threads}',
+			String(report.uniqueThreads),
+		);
+		return fillPlaceholder(withThreads, '{cost}', formatCost(report.estimatedCostUSD));
 	}
 
 	const active = $derived(getVisibleColdStartActive());

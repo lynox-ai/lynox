@@ -50,6 +50,8 @@ export interface InboxAuditEntry {
 	createdAt: string;
 }
 
+// Cold-start wire shapes mirror `core/src/integrations/inbox/cold-start{,-tracker}.ts`.
+// Update in lockstep when the API envelope changes.
 export interface ColdStartProgress {
 	accountId: string;
 	uniqueThreads: number;
@@ -164,8 +166,12 @@ export async function loadInboxCounts(): Promise<boolean> {
 export async function loadInboxItems(bucket: InboxBucket, limit = 50, offset = 0): Promise<void> {
 	loadingBucket = bucket;
 	try {
-		const url = `${getApiBase()}/inbox/items?bucket=${bucket}&limit=${String(limit)}&offset=${String(offset)}`;
-		const res = await fetch(url);
+		const params = new URLSearchParams({
+			bucket,
+			limit: String(limit),
+			offset: String(offset),
+		});
+		const res = await fetch(`${getApiBase()}/inbox/items?${params.toString()}`);
 		if (res.status === 503) {
 			available = false;
 			itemsByBucket[bucket] = [];
@@ -193,10 +199,13 @@ export async function setItemAction(
 	action: InboxUserAction | null,
 	at?: Date | undefined,
 ): Promise<void> {
-	const prev = findItemAcrossBuckets(id);
-	if (prev) {
-		prev.userAction = action ?? undefined;
-		prev.userActionAt = action ? (at ?? new Date()).toISOString() : undefined;
+	const found = findItemAcrossBuckets(id);
+	const snapshot = found
+		? { userAction: found.item.userAction, userActionAt: found.item.userActionAt }
+		: null;
+	if (found) {
+		found.item.userAction = action ?? undefined;
+		found.item.userActionAt = action ? (at ?? new Date()).toISOString() : undefined;
 	}
 	const res = await fetch(`${getApiBase()}/inbox/items/${id}/action`, {
 		method: 'PATCH',
@@ -205,18 +214,18 @@ export async function setItemAction(
 	});
 	if (!res.ok) {
 		addToast(t('inbox.error_action'), 'error');
-		// Force a reload to recover canonical state.
-		await loadInboxItems('requires_user');
-	} else {
-		// On success, remove the item from the bucket it was visible in
-		// (archive/reply/snooze remove from Needs-You). UNDO (action=null)
-		// requires reload to know where the item lives now.
-		if (action === null) {
-			await Promise.all([loadInboxCounts(), loadInboxItems('requires_user')]);
-		} else if (prev) {
-			itemsByBucket['requires_user'] = itemsByBucket['requires_user'].filter((i) => i.id !== id);
-			await loadInboxCounts();
+		if (found && snapshot) {
+			found.item.userAction = snapshot.userAction;
+			found.item.userActionAt = snapshot.userActionAt;
 		}
+		return;
+	}
+	// UNDO (action=null) needs a reload to find which bucket the item moved back to.
+	if (action === null) {
+		await Promise.all([loadInboxCounts(), loadInboxItems('requires_user')]);
+	} else if (found) {
+		itemsByBucket['requires_user'] = itemsByBucket['requires_user'].filter((i) => i.id !== id);
+		await loadInboxCounts();
 	}
 }
 
@@ -239,7 +248,6 @@ export async function setItemSnooze(
 		addToast(t('inbox.error_snooze'), 'error');
 		return;
 	}
-	// Snoozed items leave the Needs-You list. Reload counts.
 	itemsByBucket['requires_user'] = itemsByBucket['requires_user'].filter((i) => i.id !== id);
 	await loadInboxCounts();
 }
@@ -255,10 +263,12 @@ export async function loadItemAudit(id: string): Promise<InboxAuditEntry[]> {
 	}
 }
 
-function findItemAcrossBuckets(id: string): InboxItem | undefined {
+function findItemAcrossBuckets(
+	id: string,
+): { item: InboxItem; bucket: InboxBucket } | undefined {
 	for (const bucket of ['requires_user', 'draft_ready', 'auto_handled'] as const) {
 		const item = itemsByBucket[bucket].find((i) => i.id === id);
-		if (item) return item;
+		if (item) return { item, bucket };
 	}
 	return undefined;
 }
@@ -273,38 +283,49 @@ export function startInboxVisibilityRefresh(): () => void {
 	return () => document.removeEventListener('visibilitychange', handler);
 }
 
-/** Fetch a single cold-start snapshot. */
-export async function loadColdStart(): Promise<void> {
+/** Fetch a single cold-start snapshot. Returns true on a successful fetch. */
+export async function loadColdStart(): Promise<boolean> {
 	try {
 		const res = await fetch(`${getApiBase()}/inbox/cold-start`);
-		if (!res.ok) return;
+		if (!res.ok) return false;
 		const data = (await res.json()) as ColdStartSnapshot;
 		coldStart = {
 			active: Array.isArray(data.active) ? data.active : [],
 			recent: Array.isArray(data.recent) ? data.recent : [],
 		};
+		return true;
 	} catch {
-		// Network blip — keep prior state. Polling will retry.
+		return false;
 	}
 }
 
 /**
- * Poll the cold-start endpoint while a banner could be visible. Polls
- * every 2 s when an active run is known, every 15 s otherwise (idle).
- * The slow cadence still catches a newly-triggered run within ~15 s
- * without burning ticks while nothing is happening.
+ * Poll the cold-start endpoint while a banner could be visible. Cadence:
+ *   - 2 s while an active run is known
+ *   - 15 s while idle (catches a newly-triggered run within ~15 s)
+ *   - 60 s while the tab is hidden (battery + server)
+ *   - exponential backoff capped at 60 s after consecutive fetch failures
  */
 export function startColdStartPolling(): () => void {
 	if (typeof window === 'undefined') return () => {};
 	let cancelled = false;
 	let timer: ReturnType<typeof setTimeout> | null = null;
+	let consecutiveFailures = 0;
+
+	const nextDelayMs = (): number => {
+		if (consecutiveFailures > 0) {
+			return Math.min(60_000, 5000 * 2 ** (consecutiveFailures - 1));
+		}
+		if (typeof document !== 'undefined' && document.hidden) return 60_000;
+		return coldStart.active.length > 0 ? 2000 : 15_000;
+	};
 
 	const tick = async (): Promise<void> => {
 		if (cancelled) return;
-		await loadColdStart();
+		const ok = await loadColdStart();
 		if (cancelled) return;
-		const delay = coldStart.active.length > 0 ? 2000 : 15_000;
-		timer = setTimeout(() => void tick(), delay);
+		consecutiveFailures = ok ? 0 : consecutiveFailures + 1;
+		timer = setTimeout(() => void tick(), nextDelayMs());
 	};
 	void tick();
 
