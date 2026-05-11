@@ -402,8 +402,10 @@ describe('draft endpoints', () => {
 });
 
 describe('handleGenerateDraft', () => {
-  const accountResolver = (id: string): { address: string; displayName: string } | null =>
-    id === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName } : null;
+  const accountResolver = {
+    resolve: (id: string): { address: string; displayName: string } | null =>
+      id === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName } : null,
+  };
 
   it('503 when llm is not wired', async () => {
     const id = insertItem();
@@ -444,10 +446,18 @@ describe('handleGenerateDraft', () => {
 
   it('422 when the account cannot be resolved (deleted between classify and click)', async () => {
     const id = insertItem();
-    state.saveItemBody(id, 'cached body', 'email');
+    state.saveItemBody(id, 'Long enough cached body to pass the min-length gate', 'email');
     const llm: LLMCaller = vi.fn(async () => 'x');
-    const noResolver = (_id: string): { address: string; displayName: string } | null => null;
+    const noResolver = { resolve: (_id: string): null => null };
     const r = await handleGenerateDraft({ ...deps, llm, accountResolver: noResolver }, id);
+    expect(r.status).toBe(422);
+  });
+
+  it('422 when the cached body is too short (< 20 chars)', async () => {
+    const id = insertItem();
+    state.saveItemBody(id, 'ok thx', 'email');
+    const llm: LLMCaller = vi.fn(async () => 'x');
+    const r = await handleGenerateDraft({ ...deps, llm, accountResolver }, id);
     expect(r.status).toBe(422);
   });
 

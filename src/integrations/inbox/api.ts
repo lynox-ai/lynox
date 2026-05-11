@@ -36,8 +36,11 @@ export interface InboxApiDeps {
   /**
    * Resolves the account address + display name. The generator prompt needs
    * the receiving mailbox identity to write a proper signature placeholder.
+   * Same shape as `AccountResolver` in watcher-hook.ts — kept structural so
+   * the http-api layer can pass a thin function-bound wrapper without
+   * importing the watcher's interface.
    */
-  accountResolver?: ((accountId: string) => { address: string; displayName: string } | null) | undefined;
+  accountResolver?: import('./watcher-hook.js').AccountResolver | undefined;
   /** Inbox LLM caller — when absent, `handleGenerateDraft` returns 503. */
   llm?: import('./classifier/index.js').LLMCaller | undefined;
 }
@@ -287,16 +290,6 @@ export function handleCreateDraft(
   return { status: 201, body: { draft } };
 }
 
-/**
- * Generate a draft body via the inbox LLM. Does NOT persist — the UI
- * follows up with `handleCreateDraft` to commit the resulting bodyMd
- * into `inbox_drafts`. This split lets the UI show a "regenerate"
- * affordance without polluting the supersede chain.
- *
- * Returns 503 when the LLM caller is not wired (e.g. flag on but no
- * provider credentials). Returns 422 when the cached body is missing
- * — historical items predating migration v10 may not have one.
- */
 function unavailable(message: string): ApiResponse {
   return { status: 503, body: { error: message } };
 }
@@ -305,6 +298,25 @@ function unprocessable(message: string): ApiResponse {
   return { status: 422, body: { error: message } };
 }
 
+/**
+ * Minimum cached-body length below which generation is short-circuited.
+ * A 5-character snippet ("yes." or "ok thx") cannot drive a meaningful
+ * reply and would still spend ~5K tokens of LLM cost — the gate trades
+ * a 422 for an unproductive call.
+ */
+const MIN_BODY_FOR_GENERATION = 20;
+
+/**
+ * Generate a draft body via the inbox LLM. Does NOT persist — the UI
+ * follows up with `handleCreateDraft` to commit the resulting bodyMd
+ * into `inbox_drafts`. This split lets the UI show a "regenerate"
+ * affordance without polluting the supersede chain.
+ *
+ * Returns 503 when the LLM caller is not wired (e.g. flag on but no
+ * provider credentials). Returns 422 when the cached body is missing
+ * or too short — historical items predating migration v10 may not have
+ * one; sensitive-mode='skip' items intentionally cache nothing.
+ */
 export async function handleGenerateDraft(
   deps: InboxApiDeps,
   itemId: string,
@@ -318,16 +330,17 @@ export async function handleGenerateDraft(
     return { status: 501, body: { error: `generation not supported for channel: ${item.channel}` } };
   }
   const cached = deps.state.getItemBody(itemId);
-  if (!cached || cached.bodyMd.length === 0) {
-    return unprocessable('no cached body for this item — refetch the mail first');
+  if (!cached || cached.bodyMd.length < MIN_BODY_FOR_GENERATION) {
+    return unprocessable('cached body too short to draft from — refetch the mail first');
   }
-  const account = deps.accountResolver?.(item.accountId);
+  const account = deps.accountResolver?.resolve(item.accountId);
   if (!account) return unprocessable('account not resolvable — cannot build a signature');
   const { generateDraft } = await import('./generator.js');
   // Best-effort sender extraction: the classifier prompt input we cached
-  // does not preserve the From header; we can recover the address from
-  // a future thread-keyed lookup, but for v1 we surface a generic
-  // greeting via empty fromAddress + the cached body's leading text.
+  // does not preserve the From header on inbox_items; for v1 the prompt
+  // surfaces a generic greeting via empty fromAddress and relies on the
+  // cached body's leading text. A future schema enhancement can
+  // preserve From and feed it here.
   const result = await generateDraft(
     {
       item: { id: item.id, reasonDe: item.reasonDe, channel: item.channel },

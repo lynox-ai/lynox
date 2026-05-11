@@ -110,6 +110,22 @@ describe('buildInboxRunner — happy path', () => {
     expect(inbox.getItemBody(items[0]!.id)).toBeNull();
   });
 
+  it('caches the masked body verbatim when sensitive-mode = mask substituted the input', async () => {
+    // The watcher hook is the one that does the masking; from the
+    // runner's view the body in classifierInput is already what should
+    // be persisted. Pin the contract that runner.onSuccess does NOT
+    // re-sanitise — it stores whatever the prompt builder saw.
+    const llm: LLMCaller = vi.fn(async () =>
+      JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'k' }),
+    );
+    const queue = buildInboxRunner({ state: inbox, llm });
+    const masked = 'Hi me, the IBAN is [REDACTED] and the OTP is [REDACTED].';
+    queue.enqueue(payload({ classifierInput: { ...payload().classifierInput, body: masked } }));
+    await queue.drain();
+    const items = inbox.listItems();
+    expect(inbox.getItemBody(items[0]!.id)?.bodyMd).toBe(masked);
+  });
+
   it('honors classifierVersionOverride for the persisted version stamp', async () => {
     const llm: LLMCaller = vi.fn(async () =>
       JSON.stringify({ bucket: 'auto_handled', confidence: 0.9, one_line_why_de: 'k' }),

@@ -3314,7 +3314,7 @@ export class LynoxHTTPApi {
         rules: rt.rules,
         coldStartTracker: rt.coldStartTracker,
         llm: rt.llm,
-        accountResolver: rt.accounts.resolve.bind(rt.accounts),
+        accountResolver: rt.accounts,
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       return deps;

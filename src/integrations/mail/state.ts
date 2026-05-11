@@ -299,11 +299,12 @@ const MIGRATIONS: string[] = [
 
    PRAGMA foreign_keys = ON;`,
 
-  // v10: Lazy body cache for the draft-generator (PRD-UNIFIED-INBOX
-  // Phase 2). Populated on the first "Draft Reply" click — most items
-  // (auto_handled bucket, 80%+) never get one, so storage scales with
-  // user engagement, not with mail volume. CASCADE on inbox_items
-  // delete keeps the row from outliving the item it describes.
+  // v10: Body cache for the draft-generator (PRD-UNIFIED-INBOX Phase 2).
+  // Populated EAGERLY at classify time with the 500-char snippet the
+  // classifier already had in memory — `runner.onSuccess` writes the
+  // row alongside the audit insert. Generation reads from this cache
+  // and pays zero provider round-trips on click. CASCADE on
+  // inbox_items delete keeps the row from outliving the item.
   //
   // `source` mirrors the channel that produced the body ('imap',
   // 'gmail', 'whatsapp'). It is informational — the generator reads

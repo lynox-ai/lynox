@@ -118,11 +118,27 @@ export function buildGeneratorPrompt(input: GenerateDraftInput): {
 }
 
 /**
- * Generate one draft body via the LLM. Returns the model's raw text
- * trimmed of surrounding whitespace; further sanitisation (XSS, HTML)
- * happens at the editor layer per the PRD's Draft-Generation-Security
- * section. Never throws on empty-string output — the editor renders
- * the (empty) result and the user can re-trigger.
+ * Strip a leading/trailing Markdown code fence if the model ignored the
+ * "no fences" instruction. We only unwrap a single wrapping fence — body
+ * containing inline code or nested fences passes through. Returns the
+ * input unchanged when no wrapping fence is detected.
+ */
+function stripWrappingFence(raw: string): string {
+  const trimmed = raw.trim();
+  const opening = trimmed.match(/^```[a-zA-Z0-9_-]*\n/);
+  if (!opening) return trimmed;
+  const inner = trimmed.slice(opening[0].length);
+  if (!inner.endsWith('```')) return trimmed;
+  return inner.slice(0, -3).trimEnd();
+}
+
+/**
+ * Generate one draft body via the LLM. Returns the model's text with any
+ * wrapping Markdown fence stripped and surrounding whitespace trimmed.
+ * Further sanitisation (XSS, HTML) happens at the editor layer per the
+ * PRD's Draft-Generation-Security section. Never throws on empty-string
+ * output — the editor renders the (empty) result and the user can
+ * re-trigger.
  */
 export async function generateDraft(
   input: GenerateDraftInput,
@@ -136,7 +152,7 @@ export async function generateDraft(
     signal: opts.signal,
   });
   return {
-    bodyMd: raw.trim(),
+    bodyMd: stripWrappingFence(raw),
     generatorVersion: opts.generatorVersionOverride ?? GENERATOR_VERSION,
     bodyTruncated: built.bodyTruncated,
   };

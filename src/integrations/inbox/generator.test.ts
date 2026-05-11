@@ -90,4 +90,29 @@ describe('generateDraft', () => {
     const result = await generateDraft(SAMPLE, llm);
     expect(result.bodyMd).toBe('');
   });
+
+  it('strips a wrapping Markdown code fence when the model disobeys the no-fences instruction', async () => {
+    const llm: LLMCaller = vi.fn(async () => '```text\nHallo Max,\n\nMittwoch passt.\n```');
+    const result = await generateDraft(SAMPLE, llm);
+    expect(result.bodyMd).toBe('Hallo Max,\n\nMittwoch passt.');
+  });
+
+  it('strips an unlabelled wrapping fence', async () => {
+    const llm: LLMCaller = vi.fn(async () => '```\nHallo\n```');
+    const result = await generateDraft(SAMPLE, llm);
+    expect(result.bodyMd).toBe('Hallo');
+  });
+
+  it('leaves inline backticks untouched when no wrapping fence is present', async () => {
+    const llm: LLMCaller = vi.fn(async () => 'Use the `--flag` switch.');
+    const result = await generateDraft(SAMPLE, llm);
+    expect(result.bodyMd).toBe('Use the `--flag` switch.');
+  });
+
+  it('propagates the LLM rejection — caller is responsible for the 5xx envelope', async () => {
+    const llm: LLMCaller = vi.fn(async () => {
+      throw new Error('429 Too Many Requests');
+    });
+    await expect(generateDraft(SAMPLE, llm)).rejects.toThrow('429');
+  });
 });

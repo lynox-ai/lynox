@@ -211,6 +211,13 @@ function nextId(prefix: string): string {
 
 const MAX_LIST_LIMIT = 500;
 
+/**
+ * Defense-in-depth clamp on the cached body. Today's writer (the
+ * runner) emits ~500-char provider snippets; the cap leaves head-room
+ * for a future full-body refresh while keeping single rows bounded.
+ */
+const MAX_ITEM_BODY_CHARS = 8 * 1024;
+
 export class InboxStateDb {
   constructor(private readonly db: Database.Database) {}
 
@@ -531,14 +538,20 @@ export class InboxStateDb {
    * Upsert the cached body. `INSERT OR REPLACE` so a refetch (user
    * explicitly asks "reload from server") overwrites the stored row
    * without a separate delete step.
+   *
+   * The body is clamped to MAX_ITEM_BODY_CHARS as defense-in-depth — the
+   * primary caller (the runner) writes a 500-char snippet, but a future
+   * full-body refresh path could feed multi-MB messages; the clamp keeps
+   * the table size predictable and the downstream prompt bounded.
    */
   saveItemBody(itemId: string, bodyMd: string, source: string, fetchedAt: Date = new Date()): void {
+    const clamped = bodyMd.length > MAX_ITEM_BODY_CHARS ? bodyMd.slice(0, MAX_ITEM_BODY_CHARS) : bodyMd;
     this.db
       .prepare(
         `INSERT OR REPLACE INTO inbox_item_bodies (item_id, body_md, fetched_at, source)
          VALUES (?, ?, ?, ?)`,
       )
-      .run(itemId, bodyMd, fetchedAt.getTime(), source);
+      .run(itemId, clamped, fetchedAt.getTime(), source);
   }
 
   /**
