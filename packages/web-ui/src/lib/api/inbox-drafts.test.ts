@@ -229,6 +229,13 @@ describe('generateDraft', () => {
 		expect(JSON.parse(init.body as string)).toEqual({ tone: 'warmer' });
 	});
 
+	it('serializes an empty string previousBodyMd verbatim — the trigger is `!== undefined`, not truthiness', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'x', generatorVersion: 'v', bodyTruncated: false }));
+		await generateDraft('/api', 'inb_1', { tone: 'shorter', previousBodyMd: '' });
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(JSON.parse(init.body as string)).toEqual({ tone: 'shorter', previousBodyMd: '' });
+	});
+
 	it('maps status codes to discriminated failures', async () => {
 		const cases = [
 			[404, 'not_found'],

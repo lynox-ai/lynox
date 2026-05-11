@@ -153,6 +153,21 @@ describe('generateDraft', () => {
     await generateDraft({ ...SAMPLE, previousBodyMd: 'previous draft' }, llm);
     expect(captured).not.toBeNull();
     expect(captured!.user).not.toContain('<previous_draft>');
+    // Also pin the first-time-template marker so a regression that
+    // drops BOTH branches (e.g. truncates the prompt entirely) fails.
+    expect(captured!.user).toContain('Schreibe jetzt den Antwortentwurf');
+  });
+
+  it('falls back to first-time generation when previousBodyMd is an empty string even if tone is set', async () => {
+    let captured: { user: string } | null = null;
+    const llm: LLMCaller = async ({ user }) => {
+      captured = { user };
+      return 'x';
+    };
+    await generateDraft({ ...SAMPLE, previousBodyMd: '', tone: 'shorter' }, llm);
+    expect(captured).not.toBeNull();
+    expect(captured!.user).not.toContain('<previous_draft>');
+    expect(captured!.user).toContain('Schreibe jetzt den Antwortentwurf');
   });
 
   it('honours each tone modifier with its own instruction', async () => {

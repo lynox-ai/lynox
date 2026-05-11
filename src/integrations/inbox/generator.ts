@@ -32,6 +32,12 @@ export const GENERATOR_VERSION = 'haiku-2026-05';
  *     content, applying a delta to length / register / warmth.
  *   - regenerate is the modifier-less re-roll — same body, fresh draft.
  *
+ * The naming-shape is asymmetric on purpose: the first three name a
+ * direction along an axis ("more X"), the fourth names the action
+ * because there is no axis. Picking a single shape (e.g. 'rewrite'
+ * for the re-roll) would mean either renaming the user-visible
+ * concept or burying the action's meaning behind an adjective.
+ *
  * Absence of a tone means "first-time generation": no previous draft is
  * passed; the prompt produces the initial scaffold from the cached body.
  */

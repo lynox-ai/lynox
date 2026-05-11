@@ -139,6 +139,14 @@
 	// last-saved body), we show an edit-loss confirmation per PRD §Draft
 	// Editor before discarding the user's edits.
 	let pendingTone = $state<DraftTone | null>(null);
+	let confirmDialogRef = $state<HTMLDivElement | null>(null);
+
+	// Focus the alertdialog as soon as it mounts — without this, Esc from a
+	// mouse-clicked tone button never reaches the dialog's onkeydown because
+	// the button still holds focus underneath the modal.
+	$effect(() => {
+		if (pendingTone !== null && confirmDialogRef) confirmDialogRef.focus();
+	});
 
 	function hasUserEdits(): boolean {
 		const pane = getDraftPane();
@@ -288,6 +296,7 @@
 			onclick={cancelTone}
 		>
 			<div
+				bind:this={confirmDialogRef}
 				role="alertdialog"
 				aria-modal="true"
 				aria-labelledby="tone-confirm-title"
