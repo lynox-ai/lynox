@@ -120,6 +120,24 @@ describe('runColdStartForAccount', () => {
     expect(tracker.getSnapshot().recent).toHaveLength(0);
   });
 
+  it('bypasses the re-credential gate when force=true', async () => {
+    state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'preexisting',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'r',
+      classifiedAt: new Date(),
+      classifierVersion: 'v',
+    });
+    const hook = vi.fn(async () => {});
+    const provider = fakeProvider([envelope(1, 't1'), envelope(2, 't2')]);
+    await runColdStartForAccount({ provider, hook, tracker, state, force: true });
+    expect(hook).toHaveBeenCalledTimes(2);
+    expect(tracker.getSnapshot().recent[0]?.status).toBe('completed');
+  });
+
   it('reports tracker.fail when provider.list throws — never rejects', async () => {
     const hook = vi.fn(async () => {});
     const provider = fakeProvider([], { listThrows: new Error('IMAP timeout') });

@@ -61,6 +61,16 @@ export interface InboxApiDeps {
    * instances without a vault/mail account; send then 503s.
    */
   mailContext?: import('../mail/context.js').MailContext | undefined;
+  /**
+   * Operator-driven cold-start backfill. Resolves the provider from
+   * `providerResolver` internally and hands it to the runtime's bound
+   * runner. Absent when either the inbox runtime or the mail context is
+   * unwired — handler then returns 503.
+   */
+  coldStartRunner?: (
+    accountId: string,
+    runOpts?: { force?: boolean },
+  ) => Promise<void>;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -137,6 +147,41 @@ export function handleGetColdStart(deps: InboxApiDeps): ApiResponse {
     return { status: 200, body: { active: [], recent: [] } };
   }
   return { status: 200, body: deps.coldStartTracker.getSnapshot() };
+}
+
+export interface RunColdStartBody {
+  accountId: string;
+  /**
+   * Re-run for an account that already has items (default false). Needed
+   * when the unified-inbox flag was enabled after the account was already
+   * connected — `onAccountAdded` had no inbox runtime to dispatch to at
+   * that point, so the historical mail was never backfilled.
+   */
+  force?: boolean | undefined;
+}
+
+/**
+ * Operator-driven cold-start backfill. Fire-and-forget at the HTTP layer:
+ * returns 202 once the runner has been scheduled. Progress shows up on
+ * `GET /api/inbox/cold-start` as usual.
+ */
+export async function handleRunColdStart(
+  deps: InboxApiDeps,
+  body: RunColdStartBody,
+): Promise<ApiResponse> {
+  if (!deps.coldStartRunner) return unavailable('cold-start runner not wired');
+  if (!deps.providerResolver) return unavailable('mail provider registry not wired');
+  if (typeof body.accountId !== 'string' || body.accountId.length === 0) {
+    return bad('accountId is required');
+  }
+  if (!deps.providerResolver(body.accountId)) {
+    return unprocessable(`account "${body.accountId}" is not registered`, 'not_registered');
+  }
+  // Schedule the run without awaiting it — backfill can take many seconds
+  // for a 200-envelope batch and the UI polls /cold-start for progress
+  // already. Errors are surfaced through the tracker.
+  void deps.coldStartRunner(body.accountId, body.force !== undefined ? { force: body.force } : {}).catch(() => {});
+  return { status: 202, body: { ok: true, accountId: body.accountId } };
 }
 
 export interface SetActionBody {

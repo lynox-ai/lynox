@@ -50,6 +50,17 @@ export interface InboxRuntime {
   hook: OnInboundMailHook;
   /** Wire as `MailHooks.onAccountAdded` — fires a backfill pass on connect. */
   onAccountAdded: NonNullable<import('../mail/context.js').MailHooks['onAccountAdded']>;
+  /**
+   * Operator-driven cold-start re-run. The HTTP layer resolves the
+   * `MailProvider` from its registry and hands it in; runtime closes over
+   * the classifier hook, tracker, and state. Defaults preserve the
+   * `hasAnyItemForAccount` short-circuit; pass `force: true` to backfill
+   * accounts that were connected before the flag flipped.
+   */
+  runColdStart: (
+    provider: import('../mail/provider.js').MailProvider,
+    runOpts?: { force?: boolean },
+  ) => Promise<void>;
   /** LLM caller used by the draft generator. Same instance the classifier uses. */
   llm: LLMCaller;
   /** Account resolver — turns an accountId into address + display name. */
@@ -203,6 +214,19 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       await runColdStartForAccount(adapterOpts);
     };
 
+  const runColdStart: InboxRuntime['runColdStart'] = async (provider, runOpts) => {
+    if (disabledAccounts?.has(provider.accountId)) return;
+    const adapterOpts: Parameters<typeof runColdStartForAccount>[0] = {
+      provider,
+      hook,
+      tracker: coldStartTracker,
+      state,
+    };
+    if (opts.tenantId !== undefined) adapterOpts.tenantId = opts.tenantId;
+    if (runOpts?.force !== undefined) adapterOpts.force = runOpts.force;
+    await runColdStartForAccount(adapterOpts);
+  };
+
   return {
     state,
     rules,
@@ -212,6 +236,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     coldStartTracker,
     hook,
     onAccountAdded,
+    runColdStart,
     llm,
     accounts,
     shutdown: () => queue.drain(),
