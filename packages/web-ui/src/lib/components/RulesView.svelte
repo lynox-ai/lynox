@@ -215,10 +215,14 @@
 	}
 </script>
 
-<div class="p-6 max-w-3xl mx-auto" role="region" aria-label={t('inbox.rules_title')}>
-	<div class="flex items-center justify-between mb-4">
+<div
+	class="p-4 sm:p-6 max-w-3xl mx-auto pb-[max(1rem,env(safe-area-inset-bottom))]"
+	role="region"
+	aria-label={t('inbox.rules_title')}
+>
+	<div class="flex items-center justify-between flex-wrap gap-y-2 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('inbox.rules_title')}</h1>
-		<a href="/app/inbox" class="text-[11px] text-text-subtle hover:text-text-muted font-mono">← {t('inbox.rules_back')}</a>
+		<a href="/app/inbox" class="text-[11px] text-text-subtle hover:text-text-muted font-mono py-1">← {t('inbox.rules_back')}</a>
 	</div>
 
 	{#if countsLoaded && !inboxOk}
@@ -262,7 +266,7 @@
 					<button
 						type="button"
 						onclick={openForm}
-						class="rounded-[var(--radius-sm)] bg-accent/15 text-accent-text hover:bg-accent/25 px-3 py-1.5 text-[12px]"
+						class="rounded-[var(--radius-sm)] bg-accent/15 text-accent-text hover:bg-accent/25 px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 					>{t('inbox.rules_add')}</button>
 				{/if}
 			</div>
@@ -315,16 +319,16 @@
 						</div>
 					</fieldset>
 
-					<div class="flex items-center justify-end gap-2 pt-1">
+					<div class="flex items-center justify-end gap-2 pt-1 flex-wrap">
 						<button
 							type="button"
 							onclick={closeForm}
-							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-muted hover:text-text"
+							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-muted hover:text-text min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 						>{t('inbox.rules_cancel')}</button>
 						<button
 							type="submit"
 							disabled={formSubmitting || formMatchValue.trim().length === 0}
-							class="rounded-[var(--radius-sm)] bg-accent text-white hover:bg-accent-hover disabled:opacity-50 px-3 py-1.5 text-[12px]"
+							class="rounded-[var(--radius-sm)] bg-accent text-white hover:bg-accent-hover disabled:opacity-50 px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 						>{t('inbox.rules_save')}</button>
 					</div>
 				</form>
@@ -351,12 +355,12 @@
 										<button
 											type="button"
 											onclick={() => void confirmDelete(rule.id)}
-											class="rounded-[var(--radius-sm)] bg-danger/20 text-danger hover:bg-danger/30 px-2 py-1 text-[11px]"
+											class="rounded-[var(--radius-sm)] bg-danger/20 text-danger hover:bg-danger/30 px-3 py-1.5 text-[11px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 										>{t('inbox.rules_delete')}</button>
 										<button
 											type="button"
 											onclick={() => (pendingDeleteId = null)}
-											class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text"
+											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 										>{t('inbox.rules_cancel')}</button>
 									</div>
 								{:else}
@@ -364,7 +368,7 @@
 										type="button"
 										onclick={() => (pendingDeleteId = rule.id)}
 										aria-label={t('inbox.rules_delete')}
-										class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-danger hover:border-danger/40"
+										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-danger hover:border-danger/40 min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
 									>×</button>
 								{/if}
 							</div>

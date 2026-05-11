@@ -93,7 +93,7 @@
 						type="button"
 						onclick={() => dismissColdStartForAccount(entry.accountId)}
 						aria-label={t('inbox.cold_start_dismiss')}
-						class="text-text-subtle hover:text-text text-sm leading-none p-1 -mr-1 -mt-1"
+						class="text-text-subtle hover:text-text text-sm leading-none p-2 -mr-1 -mt-1 min-h-[32px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
 					>×</button>
 				</div>
 				<div
@@ -129,7 +129,7 @@
 					type="button"
 					onclick={() => dismissColdStartForAccount(entry.accountId)}
 					aria-label={t('inbox.cold_start_dismiss')}
-					class="text-text-subtle hover:text-text text-sm leading-none p-1 -mr-1"
+					class="text-text-subtle hover:text-text text-sm leading-none p-2 -mr-1 min-h-[32px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px] shrink-0"
 				>×</button>
 			</div>
 		{/each}

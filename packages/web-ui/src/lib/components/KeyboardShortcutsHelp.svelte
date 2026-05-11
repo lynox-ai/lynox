@@ -33,7 +33,7 @@
 
 {#if open}
 	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+		class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4"
 		role="presentation"
 		onclick={onClose}
 	>
@@ -45,7 +45,7 @@
 			tabindex="-1"
 			onclick={(e) => e.stopPropagation()}
 			onkeydown={(e) => { if (e.key === 'Escape') onClose(); }}
-			class="bg-bg-subtle border border-border rounded-[var(--radius-lg)] shadow-xl max-w-md w-full p-6 outline-none"
+			class="bg-bg-subtle border border-border shadow-xl max-w-md w-full p-6 outline-none rounded-t-[var(--radius-lg)] sm:rounded-[var(--radius-lg)] pb-[max(1.5rem,env(safe-area-inset-bottom))]"
 		>
 			<div class="flex items-start justify-between gap-3 mb-3">
 				<h2 id="shortcuts-help-title" class="text-base font-medium tracking-tight">
@@ -55,7 +55,7 @@
 					type="button"
 					onclick={onClose}
 					aria-label={t('inbox.shortcuts_close_button')}
-					class="text-text-subtle hover:text-text text-sm leading-none p-1 -mr-1 -mt-1"
+					class="text-text-subtle hover:text-text text-sm leading-none p-2 -mr-1 -mt-1 min-h-[32px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
 				>×</button>
 			</div>
 			<p class="text-[12px] text-text-muted mb-4">{t('inbox.shortcuts_intro')}</p>

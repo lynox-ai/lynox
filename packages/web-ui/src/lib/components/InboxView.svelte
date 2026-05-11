@@ -203,19 +203,24 @@
 	}
 </script>
 
-<div class="p-6 max-w-3xl mx-auto" role="region" aria-label={t('inbox.title')} aria-live="polite">
-	<div class="flex items-center justify-between mb-4">
+<div
+	class="p-4 sm:p-6 max-w-3xl mx-auto pb-[max(1rem,env(safe-area-inset-bottom))]"
+	role="region"
+	aria-label={t('inbox.title')}
+	aria-live="polite"
+>
+	<div class="flex items-center justify-between flex-wrap gap-y-2 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('inbox.title')}</h1>
-		<div class="flex items-center gap-3">
+		<div class="flex items-center gap-3 flex-wrap">
 			<a
 				href="/app/inbox/rules"
-				class="text-[11px] text-text-subtle hover:text-text-muted font-mono"
+				class="text-[11px] text-text-subtle hover:text-text-muted font-mono py-1"
 			>{t('inbox.rules_link')}</a>
 			{#if !touchPrimary}
 				<button
 					type="button"
 					onclick={() => (helpOpen = true)}
-					class="text-[11px] text-text-subtle hover:text-text-muted font-mono"
+					class="text-[11px] text-text-subtle hover:text-text-muted font-mono py-1"
 					aria-label={t('inbox.shortcuts_title')}
 				>{t('inbox.shortcuts_hint')}</button>
 			{/if}
@@ -229,7 +234,11 @@
 	{:else}
 		{@const counts = getInboxCounts()}
 		<ColdStartBanner />
-		<div class="flex gap-1 mb-4" role="tablist" aria-label={t('inbox.title')}>
+		<div
+			class="flex gap-1 mb-4 overflow-x-auto scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0"
+			role="tablist"
+			aria-label={t('inbox.title')}
+		>
 			<button
 				role="tab"
 				aria-selected={zone === 'requires_user'}
@@ -306,23 +315,23 @@
 									<div class="flex items-center gap-1 shrink-0">
 										<button
 											onclick={() => void onArchive(item)}
-											class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text hover:border-border-hover"
+											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 											aria-label={t('inbox.action_archive')}
 										>{t('inbox.action_archive')}</button>
 										<button
 											onclick={() => (openSnoozeFor = openSnoozeFor === item.id ? null : item.id)}
 											aria-expanded={openSnoozeFor === item.id}
-											class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text hover:border-border-hover"
+											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 										>{t('inbox.action_snooze')}</button>
 									</div>
 								{/if}
 							</div>
 							{#if openSnoozeFor === item.id}
-								<div class="mt-2 flex flex-wrap gap-1 pl-1">
+								<div class="mt-2 flex flex-wrap gap-1.5 pl-1">
 									{#each snoozePresets() as preset}
 										<button
 											onclick={() => void onSnoozePreset(item, preset.deltaMs)}
-											class="rounded-[var(--radius-sm)] bg-bg-muted text-text-muted hover:text-text px-2 py-1 text-[11px]"
+											class="rounded-[var(--radius-sm)] bg-bg-muted text-text-muted hover:text-text px-3 py-1.5 text-[11px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 										>{preset.label}</button>
 									{/each}
 								</div>
