@@ -133,6 +133,13 @@ describe('InboxStateDb — items', () => {
       auto_handled: 1,
     });
   });
+
+  it('hasAnyItemForAccount returns false for an empty account and true after one insert', () => {
+    expect(inbox.hasAnyItemForAccount(TEST_ACCOUNT.id)).toBe(false);
+    insertSampleItem();
+    expect(inbox.hasAnyItemForAccount(TEST_ACCOUNT.id)).toBe(true);
+    expect(inbox.hasAnyItemForAccount('other-acct')).toBe(false);
+  });
 });
 
 describe('InboxStateDb — user actions and snooze', () => {

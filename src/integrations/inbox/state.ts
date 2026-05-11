@@ -334,6 +334,21 @@ export class InboxStateDb {
    * Per-bucket counts for the queue badges in the header. Buckets without
    * any item are returned as 0 so the consumer never has to special-case.
    */
+  /**
+   * Cheap existence check used by the cold-start gate: if any item already
+   * exists for an account, the backfill iterator has run at least once and
+   * a fresh re-credential of the same account should not trigger a second
+   * provider.list() pull.
+   */
+  hasAnyItemForAccount(accountId: string, tenantId: string = DEFAULT_TENANT_ID): boolean {
+    const row = this.db
+      .prepare<[string, string], { c: number }>(
+        `SELECT COUNT(*) AS c FROM inbox_items WHERE tenant_id = ? AND account_id = ? LIMIT 1`,
+      )
+      .get(tenantId, accountId);
+    return (row?.c ?? 0) > 0;
+  }
+
   countItemsByBucket(tenantId: string = DEFAULT_TENANT_ID): Record<InboxBucket, number> {
     const rows = this.db
       .prepare<[string], { bucket: string; c: number }>(

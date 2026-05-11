@@ -135,6 +135,16 @@ export interface MailHooks {
 
   /** Fires when classification detects a deal-related signal (Phase 1+). */
   onDealSignalDetected?: (signal: DealSignal) => Promise<void>;
+
+  /**
+   * Fires after a freshly added account has been registered, credentials
+   * stored, and the provider attached to the watcher. Used by the
+   * unified-inbox bootstrap to trigger a cold-start backfill pass — the
+   * caller MUST NOT block addAccount on this hook, so it is invoked
+   * fire-and-forget. Hook implementations should never throw; any error
+   * should surface through their own observability surface.
+   */
+  onAccountAdded?: (accountId: string, provider: MailProvider) => Promise<void>;
 }
 
 /**
@@ -505,6 +515,14 @@ export class MailContext {
     // bug we're fixing: previously registry.add() always defaulted-when-
     // null, which silently demoted whichever account was registered first.
     this._reconcileDefault();
+
+    // Fire-and-forget — addAccount must not block on a provider.list()
+    // round-trip. The hook implementation (unified-inbox bootstrap)
+    // guarantees never to throw; we still attach a no-op catch so a
+    // future regression cannot leak an unhandled rejection.
+    if (this.hooks.onAccountAdded) {
+      void this.hooks.onAccountAdded(input.config.id, provider).catch(() => {});
+    }
   }
 
   /**
