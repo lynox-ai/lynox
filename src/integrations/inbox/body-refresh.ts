@@ -1,19 +1,24 @@
-// === Inbox body-refresh adapter — pull the full mail body on demand ===
+// === Inbox body-refresh adapters — pull the full conversation on demand ===
 //
-// The classifier caches a 500-char snippet at classify time (PR #277).
-// The generator works from that snippet by default. When the user clicks
-// "Reload from server" on the Draft pane, this module pulls the FULL
-// body via `provider.list()` + `provider.fetch()` and writes it back to
-// `inbox_item_bodies`, overwriting the cached snippet. Subsequent
-// generation calls then have the full mail content as context.
+// Two flavours sharing the same `inbox_item_bodies` cache + truncation:
 //
-// Why a list+fetch round-trip instead of a direct fetch-by-id: the
-// `MailProvider.fetch()` API takes a UID, but `inbox_items.thread_key`
-// stores either a provider-set threading id or a synthesised key — not
-// the UID. The list() call returns recent envelopes including their
-// UIDs; we match by `resolveThreadKey(env) === item.threadKey` and
-// then fetch by the matched envelope's UID. Cross-provider clean — no
-// per-provider lookup gymnastics.
+//   refreshItemBody          — email items: `provider.list({since:30d})`
+//                              then `provider.fetch({uid})` for the matched
+//                              envelope's full text body.
+//   refreshWhatsappItemBody  — WA items: pulls the last N messages of the
+//                              thread from `WhatsAppStateDb` and concatenates
+//                              them as a "Gegenüber:" / "Ich:" transcript.
+//
+// Both paths trim + clamp to `MAX_ITEM_BODY_CHARS` BEFORE handing the
+// body back to `state.saveItemBody` so `bytesWritten` reports what
+// actually hit the cache.
+//
+// Why list+fetch instead of fetch-by-id for email: `MailProvider.fetch()`
+// takes a UID, but `inbox_items.thread_key` stores either a provider-set
+// threading id or a synthesised key — not the UID. The list() call
+// returns recent envelopes including their UIDs; we match by
+// `resolveThreadKey(env) === item.threadKey` and then fetch the matched
+// envelope's UID. Cross-provider clean.
 
 import type { MailEnvelope, MailProvider } from '../mail/provider.js';
 import { MAX_ITEM_BODY_CHARS, type InboxStateDb } from './state.js';
@@ -130,6 +135,10 @@ export interface RefreshWhatsappItemBodyOptions {
  * recent `WA_MESSAGE_FETCH_LIMIT` messages of the same thread (text +
  * voice transcripts) into a single chronological context block.
  *
+ * Direction tags `"Gegenüber:"` / `"Ich:"` are hard-coded German
+ * because the generator prompt is DE-default. Revisit when the
+ * generator gets per-locale prompt branching.
+ *
  * The output is plain text — the generator's `<untrusted_data>`
  * wrapping still applies because we plumb the cached body through the
  * same `state.saveItemBody` → generator path.
@@ -161,8 +170,12 @@ export async function refreshWhatsappItemBody(
   const full = lines.join('\n\n').trim();
   if (full.length === 0) return { ok: false, reason: { kind: 'empty_body' } };
 
+  // The transcript is chronological-ASC; the latest message — the actual
+  // "ask" the generator must answer — sits at the END. When truncating
+  // we drop the oldest context and keep the tail, so the most recent
+  // exchange survives.
   const truncated = full.length > MAX_ITEM_BODY_CHARS;
-  const body = truncated ? full.slice(0, MAX_ITEM_BODY_CHARS) : full;
+  const body = truncated ? full.slice(full.length - MAX_ITEM_BODY_CHARS) : full;
   opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
   return {
     ok: true,

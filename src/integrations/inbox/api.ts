@@ -367,11 +367,13 @@ export async function handleGenerateDraft(
   }
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
-  // Generation runs channel-agnostically — both email and WhatsApp
-  // items have a cached body (snippet at classify time + optionally
-  // refreshed full body). The classifier-version-aware prompt builder
-  // already adapts via `item.reasonDe` + `channel` so the per-channel
-  // tone difference is implicit.
+  // Both email and WA items have a cached body — the classifier writes
+  // the snippet for either channel and Reload optionally fetches the
+  // full body. KNOWN LIMITATION: `buildGeneratorPrompt` still emits
+  // email-flavoured labels ("Antwortendes Postfach", "Betreff …") for
+  // WA items; channel-aware prompt branching is a follow-up. WA-pilot
+  // v1 produces usable drafts via the LLM picking the channel up from
+  // the transcript format in the body.
   const cached = deps.state.getItemBody(itemId);
   if (!cached || cached.bodyMd.length < MIN_BODY_FOR_GENERATION) {
     return unprocessable('cached body too short to draft from — refetch the mail first');

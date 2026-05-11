@@ -244,6 +244,14 @@ describe('refreshWhatsappItemBody', () => {
       expect(result.bodyMd).toContain('Gegenüber: Hi, hast du Mittwoch Zeit?');
       expect(result.bodyMd).toContain('Ich: Klar, 14 Uhr?');
       expect(result.bodyMd).toContain('Gegenüber: Perfekt, bis dann.');
+      // Pin chronological order — generator must see the latest "ask"
+      // at the tail; reversing the SUT would silently break the
+      // generation quality without this assertion.
+      const idxFirst = result.bodyMd.indexOf('Hi, hast');
+      const idxMid = result.bodyMd.indexOf('Klar, 14');
+      const idxLast = result.bodyMd.indexOf('Perfekt');
+      expect(idxFirst).toBeLessThan(idxMid);
+      expect(idxMid).toBeLessThan(idxLast);
       expect(result.bytesWritten).toBe(Buffer.byteLength(result.bodyMd, 'utf8'));
     }
     expect(state.getItemBody(item.id)?.bodyMd).toBe((result as { ok: true; bodyMd: string }).bodyMd);
@@ -289,12 +297,16 @@ describe('refreshWhatsappItemBody', () => {
     if (!result.ok) expect(result.reason.kind).toBe('fetch_failed');
   });
 
-  it('truncates concatenated transcript to MAX_ITEM_BODY_CHARS', async () => {
+  it('truncates from the START so the LATEST messages (the actual ask) survive', async () => {
     const item = waItem();
-    const long = 'x'.repeat(5 * 1024);
+    // Distinct sentinels so the test pins which slice gets kept:
+    // oldest = aaaa…, newest = zzzz… If the SUT cut from the end
+    // instead of the start, only 'a' chars would land in the body.
+    const oldest = 'a'.repeat(5 * 1024);
+    const newest = 'z'.repeat(5 * 1024);
     const messages = [
-      waMsg({ id: '1', threadId: item.threadKey, direction: 'inbound', text: long }),
-      waMsg({ id: '2', threadId: item.threadKey, direction: 'inbound', text: long }),
+      waMsg({ id: '1', threadId: item.threadKey, direction: 'inbound', text: oldest, timestamp: 1000 }),
+      waMsg({ id: '2', threadId: item.threadKey, direction: 'inbound', text: newest, timestamp: 2000 }),
     ];
     const waState = { getMessagesForThread: () => messages };
     const result = await refreshWhatsappItemBody({ waState, state, item });
@@ -302,6 +314,10 @@ describe('refreshWhatsappItemBody', () => {
     if (result.ok) {
       expect(result.truncated).toBe(true);
       expect(result.bodyMd.length).toBe(8 * 1024);
+      // Body MUST end with the newest sentinel and the suffix MUST be
+      // 'z' characters — proves we kept the tail of the transcript.
+      expect(result.bodyMd.endsWith('z')).toBe(true);
+      expect(result.bodyMd.includes(newest)).toBe(true);
     }
   });
 });

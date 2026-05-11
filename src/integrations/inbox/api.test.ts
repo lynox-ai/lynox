@@ -473,7 +473,7 @@ describe('handleRefreshItemBody', () => {
     expect(r.status).toBe(503);
   });
 
-  it('routes WA items through the whatsappStore and overwrites the cache', async () => {
+  it('routes WA items through the whatsappStore and overwrites a pre-seeded cache', async () => {
     const threadKey = 'whatsapp-41700000000';
     const id = state.insertItem({
       accountId: 'whatsapp:default',
@@ -485,6 +485,9 @@ describe('handleRefreshItemBody', () => {
       classifiedAt: new Date(),
       classifierVersion: 'v',
     });
+    // Pre-seed a stale classifier snippet so the assertion proves
+    // refresh REPLACES — not just writes when empty.
+    state.saveItemBody(id, 'stale classify-time snippet', 'whatsapp');
     const whatsappStore = {
       getMessagesForThread: () => [
         {
@@ -505,7 +508,9 @@ describe('handleRefreshItemBody', () => {
     };
     const r = await handleRefreshItemBody({ ...deps, accountResolver, whatsappStore }, id);
     expect(r.status).toBe(200);
-    expect(state.getItemBody(id)?.bodyMd).toContain('Hi, kannst du morgen?');
+    const cached = state.getItemBody(id);
+    expect(cached?.bodyMd).toContain('Hi, kannst du morgen?');
+    expect(cached?.bodyMd).not.toContain('stale classify-time snippet');
   });
 
   it('422 + reason="not_registered" when the provider is not registered for the account', async () => {
