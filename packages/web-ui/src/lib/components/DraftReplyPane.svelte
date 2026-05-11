@@ -186,15 +186,16 @@
 
 	let refreshing = $state(false);
 
-	function toastForRefreshFailure(reason: RefreshBodyFailure): { key: string; level: 'info' | 'error' } {
+	function toastForRefreshFailure(reason: RefreshBodyFailure): { silent: boolean; key: string; level: 'info' | 'error' } {
 		switch (reason.kind) {
-			case 'unavailable':    return { key: 'inbox.draft_refresh_unavailable', level: 'info' };
-			case 'unsupported':    return { key: 'inbox.draft_refresh_unsupported', level: 'info' };
-			case 'not_registered': return { key: 'inbox.draft_refresh_not_registered', level: 'info' };
-			case 'empty_body':     return { key: 'inbox.draft_refresh_empty', level: 'info' };
-			case 'not_found':      return { key: 'inbox.draft_refresh_not_found', level: 'info' };
-			case 'fetch_failed':   return { key: 'inbox.draft_refresh_failed', level: 'error' };
-			case 'network':        return { key: 'inbox.draft_refresh_failed', level: 'error' };
+			case 'aborted':        return { silent: true, key: '', level: 'info' };
+			case 'unavailable':    return { silent: false, key: 'inbox.draft_refresh_unavailable', level: 'info' };
+			case 'unsupported':    return { silent: false, key: 'inbox.draft_refresh_unsupported', level: 'info' };
+			case 'not_registered': return { silent: false, key: 'inbox.draft_refresh_not_registered', level: 'info' };
+			case 'empty_body':     return { silent: false, key: 'inbox.draft_refresh_empty', level: 'info' };
+			case 'not_found':      return { silent: false, key: 'inbox.draft_refresh_not_found', level: 'info' };
+			case 'fetch_failed':   return { silent: false, key: 'inbox.draft_refresh_failed', level: 'error' };
+			case 'network':        return { silent: false, key: 'inbox.draft_refresh_failed', level: 'error' };
 		}
 	}
 
@@ -208,7 +209,7 @@
 				return;
 			}
 			const hint = toastForRefreshFailure(result.reason);
-			addToast(t(hint.key), hint.level);
+			if (!hint.silent) addToast(t(hint.key), hint.level);
 		} finally {
 			refreshing = false;
 		}

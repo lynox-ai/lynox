@@ -474,11 +474,12 @@ describe('handleRefreshItemBody', () => {
     expect(r.status).toBe(501);
   });
 
-  it('422 when the provider is not registered for the account', async () => {
+  it('422 + reason="not_registered" when the provider is not registered for the account', async () => {
     const id = insertItem('imap:<m1@x>');
     const providerResolver = () => null;
     const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, id);
     expect(r.status).toBe(422);
+    expect((r.body as { reason: string }).reason).toBe('not_registered');
   });
 
   it('200 + overwrites the cache on the happy path', async () => {
@@ -506,11 +507,12 @@ describe('handleRefreshItemBody', () => {
     expect(r.status).toBe(502);
   });
 
-  it('422 when the provider returns an empty body', async () => {
+  it('422 + reason="empty_body" when the provider returns an empty body', async () => {
     const id = insertItem('imap:<m1@x>');
     const providerResolver = () => fakeProvider({ fetchText: '   ' });
     const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, id);
     expect(r.status).toBe(422);
+    expect((r.body as { reason: string }).reason).toBe('empty_body');
   });
 });
 

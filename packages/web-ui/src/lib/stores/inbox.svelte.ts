@@ -594,10 +594,10 @@ export async function refreshOpenPaneBody(): Promise<
 	{ ok: true } | { ok: false; reason: RefreshBodyFailure }
 > {
 	const pane = draftPane;
-	if (!pane) return { ok: false, reason: { kind: 'network' } };
+	if (!pane) return { ok: false, reason: { kind: 'aborted' } };
 	const itemId = pane.itemId;
 	const result = await apiRefreshItemBody(getApiBase(), itemId);
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'network' } };
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
 	if (!result.ok) return result;
 	return { ok: true };
 }

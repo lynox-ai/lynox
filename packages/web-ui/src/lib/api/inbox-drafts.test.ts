@@ -4,6 +4,7 @@ import {
 	generateDraft,
 	getDraft,
 	getItemDraft,
+	refreshItemBody,
 	updateDraft,
 	type CreateDraftBody,
 	type InboxDraft,
@@ -264,6 +265,76 @@ describe('generateDraft', () => {
 			throw new TypeError('network');
 		});
 		const result = await generateDraft('/api', 'inb_1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason.kind).toBe('network');
+	});
+});
+
+describe('refreshItemBody', () => {
+	it('POSTs to /body/refresh and returns the body on 200', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'FULL body', truncated: false, bytesWritten: 9 }));
+		const result = await refreshItemBody('/api', 'inb_1');
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.bodyMd).toBe('FULL body');
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(init.method).toBe('POST');
+		const url = fetchMock.mock.calls[0]?.[0] as string;
+		expect(url).toBe('/api/inbox/items/inb_1/body/refresh');
+	});
+
+	it('encodes the itemId path segment', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'x', truncated: false, bytesWritten: 1 }));
+		await refreshItemBody('/api', 'inb 1/x');
+		expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/inbox/items/inb%201%2Fx/body/refresh');
+	});
+
+	it('returns network kind when the 200 payload omits bodyMd', async () => {
+		installFetch(async () => jsonResponse({ truncated: false }));
+		const result = await refreshItemBody('/api', 'inb_1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason.kind).toBe('network');
+	});
+
+	it('reads the structured reason field on 422 to discriminate empty_body vs not_registered', async () => {
+		installFetch(async () => jsonResponse({ error: 'mail has no text body to refresh from', reason: 'empty_body' }, 422));
+		const empty = await refreshItemBody('/api', 'inb_1');
+		expect(empty.ok).toBe(false);
+		if (!empty.ok) expect(empty.reason.kind).toBe('empty_body');
+
+		installFetch(async () => jsonResponse({ error: 'mail provider not registered', reason: 'not_registered' }, 422));
+		const noProv = await refreshItemBody('/api', 'inb_1');
+		expect(noProv.ok).toBe(false);
+		if (!noProv.ok) expect(noProv.reason.kind).toBe('not_registered');
+	});
+
+	it('defaults 422 to not_registered when the reason field is missing', async () => {
+		installFetch(async () => jsonResponse({ error: 'unspecified' }, 422));
+		const result = await refreshItemBody('/api', 'inb_1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason.kind).toBe('not_registered');
+	});
+
+	it('maps status codes to discriminated failures', async () => {
+		const cases = [
+			[404, 'not_found'],
+			[501, 'unsupported'],
+			[502, 'fetch_failed'],
+			[503, 'unavailable'],
+			[500, 'network'],
+		] as const;
+		for (const [status, expected] of cases) {
+			installFetch(async () => new Response('', { status }));
+			const result = await refreshItemBody('/api', 'inb_1');
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.reason.kind).toBe(expected);
+		}
+	});
+
+	it('returns network kind when fetch throws', async () => {
+		installFetch(async () => {
+			throw new TypeError('network');
+		});
+		const result = await refreshItemBody('/api', 'inb_1');
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.reason.kind).toBe('network');
 	});

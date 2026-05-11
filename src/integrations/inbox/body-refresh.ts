@@ -16,7 +16,8 @@
 // per-provider lookup gymnastics.
 
 import type { MailEnvelope, MailProvider } from '../mail/provider.js';
-import type { InboxStateDb } from './state.js';
+import { MAX_ITEM_BODY_CHARS, type InboxStateDb } from './state.js';
+import { resolveThreadKey } from './watcher-hook.js';
 
 /** Window for the provider.list() probe. Items older than this won't refresh. */
 const DEFAULT_LOOKUP_DAYS = 30;
@@ -39,9 +40,13 @@ export interface RefreshItemBodyOptions {
 
 export interface RefreshItemBodyResult {
   ok: true;
+  /** The body actually written to the cache — already truncated to MAX_ITEM_BODY_CHARS. */
   bodyMd: string;
   source: string;
+  /** UTF-8 byte count of the written body (not char count). */
   bytesWritten: number;
+  /** True when the full body was clipped to fit MAX_ITEM_BODY_CHARS. */
+  truncated: boolean;
 }
 
 /**
@@ -80,17 +85,20 @@ export async function refreshItemBody(
     return { ok: false, reason: { kind: 'fetch_failed' } };
   }
 
-  const body = message.text.trim();
-  if (body.length === 0) return { ok: false, reason: { kind: 'empty_body' } };
+  const full = message.text.trim();
+  if (full.length === 0) return { ok: false, reason: { kind: 'empty_body' } };
 
-  // The same MAX_ITEM_BODY_CHARS clamp the state-layer enforces still
-  // applies — the saveItemBody call truncates server-side.
+  // Truncate UP FRONT so the body we hand back is exactly what hits the
+  // cache. Otherwise `bytesWritten` would lie when the state-layer
+  // silently clamped server-side.
+  const truncated = full.length > MAX_ITEM_BODY_CHARS;
+  const body = truncated ? full.slice(0, MAX_ITEM_BODY_CHARS) : full;
   opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
-  return { ok: true, bodyMd: body, source: opts.item.channel, bytesWritten: body.length };
-}
-
-function resolveThreadKey(env: MailEnvelope): string {
-  if (env.threadKey) return env.threadKey;
-  if (env.messageId) return `imap:${env.messageId}`;
-  return `imap:${env.folder}:${String(env.uid)}`;
+  return {
+    ok: true,
+    bodyMd: body,
+    source: opts.item.channel,
+    bytesWritten: Buffer.byteLength(body, 'utf8'),
+    truncated,
+  };
 }

@@ -300,8 +300,21 @@ function unavailable(message: string): ApiResponse {
   return { status: 503, body: { error: message } };
 }
 
-function unprocessable(message: string): ApiResponse {
-  return { status: 422, body: { error: message } };
+function unprocessable(message: string, reason?: string): ApiResponse {
+  return { status: 422, body: reason ? { error: message, reason } : { error: message } };
+}
+
+/**
+ * 501 gate for non-email channels. Both `handleGenerateDraft` and
+ * `handleRefreshItemBody` need it; hoisted so a future WhatsApp body
+ * adapter can drop the guard in one place.
+ */
+function requireEmailChannel(
+  item: import('../../types/index.js').InboxItem,
+  what: 'generation' | 'refresh',
+): ApiResponse | null {
+  if (item.channel === 'email') return null;
+  return { status: 501, body: { error: `${what} not supported for channel: ${item.channel}` } };
 }
 
 /**
@@ -361,11 +374,8 @@ export async function handleGenerateDraft(
   }
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
-  // Phase-2 v1 supports the email channel only — WhatsApp body lookup
-  // would need a separate adapter against the WA state store.
-  if (item.channel !== 'email') {
-    return { status: 501, body: { error: `generation not supported for channel: ${item.channel}` } };
-  }
+  const channelGate = requireEmailChannel(item, 'generation');
+  if (channelGate) return channelGate;
   const cached = deps.state.getItemBody(itemId);
   if (!cached || cached.bodyMd.length < MIN_BODY_FOR_GENERATION) {
     return unprocessable('cached body too short to draft from — refetch the mail first');
@@ -408,11 +418,10 @@ export async function handleRefreshItemBody(
   if (!deps.providerResolver) return unavailable('mail provider registry not wired');
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
-  if (item.channel !== 'email') {
-    return { status: 501, body: { error: `refresh not supported for channel: ${item.channel}` } };
-  }
+  const channelGate = requireEmailChannel(item, 'refresh');
+  if (channelGate) return channelGate;
   const provider = deps.providerResolver(item.accountId);
-  if (!provider) return unprocessable('mail provider not registered for this account');
+  if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
   const { refreshItemBody } = await import('./body-refresh.js');
   const result = await refreshItemBody({
     provider,
@@ -429,14 +438,19 @@ export async function handleRefreshItemBody(
       case 'not_found':
         return { status: 404, body: { error: 'mail no longer available in the lookup window' } };
       case 'empty_body':
-        return unprocessable('mail has no text body to refresh from');
+        return unprocessable('mail has no text body to refresh from', 'empty_body');
       case 'fetch_failed':
         return { status: 502, body: { error: 'provider fetch failed' } };
     }
   }
   return {
     status: 200,
-    body: { bodyMd: result.bodyMd, source: result.source, bytesWritten: result.bytesWritten },
+    body: {
+      bodyMd: result.bodyMd,
+      source: result.source,
+      bytesWritten: result.bytesWritten,
+      truncated: result.truncated,
+    },
   };
 }
 

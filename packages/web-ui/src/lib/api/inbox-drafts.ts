@@ -173,6 +173,10 @@ export async function updateDraft(
 	}
 }
 
+/**
+ * `aborted` is the "pane was closed mid-flight" sentinel — silent in
+ * the UI, distinct from a real network failure.
+ */
 export type RefreshBodyFailure =
 	| { kind: 'unavailable' }
 	| { kind: 'unsupported' }
@@ -180,6 +184,7 @@ export type RefreshBodyFailure =
 	| { kind: 'empty_body' }
 	| { kind: 'not_found' }
 	| { kind: 'fetch_failed' }
+	| { kind: 'aborted' }
 	| { kind: 'network' };
 
 /**
@@ -206,12 +211,11 @@ export async function refreshItemBody(
 			case 404: return { ok: false, reason: { kind: 'not_found' } };
 			case 501: return { ok: false, reason: { kind: 'unsupported' } };
 			case 422: {
-				// 422 covers both "no provider for this account" and "mail has
-				// no text body" — distinguish via the error string so the UI
-				// can show a precise hint without a second round-trip.
-				const body = await res.json().catch(() => null) as { error?: string } | null;
-				const empty = body?.error?.includes('no text body') === true;
-				return { ok: false, reason: { kind: empty ? 'empty_body' : 'not_registered' } };
+				// Backend returns a structured `reason` field that the UI
+				// reads directly — no fragile error-string matching.
+				const body = await res.json().catch(() => null) as { reason?: string } | null;
+				const kind = body?.reason === 'empty_body' ? 'empty_body' : 'not_registered';
+				return { ok: false, reason: { kind } };
 			}
 			case 502: return { ok: false, reason: { kind: 'fetch_failed' } };
 			case 503: return { ok: false, reason: { kind: 'unavailable' } };

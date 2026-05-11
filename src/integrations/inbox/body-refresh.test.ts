@@ -102,11 +102,30 @@ describe('refreshItemBody', () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.bodyMd).toBe('This is the FULL body of the original mail.');
-      expect(result.bytesWritten).toBe(result.bodyMd.length);
+      expect(result.bytesWritten).toBe(Buffer.byteLength(result.bodyMd, 'utf8'));
+      expect(result.truncated).toBe(false);
     }
     expect(state.getItemBody(item.id)?.bodyMd).toBe('This is the FULL body of the original mail.');
     // provider.fetch should be called with the matched UID
     expect((provider.fetch as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toEqual({ uid: 7 });
+  });
+
+  it('truncates bodies over MAX_ITEM_BODY_CHARS so the cache and bytesWritten stay consistent', async () => {
+    const item = inboxItem('imap:<m1@x>');
+    const huge = 'x'.repeat(10 * 1024);
+    const provider = fakeProvider({
+      envelopes: [envelope(7, { messageId: '<m1@x>' })],
+      fetchText: huge,
+    });
+    const result = await refreshItemBody({ provider, state, item });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.bodyMd.length).toBe(8 * 1024);
+      expect(result.bytesWritten).toBe(8 * 1024);
+      // Cache row matches reported body — no silent over-truncation.
+      expect(state.getItemBody(item.id)?.bodyMd.length).toBe(8 * 1024);
+    }
   });
 
   it('prefers provider-set threadKey over synthesised messageId form', async () => {

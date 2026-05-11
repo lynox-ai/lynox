@@ -212,11 +212,13 @@ function nextId(prefix: string): string {
 const MAX_LIST_LIMIT = 500;
 
 /**
- * Defense-in-depth clamp on the cached body. Today's writer (the
- * runner) emits ~500-char provider snippets; the cap leaves head-room
- * for a future full-body refresh while keeping single rows bounded.
+ * Defense-in-depth clamp on the cached body. Today's writers are the
+ * classifier (snippet, ~500 chars) and the body-refresh adapter (full
+ * mail body); the cap keeps single rows bounded. Exported so callers
+ * can truncate up-front and keep their reported byte counts honest
+ * (rather than discovering after the fact that state silently clipped).
  */
-const MAX_ITEM_BODY_CHARS = 8 * 1024;
+export const MAX_ITEM_BODY_CHARS = 8 * 1024;
 
 export class InboxStateDb {
   constructor(private readonly db: Database.Database) {}
