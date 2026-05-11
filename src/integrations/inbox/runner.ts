@@ -108,7 +108,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       });
     },
     onSuccess: (payload, result) => {
-      state.insertItemWithAudit(
+      const itemId = state.insertItemWithAudit(
         {
           tenantId: payload.tenantId,
           accountId: payload.accountId,
@@ -139,6 +139,16 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           }),
         },
       );
+      // Persist the sanitised body the classifier saw so the draft
+      // generator can read it without a second provider round-trip. We
+      // store the masked variant when sensitive-mode = 'mask' so the
+      // generator never receives PII the classifier was forbidden from
+      // seeing; for 'skip' the item bucket is `requires_user` and the
+      // body is intentionally empty (no LLM-readable content).
+      const body = payload.classifierInput.body;
+      if (typeof body === 'string' && body.length > 0) {
+        state.saveItemBody(itemId, body, payload.channel ?? 'email');
+      }
     },
     onDeadLetter: (payload, error) => {
       // PRD fail-closed default: surface to Needs You so the user sees it.

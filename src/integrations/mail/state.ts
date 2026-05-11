@@ -298,6 +298,26 @@ const MIGRATIONS: string[] = [
      ON inbox_rules(account_id, matcher_kind, matcher_value);
 
    PRAGMA foreign_keys = ON;`,
+
+  // v10: Lazy body cache for the draft-generator (PRD-UNIFIED-INBOX
+  // Phase 2). Populated on the first "Draft Reply" click — most items
+  // (auto_handled bucket, 80%+) never get one, so storage scales with
+  // user engagement, not with mail volume. CASCADE on inbox_items
+  // delete keeps the row from outliving the item it describes.
+  //
+  // `source` mirrors the channel that produced the body ('imap',
+  // 'gmail', 'whatsapp'). It is informational — the generator reads
+  // body_md and does not branch on source — but it gives audit + a
+  // future invalidation knob (e.g. refetch when Gmail sync resumes).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (10);
+
+   CREATE TABLE IF NOT EXISTS inbox_item_bodies (
+     item_id TEXT PRIMARY KEY,
+     body_md TEXT NOT NULL,
+     fetched_at INTEGER NOT NULL,
+     source TEXT NOT NULL,
+     FOREIGN KEY (item_id) REFERENCES inbox_items(id) ON DELETE CASCADE
+   );`,
 ];
 
 export interface MailStateDbOptions {

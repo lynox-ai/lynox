@@ -509,6 +509,38 @@ export class InboxStateDb {
     return result.changes > 0;
   }
 
+  // ── Item bodies (lazy cache for draft generation) ──────────────────────
+
+  /**
+   * Fetch the cached mail body for an item, or null when nothing has been
+   * cached yet. CASCADE on inbox_items delete keeps the cache row from
+   * outliving its owner — see migration v10.
+   */
+  getItemBody(itemId: string): { bodyMd: string; fetchedAt: Date; source: string } | null {
+    const row = this.db
+      .prepare<[string], { body_md: string; fetched_at: number; source: string }>(
+        `SELECT body_md, fetched_at, source FROM inbox_item_bodies WHERE item_id = ?`,
+      )
+      .get(itemId);
+    return row
+      ? { bodyMd: row.body_md, fetchedAt: new Date(row.fetched_at), source: row.source }
+      : null;
+  }
+
+  /**
+   * Upsert the cached body. `INSERT OR REPLACE` so a refetch (user
+   * explicitly asks "reload from server") overwrites the stored row
+   * without a separate delete step.
+   */
+  saveItemBody(itemId: string, bodyMd: string, source: string, fetchedAt: Date = new Date()): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO inbox_item_bodies (item_id, body_md, fetched_at, source)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(itemId, bodyMd, fetchedAt.getTime(), source);
+  }
+
   /**
    * Atomic body update + edits counter bump. Single txn so the tone-button
    * "edit-loss" guard (`userEditsCount > 0`) never sees a body change without

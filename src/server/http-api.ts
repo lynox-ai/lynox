@@ -3313,6 +3313,8 @@ export class LynoxHTTPApi {
         state: rt.state,
         rules: rt.rules,
         coldStartTracker: rt.coldStartTracker,
+        llm: rt.llm,
+        accountResolver: rt.accounts.resolve.bind(rt.accounts),
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       return deps;
@@ -3466,6 +3468,13 @@ export class LynoxHTTPApi {
         bodyMd: typeof b['bodyMd'] === 'string' ? b['bodyMd'] : '',
       };
       sendInbox(res, handleUpdateDraft(deps!, params['id']!, updateBody));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/draft/generate', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGenerateDraft } = await import('../integrations/inbox/api.js');
+      sendInbox(res, await handleGenerateDraft(deps!, params['id']!));
     }));
 
     this.staticRoutes.set('GET /api/inbox/rules', async (req, res) => {

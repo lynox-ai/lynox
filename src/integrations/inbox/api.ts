@@ -33,6 +33,13 @@ export interface InboxApiDeps {
   rules?: InboxRulesLoader | undefined;
   /** Surfaces cold-start progress to the UI banner; absent until wired. */
   coldStartTracker?: ColdStartTracker | undefined;
+  /**
+   * Resolves the account address + display name. The generator prompt needs
+   * the receiving mailbox identity to write a proper signature placeholder.
+   */
+  accountResolver?: ((accountId: string) => { address: string; displayName: string } | null) | undefined;
+  /** Inbox LLM caller — when absent, `handleGenerateDraft` returns 503. */
+  llm?: import('./classifier/index.js').LLMCaller | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -278,6 +285,64 @@ export function handleCreateDraft(
   const id = deps.state.insertDraftAndAttach(input);
   const draft = deps.state.getDraftById(id);
   return { status: 201, body: { draft } };
+}
+
+/**
+ * Generate a draft body via the inbox LLM. Does NOT persist — the UI
+ * follows up with `handleCreateDraft` to commit the resulting bodyMd
+ * into `inbox_drafts`. This split lets the UI show a "regenerate"
+ * affordance without polluting the supersede chain.
+ *
+ * Returns 503 when the LLM caller is not wired (e.g. flag on but no
+ * provider credentials). Returns 422 when the cached body is missing
+ * — historical items predating migration v10 may not have one.
+ */
+function unavailable(message: string): ApiResponse {
+  return { status: 503, body: { error: message } };
+}
+
+function unprocessable(message: string): ApiResponse {
+  return { status: 422, body: { error: message } };
+}
+
+export async function handleGenerateDraft(
+  deps: InboxApiDeps,
+  itemId: string,
+): Promise<ApiResponse> {
+  if (!deps.llm) return unavailable('draft generator not configured');
+  const item = deps.state.getItem(itemId);
+  if (!item) return notFound('item');
+  // Phase-2 v1 supports the email channel only — WhatsApp body lookup
+  // would need a separate adapter against the WA state store.
+  if (item.channel !== 'email') {
+    return { status: 501, body: { error: `generation not supported for channel: ${item.channel}` } };
+  }
+  const cached = deps.state.getItemBody(itemId);
+  if (!cached || cached.bodyMd.length === 0) {
+    return unprocessable('no cached body for this item — refetch the mail first');
+  }
+  const account = deps.accountResolver?.(item.accountId);
+  if (!account) return unprocessable('account not resolvable — cannot build a signature');
+  const { generateDraft } = await import('./generator.js');
+  // Best-effort sender extraction: the classifier prompt input we cached
+  // does not preserve the From header; we can recover the address from
+  // a future thread-keyed lookup, but for v1 we surface a generic
+  // greeting via empty fromAddress + the cached body's leading text.
+  const result = await generateDraft(
+    {
+      item: { id: item.id, reasonDe: item.reasonDe, channel: item.channel },
+      fromAddress: '',
+      accountAddress: account.address,
+      accountDisplayName: account.displayName,
+      subject: undefined,
+      body: cached.bodyMd,
+    },
+    deps.llm,
+  );
+  return {
+    status: 200,
+    body: { bodyMd: result.bodyMd, generatorVersion: result.generatorVersion, bodyTruncated: result.bodyTruncated },
+  };
 }
 
 export interface UpdateDraftBody {

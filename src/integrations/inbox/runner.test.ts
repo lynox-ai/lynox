@@ -90,6 +90,24 @@ describe('buildInboxRunner — happy path', () => {
       confidence: 0.92,
       fail_reason: null,
     });
+
+    // Snippet is cached at classify time so the draft generator never
+    // pays a second provider round-trip — Phase-2 design choice.
+    const cached = inbox.getItemBody(items[0]!.id);
+    expect(cached?.bodyMd).toBe('Hi Me, hast du Zeit?');
+    expect(cached?.source).toBe('email');
+  });
+
+  it('skips the body cache when the classifier prompt had no body (sensitive-skip path)', async () => {
+    const llm: LLMCaller = vi.fn(async () =>
+      JSON.stringify({ bucket: 'auto_handled', confidence: 0.9, one_line_why_de: 'k' }),
+    );
+    const queue = buildInboxRunner({ state: inbox, llm });
+    queue.enqueue(payload({ classifierInput: { ...payload().classifierInput, body: '' } }));
+    await queue.drain();
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(inbox.getItemBody(items[0]!.id)).toBeNull();
   });
 
   it('honors classifierVersionOverride for the persisted version stamp', async () => {
