@@ -16,6 +16,8 @@ import {
   handleGetItemDraft,
   handleListItemAudit,
   handleRunColdStart,
+  handleRunBackfillMetadata,
+  _resetBackfillMutex,
   handleListItems,
   handleListRules,
   handleResolveContact,
@@ -219,6 +221,70 @@ describe('handleRunColdStart', () => {
     // No floating rejection — vitest would fail the test if it leaked.
     await Promise.resolve();
     await Promise.resolve();
+  });
+});
+
+describe('handleRunBackfillMetadata', () => {
+  beforeEach(() => {
+    _resetBackfillMutex();
+  });
+
+  it('503s when the runner is not wired', async () => {
+    const r = await handleRunBackfillMetadata(deps, { accountId: ACCOUNT.id });
+    expect(r.status).toBe(503);
+  });
+
+  it('422s when the account is not registered', async () => {
+    const backfillMetadataRunner = vi.fn(async () => ({ accountId: ACCOUNT.id, scanned: 0, updated: 0, unmatched: 0 }));
+    const providerResolver = vi.fn(() => null);
+    const r = await handleRunBackfillMetadata(
+      { ...deps, backfillMetadataRunner, providerResolver },
+      { accountId: 'unknown' },
+    );
+    expect(r.status).toBe(422);
+    expect(backfillMetadataRunner).not.toHaveBeenCalled();
+  });
+
+  it('runs the backfill and returns the report on a valid account', async () => {
+    const report = { accountId: ACCOUNT.id, scanned: 3, updated: 2, unmatched: 1 };
+    const backfillMetadataRunner = vi.fn(async () => report);
+    const providerResolver = vi.fn(() => ({ accountId: ACCOUNT.id }) as never);
+    const r = await handleRunBackfillMetadata(
+      { ...deps, backfillMetadataRunner, providerResolver },
+      { accountId: ACCOUNT.id },
+    );
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ ok: true, ...report });
+  });
+
+  it('returns 409 when a backfill is already in flight (1-concurrent mutex)', async () => {
+    let resolveRunner: (() => void) | null = null;
+    const backfillMetadataRunner = vi.fn(
+      () => new Promise<{ accountId: string; scanned: number; updated: number; unmatched: number }>((resolve) => {
+        resolveRunner = () => resolve({ accountId: ACCOUNT.id, scanned: 0, updated: 0, unmatched: 0 });
+      }),
+    );
+    const providerResolver = vi.fn(() => ({ accountId: ACCOUNT.id }) as never);
+    const handlerDeps = { ...deps, backfillMetadataRunner, providerResolver };
+    const first = handleRunBackfillMetadata(handlerDeps, { accountId: ACCOUNT.id });
+    // First request is in flight (runner promise is pending) — second should 409 immediately.
+    await Promise.resolve();
+    const second = await handleRunBackfillMetadata(handlerDeps, { accountId: ACCOUNT.id });
+    expect(second.status).toBe(409);
+    resolveRunner!();
+    await first;
+  });
+
+  it('releases the mutex after completion so a second call can run', async () => {
+    const report = { accountId: ACCOUNT.id, scanned: 0, updated: 0, unmatched: 0 };
+    const backfillMetadataRunner = vi.fn(async () => report);
+    const providerResolver = vi.fn(() => ({ accountId: ACCOUNT.id }) as never);
+    const handlerDeps = { ...deps, backfillMetadataRunner, providerResolver };
+    const first = await handleRunBackfillMetadata(handlerDeps, { accountId: ACCOUNT.id });
+    expect(first.status).toBe(200);
+    const second = await handleRunBackfillMetadata(handlerDeps, { accountId: ACCOUNT.id });
+    expect(second.status).toBe(200);
+    expect(backfillMetadataRunner).toHaveBeenCalledTimes(2);
   });
 });
 

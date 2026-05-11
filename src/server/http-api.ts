@@ -16,6 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -3343,6 +3344,12 @@ export class LynoxHTTPApi {
           if (!provider) throw new Error(`account "${accountId}" not registered`);
           await rt.runColdStart(provider, runOpts ?? {});
         };
+        // v11 envelope-metadata backfill — same provider/state plumbing.
+        deps.backfillMetadataRunner = async (accountId) => {
+          const provider = mailCtx.registry.get(accountId);
+          if (!provider) throw new Error(`account "${accountId}" not registered`);
+          return inboxBackfillMetadata({ provider, state: rt.state });
+        };
       }
       return deps;
     };
@@ -3401,6 +3408,17 @@ export class LynoxHTTPApi {
       };
       if (typeof b['force'] === 'boolean') runBody.force = b['force'];
       sendInbox(res, await handleRunColdStart(deps!, runBody));
+    });
+
+    this.staticRoutes.set('POST /api/inbox/backfill-metadata', async (_req, res, _params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleRunBackfillMetadata } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const runBody: import('../integrations/inbox/api.js').RunBackfillMetadataBody = {
+        accountId: typeof b['accountId'] === 'string' ? b['accountId'] : '',
+      };
+      sendInbox(res, await handleRunBackfillMetadata(deps!, runBody));
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id', async (_req, res, params) => {

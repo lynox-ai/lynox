@@ -93,6 +93,21 @@ function normalizeWhitespace(input: string): string {
     .trim();
 }
 
+/**
+ * Length-cap-free version of `sanitizeBody`. Applies the same HTML
+ * strip + invisible-character removal + whitespace normalization, but
+ * returns the result regardless of length. Used by the body-cache
+ * writer in `inbox/state.ts:saveItemBody` so the cache layer's own
+ * `MAX_ITEM_BODY_CHARS` (8192) stays the documented bound rather than
+ * being shadowed by this module's prompt-shaped `MAX_BODY_CHARS` (8000).
+ */
+export function stripHtmlAndInvisibles(input: string | undefined | null): string {
+  if (!input) return '';
+  return normalizeWhitespace(
+    stripHtml(input).replace(HIDDEN_CHAR_RE, '').replace(TAG_PLANE_RE, ''),
+  );
+}
+
 export interface SanitizeResult {
   body: string;
   /** True when the body was cut to fit MAX_BODY_CHARS. */

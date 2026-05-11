@@ -29,6 +29,7 @@ import type {
   InboxRuleSource,
   InboxUserAction,
 } from '../../types/index.js';
+import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js';
 
 /** Sentinel used in single-user instances. Team-inbox lands in Phase 5+. */
 export const DEFAULT_TENANT_ID = 'default';
@@ -46,6 +47,65 @@ export interface InboxItemInput {
   classifiedAt: Date;
   classifierVersion: string;
   unsnoozeOnReply?: boolean | undefined;
+  // ── v11 envelope metadata (PRD-INBOX-PHASE-3) ──────────────────────────
+  // Optional so existing tests + dead-letter paths still compile; the
+  // writer-layer validation in `envelopeToItemInputFields` logs an
+  // audit row when fromAddress/subject are empty but does not block.
+  fromAddress?: string | undefined;
+  fromName?: string | undefined;
+  subject?: string | undefined;
+  mailDate?: Date | undefined;
+  snippet?: string | undefined;
+  messageId?: string | undefined;
+  inReplyTo?: string | undefined;
+}
+
+/**
+ * v11 envelope → InboxItemInput field projection.
+ *
+ * Single writer-layer shaping function so all four insert sites (rule
+ * fast-path, sensitive-skip, runner.onSuccess, runner.onDeadLetter)
+ * project the same envelope shape into the same column shape. Snippet
+ * is capped to 200 chars at write-time per PRD §Architecture v11.1.
+ *
+ * Validation is intentionally non-blocking: empty from/subject log an
+ * audit-row `classified_with_empty_metadata` upstream but the row still
+ * inserts (preserves the user's right to see *every* item, even ones
+ * where the provider gave us mangled headers).
+ */
+export interface EnvelopeShape {
+  from: ReadonlyArray<{ name?: string | undefined; address: string }>;
+  subject: string;
+  date: Date;
+  snippet: string;
+  messageId: string | undefined;
+  inReplyTo: string | undefined;
+}
+
+export function envelopeToItemInputFields(
+  env: EnvelopeShape,
+): Pick<InboxItemInput,
+  'fromAddress' | 'fromName' | 'subject' | 'mailDate' | 'snippet' | 'messageId' | 'inReplyTo'
+> {
+  // Header values are attacker-controlled. sanitizeHeader strips
+  // CR/LF, zero-width, bidi-control, TAGS-plane unicode (PRD threat
+  // model §"XSS via subject/from in card render"). Caps mirror RFC
+  // 5321 (320 for address) + RFC 5322 (998 for subject).
+  const primary = env.from[0];
+  const fromAddress = sanitizeHeader(primary?.address, 320);
+  const fromNameRaw = sanitizeHeader(primary?.name);
+  const fromName = fromNameRaw.length > 0 ? fromNameRaw : undefined;
+  const subject = sanitizeHeader(env.subject, 998);
+  const snippetRaw = sanitizeHeader(env.snippet, 200);
+  return {
+    fromAddress,
+    fromName,
+    subject,
+    mailDate: env.date,
+    snippet: snippetRaw.length > 0 ? snippetRaw : undefined,
+    messageId: env.messageId,
+    inReplyTo: env.inReplyTo,
+  };
 }
 
 export interface InboxAuditInput {
@@ -106,6 +166,14 @@ interface ItemRow {
   snooze_until: number | null;
   snooze_condition: string | null;
   unsnooze_on_reply: number;
+  // v11 envelope columns — DEFAULT '' on NOT NULL, NULL on the rest
+  from_address: string;
+  from_name: string | null;
+  subject: string;
+  mail_date: number | null;
+  snippet: string | null;
+  message_id: string | null;
+  in_reply_to: string | null;
 }
 
 interface AuditRow {
@@ -161,6 +229,13 @@ function rowToItem(row: ItemRow): InboxItem {
     snoozeUntil: row.snooze_until !== null ? new Date(row.snooze_until) : undefined,
     snoozeCondition: row.snooze_condition ?? undefined,
     unsnoozeOnReply: row.unsnooze_on_reply === 1,
+    fromAddress: row.from_address,
+    fromName: row.from_name ?? undefined,
+    subject: row.subject,
+    mailDate: row.mail_date !== null ? new Date(row.mail_date) : undefined,
+    snippet: row.snippet ?? undefined,
+    messageId: row.message_id ?? undefined,
+    inReplyTo: row.in_reply_to ?? undefined,
   };
 }
 
@@ -243,8 +318,10 @@ export class InboxStateDb {
         `INSERT INTO inbox_items (
            id, tenant_id, account_id, channel, thread_key,
            bucket, confidence, reason_de, classified_at, classifier_version,
-           unsnooze_on_reply
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           unsnooze_on_reply,
+           from_address, from_name, subject, mail_date, snippet,
+           message_id, in_reply_to
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (tenant_id, account_id, thread_key) DO NOTHING`,
       )
       .run(
@@ -259,6 +336,13 @@ export class InboxStateDb {
         input.classifiedAt.getTime(),
         input.classifierVersion,
         unsnoozeOnReply ? 1 : 0,
+        input.fromAddress ?? '',
+        input.fromName ?? null,
+        input.subject ?? '',
+        input.mailDate?.getTime() ?? null,
+        input.snippet ?? null,
+        input.messageId ?? null,
+        input.inReplyTo ?? null,
       ) as { changes: number };
     if (result.changes > 0) return id;
     // Race lost — another job inserted first. Return that row's id.
@@ -309,6 +393,63 @@ export class InboxStateDb {
       )
       .get(accountId, threadKey);
     return row ? rowToItem(row) : null;
+  }
+
+  /**
+   * v11 backfill writer: update envelope columns on an existing row,
+   * keyed by (tenant_id, account_id, thread_key). Used by the
+   * operator-driven backfill endpoint to fill in pre-v11 rows whose
+   * NOT NULL columns default to '' until provider.list re-runs.
+   *
+   * Returns true when exactly one row was updated, false when no row
+   * matched the key tuple. The endpoint counts updated vs missed so the
+   * operator can see how many threads on the instance pre-date v11.
+   */
+  updateItemEnvelopeByThreadKey(
+    accountId: string,
+    threadKey: string,
+    fields: {
+      fromAddress: string;
+      fromName: string | undefined;
+      subject: string;
+      mailDate: Date | undefined;
+      snippet: string | undefined;
+      messageId: string | undefined;
+      inReplyTo: string | undefined;
+    },
+    tenantId: string = DEFAULT_TENANT_ID,
+  ): boolean {
+    this._updateItemEnvelopeStmt ??= this.db.prepare(
+      `UPDATE inbox_items
+       SET from_address = ?, from_name = ?, subject = ?,
+           mail_date = ?, snippet = ?, message_id = ?, in_reply_to = ?
+       WHERE tenant_id = ? AND account_id = ? AND thread_key = ?`,
+    );
+    const result = this._updateItemEnvelopeStmt.run(
+      fields.fromAddress,
+      fields.fromName ?? null,
+      fields.subject,
+      fields.mailDate?.getTime() ?? null,
+      fields.snippet ?? null,
+      fields.messageId ?? null,
+      fields.inReplyTo ?? null,
+      tenantId,
+      accountId,
+      threadKey,
+    ) as { changes: number };
+    return result.changes > 0;
+  }
+  private _updateItemEnvelopeStmt: Database.Statement | undefined;
+
+  /**
+   * Wrap N envelope-metadata UPDATEs in a single SQLite transaction so
+   * a 200-row backfill is one fsync instead of 200. Exposed narrowly
+   * for the backfill module — keeps the generic `runInTransaction`
+   * helper off the public surface until the second caller arrives.
+   */
+  runBackfillMetadataBatch(fn: () => void): void {
+    const txn = this.db.transaction(fn);
+    txn();
   }
 
   /**
@@ -552,19 +693,34 @@ export class InboxStateDb {
    * explicitly asks "reload from server") overwrites the stored row
    * without a separate delete step.
    *
-   * The body is clamped to MAX_ITEM_BODY_CHARS as defense-in-depth — the
-   * primary caller (the runner) writes a 500-char snippet, but a future
-   * full-body refresh path could feed multi-MB messages; the clamp keeps
-   * the table size predictable and the downstream prompt bounded.
+   * Defense-in-depth: HTML is stripped + invisible chars removed via
+   * sanitizeBody before persistence (PRD-INBOX-PHASE-3 §Threat Model
+   * "XSS via body in Reading-Pane"). The classifier prompt path already
+   * feeds plaintext; this is the second line of defense for a future
+   * full-body refresh path that might forward provider.fetch().html.
+   * The body is then clamped to MAX_ITEM_BODY_CHARS so cold-start
+   * backfill of multi-MB messages cannot bloat the table.
    */
-  saveItemBody(itemId: string, bodyMd: string, source: string, fetchedAt: Date = new Date()): void {
-    const clamped = bodyMd.length > MAX_ITEM_BODY_CHARS ? bodyMd.slice(0, MAX_ITEM_BODY_CHARS) : bodyMd;
+  saveItemBody(
+    itemId: string,
+    bodyMd: string,
+    source: string,
+    fetchedAt: Date = new Date(),
+  ): { bodyMd: string; bytesWritten: number; clampedAtCacheLayer: boolean } {
+    const sanitized = stripHtmlAndInvisibles(bodyMd);
+    const clampedAtCacheLayer = sanitized.length > MAX_ITEM_BODY_CHARS;
+    const clamped = clampedAtCacheLayer ? sanitized.slice(0, MAX_ITEM_BODY_CHARS) : sanitized;
     this.db
       .prepare(
         `INSERT OR REPLACE INTO inbox_item_bodies (item_id, body_md, fetched_at, source)
          VALUES (?, ?, ?, ?)`,
       )
       .run(itemId, clamped, fetchedAt.getTime(), source);
+    return {
+      bodyMd: clamped,
+      bytesWritten: Buffer.byteLength(clamped, 'utf8'),
+      clampedAtCacheLayer,
+    };
   }
 
   /**

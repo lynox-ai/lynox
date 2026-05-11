@@ -42,6 +42,22 @@ export interface InboxQueuePayload {
   /** Optional single tenant override; falls back to the repository default. */
   tenantId?: string | undefined;
   /**
+   * v11 envelope projection. Threaded from the watcher-hook so
+   * runner.onSuccess + onDeadLetter can populate from/subject/date on
+   * the row even when classification fails. Pre-built via
+   * `envelopeToItemInputFields` so the four insert sites share one
+   * projection function.
+   */
+  envelope?: {
+    fromAddress: string;
+    fromName: string | undefined;
+    subject: string;
+    mailDate: Date | undefined;
+    snippet: string | undefined;
+    messageId: string | undefined;
+    inReplyTo: string | undefined;
+  } | undefined;
+  /**
    * Set when the watcher hook detected sensitive content and either
    * masked it or sent it through under the `allow` mode. The runner
    * folds this into the classification audit's payload_json so the user
@@ -108,6 +124,8 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       });
     },
     onSuccess: (payload, result) => {
+      const envelopeFields = payload.envelope ?? {};
+      const metadataWarning = _detectEmptyMetadata(payload.envelope);
       const itemId = state.insertItemWithAudit(
         {
           tenantId: payload.tenantId,
@@ -119,6 +137,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           reasonDe: result.reasonDe,
           classifiedAt: new Date(),
           classifierVersion: result.classifierVersion,
+          ...envelopeFields,
         },
         {
           tenantId: payload.tenantId,
@@ -136,6 +155,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
                   sensitive_redactions: payload.sensitive.redactionCount,
                 }
               : {}),
+            ...(metadataWarning ? { warning: 'classified_with_empty_metadata', missing: metadataWarning } : {}),
           }),
         },
       );
@@ -152,6 +172,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
     },
     onDeadLetter: (payload, error) => {
       // PRD fail-closed default: surface to Needs You so the user sees it.
+      const envelopeFields = payload.envelope ?? {};
       state.insertItemWithAudit(
         {
           tenantId: payload.tenantId,
@@ -163,6 +184,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           reasonDe: 'Klassifizierer-Aufruf fehlgeschlagen — manuell prüfen.',
           classifiedAt: new Date(),
           classifierVersion: `dead-letter:${error.name || 'Error'}`,
+          ...envelopeFields,
         },
         {
           tenantId: payload.tenantId,
@@ -186,5 +208,22 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
   if (policy.retryOnce !== undefined) queueOptions.retryOnce = policy.retryOnce;
 
   return new ClassifierQueue<InboxQueuePayload>(queueOptions);
+}
+
+/**
+ * Writer-layer metadata validation (PRD §Multi-Insert-Site Architecture).
+ *
+ * Returns the missing-field names when from_address or subject is empty —
+ * the caller folds this into the classification audit's payload_json as
+ * a `classified_with_empty_metadata` warning. Insert proceeds either
+ * way: the user must still see every item, even ones the provider gave
+ * us with mangled headers.
+ */
+function _detectEmptyMetadata(env: InboxQueuePayload['envelope']): ReadonlyArray<string> | null {
+  if (!env) return null;
+  const missing: string[] = [];
+  if (env.fromAddress.length === 0) missing.push('from_address');
+  if (env.subject.length === 0) missing.push('subject');
+  return missing.length > 0 ? missing : null;
 }
 

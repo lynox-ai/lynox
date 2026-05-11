@@ -438,3 +438,89 @@ describe('InboxStateDb — rules', () => {
     expect(inbox.listRulesForAccount(TEST_ACCOUNT.id)).toHaveLength(0);
   });
 });
+
+describe('InboxStateDb — v11 envelope metadata', () => {
+  it('round-trips envelope columns on insert', () => {
+    const id = inbox.insertItem({
+      accountId: TEST_ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'imap:thread-v11',
+      bucket: 'requires_user',
+      confidence: 0.8,
+      reasonDe: 'v11 envelope test',
+      classifiedAt: new Date('2026-05-12T08:30:00Z'),
+      classifierVersion: 'haiku-2026-05',
+      fromAddress: 'sender@example.com',
+      fromName: 'Sender Display',
+      subject: 'Envelope-preserving subject',
+      mailDate: new Date('2026-05-11T17:00:00Z'),
+      snippet: 'short preview',
+      messageId: '<v11msg@example.com>',
+      inReplyTo: '<parent@example.com>',
+    });
+    const item = inbox.getItem(id);
+    expect(item).toMatchObject({
+      fromAddress: 'sender@example.com',
+      fromName: 'Sender Display',
+      subject: 'Envelope-preserving subject',
+      mailDate: new Date('2026-05-11T17:00:00Z'),
+      snippet: 'short preview',
+      messageId: '<v11msg@example.com>',
+      inReplyTo: '<parent@example.com>',
+    });
+  });
+
+  it('pre-v11 callers (no envelope fields) get DEFAULT \'\' / undefined', () => {
+    const id = insertSampleItem();
+    const item = inbox.getItem(id);
+    expect(item?.fromAddress).toBe('');
+    expect(item?.fromName).toBeUndefined();
+    expect(item?.subject).toBe('');
+    expect(item?.mailDate).toBeUndefined();
+    expect(item?.snippet).toBeUndefined();
+    expect(item?.messageId).toBeUndefined();
+    expect(item?.inReplyTo).toBeUndefined();
+  });
+
+  it('updateItemEnvelopeByThreadKey fills metadata in place by thread_key', () => {
+    insertSampleItem({ threadKey: 'imap:thread-backfill' });
+    const updated = inbox.updateItemEnvelopeByThreadKey(
+      TEST_ACCOUNT.id,
+      'imap:thread-backfill',
+      {
+        fromAddress: 'backfilled@example.com',
+        fromName: 'Backfilled Sender',
+        subject: 'Backfilled subject',
+        mailDate: new Date('2026-05-09T10:00:00Z'),
+        snippet: 'backfilled snippet',
+        messageId: '<bf@example.com>',
+        inReplyTo: undefined,
+      },
+    );
+    expect(updated).toBe(true);
+    const list = inbox.listItems({ bucket: 'requires_user' });
+    expect(list[0]).toMatchObject({
+      fromAddress: 'backfilled@example.com',
+      fromName: 'Backfilled Sender',
+      subject: 'Backfilled subject',
+      mailDate: new Date('2026-05-09T10:00:00Z'),
+    });
+  });
+
+  it('updateItemEnvelopeByThreadKey returns false when no row matches', () => {
+    const updated = inbox.updateItemEnvelopeByThreadKey(
+      TEST_ACCOUNT.id,
+      'imap:no-such-thread',
+      {
+        fromAddress: 'x@y',
+        fromName: undefined,
+        subject: 's',
+        mailDate: undefined,
+        snippet: undefined,
+        messageId: undefined,
+        inReplyTo: undefined,
+      },
+    );
+    expect(updated).toBe(false);
+  });
+});

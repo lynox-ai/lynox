@@ -350,12 +350,23 @@
 						>
 							<div class="flex items-start justify-between gap-3">
 								<div class="min-w-0 flex-1">
+									<div class="flex items-center justify-between gap-2 mb-0.5">
+										<span class="text-sm text-text truncate" title={item.fromAddress || item.accountId}>
+											{item.fromName || item.fromAddress || accountShortLabel(item.accountId)}
+										</span>
+										<span class="text-[11px] text-text-subtle shrink-0">
+											{dateFormat(item.mailDate ?? item.classifiedAt)}
+										</span>
+									</div>
+									{#if item.subject}
+										<p class="text-sm font-medium text-text leading-tight truncate mb-1" title={item.subject}>
+											{item.subject}
+										</p>
+									{/if}
 									<div class="flex items-center gap-2 text-[11px] text-text-subtle mb-1">
 										<span title={item.accountId}>📬 {accountShortLabel(item.accountId)}</span>
 										<span aria-hidden="true">·</span>
 										<span>{channelLabel(item.channel)}</span>
-										<span aria-hidden="true">·</span>
-										<span>{dateFormat(item.classifiedAt)}</span>
 									</div>
 									<p class="text-sm text-text leading-relaxed">{item.reasonDe}</p>
 									{#if item.classifierVersion === 'sensitive-prefilter'}

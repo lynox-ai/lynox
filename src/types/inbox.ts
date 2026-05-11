@@ -67,6 +67,21 @@ export interface InboxItem {
   snoozeCondition: string | undefined;
   /** When true, sender's reply during a snooze brings the item back immediately. */
   unsnoozeOnReply: boolean;
+  // ── v11 envelope metadata (PRD-INBOX-PHASE-3-UX-COMPLETE) ──────────────
+  // Pre-v11 rows expose `''` for fromAddress/subject and `undefined` for
+  // the optional fields until the operator-driven backfill endpoint
+  // re-runs provider.list and fills them in place.
+  fromAddress: string;
+  fromName: string | undefined;
+  subject: string;
+  /** envelope.date.getTime() at watcher-hook time. Null for WA items + pre-v11 rows. */
+  mailDate: Date | undefined;
+  /** ≤200-char preview from envelope.snippet — cheap card preview without body fetch. */
+  snippet: string | undefined;
+  /** RFC 5322 Message-ID. Enables local SQL thread-walk via in_reply_to. */
+  messageId: string | undefined;
+  /** Parent Message-ID for sibling reverse-lookup. */
+  inReplyTo: string | undefined;
 }
 
 export interface InboxAuditEntry {

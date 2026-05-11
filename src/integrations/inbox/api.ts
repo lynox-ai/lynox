@@ -71,6 +71,13 @@ export interface InboxApiDeps {
     accountId: string,
     runOpts?: { force?: boolean },
   ) => Promise<void>;
+  /**
+   * v11 envelope-metadata backfill runner. Pulls a fresh provider.list()
+   * batch and UPDATEs the v11 columns on existing items keyed by
+   * thread_key. Single-concurrent at the instance level — the handler
+   * enforces a 409 if one is already running.
+   */
+  backfillMetadataRunner?: (accountId: string) => Promise<import('./backfill-metadata.js').BackfillMetadataReport>;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -182,6 +189,53 @@ export async function handleRunColdStart(
   // already. Errors are surfaced through the tracker.
   void deps.coldStartRunner(body.accountId, body.force !== undefined ? { force: body.force } : {}).catch(() => {});
   return { status: 202, body: { ok: true, accountId: body.accountId } };
+}
+
+export interface RunBackfillMetadataBody {
+  accountId: string;
+}
+
+/**
+ * Module-level mutex for the v11 metadata backfill. PRD-3 requires
+ * "rate-limited 1 concurrent per instance" so the IMAP load stays
+ * bounded; subsequent requests get 409 until the in-flight run finishes.
+ * Exported for tests that need to inspect/reset the flag.
+ */
+let _backfillInFlight = false;
+export function _resetBackfillMutex(): void { _backfillInFlight = false; }
+
+/**
+ * Operator-driven envelope-metadata backfill. Fills the v11 columns
+ * (from_address, from_name, subject, mail_date, snippet, message_id,
+ * in_reply_to) on rows created before migration v11 landed. Sync from
+ * the operator's perspective — the request blocks until the
+ * provider.list() pass completes and the report is returned. The
+ * tracker channel is intentionally NOT reused; backfill is a one-off
+ * per-account operator action and the report shape (scanned / updated
+ * / unmatched) is the operator's confirmation that the job succeeded.
+ */
+export async function handleRunBackfillMetadata(
+  deps: InboxApiDeps,
+  body: RunBackfillMetadataBody,
+): Promise<ApiResponse> {
+  if (!deps.backfillMetadataRunner) return unavailable('backfill runner not wired');
+  if (!deps.providerResolver) return unavailable('mail provider registry not wired');
+  if (typeof body.accountId !== 'string' || body.accountId.length === 0) {
+    return bad('accountId is required');
+  }
+  if (!deps.providerResolver(body.accountId)) {
+    return unprocessable(`account "${body.accountId}" is not registered`, 'not_registered');
+  }
+  if (_backfillInFlight) {
+    return { status: 409, body: { error: 'backfill already in progress', reason: 'concurrent_backfill' } };
+  }
+  _backfillInFlight = true;
+  try {
+    const report = await deps.backfillMetadataRunner(body.accountId);
+    return { status: 200, body: { ok: true, ...report } };
+  } finally {
+    _backfillInFlight = false;
+  }
 }
 
 export interface SetActionBody {

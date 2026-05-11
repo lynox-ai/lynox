@@ -106,18 +106,19 @@ export async function refreshItemBody(
   const full = message.text.trim();
   if (full.length === 0) return { ok: false, reason: { kind: 'empty_body' } };
 
-  // Truncate UP FRONT so the body we hand back is exactly what hits the
-  // cache. Otherwise `bytesWritten` would lie when the state-layer
-  // silently clamped server-side.
+  // Pre-clamp keeps the API's `truncated` field honest. The state layer
+  // also runs an HTML/invisible-char strip + its own clamp; we read the
+  // post-write `bytesWritten` back so the response reports the actual
+  // bytes in cache rather than the pre-strip char count.
   const truncated = full.length > MAX_ITEM_BODY_CHARS;
   const body = truncated ? full.slice(0, MAX_ITEM_BODY_CHARS) : full;
-  opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
+  const persisted = opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
   return {
     ok: true,
-    bodyMd: body,
+    bodyMd: persisted.bodyMd,
     source: opts.item.channel,
-    bytesWritten: Buffer.byteLength(body, 'utf8'),
-    truncated,
+    bytesWritten: persisted.bytesWritten,
+    truncated: truncated || persisted.clampedAtCacheLayer,
   };
 }
 
@@ -176,12 +177,12 @@ export async function refreshWhatsappItemBody(
   // exchange survives.
   const truncated = full.length > MAX_ITEM_BODY_CHARS;
   const body = truncated ? full.slice(full.length - MAX_ITEM_BODY_CHARS) : full;
-  opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
+  const persisted = opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
   return {
     ok: true,
-    bodyMd: body,
+    bodyMd: persisted.bodyMd,
     source: opts.item.channel,
-    bytesWritten: Buffer.byteLength(body, 'utf8'),
-    truncated,
+    bytesWritten: persisted.bytesWritten,
+    truncated: truncated || persisted.clampedAtCacheLayer,
   };
 }
