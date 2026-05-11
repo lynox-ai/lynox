@@ -115,3 +115,13 @@ textarea::-webkit-scrollbar {
 	outline-offset: 2px;
 	border-radius: var(--radius-sm);
 }
+
+/* Hide overflow indicators (used for horizontally-scrollable tab strips on
+   narrow viewports — content is the affordance, not a chrome scrollbar). */
+.scrollbar-none {
+	scrollbar-width: none;
+	-ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+	display: none;
+}

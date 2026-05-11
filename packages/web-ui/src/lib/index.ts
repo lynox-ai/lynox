@@ -30,6 +30,10 @@ export { default as ToastContainer } from './components/ToastContainer.svelte';
 export { default as MobileAccess } from './components/MobileAccess.svelte';
 export { default as MigrationWizard } from './components/MigrationWizard.svelte';
 export { default as PromptAnchor } from './components/PromptAnchor.svelte';
+export { default as InboxView } from './components/InboxView.svelte';
+export { default as ColdStartBanner } from './components/ColdStartBanner.svelte';
+export { default as KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp.svelte';
+export { default as RulesView } from './components/RulesView.svelte';
 
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';
@@ -119,6 +123,58 @@ export type { ContextType, ContextInfo } from './stores/context-panel.svelte.js'
 
 // Voice auto-send
 export { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from './stores/voice-autosend.svelte.js';
+
+// Inbox store (Phase 1b)
+export {
+	loadInboxCounts,
+	loadInboxItems,
+	setItemAction,
+	setItemSnooze,
+	loadItemAudit,
+	getInboxCounts,
+	getInboxItems,
+	isInboxAvailable,
+	startInboxVisibilityRefresh,
+	loadColdStart,
+	startColdStartPolling,
+	getColdStartSnapshot,
+	getVisibleColdStartActive,
+	getVisibleColdStartRecent,
+	dismissColdStartForAccount,
+	getLastAction,
+	undoLastAction,
+} from './stores/inbox.svelte.js';
+export type {
+	InboxItem,
+	InboxCounts,
+	InboxAuditEntry,
+	InboxBucket,
+	InboxChannel,
+	InboxUserAction,
+	ColdStartProgress,
+	ColdStartReport,
+	ColdStartActiveEntry,
+	ColdStartRecentEntry,
+	ColdStartSnapshot,
+	UndoableAction,
+} from './stores/inbox.svelte.js';
+
+// Inbox rules (Phase 1b)
+export {
+	listInboxRules,
+	createInboxRule,
+	deleteInboxRule,
+} from './api/inbox-rules.js';
+export type {
+	InboxRule,
+	CreateRuleBody,
+	InboxRuleMatcherKind,
+	InboxRuleAction,
+	InboxRuleSource,
+	InboxRuleBucket,
+} from './api/inbox-rules.js';
+export { listMailAccounts } from './api/mail-accounts.js';
+export type { MailAccountView } from './api/mail-accounts.js';
 
 // Push Notifications
 export {

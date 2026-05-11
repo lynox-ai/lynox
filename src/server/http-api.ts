@@ -3312,6 +3312,7 @@ export class LynoxHTTPApi {
       const deps: import('../integrations/inbox/api.js').InboxApiDeps = {
         state: rt.state,
         rules: rt.rules,
+        coldStartTracker: rt.coldStartTracker,
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       return deps;
@@ -3352,6 +3353,13 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const tenantId = url.searchParams.get('tenantId');
       sendInbox(res, handleGetCounts(deps!, tenantId !== null ? { tenantId } : {}));
+    });
+
+    this.staticRoutes.set('GET /api/inbox/cold-start', async (_req, res) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetColdStart } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleGetColdStart(deps!));
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id', async (_req, res, params) => {
