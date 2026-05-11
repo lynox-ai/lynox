@@ -182,14 +182,36 @@ describe('generateDraft', () => {
 	it('defaults bodyTruncated=false when the field is missing from the payload', async () => {
 		installFetch(async () => jsonResponse({ bodyMd: 'x', generatorVersion: 'v' }));
 		const result = await generateDraft('/api', 'inb_1');
-		expect(result.ok && result.draft.bodyTruncated).toBe(false);
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.draft.bodyTruncated).toBe(false);
 	});
 
-	it('returns network kind when the payload is malformed (missing bodyMd)', async () => {
+	it('treats a 200 with empty bodyMd as success (contract pin)', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: '', generatorVersion: 'v', bodyTruncated: false }));
+		const result = await generateDraft('/api', 'inb_1');
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.draft.bodyMd).toBe('');
+	});
+
+	it('routes a malformed 200 payload (missing bodyMd) to the recoverable unavailable fallback', async () => {
 		installFetch(async () => jsonResponse({ generatorVersion: 'v' }));
 		const result = await generateDraft('/api', 'inb_1');
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.reason.kind).toBe('network');
+		if (!result.ok) expect(result.reason.kind).toBe('unavailable');
+	});
+
+	it('routes a malformed 200 payload (missing generatorVersion) to the recoverable unavailable fallback', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'x' }));
+		const result = await generateDraft('/api', 'inb_1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason.kind).toBe('unavailable');
+	});
+
+	it('sends POST with no request body — server-side itemId in path is the only input', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'x', generatorVersion: 'v', bodyTruncated: false }));
+		await generateDraft('/api', 'inb_1');
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(init.body).toBeUndefined();
 	});
 
 	it('maps status codes to discriminated failures', async () => {

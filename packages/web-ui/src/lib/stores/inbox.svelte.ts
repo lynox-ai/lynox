@@ -499,11 +499,14 @@ export async function generateDraftForOpenPane(): Promise<
 	{ ok: true } | { ok: false; reason: GenerateDraftFailure }
 > {
 	const pane = draftPane;
-	if (!pane) return { ok: false, reason: { kind: 'network' } };
+	if (!pane) return { ok: false, reason: { kind: 'aborted' } };
 	const itemId = pane.itemId;
+	// `generating` stays true across BOTH the LLM call and the follow-up
+	// create — clearing it between would flash the empty-draft placeholder
+	// for the ~50ms create round-trip.
 	draftPane = { ...pane, generating: true };
 	const result = await apiGenerateDraft(getApiBase(), itemId);
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'network' } };
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
 	if (!result.ok) {
 		draftPane = { ...draftPane, generating: false };
 		return { ok: false, reason: result.reason };
@@ -514,7 +517,7 @@ export async function generateDraftForOpenPane(): Promise<
 		bodyMd: result.draft.bodyMd,
 		generatorVersion: result.draft.generatorVersion,
 	});
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'network' } };
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
 	if (!created) {
 		draftPane = { ...draftPane, generating: false };
 		addToast(t('inbox.draft_error_create'), 'error');

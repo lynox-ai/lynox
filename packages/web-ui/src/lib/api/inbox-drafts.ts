@@ -77,12 +77,19 @@ export interface GeneratedDraft {
 	bodyTruncated: boolean;
 }
 
+/**
+ * Why discriminated: callers need to pick between "fall back to a manual
+ * starter and keep going" (recoverable) and "surface an error and abort"
+ * (terminal). `aborted` is the "pane was closed mid-flight" sentinel —
+ * not really a failure, the caller should suppress all UI feedback.
+ */
 export type GenerateDraftFailure =
-	| { kind: 'unavailable' }   // 503 — LLM caller not configured
-	| { kind: 'unsupported' }   // 501 — channel not supported (e.g. whatsapp)
-	| { kind: 'no_body' }       // 422 — cached body missing or too short
-	| { kind: 'not_found' }     // 404 — item gone
-	| { kind: 'network' };      // fetch threw
+	| { kind: 'unavailable' }
+	| { kind: 'unsupported' }
+	| { kind: 'no_body' }
+	| { kind: 'not_found' }
+	| { kind: 'aborted' }
+	| { kind: 'network' };
 
 /**
  * Ask the backend to LLM-draft a reply for an item. Returns the
@@ -110,7 +117,10 @@ export async function generateDraft(
 					},
 				};
 			}
-			return { ok: false, reason: { kind: 'network' } };
+			// Shape-mismatch on a 200 response — likely a backend rollback or
+			// in-flight contract change. Surface as recoverable so the manual
+			// fallback runs rather than blaming the user's network.
+			return { ok: false, reason: { kind: 'unavailable' } };
 		}
 		switch (res.status) {
 			case 404: return { ok: false, reason: { kind: 'not_found' } };

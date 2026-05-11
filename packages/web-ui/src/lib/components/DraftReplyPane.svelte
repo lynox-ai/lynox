@@ -87,21 +87,23 @@
 	/**
 	 * Map a generator failure to user-facing copy. Recoverable failures
 	 * (unavailable / unsupported / no_body) tell the user we're falling
-	 * back to a manual draft; not_found / network surface an error toast
-	 * and abort.
+	 * back to a manual draft. `aborted` is the "pane was closed" sentinel
+	 * and surfaces no UI at all. not_found / network are terminal.
 	 */
-	function toastForGenerateFailure(reason: GenerateDraftFailure): { fallback: boolean; key: string; level: 'info' | 'error' } {
+	function toastForGenerateFailure(reason: GenerateDraftFailure): { fallback: boolean; silent: boolean; key: string; level: 'info' | 'error' } {
 		switch (reason.kind) {
+			case 'aborted':
+				return { fallback: false, silent: true, key: '', level: 'info' };
 			case 'unavailable':
-				return { fallback: true, key: 'inbox.draft_generate_unavailable', level: 'info' };
+				return { fallback: true, silent: false, key: 'inbox.draft_generate_unavailable', level: 'info' };
 			case 'unsupported':
-				return { fallback: true, key: 'inbox.draft_generate_unsupported', level: 'info' };
+				return { fallback: true, silent: false, key: 'inbox.draft_generate_unsupported', level: 'info' };
 			case 'no_body':
-				return { fallback: true, key: 'inbox.draft_generate_no_body', level: 'info' };
+				return { fallback: true, silent: false, key: 'inbox.draft_generate_no_body', level: 'info' };
 			case 'not_found':
-				return { fallback: false, key: 'inbox.draft_error_load', level: 'error' };
+				return { fallback: false, silent: false, key: 'inbox.draft_error_load', level: 'error' };
 			case 'network':
-				return { fallback: false, key: 'inbox.draft_generate_failed', level: 'error' };
+				return { fallback: false, silent: false, key: 'inbox.draft_generate_failed', level: 'error' };
 		}
 	}
 
@@ -114,7 +116,7 @@
 			const result = await generateDraftForOpenPane();
 			if (result.ok) return;
 			const hint = toastForGenerateFailure(result.reason);
-			addToast(t(hint.key), hint.level);
+			if (!hint.silent) addToast(t(hint.key), hint.level);
 			if (hint.fallback) await createDraftForOpenPane();
 		} finally {
 			creating = false;

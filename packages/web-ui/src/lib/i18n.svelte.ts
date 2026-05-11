@@ -1094,7 +1094,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.draft_close': { de: 'Pane schließen', en: 'Close pane' },
 	'inbox.draft_loading': { de: 'Entwurf wird geladen…', en: 'Loading draft…' },
 	'inbox.draft_none_yet': { de: 'Noch kein Entwurf für diese Mail. Erzeuge einen Starter, den du anpassen kannst.', en: 'No draft yet for this mail. Create a starter you can adapt.' },
-	'inbox.draft_create': { de: 'Entwurf anlegen', en: 'Create draft' },
+	'inbox.draft_create': { de: 'KI-Entwurf erstellen', en: 'Generate AI draft' },
 	'inbox.draft_generating': { de: 'KI schreibt einen Entwurf…', en: 'AI is drafting…' },
 	'inbox.draft_generate_unavailable': { de: 'KI-Entwurf nicht konfiguriert — leerer Entwurf zum Bearbeiten.', en: 'AI drafting not configured — opened an empty draft instead.' },
 	'inbox.draft_generate_unsupported': { de: 'KI-Entwurf gibt es für diesen Kanal noch nicht — leerer Entwurf zum Bearbeiten.', en: 'AI drafting not yet available for this channel — opened an empty draft instead.' },
