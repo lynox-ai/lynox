@@ -11,7 +11,7 @@
 	// accounts endpoint; advanced users can paste a `whatsapp:<id>`
 	// pseudo-account by hand since /api/mail/accounts only knows mail.
 
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import {
 		createInboxRule,
@@ -22,22 +22,30 @@
 		type InboxRuleBucket,
 		type InboxRuleMatcherKind,
 	} from '../api/inbox-rules.js';
-	import { listMailAccounts, type MailAccountSummary } from '../api/mail-accounts.js';
+	import { listMailAccounts, type MailAccountView } from '../api/mail-accounts.js';
+	import { getApiBase } from '../config.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isInboxAvailable, loadInboxCounts } from '../stores/inbox.svelte.js';
 
-	type ThenPreset = 'archive' | 'escalate' | 'silent';
+	type FormPreset = 'archive' | 'escalate' | 'silent';
 
-	const PRESET_MAP: Record<ThenPreset, { bucket: InboxRuleBucket; action: InboxRuleAction; labelKey: string }> = {
+	const PRESET_MAP: Record<FormPreset, { bucket: InboxRuleBucket; action: InboxRuleAction; labelKey: string }> = {
 		archive: { bucket: 'auto_handled', action: 'archive', labelKey: 'inbox.rules_then_archive' },
 		escalate: { bucket: 'requires_user', action: 'show', labelKey: 'inbox.rules_then_escalate' },
 		silent: { bucket: 'auto_handled', action: 'mark_read', labelKey: 'inbox.rules_then_silent' },
 	};
 
-	function ruleToPreset(rule: InboxRule): ThenPreset {
-		if (rule.bucket === 'requires_user') return 'escalate';
-		if (rule.action === 'archive') return 'archive';
-		return 'silent';
+	/**
+	 * Pure presentation: map a backend rule to its user-facing label. Falls
+	 * through to "other" for combinations the form doesn't expose (e.g.
+	 * `action: label`), so a rule created via the API surfaces honestly
+	 * instead of being silently mislabelled as "Mark read & hide".
+	 */
+	function ruleDisplayLabelKey(rule: InboxRule): string {
+		if (rule.bucket === 'requires_user' && rule.action === 'show') return 'inbox.rules_then_escalate';
+		if (rule.bucket === 'auto_handled' && rule.action === 'archive') return 'inbox.rules_then_archive';
+		if (rule.bucket === 'auto_handled' && rule.action === 'mark_read') return 'inbox.rules_then_silent';
+		return 'inbox.rules_then_other';
 	}
 
 	function matchLabel(kind: InboxRuleMatcherKind): string {
@@ -48,12 +56,19 @@
 		}
 	}
 
-	let accounts = $state<MailAccountSummary[]>([]);
+	let accounts = $state<MailAccountView[]>([]);
 	let accountsLoading = $state(true);
 	let rules = $state<InboxRule[]>([]);
 	let rulesLoading = $state(false);
 
-	let selectedAccountId = $state<string>('');
+	// Two-state split for the account picker: `inputAccountId` mirrors the
+	// `<input>` (every keystroke), `appliedAccountId` drives the rules load
+	// after a 250 ms debounce. Without this the $effect would spam
+	// /api/inbox/rules on every key.
+	let inputAccountId = $state<string>('');
+	let appliedAccountId = $state<string>('');
+	let applyTimer: ReturnType<typeof setTimeout> | null = null;
+
 	let countsLoaded = $state(false);
 	let inboxOk = $state(true);
 
@@ -61,22 +76,18 @@
 	let formOpen = $state(false);
 	let formMatchKind = $state<InboxRuleMatcherKind>('from');
 	let formMatchValue = $state('');
-	let formPreset = $state<ThenPreset>('archive');
+	let formPreset = $state<FormPreset>('archive');
 	let formSubmitting = $state(false);
 	let pendingDeleteId = $state<string | null>(null);
 
 	onMount(async () => {
-		// Probe inbox availability up front so the unavailable state can
-		// short-circuit the rest of the loading work.
-		await loadInboxCounts();
+		// Counts probe + mail-account list are independent — parallelise to
+		// shave one RTT off the cold mount.
+		const [, list] = await Promise.all([loadInboxCounts(), listMailAccounts(getApiBase())]);
 		inboxOk = isInboxAvailable();
 		countsLoaded = true;
-		if (!inboxOk) {
-			accountsLoading = false;
-			return;
-		}
-		const list = await listMailAccounts();
 		accountsLoading = false;
+		if (!inboxOk) return;
 		if (list === null) {
 			addToast(t('inbox.rules_error_load'), 'error');
 			return;
@@ -86,12 +97,41 @@
 		// useful when they only have one mail account configured.
 		const defaultAcc = list.find((a) => a.isDefault) ?? list[0];
 		if (defaultAcc) {
-			selectedAccountId = defaultAcc.id;
+			inputAccountId = defaultAcc.id;
+			appliedAccountId = defaultAcc.id;
 		}
 	});
 
+	onDestroy(() => {
+		if (applyTimer !== null) clearTimeout(applyTimer);
+	});
+
+	function onAccountInput(event: Event): void {
+		const value = (event.target as HTMLInputElement).value;
+		inputAccountId = value;
+		if (applyTimer !== null) clearTimeout(applyTimer);
+		// If the value matches a known account id exactly (e.g. datalist
+		// pick), apply immediately so the user does not wait for the
+		// debounce — datalist selections feel like a deliberate choice.
+		if (accounts.some((a) => a.id === value)) {
+			appliedAccountId = value;
+			return;
+		}
+		applyTimer = setTimeout(() => {
+			appliedAccountId = inputAccountId;
+		}, 250);
+	}
+
 	$effect(() => {
-		if (selectedAccountId.trim().length > 0 && countsLoaded && inboxOk) {
+		// Cancel any pending delete confirmation when the active account
+		// changes — the confirmation would otherwise attach to a rule from
+		// the previous account's list.
+		appliedAccountId;
+		pendingDeleteId = null;
+	});
+
+	$effect(() => {
+		if (appliedAccountId.trim().length > 0 && countsLoaded && inboxOk) {
 			void reloadRules();
 		} else {
 			rules = [];
@@ -99,13 +139,17 @@
 	});
 
 	async function reloadRules(): Promise<void> {
-		const target = selectedAccountId.trim();
+		const target = appliedAccountId.trim();
 		if (target.length === 0) return;
 		rulesLoading = true;
-		const list = await listInboxRules(target);
+		const list = await listInboxRules(getApiBase(), target);
 		// Drop the result if the user picked a different account while we
-		// awaited — the latest selection wins.
-		if (selectedAccountId.trim() !== target) return;
+		// awaited — clear the loading flag first so the stale call does not
+		// leave the spinner stuck across an in-flight switch.
+		if (appliedAccountId.trim() !== target) {
+			rulesLoading = false;
+			return;
+		}
 		rulesLoading = false;
 		if (list === null) {
 			addToast(t('inbox.rules_error_load'), 'error');
@@ -134,12 +178,12 @@
 	}
 
 	async function submitForm(): Promise<void> {
-		const accountId = selectedAccountId.trim();
+		const accountId = appliedAccountId.trim();
 		const value = formMatchValue.trim();
 		if (accountId.length === 0 || value.length === 0) return;
 		formSubmitting = true;
 		const preset = PRESET_MAP[formPreset];
-		const ok = await createInboxRule({
+		const ok = await createInboxRule(getApiBase(), {
 			accountId,
 			matcherKind: formMatchKind,
 			matcherValue: value,
@@ -157,12 +201,14 @@
 	}
 
 	async function confirmDelete(id: string): Promise<void> {
-		const ok = await deleteInboxRule(id);
-		pendingDeleteId = null;
+		const ok = await deleteInboxRule(getApiBase(), id);
 		if (!ok) {
+			// Keep the confirmation pinned so the user can retry the same
+			// button instead of having to re-target the row.
 			addToast(t('inbox.rules_error_delete'), 'error');
 			return;
 		}
+		pendingDeleteId = null;
 		// Optimistic: filter locally, then reconcile from server.
 		rules = rules.filter((r) => r.id !== id);
 		await reloadRules();
@@ -190,7 +236,8 @@
 				<input
 					type="text"
 					list="rules-account-list"
-					bind:value={selectedAccountId}
+					value={inputAccountId}
+					oninput={onAccountInput}
 					placeholder={t('inbox.rules_account_placeholder')}
 					class="mt-1 w-full bg-bg-subtle border border-border rounded-[var(--radius-sm)] px-3 py-2 text-sm text-text placeholder:text-text-subtle"
 				/>
@@ -202,7 +249,7 @@
 			{/if}
 		</label>
 
-		{#if selectedAccountId.trim().length === 0}
+		{#if appliedAccountId.trim().length === 0}
 			<p class="text-text-subtle text-sm">{t('inbox.rules_pick_account_first')}</p>
 		{:else if rulesLoading}
 			<p class="text-text-subtle text-sm">{t('inbox.rules_loading')}</p>
@@ -296,7 +343,7 @@
 										<span class="font-mono break-all">{rule.matcherValue}</span>
 									</p>
 									<p class="text-[11px] text-text-subtle mt-1">
-										→ {t(PRESET_MAP[ruleToPreset(rule)].labelKey)}
+										→ {t(ruleDisplayLabelKey(rule))}
 									</p>
 								</div>
 								{#if pendingDeleteId === rule.id}

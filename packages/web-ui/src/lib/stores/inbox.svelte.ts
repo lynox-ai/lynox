@@ -220,7 +220,7 @@ export async function setItemAction(
 		found.item.userAction = action ?? undefined;
 		found.item.userActionAt = action ? (at ?? new Date()).toISOString() : undefined;
 	}
-	const res = await fetch(`${getApiBase()}/inbox/items/${id}/action`, {
+	const res = await fetch(`${getApiBase()}/inbox/items/${encodeURIComponent(id)}/action`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ action, at: at?.toISOString() }),
@@ -252,7 +252,7 @@ export async function setItemSnooze(
 	unsnoozeOnReply = true,
 ): Promise<boolean> {
 	const found = findItemAcrossBuckets(id);
-	const res = await fetch(`${getApiBase()}/inbox/items/${id}/snooze`, {
+	const res = await fetch(`${getApiBase()}/inbox/items/${encodeURIComponent(id)}/snooze`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({
@@ -296,7 +296,7 @@ export async function undoLastAction(): Promise<void> {
 
 export async function loadItemAudit(id: string): Promise<InboxAuditEntry[]> {
 	try {
-		const res = await fetch(`${getApiBase()}/inbox/items/${id}/audit`);
+		const res = await fetch(`${getApiBase()}/inbox/items/${encodeURIComponent(id)}/audit`);
 		if (!res.ok) return [];
 		const data = (await res.json()) as { entries: InboxAuditEntry[] };
 		return data.entries;

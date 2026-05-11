@@ -1,18 +1,11 @@
 // === Mail accounts HTTP client ===
 //
-// `GET /api/mail/accounts` returns the no-secrets view of every
-// registered mail account. RulesView consumes it to populate the
-// account picker. Kept as a pure fetcher (no `$state`) so the surface
-// stays scoped to whoever needs it.
+// Pure fetcher around `/api/mail/accounts`. RulesView consumes it to
+// populate the account picker. `apiBase` is passed in so the file has
+// no `$state` import and can be tested directly. Wire shape matches
+// `MailContext.listAccounts()` from the engine.
 
-import { getApiBase } from '../config.svelte.js';
-
-/**
- * Wire shape exposed by the engine via `MailContext.listAccounts()` —
- * the secret-free subset. We only need id/displayName/address for the
- * UI dropdown today; the wider type is documented for future fields.
- */
-export interface MailAccountSummary {
+export interface MailAccountView {
 	id: string;
 	displayName: string;
 	address: string;
@@ -22,11 +15,11 @@ export interface MailAccountSummary {
 	authType: string;
 }
 
-export async function listMailAccounts(): Promise<MailAccountSummary[] | null> {
+export async function listMailAccounts(apiBase: string): Promise<MailAccountView[] | null> {
 	try {
-		const res = await fetch(`${getApiBase()}/mail/accounts`);
+		const res = await fetch(`${apiBase}/mail/accounts`);
 		if (!res.ok) return null;
-		const data = (await res.json()) as { accounts?: MailAccountSummary[] };
+		const data = (await res.json()) as { accounts?: MailAccountView[] };
 		return Array.isArray(data.accounts) ? data.accounts : [];
 	} catch {
 		return null;

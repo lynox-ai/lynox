@@ -174,7 +174,7 @@ export type {
 	InboxRuleBucket,
 } from './api/inbox-rules.js';
 export { listMailAccounts } from './api/mail-accounts.js';
-export type { MailAccountSummary } from './api/mail-accounts.js';
+export type { MailAccountView } from './api/mail-accounts.js';
 
 // Push Notifications
 export {

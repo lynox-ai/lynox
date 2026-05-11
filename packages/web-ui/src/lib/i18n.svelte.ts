@@ -1077,6 +1077,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.rules_then_archive': { de: 'Automatisch archivieren', en: 'Auto-archive' },
 	'inbox.rules_then_escalate': { de: 'Immer in Needs-You behalten', en: 'Always keep in Needs-You' },
 	'inbox.rules_then_silent': { de: 'Lesen markieren & ausblenden', en: 'Mark read & hide' },
+	'inbox.rules_then_other': { de: 'Andere Aktion', en: 'Other action' },
 	'inbox.rules_save': { de: 'Regel speichern', en: 'Save rule' },
 	'inbox.rules_cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'inbox.rules_add': { de: 'Neue Regel', en: 'New rule' },
