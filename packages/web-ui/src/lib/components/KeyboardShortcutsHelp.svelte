@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 
 	interface Props {
@@ -20,14 +19,27 @@
 		{ keys: ['?'], label: 'inbox.shortcuts_help' },
 	];
 
-	onMount(() => {
-		// Focus the dialog so the host's Esc handler dispatches close even
-		// when the trigger button was the prior focus owner.
+	// Focus the dialog so its onkeydown handler receives Esc immediately
+	// after open. bind:this resolves AFTER the {#if open} block mounts, so
+	// $effect (not onMount) is the right place — onMount would see a null
+	// ref.
+	$effect(() => {
 		if (open && dialogRef) dialogRef.focus();
 	});
 
+	// On touch-primary devices the host InboxView skips its window keydown
+	// listener; if focus leaves the dialog (e.g. user taps the backdrop
+	// area but misses), Esc on an external keyboard would no longer close.
+	// A window-scoped Esc handler bound only while `open` covers that gap
+	// without competing with the host listener on desktop.
 	$effect(() => {
-		if (open && dialogRef) dialogRef.focus();
+		if (!open) return;
+		if (typeof window === 'undefined') return;
+		const handler = (e: KeyboardEvent): void => {
+			if (e.key === 'Escape') onClose();
+		};
+		window.addEventListener('keydown', handler);
+		return () => window.removeEventListener('keydown', handler);
 	});
 </script>
 

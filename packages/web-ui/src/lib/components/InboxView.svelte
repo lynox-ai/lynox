@@ -181,16 +181,16 @@
 		return c === 'whatsapp' ? t('inbox.channel_whatsapp') : t('inbox.channel_email');
 	}
 
-	function snoozePresets(): ReadonlyArray<{ label: string; deltaMs: number }> {
-		const HOUR = 3600_000;
-		const DAY = 24 * HOUR;
-		return [
-			{ label: t('inbox.snooze_1h'), deltaMs: HOUR },
-			{ label: t('inbox.snooze_today'), deltaMs: 6 * HOUR },
-			{ label: t('inbox.snooze_tomorrow'), deltaMs: DAY },
-			{ label: t('inbox.snooze_week'), deltaMs: 7 * DAY },
-		];
-	}
+	const HOUR_MS = 3_600_000;
+	const DAY_MS = 24 * HOUR_MS;
+	// $derived so the array + 4 t() lookups only re-run when locale changes,
+	// not on every reactive re-eval of the snooze panel parent.
+	const snoozePresets = $derived<ReadonlyArray<{ label: string; deltaMs: number }>>([
+		{ label: t('inbox.snooze_1h'), deltaMs: HOUR_MS },
+		{ label: t('inbox.snooze_today'), deltaMs: 6 * HOUR_MS },
+		{ label: t('inbox.snooze_tomorrow'), deltaMs: DAY_MS },
+		{ label: t('inbox.snooze_week'), deltaMs: 7 * DAY_MS },
+	]);
 
 	async function onArchive(item: InboxItem): Promise<void> {
 		await setItemAction(item.id, 'archived');
@@ -235,7 +235,7 @@
 		{@const counts = getInboxCounts()}
 		<ColdStartBanner />
 		<div
-			class="flex gap-1 mb-4 overflow-x-auto scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0"
+			class="flex gap-1 mb-4 overflow-x-auto scrollbar-none -mx-4 px-4 py-1 sm:mx-0 sm:px-0"
 			role="tablist"
 			aria-label={t('inbox.title')}
 		>
@@ -328,7 +328,7 @@
 							</div>
 							{#if openSnoozeFor === item.id}
 								<div class="mt-2 flex flex-wrap gap-1.5 pl-1">
-									{#each snoozePresets() as preset}
+									{#each snoozePresets as preset (preset.label)}
 										<button
 											onclick={() => void onSnoozePreset(item, preset.deltaMs)}
 											class="rounded-[var(--radius-sm)] bg-bg-muted text-text-muted hover:text-text px-3 py-1.5 text-[11px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
