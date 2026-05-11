@@ -3425,6 +3425,49 @@ export class LynoxHTTPApi {
       sendInbox(res, handleResolveContact(deps!, email));
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/draft', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetItemDraft } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleGetItemDraft(deps!, params['id']!));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/draft', async (_req, res, params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleCreateDraft } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const createBody: import('../integrations/inbox/api.js').CreateDraftBody = {
+        bodyMd: typeof b['bodyMd'] === 'string' ? b['bodyMd'] : '',
+        generatorVersion: typeof b['generatorVersion'] === 'string' ? b['generatorVersion'] : '',
+      };
+      if (typeof b['supersededDraftId'] === 'string') {
+        createBody.supersededDraftId = b['supersededDraftId'];
+      }
+      if (typeof b['generatedAt'] === 'string') {
+        createBody.generatedAt = b['generatedAt'];
+      }
+      sendInbox(res, handleCreateDraft(deps!, params['id']!, createBody));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/drafts/:id', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetDraft } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleGetDraft(deps!, params['id']!));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/inbox/drafts/:id', async (_req, res, params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleUpdateDraft } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const updateBody: import('../integrations/inbox/api.js').UpdateDraftBody = {
+        bodyMd: typeof b['bodyMd'] === 'string' ? b['bodyMd'] : '',
+      };
+      sendInbox(res, handleUpdateDraft(deps!, params['id']!, updateBody));
+    }));
+
     this.staticRoutes.set('GET /api/inbox/rules', async (req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;

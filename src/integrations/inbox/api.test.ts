@@ -3,19 +3,24 @@ import { MailStateDb } from '../mail/state.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxStateDb } from './state.js';
 import {
+  handleCreateDraft,
   handleCreateRule,
   handleDeleteRule,
   handleGetColdStart,
   handleGetCounts,
+  handleGetDraft,
   handleGetItem,
+  handleGetItemDraft,
   handleListItemAudit,
   handleListItems,
   handleListRules,
   handleResolveContact,
   handleSetAction,
   handleSetSnooze,
+  handleUpdateDraft,
   type InboxApiDeps,
 } from './api.js';
+import type { InboxDraft } from '../../types/index.js';
 import { InboxContactResolver } from './contact-resolver.js';
 import type { CRM, ContactRecord } from '../../core/crm.js';
 import type { MailAccountConfig } from '../mail/provider.js';
@@ -222,6 +227,175 @@ describe('handleResolveContact', () => {
     };
     const r = handleResolveContact(depsWithResolver, 'max@acme.example');
     expect((r.body as { contact: unknown }).contact).toMatchObject({ name: 'Max Mustermann' });
+  });
+});
+
+describe('draft endpoints', () => {
+  it('GET item draft returns null until one is attached', () => {
+    const id = insertItem();
+    const r = handleGetItemDraft(deps, id);
+    expect(r.status).toBe(200);
+    expect((r.body as { draft: InboxDraft | null }).draft).toBeNull();
+  });
+
+  it('GET item draft returns 404 for an unknown item', () => {
+    expect(handleGetItemDraft(deps, 'nope').status).toBe(404);
+  });
+
+  it('POST creates a draft, attaches it to the item, returns 201', () => {
+    const id = insertItem();
+    const r = handleCreateDraft(deps, id, {
+      bodyMd: 'Hi Max,\n\nDanke.',
+      generatorVersion: 'gen-2026-05',
+    });
+    expect(r.status).toBe(201);
+    const draft = (r.body as { draft: InboxDraft }).draft;
+    expect(draft.itemId).toBe(id);
+    expect(draft.bodyMd).toBe('Hi Max,\n\nDanke.');
+    expect(state.getItem(id)?.draftId).toBe(draft.id);
+  });
+
+  it('POST 404s when the item does not exist', () => {
+    const r = handleCreateDraft(deps, 'nope', {
+      bodyMd: 'x',
+      generatorVersion: 'g',
+    });
+    expect(r.status).toBe(404);
+  });
+
+  it('POST rejects empty bodyMd or generatorVersion', () => {
+    const id = insertItem();
+    expect(handleCreateDraft(deps, id, { bodyMd: '', generatorVersion: 'g' }).status).toBe(400);
+    expect(handleCreateDraft(deps, id, { bodyMd: 'x', generatorVersion: '' }).status).toBe(400);
+  });
+
+  it('POST rejects non-string bodyMd (null, number, object)', () => {
+    const id = insertItem();
+    for (const bad of [null, 123, { x: 1 }]) {
+      const r = handleCreateDraft(deps, id, { bodyMd: bad as unknown as string, generatorVersion: 'g' });
+      expect(r.status).toBe(400);
+    }
+  });
+
+  it('POST returns 413 when bodyMd exceeds the per-field cap', () => {
+    const id = insertItem();
+    const huge = 'a'.repeat(256 * 1024 + 1);
+    const r = handleCreateDraft(deps, id, { bodyMd: huge, generatorVersion: 'g' });
+    expect(r.status).toBe(413);
+  });
+
+  it('POST rejects a malformed generatedAt', () => {
+    const id = insertItem();
+    const r = handleCreateDraft(deps, id, {
+      bodyMd: 'x',
+      generatorVersion: 'g',
+      generatedAt: 'not-a-date',
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('POST with supersededDraftId chains regenerations and re-attaches the active draft', () => {
+    const itemId = insertItem();
+    const first = handleCreateDraft(deps, itemId, {
+      bodyMd: 'v1',
+      generatorVersion: 'g',
+    });
+    const firstId = (first.body as { draft: InboxDraft }).draft.id;
+    const second = handleCreateDraft(deps, itemId, {
+      bodyMd: 'v2',
+      generatorVersion: 'g',
+      supersededDraftId: firstId,
+    });
+    const secondId = (second.body as { draft: InboxDraft }).draft.id;
+    expect(state.getDraftById(firstId)?.supersededBy).toBe(secondId);
+    expect(state.getItem(itemId)?.draftId).toBe(secondId);
+  });
+
+  it('POST rejects supersededDraftId pointing at another item', () => {
+    const itemA = insertItem('thread-a');
+    const itemB = insertItem('thread-b');
+    const aDraft = handleCreateDraft(deps, itemA, { bodyMd: 'a', generatorVersion: 'g' });
+    const aDraftId = (aDraft.body as { draft: InboxDraft }).draft.id;
+    const r = handleCreateDraft(deps, itemB, {
+      bodyMd: 'b',
+      generatorVersion: 'g',
+      supersededDraftId: aDraftId,
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('POST rejects an unknown supersededDraftId', () => {
+    const id = insertItem();
+    const r = handleCreateDraft(deps, id, {
+      bodyMd: 'x',
+      generatorVersion: 'g',
+      supersededDraftId: 'drf_missing',
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('GET draft by id returns 200 + draft, 404 when missing', () => {
+    const itemId = insertItem();
+    const create = handleCreateDraft(deps, itemId, { bodyMd: 'x', generatorVersion: 'g' });
+    const id = (create.body as { draft: InboxDraft }).draft.id;
+    expect(handleGetDraft(deps, id).status).toBe(200);
+    expect(handleGetDraft(deps, 'drf_missing').status).toBe(404);
+  });
+
+  it('PATCH updates body and increments edits counter', () => {
+    const itemId = insertItem();
+    const create = handleCreateDraft(deps, itemId, { bodyMd: 'orig', generatorVersion: 'g' });
+    const id = (create.body as { draft: InboxDraft }).draft.id;
+    const r = handleUpdateDraft(deps, id, { bodyMd: 'edited' });
+    expect(r.status).toBe(200);
+    const draft = (r.body as { draft: InboxDraft }).draft;
+    expect(draft.bodyMd).toBe('edited');
+    expect(draft.userEditsCount).toBe(1);
+    handleUpdateDraft(deps, id, { bodyMd: 'edited again' });
+    expect(state.getDraftById(id)?.userEditsCount).toBe(2);
+  });
+
+  it('PATCH rejects an empty body', () => {
+    const itemId = insertItem();
+    const create = handleCreateDraft(deps, itemId, { bodyMd: 'orig', generatorVersion: 'g' });
+    const id = (create.body as { draft: InboxDraft }).draft.id;
+    expect(handleUpdateDraft(deps, id, { bodyMd: '' }).status).toBe(400);
+  });
+
+  it('PATCH returns 413 when bodyMd exceeds the per-field cap', () => {
+    const itemId = insertItem();
+    const create = handleCreateDraft(deps, itemId, { bodyMd: 'orig', generatorVersion: 'g' });
+    const id = (create.body as { draft: InboxDraft }).draft.id;
+    const huge = 'a'.repeat(256 * 1024 + 1);
+    expect(handleUpdateDraft(deps, id, { bodyMd: huge }).status).toBe(413);
+  });
+
+  it('PATCH 404s for an unknown draft', () => {
+    expect(handleUpdateDraft(deps, 'drf_missing', { bodyMd: 'x' }).status).toBe(404);
+  });
+
+  it('GET item draft returns the latest active draft when multiple non-superseded drafts exist', () => {
+    const itemId = insertItem();
+    // Two POSTs without `supersededDraftId` leave both rows with
+    // `superseded_by IS NULL`; the active-draft contract is "ORDER BY
+    // generated_at DESC LIMIT 1". Locks the tiebreaker so a future
+    // ORDER BY drop fails this test instead of silently degrading.
+    const first = handleCreateDraft(deps, itemId, {
+      bodyMd: 'v1',
+      generatorVersion: 'g',
+      generatedAt: '2026-05-10T12:00:00Z',
+    });
+    const second = handleCreateDraft(deps, itemId, {
+      bodyMd: 'v2',
+      generatorVersion: 'g',
+      generatedAt: '2026-05-10T12:05:00Z',
+    });
+    const firstId = (first.body as { draft: InboxDraft }).draft.id;
+    const secondId = (second.body as { draft: InboxDraft }).draft.id;
+    expect(firstId).not.toBe(secondId);
+    const r = handleGetItemDraft(deps, itemId);
+    const active = (r.body as { draft: InboxDraft | null }).draft;
+    expect(active?.id).toBe(secondId);
   });
 });
 

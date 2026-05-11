@@ -452,6 +452,20 @@ export class InboxStateDb {
     return id;
   }
 
+  /**
+   * Insert + attach in one txn so `inbox_items.draft_id` cannot lag the
+   * actual draft row after a partial crash. Without the wrap, a SIGKILL
+   * between the two writes would leave the regenerate flow pointing at
+   * the prior (now-superseded) draft id forever.
+   */
+  insertDraftAndAttach(input: InboxDraftInput): string {
+    return this.db.transaction(() => {
+      const id = this.insertDraft(input);
+      this.attachDraft(input.itemId, id);
+      return id;
+    })();
+  }
+
   getDraftById(id: string): InboxDraft | null {
     const row = this.db
       .prepare<[string], DraftRow>('SELECT * FROM inbox_drafts WHERE id = ?')
@@ -477,6 +491,22 @@ export class InboxStateDb {
     const result = this.db
       .prepare(`UPDATE inbox_drafts SET user_edits_count = user_edits_count + 1 WHERE id = ?`)
       .run(id) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
+   * Atomic body update + edits counter bump. Single txn so the tone-button
+   * "edit-loss" guard (`userEditsCount > 0`) never sees a body change without
+   * its matching counter increment.
+   */
+  updateDraftBody(id: string, bodyMd: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE inbox_drafts
+         SET body_md = ?, user_edits_count = user_edits_count + 1
+         WHERE id = ?`,
+      )
+      .run(bodyMd, id) as { changes: number };
     return result.changes > 0;
   }
 

@@ -190,6 +190,112 @@ export function handleSetSnooze(deps: InboxApiDeps, id: string, body: SetSnoozeB
   return { status: 200, body: { ok: true } };
 }
 
+// ── Drafts ───────────────────────────────────────────────────────────────
+//
+// LLM generation + send-via-mail live in separate slices — these handlers
+// only persist + read against `inbox_drafts`.
+
+/**
+ * Per-field cap on `bodyMd`. The global request cap is 30 MB; without a
+ * tighter per-field bound an authed client can persist 30 MB markdown
+ * rows and bump `user_edits_count` per PATCH (disk-of-DOS via repeated
+ * updates). 256 KB comfortably covers the largest real mail bodies plus
+ * KG-context blocks while keeping a single draft row under one page.
+ */
+const MAX_BODY_MD_BYTES = 256 * 1024;
+
+export interface CreateDraftBody {
+  bodyMd: string;
+  generatorVersion: string;
+  /**
+   * When set, marks the named draft as superseded in the same transaction
+   * (the regenerate flow). The classifier-suggested draft and any
+   * tone-button regenerations chain via this field.
+   */
+  supersededDraftId?: string | undefined;
+  generatedAt?: string | undefined;
+}
+
+function tooLarge(message: string): ApiResponse {
+  return { status: 413, body: { error: message } };
+}
+
+function checkBodyMd(bodyMd: unknown): ApiResponse | null {
+  if (typeof bodyMd !== 'string' || bodyMd.length === 0) {
+    return bad('bodyMd is required');
+  }
+  if (Buffer.byteLength(bodyMd, 'utf8') > MAX_BODY_MD_BYTES) {
+    return tooLarge(`bodyMd exceeds ${MAX_BODY_MD_BYTES} bytes`);
+  }
+  return null;
+}
+
+export function handleGetItemDraft(deps: InboxApiDeps, itemId: string): ApiResponse {
+  if (!deps.state.getItem(itemId)) return notFound('item');
+  const draft = deps.state.getActiveDraftForItem(itemId);
+  return { status: 200, body: { draft } };
+}
+
+export function handleGetDraft(deps: InboxApiDeps, id: string): ApiResponse {
+  const draft = deps.state.getDraftById(id);
+  return draft ? { status: 200, body: { draft } } : notFound('draft');
+}
+
+export function handleCreateDraft(
+  deps: InboxApiDeps,
+  itemId: string,
+  body: CreateDraftBody,
+): ApiResponse {
+  const bodyErr = checkBodyMd(body.bodyMd);
+  if (bodyErr) return bodyErr;
+  if (typeof body.generatorVersion !== 'string' || body.generatorVersion.length === 0) {
+    return bad('generatorVersion is required');
+  }
+  const generatedAt = body.generatedAt ? new Date(body.generatedAt) : new Date();
+  if (body.generatedAt && Number.isNaN(generatedAt.getTime())) {
+    return bad('invalid generatedAt: not an ISO date');
+  }
+  const item = deps.state.getItem(itemId);
+  if (!item) return notFound('item');
+  // Supersede target must belong to the same item — otherwise a bug in the
+  // UI could supersede a draft from an unrelated thread.
+  if (body.supersededDraftId !== undefined) {
+    const prior = deps.state.getDraftById(body.supersededDraftId);
+    if (!prior) return bad('supersededDraftId not found');
+    if (prior.itemId !== itemId) return bad('supersededDraftId belongs to a different item');
+  }
+  // Inherit tenant from the parent item — never from the wire — so the
+  // route can't be used to write a draft into a different tenant's scope
+  // once Phase-5 team-inbox lifts the single-tenant assumption.
+  const input: Parameters<typeof deps.state.insertDraftAndAttach>[0] = {
+    itemId,
+    bodyMd: body.bodyMd,
+    generatedAt,
+    generatorVersion: body.generatorVersion,
+    tenantId: item.tenantId,
+  };
+  if (body.supersededDraftId !== undefined) input.supersededDraftId = body.supersededDraftId;
+  const id = deps.state.insertDraftAndAttach(input);
+  const draft = deps.state.getDraftById(id);
+  return { status: 201, body: { draft } };
+}
+
+export interface UpdateDraftBody {
+  bodyMd: string;
+}
+
+export function handleUpdateDraft(
+  deps: InboxApiDeps,
+  id: string,
+  body: UpdateDraftBody,
+): ApiResponse {
+  const bodyErr = checkBodyMd(body.bodyMd);
+  if (bodyErr) return bodyErr;
+  const ok = deps.state.updateDraftBody(id, body.bodyMd);
+  if (!ok) return notFound('draft');
+  return { status: 200, body: { draft: deps.state.getDraftById(id) } };
+}
+
 // ── Contacts ─────────────────────────────────────────────────────────────
 
 export function handleResolveContact(deps: InboxApiDeps, email: string): ApiResponse {

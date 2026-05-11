@@ -270,6 +270,38 @@ describe('InboxStateDb — drafts', () => {
     inbox.incrementDraftEdits(id);
     expect(inbox.getDraftById(id)?.userEditsCount).toBe(2);
   });
+
+  it('updateDraftBody writes the body and increments the counter atomically', () => {
+    const itemId = insertSampleItem();
+    const id = inbox.insertDraft({
+      itemId,
+      bodyMd: 'initial body',
+      generatedAt: new Date('2026-05-10T12:00:00Z'),
+      generatorVersion: 'g',
+    });
+    expect(inbox.updateDraftBody(id, 'edited body')).toBe(true);
+    const draft = inbox.getDraftById(id);
+    expect(draft?.bodyMd).toBe('edited body');
+    expect(draft?.userEditsCount).toBe(1);
+    expect(inbox.updateDraftBody(id, 'edited again')).toBe(true);
+    expect(inbox.getDraftById(id)?.userEditsCount).toBe(2);
+  });
+
+  it('updateDraftBody returns false for an unknown id', () => {
+    expect(inbox.updateDraftBody('drf_missing', 'x')).toBe(false);
+  });
+
+  it('insertDraftAndAttach atomically inserts the draft and writes inbox_items.draft_id', () => {
+    const itemId = insertSampleItem();
+    const id = inbox.insertDraftAndAttach({
+      itemId,
+      bodyMd: 'x',
+      generatedAt: new Date('2026-05-10T12:00:00Z'),
+      generatorVersion: 'g',
+    });
+    expect(inbox.getDraftById(id)?.itemId).toBe(itemId);
+    expect(inbox.getItem(itemId)?.draftId).toBe(id);
+  });
 });
 
 describe('InboxStateDb — rules', () => {
