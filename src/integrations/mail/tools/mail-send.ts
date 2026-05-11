@@ -3,30 +3,22 @@
 // Send a brand-new message via SMTP. PERMISSION-GUARDED — both at the
 // permission-guard layer (autonomous-mode block) AND inline via
 // agent.promptUser() before the actual send.
+//
+// All non-prompt logic (rate-limit, dedup, secret scan, provider.send,
+// follow-up registration) lives in `mail/send-core.ts` so the inbox
+// HTTP handler can share the exact same outbound pipeline. This
+// wrapper only adds the agent-driven confirmation step.
 
 import type { IAgent, ToolEntry } from '../../../types/index.js';
-import { getErrorMessage } from '../../../core/utils.js';
-import {
-  MailError,
-  isReceiveOnlyType,
-  personaFor,
-  type MailAddress,
-  type MailSendInput,
-} from '../provider.js';
 import type { MailContext } from '../context.js';
-import { resolveProvider, type MailRegistry } from './registry.js';
 import {
-  checkMailRateLimit,
-  checkRecipientDedup,
-  recordMailSend,
-} from './rate-limit.js';
-
-/**
- * Recipient count above which mail_send forces explicit confirmation with
- * the full list — anti-blast safety net. From PRD: "Never auto-send to >5
- * recipients without explicit user approval".
- */
-const MASS_SEND_THRESHOLD = 5;
+  buildSendPreview,
+  parseAddressList,
+  sendMail,
+  type SendCoreInput,
+  type SendCoreOptions,
+} from '../send-core.js';
+import type { MailRegistry } from './registry.js';
 
 interface MailSendToolInput {
   account?: string | undefined;
@@ -89,178 +81,72 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
       return { ...rest, body_chars: typeof input.body === 'string' ? input.body.length : 0 };
     },
     handler: async (input: MailSendToolInput, agent: IAgent): Promise<string> => {
-      try {
-        if (!input.to) return 'mail_send error: "to" is required';
-        if (!input.subject) return 'mail_send error: "subject" is required';
-        if (!input.body) return 'mail_send error: "body" is required';
+      if (!input.to) return 'mail_send error: "to" is required';
+      if (!input.subject) return 'mail_send error: "subject" is required';
+      if (!input.body) return 'mail_send error: "body" is required';
 
-        // Cross-session rate-limit check. Fires before any side effect
-        // (provider lookup, secret scan, prompt). Block-message is the
-        // tool result so the agent can choose to wait or escalate.
-        const rateBlock = checkMailRateLimit('mail_send');
-        if (rateBlock) return rateBlock;
-
-        // Fail-safe: refuse to send when no interactive prompt is available
-        // (autonomous/background mode). The permission-guard already blocks
-        // mail_send in autonomous mode, but this is the belt-and-braces.
-        if (!agent.promptUser) {
-          return 'mail_send error: sending requires interactive user confirmation, which is not available in this mode.';
-        }
-
-        // Block credential exfiltration via mail body. The deleted google_gmail
-        // tool had this; the unified mail_send needs it too. Without this, an
-        // agent that quotes a Bearer token or API key into a reply body would
-        // ship it cleartext over SMTP/Gmail with no recipient-side safeguard.
-        const { detectSecretInContent } = await import('../../../tools/builtin/http.js');
-        const secretMatch = detectSecretInContent(input.body);
-        if (secretMatch) {
-          return `mail_send blocked: body appears to contain a ${secretMatch}. Sending secrets via email is not allowed — strip the credential and retry.`;
-        }
-
-        const provider = resolveProvider(registry, input.account);
-
-        // Receive-only hard block — happens BEFORE any confirmation prompt.
-        // This is the non-overrideable boundary for compliance/bulk mailboxes.
-        const accountConfig = ctx?.getAccountConfig(provider.accountId);
-        if (accountConfig && isReceiveOnlyType(accountConfig.type)) {
-          return `mail_send blocked: account "${provider.accountId}" has type "${accountConfig.type}" which is receive-only. ` +
-            `Compliance (abuse/privacy/security/legal) and bulk (info/newsletter/notifications) mailboxes cannot send mail. ` +
-            `Pick a different account via the "account" parameter.`;
-        }
-
-        const to = parseAddressList(input.to);
-        const cc = parseAddressList(input.cc);
-        const bcc = parseAddressList(input.bcc);
-        if (to.length === 0) return 'mail_send error: "to" did not parse to any valid addresses';
-
-        // Per-recipient dedup window — same (recipients, subject) within
-        // the configured window is rejected. Catches retry storms and
-        // approval-fatigue chains where the agent re-issues the same
-        // outbound after a transient error.
-        const allRecipients = [...to, ...cc, ...bcc];
-        const dedupBlock = checkRecipientDedup(allRecipients, input.subject);
-        if (dedupBlock) return dedupBlock;
-
-        // Mass-send guard — count unique recipients across to+cc+bcc.
-        // Above threshold, the confirmation prompt becomes mandatory and
-        // lists every recipient so the user sees exactly who gets it.
-        const uniqueRecipients = new Set<string>();
-        for (const a of allRecipients) {
-          uniqueRecipients.add(a.address.toLowerCase());
-        }
-        const isMassSend = uniqueRecipients.size > MASS_SEND_THRESHOLD;
-
-        // Persona hint in the prompt so the user knows the implied voice.
-        let personaLine = '';
-        if (accountConfig) {
-          personaLine = `\n  Persona: ${truncate(personaFor(accountConfig), 160)}`;
-        }
-
-        const bodyPreview = truncate(input.body.replace(/\s+/g, ' '), 200);
-        const preview = isMassSend
-          ? `⚠ **MASS SEND** — ${String(uniqueRecipients.size)} recipients\n\n` +
-            `**Account:** ${provider.accountId}${personaLine ? `\n**Persona:** ${truncate(personaFor(accountConfig!), 120)}` : ''}\n` +
-            `**Recipients:**\n${[...to, ...cc, ...bcc].map(a => `  • ${a.address}`).join('\n')}\n` +
-            `**Subject:** ${input.subject}\n\n` +
-            `> ${bodyPreview}`
-          : `**Send email?**\n\n` +
-            `**To:** ${to.map(a => a.address).join(', ')}` +
-            `${cc.length > 0 ? `\n**Cc:** ${cc.map(a => a.address).join(', ')}` : ''}` +
-            `${bcc.length > 0 ? `\n**Bcc:** ${bcc.map(a => a.address).join(', ')}` : ''}\n` +
-            `**Subject:** ${input.subject}\n` +
-            `**From:** ${provider.accountId}${personaLine ? ` · _${truncate(personaFor(accountConfig!), 80)}_` : ''}\n\n` +
-            `> ${bodyPreview}`;
-
-        const answer = await agent.promptUser(preview, ['Yes', 'No']);
-        if (!isApproval(answer)) {
-          return isMassSend ? 'mail_send cancelled by user (mass send).' : 'mail_send cancelled by user.';
-        }
-
-        const sendInput: MailSendInput = {
-          to,
-          subject: input.subject,
-          text: input.body,
-        };
-        if (cc.length > 0) sendInput.cc = cc;
-        if (bcc.length > 0) sendInput.bcc = bcc;
-
-        const result = await provider.send(sendInput);
-
-        // Register dedup AFTER successful send. If send threw or was
-        // cancelled the agent can legitimately retry without hitting the
-        // window.
-        recordMailSend(allRecipients, input.subject);
-
-        // Optional follow-up registration — fires only on successful send
-        let followupNote = '';
-        if (input.track_followup && ctx) {
-          const daysNum = Number(input.track_followup.reminder_in_days);
-          if (Number.isFinite(daysNum) && daysNum > 0 && input.track_followup.reason) {
-            const reminderAt = new Date(Date.now() + daysNum * 24 * 60 * 60 * 1000);
-            const primaryRecipient = to[0]?.address ?? '';
-            const messageId = result.messageId || `local-${String(Date.now())}`;
-            try {
-              const followupId = ctx.stateDb.recordFollowup({
-                accountId: provider.accountId,
-                sentMessageId: messageId,
-                threadKey: messageId,
-                recipient: primaryRecipient,
-                type: input.track_followup.type ?? 'awaiting_reply',
-                reason: input.track_followup.reason,
-                reminderAt,
-                source: 'agent',
-              });
-              followupNote = `\nFollow-up registered: ${followupId} (reminder in ${String(daysNum)} days, reason: ${input.track_followup.reason})`;
-            } catch {
-              followupNote = '\n(follow-up registration failed — send itself succeeded)';
-            }
-          }
-        }
-
-        return `Email sent.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}${followupNote}`;
-      } catch (err: unknown) {
-        if (err instanceof MailError) return `mail_send error (${err.code}): ${err.message}`;
-        return `mail_send error: ${getErrorMessage(err)}`;
+      // Fail-safe: refuse when no interactive prompt is available (autonomous
+      // mode). The permission-guard already blocks mail_send there, but this
+      // is the belt-and-braces — the send-core's `beforeSend` hook below
+      // would throw otherwise.
+      if (!agent.promptUser) {
+        return 'mail_send error: sending requires interactive user confirmation, which is not available in this mode.';
       }
+      const promptUser = agent.promptUser;
+
+      const to = parseAddressList(input.to);
+      const cc = parseAddressList(input.cc);
+      const bcc = parseAddressList(input.bcc);
+
+      const coreInput: SendCoreInput = { to, cc, bcc, subject: input.subject, body: input.body };
+      if (input.account !== undefined) coreInput.account = input.account;
+
+      const opts: SendCoreOptions = {
+        beforeSend: async (sendCtx) => {
+          const preview = buildSendPreview(sendCtx);
+          const answer = await promptUser(preview, ['Yes', 'No']);
+          return isApproval(answer);
+        },
+      };
+      if (input.track_followup) opts.trackFollowup = input.track_followup;
+
+      const result = await sendMail(registry, coreInput, opts, ctx);
+
+      if (!result.ok) {
+        switch (result.status) {
+          case 'rate_limit':
+            return result.message;
+          case 'invalid_recipients':
+            return 'mail_send error: "to" did not parse to any valid addresses';
+          case 'receive_only':
+            return `mail_send blocked: ${result.message}. ` +
+              `Compliance (abuse/privacy/security/legal) and bulk (info/newsletter/notifications) mailboxes cannot send mail. ` +
+              `Pick a different account via the "account" parameter.`;
+          case 'dedup_window':
+            return result.message;
+          case 'secret_in_body':
+            return `mail_send blocked: ${result.message}. Strip the credential and retry.`;
+          case 'cancelled':
+            // beforeSend returned false — user clicked No (or the answer
+            // wasn't a positive token). Mass-send vs single-send is implicit
+            // in the preview already.
+            return 'mail_send cancelled by user.';
+          case 'provider_error':
+            return `mail_send error (${result.message})`;
+        }
+      }
+
+      const followupNote = result.followupId
+        ? `\nFollow-up registered: ${result.followupId}`
+        : (input.track_followup ? '\n(follow-up registration failed — send itself succeeded)' : '');
+
+      return `Email sent.\nMessage-ID: ${result.result.messageId}\nAccepted: ${result.result.accepted.join(', ') || '(none)'}${result.result.rejected.length > 0 ? `\nRejected: ${result.result.rejected.join(', ')}` : ''}${followupNote}`;
     },
   };
-}
-
-function parseAddressList(input: string | undefined): MailAddress[] {
-  if (!input) return [];
-  return input
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
-    .map(parseAddress)
-    .filter((a): a is MailAddress => a !== null);
-}
-
-/**
- * Parse a single RFC 5322-ish address into name + address. Accepts:
- *   "Alice Tester" <alice@x.com>
- *   Alice Tester <alice@x.com>
- *   alice@x.com
- */
-function parseAddress(raw: string): MailAddress | null {
-  const angle = raw.match(/^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/);
-  if (angle) {
-    const name = angle[1]?.trim();
-    const address = angle[2]?.trim();
-    if (!address || !address.includes('@')) return null;
-    return name ? { name, address } : { address };
-  }
-  if (raw.includes('@')) return { address: raw };
-  return null;
 }
 
 /** Accept yes/ja/ok/1/y as approval — anything else is denial. */
 function isApproval(answer: string): boolean {
   const a = answer.toLowerCase().trim();
   return ['yes', 'ja', 'ok', 'y', 'j', '1', 'sure', 'send', 'senden'].includes(a);
-}
-
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + '…';
 }

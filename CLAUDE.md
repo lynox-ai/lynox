@@ -45,7 +45,7 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 
 SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
 
-- `src/lib/components/` — 33 components (30 exported as library): ChatView (interleaved blocks), AppShell, MemoryView, HistoryView, ArtifactsView, ArtifactsHub, KnowledgeGraphView, KnowledgeHub, WorkflowsHub (list + analytics), WorkflowsView (expandable step details), PipelineProgress (sticky during execution), MarkdownRenderer (deferred artifact rendering), ContextPanel, ContactsView, DataStoreView, ApiStoreView, FileBrowserView, CommandPalette, StatusBar, ActivityHub, ChangesetReview, MigrationWizard (5-step zero-knowledge migration), SetupBanner, PasskeyPrompt, MobileAccess, ToastContainer, etc.
+- `src/lib/components/` — 32 components (29 exported as library): ChatView (interleaved blocks), AppShell, MemoryView, HistoryView, ArtifactsView, ArtifactsHub, KnowledgeGraphView, KnowledgeHub, WorkflowsHub (list + analytics), WorkflowsView (expandable step details), PipelineProgress (sticky during execution), MarkdownRenderer (deferred artifact rendering), ContextPanel, ContactsView, DataStoreView, ApiStoreView, FileBrowserView, CommandPalette, StatusBar, ActivityHub, ChangesetReview, MigrationWizard (5-step zero-knowledge migration), SetupBanner, PasskeyPrompt, MobileAccess, ToastContainer, etc.
 - `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume, interleaved ContentBlock rendering (text + tool_call blocks in chronological order)
 - `src/lib/stores/threads.svelte.ts` — Thread list store (load, archive, delete, rename)
 - `src/lib/stores/artifacts.svelte.ts` — Artifact gallery store (save, load, delete)

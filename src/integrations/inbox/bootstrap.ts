@@ -50,6 +50,10 @@ export interface InboxRuntime {
   hook: OnInboundMailHook;
   /** Wire as `MailHooks.onAccountAdded` — fires a backfill pass on connect. */
   onAccountAdded: NonNullable<import('../mail/context.js').MailHooks['onAccountAdded']>;
+  /** LLM caller used by the draft generator. Same instance the classifier uses. */
+  llm: LLMCaller;
+  /** Account resolver — turns an accountId into address + display name. */
+  accounts: { resolve: (id: string) => { address: string; displayName: string } | null };
   shutdown(): Promise<void>;
 }
 
@@ -208,6 +212,8 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     coldStartTracker,
     hook,
     onAccountAdded,
+    llm,
+    accounts,
     shutdown: () => queue.drain(),
   };
 }

@@ -298,6 +298,33 @@ describe('InboxStateDb — drafts', () => {
     expect(inbox.updateDraftBody('drf_missing', 'x')).toBe(false);
   });
 
+  it('getItemBody returns null until a body is cached, then echoes the saved fields', () => {
+    const itemId = insertSampleItem();
+    expect(inbox.getItemBody(itemId)).toBeNull();
+    inbox.saveItemBody(itemId, 'Hi Max,\n\n…full body…', 'imap', new Date('2026-05-12T10:00:00Z'));
+    const row = inbox.getItemBody(itemId);
+    expect(row?.bodyMd).toBe('Hi Max,\n\n…full body…');
+    expect(row?.source).toBe('imap');
+    expect(row?.fetchedAt.toISOString()).toBe('2026-05-12T10:00:00.000Z');
+  });
+
+  it('saveItemBody is upsert — a refetch replaces the cached row', () => {
+    const itemId = insertSampleItem();
+    inbox.saveItemBody(itemId, 'v1', 'imap', new Date('2026-05-12T10:00:00Z'));
+    inbox.saveItemBody(itemId, 'v2', 'imap', new Date('2026-05-12T11:00:00Z'));
+    const row = inbox.getItemBody(itemId);
+    expect(row?.bodyMd).toBe('v2');
+    expect(row?.fetchedAt.toISOString()).toBe('2026-05-12T11:00:00.000Z');
+  });
+
+  it('inbox_item_bodies cascades on inbox_items delete', () => {
+    const itemId = insertSampleItem();
+    inbox.saveItemBody(itemId, 'body', 'imap');
+    expect(inbox.getItemBody(itemId)).not.toBeNull();
+    mail.getConnection().prepare('DELETE FROM inbox_items WHERE id = ?').run(itemId);
+    expect(inbox.getItemBody(itemId)).toBeNull();
+  });
+
   it('insertDraftAndAttach atomically inserts the draft and writes inbox_items.draft_id', () => {
     const itemId = insertSampleItem();
     const id = inbox.insertDraftAndAttach({

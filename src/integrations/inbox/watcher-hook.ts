@@ -216,9 +216,11 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
 /**
  * Stable per-channel key for an envelope. Prefers the provider's threading
  * decision, falls back to the Message-ID, and finally synthesises one from
- * the (folder, uid) pair so dedup never collapses unrelated mails.
+ * the (folder, uid) pair so dedup never collapses unrelated mails. Exported
+ * because the body-refresh adapter must produce the same key shape — drift
+ * would silently break the match-by-threadKey lookup on reload.
  */
-function resolveThreadKey(env: MailEnvelope): string {
+export function resolveThreadKey(env: MailEnvelope): string {
   if (env.threadKey) return env.threadKey;
   if (env.messageId) return `imap:${env.messageId}`;
   return `imap:${env.folder}:${String(env.uid)}`;
