@@ -11,13 +11,15 @@ import {
 	createDraft as apiCreateDraft,
 	generateDraft as apiGenerateDraft,
 	getItemDraft as apiGetItemDraft,
+	refreshItemBody as apiRefreshItemBody,
 	updateDraft as apiUpdateDraft,
 	type DraftTone,
 	type GenerateDraftFailure,
 	type InboxDraft,
+	type RefreshBodyFailure,
 } from '../api/inbox-drafts.js';
 
-export type { DraftTone };
+export type { DraftTone, RefreshBodyFailure };
 import { getApiBase } from '../config.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -578,6 +580,25 @@ export async function regenerateDraftWithTone(
 		generating: false,
 		persistedBody: created.bodyMd,
 	};
+	return { ok: true };
+}
+
+/**
+ * Pull the full mail body from the provider for the open pane's item
+ * and overwrite the cached snippet. Subsequent regenerate calls will
+ * then see the full body as context. Does NOT alter the open draft —
+ * the user explicitly opts in by clicking "Reload from server"; their
+ * editor buffer stays untouched.
+ */
+export async function refreshOpenPaneBody(): Promise<
+	{ ok: true } | { ok: false; reason: RefreshBodyFailure }
+> {
+	const pane = draftPane;
+	if (!pane) return { ok: false, reason: { kind: 'network' } };
+	const itemId = pane.itemId;
+	const result = await apiRefreshItemBody(getApiBase(), itemId);
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'network' } };
+	if (!result.ok) return result;
 	return { ok: true };
 }
 

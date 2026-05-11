@@ -6,12 +6,13 @@
 		createDraftForOpenPane,
 		generateDraftForOpenPane,
 		getDraftPane,
+		refreshOpenPaneBody,
 		regenerateDraftWithTone,
 		saveDraftBody,
 		type DraftTone,
 		type InboxItem,
 	} from '../stores/inbox.svelte.js';
-	import type { GenerateDraftFailure } from '../api/inbox-drafts.js';
+	import type { GenerateDraftFailure, RefreshBodyFailure } from '../api/inbox-drafts.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { accountShortLabel } from '../utils/account-label.js';
 
@@ -182,6 +183,36 @@
 	function cancelTone(): void {
 		pendingTone = null;
 	}
+
+	let refreshing = $state(false);
+
+	function toastForRefreshFailure(reason: RefreshBodyFailure): { key: string; level: 'info' | 'error' } {
+		switch (reason.kind) {
+			case 'unavailable':    return { key: 'inbox.draft_refresh_unavailable', level: 'info' };
+			case 'unsupported':    return { key: 'inbox.draft_refresh_unsupported', level: 'info' };
+			case 'not_registered': return { key: 'inbox.draft_refresh_not_registered', level: 'info' };
+			case 'empty_body':     return { key: 'inbox.draft_refresh_empty', level: 'info' };
+			case 'not_found':      return { key: 'inbox.draft_refresh_not_found', level: 'info' };
+			case 'fetch_failed':   return { key: 'inbox.draft_refresh_failed', level: 'error' };
+			case 'network':        return { key: 'inbox.draft_refresh_failed', level: 'error' };
+		}
+	}
+
+	async function onRefreshClick(): Promise<void> {
+		if (refreshing) return;
+		refreshing = true;
+		try {
+			const result = await refreshOpenPaneBody();
+			if (result.ok) {
+				addToast(t('inbox.draft_refresh_ok'), 'success');
+				return;
+			}
+			const hint = toastForRefreshFailure(result.reason);
+			addToast(t(hint.key), hint.level);
+		} finally {
+			refreshing = false;
+		}
+	}
 </script>
 
 {#if getDraftPane() !== null}
@@ -211,12 +242,24 @@
 						</p>
 					{/if}
 				</div>
-				<button
-					type="button"
-					onclick={() => { flushNow(); closeDraftPane(); }}
-					aria-label={t('inbox.draft_close')}
-					class="text-text-subtle hover:text-text text-sm leading-none p-2 -mr-1 -mt-1 min-h-[32px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
-				>×</button>
+				<div class="flex items-center gap-1 shrink-0">
+					{#if item}
+						<button
+							type="button"
+							onclick={() => void onRefreshClick()}
+							disabled={refreshing}
+							title={refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_body')}
+							aria-label={t('inbox.draft_refresh_body')}
+							class="text-text-subtle hover:text-text text-[11px] font-mono p-2 -mt-1 min-h-[32px] pointer-coarse:min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+						>{refreshing ? '⟳' : '↻'}</button>
+					{/if}
+					<button
+						type="button"
+						onclick={() => { flushNow(); closeDraftPane(); }}
+						aria-label={t('inbox.draft_close')}
+						class="text-text-subtle hover:text-text text-sm leading-none p-2 -mr-1 -mt-1 min-h-[32px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+					>×</button>
+				</div>
 			</header>
 
 			<div class="flex-1 overflow-y-auto px-5 py-4">

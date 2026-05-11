@@ -3317,6 +3317,13 @@ export class LynoxHTTPApi {
         accountResolver: rt.accounts,
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
+      // Mail provider lookup for the body-refresh handler. The mail
+      // context exposes the registry; when absent (WA-only instances
+      // or pre-vault startup), refresh returns 503.
+      const mailCtx = engine.getMailContext();
+      if (mailCtx !== null) {
+        deps.providerResolver = (accountId: string) => mailCtx.registry.get(accountId);
+      }
       return deps;
     };
     const sendInbox = (
@@ -3468,6 +3475,13 @@ export class LynoxHTTPApi {
         bodyMd: typeof b['bodyMd'] === 'string' ? b['bodyMd'] : '',
       };
       sendInbox(res, handleUpdateDraft(deps!, params['id']!, updateBody));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/body/refresh', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleRefreshItemBody } = await import('../integrations/inbox/api.js');
+      sendInbox(res, await handleRefreshItemBody(deps!, params['id']!));
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/draft/generate', async (_req, res, params, body) => {

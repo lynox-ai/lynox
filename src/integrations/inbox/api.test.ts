@@ -7,6 +7,7 @@ import {
   handleCreateRule,
   handleDeleteRule,
   handleGenerateDraft,
+  handleRefreshItemBody,
   handleGetColdStart,
   handleGetCounts,
   handleGetDraft,
@@ -398,6 +399,118 @@ describe('draft endpoints', () => {
     const r = handleGetItemDraft(deps, itemId);
     const active = (r.body as { draft: InboxDraft | null }).draft;
     expect(active?.id).toBe(secondId);
+  });
+});
+
+describe('handleRefreshItemBody', () => {
+  const accountResolver = {
+    resolve: (id: string): { address: string; displayName: string } | null =>
+      id === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName } : null,
+  };
+
+  function fakeProvider(opts: {
+    listResult?: ReadonlyArray<unknown>;
+    fetchText?: string;
+    listThrows?: boolean;
+    fetchThrows?: boolean;
+  } = {}) {
+    return {
+      accountId: ACCOUNT.id,
+      authType: 'imap',
+      list: async () => {
+        if (opts.listThrows) throw new Error('boom');
+        return opts.listResult ?? [{
+          uid: 7,
+          messageId: '<m1@x>',
+          folder: 'INBOX',
+          threadKey: undefined,
+          from: [{ address: 'sender@x' }],
+          to: [{ address: 'me@x' }],
+          cc: [],
+          bcc: [],
+          subject: 's',
+          date: new Date(),
+          snippet: 'snippet',
+          flags: [],
+          seen: true,
+        }];
+      },
+      fetch: async () => {
+        if (opts.fetchThrows) throw new Error('fetch boom');
+        return { envelope: {}, text: opts.fetchText ?? 'full body text', html: undefined, attachments: [], inReplyTo: undefined, references: undefined };
+      },
+      search: async () => [],
+      send: async () => ({ messageId: '<x>', acceptedAt: new Date() }),
+      watch: async () => ({ stop: async () => {} }),
+      close: async () => {},
+    } as unknown as import('../mail/provider.js').MailProvider;
+  }
+
+  it('503 when no provider registry is wired', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const r = await handleRefreshItemBody({ ...deps, accountResolver }, id);
+    expect(r.status).toBe(503);
+  });
+
+  it('404 when the item does not exist', async () => {
+    const providerResolver = () => fakeProvider();
+    const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, 'nope');
+    expect(r.status).toBe(404);
+  });
+
+  it('501 for non-email channels', async () => {
+    const id = state.insertItem({
+      accountId: 'whatsapp:default',
+      channel: 'whatsapp',
+      threadKey: 'wa:1',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'r',
+      classifiedAt: new Date(),
+      classifierVersion: 'v',
+    });
+    const providerResolver = () => fakeProvider();
+    const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, id);
+    expect(r.status).toBe(501);
+  });
+
+  it('422 when the provider is not registered for the account', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const providerResolver = () => null;
+    const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, id);
+    expect(r.status).toBe(422);
+  });
+
+  it('200 + overwrites the cache on the happy path', async () => {
+    const id = insertItem('imap:<m1@x>');
+    state.saveItemBody(id, 'old snippet', 'email');
+    const providerResolver = () => fakeProvider({ fetchText: 'FULL replacement body, much longer.' });
+    const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, id);
+    expect(r.status).toBe(200);
+    const body = r.body as { bodyMd: string };
+    expect(body.bodyMd).toBe('FULL replacement body, much longer.');
+    expect(state.getItemBody(id)?.bodyMd).toBe('FULL replacement body, much longer.');
+  });
+
+  it('404 when no envelope in the lookup window matches the item threadKey', async () => {
+    const id = insertItem('imap:<gone@x>');
+    const providerResolver = () => fakeProvider({ listResult: [] });
+    const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, id);
+    expect(r.status).toBe(404);
+  });
+
+  it('502 on provider fetch error', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const providerResolver = () => fakeProvider({ fetchThrows: true });
+    const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, id);
+    expect(r.status).toBe(502);
+  });
+
+  it('422 when the provider returns an empty body', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const providerResolver = () => fakeProvider({ fetchText: '   ' });
+    const r = await handleRefreshItemBody({ ...deps, accountResolver, providerResolver }, id);
+    expect(r.status).toBe(422);
   });
 });
 

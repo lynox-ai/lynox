@@ -43,6 +43,12 @@ export interface InboxApiDeps {
   accountResolver?: import('./watcher-hook.js').AccountResolver | undefined;
   /** Inbox LLM caller — when absent, `handleGenerateDraft` returns 503. */
   llm?: import('./classifier/index.js').LLMCaller | undefined;
+  /**
+   * Resolves an accountId to a live MailProvider. Used by
+   * `handleRefreshItemBody` to pull the full mail body on demand.
+   * Absent on instances without a mail context (e.g. WhatsApp-only).
+   */
+  providerResolver?: ((accountId: string) => import('../mail/provider.js').MailProvider | null) | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -386,6 +392,51 @@ export async function handleGenerateDraft(
   return {
     status: 200,
     body: { bodyMd: result.bodyMd, generatorVersion: result.generatorVersion, bodyTruncated: result.bodyTruncated },
+  };
+}
+
+/**
+ * Pull the full mail body from the provider and overwrite the cached
+ * snippet for an item. Does NOT touch the draft — generation/edit
+ * proceeds normally afterward, just with richer context. WhatsApp items
+ * return 501 in v1 (the lookup adapter is a separate slice).
+ */
+export async function handleRefreshItemBody(
+  deps: InboxApiDeps,
+  itemId: string,
+): Promise<ApiResponse> {
+  if (!deps.providerResolver) return unavailable('mail provider registry not wired');
+  const item = deps.state.getItem(itemId);
+  if (!item) return notFound('item');
+  if (item.channel !== 'email') {
+    return { status: 501, body: { error: `refresh not supported for channel: ${item.channel}` } };
+  }
+  const provider = deps.providerResolver(item.accountId);
+  if (!provider) return unprocessable('mail provider not registered for this account');
+  const { refreshItemBody } = await import('./body-refresh.js');
+  const result = await refreshItemBody({
+    provider,
+    state: deps.state,
+    item: {
+      id: item.id,
+      accountId: item.accountId,
+      threadKey: item.threadKey,
+      channel: item.channel,
+    },
+  });
+  if (!result.ok) {
+    switch (result.reason.kind) {
+      case 'not_found':
+        return { status: 404, body: { error: 'mail no longer available in the lookup window' } };
+      case 'empty_body':
+        return unprocessable('mail has no text body to refresh from');
+      case 'fetch_failed':
+        return { status: 502, body: { error: 'provider fetch failed' } };
+    }
+  }
+  return {
+    status: 200,
+    body: { bodyMd: result.bodyMd, source: result.source, bytesWritten: result.bytesWritten },
   };
 }
 

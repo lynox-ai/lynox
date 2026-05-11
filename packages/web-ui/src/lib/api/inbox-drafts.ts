@@ -172,3 +172,52 @@ export async function updateDraft(
 		return null;
 	}
 }
+
+export type RefreshBodyFailure =
+	| { kind: 'unavailable' }
+	| { kind: 'unsupported' }
+	| { kind: 'not_registered' }
+	| { kind: 'empty_body' }
+	| { kind: 'not_found' }
+	| { kind: 'fetch_failed' }
+	| { kind: 'network' };
+
+/**
+ * Pull the full mail body for an item from the provider and overwrite
+ * the cached snippet. Subsequent `/generate` calls then see the full
+ * body as context. Discriminated failures let the UI surface the right
+ * copy for each error mode (provider unconfigured, registry missing,
+ * mail no longer on server, etc.).
+ */
+export async function refreshItemBody(
+	apiBase: string,
+	itemId: string,
+): Promise<{ ok: true; bodyMd: string } | { ok: false; reason: RefreshBodyFailure }> {
+	try {
+		const res = await fetch(`${apiBase}/inbox/items/${encodeURIComponent(itemId)}/body/refresh`, {
+			method: 'POST',
+		});
+		if (res.ok) {
+			const data = (await res.json()) as { bodyMd?: string };
+			if (typeof data.bodyMd !== 'string') return { ok: false, reason: { kind: 'network' } };
+			return { ok: true, bodyMd: data.bodyMd };
+		}
+		switch (res.status) {
+			case 404: return { ok: false, reason: { kind: 'not_found' } };
+			case 501: return { ok: false, reason: { kind: 'unsupported' } };
+			case 422: {
+				// 422 covers both "no provider for this account" and "mail has
+				// no text body" — distinguish via the error string so the UI
+				// can show a precise hint without a second round-trip.
+				const body = await res.json().catch(() => null) as { error?: string } | null;
+				const empty = body?.error?.includes('no text body') === true;
+				return { ok: false, reason: { kind: empty ? 'empty_body' : 'not_registered' } };
+			}
+			case 502: return { ok: false, reason: { kind: 'fetch_failed' } };
+			case 503: return { ok: false, reason: { kind: 'unavailable' } };
+			default:  return { ok: false, reason: { kind: 'network' } };
+		}
+	} catch {
+		return { ok: false, reason: { kind: 'network' } };
+	}
+}
