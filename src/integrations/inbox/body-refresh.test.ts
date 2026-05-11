@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { refreshItemBody } from './body-refresh.js';
+import { refreshItemBody, refreshWhatsappItemBody } from './body-refresh.js';
 import { InboxStateDb } from './state.js';
 import { MailStateDb } from '../mail/state.js';
 import type { MailEnvelope, MailProvider } from '../mail/provider.js';
@@ -195,5 +195,113 @@ describe('refreshItemBody', () => {
     const expectedMax = new Date(Date.now() - 7 * 86_400_000 + 1000);
     expect(sinceArg?.getTime()).toBeGreaterThan(expectedMin.getTime());
     expect(sinceArg?.getTime()).toBeLessThan(expectedMax.getTime());
+  });
+});
+
+describe('refreshWhatsappItemBody', () => {
+  function waMsg(opts: { id: string; threadId: string; direction: 'inbound' | 'outbound'; text?: string | null; transcript?: string | null; timestamp?: number }): import('../whatsapp/types.js').WhatsAppMessage {
+    return {
+      id: opts.id,
+      threadId: opts.threadId,
+      phoneE164: '41799990000',
+      direction: opts.direction,
+      kind: 'text',
+      text: opts.text ?? null,
+      mediaId: null,
+      transcript: opts.transcript ?? null,
+      mimeType: null,
+      timestamp: opts.timestamp ?? Math.floor(Date.now() / 1000),
+      isEcho: false,
+      rawJson: '{}',
+    };
+  }
+
+  function waItem(threadKey = 'whatsapp-41799990000'): { id: string; threadKey: string; channel: 'whatsapp' } {
+    const id = state.insertItem({
+      accountId: 'whatsapp:default',
+      channel: 'whatsapp',
+      threadKey,
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'wa item',
+      classifiedAt: new Date(),
+      classifierVersion: 'v',
+    });
+    return { id, threadKey, channel: 'whatsapp' };
+  }
+
+  it('concatenates inbound + outbound text into a chronological transcript and caches it', async () => {
+    const item = waItem('whatsapp-41799990000');
+    const messages = [
+      waMsg({ id: '1', threadId: item.threadKey, direction: 'inbound', text: 'Hi, hast du Mittwoch Zeit?' }),
+      waMsg({ id: '2', threadId: item.threadKey, direction: 'outbound', text: 'Klar, 14 Uhr?' }),
+      waMsg({ id: '3', threadId: item.threadKey, direction: 'inbound', text: 'Perfekt, bis dann.' }),
+    ];
+    const waState = { getMessagesForThread: () => messages };
+    const result = await refreshWhatsappItemBody({ waState, state, item });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.bodyMd).toContain('Gegenüber: Hi, hast du Mittwoch Zeit?');
+      expect(result.bodyMd).toContain('Ich: Klar, 14 Uhr?');
+      expect(result.bodyMd).toContain('Gegenüber: Perfekt, bis dann.');
+      expect(result.bytesWritten).toBe(Buffer.byteLength(result.bodyMd, 'utf8'));
+    }
+    expect(state.getItemBody(item.id)?.bodyMd).toBe((result as { ok: true; bodyMd: string }).bodyMd);
+  });
+
+  it('uses transcript when text is null (voice notes)', async () => {
+    const item = waItem('whatsapp-41799990001');
+    const messages = [
+      waMsg({ id: '1', threadId: item.threadKey, direction: 'inbound', text: null, transcript: 'Hi, Sprachnachricht-Inhalt.' }),
+    ];
+    const waState = { getMessagesForThread: () => messages };
+    const result = await refreshWhatsappItemBody({ waState, state, item });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.bodyMd).toContain('Sprachnachricht-Inhalt');
+  });
+
+  it('returns not_found when the thread has zero messages', async () => {
+    const item = waItem();
+    const waState = { getMessagesForThread: () => [] };
+    const result = await refreshWhatsappItemBody({ waState, state, item });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason.kind).toBe('not_found');
+  });
+
+  it('returns empty_body when all messages lack text + transcript', async () => {
+    const item = waItem();
+    const messages = [
+      waMsg({ id: '1', threadId: item.threadKey, direction: 'inbound', text: '', transcript: null }),
+    ];
+    const waState = { getMessagesForThread: () => messages };
+    const result = await refreshWhatsappItemBody({ waState, state, item });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason.kind).toBe('empty_body');
+  });
+
+  it('returns fetch_failed when the WA store throws', async () => {
+    const item = waItem();
+    const waState = {
+      getMessagesForThread: () => { throw new Error('db locked'); },
+    };
+    const result = await refreshWhatsappItemBody({ waState, state, item });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason.kind).toBe('fetch_failed');
+  });
+
+  it('truncates concatenated transcript to MAX_ITEM_BODY_CHARS', async () => {
+    const item = waItem();
+    const long = 'x'.repeat(5 * 1024);
+    const messages = [
+      waMsg({ id: '1', threadId: item.threadKey, direction: 'inbound', text: long }),
+      waMsg({ id: '2', threadId: item.threadKey, direction: 'inbound', text: long }),
+    ];
+    const waState = { getMessagesForThread: () => messages };
+    const result = await refreshWhatsappItemBody({ waState, state, item });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.bodyMd.length).toBe(8 * 1024);
+    }
   });
 });

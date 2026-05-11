@@ -18,6 +18,19 @@
 import type { MailEnvelope, MailProvider } from '../mail/provider.js';
 import { MAX_ITEM_BODY_CHARS, type InboxStateDb } from './state.js';
 import { resolveThreadKey } from './watcher-hook.js';
+import type { WhatsAppMessage } from '../whatsapp/types.js';
+
+/**
+ * Subset of `WhatsAppStateDb` the WA refresh path consumes. Structural
+ * dependency so tests can pass a minimal stub instead of standing up
+ * the WA state DB + schema migration.
+ */
+export interface WhatsAppMessageStore {
+  getMessagesForThread(threadId: string, limit?: number): WhatsAppMessage[];
+}
+
+/** How many recent thread messages we concatenate for the refreshed body. */
+const WA_MESSAGE_FETCH_LIMIT = 50;
 
 /** Window for the provider.list() probe. Items older than this won't refresh. */
 const DEFAULT_LOOKUP_DAYS = 30;
@@ -91,6 +104,63 @@ export async function refreshItemBody(
   // Truncate UP FRONT so the body we hand back is exactly what hits the
   // cache. Otherwise `bytesWritten` would lie when the state-layer
   // silently clamped server-side.
+  const truncated = full.length > MAX_ITEM_BODY_CHARS;
+  const body = truncated ? full.slice(0, MAX_ITEM_BODY_CHARS) : full;
+  opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
+  return {
+    ok: true,
+    bodyMd: body,
+    source: opts.item.channel,
+    bytesWritten: Buffer.byteLength(body, 'utf8'),
+    truncated,
+  };
+}
+
+export interface RefreshWhatsappItemBodyOptions {
+  waState: WhatsAppMessageStore;
+  state: InboxStateDb;
+  item: { id: string; threadKey: string; channel: 'email' | 'whatsapp' };
+  /** Override the thread-history depth (mostly for tests). */
+  messageLimit?: number | undefined;
+}
+
+/**
+ * WhatsApp counterpart to `refreshItemBody`. The classifier cached the
+ * first-message snippet at classify time; this concatenates the most
+ * recent `WA_MESSAGE_FETCH_LIMIT` messages of the same thread (text +
+ * voice transcripts) into a single chronological context block.
+ *
+ * The output is plain text — the generator's `<untrusted_data>`
+ * wrapping still applies because we plumb the cached body through the
+ * same `state.saveItemBody` → generator path.
+ */
+export async function refreshWhatsappItemBody(
+  opts: RefreshWhatsappItemBodyOptions,
+): Promise<RefreshItemBodyResult | { ok: false; reason: RefreshBodyFailure }> {
+  let messages: ReadonlyArray<WhatsAppMessage>;
+  try {
+    messages = opts.waState.getMessagesForThread(
+      opts.item.threadKey,
+      opts.messageLimit ?? WA_MESSAGE_FETCH_LIMIT,
+    );
+  } catch {
+    return { ok: false, reason: { kind: 'fetch_failed' } };
+  }
+  if (messages.length === 0) return { ok: false, reason: { kind: 'not_found' } };
+
+  // Inbound messages carry the counterparty's content; outbound ones
+  // are the user's own. Render direction as a prefix so the generator
+  // can tell who said what.
+  const lines: string[] = [];
+  for (const msg of messages) {
+    const content = (msg.text ?? msg.transcript ?? '').trim();
+    if (!content) continue;
+    const tag = msg.direction === 'inbound' ? 'Gegenüber' : 'Ich';
+    lines.push(`${tag}: ${content}`);
+  }
+  const full = lines.join('\n\n').trim();
+  if (full.length === 0) return { ok: false, reason: { kind: 'empty_body' } };
+
   const truncated = full.length > MAX_ITEM_BODY_CHARS;
   const body = truncated ? full.slice(0, MAX_ITEM_BODY_CHARS) : full;
   opts.state.saveItemBody(opts.item.id, body, opts.item.channel);

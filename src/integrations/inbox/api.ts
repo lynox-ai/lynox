@@ -45,10 +45,16 @@ export interface InboxApiDeps {
   llm?: import('./classifier/index.js').LLMCaller | undefined;
   /**
    * Resolves an accountId to a live MailProvider. Used by
-   * `handleRefreshItemBody` to pull the full mail body on demand.
-   * Absent on instances without a mail context (e.g. WhatsApp-only).
+   * `handleRefreshItemBody` to pull the full mail body on demand for
+   * email items. Absent on instances without a mail context.
    */
   providerResolver?: ((accountId: string) => import('../mail/provider.js').MailProvider | null) | undefined;
+  /**
+   * WhatsApp message store. Used by `handleRefreshItemBody` to
+   * concatenate recent thread messages for WA items. Absent when the
+   * `whatsapp-inbox` flag is off — handler then returns 503 for WA.
+   */
+  whatsappStore?: import('./body-refresh.js').WhatsAppMessageStore | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -305,19 +311,6 @@ function unprocessable(message: string, reason?: string): ApiResponse {
 }
 
 /**
- * 501 gate for non-email channels. Both `handleGenerateDraft` and
- * `handleRefreshItemBody` need it; hoisted so a future WhatsApp body
- * adapter can drop the guard in one place.
- */
-function requireEmailChannel(
-  item: import('../../types/index.js').InboxItem,
-  what: 'generation' | 'refresh',
-): ApiResponse | null {
-  if (item.channel === 'email') return null;
-  return { status: 501, body: { error: `${what} not supported for channel: ${item.channel}` } };
-}
-
-/**
  * Minimum cached-body length below which generation is short-circuited.
  * A 5-character snippet ("yes." or "ok thx") cannot drive a meaningful
  * reply and would still spend ~5K tokens of LLM cost — the gate trades
@@ -374,8 +367,11 @@ export async function handleGenerateDraft(
   }
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
-  const channelGate = requireEmailChannel(item, 'generation');
-  if (channelGate) return channelGate;
+  // Generation runs channel-agnostically — both email and WhatsApp
+  // items have a cached body (snippet at classify time + optionally
+  // refreshed full body). The classifier-version-aware prompt builder
+  // already adapts via `item.reasonDe` + `channel` so the per-channel
+  // tone difference is implicit.
   const cached = deps.state.getItemBody(itemId);
   if (!cached || cached.bodyMd.length < MIN_BODY_FOR_GENERATION) {
     return unprocessable('cached body too short to draft from — refetch the mail first');
@@ -408,37 +404,50 @@ export async function handleGenerateDraft(
 /**
  * Pull the full mail body from the provider and overwrite the cached
  * snippet for an item. Does NOT touch the draft — generation/edit
- * proceeds normally afterward, just with richer context. WhatsApp items
- * return 501 in v1 (the lookup adapter is a separate slice).
+ * proceeds normally afterward, just with richer context. Routes
+ * on `item.channel`: email → MailProvider list+fetch, whatsapp →
+ * WhatsAppStateDb thread-message concat.
  */
 export async function handleRefreshItemBody(
   deps: InboxApiDeps,
   itemId: string,
 ): Promise<ApiResponse> {
-  if (!deps.providerResolver) return unavailable('mail provider registry not wired');
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
-  const channelGate = requireEmailChannel(item, 'refresh');
-  if (channelGate) return channelGate;
-  const provider = deps.providerResolver(item.accountId);
-  if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
-  const { refreshItemBody } = await import('./body-refresh.js');
-  const result = await refreshItemBody({
-    provider,
-    state: deps.state,
-    item: {
-      id: item.id,
-      accountId: item.accountId,
-      threadKey: item.threadKey,
-      channel: item.channel,
-    },
-  });
+  const { refreshItemBody, refreshWhatsappItemBody } = await import('./body-refresh.js');
+  let result;
+  if (item.channel === 'email') {
+    if (!deps.providerResolver) return unavailable('mail provider registry not wired');
+    const provider = deps.providerResolver(item.accountId);
+    if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
+    result = await refreshItemBody({
+      provider,
+      state: deps.state,
+      item: {
+        id: item.id,
+        accountId: item.accountId,
+        threadKey: item.threadKey,
+        channel: item.channel,
+      },
+    });
+  } else {
+    if (!deps.whatsappStore) return unavailable('whatsapp message store not wired');
+    result = await refreshWhatsappItemBody({
+      waState: deps.whatsappStore,
+      state: deps.state,
+      item: {
+        id: item.id,
+        threadKey: item.threadKey,
+        channel: item.channel,
+      },
+    });
+  }
   if (!result.ok) {
     switch (result.reason.kind) {
       case 'not_found':
-        return { status: 404, body: { error: 'mail no longer available in the lookup window' } };
+        return { status: 404, body: { error: 'thread no longer available' } };
       case 'empty_body':
-        return unprocessable('mail has no text body to refresh from', 'empty_body');
+        return unprocessable('thread has no text content to refresh from', 'empty_body');
       case 'fetch_failed':
         return { status: 502, body: { error: 'provider fetch failed' } };
     }

@@ -3319,10 +3319,17 @@ export class LynoxHTTPApi {
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       // Mail provider lookup for the body-refresh handler. The mail
       // context exposes the registry; when absent (WA-only instances
-      // or pre-vault startup), refresh returns 503.
+      // or pre-vault startup), refresh returns 503 for email items.
       const mailCtx = engine.getMailContext();
       if (mailCtx !== null) {
         deps.providerResolver = (accountId: string) => mailCtx.registry.get(accountId);
+      }
+      // WhatsApp message store for WA body refresh. Absent on
+      // instances without the `whatsapp-inbox` flag — refresh then
+      // 503s for WA items.
+      const waCtx = engine.getWhatsAppContext();
+      if (waCtx !== null) {
+        deps.whatsappStore = waCtx.getStateDb();
       }
       return deps;
     };
