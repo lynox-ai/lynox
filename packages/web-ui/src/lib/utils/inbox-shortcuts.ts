@@ -11,6 +11,7 @@ export type InboxShortcutAction =
 	| { kind: 'archive' }
 	| { kind: 'snooze' }
 	| { kind: 'undo' }
+	| { kind: 'reply' }
 	| { kind: 'close' }
 	| { kind: 'toggle_help' };
 
@@ -41,6 +42,9 @@ export function keyToInboxAction(event: KeyboardEvent): InboxShortcutAction | nu
 		case 'z':
 		case 'Z':
 			return { kind: 'undo' };
+		case 'r':
+		case 'R':
+			return { kind: 'reply' };
 		case 'Escape':
 			return { kind: 'close' };
 		case '?':

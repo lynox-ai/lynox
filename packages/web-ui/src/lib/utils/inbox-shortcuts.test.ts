@@ -25,6 +25,8 @@ describe('keyToInboxAction — wired keys', () => {
 		['S', 'snooze'],
 		['z', 'undo'],
 		['Z', 'undo'],
+		['r', 'reply'],
+		['R', 'reply'],
 		['Escape', 'close'],
 		['?', 'toggle_help'],
 	])('maps %s to %s', (key, expected) => {

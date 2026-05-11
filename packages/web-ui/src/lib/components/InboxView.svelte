@@ -2,6 +2,8 @@
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import {
+		closeDraftPane,
+		getDraftPane,
 		getInboxCounts,
 		getInboxItems,
 		getLastAction,
@@ -9,6 +11,7 @@
 		isLoading,
 		loadInboxCounts,
 		loadInboxItems,
+		openDraftPane,
 		setItemAction,
 		setItemSnooze,
 		startColdStartPolling,
@@ -22,6 +25,7 @@
 	import { keyToInboxAction, shouldIgnoreShortcut } from '../utils/inbox-shortcuts.js';
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 	import ColdStartBanner from './ColdStartBanner.svelte';
+	import DraftReplyPane from './DraftReplyPane.svelte';
 	import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.svelte';
 
 	let zone = $state<InboxBucket>('requires_user');
@@ -133,7 +137,18 @@
 
 	function closeOverlays(): void {
 		if (helpOpen) { helpOpen = false; return; }
+		if (getDraftPane() !== null) { closeDraftPane(); return; }
 		if (openSnoozeFor !== null) { openSnoozeFor = null; return; }
+	}
+
+	function openReplyForSelected(): void {
+		const item = visibleItems().find((i) => i.id === selectedItemId);
+		if (!item) return;
+		void openDraftPane(item.id);
+	}
+
+	function openReplyFor(item: InboxItem): void {
+		void openDraftPane(item.id);
 	}
 
 	function onKeyDown(event: KeyboardEvent): void {
@@ -150,12 +165,17 @@
 			return;
 		}
 		if (action.kind === 'close') {
-			if (helpOpen || openSnoozeFor !== null) {
+			if (helpOpen || getDraftPane() !== null || openSnoozeFor !== null) {
 				event.preventDefault();
 				closeOverlays();
 			}
 			return;
 		}
+		// Suppress directional + bucket-actions while the pane is open — the
+		// textarea owns the keyboard then. Esc still closes via the branch
+		// above. R from another zone is treated as "open from current
+		// selection if any" — silent no-op when nothing is selected.
+		if (getDraftPane() !== null) return;
 		if (zone !== 'requires_user') return;
 		event.preventDefault();
 		switch (action.kind) {
@@ -164,6 +184,7 @@
 			case 'archive': void archiveSelected(); break;
 			case 'snooze': openSnoozeForSelected(); break;
 			case 'undo': void undoOrHint(); break;
+			case 'reply': openReplyForSelected(); break;
 		}
 	}
 
@@ -314,6 +335,11 @@
 								{#if zone === 'requires_user' && !item.userAction}
 									<div class="flex items-center gap-1 shrink-0">
 										<button
+											onclick={() => openReplyFor(item)}
+											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+											aria-label={t('inbox.action_draft_reply')}
+										>{t('inbox.action_draft_reply')}</button>
+										<button
 											onclick={() => void onArchive(item)}
 											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 											aria-label={t('inbox.action_archive')}
@@ -345,4 +371,13 @@
 </div>
 
 <KeyboardShortcutsHelp open={helpOpen} onClose={() => (helpOpen = false)} />
+
+{#if getDraftPane() !== null}
+	{@const pane = getDraftPane()!}
+	{@const paneItem = getInboxItems('requires_user').find((i) => i.id === pane.itemId)
+		?? getInboxItems('draft_ready').find((i) => i.id === pane.itemId)
+		?? getInboxItems('auto_handled').find((i) => i.id === pane.itemId)
+		?? null}
+	<DraftReplyPane item={paneItem} />
+{/if}
 
