@@ -285,6 +285,7 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — Phase 0.1 fan-out + receive-onl
   it('receive-only info@ account hard-blocks mail_send before any prompt fires', async () => {
     const registry = new InMemoryMailRegistry();
     registry.add(infoProvider);
+    registry.setDefault(infoProvider.accountId);
 
     const ctx = makeCtx([{ id: infoProvider.accountId, address: INFO, type: 'info' }]);
     const tool = createMailSendTool(registry, ctx);
