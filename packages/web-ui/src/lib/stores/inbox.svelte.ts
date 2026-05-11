@@ -7,9 +7,17 @@
 // Phase 1b ships the Needs-You zone only; the other two zones reuse the
 // same fetcher with a different bucket filter once their views land.
 
+import {
+	createDraft as apiCreateDraft,
+	getItemDraft as apiGetItemDraft,
+	updateDraft as apiUpdateDraft,
+	type InboxDraft,
+} from '../api/inbox-drafts.js';
 import { getApiBase } from '../config.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { addToast } from './toast.svelte.js';
+
+export type { InboxDraft };
 
 export type InboxBucket = 'requires_user' | 'draft_ready' | 'auto_handled';
 export type InboxChannel = 'email' | 'whatsapp';
@@ -375,4 +383,122 @@ export function startColdStartPolling(): () => void {
 		cancelled = true;
 		if (timer !== null) clearTimeout(timer);
 	};
+}
+
+// ── Draft pane ───────────────────────────────────────────────────────────
+//
+// Owns the currently-open Draft-Reply pane. There is at most one open at
+// a time — opening on a new item replaces the previous slot. The pane
+// closes when `closeDraftPane()` is called or when the underlying item
+// changes (e.g. archived from a J/K shortcut while the pane is open).
+//
+// `openDraftPane(itemId)` is idempotent. It always fetches the active
+// draft for the item (returns `null` when none exists yet, which the
+// pane renders as the "no draft, click Draft Reply to create one"
+// affordance). Phase 2 ships without LLM-driven generation, so the
+// create path stubs a starter body until the generator slice lands.
+
+const DRAFT_GENERATOR_VERSION_STUB = 'manual-2026-05';
+
+interface DraftPaneState {
+	itemId: string;
+	draft: InboxDraft | null;
+	/** True while the active-draft fetch is in flight. */
+	loading: boolean;
+	/** True while a PATCH (save) round-trip is in flight. */
+	saving: boolean;
+	/** Last-known persisted body — used so the pane can flag unsaved buffers. */
+	persistedBody: string;
+}
+
+let draftPane = $state<DraftPaneState | null>(null);
+
+export function getDraftPane(): DraftPaneState | null {
+	return draftPane;
+}
+
+export function isDraftPaneOpen(): boolean {
+	return draftPane !== null;
+}
+
+export async function openDraftPane(itemId: string): Promise<void> {
+	draftPane = {
+		itemId,
+		draft: null,
+		loading: true,
+		saving: false,
+		persistedBody: '',
+	};
+	const result = await apiGetItemDraft(getApiBase(), itemId);
+	// Race-guard: the user may have closed or re-opened on a different
+	// item before the fetch resolved; only commit the result when the
+	// pane still belongs to this itemId.
+	if (draftPane?.itemId !== itemId) return;
+	if (result === undefined) {
+		addToast(t('inbox.draft_error_load'), 'error');
+		draftPane = { ...draftPane, loading: false };
+		return;
+	}
+	draftPane = {
+		...draftPane,
+		draft: result,
+		loading: false,
+		persistedBody: result?.bodyMd ?? '',
+	};
+}
+
+export function closeDraftPane(): void {
+	draftPane = null;
+}
+
+/**
+ * Create a fresh draft for the open pane's item. Used when the user
+ * clicks "Draft Reply" on an item that has no active draft yet. The
+ * starter body is intentionally minimal — LLM-driven generation lands
+ * in the next Phase-2 slice and will replace this stub.
+ */
+export async function createDraftForOpenPane(starterBody = ''): Promise<void> {
+	const pane = draftPane;
+	if (!pane) return;
+	const initialBody = starterBody.length > 0 ? starterBody : t('inbox.draft_starter_body');
+	const created = await apiCreateDraft(getApiBase(), pane.itemId, {
+		bodyMd: initialBody,
+		generatorVersion: DRAFT_GENERATOR_VERSION_STUB,
+	});
+	if (draftPane?.itemId !== pane.itemId) return;
+	if (!created) {
+		addToast(t('inbox.draft_error_create'), 'error');
+		return;
+	}
+	draftPane = {
+		...pane,
+		draft: created,
+		persistedBody: created.bodyMd,
+	};
+}
+
+/**
+ * Persist a body edit. Caller is responsible for debouncing keystrokes —
+ * the store does not coalesce. Returns false on a non-ok response so the
+ * caller can keep the local buffer dirty.
+ */
+export async function saveDraftBody(bodyMd: string): Promise<boolean> {
+	const pane = draftPane;
+	if (!pane || !pane.draft) return false;
+	const draftId = pane.draft.id;
+	draftPane = { ...pane, saving: true };
+	const updated = await apiUpdateDraft(getApiBase(), draftId, bodyMd);
+	if (draftPane?.draft?.id !== draftId) return false;
+	if (!updated) {
+		draftPane = { ...draftPane, saving: false };
+		addToast(t('inbox.draft_error_save'), 'error');
+		return false;
+	}
+	draftPane = {
+		...draftPane,
+		draft: updated,
+		saving: false,
+		persistedBody: updated.bodyMd,
+	};
+	return true;
 }

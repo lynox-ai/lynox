@@ -98,10 +98,20 @@
 
 	// Feature-flag gated nav entries. Fetched once on mount from the Engine.
 	// When the flag is off we omit the entry entirely so non-pilot tenants see
-	// no dead link.
+	// no dead link. The unified-inbox flag wins over the legacy WhatsApp flag —
+	// once an instance flips unified-inbox on, the new pane absorbs WA.
+	let inboxEnabled = $state(false);
 	let whatsappEnabled = $state(false);
 
 	onMount(async () => {
+		// /inbox/counts returns 503 when the flag is off; treating ok=true as
+		// "enabled" mirrors the store's own probe (see inbox.svelte.ts).
+		try {
+			const res = await fetch(`${getApiBase()}/inbox/counts`);
+			inboxEnabled = res.ok;
+		} catch {
+			inboxEnabled = false;
+		}
 		try {
 			const res = await fetch(`${getApiBase()}/whatsapp/status`);
 			if (!res.ok) return;
@@ -119,8 +129,14 @@
 				descKey: 'nav.desc.chat', type: 'threads',
 			},
 		];
-		// Gated: only WhatsApp is wired today; routing to an empty page would confuse users.
-		if (whatsappEnabled) {
+		if (inboxEnabled) {
+			items.push({
+				href: '/app/inbox', labelKey: 'nav.inbox', exact: false, icon: 'inbox',
+				descKey: 'nav.desc.inbox',
+			});
+		} else if (whatsappEnabled) {
+			// Legacy fallback — WA pilot instances that have not flipped the
+			// unified-inbox flag yet still need their WA entry.
 			items.push({
 				href: '/app/whatsapp', labelKey: 'nav.inbox', exact: false, icon: 'whatsapp',
 				descKey: 'nav.desc.inbox',
@@ -295,6 +311,8 @@
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" /></svg>
 							{:else if item.icon === 'whatsapp'}
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6.938 3.06 2.4 3.72a9.06 9.06 0 003.933.84 9.04 9.04 0 00.967-.052c.08-.007.16.034.197.106l1.266 2.34a.25.25 0 00.44-.003l1.253-2.323a.25.25 0 01.23-.133c.117.006.235.011.354.014 4.714 0 8.25-2.86 8.25-6.39S18 4.5 13.29 4.5c-4.715 0-8.25 2.86-8.25 6.39 0 .58.13 1.14.36 1.68" /><path stroke-linecap="round" stroke-linejoin="round" d="M8.5 11.5l2 2 4-4" /></svg>
+							{:else if item.icon === 'inbox'}
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 13.5l3.86-7.72A2.25 2.25 0 018.13 4.5h7.74a2.25 2.25 0 012.02 1.28l3.86 7.72M2.25 13.5v5.25A2.25 2.25 0 004.5 21h15a2.25 2.25 0 002.25-2.25V13.5M2.25 13.5h5.25a.75.75 0 01.75.75v.75a3 3 0 006 0v-.75a.75.75 0 01.75-.75h5.25" /></svg>
 							{/if}
 							<div class="flex-1 min-w-0">
 								<span>{t(item.labelKey)}</span>

@@ -15,6 +15,7 @@
 		{ keys: ['A'], label: 'inbox.shortcuts_archive' },
 		{ keys: ['S'], label: 'inbox.shortcuts_snooze' },
 		{ keys: ['Z'], label: 'inbox.shortcuts_undo' },
+		{ keys: ['R'], label: 'inbox.shortcuts_reply' },
 		{ keys: ['Esc'], label: 'inbox.shortcuts_close' },
 		{ keys: ['?'], label: 'inbox.shortcuts_help' },
 	];

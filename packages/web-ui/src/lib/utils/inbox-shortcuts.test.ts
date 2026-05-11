@@ -25,6 +25,8 @@ describe('keyToInboxAction — wired keys', () => {
 		['S', 'snooze'],
 		['z', 'undo'],
 		['Z', 'undo'],
+		['r', 'reply'],
+		['R', 'reply'],
 		['Escape', 'close'],
 		['?', 'toggle_help'],
 	])('maps %s to %s', (key, expected) => {
@@ -43,6 +45,9 @@ describe('keyToInboxAction — guards', () => {
 		expect(keyToInboxAction(ev({ key: 'a', ctrlKey: true }))).toBeNull();
 		expect(keyToInboxAction(ev({ key: 'z', metaKey: true }))).toBeNull();
 		expect(keyToInboxAction(ev({ key: 'j', altKey: true }))).toBeNull();
+		// Belt-and-braces for R — ⌘+R / Ctrl+R is browser reload.
+		expect(keyToInboxAction(ev({ key: 'r', metaKey: true }))).toBeNull();
+		expect(keyToInboxAction(ev({ key: 'r', ctrlKey: true }))).toBeNull();
 	});
 
 	it('ignores combos that pair Shift with another modifier', () => {
