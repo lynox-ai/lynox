@@ -211,6 +211,17 @@ describe('InboxStateDb — user actions and snooze', () => {
       auto_handled: 0,
     });
   });
+
+  it('clearing the snooze re-surfaces the item in list and counts', () => {
+    const id = insertSampleItem({ bucket: 'requires_user' });
+    inbox.setSnooze(id, new Date(Date.now() + 60 * 60 * 1000));
+    expect(inbox.listItems({ bucket: 'requires_user' })).toHaveLength(0);
+    expect(inbox.countItemsByBucket().requires_user).toBe(0);
+
+    inbox.setSnooze(id, null);
+    expect(inbox.listItems({ bucket: 'requires_user' }).map((it) => it.id)).toEqual([id]);
+    expect(inbox.countItemsByBucket().requires_user).toBe(1);
+  });
 });
 
 describe('InboxStateDb — audit log', () => {

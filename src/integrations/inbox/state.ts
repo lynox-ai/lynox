@@ -319,10 +319,8 @@ export class InboxStateDb {
     const tenantId = opts.tenantId ?? DEFAULT_TENANT_ID;
     const limit = clampLimit(opts.limit ?? 50);
     const offset = Math.max(0, opts.offset ?? 0);
-    // Hide currently-snoozed items. They re-appear automatically once
-    // snooze_until <= Date.now() — no background job needs to "wake"
-    // them. Items with snooze_until = NULL are unsnoozed and always
-    // visible.
+    // Snoozed items re-appear automatically once snooze_until <= now — no
+    // waker job required.
     const now = Date.now();
     const rows = opts.bucket
       ? this.db
@@ -366,9 +364,8 @@ export class InboxStateDb {
   }
 
   countItemsByBucket(tenantId: string = DEFAULT_TENANT_ID): Record<InboxBucket, number> {
-    // Keep the count consistent with listItems: snoozed items disappear
-    // from both the queue listing and the zone badges. Mismatched counts
-    // (badge says "3" but list shows 1) is the bug this guards.
+    // Mirrors listItems' snooze filter so a snoozed item can never make the
+    // badge count disagree with the visible list.
     const now = Date.now();
     const rows = this.db
       .prepare<[string, number], { bucket: string; c: number }>(
