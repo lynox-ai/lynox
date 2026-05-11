@@ -3447,9 +3447,6 @@ export class LynoxHTTPApi {
       if (typeof b['generatedAt'] === 'string') {
         createBody.generatedAt = b['generatedAt'];
       }
-      if (typeof b['tenantId'] === 'string') {
-        createBody.tenantId = b['tenantId'];
-      }
       sendInbox(res, handleCreateDraft(deps!, params['id']!, createBody));
     }));
 

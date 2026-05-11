@@ -269,6 +269,21 @@ describe('draft endpoints', () => {
     expect(handleCreateDraft(deps, id, { bodyMd: 'x', generatorVersion: '' }).status).toBe(400);
   });
 
+  it('POST rejects non-string bodyMd (null, number, object)', () => {
+    const id = insertItem();
+    for (const bad of [null, 123, { x: 1 }]) {
+      const r = handleCreateDraft(deps, id, { bodyMd: bad as unknown as string, generatorVersion: 'g' });
+      expect(r.status).toBe(400);
+    }
+  });
+
+  it('POST returns 413 when bodyMd exceeds the per-field cap', () => {
+    const id = insertItem();
+    const huge = 'a'.repeat(256 * 1024 + 1);
+    const r = handleCreateDraft(deps, id, { bodyMd: huge, generatorVersion: 'g' });
+    expect(r.status).toBe(413);
+  });
+
   it('POST rejects a malformed generatedAt', () => {
     const id = insertItem();
     const r = handleCreateDraft(deps, id, {
@@ -347,8 +362,40 @@ describe('draft endpoints', () => {
     expect(handleUpdateDraft(deps, id, { bodyMd: '' }).status).toBe(400);
   });
 
+  it('PATCH returns 413 when bodyMd exceeds the per-field cap', () => {
+    const itemId = insertItem();
+    const create = handleCreateDraft(deps, itemId, { bodyMd: 'orig', generatorVersion: 'g' });
+    const id = (create.body as { draft: InboxDraft }).draft.id;
+    const huge = 'a'.repeat(256 * 1024 + 1);
+    expect(handleUpdateDraft(deps, id, { bodyMd: huge }).status).toBe(413);
+  });
+
   it('PATCH 404s for an unknown draft', () => {
     expect(handleUpdateDraft(deps, 'drf_missing', { bodyMd: 'x' }).status).toBe(404);
+  });
+
+  it('GET item draft returns the latest active draft when multiple non-superseded drafts exist', () => {
+    const itemId = insertItem();
+    // Two POSTs without `supersededDraftId` leave both rows with
+    // `superseded_by IS NULL`; the active-draft contract is "ORDER BY
+    // generated_at DESC LIMIT 1". Locks the tiebreaker so a future
+    // ORDER BY drop fails this test instead of silently degrading.
+    const first = handleCreateDraft(deps, itemId, {
+      bodyMd: 'v1',
+      generatorVersion: 'g',
+      generatedAt: '2026-05-10T12:00:00Z',
+    });
+    const second = handleCreateDraft(deps, itemId, {
+      bodyMd: 'v2',
+      generatorVersion: 'g',
+      generatedAt: '2026-05-10T12:05:00Z',
+    });
+    const firstId = (first.body as { draft: InboxDraft }).draft.id;
+    const secondId = (second.body as { draft: InboxDraft }).draft.id;
+    expect(firstId).not.toBe(secondId);
+    const r = handleGetItemDraft(deps, itemId);
+    const active = (r.body as { draft: InboxDraft | null }).draft;
+    expect(active?.id).toBe(secondId);
   });
 });
 

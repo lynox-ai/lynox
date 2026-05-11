@@ -192,12 +192,17 @@ export function handleSetSnooze(deps: InboxApiDeps, id: string, body: SetSnoozeB
 
 // ── Drafts ───────────────────────────────────────────────────────────────
 //
-// Phase-2 surface: state-layer CRUD over the existing `inbox_drafts` table.
-// LLM generation + send-via-mail-tool live in separate slices — these
-// handlers persist and read drafts but do not invoke the model or the
-// outbound mail tool. That keeps the surface easy to drive from the UI
-// (which can already render an "empty draft" affordance and a regenerate
-// button against this layer) and reviewable in isolation.
+// LLM generation + send-via-mail live in separate slices — these handlers
+// only persist + read against `inbox_drafts`.
+
+/**
+ * Per-field cap on `bodyMd`. The global request cap is 30 MB; without a
+ * tighter per-field bound an authed client can persist 30 MB markdown
+ * rows and bump `user_edits_count` per PATCH (disk-of-DOS via repeated
+ * updates). 256 KB comfortably covers the largest real mail bodies plus
+ * KG-context blocks while keeping a single draft row under one page.
+ */
+const MAX_BODY_MD_BYTES = 256 * 1024;
 
 export interface CreateDraftBody {
   bodyMd: string;
@@ -209,7 +214,20 @@ export interface CreateDraftBody {
    */
   supersededDraftId?: string | undefined;
   generatedAt?: string | undefined;
-  tenantId?: string | undefined;
+}
+
+function tooLarge(message: string): ApiResponse {
+  return { status: 413, body: { error: message } };
+}
+
+function checkBodyMd(bodyMd: unknown): ApiResponse | null {
+  if (typeof bodyMd !== 'string' || bodyMd.length === 0) {
+    return bad('bodyMd is required');
+  }
+  if (Buffer.byteLength(bodyMd, 'utf8') > MAX_BODY_MD_BYTES) {
+    return tooLarge(`bodyMd exceeds ${MAX_BODY_MD_BYTES} bytes`);
+  }
+  return null;
 }
 
 export function handleGetItemDraft(deps: InboxApiDeps, itemId: string): ApiResponse {
@@ -228,9 +246,8 @@ export function handleCreateDraft(
   itemId: string,
   body: CreateDraftBody,
 ): ApiResponse {
-  if (typeof body.bodyMd !== 'string' || body.bodyMd.length === 0) {
-    return bad('bodyMd is required');
-  }
+  const bodyErr = checkBodyMd(body.bodyMd);
+  if (bodyErr) return bodyErr;
   if (typeof body.generatorVersion !== 'string' || body.generatorVersion.length === 0) {
     return bad('generatorVersion is required');
   }
@@ -238,7 +255,8 @@ export function handleCreateDraft(
   if (body.generatedAt && Number.isNaN(generatedAt.getTime())) {
     return bad('invalid generatedAt: not an ISO date');
   }
-  if (!deps.state.getItem(itemId)) return notFound('item');
+  const item = deps.state.getItem(itemId);
+  if (!item) return notFound('item');
   // Supersede target must belong to the same item — otherwise a bug in the
   // UI could supersede a draft from an unrelated thread.
   if (body.supersededDraftId !== undefined) {
@@ -246,19 +264,18 @@ export function handleCreateDraft(
     if (!prior) return bad('supersededDraftId not found');
     if (prior.itemId !== itemId) return bad('supersededDraftId belongs to a different item');
   }
-  const input: Parameters<typeof deps.state.insertDraft>[0] = {
+  // Inherit tenant from the parent item — never from the wire — so the
+  // route can't be used to write a draft into a different tenant's scope
+  // once Phase-5 team-inbox lifts the single-tenant assumption.
+  const input: Parameters<typeof deps.state.insertDraftAndAttach>[0] = {
     itemId,
     bodyMd: body.bodyMd,
     generatedAt,
     generatorVersion: body.generatorVersion,
+    tenantId: item.tenantId,
   };
   if (body.supersededDraftId !== undefined) input.supersededDraftId = body.supersededDraftId;
-  if (body.tenantId !== undefined) input.tenantId = body.tenantId;
-  const id = deps.state.insertDraft(input);
-  // Attach the fresh draft so `inbox_items.draft_id` always points at the
-  // active one. The UI lists items by bucket; without this, "Drafted for
-  // You" would not know which draft to render after a regenerate.
-  deps.state.attachDraft(itemId, id);
+  const id = deps.state.insertDraftAndAttach(input);
   const draft = deps.state.getDraftById(id);
   return { status: 201, body: { draft } };
 }
@@ -272,9 +289,8 @@ export function handleUpdateDraft(
   id: string,
   body: UpdateDraftBody,
 ): ApiResponse {
-  if (typeof body.bodyMd !== 'string' || body.bodyMd.length === 0) {
-    return bad('bodyMd is required');
-  }
+  const bodyErr = checkBodyMd(body.bodyMd);
+  if (bodyErr) return bodyErr;
   const ok = deps.state.updateDraftBody(id, body.bodyMd);
   if (!ok) return notFound('draft');
   return { status: 200, body: { draft: deps.state.getDraftById(id) } };

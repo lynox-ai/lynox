@@ -290,6 +290,18 @@ describe('InboxStateDb — drafts', () => {
   it('updateDraftBody returns false for an unknown id', () => {
     expect(inbox.updateDraftBody('drf_missing', 'x')).toBe(false);
   });
+
+  it('insertDraftAndAttach atomically inserts the draft and writes inbox_items.draft_id', () => {
+    const itemId = insertSampleItem();
+    const id = inbox.insertDraftAndAttach({
+      itemId,
+      bodyMd: 'x',
+      generatedAt: new Date('2026-05-10T12:00:00Z'),
+      generatorVersion: 'g',
+    });
+    expect(inbox.getDraftById(id)?.itemId).toBe(itemId);
+    expect(inbox.getItem(itemId)?.draftId).toBe(id);
+  });
 });
 
 describe('InboxStateDb — rules', () => {

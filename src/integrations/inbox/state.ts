@@ -452,6 +452,20 @@ export class InboxStateDb {
     return id;
   }
 
+  /**
+   * Insert + attach in one txn so `inbox_items.draft_id` cannot lag the
+   * actual draft row after a partial crash. Without the wrap, a SIGKILL
+   * between the two writes would leave the regenerate flow pointing at
+   * the prior (now-superseded) draft id forever.
+   */
+  insertDraftAndAttach(input: InboxDraftInput): string {
+    return this.db.transaction(() => {
+      const id = this.insertDraft(input);
+      this.attachDraft(input.itemId, id);
+      return id;
+    })();
+  }
+
   getDraftById(id: string): InboxDraft | null {
     const row = this.db
       .prepare<[string], DraftRow>('SELECT * FROM inbox_drafts WHERE id = ?')
