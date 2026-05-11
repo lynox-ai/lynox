@@ -480,6 +480,22 @@ export class InboxStateDb {
     return result.changes > 0;
   }
 
+  /**
+   * Atomic body update + edits counter bump. Single txn so the tone-button
+   * "edit-loss" guard (`userEditsCount > 0`) never sees a body change without
+   * its matching counter increment.
+   */
+  updateDraftBody(id: string, bodyMd: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE inbox_drafts
+         SET body_md = ?, user_edits_count = user_edits_count + 1
+         WHERE id = ?`,
+      )
+      .run(bodyMd, id) as { changes: number };
+    return result.changes > 0;
+  }
+
   // ── Rules ────────────────────────────────────────────────────────────────
 
   insertRule(input: InboxRuleInput): string {

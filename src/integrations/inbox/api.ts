@@ -190,6 +190,96 @@ export function handleSetSnooze(deps: InboxApiDeps, id: string, body: SetSnoozeB
   return { status: 200, body: { ok: true } };
 }
 
+// ── Drafts ───────────────────────────────────────────────────────────────
+//
+// Phase-2 surface: state-layer CRUD over the existing `inbox_drafts` table.
+// LLM generation + send-via-mail-tool live in separate slices — these
+// handlers persist and read drafts but do not invoke the model or the
+// outbound mail tool. That keeps the surface easy to drive from the UI
+// (which can already render an "empty draft" affordance and a regenerate
+// button against this layer) and reviewable in isolation.
+
+export interface CreateDraftBody {
+  bodyMd: string;
+  generatorVersion: string;
+  /**
+   * When set, marks the named draft as superseded in the same transaction
+   * (the regenerate flow). The classifier-suggested draft and any
+   * tone-button regenerations chain via this field.
+   */
+  supersededDraftId?: string | undefined;
+  generatedAt?: string | undefined;
+  tenantId?: string | undefined;
+}
+
+export function handleGetItemDraft(deps: InboxApiDeps, itemId: string): ApiResponse {
+  if (!deps.state.getItem(itemId)) return notFound('item');
+  const draft = deps.state.getActiveDraftForItem(itemId);
+  return { status: 200, body: { draft } };
+}
+
+export function handleGetDraft(deps: InboxApiDeps, id: string): ApiResponse {
+  const draft = deps.state.getDraftById(id);
+  return draft ? { status: 200, body: { draft } } : notFound('draft');
+}
+
+export function handleCreateDraft(
+  deps: InboxApiDeps,
+  itemId: string,
+  body: CreateDraftBody,
+): ApiResponse {
+  if (typeof body.bodyMd !== 'string' || body.bodyMd.length === 0) {
+    return bad('bodyMd is required');
+  }
+  if (typeof body.generatorVersion !== 'string' || body.generatorVersion.length === 0) {
+    return bad('generatorVersion is required');
+  }
+  const generatedAt = body.generatedAt ? new Date(body.generatedAt) : new Date();
+  if (body.generatedAt && Number.isNaN(generatedAt.getTime())) {
+    return bad('invalid generatedAt: not an ISO date');
+  }
+  if (!deps.state.getItem(itemId)) return notFound('item');
+  // Supersede target must belong to the same item — otherwise a bug in the
+  // UI could supersede a draft from an unrelated thread.
+  if (body.supersededDraftId !== undefined) {
+    const prior = deps.state.getDraftById(body.supersededDraftId);
+    if (!prior) return bad('supersededDraftId not found');
+    if (prior.itemId !== itemId) return bad('supersededDraftId belongs to a different item');
+  }
+  const input: Parameters<typeof deps.state.insertDraft>[0] = {
+    itemId,
+    bodyMd: body.bodyMd,
+    generatedAt,
+    generatorVersion: body.generatorVersion,
+  };
+  if (body.supersededDraftId !== undefined) input.supersededDraftId = body.supersededDraftId;
+  if (body.tenantId !== undefined) input.tenantId = body.tenantId;
+  const id = deps.state.insertDraft(input);
+  // Attach the fresh draft so `inbox_items.draft_id` always points at the
+  // active one. The UI lists items by bucket; without this, "Drafted for
+  // You" would not know which draft to render after a regenerate.
+  deps.state.attachDraft(itemId, id);
+  const draft = deps.state.getDraftById(id);
+  return { status: 201, body: { draft } };
+}
+
+export interface UpdateDraftBody {
+  bodyMd: string;
+}
+
+export function handleUpdateDraft(
+  deps: InboxApiDeps,
+  id: string,
+  body: UpdateDraftBody,
+): ApiResponse {
+  if (typeof body.bodyMd !== 'string' || body.bodyMd.length === 0) {
+    return bad('bodyMd is required');
+  }
+  const ok = deps.state.updateDraftBody(id, body.bodyMd);
+  if (!ok) return notFound('draft');
+  return { status: 200, body: { draft: deps.state.getDraftById(id) } };
+}
+
 // ── Contacts ─────────────────────────────────────────────────────────────
 
 export function handleResolveContact(deps: InboxApiDeps, email: string): ApiResponse {
