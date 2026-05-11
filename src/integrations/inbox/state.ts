@@ -319,23 +319,28 @@ export class InboxStateDb {
     const tenantId = opts.tenantId ?? DEFAULT_TENANT_ID;
     const limit = clampLimit(opts.limit ?? 50);
     const offset = Math.max(0, opts.offset ?? 0);
+    // Snoozed items re-appear automatically once snooze_until <= now — no
+    // waker job required.
+    const now = Date.now();
     const rows = opts.bucket
       ? this.db
-          .prepare<[string, string, number, number], ItemRow>(
+          .prepare<[string, string, number, number, number], ItemRow>(
             `SELECT * FROM inbox_items
              WHERE tenant_id = ? AND bucket = ?
+               AND (snooze_until IS NULL OR snooze_until <= ?)
              ORDER BY classified_at DESC
              LIMIT ? OFFSET ?`,
           )
-          .all(tenantId, opts.bucket, limit, offset)
+          .all(tenantId, opts.bucket, now, limit, offset)
       : this.db
-          .prepare<[string, number, number], ItemRow>(
+          .prepare<[string, number, number, number], ItemRow>(
             `SELECT * FROM inbox_items
              WHERE tenant_id = ?
+               AND (snooze_until IS NULL OR snooze_until <= ?)
              ORDER BY classified_at DESC
              LIMIT ? OFFSET ?`,
           )
-          .all(tenantId, limit, offset);
+          .all(tenantId, now, limit, offset);
     return rows.map(rowToItem);
   }
 
@@ -359,11 +364,17 @@ export class InboxStateDb {
   }
 
   countItemsByBucket(tenantId: string = DEFAULT_TENANT_ID): Record<InboxBucket, number> {
+    // Mirrors listItems' snooze filter so a snoozed item can never make the
+    // badge count disagree with the visible list.
+    const now = Date.now();
     const rows = this.db
-      .prepare<[string], { bucket: string; c: number }>(
-        `SELECT bucket, COUNT(*) as c FROM inbox_items WHERE tenant_id = ? GROUP BY bucket`,
+      .prepare<[string, number], { bucket: string; c: number }>(
+        `SELECT bucket, COUNT(*) as c FROM inbox_items
+         WHERE tenant_id = ?
+           AND (snooze_until IS NULL OR snooze_until <= ?)
+         GROUP BY bucket`,
       )
-      .all(tenantId);
+      .all(tenantId, now);
     const counts: Record<InboxBucket, number> = {
       requires_user: 0,
       draft_ready: 0,

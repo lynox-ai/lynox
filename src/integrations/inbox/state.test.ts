@@ -184,6 +184,44 @@ describe('InboxStateDb — user actions and snooze', () => {
     expect(inbox.attachDraft(id, null)).toBe(true);
     expect(inbox.getItem(id)?.draftId).toBeUndefined();
   });
+
+  it('hides snoozed items from listItems until snooze_until has passed', () => {
+    const live = insertSampleItem({ threadKey: 'live' });
+    const future = insertSampleItem({ threadKey: 'future' });
+    const past = insertSampleItem({ threadKey: 'past' });
+
+    inbox.setSnooze(future, new Date(Date.now() + 60 * 60 * 1000)); // +1h
+    inbox.setSnooze(past, new Date(Date.now() - 60 * 60 * 1000));   // -1h
+
+    const visibleIds = inbox.listItems({ bucket: 'requires_user' }).map((it) => it.id);
+    expect(visibleIds).toContain(live);
+    expect(visibleIds).toContain(past);
+    expect(visibleIds).not.toContain(future);
+  });
+
+  it('excludes currently-snoozed items from countItemsByBucket', () => {
+    insertSampleItem({ bucket: 'requires_user', threadKey: 'a' });
+    insertSampleItem({ bucket: 'requires_user', threadKey: 'b' });
+    const snoozed = insertSampleItem({ bucket: 'requires_user', threadKey: 'c' });
+    inbox.setSnooze(snoozed, new Date(Date.now() + 60 * 60 * 1000));
+
+    expect(inbox.countItemsByBucket()).toEqual({
+      requires_user: 2,
+      draft_ready: 0,
+      auto_handled: 0,
+    });
+  });
+
+  it('clearing the snooze re-surfaces the item in list and counts', () => {
+    const id = insertSampleItem({ bucket: 'requires_user' });
+    inbox.setSnooze(id, new Date(Date.now() + 60 * 60 * 1000));
+    expect(inbox.listItems({ bucket: 'requires_user' })).toHaveLength(0);
+    expect(inbox.countItemsByBucket().requires_user).toBe(0);
+
+    inbox.setSnooze(id, null);
+    expect(inbox.listItems({ bucket: 'requires_user' }).map((it) => it.id)).toEqual([id]);
+    expect(inbox.countItemsByBucket().requires_user).toBe(1);
+  });
 });
 
 describe('InboxStateDb — audit log', () => {
