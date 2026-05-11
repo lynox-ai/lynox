@@ -206,14 +206,20 @@
 <div class="p-6 max-w-3xl mx-auto" role="region" aria-label={t('inbox.title')} aria-live="polite">
 	<div class="flex items-center justify-between mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('inbox.title')}</h1>
-		{#if !touchPrimary}
-			<button
-				type="button"
-				onclick={() => (helpOpen = true)}
+		<div class="flex items-center gap-3">
+			<a
+				href="/app/inbox/rules"
 				class="text-[11px] text-text-subtle hover:text-text-muted font-mono"
-				aria-label={t('inbox.shortcuts_title')}
-			>{t('inbox.shortcuts_hint')}</button>
-		{/if}
+			>{t('inbox.rules_link')}</a>
+			{#if !touchPrimary}
+				<button
+					type="button"
+					onclick={() => (helpOpen = true)}
+					class="text-[11px] text-text-subtle hover:text-text-muted font-mono"
+					aria-label={t('inbox.shortcuts_title')}
+				>{t('inbox.shortcuts_hint')}</button>
+			{/if}
+		</div>
 	</div>
 
 	{#if !isInboxAvailable()}

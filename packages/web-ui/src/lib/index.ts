@@ -33,6 +33,7 @@ export { default as PromptAnchor } from './components/PromptAnchor.svelte';
 export { default as InboxView } from './components/InboxView.svelte';
 export { default as ColdStartBanner } from './components/ColdStartBanner.svelte';
 export { default as KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp.svelte';
+export { default as RulesView } from './components/RulesView.svelte';
 
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';
@@ -157,6 +158,23 @@ export type {
 	ColdStartSnapshot,
 	UndoableAction,
 } from './stores/inbox.svelte.js';
+
+// Inbox rules (Phase 1b)
+export {
+	listInboxRules,
+	createInboxRule,
+	deleteInboxRule,
+} from './api/inbox-rules.js';
+export type {
+	InboxRule,
+	CreateRuleBody,
+	InboxRuleMatcherKind,
+	InboxRuleAction,
+	InboxRuleSource,
+	InboxRuleBucket,
+} from './api/inbox-rules.js';
+export { listMailAccounts } from './api/mail-accounts.js';
+export type { MailAccountSummary } from './api/mail-accounts.js';
 
 // Push Notifications
 export {
