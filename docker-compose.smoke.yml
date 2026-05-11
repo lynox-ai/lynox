@@ -45,6 +45,9 @@ services:
       # state on container stop and these never encrypt anything real.
       - LYNOX_HTTP_SECRET=smoke-test-http-secret-ephemeral
       - SEARXNG_URL=http://searxng:8080
+      # Unified Inbox flag — Phase 2 readiness smoke must boot with the
+      # feature enabled so /api/inbox/* routes are reachable from Playwright.
+      - LYNOX_FEATURE_UNIFIED_INBOX=1
     networks:
       - smoke
 
