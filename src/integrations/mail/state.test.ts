@@ -304,7 +304,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(9);
+    expect(row.v).toBe(10);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -410,7 +410,7 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
     return (state as unknown as { db: import('better-sqlite3').Database }).db;
   }
 
-  it('creates all five inbox tables', () => {
+  it('creates all inbox tables', () => {
     const tables = inner(db)
       .prepare(
         `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'inbox_%' ORDER BY name`,
@@ -419,6 +419,7 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
     expect(tables.map((t) => t.name)).toEqual([
       'inbox_audit_log',
       'inbox_drafts',
+      'inbox_item_bodies',
       'inbox_items',
       'inbox_rules',
     ]);

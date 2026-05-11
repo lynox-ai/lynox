@@ -33,6 +33,34 @@ export interface InboxApiDeps {
   rules?: InboxRulesLoader | undefined;
   /** Surfaces cold-start progress to the UI banner; absent until wired. */
   coldStartTracker?: ColdStartTracker | undefined;
+  /**
+   * Resolves the account address + display name. The generator prompt needs
+   * the receiving mailbox identity to write a proper signature placeholder.
+   * Same shape as `AccountResolver` in watcher-hook.ts — kept structural so
+   * the http-api layer can pass a thin function-bound wrapper without
+   * importing the watcher's interface.
+   */
+  accountResolver?: import('./watcher-hook.js').AccountResolver | undefined;
+  /** Inbox LLM caller — when absent, `handleGenerateDraft` returns 503. */
+  llm?: import('./classifier/index.js').LLMCaller | undefined;
+  /**
+   * Resolves an accountId to a live MailProvider. Used by
+   * `handleRefreshItemBody` to pull the full mail body on demand for
+   * email items. Absent on instances without a mail context.
+   */
+  providerResolver?: ((accountId: string) => import('../mail/provider.js').MailProvider | null) | undefined;
+  /**
+   * WhatsApp message store. Used by `handleRefreshItemBody` to
+   * concatenate recent thread messages for WA items. Absent when the
+   * `whatsapp-inbox` flag is off — handler then returns 503 for WA.
+   */
+  whatsappStore?: import('./body-refresh.js').WhatsAppMessageStore | undefined;
+  /**
+   * Full mail context — `handleSendInboxReply` needs the registry +
+   * follow-up state-db that `sendMail` reaches through. Absent on
+   * instances without a vault/mail account; send then 503s.
+   */
+  mailContext?: import('../mail/context.js').MailContext | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -278,6 +306,328 @@ export function handleCreateDraft(
   const id = deps.state.insertDraftAndAttach(input);
   const draft = deps.state.getDraftById(id);
   return { status: 201, body: { draft } };
+}
+
+function unavailable(message: string): ApiResponse {
+  return { status: 503, body: { error: message } };
+}
+
+function unprocessable(message: string, reason?: string): ApiResponse {
+  return { status: 422, body: reason ? { error: message, reason } : { error: message } };
+}
+
+/**
+ * Minimum cached-body length below which generation is short-circuited.
+ * A 5-character snippet ("yes." or "ok thx") cannot drive a meaningful
+ * reply and would still spend ~5K tokens of LLM cost — the gate trades
+ * a 422 for an unproductive call.
+ */
+const MIN_BODY_FOR_GENERATION = 20;
+
+const VALID_TONES = ['shorter', 'formal', 'warmer', 'regenerate'] as const;
+type ValidTone = typeof VALID_TONES[number];
+function isValidTone(value: unknown): value is ValidTone {
+  return typeof value === 'string' && (VALID_TONES as ReadonlyArray<string>).includes(value);
+}
+
+/** Same defense-in-depth ceiling the per-field cap uses; rewrite prompts must not exceed it. */
+const MAX_PREVIOUS_BODY_BYTES = 256 * 1024;
+
+export interface GenerateDraftBody {
+  /** Tone modifier — only honoured together with `previousBodyMd`. */
+  tone?: 'shorter' | 'formal' | 'warmer' | 'regenerate' | undefined;
+  /** Caller-supplied previous draft (typically the live editor buffer). */
+  previousBodyMd?: string | undefined;
+}
+
+/**
+ * Generate a draft body via the inbox LLM. Does NOT persist — the UI
+ * follows up with `handleCreateDraft` to commit the resulting bodyMd
+ * into `inbox_drafts`. This split lets the UI show a "regenerate"
+ * affordance without polluting the supersede chain.
+ *
+ * When `body.tone` + `body.previousBodyMd` are both set, the generator
+ * rewrites the previous draft using the chosen tone modifier (the
+ * "Kürzer / Förmlicher / Wärmer / Regenerate" flow). Either field
+ * alone falls back to first-time generation.
+ *
+ * Returns 503 when the LLM caller is not wired (e.g. flag on but no
+ * provider credentials). Returns 422 when the cached body is missing
+ * or too short — historical items predating migration v10 may not have
+ * one; sensitive-mode='skip' items intentionally cache nothing.
+ */
+export async function handleGenerateDraft(
+  deps: InboxApiDeps,
+  itemId: string,
+  body: GenerateDraftBody = {},
+): Promise<ApiResponse> {
+  if (!deps.llm) return unavailable('draft generator not configured');
+  if (body.tone !== undefined && !isValidTone(body.tone)) {
+    return bad(`invalid tone: ${String(body.tone)}`);
+  }
+  if (body.previousBodyMd !== undefined) {
+    if (typeof body.previousBodyMd !== 'string') return bad('previousBodyMd must be a string');
+    if (Buffer.byteLength(body.previousBodyMd, 'utf8') > MAX_PREVIOUS_BODY_BYTES) {
+      return tooLarge(`previousBodyMd exceeds ${MAX_PREVIOUS_BODY_BYTES} bytes`);
+    }
+  }
+  const item = deps.state.getItem(itemId);
+  if (!item) return notFound('item');
+  // Both email and WA items have a cached body — the classifier writes
+  // the snippet for either channel and Reload optionally fetches the
+  // full body. KNOWN LIMITATION: `buildGeneratorPrompt` still emits
+  // email-flavoured labels ("Antwortendes Postfach", "Betreff …") for
+  // WA items; channel-aware prompt branching is a follow-up. WA-pilot
+  // v1 produces usable drafts via the LLM picking the channel up from
+  // the transcript format in the body.
+  const cached = deps.state.getItemBody(itemId);
+  if (!cached || cached.bodyMd.length < MIN_BODY_FOR_GENERATION) {
+    return unprocessable('cached body too short to draft from — refetch the mail first');
+  }
+  const account = deps.accountResolver?.resolve(item.accountId);
+  if (!account) return unprocessable('account not resolvable — cannot build a signature');
+  const { generateDraft } = await import('./generator.js');
+  // Best-effort sender extraction: the classifier prompt input we cached
+  // does not preserve the From header on inbox_items; for v1 the prompt
+  // surfaces a generic greeting via empty fromAddress and relies on the
+  // cached body's leading text. A future schema enhancement can
+  // preserve From and feed it here.
+  const input: Parameters<typeof generateDraft>[0] = {
+    item: { id: item.id, reasonDe: item.reasonDe, channel: item.channel },
+    fromAddress: '',
+    accountAddress: account.address,
+    accountDisplayName: account.displayName,
+    subject: undefined,
+    body: cached.bodyMd,
+  };
+  if (body.previousBodyMd !== undefined) input.previousBodyMd = body.previousBodyMd;
+  if (body.tone !== undefined) input.tone = body.tone;
+  const result = await generateDraft(input, deps.llm);
+  return {
+    status: 200,
+    body: { bodyMd: result.bodyMd, generatorVersion: result.generatorVersion, bodyTruncated: result.bodyTruncated },
+  };
+}
+
+/**
+ * Pull the full mail body from the provider and overwrite the cached
+ * snippet for an item. Does NOT touch the draft — generation/edit
+ * proceeds normally afterward, just with richer context. Routes
+ * on `item.channel`: email → MailProvider list+fetch, whatsapp →
+ * WhatsAppStateDb thread-message concat.
+ */
+export async function handleRefreshItemBody(
+  deps: InboxApiDeps,
+  itemId: string,
+): Promise<ApiResponse> {
+  const item = deps.state.getItem(itemId);
+  if (!item) return notFound('item');
+  const { refreshItemBody, refreshWhatsappItemBody } = await import('./body-refresh.js');
+  let result;
+  if (item.channel === 'email') {
+    if (!deps.providerResolver) return unavailable('mail provider registry not wired');
+    const provider = deps.providerResolver(item.accountId);
+    if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
+    result = await refreshItemBody({
+      provider,
+      state: deps.state,
+      item: {
+        id: item.id,
+        accountId: item.accountId,
+        threadKey: item.threadKey,
+        channel: item.channel,
+      },
+    });
+  } else {
+    if (!deps.whatsappStore) return unavailable('whatsapp message store not wired');
+    result = await refreshWhatsappItemBody({
+      waState: deps.whatsappStore,
+      state: deps.state,
+      item: {
+        id: item.id,
+        threadKey: item.threadKey,
+        channel: item.channel,
+      },
+    });
+  }
+  if (!result.ok) {
+    switch (result.reason.kind) {
+      case 'not_found':
+        return { status: 404, body: { error: 'thread no longer available' } };
+      case 'empty_body':
+        return unprocessable('thread has no text content to refresh from', 'empty_body');
+      case 'fetch_failed':
+        return { status: 502, body: { error: 'provider fetch failed' } };
+    }
+  }
+  return {
+    status: 200,
+    body: {
+      bodyMd: result.bodyMd,
+      source: result.source,
+      bytesWritten: result.bytesWritten,
+      truncated: result.truncated,
+    },
+  };
+}
+
+/**
+ * Send the draft as a reply to its parent inbox item. Reuses the shared
+ * `sendMail` pipeline from `mail/send-core.ts` so the inbox path gets
+ * the same rate-limit, secret-scan, recipient-dedup, and follow-up
+ * mechanics the agent's `mail_send` tool runs. The UI button click is
+ * the user confirmation; no agent.promptUser modal — the textarea
+ * already showed the body for review.
+ *
+ * Routes only the email channel. WhatsApp send is a follow-up slice
+ * (needs the WA provider's own outbound API + recipient-from-phone
+ * resolution).
+ */
+export interface SendInboxReplyBody {
+  /**
+   * Optional override of the body the user wants to send. If absent,
+   * uses the draft's persistedBody. Lets the UI flush the live buffer
+   * via this field instead of an extra PATCH first.
+   */
+  body?: string | undefined;
+  /**
+   * Future-proof: an inbox reply is always single-recipient (the
+   * original sender). cc/bcc would route around the mass-send
+   * guard `sendMail`'s `beforeSend` hook enforces, and the pane has
+   * no UI for them today — accepted only so a future schema bump
+   * doesn't silently break the field on the wire.
+   */
+  cc?: ReadonlyArray<string> | undefined;
+  bcc?: ReadonlyArray<string> | undefined;
+}
+
+export async function handleSendInboxReply(
+  deps: InboxApiDeps,
+  draftId: string,
+  body: SendInboxReplyBody = {},
+): Promise<ApiResponse> {
+  const mailCtx = deps.mailContext;
+  if (!mailCtx) return unavailable('mail context not wired');
+  // Hard reject cc/bcc — mass-send guard depends on a `beforeSend`
+  // hook that the inbox-pane intentionally omits. If a future UI
+  // pane exposes cc/bcc, that lands together with a confirmation
+  // affordance, not silently.
+  if ((body.cc?.length ?? 0) > 0 || (body.bcc?.length ?? 0) > 0) {
+    return bad('inbox reply does not support cc/bcc — single-recipient only in v1');
+  }
+  const draft = deps.state.getDraftById(draftId);
+  if (!draft) return notFound('draft');
+  const item = deps.state.getItem(draft.itemId);
+  if (!item) return notFound('item');
+  if (item.channel !== 'email') {
+    return { status: 501, body: { error: `send not supported for channel: ${item.channel}` } };
+  }
+  const replyBody = (body.body ?? draft.bodyMd).trim();
+  // Structured 422 so the UI's discriminated `empty_body` kind fires
+  // the dedicated "Cannot send an empty draft" copy instead of the
+  // generic 400 → network fallback toast.
+  if (replyBody.length === 0) return unprocessable('reply body is empty', 'empty_body');
+
+  const provider = mailCtx.registry.get(item.accountId);
+  if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
+
+  // Find the original envelope so we can reply To: the sender, with the
+  // original subject + In-Reply-To/References headers for threading.
+  // Reuses the same list+match strategy as body-refresh — bounded by
+  // the 30-day lookup window.
+  const since = new Date(Date.now() - 30 * 86_400_000);
+  const { resolveThreadKey } = await import('./watcher-hook.js');
+  let envelope;
+  try {
+    const envelopes = await provider.list({ since, limit: 200 });
+    envelope = envelopes.find((env) => resolveThreadKey(env) === item.threadKey);
+  } catch {
+    return { status: 502, body: { error: 'provider lookup failed' } };
+  }
+  if (!envelope) {
+    return { status: 404, body: { error: 'original mail no longer available — cannot construct reply headers' } };
+  }
+  const fromAddress = envelope.from[0]?.address;
+  if (!fromAddress) {
+    // No usable From header — envelope is functionally not-found for
+    // reply construction. 404 with a clear message; structured-422
+    // would falsely surface as "empty_body" in the UI.
+    return { status: 404, body: { error: 'original mail has no sender address — cannot construct reply headers' } };
+  }
+
+  const subject = envelope.subject.startsWith('Re: ') || envelope.subject.startsWith('RE: ')
+    ? envelope.subject
+    : `Re: ${envelope.subject || '(kein Betreff)'}`;
+
+  const { sendMail } = await import('../mail/send-core.js');
+  const coreInput: import('../mail/send-core.js').SendCoreInput = {
+    account: provider.accountId,
+    to: [{ address: fromAddress, ...(envelope.from[0]?.name !== undefined ? { name: envelope.from[0]!.name! } : {}) }],
+    subject,
+    body: replyBody,
+  };
+  if (envelope.messageId) coreInput.inReplyTo = envelope.messageId;
+  // Threading: References = whatever the original had, append the
+  // original Message-ID so a downstream client can rebuild the chain.
+  // We don't have the original's References header here (envelopes
+  // omit it for size); a future provider.fetch could supply it. For
+  // v1 we just set References = inReplyTo, which is the most common
+  // single-message-deep reply shape.
+  if (envelope.messageId) coreInput.references = envelope.messageId;
+
+  // Keep the cross-session rate-limit gate: it's the account-wide
+  // ceiling that protects against a stolen-session spam-vector
+  // (one send per item per dedup-window would let an attacker fire
+  // thousands of replies/hour without it). Manual user clicks won't
+  // hit the 60/min cap in practice.
+  const result = await sendMail(mailCtx.registry, coreInput, {}, mailCtx);
+
+  if (!result.ok) {
+    switch (result.status) {
+      case 'rate_limit':         return { status: 429, body: { error: result.message } };
+      case 'invalid_recipients': return unprocessable(result.message);
+      case 'receive_only':       return unprocessable(result.message, 'receive_only');
+      case 'dedup_window':       return { status: 429, body: { error: result.message } };
+      case 'secret_in_body':     return unprocessable(result.message, 'secret_in_body');
+      case 'cancelled':          return { status: 409, body: { error: 'send cancelled' } };
+      case 'provider_error':     return { status: 502, body: { error: result.message } };
+      default: {
+        // Compile-time exhaustiveness: adding a new SendCoreFailureStatus
+        // variant fails this branch and surfaces the omission at build
+        // time instead of silently returning undefined at runtime.
+        const _exhaustive: never = result.status;
+        return { status: 500, body: { error: `unhandled send-core status: ${String(_exhaustive)}` } };
+      }
+    }
+  }
+
+  // Mark the inbox item as replied + audit. The UI then transitions
+  // the item out of the Needs-You zone on next list refresh. If the
+  // item vanished between the earlier getItem() and now (Art-17 race),
+  // skip the audit so it never references a missing row.
+  if (!deps.state.updateUserAction(item.id, 'replied')) {
+    return notFound('item');
+  }
+  deps.state.appendAudit({
+    itemId: item.id,
+    action: 'replied',
+    actor: 'user',
+    payloadJson: JSON.stringify({
+      draft_id: draft.id,
+      message_id: result.result.messageId,
+      accepted: result.result.accepted,
+      rejected: result.result.rejected,
+    }),
+  });
+
+  return {
+    status: 200,
+    body: {
+      messageId: result.result.messageId,
+      accepted: result.result.accepted,
+      rejected: result.result.rejected,
+    },
+  };
 }
 
 export interface UpdateDraftBody {

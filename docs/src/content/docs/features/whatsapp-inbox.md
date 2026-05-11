@@ -62,7 +62,7 @@ Save. lynox probes the Meta API once to confirm the credentials are valid.
 
 ## How it works after setup
 
-- **Inbox:** *WhatsApp* in the main navigation shows all threads with unread counts and voice-note badges. Click a thread to read, reply, or mark as read.
+- **Inbox:** WhatsApp threads surface in the unified *Inbox* (sidebar entry, route `/app/inbox`) alongside email. The classifier routes each message into *Needs you* / *Drafted for you* / *Handled today* with a channel indicator; voice-note badges and unread counts carry over.
 - **Voice notes:** Automatically transcribed via the same Voxtral pipeline that powers the dictation feature. Transcripts appear inline; the original audio stays in your WhatsApp Business App.
 - **Echoes:** When you send a message from the Mobile App instead of lynox, the `smb_message_echoes` webhook mirrors it into the lynox inbox so your conversation history stays consistent.
 - **Assistant drafts (optional):** The assistant can draft or send replies on your behalf via the `whatsapp` tool. Every outbound send always pops up a confirmation — nothing leaves your number without an explicit *Send* tap.

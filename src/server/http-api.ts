@@ -3313,8 +3313,29 @@ export class LynoxHTTPApi {
         state: rt.state,
         rules: rt.rules,
         coldStartTracker: rt.coldStartTracker,
+        llm: rt.llm,
+        accountResolver: rt.accounts,
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
+      // Mail provider lookup for the body-refresh handler. The mail
+      // context exposes the registry; when absent (WA-only instances
+      // or pre-vault startup), refresh returns 503 for email items.
+      const mailCtx = engine.getMailContext();
+      if (mailCtx !== null) {
+        deps.providerResolver = (accountId: string) => mailCtx.registry.get(accountId);
+      }
+      // WhatsApp message store for WA body refresh. Absent on
+      // instances without the `whatsapp-inbox` flag — refresh then
+      // 503s for WA items.
+      const waCtx = engine.getWhatsAppContext();
+      if (waCtx !== null) {
+        deps.whatsappStore = waCtx.getStateDb();
+      }
+      // MailContext for handleSendInboxReply — exposes registry +
+      // follow-up state DB to the shared sendMail pipeline.
+      if (mailCtx !== null) {
+        deps.mailContext = mailCtx;
+      }
       return deps;
     };
     const sendInbox = (
@@ -3466,6 +3487,38 @@ export class LynoxHTTPApi {
         bodyMd: typeof b['bodyMd'] === 'string' ? b['bodyMd'] : '',
       };
       sendInbox(res, handleUpdateDraft(deps!, params['id']!, updateBody));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/body/refresh', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleRefreshItemBody } = await import('../integrations/inbox/api.js');
+      sendInbox(res, await handleRefreshItemBody(deps!, params['id']!));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/draft/generate', async (_req, res, params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGenerateDraft } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const generateBody: import('../integrations/inbox/api.js').GenerateDraftBody = {};
+      if (typeof b['tone'] === 'string') {
+        generateBody.tone = b['tone'] as import('../integrations/inbox/api.js').GenerateDraftBody['tone'];
+      }
+      if (typeof b['previousBodyMd'] === 'string') {
+        generateBody.previousBodyMd = b['previousBodyMd'];
+      }
+      sendInbox(res, await handleGenerateDraft(deps!, params['id']!, generateBody));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/drafts/:id/send', async (_req, res, params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleSendInboxReply } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const sendBody: import('../integrations/inbox/api.js').SendInboxReplyBody = {};
+      if (typeof b['body'] === 'string') sendBody.body = b['body'];
+      sendInbox(res, await handleSendInboxReply(deps!, params['id']!, sendBody));
     }));
 
     this.staticRoutes.set('GET /api/inbox/rules', async (req, res) => {

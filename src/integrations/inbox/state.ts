@@ -211,6 +211,15 @@ function nextId(prefix: string): string {
 
 const MAX_LIST_LIMIT = 500;
 
+/**
+ * Defense-in-depth clamp on the cached body. Today's writers are the
+ * classifier (snippet, ~500 chars) and the body-refresh adapter (full
+ * mail body); the cap keeps single rows bounded. Exported so callers
+ * can truncate up-front and keep their reported byte counts honest
+ * (rather than discovering after the fact that state silently clipped).
+ */
+export const MAX_ITEM_BODY_CHARS = 8 * 1024;
+
 export class InboxStateDb {
   constructor(private readonly db: Database.Database) {}
 
@@ -507,6 +516,44 @@ export class InboxStateDb {
       .prepare(`UPDATE inbox_drafts SET user_edits_count = user_edits_count + 1 WHERE id = ?`)
       .run(id) as { changes: number };
     return result.changes > 0;
+  }
+
+  // ── Item bodies (lazy cache for draft generation) ──────────────────────
+
+  /**
+   * Fetch the cached mail body for an item, or null when nothing has been
+   * cached yet. CASCADE on inbox_items delete keeps the cache row from
+   * outliving its owner — see migration v10.
+   */
+  getItemBody(itemId: string): { bodyMd: string; fetchedAt: Date; source: string } | null {
+    const row = this.db
+      .prepare<[string], { body_md: string; fetched_at: number; source: string }>(
+        `SELECT body_md, fetched_at, source FROM inbox_item_bodies WHERE item_id = ?`,
+      )
+      .get(itemId);
+    return row
+      ? { bodyMd: row.body_md, fetchedAt: new Date(row.fetched_at), source: row.source }
+      : null;
+  }
+
+  /**
+   * Upsert the cached body. `INSERT OR REPLACE` so a refetch (user
+   * explicitly asks "reload from server") overwrites the stored row
+   * without a separate delete step.
+   *
+   * The body is clamped to MAX_ITEM_BODY_CHARS as defense-in-depth — the
+   * primary caller (the runner) writes a 500-char snippet, but a future
+   * full-body refresh path could feed multi-MB messages; the clamp keeps
+   * the table size predictable and the downstream prompt bounded.
+   */
+  saveItemBody(itemId: string, bodyMd: string, source: string, fetchedAt: Date = new Date()): void {
+    const clamped = bodyMd.length > MAX_ITEM_BODY_CHARS ? bodyMd.slice(0, MAX_ITEM_BODY_CHARS) : bodyMd;
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO inbox_item_bodies (item_id, body_md, fetched_at, source)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(itemId, clamped, fetchedAt.getTime(), source);
   }
 
   /**
