@@ -15,6 +15,7 @@ import {
   handleGetItem,
   handleGetItemDraft,
   handleListItemAudit,
+  handleRunColdStart,
   handleListItems,
   handleListRules,
   handleResolveContact,
@@ -146,6 +147,78 @@ describe('handleGetColdStart', () => {
     expect(body.active).toHaveLength(1);
     expect(body.active[0]?.accountId).toBe(ACCOUNT.id);
     expect(body.active[0]?.progress?.enqueued).toBe(4);
+  });
+});
+
+describe('handleRunColdStart', () => {
+  it('503s when the runner is not wired', async () => {
+    const r = await handleRunColdStart(deps, { accountId: ACCOUNT.id });
+    expect(r.status).toBe(503);
+  });
+
+  it('503s when the provider resolver is not wired', async () => {
+    const runner = vi.fn(async () => {});
+    const r = await handleRunColdStart({ ...deps, coldStartRunner: runner }, { accountId: ACCOUNT.id });
+    expect(r.status).toBe(503);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('400s on missing accountId', async () => {
+    const runner = vi.fn(async () => {});
+    const providerResolver = vi.fn(() => null);
+    const r = await handleRunColdStart(
+      { ...deps, coldStartRunner: runner, providerResolver },
+      { accountId: '' },
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it('422s when the account is not registered', async () => {
+    const runner = vi.fn(async () => {});
+    const providerResolver = vi.fn(() => null);
+    const r = await handleRunColdStart(
+      { ...deps, coldStartRunner: runner, providerResolver },
+      { accountId: 'unknown' },
+    );
+    expect(r.status).toBe(422);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('schedules the runner and returns 202 on a valid account', async () => {
+    const runner = vi.fn(async () => {});
+    const providerResolver = vi.fn(() => ({ accountId: ACCOUNT.id }) as never);
+    const r = await handleRunColdStart(
+      { ...deps, coldStartRunner: runner, providerResolver },
+      { accountId: ACCOUNT.id, force: true },
+    );
+    expect(r.status).toBe(202);
+    // Give the void-promise a tick to flush.
+    await Promise.resolve();
+    expect(runner).toHaveBeenCalledWith(ACCOUNT.id, { force: true });
+  });
+
+  it('forwards force=false when explicit', async () => {
+    const runner = vi.fn(async () => {});
+    const providerResolver = vi.fn(() => ({ accountId: ACCOUNT.id }) as never);
+    await handleRunColdStart(
+      { ...deps, coldStartRunner: runner, providerResolver },
+      { accountId: ACCOUNT.id, force: false },
+    );
+    await Promise.resolve();
+    expect(runner).toHaveBeenCalledWith(ACCOUNT.id, { force: false });
+  });
+
+  it('swallows runner rejections so the HTTP layer never unhandled-rejects', async () => {
+    const runner = vi.fn(async () => { throw new Error('boom'); });
+    const providerResolver = vi.fn(() => ({ accountId: ACCOUNT.id }) as never);
+    const r = await handleRunColdStart(
+      { ...deps, coldStartRunner: runner, providerResolver },
+      { accountId: ACCOUNT.id },
+    );
+    expect(r.status).toBe(202);
+    // No floating rejection — vitest would fail the test if it leaked.
+    await Promise.resolve();
+    await Promise.resolve();
   });
 });
 

@@ -36,6 +36,15 @@ export interface RunColdStartForAccountOptions {
   listLimit?: number | undefined;
   /** Single tenant scope; defaults to the repo's `'default'` sentinel. */
   tenantId?: string | undefined;
+  /**
+   * Bypass the `hasAnyItemForAccount` re-credential gate. Auto-trigger via
+   * `onAccountAdded` always runs with this false (the gate is there to stop
+   * a re-registration from re-listing). Operator-driven re-runs through the
+   * `/api/inbox/cold-start/run` endpoint set it to true so accounts that
+   * were connected before the unified-inbox flag flipped can still get a
+   * one-time backfill.
+   */
+  force?: boolean | undefined;
 }
 
 /**
@@ -55,8 +64,9 @@ export async function runColdStartForAccount(
   const accountId = opts.provider.accountId;
   // Re-credential gate: if items already exist for this account, the
   // backfill has run once before and per-envelope dedup would no-op
-  // every iteration. Skip the provider round-trip entirely.
-  if (opts.state.hasAnyItemForAccount(accountId, opts.tenantId)) return;
+  // every iteration. Skip the provider round-trip entirely — unless
+  // the caller explicitly forces a re-run (operator endpoint).
+  if (!opts.force && opts.state.hasAnyItemForAccount(accountId, opts.tenantId)) return;
 
   const cap = opts.threadCap ?? DEFAULT_THREAD_CAP;
   const listLimit = opts.listLimit ?? DEFAULT_BACKFILL_LIMIT;

@@ -3335,6 +3335,14 @@ export class LynoxHTTPApi {
       // follow-up state DB to the shared sendMail pipeline.
       if (mailCtx !== null) {
         deps.mailContext = mailCtx;
+        // Operator cold-start re-run: needs both a registered MailProvider
+        // and the runtime's bound runner (hook + tracker + state). Wired
+        // here so the handler stays free of registry plumbing.
+        deps.coldStartRunner = async (accountId, runOpts) => {
+          const provider = mailCtx.registry.get(accountId);
+          if (!provider) throw new Error(`account "${accountId}" not registered`);
+          await rt.runColdStart(provider, runOpts ?? {});
+        };
       }
       return deps;
     };
@@ -3381,6 +3389,18 @@ export class LynoxHTTPApi {
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetColdStart } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetColdStart(deps!));
+    });
+
+    this.staticRoutes.set('POST /api/inbox/cold-start/run', async (_req, res, _params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleRunColdStart } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const runBody: import('../integrations/inbox/api.js').RunColdStartBody = {
+        accountId: typeof b['accountId'] === 'string' ? b['accountId'] : '',
+      };
+      if (typeof b['force'] === 'boolean') runBody.force = b['force'];
+      sendInbox(res, await handleRunColdStart(deps!, runBody));
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id', async (_req, res, params) => {
