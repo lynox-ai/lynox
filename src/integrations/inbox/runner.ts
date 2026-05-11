@@ -27,7 +27,7 @@ import {
 export { scrubErrorMessage } from './sensitive-content.js';
 import { scrubErrorMessage as _scrubErrorMessage } from './sensitive-content.js';
 import type { InboxCostBudget } from './cost-budget.js';
-import type { InboxStateDb } from './state.js';
+import type { InboxStateDb, ThreadMessageInput } from './state.js';
 
 /**
  * Payload threaded through the queue: the prompt input the classifier
@@ -169,11 +169,12 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       if (typeof body === 'string' && body.length > 0) {
         state.saveItemBody(itemId, body, payload.channel ?? 'email');
       }
+      _writeThreadMessage(state, payload, itemId, body);
     },
     onDeadLetter: (payload, error) => {
       // PRD fail-closed default: surface to Needs You so the user sees it.
       const envelopeFields = payload.envelope ?? {};
-      state.insertItemWithAudit(
+      const itemId = state.insertItemWithAudit(
         {
           tenantId: payload.tenantId,
           accountId: payload.accountId,
@@ -200,6 +201,10 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           }),
         },
       );
+      // Dead-letter still records the message — operator may need to
+      // see what arrived even when classify failed. No body (none was
+      // successfully classified).
+      _writeThreadMessage(state, payload, itemId, undefined);
     },
   };
   if (policy.maxConcurrency !== undefined) queueOptions.maxConcurrency = policy.maxConcurrency;
@@ -225,5 +230,37 @@ function _detectEmptyMetadata(env: InboxQueuePayload['envelope']): ReadonlyArray
   if (env.fromAddress.length === 0) missing.push('from_address');
   if (env.subject.length === 0) missing.push('subject');
   return missing.length > 0 ? missing : null;
+}
+
+/**
+ * v12 thread_message write: store the per-message envelope after the
+ * classifier (or dead-letter) has decided the row's bucket. Skips
+ * silently when the payload lacks a Message-ID — we cannot dedup
+ * messages without one.
+ */
+function _writeThreadMessage(
+  state: InboxStateDb,
+  payload: InboxQueuePayload,
+  inboxItemId: string,
+  bodyMd: string | undefined,
+): void {
+  const env = payload.envelope;
+  if (!env || !env.messageId || env.messageId.length === 0) return;
+  const input: ThreadMessageInput = {
+    accountId: payload.accountId,
+    threadKey: payload.threadKey,
+    messageId: env.messageId,
+    fromAddress: env.fromAddress,
+    subject: env.subject,
+    direction: 'inbound',
+    inboxItemId,
+  };
+  if (payload.tenantId !== undefined) input.tenantId = payload.tenantId;
+  if (env.fromName !== undefined) input.fromName = env.fromName;
+  if (env.inReplyTo !== undefined) input.inReplyTo = env.inReplyTo;
+  if (env.mailDate !== undefined) input.mailDate = env.mailDate;
+  if (env.snippet !== undefined) input.snippet = env.snippet;
+  if (bodyMd !== undefined && bodyMd.length > 0) input.bodyMd = bodyMd;
+  state.insertThreadMessage(input);
 }
 

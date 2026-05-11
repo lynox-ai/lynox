@@ -18,6 +18,8 @@ import {
   handleRunColdStart,
   handleRunBackfillMetadata,
   _resetBackfillMutex,
+  handleGetItemFull,
+  handleGetItemThread,
   handleListItems,
   handleListRules,
   handleResolveContact,
@@ -110,6 +112,140 @@ describe('handleGetItem / handleListItemAudit', () => {
     const r = handleListItemAudit(deps, id);
     expect((r.body as { entries: unknown[] }).entries).toHaveLength(1);
     expect(handleListItemAudit(deps, 'missing').status).toBe(404);
+  });
+});
+
+describe('handleGetItemFull', () => {
+  it('404s on missing item', () => {
+    expect(handleGetItemFull(deps, 'missing').status).toBe(404);
+  });
+
+  it('returns item + body.source=missing when no cache row exists', () => {
+    const id = insertItem();
+    const r = handleGetItemFull(deps, id);
+    expect(r.status).toBe(200);
+    const body = r.body as { item: { id: string }; body: { md: string; source: string } };
+    expect(body.item.id).toBe(id);
+    expect(body.body.source).toBe('missing');
+    expect(body.body.md).toBe('');
+  });
+
+  it('returns item + body.source=cache + fetchedAt when cache populated', () => {
+    const id = insertItem();
+    state.saveItemBody(id, 'Hello from cache', 'imap', new Date('2026-05-12T10:00:00Z'));
+    const r = handleGetItemFull(deps, id);
+    expect(r.status).toBe(200);
+    const body = r.body as { body: { md: string; source: string; fetchedAt?: string } };
+    expect(body.body.source).toBe('cache');
+    expect(body.body.md).toBe('Hello from cache');
+    expect(body.body.fetchedAt).toBe('2026-05-12T10:00:00.000Z');
+  });
+});
+
+describe('handleGetItemThread', () => {
+  it('404s on missing item', () => {
+    expect(handleGetItemThread(deps, 'missing').status).toBe(404);
+  });
+
+  it('returns thread_message rows ordered newest-first', () => {
+    const itemId = state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'thr-multi',
+      bucket: 'requires_user',
+      confidence: 0.5,
+      reasonDe: 'r',
+      classifiedAt: new Date('2026-05-10T12:00:00Z'),
+      classifierVersion: 'v',
+      fromAddress: 'sender@x',
+      subject: 'Re: hello',
+      messageId: '<m2@example.com>',
+    });
+    state.insertThreadMessage({
+      accountId: ACCOUNT.id,
+      threadKey: 'thr-multi',
+      messageId: '<m1@example.com>',
+      fromAddress: 'sender@x',
+      subject: 'hello',
+      direction: 'inbound',
+      mailDate: new Date('2026-05-09T10:00:00Z'),
+    });
+    state.insertThreadMessage({
+      accountId: ACCOUNT.id,
+      threadKey: 'thr-multi',
+      messageId: '<m2@example.com>',
+      fromAddress: 'sender@x',
+      subject: 'Re: hello',
+      direction: 'inbound',
+      mailDate: new Date('2026-05-10T10:00:00Z'),
+      inboxItemId: itemId,
+    });
+    const r = handleGetItemThread(deps, itemId);
+    expect(r.status).toBe(200);
+    const body = r.body as {
+      messages: ReadonlyArray<{ messageId: string; subject: string }>;
+      partial: boolean;
+    };
+    expect(body.messages).toHaveLength(2);
+    expect(body.messages[0]?.messageId).toBe('<m2@example.com>');
+    expect(body.messages[1]?.messageId).toBe('<m1@example.com>');
+    expect(body.partial).toBe(false);
+  });
+
+  it('partial=true when in_reply_to references a parent we have no row for', () => {
+    const id = state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'thr-partial',
+      bucket: 'requires_user',
+      confidence: 0.5,
+      reasonDe: 'r',
+      classifiedAt: new Date('2026-05-10T12:00:00Z'),
+      classifierVersion: 'v',
+      fromAddress: 'a@x',
+      subject: 'reply',
+      messageId: '<reply@example.com>',
+      inReplyTo: '<lost-parent@example.com>',
+    });
+    state.insertThreadMessage({
+      accountId: ACCOUNT.id,
+      threadKey: 'thr-partial',
+      messageId: '<reply@example.com>',
+      fromAddress: 'a@x',
+      subject: 'reply',
+      direction: 'inbound',
+      inboxItemId: id,
+    });
+    const r = handleGetItemThread(deps, id);
+    const body = r.body as { messages: unknown[]; partial: boolean };
+    expect(body.messages).toHaveLength(1);
+    expect(body.partial).toBe(true);
+  });
+
+  it('empty thread when no inbox_thread_messages rows exist yet', () => {
+    const id = insertItem();
+    const r = handleGetItemThread(deps, id);
+    const body = r.body as { messages: unknown[]; partial: boolean };
+    expect(body.messages).toHaveLength(0);
+    expect(body.partial).toBe(false);
+  });
+
+  it('respects limit query parameter', () => {
+    const itemId = insertItem('thr-limit');
+    for (let i = 0; i < 3; i += 1) {
+      state.insertThreadMessage({
+        accountId: ACCOUNT.id,
+        threadKey: 'thr-limit',
+        messageId: `<m${i}@x>`,
+        fromAddress: 's@x',
+        subject: `m${i}`,
+        direction: 'inbound',
+        mailDate: new Date(2026, 4, 10 + i, 10, 0, 0),
+      });
+    }
+    const r = handleGetItemThread(deps, itemId, { limit: 2 });
+    const body = r.body as { messages: unknown[] };
+    expect(body.messages).toHaveLength(2);
   });
 });
 

@@ -139,6 +139,50 @@ export interface InboxRuleInput {
   createdAt?: Date | undefined;
 }
 
+export type ThreadMessageDirection = 'inbound' | 'outbound' | 'unknown';
+
+export interface ThreadMessageInput {
+  tenantId?: string | undefined;
+  accountId: string;
+  threadKey: string;
+  messageId: string;
+  inReplyTo?: string | undefined;
+  fromAddress: string;
+  fromName?: string | undefined;
+  /** JSON-encoded recipient array — caller stringifies. */
+  toJson?: string | undefined;
+  ccJson?: string | undefined;
+  subject: string;
+  bodyMd?: string | undefined;
+  mailDate?: Date | undefined;
+  snippet?: string | undefined;
+  /** 'inbound' (received), 'outbound' (sent), or 'unknown'. Default 'inbound'. */
+  direction?: ThreadMessageDirection | undefined;
+  fetchedAt?: Date | undefined;
+  /** FK into inbox_items.id when this message is the decision row's mail. */
+  inboxItemId?: string | undefined;
+}
+
+export interface ThreadMessage {
+  id: string;
+  tenantId: string;
+  accountId: string;
+  threadKey: string;
+  messageId: string;
+  inReplyTo: string | undefined;
+  fromAddress: string;
+  fromName: string | undefined;
+  toJson: string | undefined;
+  ccJson: string | undefined;
+  subject: string;
+  bodyMd: string | undefined;
+  mailDate: Date | undefined;
+  snippet: string | undefined;
+  direction: ThreadMessageDirection;
+  fetchedAt: Date;
+  inboxItemId: string | undefined;
+}
+
 export interface ListItemsOptions {
   tenantId?: string | undefined;
   bucket?: InboxBucket | undefined;
@@ -209,6 +253,26 @@ interface RuleRow {
   source: string;
 }
 
+interface ThreadMessageRow {
+  id: string;
+  tenant_id: string;
+  account_id: string;
+  thread_key: string;
+  message_id: string;
+  in_reply_to: string | null;
+  from_address: string;
+  from_name: string | null;
+  to_json: string | null;
+  cc_json: string | null;
+  subject: string;
+  body_md: string | null;
+  mail_date: number | null;
+  snippet: string | null;
+  direction: string;
+  fetched_at: number;
+  inbox_item_id: string | null;
+}
+
 // ── Row → domain mappers ───────────────────────────────────────────────────
 
 function rowToItem(row: ItemRow): InboxItem {
@@ -261,6 +325,31 @@ function rowToDraft(row: DraftRow): InboxDraft {
     generatorVersion: row.generator_version,
     userEditsCount: row.user_edits_count,
     supersededBy: row.superseded_by ?? undefined,
+  };
+}
+
+function rowToThreadMessage(row: ThreadMessageRow): ThreadMessage {
+  const directionRaw = row.direction;
+  const direction: ThreadMessageDirection =
+    directionRaw === 'inbound' || directionRaw === 'outbound' ? directionRaw : 'unknown';
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    accountId: row.account_id,
+    threadKey: row.thread_key,
+    messageId: row.message_id,
+    inReplyTo: row.in_reply_to ?? undefined,
+    fromAddress: row.from_address,
+    fromName: row.from_name ?? undefined,
+    toJson: row.to_json ?? undefined,
+    ccJson: row.cc_json ?? undefined,
+    subject: row.subject,
+    bodyMd: row.body_md ?? undefined,
+    mailDate: row.mail_date !== null ? new Date(row.mail_date) : undefined,
+    snippet: row.snippet ?? undefined,
+    direction,
+    fetchedAt: new Date(row.fetched_at),
+    inboxItemId: row.inbox_item_id ?? undefined,
   };
 }
 
@@ -393,6 +482,36 @@ export class InboxStateDb {
       )
       .get(accountId, threadKey);
     return row ? rowToItem(row) : null;
+  }
+
+  /**
+   * v11 thread-walk: all items sharing a thread_key, newest-first.
+   *
+   * PRD-INBOX-PHASE-3 §"Reading-Pane + Thread API" — `MailProvider.search`
+   * does not accept `{threadKey}`, so we fall back to local SQL siblings
+   * keyed off the v11 `message_id` + `thread_key` columns. Older messages
+   * pre-classify-window are not in `inbox_items` at all; callers surface
+   * that as `partial: true` to the UI.
+   *
+   * Capped at 50 per call to keep one query bounded; the Reading-Pane
+   * thread block respects the same cap.
+   */
+  listItemsByThreadKey(
+    accountId: string,
+    threadKey: string,
+    opts: { tenantId?: string | undefined; limit?: number | undefined } = {},
+  ): ReadonlyArray<InboxItem> {
+    const tenantId = opts.tenantId ?? DEFAULT_TENANT_ID;
+    const limit = clampLimit(opts.limit ?? 50);
+    const rows = this.db
+      .prepare<[string, string, string, number], ItemRow>(
+        `SELECT * FROM inbox_items
+         WHERE tenant_id = ? AND account_id = ? AND thread_key = ?
+         ORDER BY mail_date DESC, classified_at DESC
+         LIMIT ?`,
+      )
+      .all(tenantId, accountId, threadKey, limit);
+    return rows.map(rowToItem);
   }
 
   /**
@@ -668,6 +787,121 @@ export class InboxStateDb {
       .prepare(`UPDATE inbox_drafts SET user_edits_count = user_edits_count + 1 WHERE id = ?`)
       .run(id) as { changes: number };
     return result.changes > 0;
+  }
+
+  // ── v12 thread messages (per-message Reading-Pane storage) ─────────────
+
+  /**
+   * Insert a per-message thread row. ON CONFLICT DO NOTHING by
+   * `(tenant_id, account_id, message_id)` so the same message arriving
+   * via classify + backfill (or simultaneous watcher races) collapses
+   * to a single row.
+   *
+   * Returns the inserted (or existing) row's id so callers can wire
+   * future references. `inboxItemId` is the FK to `inbox_items` for
+   * the row that owns this thread's bucket-decision; null for messages
+   * we haven't seen as an inbox_items insert yet (sibling messages).
+   */
+  insertThreadMessage(input: ThreadMessageInput): string {
+    const id = nextId('itm');
+    const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
+    // Defense-in-depth body sanitisation (PRD §Threat Model "XSS via
+    // body in Reading-Pane"); mirrors saveItemBody's strip pass.
+    const sanitizedBody = input.bodyMd !== undefined
+      ? stripHtmlAndInvisibles(input.bodyMd)
+      : null;
+    // ON CONFLICT preserves the existing row but upgrades any field
+    // whose new value is more informative (longer body, non-null
+    // mail_date, etc.). Defends the snippet-then-fullbody flow where
+    // backfill might seed a row before runner.onSuccess gets the
+    // classifier body.
+    this._insertThreadMessageStmt ??= this.db.prepare(
+      `INSERT INTO inbox_thread_messages (
+         id, tenant_id, account_id, thread_key,
+         message_id, in_reply_to,
+         from_address, from_name, to_json, cc_json,
+         subject, body_md, mail_date, snippet,
+         direction, fetched_at, inbox_item_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (tenant_id, account_id, message_id) DO UPDATE SET
+         body_md = CASE
+           WHEN excluded.body_md IS NOT NULL
+             AND length(excluded.body_md) > length(COALESCE(inbox_thread_messages.body_md, ''))
+           THEN excluded.body_md
+           ELSE inbox_thread_messages.body_md
+         END,
+         snippet = COALESCE(NULLIF(excluded.snippet, ''), inbox_thread_messages.snippet),
+         mail_date = COALESCE(excluded.mail_date, inbox_thread_messages.mail_date),
+         inbox_item_id = COALESCE(excluded.inbox_item_id, inbox_thread_messages.inbox_item_id)`,
+    );
+    const result = this._insertThreadMessageStmt.run(
+      id,
+      tenantId,
+      input.accountId,
+      input.threadKey,
+      input.messageId,
+      input.inReplyTo ?? null,
+      input.fromAddress,
+      input.fromName ?? null,
+      input.toJson ?? null,
+      input.ccJson ?? null,
+      input.subject,
+      sanitizedBody,
+      input.mailDate?.getTime() ?? null,
+      input.snippet ?? null,
+      input.direction ?? 'inbound',
+      (input.fetchedAt ?? new Date()).getTime(),
+      input.inboxItemId ?? null,
+    ) as { changes: number; lastInsertRowid: number | bigint };
+    // changes > 0 covers both insert AND update; query for the canonical id.
+    this._selectThreadMessageIdByMsgIdStmt ??= this.db.prepare<[string, string, string], { id: string }>(
+      `SELECT id FROM inbox_thread_messages
+       WHERE tenant_id = ? AND account_id = ? AND message_id = ?`,
+    );
+    const existing = this._selectThreadMessageIdByMsgIdStmt.get(tenantId, input.accountId, input.messageId);
+    return existing?.id ?? id;
+  }
+  private _insertThreadMessageStmt: Database.Statement | undefined;
+  private _selectThreadMessageIdByMsgIdStmt: Database.Statement<[string, string, string], { id: string }> | undefined;
+
+  /**
+   * All messages in a thread, newest-first. Cap mirrors the Reading-Pane
+   * thread-history limit (50) per PRD §"Reading-Pane + Thread API".
+   */
+  listThreadMessages(
+    accountId: string,
+    threadKey: string,
+    opts: { tenantId?: string | undefined; limit?: number | undefined } = {},
+  ): ReadonlyArray<ThreadMessage> {
+    const tenantId = opts.tenantId ?? DEFAULT_TENANT_ID;
+    const limit = clampLimit(opts.limit ?? 50);
+    const rows = this.db
+      .prepare<[string, string, string, number], ThreadMessageRow>(
+        `SELECT * FROM inbox_thread_messages
+         WHERE tenant_id = ? AND account_id = ? AND thread_key = ?
+         ORDER BY mail_date DESC, fetched_at DESC
+         LIMIT ?`,
+      )
+      .all(tenantId, accountId, threadKey, limit);
+    return rows.map(rowToThreadMessage);
+  }
+
+  /**
+   * Single-message lookup by message_id. Used when /full needs the
+   * body of the specific message an inbox_items row points at.
+   */
+  getThreadMessageByMessageId(
+    accountId: string,
+    messageId: string,
+    tenantId: string = DEFAULT_TENANT_ID,
+  ): ThreadMessage | null {
+    const row = this.db
+      .prepare<[string, string, string], ThreadMessageRow>(
+        `SELECT * FROM inbox_thread_messages
+         WHERE tenant_id = ? AND account_id = ? AND message_id = ?`,
+      )
+      .get(tenantId, accountId, messageId);
+    return row ? rowToThreadMessage(row) : null;
   }
 
   // ── Item bodies (lazy cache for draft generation) ──────────────────────

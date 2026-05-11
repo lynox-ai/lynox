@@ -507,6 +507,152 @@ describe('InboxStateDb — v11 envelope metadata', () => {
     });
   });
 
+  it('listItemsByThreadKey returns the single thread row (v8 UNIQUE constraint)', () => {
+    // v8's UNIQUE(tenant_id, account_id, thread_key) means each thread maps
+    // to exactly one inbox_items row — sibling messages collapse via
+    // ON CONFLICT DO NOTHING. So local-SQL "thread history" is always 0
+    // or 1 row; full provider-side thread walk is a Phase 5 follow-up.
+    const id = inbox.insertItem({
+      accountId: TEST_ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'imap:thr-lookup',
+      bucket: 'requires_user',
+      confidence: 0.5,
+      reasonDe: 'single',
+      classifiedAt: new Date('2026-05-10T12:00:00Z'),
+      classifierVersion: 'v',
+      fromAddress: 'a@x',
+      subject: 'single thread row',
+    });
+    const messages = inbox.listItemsByThreadKey(TEST_ACCOUNT.id, 'imap:thr-lookup');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.id).toBe(id);
+  });
+
+  it('listItemsByThreadKey returns empty for an unknown thread_key', () => {
+    insertSampleItem();
+    const messages = inbox.listItemsByThreadKey(TEST_ACCOUNT.id, 'imap:no-such');
+    expect(messages).toHaveLength(0);
+  });
+
+  it('listItemsByThreadKey isolates by tenant', () => {
+    inbox.insertItem({
+      accountId: TEST_ACCOUNT.id,
+      tenantId: 'tenant-a',
+      channel: 'email',
+      threadKey: 'imap:cross-tenant',
+      bucket: 'requires_user',
+      confidence: 0.5,
+      reasonDe: 'a',
+      classifiedAt: new Date('2026-05-10T12:00:00Z'),
+      classifierVersion: 'v',
+      fromAddress: 'a@x',
+      subject: 'a',
+    });
+    inbox.insertItem({
+      accountId: TEST_ACCOUNT.id,
+      tenantId: 'tenant-b',
+      channel: 'email',
+      threadKey: 'imap:cross-tenant',
+      bucket: 'requires_user',
+      confidence: 0.5,
+      reasonDe: 'b',
+      classifiedAt: new Date('2026-05-10T12:00:00Z'),
+      classifierVersion: 'v',
+      fromAddress: 'b@x',
+      subject: 'b',
+    });
+    const a = inbox.listItemsByThreadKey(TEST_ACCOUNT.id, 'imap:cross-tenant', { tenantId: 'tenant-a' });
+    const b = inbox.listItemsByThreadKey(TEST_ACCOUNT.id, 'imap:cross-tenant', { tenantId: 'tenant-b' });
+    expect(a).toHaveLength(1);
+    expect(a[0]?.reasonDe).toBe('a');
+    expect(b).toHaveLength(1);
+    expect(b[0]?.reasonDe).toBe('b');
+  });
+
+  it('insertThreadMessage round-trips an inbound message', () => {
+    const id = inbox.insertThreadMessage({
+      accountId: TEST_ACCOUNT.id,
+      threadKey: 'thr-1',
+      messageId: '<msg-1@example.com>',
+      fromAddress: 'sender@example.com',
+      fromName: 'Sender',
+      subject: 'subject',
+      mailDate: new Date('2026-05-10T10:00:00Z'),
+      snippet: 'a snippet',
+      direction: 'inbound',
+      bodyMd: 'the body',
+    });
+    expect(id.startsWith('itm_')).toBe(true);
+    const list = inbox.listThreadMessages(TEST_ACCOUNT.id, 'thr-1');
+    expect(list).toHaveLength(1);
+    expect(list[0]?.subject).toBe('subject');
+    expect(list[0]?.direction).toBe('inbound');
+    expect(list[0]?.bodyMd).toBe('the body');
+  });
+
+  it('insertThreadMessage is idempotent on (tenant, account, message_id) dedup', () => {
+    const first = inbox.insertThreadMessage({
+      accountId: TEST_ACCOUNT.id,
+      threadKey: 'thr-dup',
+      messageId: '<dup@example.com>',
+      fromAddress: 'a@x',
+      subject: 'first',
+      direction: 'inbound',
+    });
+    const second = inbox.insertThreadMessage({
+      accountId: TEST_ACCOUNT.id,
+      threadKey: 'thr-dup-different',
+      messageId: '<dup@example.com>',
+      fromAddress: 'a@x',
+      subject: 'second-attempt',
+      direction: 'inbound',
+    });
+    expect(second).toBe(first);
+    const list = inbox.listThreadMessages(TEST_ACCOUNT.id, 'thr-dup');
+    expect(list).toHaveLength(1);
+    expect(list[0]?.subject).toBe('first');
+  });
+
+  it('listThreadMessages orders newest-first by mail_date', () => {
+    inbox.insertThreadMessage({
+      accountId: TEST_ACCOUNT.id,
+      threadKey: 'thr-order',
+      messageId: '<m1@x>',
+      fromAddress: 'a@x',
+      subject: 'older',
+      direction: 'inbound',
+      mailDate: new Date('2026-05-08T10:00:00Z'),
+    });
+    inbox.insertThreadMessage({
+      accountId: TEST_ACCOUNT.id,
+      threadKey: 'thr-order',
+      messageId: '<m2@x>',
+      fromAddress: 'a@x',
+      subject: 'newer',
+      direction: 'inbound',
+      mailDate: new Date('2026-05-10T10:00:00Z'),
+    });
+    const list = inbox.listThreadMessages(TEST_ACCOUNT.id, 'thr-order');
+    expect(list).toHaveLength(2);
+    expect(list[0]?.subject).toBe('newer');
+    expect(list[1]?.subject).toBe('older');
+  });
+
+  it('getThreadMessageByMessageId returns null on miss, row on hit', () => {
+    inbox.insertThreadMessage({
+      accountId: TEST_ACCOUNT.id,
+      threadKey: 'thr-lookup-msg',
+      messageId: '<find@x>',
+      fromAddress: 'a@x',
+      subject: 'looked-up',
+      direction: 'inbound',
+    });
+    expect(inbox.getThreadMessageByMessageId(TEST_ACCOUNT.id, '<missing@x>')).toBeNull();
+    const found = inbox.getThreadMessageByMessageId(TEST_ACCOUNT.id, '<find@x>');
+    expect(found?.subject).toBe('looked-up');
+  });
+
   it('updateItemEnvelopeByThreadKey returns false when no row matches', () => {
     const updated = inbox.updateItemEnvelopeByThreadKey(
       TEST_ACCOUNT.id,

@@ -23,7 +23,7 @@ import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
 import { analyzeSensitiveContent, reasonForCategories, type SensitiveMode } from './sensitive-content.js';
-import { envelopeToItemInputFields, type InboxStateDb } from './state.js';
+import { envelopeToItemInputFields, type InboxStateDb, type ThreadMessageInput } from './state.js';
 
 /**
  * Pseudo-accounts for non-mail channels carry an `<channel>:<id>` prefix
@@ -122,7 +122,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const envelopeFields = envelopeToItemInputFields(env);
 
     if (rule) {
-      opts.state.insertItemWithAudit(
+      const itemId = opts.state.insertItemWithAudit(
         {
           tenantId: opts.tenantId,
           accountId,
@@ -147,6 +147,15 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           }),
         },
       );
+      writeThreadMessageFromEnvelope(opts.state, {
+        tenantId: opts.tenantId,
+        accountId,
+        threadKey,
+        env,
+        envelopeFields,
+        bodyMd: env.snippet,
+        inboxItemId: itemId,
+      });
       return;
     }
 
@@ -156,7 +165,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //    allow → send raw, audit that user opted in
     const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
     if (sensitive.isSensitive && sensitiveMode === 'skip') {
-      opts.state.insertItemWithAudit(
+      const itemId = opts.state.insertItemWithAudit(
         {
           tenantId: opts.tenantId,
           accountId,
@@ -180,6 +189,16 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           }),
         },
       );
+      // Sensitive-skip stores no body (PRD: bucket=requires_user, no LLM-readable content).
+      writeThreadMessageFromEnvelope(opts.state, {
+        tenantId: opts.tenantId,
+        accountId,
+        threadKey,
+        env,
+        envelopeFields,
+        bodyMd: undefined,
+        inboxItemId: itemId,
+      });
       return;
     }
 
@@ -237,4 +256,42 @@ export function resolveThreadKey(env: MailEnvelope): string {
   if (env.threadKey) return env.threadKey;
   if (env.messageId) return `imap:${env.messageId}`;
   return `imap:${env.folder}:${String(env.uid)}`;
+}
+
+/**
+ * v12 sibling write: store the per-message envelope in
+ * `inbox_thread_messages` after the inbox_items insert. Skips silently
+ * when the mail has no Message-ID header (we can't dedup it). Direction
+ * is always 'inbound' here — outbound mails come from send-core's
+ * post-send hook, not this watcher path.
+ */
+function writeThreadMessageFromEnvelope(
+  state: InboxStateDb,
+  args: {
+    tenantId: string | undefined;
+    accountId: string;
+    threadKey: string;
+    env: MailEnvelope;
+    envelopeFields: ReturnType<typeof envelopeToItemInputFields>;
+    bodyMd: string | undefined;
+    inboxItemId: string;
+  },
+): void {
+  if (!args.env.messageId || args.env.messageId.length === 0) return;
+  const input: ThreadMessageInput = {
+    accountId: args.accountId,
+    threadKey: args.threadKey,
+    messageId: args.env.messageId,
+    fromAddress: args.envelopeFields.fromAddress ?? '',
+    subject: args.envelopeFields.subject ?? '',
+    direction: 'inbound',
+    inboxItemId: args.inboxItemId,
+  };
+  if (args.tenantId !== undefined) input.tenantId = args.tenantId;
+  if (args.envelopeFields.fromName !== undefined) input.fromName = args.envelopeFields.fromName;
+  if (args.envelopeFields.inReplyTo !== undefined) input.inReplyTo = args.envelopeFields.inReplyTo;
+  if (args.envelopeFields.mailDate !== undefined) input.mailDate = args.envelopeFields.mailDate;
+  if (args.envelopeFields.snippet !== undefined) input.snippet = args.envelopeFields.snippet;
+  if (args.bodyMd !== undefined) input.bodyMd = args.bodyMd;
+  state.insertThreadMessage(input);
 }

@@ -100,6 +100,11 @@ describe('backfillMetadata', () => {
       mailDate: new Date('2026-05-09T10:30:00Z'),
       messageId: '<bf-1@x>',
     });
+    // v12 sibling-row write: backfill populates inbox_thread_messages too.
+    const messages = inbox.listThreadMessages(ACCOUNT.id, 'imap:bf-thread-1');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.messageId).toBe('<bf-1@x>');
+    expect(messages[0]?.inboxItemId).toBe(id);
   });
 
   it('counts envelopes whose thread_key has no matching row as unmatched', async () => {

@@ -21,7 +21,7 @@
 // this returns 409 when a backfill is already in flight.
 
 import type { MailProvider } from '../mail/provider.js';
-import { envelopeToItemInputFields, type InboxStateDb } from './state.js';
+import { envelopeToItemInputFields, type InboxStateDb, type ThreadMessageInput } from './state.js';
 import { resolveThreadKey } from './watcher-hook.js';
 import { DEFAULT_BACKFILL_LIMIT } from './cold-start-adapter.js';
 
@@ -86,6 +86,27 @@ export async function backfillMetadata(
       );
       if (ok) updated += 1;
       else unmatched += 1;
+      // v12: also populate inbox_thread_messages so the Reading-Pane
+      // sees per-message envelope history. The UNIQUE(message_id)
+      // index dedups against existing rows (rerun-safe).
+      if (env.messageId && env.messageId.length > 0) {
+        const matchingItem = opts.state.findItemByThread(accountId, threadKey);
+        const tmInput: ThreadMessageInput = {
+          accountId,
+          threadKey,
+          messageId: env.messageId,
+          fromAddress: fields.fromAddress ?? '',
+          subject: fields.subject ?? '',
+          direction: 'inbound',
+        };
+        if (tenantId !== undefined) tmInput.tenantId = tenantId;
+        if (fields.fromName !== undefined) tmInput.fromName = fields.fromName;
+        if (fields.inReplyTo !== undefined) tmInput.inReplyTo = fields.inReplyTo;
+        if (fields.mailDate !== undefined) tmInput.mailDate = fields.mailDate;
+        if (fields.snippet !== undefined) tmInput.snippet = fields.snippet;
+        if (matchingItem !== null) tmInput.inboxItemId = matchingItem.id;
+        opts.state.insertThreadMessage(tmInput);
+      }
     }
   });
 
