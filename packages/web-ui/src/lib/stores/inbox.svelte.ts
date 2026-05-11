@@ -9,8 +9,10 @@
 
 import {
 	createDraft as apiCreateDraft,
+	generateDraft as apiGenerateDraft,
 	getItemDraft as apiGetItemDraft,
 	updateDraft as apiUpdateDraft,
+	type GenerateDraftFailure,
 	type InboxDraft,
 } from '../api/inbox-drafts.js';
 import { getApiBase } from '../config.svelte.js';
@@ -407,6 +409,8 @@ interface DraftPaneState {
 	loading: boolean;
 	/** True while a PATCH (save) round-trip is in flight. */
 	saving: boolean;
+	/** True while the LLM generation round-trip is in flight. */
+	generating: boolean;
 	/** Last-known persisted body — used so the pane can flag unsaved buffers. */
 	persistedBody: string;
 }
@@ -427,6 +431,7 @@ export async function openDraftPane(itemId: string): Promise<void> {
 		draft: null,
 		loading: true,
 		saving: false,
+		generating: false,
 		persistedBody: '',
 	};
 	const result = await apiGetItemDraft(getApiBase(), itemId);
@@ -452,10 +457,11 @@ export function closeDraftPane(): void {
 }
 
 /**
- * Create a fresh draft for the open pane's item. Used when the user
- * clicks "Draft Reply" on an item that has no active draft yet. The
- * starter body is intentionally minimal — LLM-driven generation lands
- * in the next Phase-2 slice and will replace this stub.
+ * Create a fresh draft for the open pane's item. Used as the manual
+ * fallback when the LLM generator is unavailable (no LLM credentials,
+ * channel unsupported, cached body missing). The starter body is
+ * intentionally minimal so the user has something editable; the
+ * generator slice replaces this whenever it succeeds.
  */
 export async function createDraftForOpenPane(starterBody = ''): Promise<void> {
 	const pane = draftPane;
@@ -475,6 +481,52 @@ export async function createDraftForOpenPane(starterBody = ''): Promise<void> {
 		draft: created,
 		persistedBody: created.bodyMd,
 	};
+}
+
+/**
+ * Ask the backend to LLM-generate a draft for the open pane's item,
+ * then commit the generated body via the existing create path. On a
+ * recoverable backend failure (`unavailable` / `unsupported` /
+ * `no_body`), the caller can fall back to `createDraftForOpenPane`
+ * with the manual starter — the discriminated `reason.kind` surfaces
+ * which fallback affordance to show.
+ *
+ * Returns the failure reason on the unhappy path so the UI can show
+ * the right copy (e.g. "Generation deaktiviert — Editor öffnen?" for
+ * unavailable vs "Mail nicht mehr verfügbar" for not_found).
+ */
+export async function generateDraftForOpenPane(): Promise<
+	{ ok: true } | { ok: false; reason: GenerateDraftFailure }
+> {
+	const pane = draftPane;
+	if (!pane) return { ok: false, reason: { kind: 'network' } };
+	const itemId = pane.itemId;
+	draftPane = { ...pane, generating: true };
+	const result = await apiGenerateDraft(getApiBase(), itemId);
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'network' } };
+	if (!result.ok) {
+		draftPane = { ...draftPane, generating: false };
+		return { ok: false, reason: result.reason };
+	}
+	// Persist the generated body via the existing create path so the
+	// supersede chain stays under one writer.
+	const created = await apiCreateDraft(getApiBase(), itemId, {
+		bodyMd: result.draft.bodyMd,
+		generatorVersion: result.draft.generatorVersion,
+	});
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'network' } };
+	if (!created) {
+		draftPane = { ...draftPane, generating: false };
+		addToast(t('inbox.draft_error_create'), 'error');
+		return { ok: false, reason: { kind: 'network' } };
+	}
+	draftPane = {
+		...draftPane,
+		draft: created,
+		generating: false,
+		persistedBody: created.bodyMd,
+	};
+	return { ok: true };
 }
 
 /**

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	createDraft,
+	generateDraft,
 	getDraft,
 	getItemDraft,
 	updateDraft,
@@ -155,5 +156,71 @@ describe('updateDraft', () => {
 	it('returns null on 413 (oversize body)', async () => {
 		installFetch(async () => jsonResponse({ error: 'too big' }, 413));
 		expect(await updateDraft('/api', 'drf_1', 'huge')).toBeNull();
+	});
+});
+
+describe('generateDraft', () => {
+	it('POSTs to /draft/generate and returns the parsed envelope on 200', async () => {
+		installFetch(async () => jsonResponse({
+			bodyMd: 'Hallo Max,\n\nMittwoch passt.',
+			generatorVersion: 'haiku-2026-05',
+			bodyTruncated: false,
+		}));
+		const result = await generateDraft('/api', 'inb_1');
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.draft.bodyMd).toBe('Hallo Max,\n\nMittwoch passt.');
+			expect(result.draft.generatorVersion).toBe('haiku-2026-05');
+			expect(result.draft.bodyTruncated).toBe(false);
+		}
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(init.method).toBe('POST');
+		const url = fetchMock.mock.calls[0]?.[0] as string;
+		expect(url).toBe('/api/inbox/items/inb_1/draft/generate');
+	});
+
+	it('defaults bodyTruncated=false when the field is missing from the payload', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'x', generatorVersion: 'v' }));
+		const result = await generateDraft('/api', 'inb_1');
+		expect(result.ok && result.draft.bodyTruncated).toBe(false);
+	});
+
+	it('returns network kind when the payload is malformed (missing bodyMd)', async () => {
+		installFetch(async () => jsonResponse({ generatorVersion: 'v' }));
+		const result = await generateDraft('/api', 'inb_1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason.kind).toBe('network');
+	});
+
+	it('maps status codes to discriminated failures', async () => {
+		const cases = [
+			[404, 'not_found'],
+			[501, 'unsupported'],
+			[422, 'no_body'],
+			[503, 'unavailable'],
+			[500, 'network'],
+		] as const;
+		for (const [status, expected] of cases) {
+			installFetch(async () => new Response('', { status }));
+			const result = await generateDraft('/api', 'inb_1');
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.reason.kind).toBe(expected);
+		}
+	});
+
+	it('encodes the itemId path segment', async () => {
+		installFetch(async () => jsonResponse({ bodyMd: 'x', generatorVersion: 'v', bodyTruncated: false }));
+		await generateDraft('/api', 'inb 1/x');
+		const url = fetchMock.mock.calls[0]?.[0] as string;
+		expect(url).toBe('/api/inbox/items/inb%201%2Fx/draft/generate');
+	});
+
+	it('returns network kind when fetch throws', async () => {
+		installFetch(async () => {
+			throw new TypeError('network');
+		});
+		const result = await generateDraft('/api', 'inb_1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason.kind).toBe('network');
 	});
 });

@@ -71,6 +71,59 @@ export async function createDraft(
 	}
 }
 
+export interface GeneratedDraft {
+	bodyMd: string;
+	generatorVersion: string;
+	bodyTruncated: boolean;
+}
+
+export type GenerateDraftFailure =
+	| { kind: 'unavailable' }   // 503 — LLM caller not configured
+	| { kind: 'unsupported' }   // 501 — channel not supported (e.g. whatsapp)
+	| { kind: 'no_body' }       // 422 — cached body missing or too short
+	| { kind: 'not_found' }     // 404 — item gone
+	| { kind: 'network' };      // fetch threw
+
+/**
+ * Ask the backend to LLM-draft a reply for an item. Returns the
+ * generated body + version stamp on success. Discriminated failures
+ * let the caller decide between "fall back to manual starter" (503 /
+ * 501 / 422) and "abort + toast" (404 / network).
+ */
+export async function generateDraft(
+	apiBase: string,
+	itemId: string,
+): Promise<{ ok: true; draft: GeneratedDraft } | { ok: false; reason: GenerateDraftFailure }> {
+	try {
+		const res = await fetch(`${apiBase}/inbox/items/${encodeURIComponent(itemId)}/draft/generate`, {
+			method: 'POST',
+		});
+		if (res.ok) {
+			const data = (await res.json()) as Partial<GeneratedDraft>;
+			if (typeof data.bodyMd === 'string' && typeof data.generatorVersion === 'string') {
+				return {
+					ok: true,
+					draft: {
+						bodyMd: data.bodyMd,
+						generatorVersion: data.generatorVersion,
+						bodyTruncated: data.bodyTruncated === true,
+					},
+				};
+			}
+			return { ok: false, reason: { kind: 'network' } };
+		}
+		switch (res.status) {
+			case 404: return { ok: false, reason: { kind: 'not_found' } };
+			case 501: return { ok: false, reason: { kind: 'unsupported' } };
+			case 422: return { ok: false, reason: { kind: 'no_body' } };
+			case 503: return { ok: false, reason: { kind: 'unavailable' } };
+			default:  return { ok: false, reason: { kind: 'network' } };
+		}
+	} catch {
+		return { ok: false, reason: { kind: 'network' } };
+	}
+}
+
 export async function updateDraft(
 	apiBase: string,
 	id: string,

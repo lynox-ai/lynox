@@ -4,10 +4,12 @@
 	import {
 		closeDraftPane,
 		createDraftForOpenPane,
+		generateDraftForOpenPane,
 		getDraftPane,
 		saveDraftBody,
 		type InboxItem,
 	} from '../stores/inbox.svelte.js';
+	import type { GenerateDraftFailure } from '../api/inbox-drafts.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { accountShortLabel } from '../utils/account-label.js';
 
@@ -82,11 +84,38 @@
 		}
 	}
 
+	/**
+	 * Map a generator failure to user-facing copy. Recoverable failures
+	 * (unavailable / unsupported / no_body) tell the user we're falling
+	 * back to a manual draft; not_found / network surface an error toast
+	 * and abort.
+	 */
+	function toastForGenerateFailure(reason: GenerateDraftFailure): { fallback: boolean; key: string; level: 'info' | 'error' } {
+		switch (reason.kind) {
+			case 'unavailable':
+				return { fallback: true, key: 'inbox.draft_generate_unavailable', level: 'info' };
+			case 'unsupported':
+				return { fallback: true, key: 'inbox.draft_generate_unsupported', level: 'info' };
+			case 'no_body':
+				return { fallback: true, key: 'inbox.draft_generate_no_body', level: 'info' };
+			case 'not_found':
+				return { fallback: false, key: 'inbox.draft_error_load', level: 'error' };
+			case 'network':
+				return { fallback: false, key: 'inbox.draft_generate_failed', level: 'error' };
+		}
+	}
+
 	async function onCreateClick(): Promise<void> {
 		if (creating) return;
 		creating = true;
 		try {
-			await createDraftForOpenPane();
+			// Try LLM generation first; fall back to a manual starter when
+			// the backend tells us generation is unavailable for this item.
+			const result = await generateDraftForOpenPane();
+			if (result.ok) return;
+			const hint = toastForGenerateFailure(result.reason);
+			addToast(t(hint.key), hint.level);
+			if (hint.fallback) await createDraftForOpenPane();
 		} finally {
 			creating = false;
 		}
@@ -140,6 +169,13 @@
 			<div class="flex-1 overflow-y-auto px-5 py-4">
 				{#if pane.loading}
 					<p class="text-text-subtle text-sm">{t('inbox.draft_loading')}</p>
+				{:else if pane.generating}
+					<div class="rounded-[var(--radius-md)] bg-bg border border-dashed border-border px-4 py-6 text-sm text-text-muted">
+						<p class="flex items-center gap-2" aria-live="polite">
+							<span class="inline-block h-2 w-2 rounded-full bg-accent animate-pulse" aria-hidden="true"></span>
+							{t('inbox.draft_generating')}
+						</p>
+					</div>
 				{:else if pane.draft === null}
 					<div class="rounded-[var(--radius-md)] bg-bg border border-dashed border-border px-4 py-6 text-sm text-text-muted flex flex-col gap-3 items-start">
 						<p>{t('inbox.draft_none_yet')}</p>
@@ -148,7 +184,7 @@
 							onclick={() => void onCreateClick()}
 							disabled={creating}
 							class="rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-sm min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
-						>{t('inbox.draft_create')}</button>
+						>{creating ? t('inbox.draft_generating') : t('inbox.draft_create')}</button>
 					</div>
 				{:else}
 					<label class="sr-only" for="draft-body">{t('inbox.draft_body_label')}</label>
