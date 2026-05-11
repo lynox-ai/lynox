@@ -490,6 +490,15 @@ export interface SendInboxReplyBody {
    * via this field instead of an extra PATCH first.
    */
   body?: string | undefined;
+  /**
+   * Future-proof: an inbox reply is always single-recipient (the
+   * original sender). cc/bcc would route around the mass-send
+   * guard `sendMail`'s `beforeSend` hook enforces, and the pane has
+   * no UI for them today — accepted only so a future schema bump
+   * doesn't silently break the field on the wire.
+   */
+  cc?: ReadonlyArray<string> | undefined;
+  bcc?: ReadonlyArray<string> | undefined;
 }
 
 export async function handleSendInboxReply(
@@ -499,6 +508,13 @@ export async function handleSendInboxReply(
 ): Promise<ApiResponse> {
   const mailCtx = deps.mailContext;
   if (!mailCtx) return unavailable('mail context not wired');
+  // Hard reject cc/bcc — mass-send guard depends on a `beforeSend`
+  // hook that the inbox-pane intentionally omits. If a future UI
+  // pane exposes cc/bcc, that lands together with a confirmation
+  // affordance, not silently.
+  if ((body.cc?.length ?? 0) > 0 || (body.bcc?.length ?? 0) > 0) {
+    return bad('inbox reply does not support cc/bcc — single-recipient only in v1');
+  }
   const draft = deps.state.getDraftById(draftId);
   if (!draft) return notFound('draft');
   const item = deps.state.getItem(draft.itemId);
@@ -507,7 +523,10 @@ export async function handleSendInboxReply(
     return { status: 501, body: { error: `send not supported for channel: ${item.channel}` } };
   }
   const replyBody = (body.body ?? draft.bodyMd).trim();
-  if (replyBody.length === 0) return bad('body is required');
+  // Structured 422 so the UI's discriminated `empty_body` kind fires
+  // the dedicated "Cannot send an empty draft" copy instead of the
+  // generic 400 → network fallback toast.
+  if (replyBody.length === 0) return unprocessable('reply body is empty', 'empty_body');
 
   const provider = mailCtx.registry.get(item.accountId);
   if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
@@ -530,7 +549,10 @@ export async function handleSendInboxReply(
   }
   const fromAddress = envelope.from[0]?.address;
   if (!fromAddress) {
-    return unprocessable('original mail has no sender address');
+    // No usable From header — envelope is functionally not-found for
+    // reply construction. 404 with a clear message; structured-422
+    // would falsely surface as "empty_body" in the UI.
+    return { status: 404, body: { error: 'original mail has no sender address — cannot construct reply headers' } };
   }
 
   const subject = envelope.subject.startsWith('Re: ') || envelope.subject.startsWith('RE: ')
@@ -553,28 +575,39 @@ export async function handleSendInboxReply(
   // single-message-deep reply shape.
   if (envelope.messageId) coreInput.references = envelope.messageId;
 
-  const result = await sendMail(
-    mailCtx.registry,
-    coreInput,
-    { skipRateLimit: true },
-    mailCtx,
-  );
+  // Keep the cross-session rate-limit gate: it's the account-wide
+  // ceiling that protects against a stolen-session spam-vector
+  // (one send per item per dedup-window would let an attacker fire
+  // thousands of replies/hour without it). Manual user clicks won't
+  // hit the 60/min cap in practice.
+  const result = await sendMail(mailCtx.registry, coreInput, {}, mailCtx);
 
   if (!result.ok) {
     switch (result.status) {
-      case 'rate_limit':       return { status: 429, body: { error: result.message } };
+      case 'rate_limit':         return { status: 429, body: { error: result.message } };
       case 'invalid_recipients': return unprocessable(result.message);
-      case 'receive_only':     return unprocessable(result.message, 'receive_only');
-      case 'dedup_window':     return { status: 429, body: { error: result.message } };
-      case 'secret_in_body':   return unprocessable(result.message, 'secret_in_body');
-      case 'cancelled':        return { status: 409, body: { error: 'send cancelled' } };
-      case 'provider_error':   return { status: 502, body: { error: result.message } };
+      case 'receive_only':       return unprocessable(result.message, 'receive_only');
+      case 'dedup_window':       return { status: 429, body: { error: result.message } };
+      case 'secret_in_body':     return unprocessable(result.message, 'secret_in_body');
+      case 'cancelled':          return { status: 409, body: { error: 'send cancelled' } };
+      case 'provider_error':     return { status: 502, body: { error: result.message } };
+      default: {
+        // Compile-time exhaustiveness: adding a new SendCoreFailureStatus
+        // variant fails this branch and surfaces the omission at build
+        // time instead of silently returning undefined at runtime.
+        const _exhaustive: never = result.status;
+        return { status: 500, body: { error: `unhandled send-core status: ${String(_exhaustive)}` } };
+      }
     }
   }
 
   // Mark the inbox item as replied + audit. The UI then transitions
-  // the item out of the Needs-You zone on next list refresh.
-  deps.state.updateUserAction(item.id, 'replied');
+  // the item out of the Needs-You zone on next list refresh. If the
+  // item vanished between the earlier getItem() and now (Art-17 race),
+  // skip the audit so it never references a missing row.
+  if (!deps.state.updateUserAction(item.id, 'replied')) {
+    return notFound('item');
+  }
   deps.state.appendAudit({
     itemId: item.id,
     action: 'replied',

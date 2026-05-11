@@ -184,6 +184,32 @@ describe('sendMail — gates', () => {
     );
     expect(capturedMassSend).toBe(true);
   });
+
+  it('returns receive_only when the account type is a read-only mailbox', async () => {
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    // Minimal ctx stub — only getAccountConfig is exercised by the gate.
+    const ctx = {
+      getAccountConfig: () => ({
+        id: 'acct-1',
+        displayName: 'Abuse',
+        address: 'abuse@x.com',
+        preset: 'custom',
+        imap: { host: 'i', port: 993, secure: true },
+        smtp: { host: 's', port: 465, secure: true },
+        authType: 'imap',
+        type: 'abuse',
+        isDefault: false,
+      }),
+    } as unknown as import('./context.js').MailContext;
+    const result = await sendMail(registry, { to: [RECIPIENT], subject: 's', body: 'b' }, {}, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe('receive_only');
+      expect(result.message).toContain('abuse');
+    }
+    expect(provider.send).not.toHaveBeenCalled();
+  });
 });
 
 describe('sendMail — provider errors', () => {

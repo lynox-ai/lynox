@@ -45,11 +45,15 @@ let mail: MailStateDb;
 let state: InboxStateDb;
 let deps: InboxApiDeps;
 
-beforeEach(() => {
+beforeEach(async () => {
   mail = new MailStateDb({ path: ':memory:' });
   mail.upsertAccount(ACCOUNT);
   state = new InboxStateDb(mail.getConnection());
   deps = { state };
+  // Reset cross-test rate-limit state so a previous test that sent
+  // multiple mails doesn't bleed its counter into the next test.
+  const { resetMailRateLimits } = await import('../mail/tools/rate-limit.js');
+  resetMailRateLimits();
 });
 
 afterEach(() => {
@@ -475,10 +479,22 @@ describe('handleSendInboxReply', () => {
     expect(r.status).toBe(501);
   });
 
-  it('400 when the body is empty after trim', async () => {
+  it('422 + reason="empty_body" when the body is empty after trim', async () => {
     const id = insertItem('imap:<m1@x>');
     const draftId = createDraftFor(id);
     const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext() }, draftId, { body: '   ' });
+    expect(r.status).toBe(422);
+    expect((r.body as { reason: string }).reason).toBe('empty_body');
+  });
+
+  it('400 when cc/bcc is non-empty — single-recipient only in v1', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const draftId = createDraftFor(id);
+    const r = await handleSendInboxReply(
+      { ...deps, mailContext: fakeMailContext() },
+      draftId,
+      { cc: ['third@x'] },
+    );
     expect(r.status).toBe(400);
   });
 
@@ -543,7 +559,62 @@ describe('handleSendInboxReply', () => {
     // Audit + state-side effects.
     expect(state.getItem(id)?.userAction).toBe('replied');
     const audit = state.listAuditForItem(id);
-    expect(audit.some((a) => a.action === 'replied' && a.actor === 'user')).toBe(true);
+    const repliedAudit = audit.find((a) => a.action === 'replied' && a.actor === 'user');
+    expect(repliedAudit).toBeDefined();
+    // Pin payload shape so a regression that drops fields from the
+    // audit record (forensics / compliance read-side) fails here.
+    const payload = JSON.parse(repliedAudit!.payloadJson) as Record<string, unknown>;
+    expect(payload['draft_id']).toBe(draftId);
+    expect(payload['message_id']).toBe('<sent@x>');
+    expect(payload['accepted']).toEqual(['alice@example.com']);
+    expect(payload['rejected']).toEqual([]);
+  });
+
+  it('honours the request body override over the persisted draft', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const draftId = createDraftFor(id);
+    const envelope = {
+      uid: 7,
+      messageId: '<m1@x>',
+      folder: 'INBOX',
+      threadKey: undefined,
+      from: [{ address: 'sender@x', name: 'Max' }],
+      to: [{ address: 'me@x' }],
+      cc: [],
+      bcc: [],
+      replyTo: [],
+      subject: 'Termin?',
+      date: new Date(),
+      flags: [],
+      snippet: 'snip',
+      hasAttachments: false,
+      attachmentCount: 0,
+      sizeBytes: 100,
+      isAutoReply: false,
+      inReplyTo: undefined,
+    } as unknown as import('../mail/provider.js').MailEnvelope;
+    const sendCalls: import('../mail/provider.js').MailSendInput[] = [];
+    const provider = {
+      accountId: ACCOUNT.id,
+      authType: 'imap',
+      list: async () => [envelope],
+      fetch: async () => ({ envelope: {}, text: '', html: undefined, attachments: [], inReplyTo: undefined, references: undefined }),
+      search: async () => [],
+      send: async (input: import('../mail/provider.js').MailSendInput) => {
+        sendCalls.push(input);
+        return { messageId: '<sent@x>', accepted: ['sender@x'], rejected: [] };
+      },
+      watch: async () => ({ stop: async () => {} }),
+      close: async () => {},
+    } as unknown as import('../mail/provider.js').MailProvider;
+    const r = await handleSendInboxReply(
+      { ...deps, mailContext: fakeMailContext({ provider, envelopes: [envelope] }) },
+      draftId,
+      { body: 'OVERRIDDEN reply text — live buffer wins' },
+    );
+    expect(r.status).toBe(200);
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0]?.text).toBe('OVERRIDDEN reply text — live buffer wins');
   });
 });
 
