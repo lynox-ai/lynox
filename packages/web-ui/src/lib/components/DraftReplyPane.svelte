@@ -19,16 +19,19 @@
 	let buffer = $state('');
 	let textareaRef = $state<HTMLTextAreaElement | null>(null);
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let creating = $state(false);
+	let lastMirroredDraftId = $state<string | null>(null);
 
-	// Mirror the persisted body into the local buffer whenever the store
-	// commits a new draft (open / create / load completed). Keystrokes
-	// then mutate the buffer freely and a debounced PATCH catches up.
+	// Mirror only when the underlying draft *identity* changes (open, create,
+	// regenerate, close). A naive mirror of `persistedBody` would re-fire on
+	// every PATCH echo and clobber keystrokes typed during the 600 ms +
+	// round-trip window — the user would watch their last word vanish.
 	$effect(() => {
 		const pane = getDraftPane();
-		if (!pane) return;
-		// Reading reactively — when the persistedBody snapshot changes
-		// (load completes or PATCH echoes back), realign the buffer.
-		buffer = pane.persistedBody;
+		const draftId = pane?.draft?.id ?? null;
+		if (draftId === lastMirroredDraftId) return;
+		lastMirroredDraftId = draftId;
+		buffer = pane?.persistedBody ?? '';
 	});
 
 	$effect(() => {
@@ -79,8 +82,14 @@
 		}
 	}
 
-	function onCreateClick(): void {
-		void createDraftForOpenPane();
+	async function onCreateClick(): Promise<void> {
+		if (creating) return;
+		creating = true;
+		try {
+			await createDraftForOpenPane();
+		} finally {
+			creating = false;
+		}
 	}
 
 	onDestroy(() => {
@@ -136,8 +145,9 @@
 						<p>{t('inbox.draft_none_yet')}</p>
 						<button
 							type="button"
-							onclick={onCreateClick}
-							class="rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-sm min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+							onclick={() => void onCreateClick()}
+							disabled={creating}
+							class="rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-sm min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
 						>{t('inbox.draft_create')}</button>
 					</div>
 				{:else}

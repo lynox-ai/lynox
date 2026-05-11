@@ -222,6 +222,18 @@
 		await setItemSnooze(item.id, until);
 		openSnoozeFor = null;
 	}
+
+	// Resolve the item referenced by the open pane. Each save echo re-renders
+	// InboxView, so a `{@const}` search would scan up to 150 entries per
+	// keystroke-batch — $derived caches until pane id or bucket arrays change.
+	const paneItem = $derived.by((): InboxItem | null => {
+		const pane = getDraftPane();
+		if (!pane) return null;
+		return getInboxItems('requires_user').find((i) => i.id === pane.itemId)
+			?? getInboxItems('draft_ready').find((i) => i.id === pane.itemId)
+			?? getInboxItems('auto_handled').find((i) => i.id === pane.itemId)
+			?? null;
+	});
 </script>
 
 <div
@@ -373,11 +385,6 @@
 <KeyboardShortcutsHelp open={helpOpen} onClose={() => (helpOpen = false)} />
 
 {#if getDraftPane() !== null}
-	{@const pane = getDraftPane()!}
-	{@const paneItem = getInboxItems('requires_user').find((i) => i.id === pane.itemId)
-		?? getInboxItems('draft_ready').find((i) => i.id === pane.itemId)
-		?? getInboxItems('auto_handled').find((i) => i.id === pane.itemId)
-		?? null}
 	<DraftReplyPane item={paneItem} />
 {/if}
 

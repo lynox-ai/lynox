@@ -89,6 +89,18 @@ describe('getDraft', () => {
 		installFetch(async () => new Response('', { status: 404 }));
 		expect(await getDraft('/api', 'drf_missing')).toBeNull();
 	});
+
+	it('returns null on 500', async () => {
+		installFetch(async () => new Response('', { status: 500 }));
+		expect(await getDraft('/api', 'drf_1')).toBeNull();
+	});
+
+	it('returns null when fetch throws', async () => {
+		installFetch(async () => {
+			throw new TypeError('network');
+		});
+		expect(await getDraft('/api', 'drf_1')).toBeNull();
+	});
 });
 
 describe('createDraft', () => {
@@ -96,6 +108,8 @@ describe('createDraft', () => {
 		installFetch(async () => jsonResponse({ draft: SAMPLE }, 201));
 		const result = await createDraft('/api', 'inb_1', CREATE_BODY);
 		expect(result).toEqual(SAMPLE);
+		const url = fetchMock.mock.calls[0]?.[0] as string;
+		expect(url).toBe('/api/inbox/items/inb_1/draft');
 		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
 		expect(init.method).toBe('POST');
 		expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
