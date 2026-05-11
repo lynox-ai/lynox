@@ -50,7 +50,46 @@ export interface InboxAuditEntry {
 	createdAt: string;
 }
 
+export interface ColdStartProgress {
+	accountId: string;
+	uniqueThreads: number;
+	enqueued: number;
+	capped: boolean;
+	capValue: number;
+}
+
+export interface ColdStartReport {
+	accountId: string;
+	uniqueThreads: number;
+	enqueued: number;
+	cappedAt: number | null;
+	rejectedByQueue: number;
+	estimatedCostUSD: number;
+}
+
+export interface ColdStartActiveEntry {
+	accountId: string;
+	status: 'running';
+	startedAt: string;
+	progress: ColdStartProgress | null;
+}
+
+export interface ColdStartRecentEntry {
+	accountId: string;
+	status: 'completed' | 'failed';
+	startedAt: string;
+	finishedAt: string;
+	report: ColdStartReport | null;
+	error: string | null;
+}
+
+export interface ColdStartSnapshot {
+	active: ColdStartActiveEntry[];
+	recent: ColdStartRecentEntry[];
+}
+
 const ZERO_COUNTS: InboxCounts = { requires_user: 0, draft_ready: 0, auto_handled: 0 };
+const EMPTY_COLD_START: ColdStartSnapshot = { active: [], recent: [] };
 
 let counts = $state<InboxCounts>(ZERO_COUNTS);
 let itemsByBucket = $state<Record<InboxBucket, InboxItem[]>>({
@@ -61,6 +100,8 @@ let itemsByBucket = $state<Record<InboxBucket, InboxItem[]>>({
 let loadingBucket = $state<InboxBucket | null>(null);
 /** Top-level availability flag — flips to false once `/api/inbox/counts` returns 503. */
 let available = $state(true);
+let coldStart = $state<ColdStartSnapshot>(EMPTY_COLD_START);
+let dismissedColdStart = $state<Record<string, true>>({});
 
 export function getInboxCounts(): InboxCounts {
 	return counts;
@@ -76,6 +117,30 @@ export function isLoading(bucket: InboxBucket): boolean {
 
 export function isInboxAvailable(): boolean {
 	return available;
+}
+
+export function getColdStartSnapshot(): ColdStartSnapshot {
+	return coldStart;
+}
+
+/**
+ * Visible active runs after honoring user-dismissals. A dismissal is keyed
+ * by accountId so a new run on the same account re-shows the banner.
+ */
+export function getVisibleColdStartActive(): ColdStartActiveEntry[] {
+	return coldStart.active.filter((a) => dismissedColdStart[a.accountId] !== true);
+}
+
+/**
+ * Recently-completed runs that the user has not dismissed. Used to flash
+ * a "Imported N threads ≈ $X" confirmation post-completion.
+ */
+export function getVisibleColdStartRecent(): ColdStartRecentEntry[] {
+	return coldStart.recent.filter((r) => dismissedColdStart[r.accountId] !== true);
+}
+
+export function dismissColdStartForAccount(accountId: string): void {
+	dismissedColdStart = { ...dismissedColdStart, [accountId]: true };
 }
 
 /** Load per-bucket counts. Returns false when the runtime is not wired (flag off). */
@@ -206,4 +271,45 @@ export function startInboxVisibilityRefresh(): () => void {
 	};
 	document.addEventListener('visibilitychange', handler);
 	return () => document.removeEventListener('visibilitychange', handler);
+}
+
+/** Fetch a single cold-start snapshot. */
+export async function loadColdStart(): Promise<void> {
+	try {
+		const res = await fetch(`${getApiBase()}/inbox/cold-start`);
+		if (!res.ok) return;
+		const data = (await res.json()) as ColdStartSnapshot;
+		coldStart = {
+			active: Array.isArray(data.active) ? data.active : [],
+			recent: Array.isArray(data.recent) ? data.recent : [],
+		};
+	} catch {
+		// Network blip — keep prior state. Polling will retry.
+	}
+}
+
+/**
+ * Poll the cold-start endpoint while a banner could be visible. Polls
+ * every 2 s when an active run is known, every 15 s otherwise (idle).
+ * The slow cadence still catches a newly-triggered run within ~15 s
+ * without burning ticks while nothing is happening.
+ */
+export function startColdStartPolling(): () => void {
+	if (typeof window === 'undefined') return () => {};
+	let cancelled = false;
+	let timer: ReturnType<typeof setTimeout> | null = null;
+
+	const tick = async (): Promise<void> => {
+		if (cancelled) return;
+		await loadColdStart();
+		if (cancelled) return;
+		const delay = coldStart.active.length > 0 ? 2000 : 15_000;
+		timer = setTimeout(() => void tick(), delay);
+	};
+	void tick();
+
+	return () => {
+		cancelled = true;
+		if (timer !== null) clearTimeout(timer);
+	};
 }

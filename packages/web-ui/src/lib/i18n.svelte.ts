@@ -1039,6 +1039,15 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.error_load': { de: 'Inbox konnte nicht geladen werden', en: 'Failed to load inbox' },
 	'inbox.error_action': { de: 'Aktion fehlgeschlagen', en: 'Action failed' },
 	'inbox.error_snooze': { de: 'Snooze fehlgeschlagen', en: 'Snooze failed' },
+	'inbox.cold_start_title': { de: 'Inbox wird aufgebaut', en: 'Setting up your inbox' },
+	'inbox.cold_start_starting': { de: 'Wir lesen deine bestehenden Threads ein…', en: 'Reading your existing threads…' },
+	'inbox.cold_start_progress': { de: '{enqueued} von {total} Threads klassifiziert', en: '{enqueued} of {total} threads classified' },
+	'inbox.cold_start_complete': { de: '{threads} Threads eingelesen · ca. {cost} einmalig', en: '{threads} threads imported · about {cost} one-time' },
+	'inbox.cold_start_complete_simple': { de: 'Inbox einsatzbereit', en: 'Inbox ready' },
+	'inbox.cold_start_failed': { de: 'Aufbau abgebrochen — probier es später erneut', en: 'Setup failed — try again later' },
+	'inbox.cold_start_failed_reason': { de: 'Aufbau abgebrochen: {error}', en: 'Setup failed: {error}' },
+	'inbox.cold_start_dismiss': { de: 'Banner ausblenden', en: 'Dismiss banner' },
+	'inbox.cold_start_aria_running': { de: 'Cold-Start läuft', en: 'Cold-start in progress' },
 };
 
 export function setLocale(locale: Locale): void {

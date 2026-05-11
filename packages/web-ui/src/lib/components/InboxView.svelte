@@ -10,24 +10,31 @@
 		loadInboxItems,
 		setItemAction,
 		setItemSnooze,
+		startColdStartPolling,
 		startInboxVisibilityRefresh,
 		type InboxBucket,
 		type InboxItem,
 	} from '../stores/inbox.svelte.js';
+	import ColdStartBanner from './ColdStartBanner.svelte';
 
 	let zone = $state<InboxBucket>('requires_user');
 	let openSnoozeFor = $state<string | null>(null);
 
-	let cleanup: (() => void) | undefined;
+	let cleanupVisibility: (() => void) | undefined;
+	let cleanupColdStart: (() => void) | undefined;
 
 	onMount(async () => {
 		await loadInboxCounts();
-		if (isInboxAvailable()) await loadInboxItems(zone);
-		cleanup = startInboxVisibilityRefresh();
+		if (isInboxAvailable()) {
+			await loadInboxItems(zone);
+			cleanupColdStart = startColdStartPolling();
+		}
+		cleanupVisibility = startInboxVisibilityRefresh();
 	});
 
 	onDestroy(() => {
-		cleanup?.();
+		cleanupVisibility?.();
+		cleanupColdStart?.();
 	});
 
 	$effect(() => {
@@ -93,6 +100,7 @@
 		</div>
 	{:else}
 		{@const counts = getInboxCounts()}
+		<ColdStartBanner />
 		<div class="flex gap-1 mb-4" role="tablist" aria-label={t('inbox.title')}>
 			<button
 				role="tab"

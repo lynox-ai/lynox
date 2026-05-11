@@ -18,6 +18,7 @@ import type {
   InboxRuleSource,
   InboxUserAction,
 } from '../../types/index.js';
+import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
@@ -30,6 +31,8 @@ export interface InboxApiDeps {
    * next inbound mail picks up the change without restarting the runtime.
    */
   rules?: InboxRulesLoader | undefined;
+  /** Surfaces cold-start progress to the UI banner; absent until wired. */
+  coldStartTracker?: ColdStartTracker | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -95,6 +98,17 @@ export function handleListItemAudit(deps: InboxApiDeps, id: string): ApiResponse
 
 export function handleGetCounts(deps: InboxApiDeps, query: { tenantId?: string | undefined } = {}): ApiResponse {
   return { status: 200, body: { counts: deps.state.countItemsByBucket(query.tenantId) } };
+}
+
+// ── Cold start ───────────────────────────────────────────────────────────
+
+export function handleGetColdStart(deps: InboxApiDeps): ApiResponse {
+  // Absence of the tracker is degraded-but-safe: an older runtime build
+  // serving a newer UI gets an empty snapshot and the banner stays hidden.
+  if (!deps.coldStartTracker) {
+    return { status: 200, body: { active: [], recent: [] } };
+  }
+  return { status: 200, body: deps.coldStartTracker.getSnapshot() };
 }
 
 export interface SetActionBody {

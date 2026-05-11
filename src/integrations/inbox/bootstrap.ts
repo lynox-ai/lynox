@@ -19,6 +19,7 @@ import {
 } from './classifier/llm.js';
 import { createMistralEuLLMCaller } from './classifier/llm-mistral.js';
 import type { ClassifierQueue } from './classifier/queue.js';
+import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxContactResolver } from './contact-resolver.js';
 import { InboxCostBudget, type InboxCostBudgetOptions } from './cost-budget.js';
 import { InboxRulesLoader } from './rules-loader.js';
@@ -43,6 +44,7 @@ export interface InboxRuntime {
   contactResolver: InboxContactResolver | null;
   budget: InboxCostBudget;
   queue: ClassifierQueue<InboxQueuePayload>;
+  coldStartTracker: ColdStartTracker;
   /** Wire as `MailHooks.onInboundMail` after MailContext construction. */
   hook: OnInboundMailHook;
   shutdown(): Promise<void>;
@@ -120,6 +122,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const rules = new InboxRulesLoader(state);
   const contactResolver = opts.crm ? new InboxContactResolver(opts.crm) : null;
   const budget = new InboxCostBudget(opts.budget ?? {});
+  const coldStartTracker = new ColdStartTracker();
 
   const onUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
     budget.recordUsage(usage.inputTokens, usage.outputTokens);
@@ -182,6 +185,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     contactResolver,
     budget,
     queue,
+    coldStartTracker,
     hook,
     shutdown: () => queue.drain(),
   };

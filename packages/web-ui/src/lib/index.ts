@@ -31,6 +31,7 @@ export { default as MobileAccess } from './components/MobileAccess.svelte';
 export { default as MigrationWizard } from './components/MigrationWizard.svelte';
 export { default as PromptAnchor } from './components/PromptAnchor.svelte';
 export { default as InboxView } from './components/InboxView.svelte';
+export { default as ColdStartBanner } from './components/ColdStartBanner.svelte';
 
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';
@@ -132,6 +133,12 @@ export {
 	getInboxItems,
 	isInboxAvailable,
 	startInboxVisibilityRefresh,
+	loadColdStart,
+	startColdStartPolling,
+	getColdStartSnapshot,
+	getVisibleColdStartActive,
+	getVisibleColdStartRecent,
+	dismissColdStartForAccount,
 } from './stores/inbox.svelte.js';
 export type {
 	InboxItem,
@@ -140,6 +147,11 @@ export type {
 	InboxBucket,
 	InboxChannel,
 	InboxUserAction,
+	ColdStartProgress,
+	ColdStartReport,
+	ColdStartActiveEntry,
+	ColdStartRecentEntry,
+	ColdStartSnapshot,
 } from './stores/inbox.svelte.js';
 
 // Push Notifications

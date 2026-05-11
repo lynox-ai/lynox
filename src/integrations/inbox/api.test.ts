@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
+import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxStateDb } from './state.js';
 import {
   handleCreateRule,
   handleDeleteRule,
+  handleGetColdStart,
   handleGetCounts,
   handleGetItem,
   handleListItemAudit,
@@ -105,6 +107,32 @@ describe('handleGetCounts', () => {
       draft_ready: 0,
       auto_handled: 1,
     });
+  });
+});
+
+describe('handleGetColdStart', () => {
+  it('returns an empty snapshot when the tracker is not wired', () => {
+    const r = handleGetColdStart(deps);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ active: [], recent: [] });
+  });
+
+  it('surfaces a running snapshot from the tracker', () => {
+    const tracker = new ColdStartTracker();
+    tracker.start(ACCOUNT.id);
+    tracker.progress({
+      accountId: ACCOUNT.id,
+      uniqueThreads: 4,
+      enqueued: 4,
+      capped: false,
+      capValue: 1000,
+    });
+    const r = handleGetColdStart({ ...deps, coldStartTracker: tracker });
+    expect(r.status).toBe(200);
+    const body = r.body as { active: ReadonlyArray<{ accountId: string; progress: { enqueued: number } | null }> };
+    expect(body.active).toHaveLength(1);
+    expect(body.active[0]?.accountId).toBe(ACCOUNT.id);
+    expect(body.active[0]?.progress?.enqueued).toBe(4);
   });
 });
 
