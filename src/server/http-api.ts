@@ -3518,6 +3518,20 @@ export class LynoxHTTPApi {
       const b = (body ?? {}) as Record<string, unknown>;
       const sendBody: import('../integrations/inbox/api.js').SendInboxReplyBody = {};
       if (typeof b['body'] === 'string') sendBody.body = b['body'];
+      // Forward cc/bcc so the handler's "single-recipient v1" guard actually
+      // sees them. Dropping them at the route layer silently allowed clients
+      // to bypass the mass-send guard by appending recipients the UI cannot
+      // confirm.
+      const asStringArray = (v: unknown): string[] | null => {
+        if (!Array.isArray(v)) return null;
+        const out: string[] = [];
+        for (const item of v) if (typeof item === 'string') out.push(item);
+        return out;
+      };
+      const cc = asStringArray(b['cc']);
+      if (cc !== null) sendBody.cc = cc;
+      const bcc = asStringArray(b['bcc']);
+      if (bcc !== null) sendBody.bcc = bcc;
       sendInbox(res, await handleSendInboxReply(deps!, params['id']!, sendBody));
     }));
 
