@@ -5,6 +5,7 @@ import {
 	getDraft,
 	getItemDraft,
 	refreshItemBody,
+	sendInboxReply,
 	updateDraft,
 	type CreateDraftBody,
 	type InboxDraft,
@@ -335,6 +336,81 @@ describe('refreshItemBody', () => {
 			throw new TypeError('network');
 		});
 		const result = await refreshItemBody('/api', 'inb_1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason.kind).toBe('network');
+	});
+});
+
+describe('sendInboxReply', () => {
+	it('POSTs without body when none is provided, returns the messageId on success', async () => {
+		installFetch(async () => jsonResponse({ messageId: '<sent@x>', accepted: ['a@x'], rejected: [] }));
+		const result = await sendInboxReply('/api', 'drf_1');
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.sent.messageId).toBe('<sent@x>');
+			expect(result.sent.accepted).toEqual(['a@x']);
+		}
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(init.method).toBe('POST');
+		expect(init.body).toBeUndefined();
+		expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/inbox/drafts/drf_1/send');
+	});
+
+	it('serializes body when provided so the backend uses it over the persisted draft', async () => {
+		installFetch(async () => jsonResponse({ messageId: '<sent@x>', accepted: [], rejected: [] }));
+		await sendInboxReply('/api', 'drf_1', 'override body');
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(JSON.parse(init.body as string)).toEqual({ body: 'override body' });
+	});
+
+	it('encodes the draftId path segment', async () => {
+		installFetch(async () => jsonResponse({ messageId: '<x>', accepted: [], rejected: [] }));
+		await sendInboxReply('/api', 'drf 1/x');
+		expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/inbox/drafts/drf%201%2Fx/send');
+	});
+
+	it('returns network kind on a 200 missing messageId', async () => {
+		installFetch(async () => jsonResponse({ accepted: [] }));
+		const result = await sendInboxReply('/api', 'drf_1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason.kind).toBe('network');
+	});
+
+	it('reads structured 422 reason to distinguish receive_only / secret_in_body / not_registered / empty_body', async () => {
+		const cases: ReadonlyArray<[string, string]> = [
+			['receive_only', 'receive_only'],
+			['secret_in_body', 'secret_in_body'],
+			['not_registered', 'not_registered'],
+			['unknown_reason', 'empty_body'],
+		];
+		for (const [serverReason, expectedKind] of cases) {
+			installFetch(async () => jsonResponse({ error: 'x', reason: serverReason }, 422));
+			const result = await sendInboxReply('/api', 'drf_1');
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.reason.kind).toBe(expectedKind);
+		}
+	});
+
+	it('maps status codes to discriminated failures', async () => {
+		const cases = [
+			[404, 'not_found'],
+			[501, 'unsupported'],
+			[429, 'rate_limit'],
+			[502, 'fetch_failed'],
+			[503, 'unavailable'],
+			[500, 'network'],
+		] as const;
+		for (const [status, expected] of cases) {
+			installFetch(async () => new Response('', { status }));
+			const result = await sendInboxReply('/api', 'drf_1');
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.reason.kind).toBe(expected);
+		}
+	});
+
+	it('returns network kind when fetch throws', async () => {
+		installFetch(async () => { throw new TypeError('network'); });
+		const result = await sendInboxReply('/api', 'drf_1');
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.reason.kind).toBe('network');
 	});

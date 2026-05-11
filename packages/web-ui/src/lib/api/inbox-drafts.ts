@@ -225,3 +225,74 @@ export async function refreshItemBody(
 		return { ok: false, reason: { kind: 'network' } };
 	}
 }
+
+export type SendReplyFailure =
+	| { kind: 'unavailable' }
+	| { kind: 'unsupported' }
+	| { kind: 'not_registered' }
+	| { kind: 'receive_only' }
+	| { kind: 'secret_in_body' }
+	| { kind: 'empty_body' }
+	| { kind: 'rate_limit' }
+	| { kind: 'not_found' }
+	| { kind: 'fetch_failed' }
+	| { kind: 'aborted' }
+	| { kind: 'network' };
+
+export interface SentReply {
+	messageId: string;
+	accepted: ReadonlyArray<string>;
+	rejected: ReadonlyArray<string>;
+}
+
+/**
+ * Send the open draft as a reply to its parent inbox item. The body
+ * arg lets the caller flush the live editor buffer in the same call;
+ * if omitted the backend uses the persisted draft body.
+ */
+export async function sendInboxReply(
+	apiBase: string,
+	draftId: string,
+	body?: string,
+): Promise<{ ok: true; sent: SentReply } | { ok: false; reason: SendReplyFailure }> {
+	try {
+		const init: RequestInit = { method: 'POST' };
+		if (body !== undefined) {
+			init.headers = { 'Content-Type': 'application/json' };
+			init.body = JSON.stringify({ body });
+		}
+		const res = await fetch(`${apiBase}/inbox/drafts/${encodeURIComponent(draftId)}/send`, init);
+		if (res.ok) {
+			const data = (await res.json()) as Partial<SentReply>;
+			if (typeof data.messageId !== 'string') return { ok: false, reason: { kind: 'network' } };
+			return {
+				ok: true,
+				sent: {
+					messageId: data.messageId,
+					accepted: Array.isArray(data.accepted) ? data.accepted : [],
+					rejected: Array.isArray(data.rejected) ? data.rejected : [],
+				},
+			};
+		}
+		switch (res.status) {
+			case 404: return { ok: false, reason: { kind: 'not_found' } };
+			case 501: return { ok: false, reason: { kind: 'unsupported' } };
+			case 422: {
+				// Structured 422 reason — distinguishes the 4 sub-cases the UI
+				// surfaces with different copy + level (info vs error).
+				const parsed = await res.json().catch(() => null) as { reason?: string } | null;
+				const reason = parsed?.reason;
+				if (reason === 'receive_only')   return { ok: false, reason: { kind: 'receive_only' } };
+				if (reason === 'secret_in_body') return { ok: false, reason: { kind: 'secret_in_body' } };
+				if (reason === 'not_registered') return { ok: false, reason: { kind: 'not_registered' } };
+				return { ok: false, reason: { kind: 'empty_body' } };
+			}
+			case 429: return { ok: false, reason: { kind: 'rate_limit' } };
+			case 502: return { ok: false, reason: { kind: 'fetch_failed' } };
+			case 503: return { ok: false, reason: { kind: 'unavailable' } };
+			default:  return { ok: false, reason: { kind: 'network' } };
+		}
+	} catch {
+		return { ok: false, reason: { kind: 'network' } };
+	}
+}

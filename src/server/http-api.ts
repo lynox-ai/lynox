@@ -3331,6 +3331,11 @@ export class LynoxHTTPApi {
       if (waCtx !== null) {
         deps.whatsappStore = waCtx.getStateDb();
       }
+      // MailContext for handleSendInboxReply — exposes registry +
+      // follow-up state DB to the shared sendMail pipeline.
+      if (mailCtx !== null) {
+        deps.mailContext = mailCtx;
+      }
       return deps;
     };
     const sendInbox = (
@@ -3504,6 +3509,16 @@ export class LynoxHTTPApi {
         generateBody.previousBodyMd = b['previousBodyMd'];
       }
       sendInbox(res, await handleGenerateDraft(deps!, params['id']!, generateBody));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/drafts/:id/send', async (_req, res, params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleSendInboxReply } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const sendBody: import('../integrations/inbox/api.js').SendInboxReplyBody = {};
+      if (typeof b['body'] === 'string') sendBody.body = b['body'];
+      sendInbox(res, await handleSendInboxReply(deps!, params['id']!, sendBody));
     }));
 
     this.staticRoutes.set('GET /api/inbox/rules', async (req, res) => {

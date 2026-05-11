@@ -9,10 +9,15 @@
 		refreshOpenPaneBody,
 		regenerateDraftWithTone,
 		saveDraftBody,
+		sendOpenPaneDraft,
 		type DraftTone,
 		type InboxItem,
 	} from '../stores/inbox.svelte.js';
-	import type { GenerateDraftFailure, RefreshBodyFailure } from '../api/inbox-drafts.js';
+	import type {
+		GenerateDraftFailure,
+		RefreshBodyFailure,
+		SendReplyFailure,
+	} from '../api/inbox-drafts.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { accountShortLabel } from '../utils/account-label.js';
 
@@ -70,20 +75,53 @@
 	}
 
 	function onTextareaKeyDown(event: KeyboardEvent): void {
-		// ⌘/Ctrl+Enter: flush the latest buffer, then notify that send
-		// wiring is the next slice's job. Without flushing first the user
-		// would think their last keystroke "vanished" when the next slice
-		// reads the persisted body.
+		// ⌘/Ctrl+Enter: explicit user-confirm to send the draft as a reply.
 		if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
 			event.preventDefault();
-			flushNow();
-			addToast(t('inbox.draft_send_pending'), 'info');
+			void onSendClick();
 			return;
 		}
 		if (event.key === 'Escape') {
 			event.preventDefault();
 			flushNow();
 			closeDraftPane();
+		}
+	}
+
+	let sending = $state(false);
+
+	function toastForSendFailure(reason: SendReplyFailure): { silent: boolean; key: string; level: 'info' | 'error' } {
+		switch (reason.kind) {
+			case 'aborted':         return { silent: true, key: '', level: 'info' };
+			case 'unavailable':     return { silent: false, key: 'inbox.draft_send_unavailable', level: 'info' };
+			case 'unsupported':     return { silent: false, key: 'inbox.draft_send_unsupported', level: 'info' };
+			case 'not_registered':  return { silent: false, key: 'inbox.draft_send_not_registered', level: 'info' };
+			case 'receive_only':    return { silent: false, key: 'inbox.draft_send_receive_only', level: 'error' };
+			case 'secret_in_body':  return { silent: false, key: 'inbox.draft_send_secret_in_body', level: 'error' };
+			case 'empty_body':      return { silent: false, key: 'inbox.draft_send_empty_body', level: 'error' };
+			case 'rate_limit':      return { silent: false, key: 'inbox.draft_send_rate_limit', level: 'info' };
+			case 'not_found':       return { silent: false, key: 'inbox.draft_send_not_found', level: 'error' };
+			case 'fetch_failed':    return { silent: false, key: 'inbox.draft_send_failed', level: 'error' };
+			case 'network':         return { silent: false, key: 'inbox.draft_send_failed', level: 'error' };
+		}
+	}
+
+	async function onSendClick(): Promise<void> {
+		if (sending) return;
+		const pane = getDraftPane();
+		if (!pane?.draft) return;
+		sending = true;
+		try {
+			const result = await sendOpenPaneDraft(buffer);
+			if (result.ok) {
+				addToast(t('inbox.draft_send_ok'), 'success');
+				closeDraftPane();
+				return;
+			}
+			const hint = toastForSendFailure(result.reason);
+			if (!hint.silent) addToast(t(hint.key), hint.level);
+		} finally {
+			sending = false;
 		}
 	}
 
@@ -132,7 +170,7 @@
 	});
 
 	// Derive UI labels once per locale change instead of per keystroke.
-	const sendPendingLabel = $derived(t('inbox.draft_send_pending'));
+	const sendLabel = $derived(t('inbox.draft_send'));
 
 	// Tone-rewrite flow: the "Kürzer / Förmlicher / Wärmer / Regenerate"
 	// buttons replace the current draft with a fresh LLM variant. If the
@@ -324,11 +362,12 @@
 				</div>
 				<button
 					type="button"
-					disabled
-					title={sendPendingLabel}
-					aria-label={sendPendingLabel}
-					class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-subtle cursor-not-allowed min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-				>{t('inbox.draft_send')} ⌘↵</button>
+					onclick={() => void onSendClick()}
+					disabled={sending || pane.draft === null || pane.generating}
+					title={sendLabel}
+					aria-label={sendLabel}
+					class="rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
+				>{sending ? t('inbox.draft_send_in_flight') : t('inbox.draft_send')} ⌘↵</button>
 			</footer>
 		</div>
 	</div>

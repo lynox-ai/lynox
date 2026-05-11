@@ -8,6 +8,7 @@ import {
   handleDeleteRule,
   handleGenerateDraft,
   handleRefreshItemBody,
+  handleSendInboxReply,
   handleGetColdStart,
   handleGetCounts,
   handleGetDraft,
@@ -399,6 +400,150 @@ describe('draft endpoints', () => {
     const r = handleGetItemDraft(deps, itemId);
     const active = (r.body as { draft: InboxDraft | null }).draft;
     expect(active?.id).toBe(secondId);
+  });
+});
+
+describe('handleSendInboxReply', () => {
+  function fakeMailContext(opts: {
+    provider?: import('../mail/provider.js').MailProvider | null;
+    envelopes?: ReadonlyArray<import('../mail/provider.js').MailEnvelope>;
+    sendThrows?: boolean;
+  } = {}): import('../mail/context.js').MailContext {
+    const list = async () => opts.envelopes ?? [];
+    const send = async () => {
+      if (opts.sendThrows) throw new Error('SMTP boom');
+      return { messageId: '<sent@x>', accepted: ['alice@example.com'], rejected: [] };
+    };
+    const provider = opts.provider !== undefined ? opts.provider : ({
+      accountId: ACCOUNT.id,
+      authType: 'imap',
+      list,
+      fetch: async () => ({ envelope: {}, text: '', html: undefined, attachments: [], inReplyTo: undefined, references: undefined }),
+      search: async () => [],
+      send,
+      watch: async () => ({ stop: async () => {} }),
+      close: async () => {},
+    } as unknown as import('../mail/provider.js').MailProvider);
+    const registry = {
+      get: () => provider,
+      list: () => provider ? [provider.accountId] : [],
+      default: () => provider?.accountId ?? null,
+    };
+    return {
+      registry,
+      stateDb: {
+        recordFollowup: () => 'followup-1',
+      },
+      getAccountConfig: () => null,
+    } as unknown as import('../mail/context.js').MailContext;
+  }
+
+  function createDraftFor(itemId: string): string {
+    return state.insertDraftAndAttach({
+      itemId,
+      bodyMd: 'Hi Max,\n\nLong enough reply body to send.',
+      generatedAt: new Date(),
+      generatorVersion: 'g',
+    });
+  }
+
+  it('503 when no mail context is wired', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const draftId = createDraftFor(id);
+    const r = await handleSendInboxReply(deps, draftId);
+    expect(r.status).toBe(503);
+  });
+
+  it('404 when the draft does not exist', async () => {
+    const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext() }, 'drf_missing');
+    expect(r.status).toBe(404);
+  });
+
+  it('501 for non-email channels', async () => {
+    const itemId = state.insertItem({
+      accountId: 'whatsapp:default',
+      channel: 'whatsapp',
+      threadKey: 'wa:1',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'r',
+      classifiedAt: new Date(),
+      classifierVersion: 'v',
+    });
+    const draftId = createDraftFor(itemId);
+    const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext() }, draftId);
+    expect(r.status).toBe(501);
+  });
+
+  it('400 when the body is empty after trim', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const draftId = createDraftFor(id);
+    const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext() }, draftId, { body: '   ' });
+    expect(r.status).toBe(400);
+  });
+
+  it('422 + reason="not_registered" when the provider is not in the registry', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const draftId = createDraftFor(id);
+    const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext({ provider: null }) }, draftId);
+    expect(r.status).toBe(422);
+    expect((r.body as { reason: string }).reason).toBe('not_registered');
+  });
+
+  it('404 when no envelope in the 30-day window matches the threadKey', async () => {
+    const id = insertItem('imap:<gone@x>');
+    const draftId = createDraftFor(id);
+    const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext({ envelopes: [] }) }, draftId);
+    expect(r.status).toBe(404);
+  });
+
+  it('502 when provider.list throws', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const draftId = createDraftFor(id);
+    const throwingProvider = {
+      accountId: ACCOUNT.id,
+      authType: 'imap',
+      list: async () => { throw new Error('IMAP timeout'); },
+      fetch: async () => ({ envelope: {}, text: '', html: undefined, attachments: [], inReplyTo: undefined, references: undefined }),
+      search: async () => [],
+      send: async () => ({ messageId: '<x>', accepted: [], rejected: [] }),
+      watch: async () => ({ stop: async () => {} }),
+      close: async () => {},
+    } as unknown as import('../mail/provider.js').MailProvider;
+    const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext({ provider: throwingProvider }) }, draftId);
+    expect(r.status).toBe(502);
+  });
+
+  it('200 + audits replied + sets user_action on the happy path', async () => {
+    const id = insertItem('imap:<m1@x>');
+    const draftId = createDraftFor(id);
+    const envelope = {
+      uid: 7,
+      messageId: '<m1@x>',
+      folder: 'INBOX',
+      threadKey: undefined,
+      from: [{ address: 'sender@x', name: 'Max' }],
+      to: [{ address: 'me@x' }],
+      cc: [],
+      bcc: [],
+      replyTo: [],
+      subject: 'Termin?',
+      date: new Date(),
+      flags: [],
+      snippet: 'snip',
+      hasAttachments: false,
+      attachmentCount: 0,
+      sizeBytes: 100,
+      isAutoReply: false,
+      inReplyTo: undefined,
+    } as unknown as import('../mail/provider.js').MailEnvelope;
+    const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext({ envelopes: [envelope] }) }, draftId);
+    expect(r.status).toBe(200);
+    expect((r.body as { messageId: string }).messageId).toBe('<sent@x>');
+    // Audit + state-side effects.
+    expect(state.getItem(id)?.userAction).toBe('replied');
+    const audit = state.listAuditForItem(id);
+    expect(audit.some((a) => a.action === 'replied' && a.actor === 'user')).toBe(true);
   });
 });
 

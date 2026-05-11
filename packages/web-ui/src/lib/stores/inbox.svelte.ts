@@ -12,14 +12,16 @@ import {
 	generateDraft as apiGenerateDraft,
 	getItemDraft as apiGetItemDraft,
 	refreshItemBody as apiRefreshItemBody,
+	sendInboxReply as apiSendInboxReply,
 	updateDraft as apiUpdateDraft,
 	type DraftTone,
 	type GenerateDraftFailure,
 	type InboxDraft,
 	type RefreshBodyFailure,
+	type SendReplyFailure,
 } from '../api/inbox-drafts.js';
 
-export type { DraftTone, RefreshBodyFailure };
+export type { DraftTone, RefreshBodyFailure, SendReplyFailure };
 import { getApiBase } from '../config.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -600,6 +602,30 @@ export async function refreshOpenPaneBody(): Promise<
 	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
 	if (!result.ok) return result;
 	return { ok: true };
+}
+
+/**
+ * Send the open draft as a reply. Passes the live buffer so the server
+ * sees the user's latest edits without an extra PATCH first. On success
+ * the inbox item transitions to `userAction: 'replied'` — the pane is
+ * closed by the component, the list refresh moves the item out of
+ * Needs-You.
+ */
+export async function sendOpenPaneDraft(
+	currentBuffer: string,
+): Promise<
+	{ ok: true; messageId: string } | { ok: false; reason: SendReplyFailure }
+> {
+	const pane = draftPane;
+	if (!pane || !pane.draft) return { ok: false, reason: { kind: 'aborted' } };
+	const draftId = pane.draft.id;
+	const itemId = pane.itemId;
+	const result = await apiSendInboxReply(getApiBase(), draftId, currentBuffer);
+	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
+	if (!result.ok) return result;
+	// Refresh counts so the badge updates after the item moves zones.
+	void loadInboxCounts();
+	return { ok: true, messageId: result.sent.messageId };
 }
 
 /**

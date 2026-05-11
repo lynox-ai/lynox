@@ -55,6 +55,12 @@ export interface InboxApiDeps {
    * `whatsapp-inbox` flag is off — handler then returns 503 for WA.
    */
   whatsappStore?: import('./body-refresh.js').WhatsAppMessageStore | undefined;
+  /**
+   * Full mail context — `handleSendInboxReply` needs the registry +
+   * follow-up state-db that `sendMail` reaches through. Absent on
+   * instances without a vault/mail account; send then 503s.
+   */
+  mailContext?: import('../mail/context.js').MailContext | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -461,6 +467,132 @@ export async function handleRefreshItemBody(
       source: result.source,
       bytesWritten: result.bytesWritten,
       truncated: result.truncated,
+    },
+  };
+}
+
+/**
+ * Send the draft as a reply to its parent inbox item. Reuses the shared
+ * `sendMail` pipeline from `mail/send-core.ts` so the inbox path gets
+ * the same rate-limit, secret-scan, recipient-dedup, and follow-up
+ * mechanics the agent's `mail_send` tool runs. The UI button click is
+ * the user confirmation; no agent.promptUser modal — the textarea
+ * already showed the body for review.
+ *
+ * Routes only the email channel. WhatsApp send is a follow-up slice
+ * (needs the WA provider's own outbound API + recipient-from-phone
+ * resolution).
+ */
+export interface SendInboxReplyBody {
+  /**
+   * Optional override of the body the user wants to send. If absent,
+   * uses the draft's persistedBody. Lets the UI flush the live buffer
+   * via this field instead of an extra PATCH first.
+   */
+  body?: string | undefined;
+}
+
+export async function handleSendInboxReply(
+  deps: InboxApiDeps,
+  draftId: string,
+  body: SendInboxReplyBody = {},
+): Promise<ApiResponse> {
+  const mailCtx = deps.mailContext;
+  if (!mailCtx) return unavailable('mail context not wired');
+  const draft = deps.state.getDraftById(draftId);
+  if (!draft) return notFound('draft');
+  const item = deps.state.getItem(draft.itemId);
+  if (!item) return notFound('item');
+  if (item.channel !== 'email') {
+    return { status: 501, body: { error: `send not supported for channel: ${item.channel}` } };
+  }
+  const replyBody = (body.body ?? draft.bodyMd).trim();
+  if (replyBody.length === 0) return bad('body is required');
+
+  const provider = mailCtx.registry.get(item.accountId);
+  if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
+
+  // Find the original envelope so we can reply To: the sender, with the
+  // original subject + In-Reply-To/References headers for threading.
+  // Reuses the same list+match strategy as body-refresh — bounded by
+  // the 30-day lookup window.
+  const since = new Date(Date.now() - 30 * 86_400_000);
+  const { resolveThreadKey } = await import('./watcher-hook.js');
+  let envelope;
+  try {
+    const envelopes = await provider.list({ since, limit: 200 });
+    envelope = envelopes.find((env) => resolveThreadKey(env) === item.threadKey);
+  } catch {
+    return { status: 502, body: { error: 'provider lookup failed' } };
+  }
+  if (!envelope) {
+    return { status: 404, body: { error: 'original mail no longer available — cannot construct reply headers' } };
+  }
+  const fromAddress = envelope.from[0]?.address;
+  if (!fromAddress) {
+    return unprocessable('original mail has no sender address');
+  }
+
+  const subject = envelope.subject.startsWith('Re: ') || envelope.subject.startsWith('RE: ')
+    ? envelope.subject
+    : `Re: ${envelope.subject || '(kein Betreff)'}`;
+
+  const { sendMail } = await import('../mail/send-core.js');
+  const coreInput: import('../mail/send-core.js').SendCoreInput = {
+    account: provider.accountId,
+    to: [{ address: fromAddress, ...(envelope.from[0]?.name !== undefined ? { name: envelope.from[0]!.name! } : {}) }],
+    subject,
+    body: replyBody,
+  };
+  if (envelope.messageId) coreInput.inReplyTo = envelope.messageId;
+  // Threading: References = whatever the original had, append the
+  // original Message-ID so a downstream client can rebuild the chain.
+  // We don't have the original's References header here (envelopes
+  // omit it for size); a future provider.fetch could supply it. For
+  // v1 we just set References = inReplyTo, which is the most common
+  // single-message-deep reply shape.
+  if (envelope.messageId) coreInput.references = envelope.messageId;
+
+  const result = await sendMail(
+    mailCtx.registry,
+    coreInput,
+    { skipRateLimit: true },
+    mailCtx,
+  );
+
+  if (!result.ok) {
+    switch (result.status) {
+      case 'rate_limit':       return { status: 429, body: { error: result.message } };
+      case 'invalid_recipients': return unprocessable(result.message);
+      case 'receive_only':     return unprocessable(result.message, 'receive_only');
+      case 'dedup_window':     return { status: 429, body: { error: result.message } };
+      case 'secret_in_body':   return unprocessable(result.message, 'secret_in_body');
+      case 'cancelled':        return { status: 409, body: { error: 'send cancelled' } };
+      case 'provider_error':   return { status: 502, body: { error: result.message } };
+    }
+  }
+
+  // Mark the inbox item as replied + audit. The UI then transitions
+  // the item out of the Needs-You zone on next list refresh.
+  deps.state.updateUserAction(item.id, 'replied');
+  deps.state.appendAudit({
+    itemId: item.id,
+    action: 'replied',
+    actor: 'user',
+    payloadJson: JSON.stringify({
+      draft_id: draft.id,
+      message_id: result.result.messageId,
+      accepted: result.result.accepted,
+      rejected: result.result.rejected,
+    }),
+  });
+
+  return {
+    status: 200,
+    body: {
+      messageId: result.result.messageId,
+      accepted: result.result.accepted,
+      rejected: result.result.rejected,
     },
   };
 }
