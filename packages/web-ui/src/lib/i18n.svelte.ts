@@ -40,6 +40,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.rename': { de: 'Umbenennen', en: 'Rename' },
 	'threads.delete': { de: 'Löschen', en: 'Delete' },
 	'threads.confirm_delete': { de: 'Thread endgültig löschen?', en: 'Permanently delete this thread?' },
+	'threads.actions_menu': { de: 'Thread-Aktionen', en: 'Thread actions' },
+	'threads.menu_close': { de: 'Menü schließen', en: 'Close menu' },
+	'threads.export': { de: 'Als Markdown exportieren', en: 'Export as Markdown' },
+	'threads.error_export': { de: 'Thread konnte nicht exportiert werden', en: 'Failed to export thread' },
+	'threads.search_placeholder': { de: 'Threads durchsuchen…', en: 'Search threads…' },
+	'threads.search_empty': { de: 'Keine Treffer.', en: 'No matches.' },
 
 	// Command Palette
 	'cmd.placeholder': { de: 'Suche oder Aktion...', en: 'Search or action...' },
@@ -70,7 +76,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.automation': { de: 'Automation', en: 'Automation' },
 	'nav.desc.automation': { de: 'Workflows, Vorschläge, Runs & Kosten', en: 'Workflows, suggestions, runs & costs' },
 	'nav.intelligence': { de: 'Intelligence', en: 'Intelligence' },
-	'nav.desc.intelligence': { de: 'Dashboards, Reports, Kontakte', en: 'Dashboards, reports, contacts' },
+	'nav.desc.intelligence': { de: 'Wissensgraph, Kontakte, Insights', en: 'Knowledge graph, contacts, insights' },
+	'nav.intelligence_kg': { de: 'Wissensgraph', en: 'Knowledge graph' },
+	'nav.intelligence_contacts': { de: 'Kontakte', en: 'Contacts' },
+	'nav.intelligence_insights': { de: 'Insights', en: 'Insights' },
 	'nav.inbox': { de: 'Inbox', en: 'Inbox' },
 	'nav.desc.inbox': { de: 'E-Mail, WhatsApp, SMS', en: 'Email, WhatsApp, SMS' },
 

@@ -51,6 +51,76 @@
 		}
 	}
 
+	// ── Per-thread 3-dot menu ─────────────────────────────────────────────
+	// Replaces the hover-only icon row that was unreachable on touch devices.
+	// One menu open at a time. `closeMenu` runs on outside-click + on every
+	// action so the menu doesn't linger after the user has decided.
+	let openMenuId = $state<string | null>(null);
+	// Free-text filter over thread titles, client-side. Server-side `q` param
+	// is an option for >1k thread accounts but the current ~50-thread typical
+	// is fast enough to filter in-memory.
+	let threadQuery = $state('');
+
+	function filteredThreads() {
+		const q = threadQuery.trim().toLowerCase();
+		const all = getThreads();
+		if (q.length === 0) return all;
+		return all.filter((th) => {
+			const hay = ((th.title ?? '') + ' ' + (th.id ?? '')).toLowerCase();
+			return hay.includes(q);
+		});
+	}
+
+	function toggleMenu(threadId: string, e: MouseEvent) {
+		e.stopPropagation();
+		openMenuId = openMenuId === threadId ? null : threadId;
+	}
+	function closeMenu() {
+		openMenuId = null;
+	}
+
+	/**
+	 * Export a thread as a Markdown file: one `# Title` header, then each
+	 * message as `**You:** / **Assistant:** content`. Browser-side download.
+	 * Useful for archiving / sharing decisions made in chat without
+	 * needing a "view in browser" link.
+	 */
+	async function exportThread(threadId: string, title: string | null) {
+		try {
+			const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(threadId)}/messages?limit=10000`);
+			if (!res.ok) {
+				alert(t('threads.error_export'));
+				return;
+			}
+			const data = (await res.json()) as { messages: Array<{ role: string; content?: unknown }> };
+			const safeTitle = (title || 'thread').trim();
+			const lines: string[] = [`# ${safeTitle}`, '', `_Exportiert am ${new Date().toLocaleString()}_`, ''];
+			for (const m of data.messages ?? []) {
+				const role = m.role === 'user' ? 'You' : m.role === 'assistant' ? 'Assistant' : m.role;
+				// `content` shape varies — string for simple messages, array of
+				// blocks for tool/multi-modal. Stringify the array safely; plain
+				// text passes through unchanged.
+				const body = typeof m.content === 'string'
+					? m.content
+					: JSON.stringify(m.content, null, 2);
+				lines.push(`**${role}:**`, '', body, '');
+			}
+			const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			const slug = safeTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+			const stamp = new Date().toISOString().slice(0, 10);
+			a.download = `lynox-thread-${slug || 'export'}-${stamp}.md`;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+		} catch {
+			alert(t('threads.error_export'));
+		}
+	}
+
 	function closeSwipe() {
 		if (!swipedThreadId) return;
 		const el = document.querySelector(`[data-swipe-thread="${swipedThreadId}"]`) as HTMLElement | null;
@@ -87,13 +157,24 @@
 		dragNode = null;
 	}
 
+	interface NavSubItem {
+		href: string;
+		labelKey: string;
+		exact: boolean;
+	}
 	interface NavItem {
 		href: string;
 		labelKey: string;
 		exact: boolean;
 		icon: string;
 		descKey?: string;
-		type?: 'threads';
+		/**
+		 * 'threads' — expand into the live thread list (Chat only).
+		 * 'subnav'  — expand into the static `subnav` list (e.g. Intelligence).
+		 * undefined — leaf entry; clicking navigates.
+		 */
+		type?: 'threads' | 'subnav';
+		subnav?: NavSubItem[];
 	}
 
 	// Feature-flag gated nav entries. Fetched once on mount from the Engine.
@@ -133,6 +214,12 @@
 			{
 				href: '/app/knowledge', labelKey: 'nav.intelligence', exact: false, icon: 'brain',
 				descKey: 'nav.desc.intelligence',
+				type: 'subnav',
+				subnav: [
+					{ href: '/app/knowledge', labelKey: 'nav.intelligence_kg', exact: true },
+					{ href: '/app/contacts', labelKey: 'nav.intelligence_contacts', exact: false },
+					{ href: '/app/insights', labelKey: 'nav.intelligence_insights', exact: false },
+				],
 			},
 			{
 				href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts',
@@ -143,16 +230,20 @@
 	});
 
 	const isThreadsItem = (item: NavItem) => item.type === 'threads';
+	const isSubnavItem = (item: NavItem) => item.type === 'subnav' && (item.subnav?.length ?? 0) > 0;
+	const isExpandable = (item: NavItem) => isThreadsItem(item) || isSubnavItem(item);
 
 	function isActive(href: string, exact: boolean): boolean {
 		const path = $page.url.pathname;
 		return exact ? path === href : path.startsWith(href);
 	}
 
-	// Routes without their own sidebar entry highlight their parent.
+	// Routes without their own sidebar entry highlight their parent. The
+	// Intelligence subnav children are listed here too so the parent stays
+	// highlighted (and auto-expanded on mount) when the user navigates to one.
 	const PARENT_OWNS: Record<string, string[]> = {
 		'/app/workflows': ['/app/activity'],
-		'/app/knowledge': ['/app/contacts'],
+		'/app/knowledge': ['/app/contacts', '/app/insights'],
 	};
 
 	function isParentActive(item: NavItem): boolean {
@@ -168,7 +259,7 @@
 	}
 
 	function handleNavClick(item: NavItem, e: MouseEvent) {
-		if (isThreadsItem(item)) {
+		if (isExpandable(item)) {
 			if (expandedSection === item.href) {
 				e.preventDefault();
 				expandedSection = null;
@@ -214,12 +305,14 @@
 	// Auto-refresh threads when tab regains focus (cross-device sync)
 	let stopVisibilityRefresh: (() => void) | undefined;
 
-	// Auto-expand section matching current route on mount
+	// Auto-expand section matching current route on mount.
 	onMount(() => {
 		void loadThreads();
 		stopVisibilityRefresh = startVisibilityRefresh();
-		// Threads list is the only expandable section; auto-open it on Chat routes.
-		const match = nav.find(item => isThreadsItem(item) && isParentActive(item));
+		// Expand the active section so the user can see siblings without
+		// re-clicking the parent: works for both threads (Chat) and subnav
+		// (Intelligence).
+		const match = nav.find(item => isExpandable(item) && isParentActive(item));
 		if (match) {
 			expandedSection = match.href;
 		}
@@ -301,7 +394,7 @@
 									<span class="block text-xs text-text-subtle font-normal tracking-normal">{t(item.descKey)}</span>
 								{/if}
 							</div>
-							{#if isThreadsItem(item)}
+							{#if isExpandable(item)}
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
 									class="h-3 w-3 shrink-0 text-text-subtle transition-transform duration-150 {expandedSection === item.href ? 'rotate-90' : ''}"
@@ -310,20 +403,58 @@
 							{/if}
 						</a>
 
+						<!-- Static sub-nav (Intelligence): explicit child routes -->
+						{#if expandedSection === item.href && isSubnavItem(item) && item.subnav}
+							<ul transition:slide={{ duration: 150 }} class="mt-1 space-y-0.5 ml-7">
+								{#each item.subnav as sub (sub.href)}
+									<li>
+										<a
+											href={sub.href}
+											onclick={() => { sidebarOpen = false; }}
+											class="block rounded-[var(--radius-sm)] px-2 py-1.5 text-sm transition-colors {isActive(sub.href, sub.exact)
+												? 'bg-accent/10 text-accent-text'
+												: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+										>{t(sub.labelKey)}</a>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+
 						<!-- Sub-items: threads list (Chat only). Hub sub-tabs render inside the page. -->
 						{#if expandedSection === item.href && item.type === 'threads'}
 							<div transition:slide={{ duration: 150 }}>
 								{#if getThreads().length > 0}
+									<!-- Thread search: client-side filter on title. Tiny enough to drop
+										 into the existing sidebar without a sub-component. -->
+									<div class="mx-1 mt-2 mb-1">
+										<input
+											type="search"
+											bind:value={threadQuery}
+											placeholder={t('threads.search_placeholder')}
+											class="w-full px-2 py-1 text-[12px] bg-bg-subtle border border-border rounded-[var(--radius-sm)] text-text placeholder:text-text-subtle focus:border-accent focus:outline-none"
+											aria-label={t('threads.search_placeholder')}
+										/>
+									</div>
+									{@const visibleThreads = filteredThreads()}
+									{#if visibleThreads.length === 0}
+										<p class="px-2 py-2 text-[11px] text-text-subtle">{t('threads.search_empty')}</p>
+									{:else}
 									<ul class="mt-1 space-y-0.5 max-h-72 overflow-y-auto scrollbar-thin" aria-label={t('threads.recent')}>
-										{#each getThreads() as thread (thread.id)}
+										{#each visibleThreads as thread (thread.id)}
 											{@const isThreadActive = getSessionId() === thread.id}
 											<li class="relative overflow-hidden rounded-[var(--radius-sm)]">
-												<!-- Swipe archive action (mobile) -->
+												<!-- Swipe archive action (mobile). Icon only — the previous full
+													 "Archivieren" label clipped to "chivieren" at narrow widths. -->
 												<button
 													onclick={(e) => { e.stopPropagation(); void archiveThread(thread.id, getSessionId()); closeSwipe(); }}
-													class="absolute inset-y-0 right-0 z-0 flex items-center px-4 bg-danger/20 text-danger text-sm font-medium"
+													class="absolute inset-y-0 right-0 z-0 flex items-center px-4 bg-danger/20 text-danger"
 													aria-label={t('threads.archive')}
-												>{t('threads.archive')}</button>
+													title={t('threads.archive')}
+												>
+													<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+														<path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" />
+													</svg>
+												</button>
 												<div
 													role="group"
 													data-swipe-thread={thread.id}
@@ -367,29 +498,82 @@
 															{timeAgo(thread.updated_at)}
 														</span>
 													{/if}
-													<button
-														onclick={(e: MouseEvent) => { e.stopPropagation(); void toggleFavorite(thread.id); }}
-														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-accent hover:bg-accent/10 text-xs transition-colors"
-														aria-label={thread.is_favorite ? t('threads.unfavorite') : t('threads.favorite')}
-													>{thread.is_favorite ? '\u2605' : '\u2606'}</button>
-													<button
-														onclick={(e: MouseEvent) => { e.stopPropagation(); void archiveThread(thread.id, getSessionId()); }}
-														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-text-muted hover:bg-text-muted/10 text-xs transition-colors"
-														aria-label={t('threads.archive')}
-														title={t('threads.archive')}
-													><svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg></button>
-													<button
-														onclick={(e: MouseEvent) => { e.stopPropagation(); void confirmDelete(thread.id); }}
-														class="hidden group-hover:flex shrink-0 items-center justify-center h-5 w-5 mr-1 rounded text-text-subtle hover:text-danger hover:bg-danger/10 text-xs transition-colors"
-														aria-label={t('threads.delete')}
-														title={t('threads.delete')}
-													>
-														<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
-													</button>
+													<!-- Per-thread kebab menu. Always visible (was hover-only with three
+														 inline icon buttons; that approach was unreachable on touch). Opens
+														 a popover with Rename / Favorite / Archive / Delete / Export. -->
+													<div class="relative shrink-0 mr-1">
+														<button
+															type="button"
+															onclick={(e: MouseEvent) => toggleMenu(thread.id, e)}
+															class="flex items-center justify-center h-7 w-7 rounded text-text-subtle hover:text-text hover:bg-text-muted/10 transition-colors pointer-coarse:h-9 pointer-coarse:w-9"
+															aria-label={t('threads.actions_menu')}
+															aria-expanded={openMenuId === thread.id}
+															aria-haspopup="menu"
+														>
+															<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+																<path stroke-linecap="round" stroke-linejoin="round" d="M12 6.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5ZM12 12.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5ZM12 18.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Z" />
+															</svg>
+														</button>
+														{#if openMenuId === thread.id}
+															<!-- Click-outside backdrop. Transparent \u2014 captures dismissal taps anywhere. -->
+															<button
+																type="button"
+																class="fixed inset-0 z-40 cursor-default"
+																onclick={closeMenu}
+																aria-label={t('threads.menu_close')}
+															></button>
+															<ul
+																role="menu"
+																class="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
+															>
+																<li role="none">
+																	<button
+																		type="button"
+																		role="menuitem"
+																		onclick={(e: MouseEvent) => { e.stopPropagation(); closeMenu(); startRename(thread.id, thread.title || formatThreadDate(thread.created_at)); }}
+																		class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[40px]"
+																	>{t('threads.rename')}</button>
+																</li>
+																<li role="none">
+																	<button
+																		type="button"
+																		role="menuitem"
+																		onclick={(e: MouseEvent) => { e.stopPropagation(); closeMenu(); void toggleFavorite(thread.id); }}
+																		class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[40px]"
+																	>{thread.is_favorite ? t('threads.unfavorite') : t('threads.favorite')}</button>
+																</li>
+																<li role="none">
+																	<button
+																		type="button"
+																		role="menuitem"
+																		onclick={(e: MouseEvent) => { e.stopPropagation(); closeMenu(); void archiveThread(thread.id, getSessionId()); }}
+																		class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[40px]"
+																	>{t('threads.archive')}</button>
+																</li>
+																<li role="none">
+																	<button
+																		type="button"
+																		role="menuitem"
+																		onclick={(e: MouseEvent) => { e.stopPropagation(); closeMenu(); void exportThread(thread.id, thread.title ?? null); }}
+																		class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[40px]"
+																	>{t('threads.export')}</button>
+																</li>
+																<li role="none">
+																	<button
+																		type="button"
+																		role="menuitem"
+																		onclick={(e: MouseEvent) => { e.stopPropagation(); closeMenu(); void confirmDelete(thread.id); }}
+																		class="block w-full px-3 py-2 text-left text-[12px] text-danger hover:bg-danger/10 min-h-[40px]"
+																	>{t('threads.delete')}</button>
+																</li>
+															</ul>
+														{/if}
+													</div>
 												</div>
 											</li>
 										{/each}
 									</ul>
+									{/if}
 								{/if}
 							</div>
 						{/if}
