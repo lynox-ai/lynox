@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "generatedAt": "2026-05-12T00:00:00Z",
+  "generator": "hand-crafted-seed",
+  "note": "12-entry hand-crafted seed for the eval-runner contract. Expand to ≥100 via scripts/inbox-eval-gen.ts before relying on the ≥80% pass-criterion. Names use Mustermann / Acme / example.com per the anti-PII rules in core/tests/eval/README.md.",
+  "fixtures": [
+    {
+      "id": "ah-de-newsletter-01",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "newsletter@acme-shop.example",
+      "fromName": "Acme Shop",
+      "subject": "Frühlingsangebote: 20% auf alle Produkte bis Sonntag",
+      "body": "Liebe Kundin, lieber Kunde,\n\ndiese Woche gibt es 20% Rabatt auf das gesamte Sortiment. Verwenden Sie den Code FRUEHLING20 an der Kasse.\n\nViele Grüße, das Acme-Team\n\nKein Newsletter mehr? Abmeldelink unten."
+    },
+    {
+      "id": "ah-en-receipt-01",
+      "category": "receipt",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "receipts@acme-billing.example",
+      "fromName": "Acme Billing",
+      "subject": "Receipt from Acme Inc. — CHF 49.00",
+      "body": "Thank you for your payment.\n\nAmount: CHF 49.00\nCard: •••• 4242\nDate: 12 May 2026\n\nThis receipt was generated automatically. No action required."
+    },
+    {
+      "id": "ah-de-rsvp-confirmation-01",
+      "category": "rsvp-confirmation",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "events@beispielkonferenz.example",
+      "fromName": "Beispielkonferenz",
+      "subject": "Deine Anmeldung wurde bestätigt",
+      "body": "Hallo Mustermann,\n\ndeine Anmeldung zur Beispielkonferenz am 03. Juni 2026 ist eingegangen. Den Kalendereintrag findest du im Anhang.\n\nKeine weitere Bestätigung nötig."
+    },
+    {
+      "id": "ah-en-shipping-update-01",
+      "category": "shipping-update",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@logistics.example",
+      "fromName": "Acme Logistics",
+      "subject": "Your order #12345 has shipped",
+      "body": "Hi there,\n\nYour order is on its way. Tracking number: ACME-12345-CH. Estimated delivery: 14 May 2026.\n\nNo action required. Track here: tracking.example/ACME-12345-CH"
+    },
+    {
+      "id": "ru-de-invoice-due-01",
+      "category": "invoice-due",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@dienstleister.example",
+      "fromName": "Acme Dienstleister AG",
+      "subject": "Rechnung 2026-04-17 — Zahlung bis 26.05.2026",
+      "body": "Sehr geehrte Frau Mustermann,\n\nim Anhang finden Sie unsere Rechnung über CHF 1'240.00 für den Monat April. Bitte überweisen Sie den Betrag bis spätestens 26.05.2026 auf das angegebene Konto.\n\nFreundliche Grüße"
+    },
+    {
+      "id": "ru-en-colleague-question-01",
+      "category": "colleague-question",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "max.mustermann@acme-corp.example",
+      "fromName": "Max Mustermann",
+      "subject": "Quick question on the Q2 roadmap",
+      "body": "Hi,\n\nDo you have 10 minutes today to walk me through the priorities for Q2? I'm trying to finalise the OKR doc and your input on the search-quality work would help.\n\nThanks,\nMax"
+    },
+    {
+      "id": "ru-de-customer-complaint-01",
+      "category": "customer-complaint",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "kundin@kundenfirma.example",
+      "fromName": "Erika Mustermann",
+      "subject": "Problem mit der letzten Lieferung",
+      "body": "Hallo,\n\nleider war die letzte Lieferung unvollständig — es fehlten drei Kartons. Was schlagen Sie als Lösung vor?\n\nViele Grüße,\nErika Mustermann"
+    },
+    {
+      "id": "ru-en-payment-failed-01",
+      "category": "payment-failed",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "billing@acme-billing.example",
+      "fromName": "Acme Billing",
+      "subject": "Action required: Payment failed",
+      "body": "Hi,\n\nWe couldn't process your latest payment of CHF 49.00. The card on file was declined. Please update your billing details within 7 days to avoid service interruption.\n\nUpdate: https://billing.example/update"
+    },
+    {
+      "id": "dr-de-meeting-request-01",
+      "category": "meeting-request",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "max.mustermann@acme-corp.example",
+      "fromName": "Max Mustermann",
+      "subject": "Termin für nächste Woche?",
+      "body": "Hallo,\n\nhast du nächste Woche Zeit für einen kurzen Call zum Thema Onboarding? 30 Minuten sollten reichen. Donnerstag oder Freitag wäre für mich gut.\n\nViele Grüße,\nMax"
+    },
+    {
+      "id": "dr-en-quick-reply-needed-01",
+      "category": "quick-reply",
+      "language": "en",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "alice@partnercompany.example",
+      "fromName": "Alice Mustermann",
+      "subject": "Confirming our 3pm tomorrow",
+      "body": "Hi,\n\nJust confirming our 3pm tomorrow via the same Zoom link. Let me know if anything changed on your end.\n\nThanks,\nAlice"
+    },
+    {
+      "id": "dr-de-info-share-01",
+      "category": "info-share",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "bob.mustermann@kollege.example",
+      "fromName": "Bob Mustermann",
+      "subject": "Kurzer Update zum letzten Status-Call",
+      "body": "Hi,\n\nKurz zur Info: Wir haben gestern entschieden, dass die Migration auf März 2026 verschoben wird. Falls du das in deinem Plan berücksichtigen musst, gib kurz Bescheid.\n\nGrüsse,\nBob"
+    },
+    {
+      "id": "dr-en-clarifying-question-01",
+      "category": "clarifying-question",
+      "language": "en",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "support@vendor.example",
+      "fromName": "Acme Vendor Support",
+      "subject": "Re: Your ticket #4912 — can you confirm the affected version?",
+      "body": "Hi,\n\nThanks for opening the ticket. Could you confirm which version of the SDK you're on (output of `npm list @acme-vendor/sdk`)? That'll narrow down the regression window.\n\nBest,\nThe Support team"
+    }
+  ]
+}
