@@ -26,16 +26,19 @@ test.use({
 
 test.describe('Unified Inbox Phase 2 smoke', () => {
 
-  test('GET /api/inbox/counts returns the three-zone shape', async ({ request }) => {
+  test('GET /api/inbox/counts returns the three-zone shape + snoozed', async ({ request }) => {
     const res = await request.get('/api/inbox/counts');
     expect(res.status()).toBe(200);
     const body = (await res.json()) as unknown;
-    expect(body).toEqual({
+    // toMatchObject is forward-compatible — additional top-level fields
+    // (e.g. when Phase 4 adds `pending`) don't break this assertion.
+    expect(body).toMatchObject({
       counts: {
         requires_user: expect.any(Number),
         draft_ready: expect.any(Number),
         auto_handled: expect.any(Number),
       },
+      snoozed: expect.any(Number),
     });
   });
 
@@ -97,7 +100,8 @@ test.describe('Unified Inbox Phase 2 smoke', () => {
     const tablist = page.getByRole('tablist').first();
     await expect(tablist).toBeVisible();
     const tabs = page.getByRole('tab');
-    await expect(tabs).toHaveCount(3);
+    // 4 zones now (Phase 3): requires_user / draft_ready / auto_handled / snoozed
+    await expect(tabs).toHaveCount(4);
 
     expect(errors, `unexpected JS errors:\n${errors.join('\n')}`).toEqual([]);
   });
