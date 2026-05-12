@@ -138,6 +138,55 @@ export interface UndoableAction {
 }
 let lastAction = $state<UndoableAction | null>(null);
 
+// ── Reading-Pane wire shapes ───────────────────────────────────────────────
+//
+// Backed by GET /api/inbox/items/:id/full and :id/thread. The store keeps
+// the open-item state separate from `itemsByBucket` so closing the pane
+// (or switching buckets) doesn't churn the list.
+
+export interface InboxFullBody {
+	md: string;
+	source: 'cache' | 'missing';
+	fetchedAt?: string | undefined; // ISO
+}
+
+export interface InboxItemFull {
+	item: InboxItem;
+	body: InboxFullBody;
+}
+
+export type InboxMessageDirection = 'inbound' | 'outbound' | 'unknown';
+
+export interface InboxThreadMessage {
+	id: string;
+	tenantId: string;
+	accountId: string;
+	threadKey: string;
+	messageId: string;
+	inReplyTo?: string | undefined;
+	fromAddress: string;
+	fromName?: string | undefined;
+	toJson?: string | undefined;
+	ccJson?: string | undefined;
+	subject: string;
+	bodyMd?: string | undefined;
+	mailDate?: string | undefined; // ISO
+	snippet?: string | undefined;
+	direction: InboxMessageDirection;
+	fetchedAt: string; // ISO
+	inboxItemId?: string | undefined;
+}
+
+export interface InboxThreadResponse {
+	messages: InboxThreadMessage[];
+	partial: boolean;
+}
+
+let selectedItemId = $state<string | null>(null);
+let selectedFull = $state<InboxItemFull | null>(null);
+let selectedThread = $state<InboxThreadResponse | null>(null);
+let loadingSelected = $state(false);
+
 export function getInboxCounts(): InboxCounts {
 	return counts;
 }
@@ -180,6 +229,100 @@ export function dismissColdStartForAccount(accountId: string): void {
 
 export function getLastAction(): UndoableAction | null {
 	return lastAction;
+}
+
+// ── Reclassification banner ─────────────────────────────────────────────────
+//
+// PRD-INBOX-PHASE-3 §"Re-Classification mid-read": when the background
+// classifier re-buckets items, show a banner with "N items moved, refresh?".
+// PR 3b ships the plumbing — `notifyReclassifyBatch` is called from a
+// future PR 3c signal source (classifier diff watcher). The banner UI in
+// InboxView reads `getReclassifyBanner()` and clears via dismiss/refresh.
+
+export interface ReclassifyBatch {
+	/** How many items moved buckets in this batch. */
+	count: number;
+	/** Stable per-batch id so a second dismissal doesn't suppress a later batch. */
+	batchId: string;
+}
+
+let reclassifyBanner = $state<ReclassifyBatch | null>(null);
+let dismissedReclassifyBatchIds = new Set<string>();
+
+export function getReclassifyBanner(): ReclassifyBatch | null {
+	return reclassifyBanner;
+}
+
+export function notifyReclassifyBatch(count: number, batchId: string): void {
+	if (count <= 0) return;
+	if (dismissedReclassifyBatchIds.has(batchId)) return;
+	reclassifyBanner = { count, batchId };
+}
+
+export function dismissReclassifyBanner(): void {
+	if (reclassifyBanner !== null) {
+		dismissedReclassifyBatchIds.add(reclassifyBanner.batchId);
+	}
+	reclassifyBanner = null;
+}
+
+// ── Reading-Pane store API ─────────────────────────────────────────────────
+
+export function getSelectedItemId(): string | null {
+	return selectedItemId;
+}
+
+export function getSelectedFull(): InboxItemFull | null {
+	return selectedFull;
+}
+
+export function getSelectedThread(): InboxThreadResponse | null {
+	return selectedThread;
+}
+
+export function isSelectedLoading(): boolean {
+	return loadingSelected;
+}
+
+/**
+ * Open an item in the Reading-Pane. Sets `selectedItemId` immediately so
+ * the pane can render a skeleton; fetches `/full` then `/thread` async.
+ * Last-write-wins on rapid clicks via the captured `requestId` guard so
+ * a slow `/full` for an earlier click can't overwrite the current view.
+ */
+let _openRequestId = 0;
+export async function openItem(id: string): Promise<void> {
+	const requestId = ++_openRequestId;
+	selectedItemId = id;
+	selectedFull = null;
+	selectedThread = null;
+	loadingSelected = true;
+	try {
+		const [fullRes, threadRes] = await Promise.all([
+			fetch(`${getApiBase()}/inbox/items/${encodeURIComponent(id)}/full`),
+			fetch(`${getApiBase()}/inbox/items/${encodeURIComponent(id)}/thread`),
+		]);
+		// Stale-response guard: a newer openItem() bumped the request id.
+		if (requestId !== _openRequestId) return;
+		if (fullRes.ok) {
+			selectedFull = (await fullRes.json()) as InboxItemFull;
+		}
+		if (threadRes.ok) {
+			selectedThread = (await threadRes.json()) as InboxThreadResponse;
+		}
+	} catch {
+		// Network error — pane will show its empty/error state via getters.
+	} finally {
+		if (requestId === _openRequestId) loadingSelected = false;
+	}
+}
+
+export function closeItem(): void {
+	selectedItemId = null;
+	selectedFull = null;
+	selectedThread = null;
+	loadingSelected = false;
+	_openRequestId += 1; // cancel any in-flight load
 }
 
 /** Load per-bucket counts. Returns false when the runtime is not wired (flag off). */
@@ -272,21 +415,33 @@ export async function setItemAction(
 	return true;
 }
 
+export type SnoozePreset = 'later_today' | 'tomorrow_morning' | 'monday_9am' | 'next_week';
+
 export async function setItemSnooze(
 	id: string,
 	until: Date | null,
 	condition?: string | null,
 	unsnoozeOnReply = true,
+	preset?: SnoozePreset | null,
 ): Promise<boolean> {
 	const found = findItemAcrossBuckets(id);
+	// When a preset is supplied the server resolves it timezone-aware;
+	// pass the user's browser timezone so the cap-at-23:00 (later_today)
+	// + next-Monday math anchors to the right wall clock.
+	const timezone = typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : undefined;
+	const body: Record<string, unknown> = {
+		until: until?.toISOString() ?? null,
+		condition: condition ?? null,
+		unsnoozeOnReply,
+	};
+	if (preset !== undefined && preset !== null) {
+		body['preset'] = preset;
+		if (timezone !== undefined) body['timezone'] = timezone;
+	}
 	const res = await fetch(`${getApiBase()}/inbox/items/${encodeURIComponent(id)}/snooze`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			until: until?.toISOString() ?? null,
-			condition: condition ?? null,
-			unsnoozeOnReply,
-		}),
+		body: JSON.stringify(body),
 	});
 	if (!res.ok) {
 		addToast(t('inbox.error_snooze'), 'error');
@@ -408,16 +563,42 @@ export async function runColdStartBackfillForAllAccounts(): Promise<number> {
 	return scheduled;
 }
 
+/**
+ * Listeners fired when a cold-start run completes — used by InboxView to
+ * auto-refresh the queue without the user having to click anything. Keyed
+ * by accountId so a second completion on the same account re-fires.
+ */
+const _coldStartCompletionListeners = new Set<(accountId: string) => void>();
+let _seenCompletedAccountKeys = new Set<string>();
+
+export function onColdStartCompletion(fn: (accountId: string) => void): () => void {
+	_coldStartCompletionListeners.add(fn);
+	return () => _coldStartCompletionListeners.delete(fn);
+}
+
 /** Fetch a single cold-start snapshot. Returns true on a successful fetch. */
 export async function loadColdStart(): Promise<boolean> {
 	try {
 		const res = await fetch(`${getApiBase()}/inbox/cold-start`);
 		if (!res.ok) return false;
 		const data = (await res.json()) as ColdStartSnapshot;
-		coldStart = {
+		const next: ColdStartSnapshot = {
 			active: Array.isArray(data.active) ? data.active : [],
 			recent: Array.isArray(data.recent) ? data.recent : [],
 		};
+		// PRD-3 §"Auto-Refresh on Cold-Start Complete": fire the listeners
+		// when a completed-entry first appears. Key by `${accountId}:${finishedAt}`
+		// (when present) so a re-run on the same account re-fires.
+		for (const entry of next.recent) {
+			const key = `${entry.accountId}:${entry.finishedAt ?? entry.status}`;
+			if (!_seenCompletedAccountKeys.has(key) && entry.status === 'completed') {
+				_seenCompletedAccountKeys.add(key);
+				for (const fn of _coldStartCompletionListeners) {
+					try { fn(entry.accountId); } catch { /* listener errors must not break polling */ }
+				}
+			}
+		}
+		coldStart = next;
 		return true;
 	} catch {
 		return false;

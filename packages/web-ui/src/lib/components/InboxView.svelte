@@ -3,15 +3,21 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import {
 		closeDraftPane,
+		closeItem,
+		dismissReclassifyBanner,
 		getDraftPane,
 		getInboxCounts,
 		getInboxItems,
 		getLastAction,
+		getReclassifyBanner,
+		getSelectedItemId,
 		isInboxAvailable,
 		isLoading,
 		loadInboxCounts,
 		loadInboxItems,
+		onColdStartCompletion,
 		openDraftPane,
+		openItem,
 		runColdStartBackfillForAllAccounts,
 		setItemAction,
 		setItemSnooze,
@@ -27,6 +33,7 @@
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 	import ColdStartBanner from './ColdStartBanner.svelte';
 	import DraftReplyPane from './DraftReplyPane.svelte';
+	import InboxReadingPane from './InboxReadingPane.svelte';
 	import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.svelte';
 
 	let zone = $state<InboxBucket>('requires_user');
@@ -41,6 +48,7 @@
 
 	let cleanupVisibility: (() => void) | undefined;
 	let cleanupColdStart: (() => void) | undefined;
+	let cleanupColdStartListener: (() => void) | undefined;
 	let cleanupKeyHandler: (() => void) | undefined;
 
 	onMount(async () => {
@@ -49,6 +57,13 @@
 		// Polling starts unconditionally so a late flag-flip still surfaces the
 		// banner; the endpoint returns 503 + empty snapshot while disabled.
 		cleanupColdStart = startColdStartPolling();
+		// Auto-refresh the queue when a cold-start run completes (PRD-3 §"Auto-Refresh
+		// on Cold-Start Complete"). Idempotent reloads; brief flicker is acceptable
+		// for the "your inbox just filled up" moment.
+		cleanupColdStartListener = onColdStartCompletion(() => {
+			void loadInboxCounts();
+			void loadInboxItems(zone);
+		});
 		cleanupVisibility = startInboxVisibilityRefresh();
 		// Skip the listener entirely on touch-primary devices — the help
 		// affordance is keyboard-only and the events would be dead weight.
@@ -61,6 +76,7 @@
 	onDestroy(() => {
 		cleanupVisibility?.();
 		cleanupColdStart?.();
+		cleanupColdStartListener?.();
 		cleanupKeyHandler?.();
 	});
 
@@ -236,14 +252,22 @@
 			?? getInboxItems('auto_handled').find((i) => i.id === pane.itemId)
 			?? null;
 	});
+
+	const readingOpen = $derived(getSelectedItemId() !== null);
 </script>
 
+<!-- Two-pane layout (PR 3b §Architecture):
+     - <md (mobile): the list takes the full screen; clicking an item swaps in
+       the ReadingPane (full-screen), back-button (showBack) closes back to list.
+     - ≥md: list = 30% left column, reading-pane = 70% right column. Reading-pane
+       shows an empty-state until an item is selected.
+     The 25/40/35 three-pane split with the Mail-Context-Sidebar lands in Phase 4. -->
+<div class="flex h-full" role="region" aria-label={t('inbox.title')}>
 <div
-	class="p-4 sm:p-6 max-w-3xl mx-auto pb-[max(1rem,env(safe-area-inset-bottom))]"
-	role="region"
-	aria-label={t('inbox.title')}
+	class="{readingOpen ? 'hidden md:flex' : 'flex'} flex-col md:w-[30%] xl:w-[30%] md:border-r md:border-border min-w-0 overflow-y-auto"
 	aria-live="polite"
 >
+<div class="p-4 sm:p-6 pb-[max(1rem,env(safe-area-inset-bottom))]">
 	<div class="flex items-center justify-between flex-wrap gap-y-2 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('inbox.title')}</h1>
 		<div class="flex items-center gap-3 flex-wrap">
@@ -268,7 +292,34 @@
 		</div>
 	{:else}
 		{@const counts = getInboxCounts()}
+		{@const reclassifyBanner = getReclassifyBanner()}
 		<ColdStartBanner />
+		{#if reclassifyBanner}
+			<div
+				class="mb-3 flex items-center justify-between gap-2 rounded-[var(--radius-md)] border border-accent bg-accent/5 px-3 py-2 text-[12px] text-text"
+				role="status"
+				aria-live="polite"
+			>
+				<span>{t('inbox.reclassify_banner_text').replace('{count}', String(reclassifyBanner.count))}</span>
+				<div class="flex items-center gap-1.5">
+					<button
+						type="button"
+						class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text"
+						onclick={() => {
+							void loadInboxCounts();
+							void loadInboxItems(zone);
+							dismissReclassifyBanner();
+						}}
+					>{t('inbox.reclassify_banner_refresh')}</button>
+					<button
+						type="button"
+						class="rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-text-subtle hover:text-text"
+						onclick={() => dismissReclassifyBanner()}
+						aria-label={t('inbox.reclassify_banner_dismiss')}
+					>×</button>
+				</div>
+			</div>
+		{/if}
 		<div
 			class="flex gap-1 mb-4 overflow-x-auto scrollbar-none -mx-4 px-4 py-1 sm:mx-0 sm:px-0"
 			role="tablist"
@@ -349,7 +400,15 @@
 							class="rounded-[var(--radius-md)] border bg-bg-subtle px-4 py-3 transition-colors {zone === 'requires_user' && selectedItemId === item.id ? 'border-accent' : 'border-border'}"
 						>
 							<div class="flex items-start justify-between gap-3">
-								<div class="min-w-0 flex-1">
+								<button
+									type="button"
+									class="min-w-0 flex-1 text-left cursor-pointer"
+									onclick={() => {
+										selectedItemId = item.id;
+										void openItem(item.id);
+									}}
+									aria-label={`${t('inbox.reading_open')}: ${item.subject || item.reasonDe}`}
+								>
 									<div class="flex items-center justify-between gap-2 mb-0.5">
 										<span class="text-sm text-text truncate" title={item.fromAddress || item.accountId}>
 											{item.fromName || item.fromAddress || accountShortLabel(item.accountId)}
@@ -374,7 +433,7 @@
 											⚠ {t('inbox.action_reply')}
 										</p>
 									{/if}
-								</div>
+								</button>
 								{#if zone === 'requires_user' && !item.userAction}
 									<div class="flex items-center gap-1 shrink-0">
 										<button
@@ -411,6 +470,21 @@
 			{/if}
 		{/if}
 	{/if}
+		</div>
+	</div>
+	<!-- Reading-pane column -->
+	<div
+		class="{readingOpen ? 'flex' : 'hidden md:flex'} flex-1 flex-col min-w-0 overflow-hidden"
+	>
+		<InboxReadingPane
+			onReply={(item) => void openDraftPane(item.id)}
+			onActionApplied={() => {
+				void loadInboxCounts();
+				void loadInboxItems(zone);
+			}}
+			showBack
+		/>
+	</div>
 </div>
 
 <KeyboardShortcutsHelp open={helpOpen} onClose={() => (helpOpen = false)} />

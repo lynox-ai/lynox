@@ -21,6 +21,7 @@ import {
   handleGetItemFull,
   handleGetItemThread,
   handleListItems,
+  resolveSnoozePreset,
   handleListRules,
   handleResolveContact,
   handleSetAction,
@@ -490,6 +491,100 @@ describe('handleSetSnooze', () => {
 
   it('returns 404 for unknown id', () => {
     expect(handleSetSnooze(deps, 'nope', { until: null }).status).toBe(404);
+  });
+
+  it('resolves preset=tomorrow_morning to 09:00 local in target timezone', () => {
+    const id = insertItem();
+    const r = handleSetSnooze(deps, id, {
+      until: null,
+      preset: 'tomorrow_morning',
+      timezone: 'Europe/Zurich',
+    });
+    expect(r.status).toBe(200);
+    const item = state.getItem(id);
+    expect(item?.snoozeUntil).toBeDefined();
+    // The exact value depends on "now", but the hour-component in target tz
+    // must be 09:00 — verified via Intl.DateTimeFormat reciprocal.
+    const localHour = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Zurich',
+      hour: 'numeric',
+      hour12: false,
+    }).format(item!.snoozeUntil!);
+    expect(localHour).toBe('09');
+  });
+
+  it('preset wins over explicit until when both provided', () => {
+    const id = insertItem();
+    const r = handleSetSnooze(deps, id, {
+      until: '2026-05-15T00:00:00Z',
+      preset: 'tomorrow_morning',
+      timezone: 'Europe/Zurich',
+    });
+    expect(r.status).toBe(200);
+    const item = state.getItem(id);
+    // Preset resolves to local 09:00 of tomorrow, not the 2026-05-15 we passed.
+    expect(item?.snoozeUntil?.toISOString()).not.toBe('2026-05-15T00:00:00.000Z');
+  });
+
+  it('rejects an unknown preset', () => {
+    const id = insertItem();
+    const r = handleSetSnooze(deps, id, {
+      until: null,
+      preset: 'next_year' as never,
+      timezone: 'Europe/Zurich',
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('resolveSnoozePreset: later_today caps at 23:00 local', () => {
+    // Synthetic "now" at 21:30 local in Zurich. +3h would be 00:30 next day,
+    // but the cap is 23:00 local same day.
+    const now = new Date('2026-05-12T19:30:00Z'); // 21:30 in CEST (UTC+2)
+    const result = resolveSnoozePreset('later_today', now, 'Europe/Zurich');
+    const localHour = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Zurich',
+      hour: 'numeric',
+      hour12: false,
+    }).format(result);
+    expect(localHour).toBe('23');
+  });
+
+  it('resolveSnoozePreset: next_week is exactly 7 days later at 09:00 local', () => {
+    const now = new Date('2026-05-12T10:00:00Z');
+    const result = resolveSnoozePreset('next_week', now, 'Europe/Zurich');
+    const daysDiff = Math.round((result.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
+    expect(daysDiff).toBe(7);
+    const localHour = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Zurich',
+      hour: 'numeric',
+      hour12: false,
+    }).format(result);
+    expect(localHour).toBe('09');
+  });
+
+  it('resolveSnoozePreset: monday_9am when today IS Monday after 09:00 advances 7 days', () => {
+    // 2026-05-11 is a Monday. 14:00Z = 16:00 CEST (after 9am).
+    const monMorningPast = new Date('2026-05-11T14:00:00Z');
+    const result = resolveSnoozePreset('monday_9am', monMorningPast, 'Europe/Zurich');
+    const daysDiff = Math.round((result.getTime() - monMorningPast.getTime()) / (24 * 60 * 60 * 1000));
+    expect(daysDiff).toBeGreaterThanOrEqual(6);
+    expect(daysDiff).toBeLessThanOrEqual(7);
+    const localHour = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Zurich',
+      hour: 'numeric',
+      hour12: false,
+    }).format(result);
+    expect(localHour).toBe('09');
+  });
+
+  it('rejects an invalid timezone string (would otherwise throw RangeError 500)', () => {
+    const id = insertItem();
+    const r = handleSetSnooze(deps, id, {
+      until: null,
+      preset: 'tomorrow_morning',
+      timezone: 'Not/A_Real_Zone',
+    });
+    expect(r.status).toBe(400);
   });
 });
 
