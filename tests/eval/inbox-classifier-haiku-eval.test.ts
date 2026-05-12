@@ -51,5 +51,5 @@ describeOrSkip('inbox-classifier eval (Anthropic Haiku)', () => {
     console.log('\n=== HAIKU ===\n' + formatReport(report) + '\n');
     expect(report.bucketMatchPct).toBeGreaterThanOrEqual(PASS_THRESHOLD_PCT);
     expect(report.missedRequiresUser).toBe(0);
-  }, 5 * 60 * 1000);
+  }, 15 * 60 * 1000);
 });

@@ -44,7 +44,7 @@ interface Category {
 const CATEGORIES: ReadonlyArray<Category> = [
   {
     id: 'newsletter',
-    count: 20,
+    count: 60,
     hintBucket: 'auto_handled',
     language: 'mixed',
     prompt:
@@ -52,7 +52,7 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'receipt',
-    count: 15,
+    count: 50,
     hintBucket: 'auto_handled',
     language: 'mixed',
     prompt:
@@ -60,7 +60,7 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'shipping-confirmation',
-    count: 10,
+    count: 35,
     hintBucket: 'auto_handled',
     language: 'mixed',
     prompt:
@@ -68,7 +68,7 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'invoice-due',
-    count: 15,
+    count: 55,
     hintBucket: 'requires_user',
     language: 'mixed',
     prompt:
@@ -76,7 +76,7 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'customer-question',
-    count: 15,
+    count: 55,
     hintBucket: 'requires_user',
     language: 'mixed',
     prompt:
@@ -84,7 +84,7 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'colleague-question',
-    count: 10,
+    count: 35,
     hintBucket: 'requires_user',
     language: 'mixed',
     prompt:
@@ -92,7 +92,7 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'payment-failed',
-    count: 5,
+    count: 25,
     hintBucket: 'requires_user',
     language: 'mixed',
     prompt:
@@ -100,7 +100,7 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'meeting-request',
-    count: 10,
+    count: 40,
     hintBucket: 'draft_ready',
     language: 'mixed',
     prompt:
@@ -108,7 +108,7 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'clarifying-question',
-    count: 10,
+    count: 35,
     hintBucket: 'draft_ready',
     language: 'mixed',
     prompt:
@@ -116,11 +116,36 @@ const CATEGORIES: ReadonlyArray<Category> = [
   },
   {
     id: 'info-share',
-    count: 10,
+    count: 40,
     hintBucket: 'draft_ready',
     language: 'mixed',
     prompt:
       'Info-Mail mit Status-Update / Heads-up, die eine kurze Bestätigung erwartet („Danke, gemerkt"). Body 80-180 Zeichen. Fiktive Namen.',
+  },
+  // === Expansion 2026-05-12 — corpus breadth for ≥500-fixture signal ===
+  {
+    id: 'forwarded-thread',
+    count: 30,
+    hintBucket: 'requires_user',
+    language: 'mixed',
+    prompt:
+      'Eine WEITERGELEITETE Mail-Konversation (Subject mit „Fwd:" / „WG:"). Body enthält Original-Mail im Anhang (-----Original Message-----) und einen kurzen Lead-In wie „FYI, dachte das wäre für dich relevant" oder „Was meinst du dazu?". Manche brauchen eine Entscheidung, manche sind reines FYI. Fiktive Namen.',
+  },
+  {
+    id: 'urgent-deadline',
+    count: 25,
+    hintBucket: 'requires_user',
+    language: 'mixed',
+    prompt:
+      'Mail mit klarer Deadline-Sprache („dringend", „bis EOD", „bis morgen 10 Uhr", „URGENT — please reply by ..."). Body verlangt eine konkrete Aktion oder Entscheidung innerhalb der Frist. Absender ist Person oder Vorgesetzter (nicht Marketing). Fiktive Namen.',
+  },
+  {
+    id: 'out-of-office',
+    count: 20,
+    hintBucket: 'auto_handled',
+    language: 'mixed',
+    prompt:
+      'Automatische Abwesenheitsnotiz / Out-of-office-Reply. Body sagt „Ich bin bis [Datum] nicht erreichbar, in dringenden Fällen kontaktieren Sie [Vertretung]". Keine Aktion erforderlich — die ursprüngliche Mail bleibt unbeantwortet, aber DIESE Mail ist nur eine Bestätigung der Abwesenheit. Auto_handled.',
   },
 ];
 
@@ -164,7 +189,7 @@ async function generateBatch(
   n: number,
 ): Promise<GenMail[]> {
   const user = `Generiere ${n} Mails dieser Kategorie:\n\n${category.prompt}\n\nSprache: ${category.language === 'mixed' ? 'mische DE und EN (~50/50)' : category.language}. Body 40-220 Zeichen. Jede Mail muss subject, fromAddress, fromName, body, language haben.`;
-  const raw = await llm({ system: PHASE1_SYSTEM, user });
+  const raw = await withRateLimitRetry(() => llm({ system: PHASE1_SYSTEM, user }));
   try {
     const parsed = JSON.parse(raw) as { mails?: unknown };
     if (!Array.isArray(parsed.mails)) return [];
@@ -209,12 +234,36 @@ interface Label {
   category: string;
 }
 
+/**
+ * Wrap an LLM call in 429-aware retry with exponential backoff. Mistral
+ * caps free-tier RPM aggressively; on a 505-fixture corpus the labeler
+ * will hit the cap after ~80-100 sequential calls. Each 429 = wait 30s
+ * × attempt-number, then try again. Hard limit 6 attempts (≈3 min
+ * cumulative wait) before giving up on that one call.
+ */
+async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+  const maxAttempts = 6;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('429') && !msg.toLowerCase().includes('rate')) throw err;
+      if (attempt === maxAttempts) throw err;
+      const waitMs = 30_000 * attempt;
+      process.stdout.write(`  rate-limited, backing off ${waitMs / 1000}s (attempt ${attempt}/${maxAttempts})…\n`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  throw new Error('unreachable');
+}
+
 async function labelMail(
   llm: ReturnType<typeof createMistralEuLLMCaller>,
   mail: GenMail,
 ): Promise<Label | null> {
   const user = `Absender: ${mail.fromName} <${mail.fromAddress}>\nBetreff: ${mail.subject}\nBody:\n${mail.body}`;
-  const raw = await llm({ system: PHASE2_SYSTEM, user });
+  const raw = await withRateLimitRetry(() => llm({ system: PHASE2_SYSTEM, user }));
   try {
     const parsed = JSON.parse(raw) as { bucket?: unknown; category?: unknown };
     if (parsed.bucket !== 'requires_user' && parsed.bucket !== 'draft_ready' && parsed.bucket !== 'auto_handled') {
@@ -286,6 +335,9 @@ async function main(): Promise<void> {
       body: mail.body,
     });
     if ((i + 1) % 10 === 0) process.stdout.write(`  ${i + 1}/${allMails.length}\n`);
+    // Inter-call throttle so we stay under Mistral's free-tier RPM
+    // even before the 429-retry kicks in. 250ms × 505 ≈ +2min total.
+    await new Promise((r) => setTimeout(r, 250));
   }
 
   const corpus = {

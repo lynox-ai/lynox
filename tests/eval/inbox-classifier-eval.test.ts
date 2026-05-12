@@ -52,5 +52,5 @@ describeOrSkip('inbox-classifier eval (Mistral EU)', () => {
     // as auto_handled is a missed mail (unrepairable). The reverse —
     // auto_handled mail landing in requires_user — is one extra click.
     expect(report.missedRequiresUser).toBe(0);
-  }, 5 * 60 * 1000);
+  }, 15 * 60 * 1000);
 });

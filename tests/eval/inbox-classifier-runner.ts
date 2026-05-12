@@ -137,10 +137,29 @@ export async function runInboxEval(
     let predicted: InboxBucket;
     let confidence: number;
     try {
-      const verdict = await classifyMail(input, llm, {
-        signal: controller.signal,
-        ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
-      });
+      // 429-retry wrapper — Mistral free-tier RPM kicks in around 80-100
+      // sequential calls. Without retry, a 505-fixture run loses ~10% to
+      // rate-limits and the fail-closed branch below pollutes the matrix
+      // (predicts requires_user for what should have been auto_handled,
+      // inflating auto_handled_noise). 6 attempts × 30s × attempt = up
+      // to ~3 min cumulative wait per fixture before giving up.
+      const verdict = await (async () => {
+        const maxAttempts = 6;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          try {
+            return await classifyMail(input, llm, {
+              signal: controller.signal,
+              ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+            });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!msg.includes('429') && !msg.toLowerCase().includes('rate')) throw err;
+            if (attempt === maxAttempts) throw err;
+            await new Promise((r) => setTimeout(r, 30_000 * attempt));
+          }
+        }
+        throw new Error('unreachable');
+      })();
       predicted = verdict.bucket;
       confidence = verdict.confidence;
     } catch (err) {
