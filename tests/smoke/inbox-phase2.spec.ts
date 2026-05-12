@@ -10,23 +10,21 @@ function mintSessionCookie(secret: string): string {
   return `${ts}.${sig}`;
 }
 
-test.describe('Unified Inbox Phase 2 smoke', () => {
-  // One cookie per worker is plenty — the HMAC has a 7-day TTL on the server
-  // and a smoke run takes seconds.
-  const COOKIE_VALUE = mintSessionCookie(SMOKE_SECRET);
+// One cookie per worker is plenty — the HMAC has a 7-day TTL on the server
+// and a smoke run takes seconds.
+const COOKIE_VALUE = mintSessionCookie(SMOKE_SECRET);
 
-  test.beforeEach(async ({ context, baseURL }) => {
-    const host = new URL(baseURL ?? 'http://localhost:3333').hostname;
-    await context.addCookies([{
-      name: 'lynox_session',
-      value: COOKIE_VALUE,
-      domain: host,
-      path: '/',
-      httpOnly: false,
-      secure: false,
-      sameSite: 'Lax',
-    }]);
-  });
+// Set the cookie via extraHTTPHeaders so it applies to BOTH the page-context
+// (browser navigation tests) AND the standalone `request` fixture
+// (APIRequestContext). context.addCookies() alone does NOT propagate to
+// `request`, which silently 401'd every API smoke before this fix.
+test.use({
+  extraHTTPHeaders: {
+    Cookie: `lynox_session=${COOKIE_VALUE}`,
+  },
+});
+
+test.describe('Unified Inbox Phase 2 smoke', () => {
 
   test('GET /api/inbox/counts returns the three-zone shape', async ({ request }) => {
     const res = await request.get('/api/inbox/counts');
