@@ -85,3 +85,48 @@ jobs:
           format: table
           exit-code: 1
           severity: CRITICAL
+
+  # Live IMAPS/SMTPS integration tests against a real GreenMail container.
+  # In the `test` job above these silently skip (describe.skipIf when the TCP
+  # probe fails), so a regression in ImapSmtpProvider or the inbox runtime
+  # would never trip CI. This job boots GreenMail in the runner, waits for
+  # IMAPS, and runs the two greenmail spec files explicitly. Separate from
+  # `test` so coverage data stays single-source and a flaky mail-server boot
+  # doesn't taint the main coverage gate.
+  greenmail:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@v6
+        with: { version: '10' }
+      - run: pnpm install --frozen-lockfile
+
+      - name: Start GreenMail
+        run: |
+          docker run --rm -d --name lynox-greenmail \
+            -p 3025:3025 -p 3143:3143 -p 3465:3465 -p 3993:3993 -p 8080:8080 \
+            -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled' \
+            greenmail/standalone:2.1.8
+
+      - name: Wait for IMAPS to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 3993 2>/dev/null; then
+              echo "GreenMail IMAPS ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "FAIL: GreenMail never became reachable"
+          docker logs lynox-greenmail 2>&1 | tail -40
+          exit 1
+
+      - name: Run greenmail integration suite
+        run: pnpm exec vitest run tests/integration/mail-greenmail.test.ts tests/integration/mail-greenmail-adversarial.test.ts
+
+      - name: Stop GreenMail
+        if: always()
+        run: docker rm -f lynox-greenmail 2>/dev/null || true
