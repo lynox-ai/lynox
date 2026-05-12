@@ -136,6 +136,66 @@ export function handleGetItem(deps: InboxApiDeps, id: string): ApiResponse {
   return item ? { status: 200, body: { item } } : notFound('item');
 }
 
+/**
+ * Reading-pane backing endpoint (PRD-INBOX-PHASE-3 §Reading-Pane).
+ *
+ * Body resolution prefers the v12 `inbox_thread_messages` row matching
+ * the item's `messageId`; falls back to the v10 `inbox_item_bodies`
+ * cache for pre-v12 rows. `source: 'missing'` covers the
+ * sensitive-skip path that leaves both empty — UI surfaces an "ask
+ * the assistant" hint instead of triggering a provider fetch (round-2
+ * review dropped `/body/fetch` as a DoS vector).
+ */
+export function handleGetItemFull(deps: InboxApiDeps, id: string): ApiResponse {
+  const item = deps.state.getItem(id);
+  if (!item) return notFound('item');
+  let body: { md: string; source: 'cache' | 'missing'; fetchedAt?: string };
+  const tm = item.messageId !== undefined && item.messageId.length > 0
+    ? deps.state.getThreadMessageByMessageId(item.accountId, item.messageId, item.tenantId)
+    : null;
+  if (tm !== null && tm.bodyMd !== undefined && tm.bodyMd.length > 0) {
+    body = { md: tm.bodyMd, source: 'cache', fetchedAt: tm.fetchedAt.toISOString() };
+  } else {
+    const legacy = deps.state.getItemBody(id);
+    body = legacy
+      ? { md: legacy.bodyMd, source: 'cache', fetchedAt: legacy.fetchedAt.toISOString() }
+      : { md: '', source: 'missing' };
+  }
+  return { status: 200, body: { item, body } };
+}
+
+/**
+ * Thread-history endpoint (PRD-INBOX-PHASE-3 §Reading-Pane + Thread API).
+ *
+ * Reads from v12 `inbox_thread_messages` (one row per mail, many per
+ * thread). Order is newest-first by `mail_date`. `partial: true` when
+ * the item's `in_reply_to` references a parent message we do not have
+ * a row for — the UI shows a follow-up hint instead of pretending the
+ * thread is complete.
+ */
+export function handleGetItemThread(
+  deps: InboxApiDeps,
+  id: string,
+  opts: { limit?: number | undefined } = {},
+): ApiResponse {
+  const item = deps.state.getItem(id);
+  if (!item) return notFound('item');
+  const messages = deps.state.listThreadMessages(item.accountId, item.threadKey, {
+    tenantId: item.tenantId,
+    ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+  });
+  // partial=true when in_reply_to references a parent message we have
+  // no thread_messages row for — the UI shows a follow-up hint. Look
+  // the parent up directly so a limit-truncated message list never
+  // false-positives partial.
+  let partial = false;
+  if (item.inReplyTo !== undefined && item.inReplyTo.length > 0) {
+    const parent = deps.state.getThreadMessageByMessageId(item.accountId, item.inReplyTo, item.tenantId);
+    partial = parent === null;
+  }
+  return { status: 200, body: { messages, partial } };
+}
+
 export function handleListItemAudit(deps: InboxApiDeps, id: string): ApiResponse {
   if (!deps.state.getItem(id)) return notFound('item');
   return { status: 200, body: { entries: deps.state.listAuditForItem(id) } };

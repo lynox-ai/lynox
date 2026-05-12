@@ -398,6 +398,56 @@ const MIGRATIONS: string[] = [
      ON inbox_user_action_log(bulk_id) WHERE undone_at IS NULL;
    CREATE INDEX IF NOT EXISTS idx_user_action_log_active
      ON inbox_user_action_log(performed_at DESC) WHERE undone_at IS NULL;`,
+
+  // v12: Per-message thread storage for the Reading-Pane (PRD-INBOX-PHASE-3
+  // §"Reading-Pane + Thread API" reconciliation).
+  //
+  // The v8 UNIQUE(tenant_id, account_id, thread_key) constraint on
+  // `inbox_items` means each thread maps to exactly one row — the
+  // "thread = unit of decision" contract from Phase 1a. Thread-history
+  // for the Reading-Pane needs a different shape: many rows per thread,
+  // one per individual mail. This sibling table provides that. inbox_items
+  // stays the decision queue (unchanged); inbox_thread_messages is the
+  // per-message log the Reading-Pane reads from.
+  //
+  // Writers: watcher-hook (rule fast-path, sensitive-skip), runner.onSuccess,
+  // runner.onDeadLetter, backfill-metadata, and (Phase 4) send-core after
+  // provider.send. `direction` discriminates inbound vs outbound at the
+  // row level so the Reading-Pane can render both sides of a thread.
+  //
+  // FK direction matches v9's inbound pattern (CASCADE on mail_account
+  // delete via application-level cleanup; SET NULL on inbox_item delete
+  // so the message survives a queue purge but loses its decision-row
+  // link — auditable and queryable).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (12);
+
+   CREATE TABLE IF NOT EXISTS inbox_thread_messages (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     account_id TEXT NOT NULL,
+     thread_key TEXT NOT NULL,
+     message_id TEXT NOT NULL,
+     in_reply_to TEXT,
+     from_address TEXT NOT NULL,
+     from_name TEXT,
+     to_json TEXT,
+     cc_json TEXT,
+     subject TEXT NOT NULL,
+     body_md TEXT,
+     mail_date INTEGER,
+     snippet TEXT,
+     direction TEXT NOT NULL DEFAULT 'inbound',
+     fetched_at INTEGER NOT NULL,
+     inbox_item_id TEXT,
+     FOREIGN KEY (inbox_item_id) REFERENCES inbox_items(id) ON DELETE SET NULL
+   );
+
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_messages_msgid
+     ON inbox_thread_messages(tenant_id, account_id, message_id);
+   CREATE INDEX IF NOT EXISTS idx_thread_messages_thread
+     ON inbox_thread_messages(tenant_id, account_id, thread_key, mail_date DESC);
+   CREATE INDEX IF NOT EXISTS idx_thread_messages_item
+     ON inbox_thread_messages(inbox_item_id);`,
 ];
 
 export interface MailStateDbOptions {

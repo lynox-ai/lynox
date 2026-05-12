@@ -304,7 +304,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(11);
+    expect(row.v).toBe(12);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -422,6 +422,7 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
       'inbox_item_bodies',
       'inbox_items',
       'inbox_rules',
+      'inbox_thread_messages',
       'inbox_user_action_log',
     ]);
   });
@@ -583,5 +584,69 @@ describe('MailStateDb — migration v11 (UX-Complete inbox foundation)', () => {
       .get() as { from_address: string; subject: string };
     expect(row.from_address).toBe('');
     expect(row.subject).toBe('');
+  });
+});
+
+describe('MailStateDb — migration v12 (inbox_thread_messages)', () => {
+  function inner(state: MailStateDb): import('better-sqlite3').Database {
+    return (state as unknown as { db: import('better-sqlite3').Database }).db;
+  }
+
+  it('creates inbox_thread_messages with the expected columns', () => {
+    const cols = inner(db)
+      .prepare(`PRAGMA table_info(inbox_thread_messages)`)
+      .all() as ReadonlyArray<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    for (const expected of [
+      'id',
+      'tenant_id',
+      'account_id',
+      'thread_key',
+      'message_id',
+      'in_reply_to',
+      'from_address',
+      'from_name',
+      'to_json',
+      'cc_json',
+      'subject',
+      'body_md',
+      'mail_date',
+      'snippet',
+      'direction',
+      'fetched_at',
+      'inbox_item_id',
+    ]) {
+      expect(names.has(expected)).toBe(true);
+    }
+  });
+
+  it('UNIQUE(tenant_id, account_id, message_id) prevents duplicate inserts', () => {
+    inner(db).prepare(`INSERT INTO mail_accounts
+        (id, display_name, address, preset, imap_host, imap_port, smtp_host, smtp_port, type, auth_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('acct-v12', 'Test', 'test@example.com', 'custom', 'imap.x', 993, 'smtp.x', 465, 'personal', 'imap');
+    inner(db)
+      .prepare(
+        `INSERT INTO inbox_thread_messages (id, account_id, thread_key, message_id, from_address, subject, direction, fetched_at)
+         VALUES ('itm-1', 'acct-v12', 'thr-1', '<msg-1@x>', 'a@x', 's', 'inbound', 0)`,
+      )
+      .run();
+    expect(() => {
+      inner(db)
+        .prepare(
+          `INSERT INTO inbox_thread_messages (id, account_id, thread_key, message_id, from_address, subject, direction, fetched_at)
+           VALUES ('itm-2', 'acct-v12', 'thr-1', '<msg-1@x>', 'a@x', 's', 'inbound', 0)`,
+        )
+        .run();
+    }).toThrow(/UNIQUE/);
+  });
+
+  it('idx_thread_messages_thread index exists for newest-first reads', () => {
+    const indexes = inner(db)
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type='index' AND name = 'idx_thread_messages_thread'`,
+      )
+      .all() as ReadonlyArray<{ name: string }>;
+    expect(indexes).toHaveLength(1);
   });
 });

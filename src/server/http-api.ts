@@ -3428,6 +3428,24 @@ export class LynoxHTTPApi {
       sendInbox(res, handleGetItem(deps!, params['id']!));
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/full', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetItemFull } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleGetItemFull(deps!, params['id']!));
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/thread', async (req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetItemThread } = await import('../integrations/inbox/api.js');
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limitRaw = url.searchParams.get('limit');
+      const parsedLimit = limitRaw !== null ? Number.parseInt(limitRaw, 10) : NaN;
+      const opts = Number.isFinite(parsedLimit) && parsedLimit > 0 ? { limit: parsedLimit } : {};
+      sendInbox(res, handleGetItemThread(deps!, params['id']!, opts));
+    }));
+
     this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/audit', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
