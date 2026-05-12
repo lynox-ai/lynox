@@ -544,8 +544,13 @@
 
 			<!-- Bottom: Settings + Sign out. Two-up row so both stay in the same
 				 visual zone but Sign out gets its own icon target (was previously
-				 in the chat header bar, an awkward spot for an account action). -->
-			<div class="border-t border-border px-3 py-3" style="padding-bottom: env(safe-area-inset-bottom, 0.75rem);">
+				 in the chat header bar, an awkward spot for an account action).
+				 We deliberately do NOT pad to `env(safe-area-inset-bottom)` —
+				 it produced ~34px of empty space on iPhone below the row that
+				 the user perceived as a layout bug. The Home Indicator zone is
+				 reserved for system gestures but not off-limits; the Settings
+				 link's tap target still sits above the indicator bar. -->
+			<div class="border-t border-border px-3 py-3">
 				<div class="flex items-center gap-1">
 					<a
 						href="/app/settings"

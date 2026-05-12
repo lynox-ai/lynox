@@ -244,8 +244,12 @@
 	{/if}
 {/snippet}
 
-<!-- Mobile: minimal engine indicator + voice auto-send + auto-speak toggles -->
-<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2 pb-[env(safe-area-inset-bottom)]">
+<!-- Mobile: minimal engine indicator + voice auto-send + auto-speak toggles.
+	Previously added `pb-[env(safe-area-inset-bottom)]` (~34px on iPhone) which
+	produced wasted black space below the status text. The iOS Home Indicator
+	bar visually overlaps the bottom edge now, but the status text sits above
+	the indicator and stays legible. -->
+<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2">
 	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
@@ -259,8 +263,10 @@
 	{@render autoSpeakBtn()}
 </div>
 
-<!-- Desktop: full status bar -->
-<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle min-h-8 px-1 pb-[env(safe-area-inset-bottom)] overflow-x-auto scrollbar-none">
+<!-- Desktop: full status bar. No safe-area-inset — desktop has no Home Indicator
+	zone, and adding the env() call still consumed a few px on browsers that
+	report a non-zero value for the gesture pad (some macOS Safari builds). -->
+<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle min-h-8 px-1 overflow-x-auto scrollbar-none">
 	<!-- Engine Status (clickable) -->
 	<button onclick={togglePanel} class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
