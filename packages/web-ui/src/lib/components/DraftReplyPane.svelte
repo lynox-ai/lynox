@@ -432,30 +432,36 @@
 				{/if}
 			</div>
 
-			<footer class="px-5 pt-3 pb-2 border-t border-border flex flex-wrap items-center justify-between gap-2">
-				<div class="flex flex-wrap items-center gap-1.5">
-					{#each [
-						{ tone: 'shorter', label: 'inbox.draft_tone_shorter' },
-						{ tone: 'formal', label: 'inbox.draft_tone_formal' },
-						{ tone: 'warmer', label: 'inbox.draft_tone_warmer' },
-						{ tone: 'regenerate', label: 'inbox.draft_regenerate' },
-					] as const as opt (opt.tone)}
-						<button
-							type="button"
-							onclick={() => onToneClick(opt.tone)}
-							disabled={pane.generating || pane.draft === null}
-							class="rounded-[var(--radius-sm)] border border-border bg-bg hover:border-border-hover hover:text-text px-3 py-1.5 text-[12px] text-text-muted min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
-						>{t(opt.label)}</button>
-					{/each}
+			<footer class="px-5 pt-3 pb-2 border-t border-border">
+				<!-- Tone buttons in a horizontally scrolling row on mobile so they stay
+					on ONE line instead of wrapping to multiple rows (used to eat ~3 rows
+					of vertical space on iPhone). Send button on its own line below for
+					tap accuracy. On sm+ everything goes on one line like before. -->
+				<div class="flex sm:flex-row flex-col gap-2 sm:items-center sm:justify-between">
+					<div class="flex items-center gap-1.5 overflow-x-auto scrollbar-none -mx-1 px-1 sm:overflow-visible">
+						{#each [
+							{ tone: 'shorter', label: 'inbox.draft_tone_shorter' },
+							{ tone: 'formal', label: 'inbox.draft_tone_formal' },
+							{ tone: 'warmer', label: 'inbox.draft_tone_warmer' },
+							{ tone: 'regenerate', label: 'inbox.draft_regenerate' },
+						] as const as opt (opt.tone)}
+							<button
+								type="button"
+								onclick={() => onToneClick(opt.tone)}
+								disabled={pane.generating || pane.draft === null}
+								class="shrink-0 rounded-[var(--radius-sm)] border border-border bg-bg hover:border-border-hover hover:text-text px-3 py-1.5 text-[12px] text-text-muted min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
+							>{t(opt.label)}</button>
+						{/each}
+					</div>
+					<button
+						type="button"
+						onclick={() => void onSendClick()}
+						disabled={sending || pane.draft === null || pane.generating}
+						title={sendLabel}
+						aria-label={sendLabel}
+						class="w-full sm:w-auto rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
+					>{sending ? t('inbox.draft_send_in_flight') : t('inbox.draft_send')} ⌘↵</button>
 				</div>
-				<button
-					type="button"
-					onclick={() => void onSendClick()}
-					disabled={sending || pane.draft === null || pane.generating}
-					title={sendLabel}
-					aria-label={sendLabel}
-					class="rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
-				>{sending ? t('inbox.draft_send_in_flight') : t('inbox.draft_send')} ⌘↵</button>
 			</footer>
 		</div>
 	</div>
