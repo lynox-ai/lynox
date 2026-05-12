@@ -834,7 +834,11 @@ export class InboxStateDb {
          mail_date = COALESCE(excluded.mail_date, inbox_thread_messages.mail_date),
          inbox_item_id = COALESCE(excluded.inbox_item_id, inbox_thread_messages.inbox_item_id)`,
     );
-    const result = this._insertThreadMessageStmt.run(
+    // ON CONFLICT DO UPDATE always reports `changes > 0` (insert or
+    // update path), so we drop the result and query for the canonical
+    // id by `(tenant_id, account_id, message_id)` — the UNIQUE key
+    // that the conflict clause guards.
+    this._insertThreadMessageStmt.run(
       id,
       tenantId,
       input.accountId,
@@ -852,8 +856,7 @@ export class InboxStateDb {
       input.direction ?? 'inbound',
       (input.fetchedAt ?? new Date()).getTime(),
       input.inboxItemId ?? null,
-    ) as { changes: number; lastInsertRowid: number | bigint };
-    // changes > 0 covers both insert AND update; query for the canonical id.
+    );
     this._selectThreadMessageIdByMsgIdStmt ??= this.db.prepare<[string, string, string], { id: string }>(
       `SELECT id FROM inbox_thread_messages
        WHERE tenant_id = ? AND account_id = ? AND message_id = ?`,
