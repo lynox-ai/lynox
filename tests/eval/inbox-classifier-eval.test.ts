@@ -38,6 +38,7 @@ describeOrSkip('inbox-classifier eval (Mistral EU)', () => {
     const corpus = JSON.parse(raw) as InboxEvalCorpus;
     const llm = createMistralEuLLMCaller({ apiKey: apiKey! });
     const report = await runInboxEval(corpus, llm, {
+      provider: 'mistral',
       onProgress: (i, n) => {
         if (i % 10 === 0 || i === n) {
           process.stdout.write(`  [eval] ${i}/${n}\n`);

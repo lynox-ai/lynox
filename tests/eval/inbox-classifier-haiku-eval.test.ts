@@ -40,6 +40,7 @@ describeOrSkip('inbox-classifier eval (Anthropic Haiku)', () => {
     const corpus = JSON.parse(raw) as InboxEvalCorpus;
     const llm = createHaikuLLMCaller({ apiKey: apiKey! });
     const report = await runInboxEval(corpus, llm, {
+      provider: 'anthropic',
       onProgress: (i, n) => {
         if (i % 10 === 0 || i === n) {
           process.stdout.write(`  [eval] ${i}/${n}\n`);

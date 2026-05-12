@@ -9,6 +9,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { createMistralEuLLMCaller } from '../src/integrations/inbox/classifier/llm-mistral.js';
+import { createHaikuLLMCaller } from '../src/integrations/inbox/classifier/llm.js';
+import type { LLMCaller } from '../src/integrations/inbox/classifier/index.js';
 import {
   runInboxEval,
   type InboxEvalCorpus,
@@ -17,19 +19,32 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_PATH = join(__dirname, '..', 'tests', 'eval', 'inbox-classifier-fixtures.json');
 
-function getApiKey(): string {
-  if (process.env['MISTRAL_API_KEY']) return process.env['MISTRAL_API_KEY'];
+type Provider = 'mistral' | 'haiku';
+
+function buildLlm(provider: Provider): LLMCaller {
   const raw = readFileSync(join(homedir(), '.lynox', 'config.json'), 'utf8');
   const config = JSON.parse(raw) as Record<string, string>;
-  return config['mistral_api_key']!;
+  if (provider === 'haiku') {
+    const apiKey = process.env['ANTHROPIC_API_KEY'] ?? config['anthropic_api_key'];
+    if (!apiKey) throw new Error('ANTHROPIC_API_KEY missing — set env or config.json:anthropic_api_key');
+    return createHaikuLLMCaller({ apiKey });
+  }
+  const apiKey = process.env['MISTRAL_API_KEY'] ?? config['mistral_api_key'];
+  if (!apiKey) throw new Error('MISTRAL_API_KEY missing — set env or config.json:mistral_api_key');
+  return createMistralEuLLMCaller({ apiKey });
 }
 
 async function main(): Promise<void> {
-  const corpus = JSON.parse(readFileSync(FIXTURES_PATH, 'utf8')) as InboxEvalCorpus;
-  const llm = createMistralEuLLMCaller({ apiKey: getApiKey() });
+  const providerArg = process.argv.indexOf('--provider');
+  const provider: Provider = providerArg !== -1 && process.argv[providerArg + 1] === 'haiku' ? 'haiku' : 'mistral';
 
-  process.stdout.write(`Running eval over ${corpus.fixtures.length} fixtures…\n`);
+  const corpus = JSON.parse(readFileSync(FIXTURES_PATH, 'utf8')) as InboxEvalCorpus;
+  const llm = buildLlm(provider);
+  const promptProvider = provider === 'haiku' ? 'anthropic' : 'mistral';
+
+  process.stdout.write(`Provider: ${provider} (prompt: ${promptProvider})\nRunning eval over ${corpus.fixtures.length} fixtures…\n`);
   const report = await runInboxEval(corpus, llm, {
+    provider: promptProvider,
     onProgress: (i, n) => {
       if (i % 20 === 0 || i === n) process.stdout.write(`  ${i}/${n}\n`);
     },

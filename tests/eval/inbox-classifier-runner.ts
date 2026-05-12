@@ -16,7 +16,7 @@
 // direction is what we gate; the noisy count is surfaced as `autoHandledNoise`
 // for diagnosis but does not fail the eval.
 
-import { classifyMail, type ClassifierPromptInput, type LLMCaller } from '../../src/integrations/inbox/classifier/index.js';
+import { classifyMail, type ClassifierPromptInput, type ClassifierProvider, type LLMCaller } from '../../src/integrations/inbox/classifier/index.js';
 import type { InboxBucket } from '../../src/types/index.js';
 
 export interface InboxEvalFixture {
@@ -83,6 +83,12 @@ export interface RunEvalOptions {
   accountDisplayName?: string | undefined;
   /** Per-sample timeout in ms. Default 30s. */
   perSampleTimeoutMs?: number | undefined;
+  /**
+   * Provider hint passed through to `classifyMail` so each LLM gets
+   * its tuned system prompt. Default `'mistral'`. The eval test files
+   * bind this to the matching LLMCaller.
+   */
+  provider?: ClassifierProvider | undefined;
   /** Progress callback fired after each fixture. */
   onProgress?: ((completed: number, total: number, sample: InboxEvalSample) => void) | undefined;
 }
@@ -131,7 +137,10 @@ export async function runInboxEval(
     let predicted: InboxBucket;
     let confidence: number;
     try {
-      const verdict = await classifyMail(input, llm, { signal: controller.signal });
+      const verdict = await classifyMail(input, llm, {
+        signal: controller.signal,
+        ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+      });
       predicted = verdict.bucket;
       confidence = verdict.confidence;
     } catch (err) {

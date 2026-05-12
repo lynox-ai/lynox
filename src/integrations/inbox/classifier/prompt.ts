@@ -35,7 +35,26 @@ export interface BuiltPrompt {
   sanitized: SanitizeResult;
 }
 
-const SYSTEM_PROMPT = `Du bist der Inbox-Klassifizierer für lynox. Deine einzige Aufgabe: \
+/**
+ * Provider tag the bootstrap threads through `ClassifyOptions` so the
+ * prompt builder can pick a model-specific variant. Both prompts target
+ * the same JSON contract — wording is tuned to each model's strengths.
+ *
+ * Mistral Small (EU default): instructive, German-heavy, leans on
+ * explicit positive-example clauses.
+ *
+ * Anthropic Haiku (US default): identical baseline as Mistral today;
+ * a Haiku-specific variant can land here when measurement shows real
+ * headroom. Current measurement (2026-05-12, 120-fixture corpus):
+ * both providers land at 88.3% / 0 missed_requires_user with the same
+ * Mistral-tuned prompt — the residual mismatches are ground-truth
+ * disagreements both classifiers share, not provider-specific tuning
+ * gaps. Kept as a separate constant so a future divergent tune lands
+ * cleanly without touching the Mistral path.
+ */
+export type ClassifierProvider = 'mistral' | 'anthropic';
+
+const MISTRAL_SYSTEM_PROMPT = `Du bist der Inbox-Klassifizierer für lynox. Deine einzige Aufgabe: \
 genau eine der drei Buckets zurückgeben.
 
 Buckets:
@@ -77,10 +96,31 @@ Erklärung. Schema:
 "one_line_why_de": "max 200 Zeichen, Deutsch"}`;
 
 /**
- * Build the system+user message pair for a single mail. Pure function — no
- * I/O. Caller passes the result straight into messages.create().
+ * Anthropic Haiku variant. Currently identical to the Mistral prompt.
+ *
+ * History (2026-05-12): a candidate Haiku-specific variant was
+ * developed (tighter decision-tree shape, English glosses next to
+ * German keywords, explicit calendar-check rule for meeting requests
+ * without proposed time). Measurement on the 120-fixture corpus showed
+ * the variant *regressed* Haiku from 88.3% → 85.0% bucket-match and
+ * introduced 1 auto_handled noise. Kept as a constant so future
+ * divergent tunes land cleanly, but currently aliased to the Mistral
+ * prompt — empirically, the same prompt serves both classifiers best
+ * at this corpus quality. Re-iterate once the corpus crosses ≥500
+ * fixtures and the model-specific signal can outrun the noise.
  */
-export function buildClassifierPrompt(input: ClassifierPromptInput): BuiltPrompt {
+const HAIKU_SYSTEM_PROMPT = MISTRAL_SYSTEM_PROMPT;
+
+/**
+ * Build the system+user message pair for a single mail. Pure function — no
+ * I/O. Caller passes the result straight into messages.create(). The
+ * optional `provider` arg selects the model-specific system prompt;
+ * default is the Mistral variant (production EU default).
+ */
+export function buildClassifierPrompt(
+  input: ClassifierPromptInput,
+  provider: ClassifierProvider = 'mistral',
+): BuiltPrompt {
   const subject = sanitizeHeader(input.subject);
   const fromName = sanitizeHeader(input.fromDisplayName);
   const fromAddr = sanitizeHeader(input.fromAddress, 320); // RFC 5321 max
@@ -107,5 +147,6 @@ export function buildClassifierPrompt(input: ClassifierPromptInput): BuiltPrompt
     '</untrusted_data>',
   ].join('\n');
 
-  return { system: SYSTEM_PROMPT, user, sanitized };
+  const system = provider === 'anthropic' ? HAIKU_SYSTEM_PROMPT : MISTRAL_SYSTEM_PROMPT;
+  return { system, user, sanitized };
 }
