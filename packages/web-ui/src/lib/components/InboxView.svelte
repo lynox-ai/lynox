@@ -11,11 +11,14 @@
 		getLastAction,
 		getReclassifyBanner,
 		getSelectedItemId,
+		isComposeOpen,
 		isInboxAvailable,
 		isLoading,
+		isSelectedForBulk,
 		loadInboxCounts,
 		loadInboxItems,
 		onColdStartCompletion,
+		openCompose,
 		openDraftPane,
 		openItem,
 		runColdStartBackfillForAllAccounts,
@@ -23,6 +26,7 @@
 		setItemSnooze,
 		startColdStartPolling,
 		startInboxVisibilityRefresh,
+		toggleBulkSelection,
 		undoLastAction,
 		type InboxBucket,
 		type InboxItem,
@@ -33,12 +37,17 @@
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 	import ColdStartBanner from './ColdStartBanner.svelte';
 	import DraftReplyPane from './DraftReplyPane.svelte';
+	import InboxBulkBar from './InboxBulkBar.svelte';
+	import InboxComposePane from './InboxComposePane.svelte';
 	import InboxReadingPane from './InboxReadingPane.svelte';
+	import InboxSearchBar from './InboxSearchBar.svelte';
+	import InboxUndoToast from './InboxUndoToast.svelte';
 	import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.svelte';
 
 	let zone = $state<InboxBucket>('requires_user');
 	let openSnoozeFor = $state<string | null>(null);
 	let selectedItemId = $state<string | null>(null);
+	let searchQuery = $state('');
 	let helpOpen = $state(false);
 	let coldStartButtonBusy = $state(false);
 	// Gate items-fetch on counts-loaded so the $effect doesn't race onMount's
@@ -83,7 +92,7 @@
 	$effect(() => {
 		if (!countsLoaded) return;
 		if (zone && isInboxAvailable()) {
-			void loadInboxItems(zone);
+			void loadInboxItems(zone, 50, 0, searchQuery);
 			// Selection only makes sense for the Needs-You actionable list.
 			if (zone !== 'requires_user') selectedItemId = null;
 			openSnoozeFor = null;
@@ -254,6 +263,37 @@
 	});
 
 	const readingOpen = $derived(getSelectedItemId() !== null);
+
+	// Compose-vs-active-Reply collision (PRD §"Compose-vs active Reply-Draft
+	// collision" round-2 U14). When the user clicks Compose while a reply
+	// draft pane is open, prompt the three-way modal. Reply drafts are
+	// already auto-saved by DraftReplyPane's keystroke handler — the
+	// "Save+New" path just closes the pane, "Discard" same, "Cancel" stays.
+	let composeCollision = $state(false);
+
+	function onComposeClick(): void {
+		if (getDraftPane() !== null) {
+			composeCollision = true;
+		} else {
+			openCompose();
+		}
+	}
+
+	function resolveCollisionSaveAndOpen(): void {
+		// Reply draft is already auto-saved via DraftReplyPane's autosave —
+		// closing the pane is enough. If a future regression breaks autosave,
+		// this is the layering point to add an explicit flush.
+		closeDraftPane();
+		composeCollision = false;
+		openCompose();
+	}
+
+	function resolveCollisionDiscardAndOpen(): void {
+		// Per PRD: lost edits not recoverable beyond the most recent autosave.
+		closeDraftPane();
+		composeCollision = false;
+		openCompose();
+	}
 </script>
 
 <!-- Two-pane layout (PR 3b §Architecture):
@@ -271,6 +311,11 @@
 	<div class="flex items-center justify-between flex-wrap gap-y-2 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('inbox.title')}</h1>
 		<div class="flex items-center gap-3 flex-wrap">
+			<button
+				type="button"
+				onclick={() => onComposeClick()}
+				class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90"
+			>{t('inbox.compose_new')}</button>
 			<a
 				href="/app/inbox/rules"
 				class="text-[11px] text-text-subtle hover:text-text-muted font-mono py-1"
@@ -294,6 +339,8 @@
 		{@const counts = getInboxCounts()}
 		{@const reclassifyBanner = getReclassifyBanner()}
 		<ColdStartBanner />
+		<InboxSearchBar value={searchQuery} onChange={(q) => (searchQuery = q)} />
+		<InboxBulkBar />
 		{#if reclassifyBanner}
 			<div
 				class="mb-3 flex items-center justify-between gap-2 rounded-[var(--radius-md)] border border-accent bg-accent/5 px-3 py-2 text-[12px] text-text"
@@ -390,6 +437,7 @@
 					</div>
 				{/if}
 			{:else}
+				{@const visibleIds = items.map((i) => i.id)}
 				<ul class="space-y-2" role="list">
 					{#each items as item (item.id)}
 						<li
@@ -400,6 +448,16 @@
 							class="rounded-[var(--radius-md)] border bg-bg-subtle px-4 py-3 transition-colors {zone === 'requires_user' && selectedItemId === item.id ? 'border-accent' : 'border-border'}"
 						>
 							<div class="flex items-start justify-between gap-3">
+								<input
+									type="checkbox"
+									class="mt-1 shrink-0 cursor-pointer"
+									checked={isSelectedForBulk(item.id)}
+									onclick={(e) => {
+										const evt = e as MouseEvent;
+										toggleBulkSelection(item.id, visibleIds, evt.shiftKey);
+									}}
+									aria-label={`Auswählen: ${item.subject || item.reasonDe}`}
+								/>
 								<button
 									type="button"
 									class="min-w-0 flex-1 text-left cursor-pointer"
@@ -492,4 +550,43 @@
 {#if getDraftPane() !== null}
 	<DraftReplyPane item={paneItem} />
 {/if}
+
+{#if isComposeOpen()}
+	<InboxComposePane />
+{/if}
+
+{#if composeCollision}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-bg/60"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="compose-collision-title"
+	>
+		<div class="max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-4 shadow-xl">
+			<h2 id="compose-collision-title" class="mb-2 text-sm font-medium text-text">
+				{t('inbox.compose_collision_title')}
+			</h2>
+			<p class="mb-4 text-[12px] text-text-muted">{t('inbox.compose_collision_body')}</p>
+			<div class="flex flex-wrap items-center justify-end gap-2">
+				<button
+					type="button"
+					class="rounded-[var(--radius-sm)] px-3 py-1.5 text-[11px] text-text-subtle hover:text-text"
+					onclick={() => (composeCollision = false)}
+				>{t('inbox.compose_collision_cancel')}</button>
+				<button
+					type="button"
+					class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text"
+					onclick={() => resolveCollisionDiscardAndOpen()}
+				>{t('inbox.compose_collision_discard')}</button>
+				<button
+					type="button"
+					class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90"
+					onclick={() => resolveCollisionSaveAndOpen()}
+				>{t('inbox.compose_collision_save_new')}</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<InboxUndoToast currentZone={zone} />
 

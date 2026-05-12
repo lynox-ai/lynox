@@ -273,6 +273,12 @@ export function parseAddressList(raw: string | undefined): MailAddress[] {
 }
 
 function parseAddress(raw: string): MailAddress | null {
+  // Defense-in-depth header-injection guard: any CR/LF (or other ASCII
+  // control char) in a recipient string lets an attacker append
+  // synthetic SMTP headers (Bcc:, Subject:, body separator) when the
+  // value reaches the wire. Most MTAs re-encode but we never want to
+  // rely on that — drop any segment containing such bytes.
+  if (/[\r\n -]/.test(raw)) return null;
   const angle = raw.match(/^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/);
   if (angle) {
     const name = angle[1]?.trim();

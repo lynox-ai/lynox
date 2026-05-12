@@ -189,6 +189,12 @@ export interface ListItemsOptions {
   /** Default 50, capped at 500 to keep one query bounded. */
   limit?: number | undefined;
   offset?: number | undefined;
+  /**
+   * Free-text filter (PRD-INBOX-PHASE-3 §"Search-Bar"). LIKE-match across
+   * subject, from_address, snippet, reason_de. Trimmed + lower-bounded at
+   * length 1; longer than 200 chars is rejected at the handler layer.
+   */
+  q?: string | undefined;
 }
 
 // ── Row shapes (camelCase mapped from snake_case columns) ──────────────────
@@ -582,25 +588,59 @@ export class InboxStateDb {
     // Snoozed items re-appear automatically once snooze_until <= now — no
     // waker job required.
     const now = Date.now();
-    const rows = opts.bucket
-      ? this.db
-          .prepare<[string, string, number, number, number], ItemRow>(
-            `SELECT * FROM inbox_items
-             WHERE tenant_id = ? AND bucket = ?
-               AND (snooze_until IS NULL OR snooze_until <= ?)
-             ORDER BY classified_at DESC
-             LIMIT ? OFFSET ?`,
-          )
-          .all(tenantId, opts.bucket, now, limit, offset)
-      : this.db
-          .prepare<[string, number, number, number], ItemRow>(
-            `SELECT * FROM inbox_items
-             WHERE tenant_id = ?
-               AND (snooze_until IS NULL OR snooze_until <= ?)
-             ORDER BY classified_at DESC
-             LIMIT ? OFFSET ?`,
-          )
-          .all(tenantId, now, limit, offset);
+    // PRD §"Search-Bar": LIKE-match across subject/from/snippet/reason.
+    // SQLite LIKE is case-insensitive on ASCII (default LIKE collation);
+    // diacritic-folding is a Phase 5 improvement when search becomes a
+    // hot path. `%` and `_` are wildcards — we escape them via ESCAPE
+    // so a user typing "30% off" doesn't match every row.
+    const q = opts.q?.trim() ?? '';
+    const useSearch = q.length > 0;
+    const qPattern = useSearch ? `%${q.replace(/[\\%_]/g, '\\$&')}%` : '';
+    type ItemRowQ = ItemRow;
+    let rows: ItemRowQ[];
+    if (opts.bucket) {
+      rows = useSearch
+        ? this.db
+            .prepare<[string, string, number, string, string, string, string, number, number], ItemRowQ>(
+              `SELECT * FROM inbox_items
+               WHERE tenant_id = ? AND bucket = ?
+                 AND (snooze_until IS NULL OR snooze_until <= ?)
+                 AND (subject LIKE ? ESCAPE '\\' OR from_address LIKE ? ESCAPE '\\' OR snippet LIKE ? ESCAPE '\\' OR reason_de LIKE ? ESCAPE '\\')
+               ORDER BY classified_at DESC
+               LIMIT ? OFFSET ?`,
+            )
+            .all(tenantId, opts.bucket, now, qPattern, qPattern, qPattern, qPattern, limit, offset)
+        : this.db
+            .prepare<[string, string, number, number, number], ItemRowQ>(
+              `SELECT * FROM inbox_items
+               WHERE tenant_id = ? AND bucket = ?
+                 AND (snooze_until IS NULL OR snooze_until <= ?)
+               ORDER BY classified_at DESC
+               LIMIT ? OFFSET ?`,
+            )
+            .all(tenantId, opts.bucket, now, limit, offset);
+    } else {
+      rows = useSearch
+        ? this.db
+            .prepare<[string, number, string, string, string, string, number, number], ItemRowQ>(
+              `SELECT * FROM inbox_items
+               WHERE tenant_id = ?
+                 AND (snooze_until IS NULL OR snooze_until <= ?)
+                 AND (subject LIKE ? ESCAPE '\\' OR from_address LIKE ? ESCAPE '\\' OR snippet LIKE ? ESCAPE '\\' OR reason_de LIKE ? ESCAPE '\\')
+               ORDER BY classified_at DESC
+               LIMIT ? OFFSET ?`,
+            )
+            .all(tenantId, now, qPattern, qPattern, qPattern, qPattern, limit, offset)
+        : this.db
+            .prepare<[string, number, number, number], ItemRowQ>(
+              `SELECT * FROM inbox_items
+               WHERE tenant_id = ?
+                 AND (snooze_until IS NULL OR snooze_until <= ?)
+               ORDER BY classified_at DESC
+               LIMIT ? OFFSET ?`,
+            )
+            .all(tenantId, now, limit, offset);
+    }
     return rows.map(rowToItem);
   }
 
@@ -646,6 +686,139 @@ export class InboxStateDb {
       }
     }
     return counts;
+  }
+
+  // ── v11.3 bulk-action UNDO stack ──────────────────────────────────────
+
+  /**
+   * Append per-item UNDO log row inside a bulk operation. Caller writes
+   * one of these per affected item, all sharing the same `bulkId` so
+   * `undoBulkActionLog(bulkId)` can reverse them in one transaction.
+   *
+   * `priorUserAction` snapshots the row's prior state so UNDO can
+   * restore it (an item the user previously archived, then mass-archived,
+   * stays archived after UNDO — preserves the audit-meaningful state).
+   */
+  insertBulkActionLog(input: {
+    tenantId?: string | undefined;
+    bulkId: string;
+    itemId: string;
+    priorUserAction: InboxUserAction | null;
+    priorUserActionAt: Date | null;
+    action: InboxUserAction;
+    performedAt?: Date | undefined;
+  }): string {
+    const id = nextId('iul');
+    const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
+    const performedAt = input.performedAt ?? new Date();
+    this.db
+      .prepare(
+        `INSERT INTO inbox_user_action_log (
+           id, tenant_id, bulk_id, item_id,
+           prior_user_action, prior_user_action_at,
+           action, performed_at, undone_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(
+        id,
+        tenantId,
+        input.bulkId,
+        input.itemId,
+        input.priorUserAction ?? null,
+        input.priorUserActionAt?.getTime() ?? null,
+        input.action,
+        performedAt.getTime(),
+      );
+    return id;
+  }
+
+  /**
+   * Flip `undone_at` on every active row sharing `bulkId` and reverse
+   * each `inbox_items.user_action` back to its `prior_user_action`.
+   * Returns the count of items reverted. Idempotent — a second call
+   * sees `undone_at IS NOT NULL` and is a no-op.
+   *
+   * `withinMs` enforces the time-window: rows whose `performed_at` is
+   * older than `now - withinMs` are NOT reverted; callers surface this
+   * as 410 Gone to the UI.
+   */
+  undoBulkAction(
+    bulkId: string,
+    now: Date = new Date(),
+    withinMs: number = 60_000,
+  ): number {
+    const earliest = now.getTime() - withinMs;
+    const rows = this.db
+      .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null }>(
+        `SELECT id, item_id, prior_user_action, prior_user_action_at
+         FROM inbox_user_action_log
+         WHERE bulk_id = ? AND undone_at IS NULL AND performed_at >= ?`,
+      )
+      .all(bulkId, earliest);
+    if (rows.length === 0) return 0;
+    const undoMs = now.getTime();
+    const flipUndone = this.db.prepare(
+      `UPDATE inbox_user_action_log SET undone_at = ? WHERE id = ?`,
+    );
+    const restoreAction = this.db.prepare(
+      `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ?`,
+    );
+    const txn = this.db.transaction(() => {
+      for (const row of rows) {
+        flipUndone.run(undoMs, row.id);
+        restoreAction.run(
+          row.prior_user_action,
+          row.prior_user_action_at,
+          row.item_id,
+        );
+      }
+    });
+    txn();
+    return rows.length;
+  }
+
+  /**
+   * Recent un-done bulks for the operator's UNDO menu. PRD §"UNDO-Toast
+   * UX spec": "Route change → toasts dismiss but bulks stay undoable
+   * from `/api/inbox/undo/recent` (the menu in InboxView header)".
+   */
+  listRecentBulks(
+    tenantId: string = DEFAULT_TENANT_ID,
+    withinMs: number = 60_000,
+    limit: number = 5,
+    now: Date = new Date(),
+  ): ReadonlyArray<{ bulkId: string; action: InboxUserAction; performedAt: Date; itemCount: number }> {
+    const earliest = now.getTime() - withinMs;
+    const rows = this.db
+      .prepare<[string, number, number], { bulk_id: string; action: string; performed_at: number; item_count: number }>(
+        `SELECT bulk_id, action, MAX(performed_at) AS performed_at, COUNT(*) AS item_count
+         FROM inbox_user_action_log
+         WHERE tenant_id = ? AND undone_at IS NULL AND performed_at >= ?
+         GROUP BY bulk_id
+         ORDER BY performed_at DESC
+         LIMIT ?`,
+      )
+      .all(tenantId, earliest, limit);
+    return rows.map((r) => ({
+      bulkId: r.bulk_id,
+      action: r.action as InboxUserAction,
+      performedAt: new Date(r.performed_at),
+      itemCount: r.item_count,
+    }));
+  }
+
+  /**
+   * Cleanup task driven by `tasks` cron `inbox_action_log_prune`
+   * (PRD §"Cleanup"). Drops rows older than `olderThanMs` regardless
+   * of `undone_at` — they're no longer undoable and have served their
+   * audit purpose via the parallel `inbox_audit_log` append-only stream.
+   */
+  pruneOldBulkActionLog(olderThanMs: number = 5 * 60 * 1000, now: Date = new Date()): number {
+    const threshold = now.getTime() - olderThanMs;
+    const result = this.db
+      .prepare(`DELETE FROM inbox_user_action_log WHERE performed_at < ?`)
+      .run(threshold) as { changes: number };
+    return result.changes;
   }
 
   /**
