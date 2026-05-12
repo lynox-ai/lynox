@@ -23,7 +23,7 @@ import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
 import { analyzeSensitiveContent, reasonForCategories, type SensitiveMode } from './sensitive-content.js';
-import type { InboxStateDb } from './state.js';
+import { envelopeToItemInputFields, type InboxStateDb } from './state.js';
 
 /**
  * Pseudo-accounts for non-mail channels carry an `<channel>:<id>` prefix
@@ -119,6 +119,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       // which the watcher does not pass through. List-Id rules will start
       // matching once the watcher hook gains header forwarding.
     });
+    const envelopeFields = envelopeToItemInputFields(env);
+
     if (rule) {
       opts.state.insertItemWithAudit(
         {
@@ -131,6 +133,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           reasonDe: `Regel: ${rule.matcherKind} = ${rule.matcherValue}`,
           classifiedAt: new Date(),
           classifierVersion: `rule:${rule.id}`,
+          ...envelopeFields,
         },
         {
           tenantId: opts.tenantId,
@@ -164,6 +167,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           reasonDe: reasonForCategories(sensitive.categories),
           classifiedAt: new Date(),
           classifierVersion: 'sensitive-prefilter',
+          ...envelopeFields,
         },
         {
           tenantId: opts.tenantId,
@@ -200,6 +204,15 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       channel,
       threadKey,
       classifierInput,
+      envelope: {
+        fromAddress: envelopeFields.fromAddress ?? '',
+        fromName: envelopeFields.fromName,
+        subject: envelopeFields.subject ?? '',
+        mailDate: envelopeFields.mailDate,
+        snippet: envelopeFields.snippet,
+        messageId: envelopeFields.messageId,
+        inReplyTo: envelopeFields.inReplyTo,
+      },
     };
     if (opts.tenantId !== undefined) payload.tenantId = opts.tenantId;
     if (sensitive.isSensitive) {

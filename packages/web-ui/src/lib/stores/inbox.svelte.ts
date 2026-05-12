@@ -49,6 +49,16 @@ export interface InboxItem {
 	snoozeUntil?: string | undefined;
 	snoozeCondition?: string | undefined;
 	unsnoozeOnReply: boolean;
+	// v11 envelope metadata — pre-v11 rows expose '' / undefined until the
+	// operator-driven backfill endpoint (POST /api/inbox/backfill-metadata)
+	// fills them in place.
+	fromAddress: string;
+	fromName?: string | undefined;
+	subject: string;
+	mailDate?: string | undefined; // ISO
+	snippet?: string | undefined;
+	messageId?: string | undefined;
+	inReplyTo?: string | undefined;
 }
 
 export interface InboxCounts {

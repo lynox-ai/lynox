@@ -304,7 +304,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(10);
+    expect(row.v).toBe(11);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -422,6 +422,7 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
       'inbox_item_bodies',
       'inbox_items',
       'inbox_rules',
+      'inbox_user_action_log',
     ]);
   });
 
@@ -519,5 +520,68 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
       .prepare(`SELECT account_id FROM inbox_items WHERE id = 'wa1'`)
       .get() as { account_id: string };
     expect(row.account_id).toBe('whatsapp:491234567890');
+  });
+});
+
+describe('MailStateDb — migration v11 (UX-Complete inbox foundation)', () => {
+  function inner(state: MailStateDb): import('better-sqlite3').Database {
+    return (state as unknown as { db: import('better-sqlite3').Database }).db;
+  }
+
+  it('adds the seven envelope columns to inbox_items', () => {
+    const cols = inner(db)
+      .prepare(`PRAGMA table_info(inbox_items)`)
+      .all() as ReadonlyArray<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    for (const expected of [
+      'from_address',
+      'from_name',
+      'subject',
+      'mail_date',
+      'snippet',
+      'message_id',
+      'in_reply_to',
+    ]) {
+      expect(names.has(expected)).toBe(true);
+    }
+  });
+
+  it('creates mail_sent_log and inbox_user_action_log', () => {
+    const tables = inner(db)
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('mail_sent_log', 'inbox_user_action_log') ORDER BY name`,
+      )
+      .all() as ReadonlyArray<{ name: string }>;
+    expect(tables.map((t) => t.name)).toEqual(['inbox_user_action_log', 'mail_sent_log']);
+  });
+
+  it('idx_inbox_items_from index exists for from_address LIKE-search', () => {
+    const indexes = inner(db)
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type='index' AND name = 'idx_inbox_items_from'`,
+      )
+      .all() as ReadonlyArray<{ name: string }>;
+    expect(indexes).toHaveLength(1);
+  });
+
+  it('pre-v11 rows default to empty-string for NOT NULL string columns', () => {
+    // Simulate a row inserted by code that does not pass envelope fields
+    // (the legacy column order maps to columns the v11 ALTER added with
+    // DEFAULT ''). Confirms the migration safely seeds existing rows.
+    inner(db).prepare(`INSERT INTO mail_accounts
+        (id, display_name, address, preset, imap_host, imap_port, smtp_host, smtp_port, type, auth_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('acct-v11', 'Test', 'test@example.com', 'custom', 'imap.x', 993, 'smtp.x', 465, 'personal', 'imap');
+    inner(db)
+      .prepare(
+        `INSERT INTO inbox_items (id, account_id, channel, thread_key, bucket, confidence, reason_de, classified_at, classifier_version)
+         VALUES ('legacy-row', 'acct-v11', 'email', 'imap:legacy', 'requires_user', 0.5, 'r', 0, 'v')`,
+      )
+      .run();
+    const row = inner(db)
+      .prepare(`SELECT from_address, subject FROM inbox_items WHERE id = 'legacy-row'`)
+      .get() as { from_address: string; subject: string };
+    expect(row.from_address).toBe('');
+    expect(row.subject).toBe('');
   });
 });

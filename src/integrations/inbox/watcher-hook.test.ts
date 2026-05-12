@@ -74,7 +74,8 @@ function envelope(overrides: Partial<MailEnvelope> = {}): MailEnvelope {
 describe('createInboxClassifierHook — enqueue path', () => {
   it('builds a classifier payload from the envelope and enqueues it', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    await hook(ACCOUNT.id, envelope());
+    const env = envelope();
+    await hook(ACCOUNT.id, env);
     expect(queueCalls).toHaveLength(1);
     const payload = queueCalls[0]!;
     expect(payload).toEqual({
@@ -88,6 +89,15 @@ describe('createInboxClassifierHook — enqueue path', () => {
         fromAddress: 'mustermann@example.com',
         fromDisplayName: 'Max Mustermann',
         body: 'Hi Me, hast du Zeit am Mittwoch?',
+      },
+      envelope: {
+        fromAddress: 'mustermann@example.com',
+        fromName: 'Max Mustermann',
+        subject: 'Termin nächste Woche?',
+        mailDate: env.date,
+        snippet: 'Hi Me, hast du Zeit am Mittwoch?',
+        messageId: '<m1@x>',
+        inReplyTo: undefined,
       },
     });
     // No item written yet — queue's onSuccess does that asynchronously.

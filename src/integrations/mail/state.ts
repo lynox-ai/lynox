@@ -319,6 +319,85 @@ const MIGRATIONS: string[] = [
      source TEXT NOT NULL,
      FOREIGN KEY (item_id) REFERENCES inbox_items(id) ON DELETE CASCADE
    );`,
+
+  // v11: UX-Complete inbox foundation (PRD-INBOX-PHASE-3-UX-COMPLETE).
+  //
+  // v11.1 — Envelope metadata + thread chain on inbox_items. Item cards
+  //   showed account_id and classified_at because the envelope was
+  //   discarded after classify; the canary surfaced this immediately
+  //   (93 cards all reading "21:31", sender invisible). DEFAULT '' on
+  //   the NOT NULL strings is a bridge value for pre-v11 rows that the
+  //   operator-driven backfill endpoint then fills in place; the
+  //   writer-layer (envelopeToItemInputFields) rejects empties going
+  //   forward.
+  //
+  // v11.2 — mail_sent_log: outbound source-of-truth, written from
+  //   send-core.ts post-provider.send. Decouples Phase-4 features
+  //   (Send Later, reply-watching for follow-up auto-close, outbound
+  //   thread context) from re-parsing IMAP Sent folder. body_chars
+  //   stores size only — never the body itself (privacy).
+  //
+  // v11.3 — inbox_user_action_log: 60s-window UNDO stack for bulk
+  //   actions. Per-id rows grouped by bulk_id; mutation-allowed (the
+  //   `undone_at` flag flips) unlike append-only inbox_audit_log. The
+  //   `tasks` cron 'inbox_action_log_prune' drops rows older than 5min.
+  //
+  // Pattern: pure ALTER TABLE ADD COLUMN — no v9-style rebuild dance.
+  // Safe because FKs are INBOUND (inbox_audit_log/inbox_drafts/
+  // inbox_item_bodies → inbox_items) and SQLite handles ADD COLUMN as
+  // O(1) metadata only.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (11);
+
+   ALTER TABLE inbox_items ADD COLUMN from_address TEXT NOT NULL DEFAULT '';
+   ALTER TABLE inbox_items ADD COLUMN from_name TEXT;
+   ALTER TABLE inbox_items ADD COLUMN subject TEXT NOT NULL DEFAULT '';
+   ALTER TABLE inbox_items ADD COLUMN mail_date INTEGER;
+   ALTER TABLE inbox_items ADD COLUMN snippet TEXT;
+   ALTER TABLE inbox_items ADD COLUMN message_id TEXT;
+   ALTER TABLE inbox_items ADD COLUMN in_reply_to TEXT;
+
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_from
+     ON inbox_items(tenant_id, from_address);
+
+   CREATE TABLE IF NOT EXISTS mail_sent_log (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     account_id TEXT NOT NULL,
+     message_id TEXT NOT NULL,
+     in_reply_to TEXT,
+     to_json TEXT NOT NULL,
+     cc_json TEXT,
+     bcc_json TEXT,
+     subject TEXT NOT NULL,
+     body_chars INTEGER NOT NULL,
+     sent_at INTEGER NOT NULL,
+     reply_received_at INTEGER,
+     followup_id TEXT,
+     FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
+   );
+
+   CREATE INDEX IF NOT EXISTS idx_mail_sent_log_recent
+     ON mail_sent_log(tenant_id, sent_at DESC);
+   CREATE INDEX IF NOT EXISTS idx_mail_sent_log_message_id
+     ON mail_sent_log(message_id);
+
+   CREATE TABLE IF NOT EXISTS inbox_user_action_log (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     bulk_id TEXT NOT NULL,
+     item_id TEXT NOT NULL,
+     prior_user_action TEXT,
+     prior_user_action_at INTEGER,
+     action TEXT NOT NULL,
+     performed_at INTEGER NOT NULL,
+     undone_at INTEGER,
+     FOREIGN KEY (item_id) REFERENCES inbox_items(id) ON DELETE CASCADE
+   );
+
+   CREATE INDEX IF NOT EXISTS idx_user_action_log_bulk
+     ON inbox_user_action_log(bulk_id) WHERE undone_at IS NULL;
+   CREATE INDEX IF NOT EXISTS idx_user_action_log_active
+     ON inbox_user_action_log(performed_at DESC) WHERE undone_at IS NULL;`,
 ];
 
 export interface MailStateDbOptions {
