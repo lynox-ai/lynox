@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
-	import { t } from '../i18n.svelte.js';
+	import { t, getLocale } from '../i18n.svelte.js';
 	import {
 		closeDraftPane,
 		createDraftForOpenPane,
 		generateDraftForOpenPane,
 		getDraftPane,
+		getSelectedFull,
+		getSelectedThread,
 		refreshOpenPaneBody,
 		regenerateDraftWithTone,
 		saveDraftBody,
@@ -20,6 +22,8 @@
 	} from '../api/inbox-drafts.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { accountShortLabel } from '../utils/account-label.js';
+	import MarkdownRenderer from './MarkdownRenderer.svelte';
+	import InboxThreadHistory from './InboxThreadHistory.svelte';
 
 	interface Props {
 		item: InboxItem | null;
@@ -252,6 +256,27 @@
 			refreshing = false;
 		}
 	}
+
+	// Context block — the email-being-replied-to. Reads from the same selected-
+	// item state the reading pane uses, so when the user opens the draft from
+	// list or reading-pane they see what they're replying to.
+	const selectedFull = $derived(getSelectedFull());
+	const selectedThread = $derived(getSelectedThread());
+	let contextExpanded = $state(false);
+
+	function dateFormat(iso: string | undefined): string {
+		if (!iso) return '';
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return '';
+		const locale = getLocale() === 'de' ? 'de-CH' : 'en-US';
+		return d.toLocaleDateString(locale, {
+			year: 'numeric',
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit',
+		});
+	}
 </script>
 
 {#if getDraftPane() !== null}
@@ -269,17 +294,28 @@
 			onclick={(e) => e.stopPropagation()}
 			onkeydown={(e) => e.stopPropagation()}
 			class="bg-bg-subtle border-l border-border shadow-xl w-full sm:max-w-[520px] flex flex-col h-full overflow-hidden pb-[max(1rem,env(safe-area-inset-bottom))]"
+			style="padding-top: env(safe-area-inset-top);"
 		>
-			<header class="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-border">
-				<div class="min-w-0 flex-1">
-					<h2 id="draft-pane-title" class="text-base font-medium tracking-tight">
-						{t('inbox.draft_title')}
-					</h2>
-					{#if item}
-						<p class="text-[11px] text-text-subtle mt-0.5 truncate">
-							📬 {accountShortLabel(item.accountId)} · {item.reasonDe}
-						</p>
-					{/if}
+			<header class="flex items-start justify-between gap-3 px-5 pt-3 pb-3 border-b border-border">
+				<div class="flex items-start gap-2 min-w-0 flex-1">
+					<!-- Mobile back-button. Hidden on sm+ where the pane is a right-side modal
+						and the × button on the right is the dismissal affordance. -->
+					<button
+						type="button"
+						onclick={() => { flushNow(); closeDraftPane(); }}
+						class="sm:hidden text-text-subtle hover:text-text text-base p-2 -ml-2 -mt-1 min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+						aria-label={t('inbox.draft_close')}
+					>←</button>
+					<div class="min-w-0 flex-1">
+						<h2 id="draft-pane-title" class="text-base font-medium tracking-tight">
+							{t('inbox.draft_title')}
+						</h2>
+						{#if item}
+							<p class="text-[11px] text-text-subtle mt-0.5 truncate">
+								📬 {accountShortLabel(item.accountId)} · {item.reasonDe}
+							</p>
+						{/if}
+					</div>
 				</div>
 				<div class="flex items-center gap-1 shrink-0">
 					{#if item}
@@ -302,6 +338,58 @@
 			</header>
 
 			<div class="flex-1 overflow-y-auto px-5 py-4">
+				<!-- Context block: the email-being-replied-to. Collapsed by default;
+					tap "Mehr anzeigen" to expand the full body + thread chain so the
+					user can verify the LLM-generated draft against the original message
+					before sending. Mobile users used to have NO way to see context — they
+					were stuck staring at a generated reply with no source. -->
+				{#if selectedFull && item && selectedFull.item.id === item.id}
+					<section
+						class="mb-3 rounded-[var(--radius-md)] border border-border bg-bg"
+						aria-label={t('inbox.draft_context_label')}
+					>
+						<button
+							type="button"
+							onclick={() => (contextExpanded = !contextExpanded)}
+							aria-expanded={contextExpanded}
+							class="w-full text-left px-3 py-2 flex items-start gap-2 hover:bg-bg-muted/30 rounded-[var(--radius-md)] min-h-[44px]"
+						>
+							<span class="text-text-subtle text-[11px] mt-0.5 shrink-0" aria-hidden="true">{contextExpanded ? '▾' : '▸'}</span>
+							<div class="min-w-0 flex-1">
+								<div class="flex items-baseline justify-between gap-2 mb-0.5">
+									<span class="text-[12px] text-text-muted truncate">
+										{selectedFull.item.fromName || selectedFull.item.fromAddress || ''}
+									</span>
+									<span class="text-[11px] text-text-subtle shrink-0">
+										{dateFormat(selectedFull.item.mailDate ?? selectedFull.item.classifiedAt)}
+									</span>
+								</div>
+								{#if selectedFull.item.subject}
+									<p class="text-[12px] text-text leading-tight truncate" title={selectedFull.item.subject}>
+										{selectedFull.item.subject}
+									</p>
+								{/if}
+							</div>
+						</button>
+						{#if contextExpanded}
+							<div class="border-t border-border px-3 py-3 space-y-3">
+								{#if selectedFull.body.source === 'missing'}
+									<p class="rounded-[var(--radius-sm)] border border-warning bg-warning-subtle px-3 py-2 text-[11px] text-warning">
+										{t('inbox.reading_body_missing')}
+									</p>
+								{:else}
+									<article class="prose prose-sm max-w-none text-[13px]">
+										<MarkdownRenderer content={selectedFull.body.md} streaming={false} />
+									</article>
+								{/if}
+								{#if selectedThread && (selectedThread.messages.length > 0 || selectedThread.partial)}
+									<InboxThreadHistory thread={selectedThread} currentMessageId={selectedFull.item.messageId} />
+								{/if}
+							</div>
+						{/if}
+					</section>
+				{/if}
+
 				{#if pane.loading}
 					<p class="text-text-subtle text-sm">{t('inbox.draft_loading')}</p>
 				{:else if pane.generating}

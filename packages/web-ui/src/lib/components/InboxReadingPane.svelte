@@ -5,11 +5,13 @@
 		getSelectedFull,
 		getSelectedThread,
 		isSelectedLoading,
+		refreshSelectedItemBody,
 		setItemAction,
 		setItemSnooze,
 		type InboxItem,
 		type SnoozePreset,
 	} from '../stores/inbox.svelte.js';
+	import { addToast } from '../stores/toast.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 
@@ -28,6 +30,32 @@
 	const thread = $derived(getSelectedThread());
 	const loading = $derived(isSelectedLoading());
 	let snoozeOpen = $state(false);
+	let refreshing = $state(false);
+
+	async function onRefreshBody(): Promise<void> {
+		if (refreshing) return;
+		refreshing = true;
+		try {
+			const result = await refreshSelectedItemBody();
+			if (result.ok) {
+				addToast(t('inbox.draft_refresh_ok'), 'success');
+				return;
+			}
+			if (result.reason.kind === 'aborted') return;
+			const keyMap: Record<string, string> = {
+				unavailable: 'inbox.draft_refresh_unavailable',
+				unsupported: 'inbox.draft_refresh_unsupported',
+				not_registered: 'inbox.draft_refresh_not_registered',
+				empty_body: 'inbox.draft_refresh_empty',
+				not_found: 'inbox.draft_refresh_not_found',
+				fetch_failed: 'inbox.draft_refresh_failed',
+				network: 'inbox.draft_refresh_failed',
+			};
+			addToast(t(keyMap[result.reason.kind] ?? 'inbox.draft_refresh_failed'), 'info');
+		} finally {
+			refreshing = false;
+		}
+	}
 
 	function dateFormat(iso: string | undefined): string {
 		if (!iso) return '';
@@ -105,6 +133,14 @@
 			</div>
 			<div class="flex shrink-0 items-center gap-1.5">
 				{#if full}
+					<button
+						type="button"
+						onclick={() => void onRefreshBody()}
+						disabled={refreshing}
+						title={refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_body')}
+						aria-label={t('inbox.draft_refresh_body')}
+						class="text-text-subtle hover:text-text text-[11px] font-mono p-2 min-h-[36px] pointer-coarse:min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+					>{refreshing ? '⟳' : '↻'}</button>
 					<button
 						type="button"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"

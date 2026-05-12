@@ -111,8 +111,10 @@ test.describe('Unified Inbox Phase 2 smoke', () => {
 
     const res = await page.goto('/app/inbox/rules');
     expect(res?.status(), 'GET /app/inbox/rules should return 200').toBe(200);
-    // Anchor on a stable selector that always renders, even when no rules exist.
-    await expect(page.locator('main, [role="main"], body')).toBeVisible();
+    // Anchor on the SvelteKit-rendered <main>. The earlier `'main, [role="main"], body'`
+    // OR-selector tripped Playwright's strict mode (two matches: body + main); body is a
+    // useless anchor anyway since it's always present even on a crashed render.
+    await expect(page.getByRole('main')).toBeVisible();
 
     expect(errors, `unexpected JS errors:\n${errors.join('\n')}`).toEqual([]);
   });

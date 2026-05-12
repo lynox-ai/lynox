@@ -521,6 +521,29 @@ export function closeItem(): void {
 	_openRequestId += 1; // cancel any in-flight load
 }
 
+/**
+ * Refresh the body cache for the currently-selected item — pulls the full
+ * mail body from the provider and updates `selectedFull.body.md`. Used by
+ * the reading pane's ↻ button so the user can see the full email after
+ * landing on the cached snippet from classify-time.
+ */
+export async function refreshSelectedItemBody(): Promise<
+	{ ok: true } | { ok: false; reason: RefreshBodyFailure }
+> {
+	const itemId = selectedItemId;
+	if (!itemId) return { ok: false, reason: { kind: 'aborted' } };
+	const result = await apiRefreshItemBody(getApiBase(), itemId);
+	if (selectedItemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
+	if (!result.ok) return result;
+	if (selectedFull && selectedFull.item.id === itemId) {
+		selectedFull = {
+			...selectedFull,
+			body: { md: result.bodyMd, source: 'cache', fetchedAt: new Date().toISOString() },
+		};
+	}
+	return { ok: true };
+}
+
 /** Load per-bucket counts. Returns false when the runtime is not wired (flag off). */
 export async function loadInboxCounts(): Promise<boolean> {
 	try {

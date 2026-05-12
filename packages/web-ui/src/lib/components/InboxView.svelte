@@ -171,10 +171,15 @@
 	function openReplyForSelected(): void {
 		const item = visibleItems().find((i) => i.id === selectedItemId);
 		if (!item) return;
+		// Pre-load full + thread so DraftReplyPane can render the email-being-
+		// replied-to + thread chain. Without this, mobile users land in the
+		// draft view with no context to verify the LLM-generated reply.
+		void openItem(item.id);
 		void openDraftPane(item.id);
 	}
 
 	function openReplyFor(item: InboxItem): void {
+		void openItem(item.id);
 		void openDraftPane(item.id);
 	}
 
@@ -492,26 +497,30 @@
 										</p>
 									{/if}
 								</button>
-								{#if zone === 'requires_user' && !item.userAction}
-									<div class="flex items-center gap-1 shrink-0">
-										<button
-											onclick={() => openReplyFor(item)}
-											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-											aria-label={t('inbox.action_draft_reply')}
-										>{t('inbox.action_draft_reply')}</button>
-										<button
-											onclick={() => void onArchive(item)}
-											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-											aria-label={t('inbox.action_archive')}
-										>{t('inbox.action_archive')}</button>
-										<button
-											onclick={() => (openSnoozeFor = openSnoozeFor === item.id ? null : item.id)}
-											aria-expanded={openSnoozeFor === item.id}
-											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-										>{t('inbox.action_snooze')}</button>
-									</div>
-								{/if}
 							</div>
+							{#if zone === 'requires_user' && !item.userAction}
+								<!-- Action row sits below the card content (sm+ right-justified) so the buttons
+									no longer overlap the sender + AI summary on narrow viewports. Mail clients
+									like Spark / Apple Mail use the same pattern; the reading-pane on desktop
+									has its own inline header buttons. -->
+								<div class="mt-2 flex flex-wrap items-center gap-1 sm:justify-end pl-7 sm:pl-0">
+									<button
+										onclick={() => openReplyFor(item)}
+										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+										aria-label={t('inbox.action_draft_reply')}
+									>{t('inbox.action_draft_reply')}</button>
+									<button
+										onclick={() => void onArchive(item)}
+										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+										aria-label={t('inbox.action_archive')}
+									>{t('inbox.action_archive')}</button>
+									<button
+										onclick={() => (openSnoozeFor = openSnoozeFor === item.id ? null : item.id)}
+										aria-expanded={openSnoozeFor === item.id}
+										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+									>{t('inbox.action_snooze')}</button>
+								</div>
+							{/if}
 							{#if openSnoozeFor === item.id}
 								<div class="mt-2 flex flex-wrap gap-1.5 pl-1">
 									{#each snoozePresets as preset (preset.label)}
@@ -535,7 +544,7 @@
 		class="{readingOpen ? 'flex' : 'hidden md:flex'} flex-1 flex-col min-w-0 overflow-hidden"
 	>
 		<InboxReadingPane
-			onReply={(item) => void openDraftPane(item.id)}
+			onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
 			onActionApplied={() => {
 				void loadInboxCounts();
 				void loadInboxItems(zone);
