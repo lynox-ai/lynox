@@ -2321,8 +2321,12 @@
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
 	{/if}
 
-	<!-- Input -->
-	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
+	<!-- Input. NO safe-area-inset-bottom here — the StatusBar below this row
+		 (rendered by AppShell) already absorbs the iOS Home Indicator zone via
+		 its own `pb-[env(safe-area-inset-bottom)]`. Adding it here double-pays
+		 the safe area and renders as wasted black space between the input and
+		 the status bar. -->
+	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl mx-auto flex flex-wrap gap-2 mb-2">
