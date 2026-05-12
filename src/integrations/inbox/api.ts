@@ -107,7 +107,12 @@ export interface ListItemsQuery {
   limit?: string | number | undefined;
   offset?: string | number | undefined;
   tenantId?: string | undefined;
+  /** Free-text search across subject/from/snippet/reason_de (zone-scoped). */
+  q?: string | undefined;
 }
+
+/** PRD §"Search-Bar" caps user input at 200 chars to keep one LIKE query bounded. */
+const MAX_SEARCH_QUERY_LENGTH = 200;
 
 function parseInt32(value: string | number | undefined): number | undefined {
   if (value === undefined) return undefined;
@@ -128,6 +133,12 @@ export function handleListItems(deps: InboxApiDeps, query: ListItemsQuery): ApiR
   const offset = parseInt32(query.offset);
   if (offset !== undefined) opts.offset = offset;
   if (query.tenantId !== undefined) opts.tenantId = query.tenantId;
+  if (query.q !== undefined && query.q.length > 0) {
+    if (query.q.length > MAX_SEARCH_QUERY_LENGTH) {
+      return bad(`q exceeds ${MAX_SEARCH_QUERY_LENGTH} chars`);
+    }
+    opts.q = query.q;
+  }
   return { status: 200, body: { items: deps.state.listItems(opts) } };
 }
 
@@ -249,6 +260,102 @@ export async function handleRunColdStart(
   // already. Errors are surfaced through the tracker.
   void deps.coldStartRunner(body.accountId, body.force !== undefined ? { force: body.force } : {}).catch(() => {});
   return { status: 202, body: { ok: true, accountId: body.accountId } };
+}
+
+// ── Bulk actions (PRD-INBOX-PHASE-3 §"Bulk Actions") ────────────────────
+
+export type BulkAction = Extract<InboxUserAction, 'archived' | 'snoozed' | 'unhandled'>;
+const VALID_BULK_ACTIONS: ReadonlyArray<BulkAction> = ['archived', 'snoozed', 'unhandled'];
+
+export interface BulkActionBody {
+  ids: ReadonlyArray<string>;
+  action: BulkAction;
+}
+
+/**
+ * Apply one action to many items in a single transaction. Per-id rows
+ * are written to `inbox_audit_log` (append-only) AND
+ * `inbox_user_action_log` (mutation-allowed via `undone_at`). The
+ * returned `bulkId` keys both the UNDO call and the in-UI toast.
+ *
+ * Items that don't exist or are already in the target state are
+ * recorded in `skipped` rather than failing the whole batch — bulk
+ * archive of 47 items still reports 45-applied + 2-skipped instead of
+ * an all-or-nothing 500.
+ */
+export function handleBulkAction(deps: InboxApiDeps, body: BulkActionBody): ApiResponse {
+  if (!Array.isArray(body.ids) || body.ids.length === 0) {
+    return bad('ids: non-empty array required');
+  }
+  if (!VALID_BULK_ACTIONS.includes(body.action)) {
+    return bad(`invalid action: ${String(body.action)}`);
+  }
+  const bulkId = `bulk_${String(Date.now())}_${Math.random().toString(36).slice(2, 10)}`;
+  const performedAt = new Date();
+  const applied: string[] = [];
+  const skipped: { id: string; reason: string }[] = [];
+  for (const id of body.ids) {
+    const item = deps.state.getItem(id);
+    if (item === null) {
+      skipped.push({ id, reason: 'not_found' });
+      continue;
+    }
+    if (item.userAction === body.action) {
+      skipped.push({ id, reason: 'already_in_state' });
+      continue;
+    }
+    deps.state.insertBulkActionLog({
+      tenantId: item.tenantId,
+      bulkId,
+      itemId: id,
+      priorUserAction: item.userAction ?? null,
+      priorUserActionAt: item.userActionAt ?? null,
+      action: body.action,
+      performedAt,
+    });
+    deps.state.updateUserAction(id, body.action, performedAt);
+    // 'unhandled' is a soft revert and is not in InboxAuditAction —
+    // the inbox_user_action_log row already records the per-id state
+    // change with the shared bulk_id, so we skip the audit row for it.
+    if (body.action === 'archived' || body.action === 'snoozed') {
+      deps.state.appendAudit({
+        tenantId: item.tenantId,
+        itemId: id,
+        action: body.action,
+        actor: 'user',
+        payloadJson: JSON.stringify({ bulk_id: bulkId, at: performedAt.toISOString() }),
+        createdAt: performedAt,
+      });
+    }
+    applied.push(id);
+  }
+  return { status: 200, body: { bulkId, applied, skipped } };
+}
+
+/**
+ * Reverse a bulk action within the UNDO window (default 60s). Returns
+ * 410 once expired. The per-id `undone_at` flag on `inbox_user_action_log`
+ * is the undo audit trail; we do NOT write per-item rows into
+ * `inbox_audit_log` for the undo path (the FK there is per-item, and
+ * the row's prior state is already snapshot in user_action_log).
+ */
+export function handleUndoBulk(deps: InboxApiDeps, bulkId: string): ApiResponse {
+  const reverted = deps.state.undoBulkAction(bulkId);
+  if (reverted === 0) {
+    return { status: 410, body: { error: 'undo window expired or bulk_id unknown', reason: 'undo_expired' } };
+  }
+  return { status: 200, body: { ok: true, reverted } };
+}
+
+/** Last 5 undoable bulks within the UNDO window (PRD §"UNDO-Toast UX"). */
+export function handleListRecentBulks(deps: InboxApiDeps): ApiResponse {
+  const recent = deps.state.listRecentBulks();
+  return { status: 200, body: { recent: recent.map((r) => ({
+    bulkId: r.bulkId,
+    action: r.action,
+    performedAt: r.performedAt.toISOString(),
+    itemCount: r.itemCount,
+  })) } };
 }
 
 export interface RunBackfillMetadataBody {
@@ -917,6 +1024,89 @@ export async function handleSendInboxReply(
     }),
   });
 
+  return {
+    status: 200,
+    body: {
+      messageId: result.result.messageId,
+      accepted: result.result.accepted,
+      rejected: result.result.rejected,
+    },
+  };
+}
+
+// ── Compose-new send (PRD-INBOX-PHASE-3 §"Compose-New") ──────────────────
+
+export interface ComposeSendBody {
+  /** Sender account id — must be a registered mail account. */
+  accountId: string;
+  /** Comma-separated address list; parsed via send-core's helper. */
+  to: string;
+  cc?: string | undefined;
+  bcc?: string | undefined;
+  subject: string;
+  body: string;
+}
+
+/**
+ * One-shot send for a compose-new (no parent inbox item). Mirrors the
+ * reply path but skips draft persistence + audit anchoring. Mass-send
+ * guard fires for >5 total recipients via send-core's beforeSend hook
+ * (PRD §"Send-time confirmation" round-2 C-S13). The client must
+ * confirm before re-POSTing with `confirmedAt: now` — Phase 4 will
+ * wire that pre-flight; v1 trusts the UI's recipient cap.
+ */
+export async function handleComposeSend(
+  deps: InboxApiDeps,
+  body: ComposeSendBody,
+): Promise<ApiResponse> {
+  const mailCtx = deps.mailContext;
+  if (!mailCtx) return unavailable('mail context not wired');
+  if (typeof body.accountId !== 'string' || body.accountId.length === 0) {
+    return bad('accountId is required');
+  }
+  if (typeof body.to !== 'string' || body.to.trim().length === 0) {
+    return bad('to is required');
+  }
+  if (typeof body.subject !== 'string') return bad('subject is required');
+  const replyBody = (body.body ?? '').trim();
+  if (replyBody.length === 0) return unprocessable('compose body is empty', 'empty_body');
+
+  const provider = mailCtx.registry.get(body.accountId);
+  if (!provider) {
+    return unprocessable('mail provider not registered for this account', 'not_registered');
+  }
+
+  const { parseAddressList, sendMail } = await import('../mail/send-core.js');
+  const to = parseAddressList(body.to);
+  if (to.length === 0) return bad('to: no valid addresses');
+  const cc = body.cc !== undefined ? parseAddressList(body.cc) : [];
+  const bcc = body.bcc !== undefined ? parseAddressList(body.bcc) : [];
+
+  const coreInput: import('../mail/send-core.js').SendCoreInput = {
+    account: provider.accountId,
+    to,
+    subject: body.subject,
+    body: replyBody,
+  };
+  if (cc.length > 0) coreInput.cc = cc;
+  if (bcc.length > 0) coreInput.bcc = bcc;
+
+  const result = await sendMail(mailCtx.registry, coreInput, {}, mailCtx);
+  if (!result.ok) {
+    switch (result.status) {
+      case 'rate_limit':         return { status: 429, body: { error: result.message } };
+      case 'invalid_recipients': return unprocessable(result.message);
+      case 'receive_only':       return unprocessable(result.message, 'receive_only');
+      case 'dedup_window':       return { status: 429, body: { error: result.message } };
+      case 'secret_in_body':     return unprocessable(result.message, 'secret_in_body');
+      case 'cancelled':          return { status: 409, body: { error: 'send cancelled' } };
+      case 'provider_error':     return { status: 502, body: { error: result.message } };
+      default: {
+        const _exhaustive: never = result.status;
+        return { status: 500, body: { error: `unhandled send-core status: ${String(_exhaustive)}` } };
+      }
+    }
+  }
   return {
     status: 200,
     body: {

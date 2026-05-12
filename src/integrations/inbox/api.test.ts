@@ -18,9 +18,13 @@ import {
   handleRunColdStart,
   handleRunBackfillMetadata,
   _resetBackfillMutex,
+  handleBulkAction,
+  handleComposeSend,
   handleGetItemFull,
   handleGetItemThread,
   handleListItems,
+  handleListRecentBulks,
+  handleUndoBulk,
   resolveSnoozePreset,
   handleListRules,
   handleResolveContact,
@@ -1318,5 +1322,154 @@ describe('rules endpoints', () => {
     expect(handleCreateRule(deps, { ...base, bucket: 'draft_ready' as never }).status).toBe(400);
     expect(handleCreateRule(deps, { ...base, action: 'nuke' as never }).status).toBe(400);
     expect(handleCreateRule(deps, { ...base, source: 'gut_feeling' as never }).status).toBe(400);
+  });
+});
+
+describe('handleBulkAction', () => {
+  it('archives a list of items in one transaction and returns the bulkId', () => {
+    const a = insertItem('a');
+    const b = insertItem('b');
+    const c = insertItem('c');
+    const r = handleBulkAction(deps, { ids: [a, b, c], action: 'archived' });
+    expect(r.status).toBe(200);
+    const body = r.body as { bulkId: string; applied: string[]; skipped: unknown[] };
+    expect(body.bulkId.startsWith('bulk_')).toBe(true);
+    expect(body.applied).toEqual([a, b, c]);
+    expect(body.skipped).toEqual([]);
+    // Each item now in 'archived' state
+    expect(state.getItem(a)?.userAction).toBe('archived');
+    expect(state.getItem(b)?.userAction).toBe('archived');
+    expect(state.getItem(c)?.userAction).toBe('archived');
+  });
+
+  it('skips already-in-state items + not-found ids', () => {
+    const a = insertItem('a');
+    state.updateUserAction(a, 'archived');
+    const r = handleBulkAction(deps, { ids: [a, 'missing'], action: 'archived' });
+    const body = r.body as { applied: string[]; skipped: { id: string; reason: string }[] };
+    expect(body.applied).toEqual([]);
+    expect(body.skipped.map((s) => s.reason).sort()).toEqual(['already_in_state', 'not_found']);
+  });
+
+  it('rejects empty ids', () => {
+    expect(handleBulkAction(deps, { ids: [], action: 'archived' }).status).toBe(400);
+  });
+
+  it('rejects invalid action', () => {
+    const a = insertItem('a');
+    expect(handleBulkAction(deps, { ids: [a], action: 'nuke' as never }).status).toBe(400);
+  });
+});
+
+describe('handleUndoBulk', () => {
+  it('reverses the bulk and returns reverted count', async () => {
+    const a = insertItem('a');
+    const b = insertItem('b');
+    const bulkResp = handleBulkAction(deps, { ids: [a, b], action: 'archived' });
+    const bulkId = (bulkResp.body as { bulkId: string }).bulkId;
+    const r = handleUndoBulk(deps, bulkId);
+    expect(r.status).toBe(200);
+    const body = r.body as { ok: boolean; reverted: number };
+    expect(body.reverted).toBe(2);
+    expect(state.getItem(a)?.userAction).toBeUndefined();
+    expect(state.getItem(b)?.userAction).toBeUndefined();
+  });
+
+  it('returns 410 for an unknown bulkId or one outside the window', () => {
+    const r = handleUndoBulk(deps, 'bulk_unknown');
+    expect(r.status).toBe(410);
+  });
+});
+
+describe('handleListRecentBulks', () => {
+  it('returns recent undoable bulks newest-first', () => {
+    const a = insertItem('a');
+    const b = insertItem('b');
+    const r1 = handleBulkAction(deps, { ids: [a], action: 'archived' });
+    const r2 = handleBulkAction(deps, { ids: [b], action: 'snoozed' });
+    const list = handleListRecentBulks(deps);
+    expect(list.status).toBe(200);
+    const body = list.body as { recent: { bulkId: string; action: string; itemCount: number }[] };
+    expect(body.recent.length).toBeGreaterThanOrEqual(2);
+    const bulkIds = body.recent.map((r) => r.bulkId);
+    expect(bulkIds).toContain((r1.body as { bulkId: string }).bulkId);
+    expect(bulkIds).toContain((r2.body as { bulkId: string }).bulkId);
+  });
+});
+
+describe('handleListItems q= search', () => {
+  it('narrows the result set when q matches subject', () => {
+    state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'thr-rechnung',
+      bucket: 'requires_user',
+      confidence: 0.5,
+      reasonDe: 'r',
+      classifiedAt: new Date('2026-05-10'),
+      classifierVersion: 'v',
+      fromAddress: 'biller@x',
+      subject: 'Rechnung 2026-05',
+    });
+    insertItem('thr-other');
+    const r = handleListItems(deps, { q: 'Rechnung' });
+    expect(r.status).toBe(200);
+    const body = r.body as { items: ReadonlyArray<{ subject: string }> };
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]?.subject).toBe('Rechnung 2026-05');
+  });
+
+  it('rejects q longer than 200 chars', () => {
+    const r = handleListItems(deps, { q: 'a'.repeat(201) });
+    expect(r.status).toBe(400);
+  });
+});
+
+describe('handleComposeSend', () => {
+  it('503s when mail context is not wired', async () => {
+    const r = await handleComposeSend(deps, {
+      accountId: 'a',
+      to: 'a@b.com',
+      subject: 's',
+      body: 'b',
+    });
+    expect(r.status).toBe(503);
+  });
+
+  it('400s on missing accountId / to / empty body', async () => {
+    const mailContext = { registry: { get: vi.fn() } } as never;
+    const depsWith = { ...deps, mailContext };
+    expect((await handleComposeSend(depsWith, { accountId: '', to: 'a@b', subject: 's', body: 'b' })).status).toBe(400);
+    expect((await handleComposeSend(depsWith, { accountId: 'a', to: '', subject: 's', body: 'b' })).status).toBe(400);
+  });
+
+  it('422 empty_body when body is whitespace only', async () => {
+    const mailContext = { registry: { get: vi.fn(() => ({ accountId: 'a' })) } } as never;
+    const r = await handleComposeSend(
+      { ...deps, mailContext },
+      { accountId: 'a', to: 'a@b.com', subject: 's', body: '   ' },
+    );
+    expect(r.status).toBe(422);
+    expect((r.body as { reason?: string }).reason).toBe('empty_body');
+  });
+
+  it('422 not_registered when account is not in the registry', async () => {
+    const mailContext = { registry: { get: vi.fn(() => null) } } as never;
+    const r = await handleComposeSend(
+      { ...deps, mailContext },
+      { accountId: 'missing', to: 'a@b.com', subject: 's', body: 'b' },
+    );
+    expect(r.status).toBe(422);
+    expect((r.body as { reason?: string }).reason).toBe('not_registered');
+  });
+
+  it('400 when to has no valid addresses (after header-injection filter)', async () => {
+    const mailContext = { registry: { get: vi.fn(() => ({ accountId: 'a' })) } } as never;
+    // CR/LF gets stripped by parseAddress; the segment after CR/LF is also invalid.
+    const r = await handleComposeSend(
+      { ...deps, mailContext },
+      { accountId: 'a', to: 'malformed\r\ninjected', subject: 's', body: 'b' },
+    );
+    expect(r.status).toBe(400);
   });
 });

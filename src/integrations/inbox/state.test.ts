@@ -670,3 +670,140 @@ describe('InboxStateDb — v11 envelope metadata', () => {
     expect(updated).toBe(false);
   });
 });
+
+describe('InboxStateDb — bulk action log + UNDO', () => {
+  it('insertBulkActionLog round-trips a per-id row keyed by bulk_id', () => {
+    const itemId = insertSampleItem();
+    const id = inbox.insertBulkActionLog({
+      bulkId: 'bulk-1',
+      itemId,
+      priorUserAction: null,
+      priorUserActionAt: null,
+      action: 'archived',
+    });
+    expect(id.startsWith('iul_')).toBe(true);
+    const recent = inbox.listRecentBulks();
+    expect(recent).toHaveLength(1);
+    expect(recent[0]?.bulkId).toBe('bulk-1');
+    expect(recent[0]?.itemCount).toBe(1);
+    expect(recent[0]?.action).toBe('archived');
+  });
+
+  it('undoBulkAction reverts each item to its prior_user_action', () => {
+    const a = insertSampleItem({ threadKey: 'thr-a' });
+    const b = insertSampleItem({ threadKey: 'thr-b' });
+    // Pre-existing state: `a` was already archived; `b` was untouched.
+    inbox.updateUserAction(a, 'archived', new Date('2026-05-01T00:00:00Z'));
+    // Bulk action: snooze both.
+    inbox.insertBulkActionLog({ bulkId: 'b-undo', itemId: a, priorUserAction: 'archived', priorUserActionAt: new Date('2026-05-01T00:00:00Z'), action: 'snoozed' });
+    inbox.insertBulkActionLog({ bulkId: 'b-undo', itemId: b, priorUserAction: null, priorUserActionAt: null, action: 'snoozed' });
+    inbox.updateUserAction(a, 'snoozed');
+    inbox.updateUserAction(b, 'snoozed');
+    expect(inbox.getItem(a)?.userAction).toBe('snoozed');
+    expect(inbox.getItem(b)?.userAction).toBe('snoozed');
+    // Undo: a returns to archived (its prior state), b returns to null.
+    const reverted = inbox.undoBulkAction('b-undo');
+    expect(reverted).toBe(2);
+    expect(inbox.getItem(a)?.userAction).toBe('archived');
+    expect(inbox.getItem(b)?.userAction).toBeUndefined();
+    // Second call is a no-op.
+    expect(inbox.undoBulkAction('b-undo')).toBe(0);
+  });
+
+  it('undoBulkAction refuses rows older than the window', () => {
+    const itemId = insertSampleItem();
+    inbox.insertBulkActionLog({
+      bulkId: 'b-old',
+      itemId,
+      priorUserAction: null,
+      priorUserActionAt: null,
+      action: 'archived',
+      performedAt: new Date(Date.now() - 120_000), // 2 minutes ago
+    });
+    inbox.updateUserAction(itemId, 'archived');
+    const reverted = inbox.undoBulkAction('b-old', new Date(), 60_000);
+    expect(reverted).toBe(0);
+    expect(inbox.getItem(itemId)?.userAction).toBe('archived');
+  });
+
+  it('listRecentBulks returns groups newest-first, capped at limit', () => {
+    for (let i = 0; i < 7; i += 1) {
+      const id = insertSampleItem({ threadKey: `thr-r-${i}` });
+      inbox.insertBulkActionLog({
+        bulkId: `b-${i}`,
+        itemId: id,
+        priorUserAction: null,
+        priorUserActionAt: null,
+        action: 'archived',
+        performedAt: new Date(Date.now() - i * 1000),
+      });
+    }
+    const recent = inbox.listRecentBulks(undefined, 60_000, 5);
+    expect(recent).toHaveLength(5);
+    // Newest first
+    expect(recent[0]?.bulkId).toBe('b-0');
+  });
+
+  it('pruneOldBulkActionLog deletes rows older than the window', () => {
+    const itemId = insertSampleItem();
+    inbox.insertBulkActionLog({
+      bulkId: 'b-prune',
+      itemId,
+      priorUserAction: null,
+      priorUserActionAt: null,
+      action: 'archived',
+      performedAt: new Date(Date.now() - 10 * 60 * 1000), // 10 min ago
+    });
+    const deleted = inbox.pruneOldBulkActionLog(5 * 60 * 1000);
+    expect(deleted).toBe(1);
+  });
+});
+
+describe('InboxStateDb — listItems with ?q= search', () => {
+  function seedFor(subject: string, fromAddress: string, snippet: string | undefined, threadKey: string): string {
+    return inbox.insertItem({
+      accountId: TEST_ACCOUNT.id,
+      channel: 'email',
+      threadKey,
+      bucket: 'requires_user',
+      confidence: 0.5,
+      reasonDe: 'noise',
+      classifiedAt: new Date('2026-05-10T12:00:00Z'),
+      classifierVersion: 'v',
+      fromAddress,
+      subject,
+      snippet,
+    });
+  }
+
+  it('matches subject', () => {
+    seedFor('Rechnung Mai', 'biller@example.com', undefined, 'thr-q-1');
+    seedFor('Newsletter', 'news@example.com', undefined, 'thr-q-2');
+    const list = inbox.listItems({ q: 'Rechnung' });
+    expect(list).toHaveLength(1);
+    expect(list[0]?.subject).toBe('Rechnung Mai');
+  });
+
+  it('matches from_address case-insensitively', () => {
+    seedFor('Hi', 'roland@example.com', undefined, 'thr-q-a');
+    seedFor('Hi', 'alice@example.com', undefined, 'thr-q-b');
+    const list = inbox.listItems({ q: 'ROLAND' });
+    expect(list.map((i) => i.fromAddress)).toContain('roland@example.com');
+    expect(list.some((i) => i.fromAddress === 'alice@example.com')).toBe(false);
+  });
+
+  it('matches snippet', () => {
+    seedFor('S', 'a@x', 'Termin am Montag', 'thr-q-s1');
+    seedFor('S', 'a@x', 'Anderes Thema', 'thr-q-s2');
+    const list = inbox.listItems({ q: 'Termin' });
+    expect(list).toHaveLength(1);
+  });
+
+  it('escapes wildcard chars in user input (no false-match on %)', () => {
+    seedFor('30 off', 'a@x', undefined, 'thr-q-w1');
+    seedFor('Anything', 'b@x', undefined, 'thr-q-w2');
+    // The pattern is `%${escaped}%`; without escape `%` in input would match all.
+    const list = inbox.listItems({ q: '30%' });
+    expect(list).toHaveLength(0); // No subject contains literal "30%"
+  });
+});

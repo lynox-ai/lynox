@@ -3379,6 +3379,8 @@ export class LynoxHTTPApi {
       if (offset !== null) query.offset = offset;
       const tenantId = url.searchParams.get('tenantId');
       if (tenantId !== null) query.tenantId = tenantId;
+      const q = url.searchParams.get('q');
+      if (q !== null) query.q = q;
       sendInbox(res, handleListItems(deps!, query));
     });
 
@@ -3408,6 +3410,48 @@ export class LynoxHTTPApi {
       };
       if (typeof b['force'] === 'boolean') runBody.force = b['force'];
       sendInbox(res, await handleRunColdStart(deps!, runBody));
+    });
+
+    this.staticRoutes.set('POST /api/inbox/compose-send', async (_req, res, _params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleComposeSend } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const composeBody: import('../integrations/inbox/api.js').ComposeSendBody = {
+        accountId: typeof b['accountId'] === 'string' ? b['accountId'] : '',
+        to: typeof b['to'] === 'string' ? b['to'] : '',
+        subject: typeof b['subject'] === 'string' ? b['subject'] : '',
+        body: typeof b['body'] === 'string' ? b['body'] : '',
+      };
+      if (typeof b['cc'] === 'string') composeBody.cc = b['cc'];
+      if (typeof b['bcc'] === 'string') composeBody.bcc = b['bcc'];
+      sendInbox(res, await handleComposeSend(deps!, composeBody));
+    });
+
+    this.staticRoutes.set('POST /api/inbox/items/bulk-action', async (_req, res, _params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleBulkAction } = await import('../integrations/inbox/api.js');
+      const b = (body ?? {}) as Record<string, unknown>;
+      const bulkBody: import('../integrations/inbox/api.js').BulkActionBody = {
+        ids: Array.isArray(b['ids']) ? (b['ids'] as ReadonlyArray<string>).filter((s) => typeof s === 'string') : [],
+        action: b['action'] as import('../integrations/inbox/api.js').BulkAction,
+      };
+      sendInbox(res, handleBulkAction(deps!, bulkBody));
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/undo/:bulkId', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleUndoBulk } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleUndoBulk(deps!, params['bulkId']!));
+    }));
+
+    this.staticRoutes.set('GET /api/inbox/undo/recent', async (_req, res) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleListRecentBulks } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleListRecentBulks(deps!));
     });
 
     this.staticRoutes.set('POST /api/inbox/backfill-metadata', async (_req, res, _params, body) => {

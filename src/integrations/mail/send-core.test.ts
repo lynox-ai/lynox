@@ -69,6 +69,28 @@ describe('parseAddressList', () => {
     expect(parseAddressList(undefined)).toEqual([]);
     expect(parseAddressList('')).toEqual([]);
   });
+
+  it('drops segments containing CR/LF (header-injection guard)', () => {
+    // PRD-INBOX-PHASE-3 §"Send-time confirmation" requires header-injection
+    // defense at parse time. CR/LF in either the local-part or angle-form
+    // would let the SMTP wire stream pick up a synthesised Bcc header.
+    const injected = 'safe@x.com, x@evil.com\r\nBcc: leak@attacker.com';
+    const result = parseAddressList(injected);
+    // First address (safe) survives; the malformed second is dropped.
+    expect(result).toHaveLength(1);
+    expect(result[0]?.address).toBe('safe@x.com');
+  });
+
+  it('drops C0 control chars in the display name', () => {
+    expect(parseAddressList('"Max\x00" <max@x.com>')).toHaveLength(0);
+    expect(parseAddressList('"Max\x1f" <max@x.com>')).toHaveLength(0);
+  });
+
+  it('accepts space in display name (must not over-reject)', () => {
+    const result = parseAddressList('Max Mustermann <max@x.com>');
+    expect(result).toHaveLength(1);
+    expect(result[0]?.name).toBe('Max Mustermann');
+  });
 });
 
 describe('sendMail — happy path', () => {

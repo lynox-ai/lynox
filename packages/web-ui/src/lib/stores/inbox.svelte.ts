@@ -138,6 +138,202 @@ export interface UndoableAction {
 }
 let lastAction = $state<UndoableAction | null>(null);
 
+// ── Bulk selection + undo (PRD-INBOX-PHASE-3 §"Bulk Actions") ──────────────
+
+export type BulkAction = 'archived' | 'snoozed' | 'unhandled';
+
+export interface BulkActionResult {
+	bulkId: string;
+	action: BulkAction;
+	itemCount: number;
+	performedAt: number; // ms epoch — drives the 60s toast countdown
+}
+
+let selectedForBulk = $state(new Set<string>());
+let lastSelectedId = $state<string | null>(null);
+let recentBulks = $state<BulkActionResult[]>([]);
+
+export function getSelectedForBulk(): ReadonlySet<string> {
+	return selectedForBulk;
+}
+
+export function isSelectedForBulk(id: string): boolean {
+	return selectedForBulk.has(id);
+}
+
+export function getSelectionCount(): number {
+	return selectedForBulk.size;
+}
+
+export function getRecentBulks(): ReadonlyArray<BulkActionResult> {
+	return recentBulks;
+}
+
+/**
+ * Toggle a single item. With `shift=true` and a previously-selected
+ * anchor, select the inclusive range from the anchor to this id
+ * across the given ordered list (the visible bucket).
+ */
+export function toggleBulkSelection(
+	id: string,
+	visibleOrderedIds: ReadonlyArray<string>,
+	shift = false,
+): void {
+	const next = new Set(selectedForBulk);
+	if (shift && lastSelectedId !== null) {
+		const from = visibleOrderedIds.indexOf(lastSelectedId);
+		const to = visibleOrderedIds.indexOf(id);
+		if (from >= 0 && to >= 0) {
+			const [lo, hi] = from < to ? [from, to] : [to, from];
+			for (let i = lo; i <= hi; i += 1) next.add(visibleOrderedIds[i]!);
+			selectedForBulk = next;
+			return;
+		}
+	}
+	if (next.has(id)) {
+		next.delete(id);
+	} else {
+		next.add(id);
+	}
+	selectedForBulk = next;
+	lastSelectedId = id;
+}
+
+export function clearBulkSelection(): void {
+	selectedForBulk = new Set();
+	lastSelectedId = null;
+}
+
+/**
+ * Apply a bulk action to all currently-selected items. Optimistic UI
+ * update: items are removed from their current bucket before the
+ * server confirms — the UNDO path restores them if the user clicks
+ * "Undo" within the 60s window.
+ */
+export async function applyBulkAction(action: BulkAction): Promise<BulkActionResult | null> {
+	const ids = Array.from(selectedForBulk);
+	if (ids.length === 0) return null;
+	const res = await fetch(`${getApiBase()}/inbox/items/bulk-action`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ ids, action }),
+	});
+	if (!res.ok) {
+		addToast(t('inbox.error_bulk_action'), 'error');
+		return null;
+	}
+	const data = (await res.json()) as { bulkId: string; applied: string[]; skipped: { id: string; reason: string }[] };
+	// Optimistic removal from each bucket.
+	for (const bucket of ['requires_user', 'draft_ready', 'auto_handled'] as const) {
+		itemsByBucket[bucket] = itemsByBucket[bucket].filter((i) => !data.applied.includes(i.id));
+	}
+	const result: BulkActionResult = {
+		bulkId: data.bulkId,
+		action,
+		itemCount: data.applied.length,
+		performedAt: Date.now(),
+	};
+	recentBulks = [result, ...recentBulks].slice(0, 5);
+	clearBulkSelection();
+	void loadInboxCounts();
+	return result;
+}
+
+/** Reverse the bulk and refresh affected views. */
+export async function undoBulk(bulkId: string, currentZone: InboxBucket): Promise<boolean> {
+	const res = await fetch(`${getApiBase()}/inbox/undo/${encodeURIComponent(bulkId)}`, {
+		method: 'POST',
+	});
+	if (!res.ok) {
+		addToast(t('inbox.error_bulk_undo'), 'error');
+		return false;
+	}
+	recentBulks = recentBulks.filter((b) => b.bulkId !== bulkId);
+	void loadInboxCounts();
+	void loadInboxItems(currentZone);
+	return true;
+}
+
+/** Drop the local cache so a refresh kicks fresh from /undo/recent on next read. */
+export function pruneRecentBulks(now = Date.now(), windowMs = 60_000): void {
+	recentBulks = recentBulks.filter((b) => now - b.performedAt < windowMs);
+}
+
+// ── Compose-new (PRD-INBOX-PHASE-3 §"Compose-New") ─────────────────────────
+
+export interface ComposeDraft {
+	to: string;
+	cc: string;
+	bcc: string;
+	subject: string;
+	body: string;
+}
+
+let composeOpen = $state(false);
+let composeDraft = $state<ComposeDraft>({ to: '', cc: '', bcc: '', subject: '', body: '' });
+let composeSending = $state(false);
+
+export function isComposeOpen(): boolean {
+	return composeOpen;
+}
+
+export function getComposeDraft(): ComposeDraft {
+	return composeDraft;
+}
+
+export function isComposeSending(): boolean {
+	return composeSending;
+}
+
+export function openCompose(): void {
+	composeOpen = true;
+	composeDraft = { to: '', cc: '', bcc: '', subject: '', body: '' };
+}
+
+export function updateComposeDraft(patch: Partial<ComposeDraft>): void {
+	composeDraft = { ...composeDraft, ...patch };
+}
+
+export function closeCompose(): void {
+	composeOpen = false;
+	composeDraft = { to: '', cc: '', bcc: '', subject: '', body: '' };
+}
+
+/**
+ * Send the compose-new draft. Returns true on success. Account id
+ * must come from the caller (the UI's account selector).
+ */
+export async function sendCompose(accountId: string): Promise<boolean> {
+	if (composeSending) return false;
+	composeSending = true;
+	try {
+		const res = await fetch(`${getApiBase()}/inbox/compose-send`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				accountId,
+				to: composeDraft.to,
+				cc: composeDraft.cc,
+				bcc: composeDraft.bcc,
+				subject: composeDraft.subject,
+				body: composeDraft.body,
+			}),
+		});
+		if (!res.ok) {
+			addToast(t('inbox.compose_send_failed'), 'error');
+			return false;
+		}
+		addToast(t('inbox.compose_send_ok'), 'success');
+		closeCompose();
+		return true;
+	} catch {
+		addToast(t('inbox.compose_send_failed'), 'error');
+		return false;
+	} finally {
+		composeSending = false;
+	}
+}
+
 // ── Reading-Pane wire shapes ───────────────────────────────────────────────
 //
 // Backed by GET /api/inbox/items/:id/full and :id/thread. The store keeps
@@ -343,7 +539,12 @@ export async function loadInboxCounts(): Promise<boolean> {
 	}
 }
 
-export async function loadInboxItems(bucket: InboxBucket, limit = 50, offset = 0): Promise<void> {
+export async function loadInboxItems(
+	bucket: InboxBucket,
+	limit = 50,
+	offset = 0,
+	q?: string,
+): Promise<void> {
 	loadingBucket = bucket;
 	try {
 		const params = new URLSearchParams({
@@ -351,6 +552,7 @@ export async function loadInboxItems(bucket: InboxBucket, limit = 50, offset = 0
 			limit: String(limit),
 			offset: String(offset),
 		});
+		if (q !== undefined && q.length > 0) params.set('q', q);
 		const res = await fetch(`${getApiBase()}/inbox/items?${params.toString()}`);
 		if (res.status === 503) {
 			available = false;
