@@ -1032,6 +1032,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.snooze_today': { de: 'Heute Abend', en: 'Tonight' },
 	'inbox.snooze_tomorrow': { de: 'Morgen', en: 'Tomorrow' },
 	'inbox.snooze_week': { de: 'Nächste Woche', en: 'Next week' },
+	'inbox.snooze_monday_9': { de: 'Montag 9 Uhr', en: 'Monday 9am' },
 	'inbox.snooze_cancel': { de: 'Snooze beenden', en: 'Unsnooze' },
 	'inbox.channel_email': { de: 'E-Mail', en: 'Email' },
 	'inbox.channel_whatsapp': { de: 'WhatsApp', en: 'WhatsApp' },
@@ -1150,6 +1151,34 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.draft_error_save': { de: 'Entwurf konnte nicht gespeichert werden', en: 'Failed to save draft' },
 	'inbox.action_draft_reply': { de: 'Antwort entwerfen', en: 'Draft reply' },
 	'inbox.shortcuts_reply': { de: 'Antwort-Pane für Auswahl öffnen', en: 'Open reply pane for selection' },
+	'inbox.reading_loading': { de: 'Lade…', en: 'Loading…' },
+	'inbox.reading_open': { de: 'E-Mail öffnen', en: 'Open mail' },
+	'inbox.reading_body_missing': {
+		de: 'Inhalt nicht eingelesen. Frag den Assistenten im Chat, die Mail über mail_read zu öffnen.',
+		en: 'Body not cached. Ask the assistant in chat to open this mail via mail_read.',
+	},
+	'inbox.reading_close': { de: 'Schließen', en: 'Close' },
+	'inbox.reading_back': { de: 'Zurück', en: 'Back' },
+	'inbox.reading_empty_state': {
+		de: 'Wähle eine Mail aus der Liste, um sie zu lesen.',
+		en: 'Pick a mail from the list to read it.',
+	},
+	'inbox.thread_history_title': { de: 'Thread-Verlauf', en: 'Thread history' },
+	'inbox.thread_history_partial': {
+		de: 'Vollständiger Thread folgt — ältere Nachrichten sind nicht eingelesen.',
+		en: 'Full thread coming later — older messages not yet imported.',
+	},
+	'inbox.thread_history_empty': {
+		de: 'Keine weiteren Nachrichten in diesem Thread.',
+		en: 'No other messages in this thread.',
+	},
+	'inbox.thread_message_outbound': { de: 'Du', en: 'You' },
+	'inbox.reclassify_banner_text': {
+		de: '{count} Items haben Status geändert',
+		en: '{count} items changed status',
+	},
+	'inbox.reclassify_banner_refresh': { de: 'Liste aktualisieren', en: 'Refresh list' },
+	'inbox.reclassify_banner_dismiss': { de: 'Schließen', en: 'Dismiss' },
 };
 
 export function setLocale(locale: Locale): void {

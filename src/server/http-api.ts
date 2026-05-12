@@ -3481,6 +3481,12 @@ export class LynoxHTTPApi {
       if (typeof b['unsnoozeOnReply'] === 'boolean') {
         snoozeBody.unsnoozeOnReply = b['unsnoozeOnReply'];
       }
+      if (typeof b['preset'] === 'string' || b['preset'] === null) {
+        snoozeBody.preset = b['preset'] as import('../integrations/inbox/api.js').SnoozePreset | null;
+      }
+      if (typeof b['timezone'] === 'string') {
+        snoozeBody.timezone = b['timezone'];
+      }
       sendInbox(res, handleSetSnooze(deps!, params['id']!, snoozeBody));
     }));
 

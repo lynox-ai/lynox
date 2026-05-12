@@ -343,16 +343,154 @@ export function handleSetAction(deps: InboxApiDeps, id: string, body: SetActionB
   return { status: 200, body: { ok: true } };
 }
 
+export type SnoozePreset = 'later_today' | 'tomorrow_morning' | 'monday_9am' | 'next_week';
+const VALID_SNOOZE_PRESETS: ReadonlyArray<SnoozePreset> = [
+  'later_today',
+  'tomorrow_morning',
+  'monday_9am',
+  'next_week',
+];
+
 export interface SetSnoozeBody {
   /** Null clears the snooze. */
   until: string | null;
+  /**
+   * Optional named preset (PRD-INBOX-PHASE-3 §"Snooze Presets"). When set,
+   * the server resolves to a deterministic timezone-aware `until` value
+   * and ignores `until`. Pass `null` to fall back to the explicit `until`.
+   */
+  preset?: SnoozePreset | null | undefined;
+  /**
+   * Session timezone (IANA name, e.g. 'Europe/Zurich'). Server uses this
+   * to anchor the preset resolution to the user's wall clock. Default
+   * 'UTC' when absent — preset values will land at local UTC, which is
+   * acceptable for `next_week`-grade granularity but not for the
+   * `later_today` window.
+   */
+  timezone?: string | undefined;
   condition?: string | null | undefined;
   unsnoozeOnReply?: boolean | undefined;
 }
 
+/**
+ * Resolve a named preset to a deterministic Date using the session
+ * timezone (PRD-INBOX-PHASE-3 §"Snooze Presets"):
+ *   - later_today      = +3h, capped at 23:00 local
+ *   - tomorrow_morning = next 09:00 local
+ *   - monday_9am       = next Monday 09:00 local (today if already past)
+ *   - next_week        = +7d 09:00 local
+ *
+ * Implemented via Intl.DateTimeFormat to avoid pulling in a tz library
+ * for a handful of midnight-aligned calculations.
+ */
+export function resolveSnoozePreset(
+  preset: SnoozePreset,
+  now: Date,
+  timezone: string,
+): Date {
+  // Get the wall-clock components in the target timezone.
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    fmt.formatToParts(now).filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]),
+  ) as Record<string, string>;
+  const year = Number.parseInt(parts['year']!, 10);
+  const month = Number.parseInt(parts['month']!, 10);
+  const day = Number.parseInt(parts['day']!, 10);
+  const hour = Number.parseInt(parts['hour']!, 10);
+  // Build a UTC date that *represents* the requested local wall-clock,
+  // then re-anchor it to the timezone via offset math. For the
+  // simple-granularity presets (09:00 etc.) we can construct the target
+  // as if it were UTC and let the offset math correct it.
+  const offsetMs = _timezoneOffsetMs(now, timezone);
+  const buildLocal = (y: number, mo: number, d: number, h: number, mi: number): Date => {
+    // Components are interpreted as the target-tz wall-clock; converting
+    // to UTC means subtracting the timezone offset.
+    return new Date(Date.UTC(y, mo - 1, d, h, mi, 0) - offsetMs);
+  };
+  if (preset === 'later_today') {
+    const cap = buildLocal(year, month, day, 23, 0);
+    const plus3h = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+    return plus3h.getTime() > cap.getTime() ? cap : plus3h;
+  }
+  if (preset === 'tomorrow_morning') {
+    const tomorrow = buildLocal(year, month, day, 9, 0);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    return tomorrow;
+  }
+  if (preset === 'monday_9am') {
+    // Compute "next Monday" in target tz. We need the local weekday;
+    // Intl.DateTimeFormat doesn't expose it directly, derive via Date.
+    const localNow = new Date(now.getTime() + offsetMs);
+    const localWeekday = localNow.getUTCDay(); // 0=Sun ... 6=Sat
+    let daysUntilMonday = (1 - localWeekday + 7) % 7;
+    if (daysUntilMonday === 0 && hour >= 9) daysUntilMonday = 7;
+    const target = buildLocal(year, month, day, 9, 0);
+    target.setUTCDate(target.getUTCDate() + daysUntilMonday);
+    return target;
+  }
+  // next_week
+  const nextWeek = buildLocal(year, month, day, 9, 0);
+  nextWeek.setUTCDate(nextWeek.getUTCDate() + 7);
+  return nextWeek;
+}
+
+/**
+ * Compute the offset (ms) between the given moment as observed in `timezone`
+ * and UTC. Returns positive ms when the timezone is ahead of UTC.
+ */
+function _timezoneOffsetMs(at: Date, timezone: string): number {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    fmt.formatToParts(at).filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]),
+  ) as Record<string, string>;
+  const utcTime = Date.UTC(
+    Number.parseInt(parts['year']!, 10),
+    Number.parseInt(parts['month']!, 10) - 1,
+    Number.parseInt(parts['day']!, 10),
+    Number.parseInt(parts['hour']!, 10),
+    Number.parseInt(parts['minute']!, 10),
+    Number.parseInt(parts['second']!, 10),
+  );
+  return utcTime - at.getTime();
+}
+
 export function handleSetSnooze(deps: InboxApiDeps, id: string, body: SetSnoozeBody): ApiResponse {
   let until: Date | null = null;
-  if (body.until !== null) {
+  // Preset wins over explicit `until` (PRD: "Body shape stays
+  // backwards-compatible … `until` wins if preset null").
+  if (body.preset !== null && body.preset !== undefined) {
+    if (!VALID_SNOOZE_PRESETS.includes(body.preset)) {
+      return bad(`invalid preset: ${String(body.preset)}`);
+    }
+    const tz = body.timezone ?? 'UTC';
+    // `tz` ends up in `new Intl.DateTimeFormat({ timeZone })` which throws
+    // RangeError on invalid IANA names. Validate up-front so a client
+    // typo (or hostile input) returns 400 instead of an uncaught 500.
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    } catch {
+      return bad(`invalid timezone: ${tz}`);
+    }
+    until = resolveSnoozePreset(body.preset, new Date(), tz);
+  } else if (body.until !== null) {
     until = new Date(body.until);
     if (Number.isNaN(until.getTime())) return bad('invalid until: not an ISO date');
   }
