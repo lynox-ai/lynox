@@ -7,7 +7,7 @@
 // The LLM call itself is injected so tests can run without network and so
 // the queue can wrap it with a per-job AbortController + timeout.
 
-import { buildClassifierPrompt, type ClassifierPromptInput } from './prompt.js';
+import { buildClassifierPrompt, type ClassifierPromptInput, type ClassifierProvider } from './prompt.js';
 import { parseClassifierResponse, type ClassifierVerdict } from './schema.js';
 
 /**
@@ -33,6 +33,12 @@ export interface ClassifyOptions {
   signal?: AbortSignal | undefined;
   /** Override the default classifier version (mainly for tests). */
   classifierVersion?: string | undefined;
+  /**
+   * Which provider's tuned system prompt to use. Bootstrap binds this
+   * at runtime based on `llmRegion` (EU=mistral, US=anthropic). Default
+   * `'mistral'` — keeps existing test fixtures stable.
+   */
+  provider?: ClassifierProvider | undefined;
 }
 
 export interface ClassifyResult extends ClassifierVerdict {
@@ -52,7 +58,7 @@ export async function classifyMail(
   llm: LLMCaller,
   opts: ClassifyOptions = {},
 ): Promise<ClassifyResult> {
-  const built = buildClassifierPrompt(input);
+  const built = buildClassifierPrompt(input, opts.provider);
   const raw = await llm({
     system: built.system,
     user: built.user,
@@ -66,6 +72,6 @@ export async function classifyMail(
   };
 }
 
-export type { ClassifierPromptInput } from './prompt.js';
+export type { ClassifierPromptInput, ClassifierProvider } from './prompt.js';
 export type { ClassifierVerdict, FailReason } from './schema.js';
 export { REQUIRES_USER_THRESHOLD, MAX_REASON_LEN } from './schema.js';
