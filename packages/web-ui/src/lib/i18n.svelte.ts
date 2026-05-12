@@ -1174,6 +1174,10 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'No other messages in this thread.',
 	},
 	'inbox.thread_message_outbound': { de: 'Du', en: 'You' },
+	'inbox.thread_message_body_snippet_only': {
+		de: 'Nur Vorschau verfügbar — Volltext nicht zwischengespeichert.',
+		en: 'Snippet only — full body not cached.',
+	},
 	'inbox.reclassify_banner_text': {
 		de: '{count} Items haben Status geändert',
 		en: '{count} items changed status',
