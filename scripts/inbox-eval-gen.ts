@@ -236,7 +236,11 @@ async function main(): Promise<void> {
   const dryTotal = dryArg !== -1 ? Number.parseInt(process.argv[dryArg + 1] ?? '12', 10) : 0;
   const isDry = dryTotal > 0;
 
-  const llm = createMistralEuLLMCaller({ apiKey: getApiKey() });
+  // DEFAULT_MAX_TOKENS in llm-mistral.ts is 256 (sized for the
+  // classifier's single-verdict JSON). Generation needs much more —
+  // an 8-mail batch with realistic bodies runs ~600-1000 tokens; the
+  // labeler is small (~30 tokens). 4096 is generous for either.
+  const llm = createMistralEuLLMCaller({ apiKey: getApiKey(), maxTokens: 4096 });
   const allMails: Array<{ mail: GenMail; hintBucket: InboxBucket; categoryId: string }> = [];
 
   // Scale per-category count down proportionally for dry runs.

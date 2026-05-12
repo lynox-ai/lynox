@@ -1,128 +1,1213 @@
 {
-  "version": 1,
-  "generatedAt": "2026-05-12T00:00:00Z",
-  "generator": "hand-crafted-seed",
-  "note": "12-entry hand-crafted seed for the eval-runner contract. Expand to ≥100 via scripts/inbox-eval-gen.ts before relying on the ≥80% pass-criterion. Names use Mustermann / Acme / example.com per the anti-PII rules in core/tests/eval/README.md.",
+  "version": 2,
+  "generatedAt": "2026-05-12T07:57:17.444Z",
+  "generator": "inbox-eval-gen v1 (Mistral EU, full); operator-must-run inbox-eval-lint before merge",
+  "note": "PRD-INBOX-PHASE-3 §\"Classification Tuning\". Re-run only when prompt or model bumps invalidate the corpus.",
+  "antiPiiNote": "Surnames (Lopez, Schmidt, Wilson, …) were synthesized by Mistral Phase-1 and may coincide with real names — no customer data was input. Sender domains beyond `*.example` are also Mistral-invented. The `inbox-eval-lint.ts` script flags both as findings for operator review; this corpus ships with them because their privacy risk on a public OSS fixture is low (synthesized, not extracted). If a coincidence with a real lynox customer ever surfaces, regenerate. Brand domains (lynox.*, brandfusion.*) WERE manually scrubbed.",
+  "operatorRelabels": [
+    "info-share-de-117 (compliance_notification): Phase-2 labeler emitted requires_user because of 'Bitte lesen Sie' wording, but the body has no deadline + no required action. Re-labeled to auto_handled (2026-05-12)."
+  ],
   "fixtures": [
     {
-      "id": "ah-de-newsletter-01",
+      "id": "newsletter-en-000",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "promo@acme.example",
+      "fromName": "Acme Deals",
+      "subject": "🔥 Black Friday Sale – Up to 70% OFF!",
+      "body": "Don’t miss our Black Friday deals! Shop now and save up to 70%. Unsubscribe at any time."
+    },
+    {
+      "id": "newsletter-de-001",
       "category": "newsletter",
       "language": "de",
       "expectedBucket": "auto_handled",
-      "fromAddress": "newsletter@acme-shop.example",
-      "fromName": "Acme Shop",
-      "subject": "Frühlingsangebote: 20% auf alle Produkte bis Sonntag",
-      "body": "Liebe Kundin, lieber Kunde,\n\ndiese Woche gibt es 20% Rabatt auf das gesamte Sortiment. Verwenden Sie den Code FRUEHLING20 an der Kasse.\n\nViele Grüße, das Acme-Team\n\nKein Newsletter mehr? Abmeldelink unten."
+      "fromAddress": "newsletter@beispiel-ag.example",
+      "fromName": "Beispiel AG News",
+      "subject": "Sonderangebot: 50% Rabatt auf alle Produkte!",
+      "body": "Nur diese Woche: 50% Rabatt auf alles! Jetzt zugreifen und sparen. Abmelden hier: [Link]."
     },
     {
-      "id": "ah-en-receipt-01",
+      "id": "newsletter-en-002",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "marketing@example-shop.example",
+      "fromName": "Example Shop Deals",
+      "subject": "Summer Clearance – Up to 60% OFF!",
+      "body": "Summer clearance is here! Enjoy up to 60% off on selected items. Unsubscribe anytime."
+    },
+    {
+      "id": "newsletter-de-003",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "newsletter@beispiel-ag.example",
+      "fromName": "Beispiel AG News",
+      "subject": "🌿 Frühlingsaktion: 30% auf Gartenmöbel!",
+      "body": "Genießen Sie 30% Rabatt auf Gartenmöbel – nur bis Ende April! Abmelden: [Link]."
+    },
+    {
+      "id": "newsletter-en-004",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "promo@acme.example",
+      "fromName": "Acme Flash Deals",
+      "subject": "Flash Sale Alert: 48h only – 50% OFF!",
+      "body": "Limited-time flash sale! 50% off for 48 hours only. Unsubscribe here: [Link]."
+    },
+    {
+      "id": "newsletter-de-005",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "marketing@example-shop.example",
+      "fromName": "Example Shop Festive",
+      "subject": "🎄 Weihnachts-Special: 20% auf alles!",
+      "body": "Weihnachts-Special: 20% Rabatt auf alle Artikel! Nur bis 24.12. Abmelden: [Link]."
+    },
+    {
+      "id": "newsletter-en-006",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "newsletter@beispiel-ag.example",
+      "fromName": "Beispiel AG Deals",
+      "subject": "Cyber Monday Madness – Up to 80% OFF!",
+      "body": "Cyber Monday madness is here! Save up to 80% on selected items. Unsubscribe anytime."
+    },
+    {
+      "id": "newsletter-de-007",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "promo@acme.example",
+      "fromName": "Acme Seasonal",
+      "subject": "🍂 Herbst-Rabatt: 25% auf Mode!",
+      "body": "Herbst-Rabatt: 25% auf alle Modeartikel! Nur diese Woche. Abmelden: [Link]."
+    },
+    {
+      "id": "newsletter-en-008",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "promo@acme.example",
+      "fromName": "Acme Deals",
+      "subject": "🔥 Exclusive 20% OFF – Only Today!",
+      "body": "Grab your 20% discount now! Use code SAVE20 at checkout. Unsubscribe below."
+    },
+    {
+      "id": "newsletter-de-009",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "newsletter@beispiel-ag.example",
+      "fromName": "Beispiel AG News",
+      "subject": "Sonderangebot: 3 für 2 – Nur diese Woche!",
+      "body": "Kaufen Sie 3 Artikel, zahlen Sie nur 2! Jetzt sichern. Abmelden unter: https://beispiel-ag.example/unsubscribe"
+    },
+    {
+      "id": "newsletter-en-010",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "marketing@example-shop.example",
+      "fromName": "Example Shop Deals",
+      "subject": "Flash Sale: Up to 50% Off – Limited Stock!",
+      "body": "Hurry! Up to 50% off on selected items. Shop now before it's gone. Unsubscribe here."
+    },
+    {
+      "id": "newsletter-de-011",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "newsletter@beispiel-ag.example",
+      "fromName": "Beispiel AG News",
+      "subject": "Frühlingsaktion: 15% Rabatt auf alles!",
+      "body": "Genießen Sie 15% Rabatt auf Ihre Bestellung. Code: FRUEHLING15. Abmelden: https://beispiel-ag.example/unsubscribe"
+    },
+    {
+      "id": "newsletter-en-012",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "promo@acme.example",
+      "fromName": "Acme Deals",
+      "subject": "Black Friday Alert: Save Up to 70%!",
+      "body": "Black Friday is here! Enjoy up to 70% off. Shop now. Unsubscribe below."
+    },
+    {
+      "id": "newsletter-de-013",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "marketing@example-shop.example",
+      "fromName": "Example Shop Deals",
+      "subject": "Sommer-Special: Kostenloser Versand ab 50€!",
+      "body": "Jetzt kostenlos versenden! Ab 50€ Bestellwert. Jetzt shoppen. Abmelden: https://example-shop.example/unsubscribe"
+    },
+    {
+      "id": "newsletter-en-014",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "newsletter@acme.example",
+      "fromName": "Acme Fashion",
+      "subject": "New Collection Launch – Shop Now!",
+      "body": "Discover our latest collection! Limited stock available. Unsubscribe here."
+    },
+    {
+      "id": "newsletter-de-015",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "marketing@beispiel-ag.example",
+      "fromName": "Beispiel AG News",
+      "subject": "Winter-Vorteil: 10% Extra-Rabatt für Stammkunden!",
+      "body": "Als Stammkunde erhalten Sie 10% Extra-Rabatt. Code: STAMM10. Abmelden: https://beispiel-ag.example/unsubscribe"
+    },
+    {
+      "id": "newsletter-en-016",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "promo@example-shop.example",
+      "fromName": "Example Shop Team",
+      "subject": "🎉 Up to 50% OFF – Summer Sale Starts Now!",
+      "body": "Grab your summer deals before they're gone! Unbeatable prices on all items. Unsubscribe here: https://example-shop.example/unsubscribe"
+    },
+    {
+      "id": "newsletter-de-017",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "marketing@acme.example",
+      "fromName": "Acme Marketing",
+      "subject": "Nur heute: 20% Rabatt auf alles – Schnell zugreifen!",
+      "body": "Limited-time offer! 20% off everything today only. Opt-out: https://acme.example/abmelden"
+    },
+    {
+      "id": "newsletter-en-018",
+      "category": "newsletter",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "newsletter@beispiel-ag.example",
+      "fromName": "Beispiel AG Newsletter",
+      "subject": "Black Friday Alert: Up to 70% Discounts Inside!",
+      "body": "Exclusive deals for you! Don’t miss out. Unsubscribe: https://beispiel-ag.example/optout"
+    },
+    {
+      "id": "newsletter-de-019",
+      "category": "newsletter",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "newsletter@acme.example",
+      "fromName": "Acme Style News",
+      "subject": "Saisonstart: Jetzt 15% Rabatt auf neue Kollektion!",
+      "body": "Frische Trends mit Rabatt – nur diese Woche! Abmelden: https://acme.example/newsletter-abmelden"
+    },
+    {
+      "id": "receipt-en-020",
+      "category": "payment_receipt",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "receipts@billing.example-pay.example",
+      "fromName": "Acme Billing",
+      "subject": "Payment confirmation for your recent transaction",
+      "body": "Your payment of €124.50 was successfully processed. Card ending in ••••1234. Thank you!"
+    },
+    {
+      "id": "receipt-de-021",
+      "category": "payment_receipt",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "billing@acme.example",
+      "fromName": "Acme Billing Service",
+      "subject": "Zahlungsbestätigung: Rechnung Nr. 2024-0543",
+      "body": "Ihre Zahlung von 89,99 € wurde erfolgreich verbucht. Karte ••••4567. Vielen Dank!"
+    },
+    {
+      "id": "receipt-en-022",
+      "category": "payment_receipt",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "receipts@billing.example-pay.example",
+      "fromName": "example-pay Billing",
+      "subject": "Your payment has been received",
+      "body": "Payment of $75.00 completed. Card ••••9876. No further action needed."
+    },
+    {
+      "id": "receipt-de-023",
+      "category": "payment_receipt",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "billing@acme.example",
+      "fromName": "Acme Billing Team",
+      "subject": "Bestätigung: Zahlungseingang Rechnung 2024-0789",
+      "body": "Ihre Zahlung von 249,00 € wurde erfolgreich verarbeitet. Karte ••••2468. Danke!"
+    },
+    {
+      "id": "receipt-en-024",
       "category": "receipt",
       "language": "en",
       "expectedBucket": "auto_handled",
-      "fromAddress": "receipts@acme-billing.example",
-      "fromName": "Acme Billing",
-      "subject": "Receipt from Acme Inc. — CHF 49.00",
-      "body": "Thank you for your payment.\n\nAmount: CHF 49.00\nCard: •••• 4242\nDate: 12 May 2026\n\nThis receipt was generated automatically. No action required."
+      "fromAddress": "receipts@billing.example-pay.example",
+      "fromName": "example-pay Billing",
+      "subject": "Transaction receipt - Order #45678",
+      "body": "Payment of £45.67 completed. Card ••••3691. Thank you for your purchase."
     },
     {
-      "id": "ah-de-rsvp-confirmation-01",
-      "category": "rsvp-confirmation",
+      "id": "receipt-de-025",
+      "category": "payment_receipt",
       "language": "de",
       "expectedBucket": "auto_handled",
-      "fromAddress": "events@beispielkonferenz.example",
-      "fromName": "Beispielkonferenz",
-      "subject": "Deine Anmeldung wurde bestätigt",
-      "body": "Hallo Mustermann,\n\ndeine Anmeldung zur Beispielkonferenz am 03. Juni 2026 ist eingegangen. Den Kalendereintrag findest du im Anhang.\n\nKeine weitere Bestätigung nötig."
+      "fromAddress": "billing@acme.example",
+      "fromName": "Acme Billing Service",
+      "subject": "Zahlungsbestätigung: Rechnung 2024-0123",
+      "body": "Ihre Zahlung von 15,50 € wurde erfolgreich gebucht. Karte ••••5555. Vielen Dank!"
     },
     {
-      "id": "ah-en-shipping-update-01",
-      "category": "shipping-update",
+      "id": "receipt-en-026",
+      "category": "payment_receipt",
       "language": "en",
       "expectedBucket": "auto_handled",
-      "fromAddress": "noreply@logistics.example",
-      "fromName": "Acme Logistics",
-      "subject": "Your order #12345 has shipped",
-      "body": "Hi there,\n\nYour order is on its way. Tracking number: ACME-12345-CH. Estimated delivery: 14 May 2026.\n\nNo action required. Track here: tracking.example/ACME-12345-CH"
+      "fromAddress": "receipts@billing.example-pay.example",
+      "fromName": "example-pay Billing",
+      "subject": "Your subscription payment was successful",
+      "body": "Payment of $29.99 completed. Card ••••7777. No action required."
     },
     {
-      "id": "ru-de-invoice-due-01",
-      "category": "invoice-due",
+      "id": "receipt-de-027",
+      "category": "payment_receipt",
       "language": "de",
-      "expectedBucket": "requires_user",
-      "fromAddress": "buchhaltung@dienstleister.example",
-      "fromName": "Acme Dienstleister AG",
-      "subject": "Rechnung 2026-04-17 — Zahlung bis 26.05.2026",
-      "body": "Sehr geehrte Frau Mustermann,\n\nim Anhang finden Sie unsere Rechnung über CHF 1'240.00 für den Monat April. Bitte überweisen Sie den Betrag bis spätestens 26.05.2026 auf das angegebene Konto.\n\nFreundliche Grüße"
+      "expectedBucket": "auto_handled",
+      "fromAddress": "billing@acme.example",
+      "fromName": "Acme Billing Team",
+      "subject": "Bestätigung: Zahlungseingang Rechnung 2024-0987",
+      "body": "Ihre Zahlung von 320,00 € wurde erfolgreich verarbeitet. Karte ••••8888. Danke!"
     },
     {
-      "id": "ru-en-colleague-question-01",
-      "category": "colleague-question",
+      "id": "receipt-en-028",
+      "category": "payment_receipt",
       "language": "en",
-      "expectedBucket": "requires_user",
-      "fromAddress": "max.mustermann@acme-corp.example",
-      "fromName": "Max Mustermann",
-      "subject": "Quick question on the Q2 roadmap",
-      "body": "Hi,\n\nDo you have 10 minutes today to walk me through the priorities for Q2? I'm trying to finalise the OKR doc and your input on the search-quality work would help.\n\nThanks,\nMax"
-    },
-    {
-      "id": "ru-de-customer-complaint-01",
-      "category": "customer-complaint",
-      "language": "de",
-      "expectedBucket": "requires_user",
-      "fromAddress": "kundin@kundenfirma.example",
-      "fromName": "Erika Mustermann",
-      "subject": "Problem mit der letzten Lieferung",
-      "body": "Hallo,\n\nleider war die letzte Lieferung unvollständig — es fehlten drei Kartons. Was schlagen Sie als Lösung vor?\n\nViele Grüße,\nErika Mustermann"
-    },
-    {
-      "id": "ru-en-payment-failed-01",
-      "category": "payment-failed",
-      "language": "en",
-      "expectedBucket": "requires_user",
-      "fromAddress": "billing@acme-billing.example",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "receipts@example-pay.example",
       "fromName": "Acme Billing",
-      "subject": "Action required: Payment failed",
-      "body": "Hi,\n\nWe couldn't process your latest payment of CHF 49.00. The card on file was declined. Please update your billing details within 7 days to avoid service interruption.\n\nUpdate: https://billing.example/update"
+      "subject": "Payment Confirmation: €49.99 processed",
+      "body": "Your payment of €49.99 with card ••••1234 was successful on 2024-05-15. No action required."
     },
     {
-      "id": "dr-de-meeting-request-01",
-      "category": "meeting-request",
+      "id": "receipt-de-029",
+      "category": "payment_receipt",
       "language": "de",
-      "expectedBucket": "draft_ready",
-      "fromAddress": "max.mustermann@acme-corp.example",
-      "fromName": "Max Mustermann",
-      "subject": "Termin für nächste Woche?",
-      "body": "Hallo,\n\nhast du nächste Woche Zeit für einen kurzen Call zum Thema Onboarding? 30 Minuten sollten reichen. Donnerstag oder Freitag wäre für mich gut.\n\nViele Grüße,\nMax"
+      "expectedBucket": "auto_handled",
+      "fromAddress": "billing@acme.example",
+      "fromName": "Acme GmbH Rechnungsstelle",
+      "subject": "Zahlungseingang: 29,90 € bestätigt",
+      "body": "Ihre Zahlung von 29,90 € mit Karte ••••5678 war erfolgreich am 12.05.2024. Keine weiteren Schritte nötig."
     },
     {
-      "id": "dr-en-quick-reply-needed-01",
-      "category": "quick-reply",
+      "id": "receipt-en-030",
+      "category": "payment_receipt",
       "language": "en",
-      "expectedBucket": "draft_ready",
-      "fromAddress": "alice@partnercompany.example",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "receipts@example-pay.example",
+      "fromName": "example-pay.example Billing",
+      "subject": "Receipt: $15.50 transaction completed",
+      "body": "Your $15.50 payment with card ••••9012 was successful on May 10, 2024. No action required."
+    },
+    {
+      "id": "receipt-de-031",
+      "category": "payment_receipt",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "billing@acme.example",
+      "fromName": "Acme Billing Team",
+      "subject": "Zahlungsbestätigung: 79,99 € verbucht",
+      "body": "Ihre Zahlung von 79,99 € mit Karte ••••3456 war erfolgreich am 08.05.2024. Vielen Dank!"
+    },
+    {
+      "id": "receipt-en-032",
+      "category": "payment_receipt",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "receipts@example-pay.example",
+      "fromName": "Acme Billing Services",
+      "subject": "Payment received: £22.00 processed",
+      "body": "Your £22.00 payment with card ••••7890 was successful on 05.05.2024. No further action needed."
+    },
+    {
+      "id": "receipt-de-033",
+      "category": "zahlungsbestätigung",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "billing@acme.example",
+      "fromName": "Acme GmbH Abrechnung",
+      "subject": "Zahlungsbestätigung: 12,34 € erfolgreich",
+      "body": "Ihre Zahlung von 12,34 € mit Karte ••••2345 war erfolgreich am 01.05.2024. Danke für Ihre Zahlung."
+    },
+    {
+      "id": "receipt-en-034",
+      "category": "receipt",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "receipts@example-pay.example",
+      "fromName": "example-pay.example Billing",
+      "subject": "Receipt: €99.00 transaction confirmed",
+      "body": "Your €99.00 payment with card ••••6789 was successful on April 28, 2024. No action required."
+    },
+    {
+      "id": "shipping-confirmation-en-035",
+      "category": "shipping_notification",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@logistics-style.com",
+      "fromName": "Logistics Style",
+      "subject": "Your order has been shipped!",
+      "body": "Your package with tracking #LS-2024-0589 is on its way. ETA: 3-5 business days. No action required."
+    },
+    {
+      "id": "shipping-confirmation-de-036",
+      "category": "shipping_confirmation",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@logistik-plus.de",
+      "fromName": "Logistik Plus",
+      "subject": "Lieferbestätigung – Paket unterwegs",
+      "body": "Ihr Paket mit der Sendungsnummer LP-2024-1122 ist unterwegs. Voraussichtliche Ankunft: 2-4 Werktage."
+    },
+    {
+      "id": "shipping-confirmation-en-037",
+      "category": "shipping_confirmation",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@express-flow.net",
+      "fromName": "Express Flow",
+      "subject": "Shipment Confirmation – Tracking #EX-9876",
+      "body": "Your order is shipped. Tracking #EX-9876. ETA within 2 business days. No further action needed."
+    },
+    {
+      "id": "shipping-confirmation-de-038",
+      "category": "shipping_notification",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@versandheld.de",
+      "fromName": "VersandHeld",
+      "subject": "Ihr Paket ist unterwegs",
+      "body": "Sendungsnummer VH-2024-0741. Voraussichtliche Lieferung: 1-3 Werktage. Keine Aktion erforderlich."
+    },
+    {
+      "id": "shipping-confirmation-en-039",
+      "category": "shipping_notification",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@global-ship.com",
+      "fromName": "Global Ship",
+      "subject": "Your delivery is on the way!",
+      "body": "Tracking #GS-2024-4561. ETA: 5-7 business days. No action required."
+    },
+    {
+      "id": "shipping-confirmation-de-040",
+      "category": "shipping",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@speedfreight.de",
+      "fromName": "SpeedFreight",
+      "subject": "Lieferbestätigung – Sendungsnummer SF-3344",
+      "body": "Ihr Paket ist unterwegs. Voraussichtliche Ankunft: 2 Werktage. Keine weiteren Schritte nötig."
+    },
+    {
+      "id": "shipping-confirmation-en-041",
+      "category": "shipping",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@transitline.com",
+      "fromName": "TransitLine",
+      "subject": "Shipment Update – Tracking #TR-1234",
+      "body": "Your package is shipped. ETA: 3-4 business days. No action needed."
+    },
+    {
+      "id": "shipping-confirmation-de-042",
+      "category": "shipping",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@paketprofi.de",
+      "fromName": "PaketProfi",
+      "subject": "Ihr Paket ist unterwegs – Sendungsnummer PP-5678",
+      "body": "Voraussichtliche Lieferung: 1-2 Werktage. Keine Aktion erforderlich."
+    },
+    {
+      "id": "shipping-confirmation-en-043",
+      "category": "shipping_notification",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@logistics-style.example",
+      "fromName": "Logistics Style",
+      "subject": "Your order has been shipped! Tracking #XYZ123456789",
+      "body": "Your package is on its way! ETA: 3-5 business days. Track here: logistics-style.example/track/XYZ123456789"
+    },
+    {
+      "id": "shipping-confirmation-de-044",
+      "category": "shipping",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "noreply@versandmeister.example",
+      "fromName": "VersandMeister",
+      "subject": "Lieferbestätigung – Ihre Bestellung ist unterwegs",
+      "body": "Ihre Sendung ist auf dem Weg! Voraussichtliche Ankunft: 2-4 Werktage. Tracking: versandmeister.example/track/ABC987654321"
+    },
+    {
+      "id": "invoice-due-de-045",
+      "category": "payment_reminder",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@acme-dienstleister.example",
+      "fromName": "Acme Dienstleister Buchhaltung",
+      "subject": "Rechnung Nr. 2024-0542 - Zahlung fällig bis 15.06.2024",
+      "body": "Sehr geehrter Kunde, Ihre Rechnung Nr. 2024-0542 über CHF 1.250,00 ist fällig bis 15.06.2024. Bitte überweisen Sie auf CH93 8000 5000 0000 0000 0."
+    },
+    {
+      "id": "invoice-due-en-046",
+      "category": "payment_reminder",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "accounts@example-services.example",
+      "fromName": "Example Services Accounts Payable",
+      "subject": "Invoice #2024-0789 - Due date: 20.06.2024",
+      "body": "Dear Client, Invoice #2024-0789 for €890.50 is due by 20.06.2024. Please transfer to DE89 3704 0044 0532 0130 00."
+    },
+    {
+      "id": "invoice-due-de-047",
+      "category": "payment_reminder",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@acme-dienstleister.example",
+      "fromName": "Acme Dienstleister Buchhaltung",
+      "subject": "Zahlungserinnerung: Rechnung 2024-1123 fällig am 05.07.2024",
+      "body": "Ihre Rechnung Nr. 2024-1123 über CHF 3.200,00 ist bis 05.07.2024 zu begleichen. Überweisung auf CH45 0023 5234 5678 9012 3."
+    },
+    {
+      "id": "invoice-due-en-048",
+      "category": "payment_reminder",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "accounts@example-services.example",
+      "fromName": "Example Services Accounts Payable",
+      "subject": "Payment Reminder: Invoice #2024-0912 Due 30.06.2024",
+      "body": "Invoice #2024-0912 for €1.750,00 is due by 30.06.2024. Transfer to DE91 1000 0000 0123 4567 89."
+    },
+    {
+      "id": "invoice-due-de-049",
+      "category": "invoice_payment",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@acme-dienstleister.example",
+      "fromName": "Acme Dienstleister Buchhaltung",
+      "subject": "Rechnung 2024-1456: Frist 10.07.2024 - CHF 2.100,00",
+      "body": "Rechnung Nr. 2024-1456 über CHF 2.100,00 fällig bis 10.07.2024. IBAN: CH53 0076 2011 6238 5295 7."
+    },
+    {
+      "id": "invoice-due-en-050",
+      "category": "payment_invoice",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "accounts@example-services.example",
+      "fromName": "Example Services Accounts Payable",
+      "subject": "Invoice #2024-0345 - Due 08.07.2024 - €1.450,00",
+      "body": "Invoice #2024-0345 for €1.450,00 is due by 08.07.2024. Please pay to DE88 1001 0010 0123 4567 89."
+    },
+    {
+      "id": "invoice-due-de-051",
+      "category": "payment_reminder",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@acme-dienstleister.example",
+      "fromName": "Acme Dienstleister Buchhaltung",
+      "subject": "Zahlungsaufforderung: Rechnung 2024-1890 fällig 25.07.2024",
+      "body": "Rechnung Nr. 2024-1890 über CHF 980,00 ist bis 25.07.2024 zu begleichen. Überweisung auf CH63 0024 0001 0000 0000 0."
+    },
+    {
+      "id": "invoice-due-en-052",
+      "category": "payment_reminder",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "accounts@example-services.example",
+      "fromName": "Example Services Accounts Payable",
+      "subject": "Payment Due: Invoice #2024-0678 by 12.07.2024 - €2.300,00",
+      "body": "Invoice #2024-0678 for €2.300,00 is due by 12.07.2024. Transfer to DE75 5121 0800 1245 6789 01."
+    },
+    {
+      "id": "invoice-due-de-053",
+      "category": "rechnung",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@acme-dienstleister.example",
+      "fromName": "Acme Dienstleister Buchhaltung",
+      "subject": "Rechnung Nr. 2024-0456 - Fälligkeitsdatum 15.05.2024",
+      "body": "Sehr geehrter Kunde, Ihre Rechnung über CHF 1.245,00 ist fällig bis 15.05.2024. IBAN: CH93 0076 2011 6238 5295 7. Vielen Dank!"
+    },
+    {
+      "id": "invoice-due-en-054",
+      "category": "invoice_payment",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "accounts@example-services.example",
+      "fromName": "Example Services Accounting",
+      "subject": "Invoice #2024-0789 - Due Date 20.05.2024",
+      "body": "Dear Customer, your invoice of EUR 890.50 is due by 20.05.2024. IBAN: DE89 3704 0044 0532 0130 00. Thank you!"
+    },
+    {
+      "id": "invoice-due-de-055",
+      "category": "zahlungserinnerung",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@acme-dienstleister.example",
+      "fromName": "Acme Dienstleister Buchhaltung",
+      "subject": "Zahlungserinnerung: Rechnung 2024-1122",
+      "body": "Ihre Rechnung über EUR 670,00 ist fällig bis 10.06.2024. Bitte überweisen Sie auf IBAN: DE44 5001 0517 5407 3249 11. Vielen Dank!"
+    },
+    {
+      "id": "invoice-due-en-056",
+      "category": "payment_reminder",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "accounts@example-services.example",
+      "fromName": "Example Services Accounting",
+      "subject": "Payment Reminder: Invoice #2024-0333",
+      "body": "Your invoice of CHF 2.150,00 is due by 05.06.2024. Please transfer to IBAN: CH53 0023 5224 0165 4109 3. Thank you!"
+    },
+    {
+      "id": "invoice-due-de-057",
+      "category": "rechnung_frist",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@acme-dienstleister.example",
+      "fromName": "Acme Dienstleister Buchhaltung",
+      "subject": "Rechnung 2024-0888 - Frist 30.05.2024",
+      "body": "Ihre Rechnung über EUR 1.990,00 ist fällig bis 30.05.2024. IBAN: DE75 5121 0800 1245 6789 00. Bitte beachten!"
+    },
+    {
+      "id": "invoice-due-en-058",
+      "category": "payment_reminder",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "accounts@example-services.example",
+      "fromName": "Example Services Accounting",
+      "subject": "Invoice #2024-0999 - Due Date 25.05.2024",
+      "body": "Your invoice of CHF 1.450,00 is due by 25.05.2024. IBAN: CH38 0079 6124 0456 7800 9. Thank you for your prompt payment!"
+    },
+    {
+      "id": "invoice-due-de-059",
+      "category": "rechnung",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "buchhaltung@acme-dienstleister.example",
+      "fromName": "Acme Dienstleister Buchhaltung",
+      "subject": "Fällige Rechnung Nr. 2024-1200",
+      "body": "Ihre Rechnung über EUR 560,00 ist fällig bis 08.06.2024. Überweisen Sie bitte auf IBAN: DE87 2005 0550 1020 2345 67. Vielen Dank!"
+    },
+    {
+      "id": "customer-question-en-060",
+      "category": "customer_inquiry",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "max.mustermann@acme.example",
+      "fromName": "Max Mustermann",
+      "subject": "Frage zur Rechnung Nr. 2024-0543",
+      "body": "Hello, I noticed a discrepancy in invoice 2024-0543. The amount seems incorrect. Can you clarify?"
+    },
+    {
+      "id": "customer-question-de-061",
+      "category": "kundenanfrage",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "erika.beispiel@acme-corp.example",
+      "fromName": "Erika Beispiel",
+      "subject": "Rückruf wegen defekter Ware",
+      "body": "Sehr geehrtes Team, die gelieferte Ware ist beschädigt. Bitte umgehend um Rückruf."
+    },
+    {
+      "id": "customer-question-en-062",
+      "category": "payment_delay_request",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "alice.mustermann@example.example",
       "fromName": "Alice Mustermann",
-      "subject": "Confirming our 3pm tomorrow",
-      "body": "Hi,\n\nJust confirming our 3pm tomorrow via the same Zoom link. Let me know if anything changed on your end.\n\nThanks,\nAlice"
+      "subject": "Urgent: Payment delay",
+      "body": "We need to extend the payment deadline for invoice 2024-0589 by 7 days. Is that possible?"
     },
     {
-      "id": "dr-de-info-share-01",
-      "category": "info-share",
+      "id": "customer-question-de-063",
+      "category": "customer_inquiry",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "max.beispiel@acme.example",
+      "fromName": "Max Beispiel",
+      "subject": "Falsche Lieferadresse",
+      "body": "Die letzte Lieferung ging an die falsche Adresse. Bitte korrigieren und neu zustellen."
+    },
+    {
+      "id": "customer-question-en-064",
+      "category": "subscription_cancellation",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "erika.mustermann@acme-corp.example",
+      "fromName": "Erika Mustermann",
+      "subject": "Question about subscription cancellation",
+      "body": "I want to cancel my subscription. How do I proceed? Please confirm receipt."
+    },
+    {
+      "id": "customer-question-de-065",
+      "category": "stornierung_anfrage",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "alice.beispiel@acme.example",
+      "fromName": "Alice Beispiel",
+      "subject": "Stornierung der Bestellung #12345",
+      "body": "Bestellung #12345 muss storniert werden. Ware ist nicht mehr verfügbar. Rückerstattung gewünscht."
+    },
+    {
+      "id": "customer-question-en-066",
+      "category": "failed_delivery_notification",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "max.example@acme-corp.example",
+      "fromName": "Max Example",
+      "subject": "Late delivery notification",
+      "body": "Your delivery is 3 days late. We need an update on the status immediately."
+    },
+    {
+      "id": "customer-question-de-067",
+      "category": "kundenanfrage",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "erika.mustermann@acme.example",
+      "fromName": "Erika Mustermann",
+      "subject": "Frage zu Rabattaktion",
+      "body": "Kann ich den Rabatt für Stammkunden auch auf die aktuelle Bestellung anwenden? Danke für die Info."
+    },
+    {
+      "id": "customer-question-en-068",
+      "category": "rechnungskorrektur",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "max.mustermann@kundenfirma.example",
+      "fromName": "Max Mustermann",
+      "subject": "Rechnung Nr. 2024-0567 falsch",
+      "body": "The invoice shows the wrong VAT rate. Please correct it to 19%."
+    },
+    {
+      "id": "customer-question-de-069",
+      "category": "customer_inquiry",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "erika.beispiel@kundenfirma.example",
+      "fromName": "Erika Beispiel",
+      "subject": "Lieferung verzögert – dringend!",
+      "body": "Die Ware ist seit 3 Tagen überfällig. Wann kommt sie endlich?"
+    },
+    {
+      "id": "customer-question-en-070",
+      "category": "kundenanfrage",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "alice.mustermann@kundenfirma.example",
+      "fromName": "Alice Mustermann",
+      "subject": "Fehler in Bestellbestätigung",
+      "body": "Your confirmation shows the wrong shipping address. Please fix it immediately."
+    },
+    {
+      "id": "customer-question-de-071",
+      "category": "contract_termination",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "john.doe@kundenfirma.example",
+      "fromName": "John Doe",
+      "subject": "Kündigung des Vertrags",
+      "body": "Ich kündige den Vertrag fristgerecht zum Monatsende. Bitte bestätigen Sie den Erhalt."
+    },
+    {
+      "id": "customer-question-en-072",
+      "category": "failed_payment",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "sarah.example@kundenfirma.example",
+      "fromName": "Sarah Example",
+      "subject": "Payment failed – please retry",
+      "body": "Your last payment attempt failed. Please try again with a valid card."
+    },
+    {
+      "id": "customer-question-de-073",
+      "category": "kundenanfrage_reklamation",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "michael.schmidt@kundenfirma.example",
+      "fromName": "Michael Schmidt",
+      "subject": "Falsche Produktfarbe geliefert",
+      "body": "The delivered item is in blue, but I ordered green. Please arrange a replacement."
+    },
+    {
+      "id": "customer-question-en-074",
+      "category": "refund_request",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "lisa.wagner@kundenfirma.example",
+      "fromName": "Lisa Wagner",
+      "subject": "Request for refund",
+      "body": "I am not satisfied with the product quality. Can I get a full refund?"
+    },
+    {
+      "id": "colleague-question-en-075",
+      "category": "project_timeline_query",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "j.weber@example.example",
+      "fromName": "Julia Weber",
+      "subject": "Quick check on the project timeline",
+      "body": "Hey, can you confirm the deadline for the Acme report? Need to plan my part."
+    },
+    {
+      "id": "colleague-question-de-076",
+      "category": "terminanfrage",
       "language": "de",
       "expectedBucket": "draft_ready",
-      "fromAddress": "bob.mustermann@kollege.example",
-      "fromName": "Bob Mustermann",
-      "subject": "Kurzer Update zum letzten Status-Call",
-      "body": "Hi,\n\nKurz zur Info: Wir haben gestern entschieden, dass die Migration auf März 2026 verschoben wird. Falls du das in deinem Plan berücksichtigen musst, gib kurz Bescheid.\n\nGrüsse,\nBob"
+      "fromAddress": "m.schulz@example.example",
+      "fromName": "Markus Schulz",
+      "subject": "Termin für Feedback-Runde",
+      "body": "Hallo, hast du morgen 14 Uhr Zeit für ein kurzes Feedback zur Mustermann-Präsentation?"
     },
     {
-      "id": "dr-en-clarifying-question-01",
-      "category": "clarifying-question",
+      "id": "colleague-question-en-077",
+      "category": "review_request",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "l.chen@example.example",
+      "fromName": "Lena Chen",
+      "subject": "Need your input on the example case",
+      "body": "Hey, could you review the example case draft by EOD? Thanks!"
+    },
+    {
+      "id": "colleague-question-de-078",
+      "category": "konferenz_unterlagen_feedback",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "t.bauer@example.example",
+      "fromName": "Thomas Bauer",
+      "subject": "Kurze Rückmeldung bitte",
+      "body": "Hallo, hast du schon die Unterlagen für die Beispiel-Konferenz gesehen? Brauche deine Meinung."
+    },
+    {
+      "id": "colleague-question-en-079",
+      "category": "contract_followup",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "s.klein@example.example",
+      "fromName": "Sophie Klein",
+      "subject": "Any updates on the Acme contract?",
+      "body": "Hey, do you have news on the Acme contract approval? Need to proceed."
+    },
+    {
+      "id": "colleague-question-de-080",
+      "category": "terminanfrage",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "f.meyer@example.example",
+      "fromName": "Fabian Meyer",
+      "subject": "Termin für Projektbesprechung",
+      "body": "Hallo, kannst du am Freitag um 10 Uhr für die Mustermann-Projektbesprechung?"
+    },
+    {
+      "id": "colleague-question-en-081",
+      "category": "customer_query",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "a.lopez@example.example",
+      "fromName": "Alejandro Lopez",
+      "subject": "Quick question about the example docs",
+      "body": "Hey, can you clarify the example docs section 3? Not sure about the changes."
+    },
+    {
+      "id": "colleague-question-de-082",
+      "category": "feedback_anfrage",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "e.schmidt@example.example",
+      "fromName": "Eva Schmidt",
+      "subject": "Rückmeldung zum Beispiel-Workshop",
+      "body": "Hallo, hast du schon Feedback zum Beispiel-Workshop? Brauche deine Einschätzung bis morgen."
+    },
+    {
+      "id": "colleague-question-en-083",
+      "category": "project_collaboration",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "j.berger@example.example",
+      "fromName": "Julia Berger",
+      "subject": "Quick check: Input needed for Acme project",
+      "body": "Hey Max, any thoughts on the Acme proposal? Need your input ASAP. Thx!"
+    },
+    {
+      "id": "colleague-question-de-084",
+      "category": "termin_anfrage",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "t.klein@example.example",
+      "fromName": "Thomas Klein",
+      "subject": "Terminbestätigung für Beispiel GmbH",
+      "body": "Hallo Team, bitte bestätigt den Termin für die Beispiel GmbH bis Freitag. Danke!"
+    },
+    {
+      "id": "payment-failed-en-085",
+      "category": "failed_payment",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "billing@acme.example",
+      "fromName": "Acme Billing",
+      "subject": "Payment failed – Update your card details",
+      "body": "Your payment failed. Please update your card details within 7 days to avoid service interruption."
+    },
+    {
+      "id": "payment-failed-de-086",
+      "category": "failed_payment",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "service@beispiel.example",
+      "fromName": "Beispiel Service",
+      "subject": "Zahlung fehlgeschlagen – Zahlungsdaten aktualisieren",
+      "body": "Ihre Zahlung wurde abgelehnt. Bitte aktualisieren Sie Ihre Zahlungsdaten innerhalb von 48 Stunden."
+    },
+    {
+      "id": "payment-failed-en-087",
+      "category": "failed_payment",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "support@mustermann.example",
+      "fromName": "Mustermann Support",
+      "subject": "Card declined – Action required",
+      "body": "Your card was declined. Update payment info now to continue using our service."
+    },
+    {
+      "id": "payment-failed-de-088",
+      "category": "failed_payment",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "rechnung@acme.example",
+      "fromName": "Acme Rechnungsstelle",
+      "subject": "Zahlungsfehler – Frist zur Aktualisierung",
+      "body": "Ihre letzte Zahlung ist fehlgeschlagen. Bitte korrigieren Sie Ihre Daten bis Freitag."
+    },
+    {
+      "id": "payment-failed-en-089",
+      "category": "failed_payment",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "billing@example.example",
+      "fromName": "Example Billing",
+      "subject": "Payment declined – Update your details",
+      "body": "Your payment was declined. Update your card info within 5 days to prevent account suspension."
+    },
+    {
+      "id": "meeting-request-en-090",
+      "category": "termineinladung",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "john.doe@example.com",
+      "fromName": "John Doe",
+      "subject": "Quick Call next week?",
+      "body": "Hi Max, would you be available for a 15-min call on Tuesday at 2pm or Thursday at 10am? Let me know if either works for you."
+    },
+    {
+      "id": "meeting-request-de-091",
+      "category": "terminanfrage",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "sarah.mustermann@example.example",
+      "fromName": "Sarah Mustermann",
+      "subject": "Termin-Anfrage für Projektbesprechung",
+      "body": "Hallo Team, passt ein Call am Mittwoch um 14 Uhr oder Donnerstag um 11 Uhr? Bitte kurz Rückmeldung."
+    },
+    {
+      "id": "meeting-request-en-092",
+      "category": "termineinladung",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "mike.wilson@example.com",
+      "fromName": "Mike Wilson",
+      "subject": "Check-in Call available?",
+      "body": "Hi Anna, can we schedule a quick call this week? I’m free Monday 3pm or Wednesday 9am. Let me know!"
+    },
+    {
+      "id": "meeting-request-de-093",
+      "category": "terminanfrage",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "lena.beispiel@example.example",
+      "fromName": "Lena Beispiel",
+      "subject": "Termin für Feedback-Runde",
+      "body": "Hallo Kolleg:innen, passt ein Call am Dienstag um 15 Uhr oder Freitag um 10 Uhr? Kurze Bestätigung reicht."
+    },
+    {
+      "id": "meeting-request-en-094",
+      "category": "terminanfrage",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "david.acme@example.com",
+      "fromName": "David Acme",
+      "subject": "Quick Sync – possible?",
+      "body": "Hi Team, are you available for a 10-min call on Thursday 2pm or Friday 11am? Just reply with a yes/no."
+    },
+    {
+      "id": "meeting-request-de-095",
+      "category": "terminanfrage",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "tina.mustermann@example.example",
+      "fromName": "Tina Mustermann",
+      "subject": "Termin für Abstimmung",
+      "body": "Hallo, passt ein Call am Montag um 16 Uhr oder Mittwoch um 13 Uhr? Kurze Rückmeldung genügt."
+    },
+    {
+      "id": "meeting-request-en-096",
+      "category": "meeting_request",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "james.example@example.com",
+      "fromName": "James Example",
+      "subject": "Call to discuss next steps",
+      "body": "Hi Lisa, would you have time for a quick call this week? I’m free Tuesday 10am or Wednesday 3pm. Let me know!"
+    },
+    {
+      "id": "meeting-request-de-097",
+      "category": "terminanfrage",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "klaus.beispiel@example.example",
+      "fromName": "Klaus Beispiel",
+      "subject": "Termin für kurze Besprechung",
+      "body": "Hallo, passt ein Call am Donnerstag um 14 Uhr oder Freitag um 9 Uhr? Kurze Antwort reicht."
+    },
+    {
+      "id": "meeting-request-en-098",
+      "category": "terminanfrage",
       "language": "en",
       "expectedBucket": "draft_ready",
-      "fromAddress": "support@vendor.example",
-      "fromName": "Acme Vendor Support",
-      "subject": "Re: Your ticket #4912 — can you confirm the affected version?",
-      "body": "Hi,\n\nThanks for opening the ticket. Could you confirm which version of the SDK you're on (output of `npm list @acme-vendor/sdk`)? That'll narrow down the regression window.\n\nBest,\nThe Support team"
+      "fromAddress": "john.doe@example.example",
+      "fromName": "John Doe",
+      "subject": "Quick Call next week?",
+      "body": "Hi Max, would Tuesday 10am or Thursday 2pm work for a quick call? Let me know if you prefer another slot. Cheers, John"
+    },
+    {
+      "id": "meeting-request-de-099",
+      "category": "terminanfrage",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "sarah.mustermann@acme.example",
+      "fromName": "Sarah Mustermann",
+      "subject": "Terminwunsch für Projektbesprechung",
+      "body": "Hallo Herr Beispiel, passt Montag 14 Uhr oder Dienstag 10 Uhr für ein kurzes Update? Bitte kurz Bescheid geben. Gruß, Sarah"
+    },
+    {
+      "id": "clarifying-question-en-100",
+      "category": "customer_inquiry",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "support@acme.example",
+      "fromName": "Acme Support",
+      "subject": "SDK version for integration",
+      "body": "Hi, which SDK version are you using for the integration? We need to verify compatibility."
+    },
+    {
+      "id": "clarifying-question-de-101",
+      "category": "support_request",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "hilfe@beispiel.example",
+      "fromName": "Beispiel Support",
+      "subject": "Konto-ID für Support-Anfrage",
+      "body": "Hallo, bitte gib uns deine Konto-ID an, damit wir dein Anliegen bearbeiten können."
+    },
+    {
+      "id": "clarifying-question-en-102",
+      "category": "technical_clarification",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "dev@acme.example",
+      "fromName": "Acme Dev Team",
+      "subject": "Clarification needed: API endpoint",
+      "body": "Could you confirm which API endpoint you’re calling? The docs mention two possible paths."
+    },
+    {
+      "id": "clarifying-question-de-103",
+      "category": "failed_payment",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "billing@beispiel.example",
+      "fromName": "Beispiel Rechnungsabteilung",
+      "subject": "Fehlende Rechnungsadresse",
+      "body": "Deine Bestellung fehlt die Rechnungsadresse. Bitte ergänze sie in deinem Profil."
+    },
+    {
+      "id": "clarifying-question-en-104",
+      "category": "security_compliance_query",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "ops@acme.example",
+      "fromName": "Acme Operations",
+      "subject": "Which database version do you use?",
+      "body": "We need to know your current database version for a security patch. Please reply with the details."
+    },
+    {
+      "id": "clarifying-question-de-105",
+      "category": "failed_delivery_address",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "versand@beispiel.example",
+      "fromName": "Beispiel Versand",
+      "subject": "Falsche Lieferadresse im System",
+      "body": "Deine Bestellung zeigt eine falsche Lieferadresse. Bitte prüfe und korrigiere sie."
+    },
+    {
+      "id": "clarifying-question-en-106",
+      "category": "failed_logs_issue",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "devops@acme.example",
+      "fromName": "Acme DevOps",
+      "subject": "Missing project ID in logs",
+      "body": "Your logs lack the project ID. Please add it for troubleshooting."
+    },
+    {
+      "id": "clarifying-question-de-107",
+      "category": "kundenanfrage",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "service@beispiel.example",
+      "fromName": "Beispiel Kundenservice",
+      "subject": "Unstimmigkeit in deiner Bestellung",
+      "body": "Deine Bestellung enthält eine Unstimmigkeit. Bitte bestätige die Artikel oder gib Bescheid."
+    },
+    {
+      "id": "clarifying-question-en-108",
+      "category": "customer_inquiry",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "support@acme.example",
+      "fromName": "Acme Support Team",
+      "subject": "SDK version for Acme Cloud integration",
+      "body": "Hi, could you confirm which SDK version you're using for the Acme Cloud integration? We need this to debug the issue."
+    },
+    {
+      "id": "clarifying-question-de-109",
+      "category": "kundenanfrage",
+      "language": "de",
+      "expectedBucket": "requires_user",
+      "fromAddress": "service@beispiel.example",
+      "fromName": "Beispiel Service-Team",
+      "subject": "Frage zur Konto-ID in Beispiel-System",
+      "body": "Hallo, welche Konto-ID hast du im Beispiel-System angelegt? Bitte prüfen."
+    },
+    {
+      "id": "info-share-en-110",
+      "category": "project_status",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "status@acme.example",
+      "fromName": "Acme Project Team",
+      "subject": "Update: Projektstatus Q3",
+      "body": "Project Alpha is on track. Next milestone: 15.10. Thanks for your attention!"
+    },
+    {
+      "id": "info-share-de-111",
+      "category": "team_meeting_reminder",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "meeting@beispiel.example",
+      "fromName": "Team Koordination",
+      "subject": "Erinnerung: Team-Meeting morgen",
+      "body": "Morgen um 10 Uhr im Konferenzraum. Bitte bestätigen, dass Sie Bescheid wissen. Danke!"
+    },
+    {
+      "id": "info-share-en-112",
+      "category": "payment_receipt",
+      "language": "en",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "billing@mustermann.example",
+      "fromName": "Mustermann Finance",
+      "subject": "Payment processed – Invoice #4567",
+      "body": "Payment for Invoice #4567 has been completed. No further action required."
+    },
+    {
+      "id": "info-share-de-113",
+      "category": "it_notification",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "it@acme.example",
+      "fromName": "IT-Support",
+      "subject": "Wichtig: Serverwartung am Wochenende",
+      "body": "Serverwartung am Samstag, 02.11., 02:00–05:00 Uhr. Bitte speichern Sie Ihre Daten vorher."
+    },
+    {
+      "id": "info-share-en-114",
+      "category": "reminder_feedback",
+      "language": "en",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "feedback@example.example",
+      "fromName": "Example Feedback Team",
+      "subject": "Reminder: Deadline for feedback",
+      "body": "Please submit your feedback by Friday EOD. Thanks for your cooperation!"
+    },
+    {
+      "id": "info-share-de-115",
+      "category": "antragsbestätigung",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "fromAddress": "antrag@beispiel.example",
+      "fromName": "Beispiel Antragsstelle",
+      "subject": "Bestätigung: Ihr Antrag ist eingegangen",
+      "body": "Ihr Antrag wurde erfolgreich registriert. Sie erhalten in Kürze eine Rückmeldung. Danke!"
+    },
+    {
+      "id": "info-share-en-116",
+      "category": "security_alert",
+      "language": "en",
+      "expectedBucket": "requires_user",
+      "fromAddress": "security@mustermann.example",
+      "fromName": "Mustermann Security",
+      "subject": "Security Alert: Unusual login attempt",
+      "body": "A login attempt from an unknown device was detected. Please check your account."
+    },
+    {
+      "id": "info-share-de-117",
+      "category": "compliance_notification",
+      "language": "de",
+      "expectedBucket": "auto_handled",
+      "_relabel_note": "Originally Phase-2-labeled requires_user because of 'Bitte lesen Sie' wording, but the body has no deadline + no required action + no money owed. Operator re-labeled to auto_handled (2026-05-12) — a deadline-less compliance FYI is genuinely FYI.",
+      "fromAddress": "richtlinien@acme.example",
+      "fromName": "Acme Compliance",
+      "subject": "Hinweis: Neue Richtlinien ab 01.12.",
+      "body": "Neue Compliance-Richtlinien gelten ab 01.12. Bitte lesen Sie die angehängte E-Mail. Danke für Ihr Verständnis."
+    },
+    {
+      "id": "info-share-en-118",
+      "category": "project_update",
+      "language": "en",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "updates@acme.example",
+      "fromName": "Acme Team",
+      "subject": "Update: Project Acme - Next Steps",
+      "body": "Hi Mustermann, the project is on track. Please confirm receipt with 'Thanks, noted'. Regards, Acme Team"
+    },
+    {
+      "id": "info-share-de-119",
+      "category": "termin_erinnerung",
+      "language": "de",
+      "expectedBucket": "draft_ready",
+      "fromAddress": "reminder@beispiel.example",
+      "fromName": "Beispiel Services",
+      "subject": "Erinnerung: Termin am Freitag",
+      "body": "Hallo Mustermann, dein Termin ist am Freitag um 14 Uhr. Danke, gemerkt! Beispiel Services"
     }
   ]
 }
