@@ -33,13 +33,18 @@
 	}
 </script>
 
+<!-- Full-screen on mobile (<sm), bottom-right modal on sm+. The previous half-overlay
+	on mobile sat on top of the inbox list and was visually confusing — you couldn't tell
+	if the compose form was a separate screen or an inline draft over the list. -->
 <div
-	class="fixed bottom-0 right-4 z-40 w-full max-w-2xl rounded-t-[var(--radius-md)] border border-border bg-bg shadow-xl"
+	class="fixed inset-0 z-40 flex flex-col bg-bg shadow-xl sm:inset-auto sm:bottom-0 sm:right-4 sm:w-full sm:max-w-2xl sm:rounded-t-[var(--radius-md)] sm:border sm:border-border"
+	style="padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);"
 	role="dialog"
+	aria-modal="true"
 	aria-label={t('inbox.compose_title')}
 >
-	<form onsubmit={onSubmit}>
-		<header class="flex items-center justify-between border-b border-border px-4 py-2">
+	<form onsubmit={onSubmit} class="flex flex-1 flex-col min-h-0 sm:block">
+		<header class="flex items-center justify-between border-b border-border px-4 py-2 shrink-0">
 			<h2 class="text-sm font-medium text-text">{t('inbox.compose_title')}</h2>
 			<button
 				type="button"
@@ -49,7 +54,7 @@
 			>×</button>
 		</header>
 
-		<div class="space-y-2 p-4">
+		<div class="space-y-2 p-4 flex-1 overflow-y-auto sm:flex-initial sm:overflow-visible">
 			{#if accounts.length > 1}
 				<label class="block text-[11px] text-text-subtle">
 					{t('inbox.compose_account')}
@@ -124,7 +129,7 @@
 			></textarea>
 		</div>
 
-		<footer class="flex items-center justify-end gap-2 border-t border-border px-4 py-2">
+		<footer class="flex items-center justify-end gap-2 border-t border-border px-4 py-2 shrink-0">
 			<button
 				type="button"
 				class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text"

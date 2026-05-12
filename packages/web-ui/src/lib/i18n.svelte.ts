@@ -1102,6 +1102,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.rules_unavailable': { de: 'Inbox ist nicht aktiviert. Regeln stehen erst zur Verfügung, wenn die Inbox-Feature-Flag gesetzt ist.', en: 'Inbox is not enabled. Rules require the inbox feature flag.' },
 	'inbox.draft_title': { de: 'Antwort entwerfen', en: 'Draft reply' },
 	'inbox.draft_close': { de: 'Pane schließen', en: 'Close pane' },
+	'inbox.draft_context_label': { de: 'Ursprüngliche Mail', en: 'Original mail' },
 	'inbox.draft_refresh_body': { de: 'Mail-Inhalt nachladen', en: 'Pull full mail body' },
 	'inbox.draft_refresh_in_flight': { de: 'Lade Volltext…', en: 'Pulling full body…' },
 	'inbox.draft_refresh_ok': { de: 'Volltext geladen — neu generieren für besseren Kontext', en: 'Full body loaded — regenerate for richer context' },
