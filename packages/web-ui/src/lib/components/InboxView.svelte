@@ -11,12 +11,16 @@
 		getLastAction,
 		getReclassifyBanner,
 		getSelectedItemId,
+		getSnoozedCount,
+		getSnoozedItems,
 		isComposeOpen,
 		isInboxAvailable,
 		isLoading,
+		isLoadingSnoozed,
 		isSelectedForBulk,
 		loadInboxCounts,
 		loadInboxItems,
+		loadSnoozedItems,
 		onColdStartCompletion,
 		openCompose,
 		openDraftPane,
@@ -30,6 +34,7 @@
 		undoLastAction,
 		type InboxBucket,
 		type InboxItem,
+		type InboxZone,
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { accountShortLabel } from '../utils/account-label.js';
@@ -44,7 +49,7 @@
 	import InboxUndoToast from './InboxUndoToast.svelte';
 	import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.svelte';
 
-	let zone = $state<InboxBucket>('requires_user');
+	let zone = $state<InboxZone>('requires_user');
 	let openSnoozeFor = $state<string | null>(null);
 	let selectedItemId = $state<string | null>(null);
 	let searchQuery = $state('');
@@ -71,7 +76,8 @@
 		// for the "your inbox just filled up" moment.
 		cleanupColdStartListener = onColdStartCompletion(() => {
 			void loadInboxCounts();
-			void loadInboxItems(zone);
+			if (zone === 'snoozed') void loadSnoozedItems();
+			else void loadInboxItems(zone);
 		});
 		cleanupVisibility = startInboxVisibilityRefresh();
 		// Skip the listener entirely on touch-primary devices — the help
@@ -92,7 +98,11 @@
 	$effect(() => {
 		if (!countsLoaded) return;
 		if (zone && isInboxAvailable()) {
-			void loadInboxItems(zone, 50, 0, searchQuery);
+			if (zone === 'snoozed') {
+				void loadSnoozedItems(50, 0);
+			} else {
+				void loadInboxItems(zone, 50, 0, searchQuery);
+			}
 			// Selection only makes sense for the Needs-You actionable list.
 			if (zone !== 'requires_user') selectedItemId = null;
 			openSnoozeFor = null;
@@ -100,6 +110,11 @@
 	});
 
 	function visibleItems(): InboxItem[] {
+		if (zone === 'snoozed') {
+			// Snoozed items keep their snooze_until; userAction stays unhandled
+			// because snoozing is its own first-class state. No userAction filter.
+			return getSnoozedItems();
+		}
 		return getInboxItems(zone).filter((i) => !i.userAction);
 	}
 
@@ -247,12 +262,52 @@
 
 	async function onArchive(item: InboxItem): Promise<void> {
 		await setItemAction(item.id, 'archived');
+		// In the Snoozed zone the optimistic removal isn't wired through
+		// the same path; reload to mirror the server state.
+		if (zone === 'snoozed') {
+			await loadSnoozedItems();
+			await loadInboxCounts();
+		}
 	}
 
 	async function onSnoozePreset(item: InboxItem, deltaMs: number): Promise<void> {
 		const until = new Date(Date.now() + deltaMs);
 		await setItemSnooze(item.id, until);
 		openSnoozeFor = null;
+	}
+
+	/**
+	 * Un-snooze: clear snooze_until so the item returns to whatever bucket
+	 * it was classified into. The store's setItemSnooze accepts `null` to
+	 * mean "clear" — same wake path the cron uses when wake-time hits.
+	 */
+	async function unsnooze(item: InboxItem): Promise<void> {
+		await setItemSnooze(item.id, null);
+		// Snoozed view doesn't optimistically drop the row; refresh both
+		// the list and counts so the un-snoozed item disappears here and
+		// the snoozed-count badge ticks down.
+		await loadSnoozedItems();
+		await loadInboxCounts();
+	}
+
+	/**
+	 * Short countdown label for snoozed items, e.g. "in 2 Std", "in 3 Tagen".
+	 * Reads locale to switch DE/EN units. Granularity goes minute → hour → day
+	 * → week; anything further falls back to the absolute date.
+	 */
+	function snoozeCountdown(until: string): string {
+		const d = new Date(until);
+		if (Number.isNaN(d.getTime())) return '';
+		const ms = d.getTime() - Date.now();
+		if (ms < 0) return dateFormat(until);
+		const min = Math.round(ms / 60_000);
+		const hr = Math.round(ms / 3_600_000);
+		const day = Math.round(ms / 86_400_000);
+		const isDE = getLocale() === 'de';
+		if (min < 60) return isDE ? `in ${min} Min` : `in ${min} min`;
+		if (hr < 24) return isDE ? `in ${hr} Std` : `in ${hr}h`;
+		if (day < 14) return isDE ? `in ${day} Tagen` : `in ${day}d`;
+		return dateFormat(until);
 	}
 
 	// Resolve the item referenced by the open pane. Each save echo re-renders
@@ -359,7 +414,8 @@
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text"
 						onclick={() => {
 							void loadInboxCounts();
-							void loadInboxItems(zone);
+							if (zone === 'snoozed') void loadSnoozedItems();
+							else void loadInboxItems(zone);
 							dismissReclassifyBanner();
 						}}
 					>{t('inbox.reclassify_banner_refresh')}</button>
@@ -410,16 +466,28 @@
 					<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.auto_handled}</span>
 				{/if}
 			</button>
+			<button
+				role="tab"
+				aria-selected={zone === 'snoozed'}
+				onclick={() => (zone = 'snoozed')}
+				class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'snoozed' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+			>
+				<span>{t('inbox.zone_snoozed')}</span>
+				{#if getSnoozedCount() > 0}
+					<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{getSnoozedCount()}</span>
+				{/if}
+			</button>
 		</div>
 
-		{#if isLoading(zone)}
+		{#if zone === 'snoozed' ? isLoadingSnoozed() : isLoading(zone)}
 			<p class="text-text-subtle text-sm">{t('inbox.loading')}</p>
 		{:else}
-			{@const items = getInboxItems(zone)}
+			{@const items = zone === 'snoozed' ? getSnoozedItems() : getInboxItems(zone)}
 			{#if items.length === 0}
 				<p class="text-text-subtle text-sm">
 					{#if zone === 'requires_user'}{t('inbox.empty_needs_you')}
 					{:else if zone === 'draft_ready'}{t('inbox.empty_drafted')}
+					{:else if zone === 'snoozed'}{t('inbox.empty_snoozed')}
 					{:else}{t('inbox.empty_handled')}
 					{/if}
 				</p>
@@ -477,7 +545,9 @@
 											{item.fromName || item.fromAddress || accountShortLabel(item.accountId)}
 										</span>
 										<span class="text-[11px] text-text-subtle shrink-0">
-											{dateFormat(item.mailDate ?? item.classifiedAt)}
+											{zone === 'snoozed' && item.snoozeUntil
+												? snoozeCountdown(item.snoozeUntil)
+												: dateFormat(item.mailDate ?? item.classifiedAt)}
 										</span>
 									</div>
 									{#if item.subject}
@@ -486,7 +556,12 @@
 										</p>
 									{/if}
 									<div class="flex items-center gap-2 text-[11px] text-text-subtle mb-1">
-										<span title={item.accountId}>📬 {accountShortLabel(item.accountId)}</span>
+										<span class="inline-flex items-center gap-1" title={item.accountId}>
+											<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+												<path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+											</svg>
+											{accountShortLabel(item.accountId)}
+										</span>
 										<span aria-hidden="true">·</span>
 										<span>{channelLabel(item.channel)}</span>
 									</div>
@@ -498,7 +573,23 @@
 									{/if}
 								</button>
 							</div>
-							{#if zone === 'requires_user' && !item.userAction}
+							{#if zone === 'snoozed'}
+								<!-- Snoozed-zone action row: un-snooze (bring it back NOW). Archive
+									is also useful here in case the user decided the deferred mail is
+									actually irrelevant. -->
+								<div class="mt-2 flex flex-wrap items-center gap-1 sm:justify-end pl-7 sm:pl-0">
+									<button
+										onclick={() => void unsnooze(item)}
+										class="rounded-[var(--radius-sm)] border border-accent bg-accent/10 text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90 min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+										aria-label={t('inbox.action_unsnooze')}
+									>{t('inbox.action_unsnooze')}</button>
+									<button
+										onclick={() => void onArchive(item)}
+										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+										aria-label={t('inbox.action_archive')}
+									>{t('inbox.action_archive')}</button>
+								</div>
+							{:else if zone === 'requires_user' && !item.userAction}
 								<!-- Action row sits below the card content (sm+ right-justified) so the buttons
 									no longer overlap the sender + AI summary on narrow viewports. Mail clients
 									like Spark / Apple Mail use the same pattern; the reading-pane on desktop
@@ -547,7 +638,8 @@
 			onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
 			onActionApplied={() => {
 				void loadInboxCounts();
-				void loadInboxItems(zone);
+				if (zone === 'snoozed') void loadSnoozedItems();
+				else void loadInboxItems(zone);
 			}}
 			showBack
 		/>
@@ -597,5 +689,7 @@
 	</div>
 {/if}
 
-<InboxUndoToast currentZone={zone} />
+<!-- InboxUndoToast doesn't refresh the snoozed list — pass requires_user as a safe
+	default when the active zone is the new synthetic 'snoozed' view. -->
+<InboxUndoToast currentZone={zone === 'snoozed' ? 'requires_user' : zone} />
 

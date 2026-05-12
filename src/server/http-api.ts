@@ -3381,6 +3381,8 @@ export class LynoxHTTPApi {
       if (tenantId !== null) query.tenantId = tenantId;
       const q = url.searchParams.get('q');
       if (q !== null) query.q = q;
+      const snoozedOnly = url.searchParams.get('snoozedOnly');
+      if (snoozedOnly !== null) query.snoozedOnly = snoozedOnly;
       sendInbox(res, handleListItems(deps!, query));
     });
 

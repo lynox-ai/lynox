@@ -37,10 +37,16 @@ export interface WhatsAppMessageStore {
 /** How many recent thread messages we concatenate for the refreshed body. */
 const WA_MESSAGE_FETCH_LIMIT = 50;
 
-/** Window for the provider.list() probe. Items older than this won't refresh. */
+/** Window for the provider.list() probe when the item has no `mailDate`. */
 const DEFAULT_LOOKUP_DAYS = 30;
-/** Hard upper bound on the envelope batch — keeps the round-trip cheap. */
-const DEFAULT_LIST_LIMIT = 200;
+/** Slack around a known `mailDate`: IMAP returns INTERNALDATE, the envelope
+  *  has the Date header — these can disagree by hours across timezones. ±7d
+ *  is generous enough to absorb that without re-introducing the limit problem. */
+const DATE_SLACK_DAYS = 7;
+/** Hard upper bound on the envelope batch. Was 200; rafael's canary had 93
+ *  threads in the last 30 days, so a busy inbox can easily exceed the cap
+ *  and silently drop the target mail with a misleading "30 Tage" toast. */
+const DEFAULT_LIST_LIMIT = 1000;
 
 export type RefreshBodyFailure =
   | { kind: 'not_found' }       // no envelope in the lookup window matches threadKey
@@ -50,7 +56,16 @@ export type RefreshBodyFailure =
 export interface RefreshItemBodyOptions {
   provider: MailProvider;
   state: InboxStateDb;
-  item: { id: string; accountId: string; threadKey: string; channel: 'email' | 'whatsapp' };
+  item: {
+    id: string;
+    accountId: string;
+    threadKey: string;
+    channel: 'email' | 'whatsapp';
+    /** v11 envelope date — narrows the lookup window from 30d → ±7d around this. */
+    mailDate?: Date | undefined;
+    /** v11 RFC 5322 Message-ID — used for direct envelope match before falling back to threadKey. */
+    messageId?: string | undefined;
+  };
   /** Override the 30-day lookup window — tests pass small values. */
   lookupDays?: number | undefined;
   listLimit?: number | undefined;
@@ -79,21 +94,50 @@ export interface RefreshItemBodyResult {
 export async function refreshItemBody(
   opts: RefreshItemBodyOptions,
 ): Promise<RefreshItemBodyResult | { ok: false; reason: RefreshBodyFailure }> {
-  const since = new Date(Date.now() - (opts.lookupDays ?? DEFAULT_LOOKUP_DAYS) * 86_400_000);
+  // Narrow the lookup window around the known mail date when v11 envelope
+  // metadata is populated. Without this we'd scan up to 30 days × 200 mails
+  // (the old default) and miss anything beyond the first 200 — that's how
+  // the misleading "older than 30 days" toast was firing on a 1-day-old mail
+  // last night.
+  const lookupDays = opts.lookupDays ?? DEFAULT_LOOKUP_DAYS;
+  const slackMs = DATE_SLACK_DAYS * 86_400_000;
+  const since = opts.item.mailDate !== undefined
+    ? new Date(opts.item.mailDate.getTime() - slackMs)
+    : new Date(Date.now() - lookupDays * 86_400_000);
   const listLimit = opts.listLimit ?? DEFAULT_LIST_LIMIT;
 
   let envelopes: ReadonlyArray<MailEnvelope>;
   try {
-    envelopes = await opts.provider.list({ since, limit: listLimit });
+    // Prefer search() with a tight date range when we know mailDate — IMAP-native
+    // SEARCH SINCE/BEFORE bypasses the list-window pagination problem entirely.
+    // Fall back to list() when mailDate is missing (pre-v11 items).
+    if (opts.item.mailDate !== undefined) {
+      const before = new Date(opts.item.mailDate.getTime() + slackMs);
+      envelopes = await opts.provider.search(
+        { since, before },
+        { limit: listLimit },
+      );
+    } else {
+      envelopes = await opts.provider.list({ since, limit: listLimit });
+    }
   } catch {
     return { ok: false, reason: { kind: 'fetch_failed' } };
   }
 
-  // resolveThreadKey is duplicated from watcher-hook.ts on purpose —
-  // both call sites must agree on the synthesised key shape so dedup
-  // never collapses unrelated mails. An import would tangle the
-  // refresh path into the live-watcher module.
-  const match = envelopes.find((env) => resolveThreadKey(env) === opts.item.threadKey);
+  // Match strategy (most → least precise):
+  //   1. v11 Message-ID — RFC 5322 ID is unique per mail. Direct lookup.
+  //   2. resolveThreadKey() — synthesised thread key, matches the watcher path.
+  // resolveThreadKey is duplicated from watcher-hook.ts on purpose — both
+  // call sites must agree on the synthesised key shape so dedup never
+  // collapses unrelated mails. An import would tangle the refresh path
+  // into the live-watcher module.
+  let match: MailEnvelope | undefined;
+  if (opts.item.messageId !== undefined && opts.item.messageId !== '') {
+    match = envelopes.find((env) => env.messageId === opts.item.messageId);
+  }
+  if (!match) {
+    match = envelopes.find((env) => resolveThreadKey(env) === opts.item.threadKey);
+  }
   if (!match) return { ok: false, reason: { kind: 'not_found' } };
 
   let message;

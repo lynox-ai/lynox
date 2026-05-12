@@ -12,6 +12,7 @@
 		type SnoozePreset,
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { inboxHeadline } from '../utils/inbox-headline.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 
@@ -150,8 +151,8 @@
 							<div class="h-4 w-1/2 animate-pulse rounded bg-bg-subtle"></div>
 						</div>
 					{:else if full}
-						<h2 class="truncate text-base sm:text-lg font-semibold text-text" title={full.item.subject}>
-							{full.item.subject || '(kein Betreff)'}
+						<h2 class="truncate text-base sm:text-lg font-semibold text-text" title={full.item.subject || full.item.snippet || full.item.reasonDe}>
+							{inboxHeadline(full.item)}
 						</h2>
 						<div class="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] text-text-subtle">
 							<span class="text-text-muted truncate max-w-full">

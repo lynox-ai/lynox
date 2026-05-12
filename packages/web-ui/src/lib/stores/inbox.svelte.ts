@@ -29,6 +29,12 @@ import { addToast } from './toast.svelte.js';
 export type { InboxDraft };
 
 export type InboxBucket = 'requires_user' | 'draft_ready' | 'auto_handled';
+/**
+ * UI-level zone: real backend buckets PLUS the synthetic 'snoozed' view.
+ * Backend doesn't know about 'snoozed' — it's a `snoozedOnly=true` filter
+ * over all buckets. Phase 4 replaces this with first-class `pending`.
+ */
+export type InboxZone = InboxBucket | 'snoozed';
 export type InboxChannel = 'email' | 'whatsapp';
 export type InboxUserAction = 'archived' | 'replied' | 'snoozed' | 'unhandled';
 
@@ -121,12 +127,15 @@ const ZERO_COUNTS: InboxCounts = { requires_user: 0, draft_ready: 0, auto_handle
 const EMPTY_COLD_START: ColdStartSnapshot = { active: [], recent: [] };
 
 let counts = $state<InboxCounts>(ZERO_COUNTS);
+let snoozedCount = $state(0);
 let itemsByBucket = $state<Record<InboxBucket, InboxItem[]>>({
 	requires_user: [],
 	draft_ready: [],
 	auto_handled: [],
 });
+let snoozedItems = $state<InboxItem[]>([]);
 let loadingBucket = $state<InboxBucket | null>(null);
+let loadingSnoozed = $state(false);
 /** Top-level availability flag — flips to false once `/api/inbox/counts` returns 503. */
 let available = $state(true);
 let coldStart = $state<ColdStartSnapshot>(EMPTY_COLD_START);
@@ -553,13 +562,54 @@ export async function loadInboxCounts(): Promise<boolean> {
 			return false;
 		}
 		if (!res.ok) return false;
-		const data = (await res.json()) as { counts: InboxCounts };
+		const data = (await res.json()) as { counts: InboxCounts; snoozed?: number };
 		counts = { ...ZERO_COUNTS, ...data.counts };
+		snoozedCount = data.snoozed ?? 0;
 		available = true;
 		return true;
 	} catch {
 		return false;
 	}
+}
+
+/** Snoozed-zone listing. Items sleeping with `snooze_until > now`, ordered by wake time ASC. */
+export async function loadSnoozedItems(limit = 50, offset = 0): Promise<void> {
+	loadingSnoozed = true;
+	try {
+		const params = new URLSearchParams({
+			snoozedOnly: 'true',
+			limit: String(limit),
+			offset: String(offset),
+		});
+		const res = await fetch(`${getApiBase()}/inbox/items?${params.toString()}`);
+		if (res.status === 503) {
+			available = false;
+			snoozedItems = [];
+			return;
+		}
+		if (!res.ok) {
+			addToast(t('inbox.error_load'), 'error');
+			return;
+		}
+		const data = (await res.json()) as { items: InboxItem[] };
+		snoozedItems = data.items;
+	} catch {
+		addToast(t('inbox.error_load'), 'error');
+	} finally {
+		loadingSnoozed = false;
+	}
+}
+
+export function getSnoozedItems(): InboxItem[] {
+	return snoozedItems;
+}
+
+export function isLoadingSnoozed(): boolean {
+	return loadingSnoozed;
+}
+
+export function getSnoozedCount(): number {
+	return snoozedCount;
 }
 
 export async function loadInboxItems(

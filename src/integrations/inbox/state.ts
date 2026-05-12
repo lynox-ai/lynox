@@ -195,6 +195,17 @@ export interface ListItemsOptions {
    * length 1; longer than 200 chars is rejected at the handler layer.
    */
   q?: string | undefined;
+  /**
+   * Invert the snooze filter: return ONLY items with `snooze_until > now`,
+   * ordered by wake time ASC. Used by the dedicated "Snoozed" zone the UI
+   * shows so users can review + un-snooze deferred items. PR #285 hid
+   * snoozed items from all buckets; without a recovery surface they
+   * silently vanished.
+   *
+   * Mutually exclusive with the default snooze-elided behaviour: when set,
+   * `bucket` is ignored (snoozed items can be in any bucket).
+   */
+  snoozedOnly?: boolean | undefined;
 }
 
 // ── Row shapes (camelCase mapped from snake_case columns) ──────────────────
@@ -588,6 +599,41 @@ export class InboxStateDb {
     // Snoozed items re-appear automatically once snooze_until <= now — no
     // waker job required.
     const now = Date.now();
+
+    // ── Snoozed-only branch ─────────────────────────────────────────────
+    // The default queue elides snoozed items so they don't clutter the
+    // active zones. The Snoozed tab needs the inverse: ONLY items still
+    // sleeping, ordered by wake time so the user sees what's coming up
+    // first. Search still applies. Bucket is intentionally ignored —
+    // snoozed items can live in any bucket and the user wants to see
+    // all of them in one place.
+    if (opts.snoozedOnly === true) {
+      const q = opts.q?.trim() ?? '';
+      const useSearch = q.length > 0;
+      const qPattern = useSearch ? `%${q.replace(/[\\%_]/g, '\\$&')}%` : '';
+      const rows = useSearch
+        ? this.db
+            .prepare<[string, number, string, string, string, string, number, number], ItemRow>(
+              `SELECT * FROM inbox_items
+               WHERE tenant_id = ?
+                 AND snooze_until IS NOT NULL AND snooze_until > ?
+                 AND (subject LIKE ? ESCAPE '\\' OR from_address LIKE ? ESCAPE '\\' OR snippet LIKE ? ESCAPE '\\' OR reason_de LIKE ? ESCAPE '\\')
+               ORDER BY snooze_until ASC
+               LIMIT ? OFFSET ?`,
+            )
+            .all(tenantId, now, qPattern, qPattern, qPattern, qPattern, limit, offset)
+        : this.db
+            .prepare<[string, number, number, number], ItemRow>(
+              `SELECT * FROM inbox_items
+               WHERE tenant_id = ?
+                 AND snooze_until IS NOT NULL AND snooze_until > ?
+               ORDER BY snooze_until ASC
+               LIMIT ? OFFSET ?`,
+            )
+            .all(tenantId, now, limit, offset);
+      return rows.map(rowToItem);
+    }
+
     // PRD §"Search-Bar": LIKE-match across subject/from/snippet/reason.
     // SQLite LIKE is case-insensitive on ASCII (default LIKE collation);
     // diacritic-folding is a Phase 5 improvement when search becomes a
@@ -686,6 +732,24 @@ export class InboxStateDb {
       }
     }
     return counts;
+  }
+
+  /**
+   * Count of items currently snoozed (snooze_until > now). Surfaced as a
+   * badge on the dedicated Snoozed zone tab so the user can see at a
+   * glance how many decisions they've deferred. Phase 4 replaces this
+   * with the broader Pending zone covering snooze + reminders.
+   */
+  countSnoozedItems(tenantId: string = DEFAULT_TENANT_ID): number {
+    const now = Date.now();
+    const row = this.db
+      .prepare<[string, number], { c: number }>(
+        `SELECT COUNT(*) AS c FROM inbox_items
+         WHERE tenant_id = ?
+           AND snooze_until IS NOT NULL AND snooze_until > ?`,
+      )
+      .get(tenantId, now);
+    return row?.c ?? 0;
   }
 
   // ── v11.3 bulk-action UNDO stack ──────────────────────────────────────

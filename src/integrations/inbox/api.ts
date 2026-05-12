@@ -109,6 +109,13 @@ export interface ListItemsQuery {
   tenantId?: string | undefined;
   /** Free-text search across subject/from/snippet/reason_de (zone-scoped). */
   q?: string | undefined;
+  /**
+   * When 'true' (string from query param), returns ONLY items still snoozed
+   * (snooze_until > now), ordered by wake time ASC. Mutually exclusive with
+   * `bucket` — snoozed items live in the dedicated Snoozed zone regardless
+   * of their original classifier bucket.
+   */
+  snoozedOnly?: string | undefined;
 }
 
 /** PRD §"Search-Bar" caps user input at 200 chars to keep one LIKE query bounded. */
@@ -122,7 +129,10 @@ function parseInt32(value: string | number | undefined): number | undefined {
 
 export function handleListItems(deps: InboxApiDeps, query: ListItemsQuery): ApiResponse {
   const opts: ListItemsOptions = {};
-  if (query.bucket !== undefined) {
+  const snoozedOnly = query.snoozedOnly === 'true';
+  if (snoozedOnly) {
+    opts.snoozedOnly = true;
+  } else if (query.bucket !== undefined) {
     if (!VALID_BUCKETS.includes(query.bucket as InboxBucket)) {
       return bad(`invalid bucket: ${query.bucket}`);
     }
@@ -213,7 +223,12 @@ export function handleListItemAudit(deps: InboxApiDeps, id: string): ApiResponse
 }
 
 export function handleGetCounts(deps: InboxApiDeps, query: { tenantId?: string | undefined } = {}): ApiResponse {
-  return { status: 200, body: { counts: deps.state.countItemsByBucket(query.tenantId) } };
+  // `counts` keeps its three-zone shape for back-compat with the existing
+  // smoke spec and clients reading the contract. `snoozed` rides alongside
+  // as a top-level field so the new Snoozed tab can render its badge.
+  const counts = deps.state.countItemsByBucket(query.tenantId);
+  const snoozed = deps.state.countSnoozedItems(query.tenantId);
+  return { status: 200, body: { counts, snoozed } };
 }
 
 // ── Cold start ───────────────────────────────────────────────────────────
@@ -840,6 +855,11 @@ export async function handleRefreshItemBody(
         accountId: item.accountId,
         threadKey: item.threadKey,
         channel: item.channel,
+        // v11 metadata narrows the IMAP search to ±7d around the known date
+        // and lets us match the envelope by Message-ID directly instead of
+        // reconstructing the threadKey across providers.
+        ...(item.mailDate !== undefined ? { mailDate: item.mailDate } : {}),
+        ...(item.messageId !== undefined && item.messageId !== '' ? { messageId: item.messageId } : {}),
       },
     });
   } else {
