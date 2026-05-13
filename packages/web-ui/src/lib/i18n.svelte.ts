@@ -1228,6 +1228,24 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.compose_collision_save_new': { de: 'Speichern + Neu', en: 'Save + New' },
 	'inbox.compose_collision_discard': { de: 'Verwerfen', en: 'Discard' },
 	'inbox.compose_collision_cancel': { de: 'Abbrechen', en: 'Cancel' },
+	// 3-pane / Kopilot / Triage mode (B-default + C-toggle)
+	'inbox.kopilot_summary_one': { de: '{count} Mail braucht dich.', en: '{count} mail needs you.' },
+	'inbox.kopilot_summary_many': { de: '{count} Mails brauchen dich.', en: '{count} mails need you.' },
+	'inbox.kopilot_summary_zero': { de: 'Inbox ist leer. Nichts wartet auf dich.', en: 'Inbox is clear. Nothing waiting on you.' },
+	'inbox.kopilot_top_heading': { de: 'Oben in deiner Liste', en: 'Top of your list' },
+	'inbox.kopilot_drafts_ready': { de: '{count} Antwort-Entwürfe bereit', en: '{count} draft replies ready' },
+	'inbox.kopilot_auto_handled': { de: '{count} heute automatisch erledigt', en: '{count} handled automatically today' },
+	'inbox.kopilot_start_triage': { de: 'Triage-Modus starten', en: 'Start triage mode' },
+	'inbox.kopilot_pick_hint': { de: 'Oder wähl eine Mail aus der Liste links.', en: 'Or pick a mail from the list on the left.' },
+	'inbox.kopilot_keys_hint': { de: 'Tastatur: j/k navigieren · r antworten · a archivieren · s snooze · t Triage', en: 'Keys: j/k navigate · r reply · a archive · s snooze · t triage' },
+	'inbox.triage_title': { de: 'Triage', en: 'Triage' },
+	'inbox.triage_position': { de: '{pos} von {total}', en: '{pos} of {total}' },
+	'inbox.triage_exit': { de: 'Liste anzeigen', en: 'Back to list' },
+	'inbox.triage_prev': { de: 'Vorherige', en: 'Previous' },
+	'inbox.triage_next': { de: 'Nächste', en: 'Next' },
+	'inbox.triage_done': { de: 'Triage abgeschlossen — Inbox-Zero erreicht.', en: 'Triage done — inbox zero reached.' },
+	'inbox.triage_unavailable': { de: 'Triage-Modus ist nur in „Braucht dich" verfügbar.', en: 'Triage mode is only available in "Needs you".' },
+	'inbox.shortcuts_triage': { de: 'Triage-Modus umschalten', en: 'Toggle triage mode' },
 };
 
 export function setLocale(locale: Locale): void {

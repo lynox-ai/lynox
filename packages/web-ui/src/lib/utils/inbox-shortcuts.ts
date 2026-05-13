@@ -13,7 +13,8 @@ export type InboxShortcutAction =
 	| { kind: 'undo' }
 	| { kind: 'reply' }
 	| { kind: 'close' }
-	| { kind: 'toggle_help' };
+	| { kind: 'toggle_help' }
+	| { kind: 'toggle_triage' };
 
 /**
  * Translate a key event into an inbox action, or null when the event
@@ -45,6 +46,9 @@ export function keyToInboxAction(event: KeyboardEvent): InboxShortcutAction | nu
 		case 'r':
 		case 'R':
 			return { kind: 'reply' };
+		case 't':
+		case 'T':
+			return { kind: 'toggle_triage' };
 		case 'Escape':
 			return { kind: 'close' };
 		case '?':
