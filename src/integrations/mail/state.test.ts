@@ -651,3 +651,153 @@ describe('MailStateDb — migration v12 (inbox_thread_messages)', () => {
     expect(indexes).toHaveLength(1);
   });
 });
+
+describe('MailStateDb — sidebar context queries', () => {
+  beforeEach(() => {
+    db.upsertAccount({
+      id: 'acct',
+      displayName: 'Me',
+      address: 'me@x.example',
+      preset: 'custom',
+      imap: { host: 'imap', port: 993, secure: true },
+      smtp: { host: 'smtp', port: 465, secure: true },
+      authType: 'imap',
+      type: 'personal',
+      isDefault: true,
+    });
+  });
+
+  it('records and lists outbound for an address (newest-first, capped at limit)', () => {
+    const t0 = Date.now();
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<m1@x>',
+      to: [{ address: 'mustermann@acme.example' }],
+      subject: 'first',
+      bodyChars: 100,
+      sentAt: new Date(t0 - 10_000),
+    });
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<m2@x>',
+      to: [{ address: 'Mustermann@ACME.example' }],
+      subject: 'second',
+      bodyChars: 200,
+      sentAt: new Date(t0),
+    });
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<m3@x>',
+      to: [{ address: 'someone@else.example' }],
+      subject: 'unrelated',
+      bodyChars: 50,
+      sentAt: new Date(t0 + 1_000),
+    });
+
+    const list = db.listOutboundForAddress('mustermann@acme.example', { limit: 5 });
+
+    expect(list).toHaveLength(2);
+    expect(list[0]?.subject).toBe('second');
+    expect(list[1]?.subject).toBe('first');
+  });
+
+  it('does not match a substring address (mustermanns@x must not match mustermann@x)', () => {
+    const t0 = Date.now();
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<exact@x>',
+      to: [{ address: 'mustermann@acme.example' }],
+      subject: 'exact match',
+      bodyChars: 10,
+      sentAt: new Date(t0),
+    });
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<longer@x>',
+      to: [{ address: 'mustermanns@acme.example' }],
+      subject: 'plural — longer suffix',
+      bodyChars: 10,
+      sentAt: new Date(t0 + 1_000),
+    });
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<prefix@x>',
+      to: [{ address: 'pre.mustermann@acme.example' }],
+      subject: 'prefix',
+      bodyChars: 10,
+      sentAt: new Date(t0 + 2_000),
+    });
+    const list = db.listOutboundForAddress('mustermann@acme.example');
+    expect(list).toHaveLength(1);
+    expect(list[0]?.subject).toBe('exact match');
+  });
+
+  it('escapes LIKE wildcards in the address needle (no false-match on _ or %)', () => {
+    const t0 = Date.now();
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<m_under@x>',
+      to: [{ address: 'bob_smith@x.example' }],
+      subject: 'literal underscore',
+      bodyChars: 10,
+      sentAt: new Date(t0),
+    });
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<m_other@x>',
+      to: [{ address: 'bobxsmith@x.example' }],
+      subject: 'should not match underscore query',
+      bodyChars: 10,
+      sentAt: new Date(t0 + 1_000),
+    });
+    // Without ESCAPE, `_` is a single-char wildcard and would match both.
+    const list = db.listOutboundForAddress('bob_smith@x.example');
+    expect(list).toHaveLength(1);
+    expect(list[0]?.subject).toBe('literal underscore');
+  });
+
+  it('matches case-insensitively across to/cc and respects limit', () => {
+    const t0 = Date.now();
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<cc1@x>',
+      to: [{ address: 'primary@x.example' }],
+      cc: [{ address: 'Cc@Acme.Example' }],
+      subject: 'cc match',
+      bodyChars: 80,
+      sentAt: new Date(t0),
+    });
+    const list = db.listOutboundForAddress('cc@acme.example');
+    expect(list).toHaveLength(1);
+    expect(list[0]?.subject).toBe('cc match');
+  });
+
+  it('lists open follow-ups by recipient (case-insensitive, status filtered)', () => {
+    db.recordFollowup({
+      accountId: 'acct',
+      sentMessageId: '<sent1@x>',
+      threadKey: '<sent1@x>',
+      recipient: 'awaited@x.example',
+      type: 'awaiting_reply',
+      reason: 'waiting on quote',
+      reminderAt: new Date(Date.now() + 86_400_000),
+      source: 'user',
+    });
+    const cancelled = db.recordFollowup({
+      accountId: 'acct',
+      sentMessageId: '<sent2@x>',
+      threadKey: '<sent2@x>',
+      recipient: 'awaited@x.example',
+      type: 'awaiting_reply',
+      reason: 'cancelled one',
+      reminderAt: new Date(Date.now() + 86_400_000),
+      source: 'user',
+    });
+    db.cancelFollowup(cancelled);
+
+    const list = db.listOpenFollowupsForRecipient('Awaited@X.example');
+
+    expect(list).toHaveLength(1);
+    expect(list[0]?.reason).toBe('waiting on quote');
+  });
+});

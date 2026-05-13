@@ -957,6 +957,62 @@ export class InboxStateDb {
     return rows.map(rowToItem);
   }
 
+  /**
+   * Recent items from the same sender — used by the Mail-Context-Sidebar's
+   * "Recent Threads" section. Excludes the currently-open item to avoid
+   * showing the user the thread they're already reading. Case-insensitive
+   * match on `from_address` because envelope casing isn't normalised at
+   * write time.
+   */
+  listRecentByFromAddress(
+    fromAddress: string,
+    opts: { excludeItemId?: string | undefined; limit?: number | undefined; tenantId?: string | undefined } = {},
+  ): ReadonlyArray<InboxItem> {
+    const tenantId = opts.tenantId ?? DEFAULT_TENANT_ID;
+    const limit = clampLimit(opts.limit ?? 5);
+    const exclude = opts.excludeItemId ?? '';
+    const rows = this.db
+      .prepare<[string, string, string, number], ItemRow>(
+        `SELECT * FROM inbox_items
+         WHERE tenant_id = ?
+           AND LOWER(from_address) = LOWER(?)
+           AND id != ?
+         ORDER BY COALESCE(mail_date, classified_at) DESC, classified_at DESC
+         LIMIT ?`,
+      )
+      .all(tenantId, fromAddress, exclude, limit);
+    return rows.map(rowToItem);
+  }
+
+  /**
+   * Active mail-anchored reminders from the same sender — pending
+   * snoozes with `notify_on_unsnooze = 1` that haven't been actioned.
+   * Used by the sidebar so the user sees "you set a reminder for this
+   * contact" alongside their current thread.
+   */
+  listActiveRemindersByFromAddress(
+    fromAddress: string,
+    opts: { excludeItemId?: string | undefined; limit?: number | undefined; tenantId?: string | undefined } = {},
+  ): ReadonlyArray<InboxItem> {
+    const tenantId = opts.tenantId ?? DEFAULT_TENANT_ID;
+    const limit = clampLimit(opts.limit ?? 5);
+    const exclude = opts.excludeItemId ?? '';
+    const rows = this.db
+      .prepare<[string, string, string, number], ItemRow>(
+        `SELECT * FROM inbox_items
+         WHERE tenant_id = ?
+           AND LOWER(from_address) = LOWER(?)
+           AND id != ?
+           AND notify_on_unsnooze = 1
+           AND snooze_until IS NOT NULL
+           AND user_action IS NULL
+         ORDER BY snooze_until ASC
+         LIMIT ?`,
+      )
+      .all(tenantId, fromAddress, exclude, limit);
+    return rows.map(rowToItem);
+  }
+
   /** Stamp the fire time so the same wake-up doesn't re-emit. */
   markReminderNotified(id: string, when: Date = new Date()): boolean {
     const result = this.db

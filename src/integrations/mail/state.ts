@@ -674,6 +674,70 @@ function rowToScheduledSend(row: ScheduledSendRow): ScheduledSend {
   };
 }
 
+// ── mail_sent_log types (outbound history, v11.2) ───────────────────────
+
+export interface SentMailLogInput {
+  tenantId?: string | undefined;
+  accountId: string;
+  messageId: string;
+  inReplyTo?: string | undefined;
+  to: ReadonlyArray<MailAddress>;
+  cc?: ReadonlyArray<MailAddress> | undefined;
+  bcc?: ReadonlyArray<MailAddress> | undefined;
+  subject: string;
+  bodyChars: number;
+  sentAt?: Date | undefined;
+  followupId?: string | undefined;
+}
+
+export interface SentMailLogEntry {
+  id: string;
+  tenantId: string;
+  accountId: string;
+  messageId: string;
+  inReplyTo: string | undefined;
+  to: ReadonlyArray<MailAddress>;
+  cc: ReadonlyArray<MailAddress>;
+  bcc: ReadonlyArray<MailAddress>;
+  subject: string;
+  bodyChars: number;
+  sentAt: Date;
+  followupId: string | undefined;
+}
+
+interface SentMailLogRow {
+  id: string;
+  tenant_id: string;
+  account_id: string;
+  message_id: string;
+  in_reply_to: string | null;
+  to_json: string;
+  cc_json: string | null;
+  bcc_json: string | null;
+  subject: string;
+  body_chars: number;
+  sent_at: number;
+  reply_received_at: number | null;
+  followup_id: string | null;
+}
+
+function rowToSentMailLog(row: SentMailLogRow): SentMailLogEntry {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    accountId: row.account_id,
+    messageId: row.message_id,
+    inReplyTo: row.in_reply_to ?? undefined,
+    to: JSON.parse(row.to_json) as MailAddress[],
+    cc: row.cc_json ? (JSON.parse(row.cc_json) as MailAddress[]) : [],
+    bcc: row.bcc_json ? (JSON.parse(row.bcc_json) as MailAddress[]) : [],
+    subject: row.subject,
+    bodyChars: row.body_chars,
+    sentAt: new Date(row.sent_at),
+    followupId: row.followup_id ?? undefined,
+  };
+}
+
 interface FollowupRow {
   id: string;
   account_id: string;
@@ -1104,6 +1168,97 @@ export class MailStateDb {
         `SELECT * FROM mail_followups WHERE account_id = ? ORDER BY created_at DESC`,
       )
       .all(accountId);
+    return rows.map(rowToFollowup);
+  }
+
+  // ── mail_sent_log (outbound source-of-truth, v11.2) ──────────────────
+
+  /**
+   * Persist an outbound send for context-sidebar + follow-up watching.
+   * Schema lives in v11.2 but writes only land here in Phase 4a; older
+   * sends are absent from the table. Callers swallow throws — this is
+   * observational data, not load-bearing on the send itself.
+   */
+  recordSentMail(input: SentMailLogInput): string {
+    const id = randomUUID().slice(0, 12);
+    this.db
+      .prepare<[
+        string, string, string, string, string | null,
+        string, string | null, string | null,
+        string, number, number, string | null,
+      ], unknown>(
+        `INSERT INTO mail_sent_log (
+           id, tenant_id, account_id, message_id, in_reply_to,
+           to_json, cc_json, bcc_json,
+           subject, body_chars, sent_at, followup_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.tenantId ?? 'default',
+        input.accountId,
+        input.messageId,
+        input.inReplyTo ?? null,
+        JSON.stringify(input.to),
+        input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
+        input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
+        input.subject,
+        input.bodyChars,
+        (input.sentAt ?? new Date()).getTime(),
+        input.followupId ?? null,
+      );
+    return id;
+  }
+
+  /**
+   * Outbound history to a specific address — used by the Mail-Context-
+   * Sidebar. Scans `to_json`/`cc_json` via LIKE because the table is
+   * small (one row per send) and the query runs only on Reading-Pane
+   * open. Address must be pre-validated by the caller (length-capped,
+   * RFC-charset checked); LIKE wildcards in the needle are escaped so
+   * an unsanitised `bob_smith@x.com` cannot match unrelated rows.
+   */
+  listOutboundForAddress(
+    address: string,
+    opts: { limit?: number | undefined; tenantId?: string | undefined } = {},
+  ): ReadonlyArray<SentMailLogEntry> {
+    const limit = Math.min(Math.max(opts.limit ?? 5, 1), 50);
+    const tenantId = opts.tenantId ?? 'default';
+    const escaped = address.toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`);
+    const needle = `%"address":"${escaped}"%`;
+    const rows = this.db
+      .prepare<[string, string, string, number], SentMailLogRow>(
+        `SELECT * FROM mail_sent_log
+         WHERE tenant_id = ?
+           AND (LOWER(to_json) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(cc_json, '')) LIKE ? ESCAPE '\\')
+         ORDER BY sent_at DESC
+         LIMIT ?`,
+      )
+      .all(tenantId, needle, needle, limit);
+    return rows.map(rowToSentMailLog);
+  }
+
+  /**
+   * Open follow-ups awaiting a reply from a specific recipient. Filter
+   * is recipient-side because that's the data the sidebar shows —
+   * follow-ups we created when sending to this address and are still
+   * waiting on. The table has no `tenant_id` column today (single-
+   * instance assumption); add scoping here when multi-tenant lands.
+   */
+  listOpenFollowupsForRecipient(
+    recipient: string,
+    limit: number = 5,
+  ): ReadonlyArray<MailFollowup> {
+    const cappedLimit = Math.min(Math.max(limit, 1), 50);
+    const rows = this.db
+      .prepare<[string, number], FollowupRow>(
+        `SELECT * FROM mail_followups
+         WHERE LOWER(recipient) = LOWER(?)
+           AND status IN ('pending', 'reminded')
+         ORDER BY reminder_at ASC
+         LIMIT ?`,
+      )
+      .all(recipient, cappedLimit);
     return rows.map(rowToFollowup);
   }
 

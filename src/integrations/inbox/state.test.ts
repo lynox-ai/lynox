@@ -825,3 +825,69 @@ describe('InboxStateDb — settings KV (v15)', () => {
     expect(inbox.getSetting('push.inbox_enabled')).toBe('true');
   });
 });
+
+describe('InboxStateDb — sidebar context queries', () => {
+  function seedItemFromAddress(
+    fromAddress: string,
+    overrides: Partial<Parameters<InboxStateDb['insertItem']>[0]> = {},
+  ): string {
+    return insertSampleItem({
+      threadKey: `imap:thread-${Math.random().toString(36).slice(2, 8)}`,
+      fromAddress,
+      subject: `Subject from ${fromAddress}`,
+      ...overrides,
+    });
+  }
+
+  it('returns recent items from same sender, newest-first, capped at limit', () => {
+    const me = 'sender@acme.example';
+    seedItemFromAddress(me, { classifiedAt: new Date('2026-04-01T10:00:00Z') });
+    const newer = seedItemFromAddress(me, { classifiedAt: new Date('2026-05-01T10:00:00Z') });
+    seedItemFromAddress('other@x.example', { classifiedAt: new Date('2026-05-02T10:00:00Z') });
+    const open = seedItemFromAddress(me, { classifiedAt: new Date('2026-05-09T10:00:00Z') });
+
+    const list = inbox.listRecentByFromAddress(me, { excludeItemId: open, limit: 5 });
+
+    expect(list).toHaveLength(2);
+    expect(list[0]?.id).toBe(newer);
+    expect(list.every((i) => i.id !== open)).toBe(true);
+    expect(list.every((i) => i.fromAddress.toLowerCase() === me)).toBe(true);
+  });
+
+  it('matches case-insensitively on from_address (envelope casing not normalised)', () => {
+    seedItemFromAddress('Mixed@Acme.Example');
+    const list = inbox.listRecentByFromAddress('mixed@acme.example');
+    expect(list).toHaveLength(1);
+  });
+
+  it('orders reminders by snooze_until ASC and excludes the open item', () => {
+    const me = 'sender@acme.example';
+    const open = seedItemFromAddress(me);
+    const farFuture = new Date(Date.now() + 14 * 86_400_000);
+    const nearFuture = new Date(Date.now() + 1 * 86_400_000);
+    const far = seedItemFromAddress(me);
+    inbox.setSnooze(far, farFuture, null, true, true);
+    const near = seedItemFromAddress(me);
+    inbox.setSnooze(near, nearFuture, null, true, true);
+
+    const list = inbox.listActiveRemindersByFromAddress(me, { excludeItemId: open, limit: 5 });
+
+    expect(list.map((i) => i.id)).toEqual([near, far]);
+  });
+
+  it('returns only active mail-anchored reminders for the sender', () => {
+    const me = 'sender@acme.example';
+    const future = new Date(Date.now() + 7 * 86_400_000);
+    const remind = seedItemFromAddress(me);
+    inbox.setSnooze(remind, future, null, true, true);
+    seedItemFromAddress(me); // active but no reminder set
+    const archived = seedItemFromAddress(me);
+    inbox.setSnooze(archived, future, null, true, true);
+    inbox.updateUserAction(archived, 'archived');
+
+    const list = inbox.listActiveRemindersByFromAddress(me, { limit: 5 });
+
+    expect(list).toHaveLength(1);
+    expect(list[0]?.id).toBe(remind);
+  });
+});

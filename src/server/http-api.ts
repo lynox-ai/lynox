@@ -3521,6 +3521,13 @@ export class LynoxHTTPApi {
       sendInbox(res, handleListItemAudit(deps!, params['id']!));
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/context', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetItemContext } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleGetItemContext(deps!, params['id']!));
+    }));
+
     this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/inbox/items/:id/action', async (_req, res, params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;

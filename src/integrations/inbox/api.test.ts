@@ -13,6 +13,7 @@ import {
   handleGetCounts,
   handleGetDraft,
   handleGetItem,
+  handleGetItemContext,
   handleGetItemDraft,
   handleGetNotificationPrefs,
   handleListItemAudit,
@@ -146,6 +147,112 @@ describe('handleGetItemFull', () => {
     expect(body.body.source).toBe('cache');
     expect(body.body.md).toBe('Hello from cache');
     expect(body.body.fetchedAt).toBe('2026-05-12T10:00:00.000Z');
+  });
+});
+
+describe('handleGetItemContext', () => {
+  it('404s on missing item', () => {
+    expect(handleGetItemContext(deps, 'missing').status).toBe(404);
+  });
+
+  it('returns sender + empty sections when no related state exists', () => {
+    const id = state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'thr-ctx-1',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'r',
+      classifiedAt: new Date('2026-05-10'),
+      classifierVersion: 'v',
+      fromAddress: 'sender@x.example',
+      fromName: 'Sender',
+      subject: 'hello',
+    });
+    const r = handleGetItemContext(deps, id);
+    expect(r.status).toBe(200);
+    const body = r.body as {
+      sender: { address: string; name: string | null };
+      recentThreads: ReadonlyArray<unknown>;
+      openFollowups: ReadonlyArray<unknown>;
+      outboundHistory: ReadonlyArray<unknown>;
+      reminders: ReadonlyArray<unknown>;
+    };
+    expect(body.sender.address).toBe('sender@x.example');
+    expect(body.sender.name).toBe('Sender');
+    expect(body.recentThreads).toEqual([]);
+    expect(body.openFollowups).toEqual([]);
+    expect(body.outboundHistory).toEqual([]);
+    expect(body.reminders).toEqual([]);
+  });
+
+  it('returns empty sections (no LIKE-scan) when item.fromAddress is empty', () => {
+    const id = state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'thr-ctx-empty-from',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'r',
+      classifiedAt: new Date('2026-05-10'),
+      classifierVersion: 'v',
+      // fromAddress omitted → defaults to '' per insertItem
+    });
+    const r = handleGetItemContext(deps, id);
+    expect(r.status).toBe(200);
+    const body = r.body as { sender: { address: string }; recentThreads: ReadonlyArray<unknown> };
+    expect(body.sender.address).toBe('');
+    expect(body.recentThreads).toEqual([]);
+  });
+
+  it('populates recent + reminders from same sender, excluding the open item', () => {
+    const open = state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'thr-ctx-open',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'r',
+      classifiedAt: new Date('2026-05-10'),
+      classifierVersion: 'v',
+      fromAddress: 'sender@x.example',
+      subject: 'open thread',
+    });
+    state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'thr-ctx-prev',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'r',
+      classifiedAt: new Date('2026-04-10'),
+      classifierVersion: 'v',
+      fromAddress: 'sender@x.example',
+      subject: 'older thread',
+    });
+    const remind = state.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'thr-ctx-rem',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'r',
+      classifiedAt: new Date('2026-04-05'),
+      classifierVersion: 'v',
+      fromAddress: 'sender@x.example',
+      subject: 'reminded thread',
+    });
+    state.setSnooze(remind, new Date(Date.now() + 86_400_000), null, true, true);
+
+    const r = handleGetItemContext(deps, open);
+    expect(r.status).toBe(200);
+    const body = r.body as {
+      recentThreads: ReadonlyArray<{ id: string }>;
+      reminders: ReadonlyArray<{ id: string }>;
+    };
+    expect(body.recentThreads.map((i) => i.id)).not.toContain(open);
+    expect(body.recentThreads).toHaveLength(2);
+    expect(body.reminders.map((i) => i.id)).toEqual([remind]);
   });
 });
 
