@@ -13,7 +13,17 @@
 		last_run_status?: string;
 		priority?: string;
 		assignee?: string;
+		task_type?: string;
 	}
+
+	interface Props {
+		/** Hide rows whose task_type doesn't match. When unset, show all
+		 *  (the legacy "everything" view); when set to 'reminder', the
+		 *  AutomationHub Reminders tab passes 'reminder' to scope the list. */
+		filterTaskType?: string | undefined;
+	}
+
+	const { filterTaskType }: Props = $props();
 
 	type Frequency = 'once' | 'hourly' | 'daily' | 'weekly' | 'monthly';
 
@@ -44,7 +54,12 @@
 			const res = await fetch(`${getApiBase()}/tasks`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { tasks: TaskRecord[] };
-			tasks = data.tasks;
+			// Client-side filter — the /api/tasks endpoint doesn't yet
+			// support a task_type query param. Cheap on the typical
+			// <100 task volume; revisit if it grows.
+			tasks = filterTaskType !== undefined
+				? data.tasks.filter((task) => (task.task_type ?? '') === filterTaskType)
+				: data.tasks;
 		} catch {
 			error = t('common.load_failed');
 		}
