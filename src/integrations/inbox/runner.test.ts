@@ -141,6 +141,45 @@ describe('buildInboxRunner — happy path', () => {
   });
 });
 
+describe('buildInboxRunner — push notifier wire', () => {
+  it('fires the notifier on a NEW requires_user classification', async () => {
+    const llm: LLMCaller = vi.fn(async () =>
+      JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'k' }),
+    );
+    const notifyNewItem = vi.fn(async () => true);
+    const queue = buildInboxRunner({ state: inbox, llm, notifier: { notifyNewItem } });
+    queue.enqueue(payload());
+    await queue.drain();
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(notifyNewItem.mock.calls[0]?.[0]).toMatchObject({ bucket: 'requires_user' });
+  });
+
+  it('does not fire on auto_handled or draft_ready (notifier owns the bucket gate too)', async () => {
+    const llm: LLMCaller = vi.fn(async () =>
+      JSON.stringify({ bucket: 'auto_handled', confidence: 0.9, one_line_why_de: 'k' }),
+    );
+    const notifyNewItem = vi.fn(async () => true);
+    const queue = buildInboxRunner({ state: inbox, llm, notifier: { notifyNewItem } });
+    queue.enqueue(payload());
+    await queue.drain();
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('fires on the dead-letter path (fail-closed → requires_user)', async () => {
+    const llm: LLMCaller = vi.fn(async () => { throw new Error('boom'); });
+    const notifyNewItem = vi.fn(async () => true);
+    const queue = buildInboxRunner({
+      state: inbox,
+      llm,
+      policy: { retryOnce: false },
+      notifier: { notifyNewItem },
+    });
+    queue.enqueue(payload());
+    await queue.drain();
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('buildInboxRunner — fail-closed dead-letter', () => {
   it('inserts a requires_user stub and audits the failure when classification fails', async () => {
     const llm: LLMCaller = vi.fn(async () => {

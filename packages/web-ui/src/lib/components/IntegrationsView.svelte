@@ -15,6 +15,65 @@
 		isSupported as isPushSupported,
 		isIosWithoutPwa,
 	} from '../stores/notifications.svelte.js';
+	import {
+		getNotificationPrefs,
+		updateNotificationPrefs,
+		type NotificationPrefs,
+		type NotificationPrefsPatch,
+	} from '../api/inbox-notifications.js';
+
+	let prefs = $state<NotificationPrefs | null>(null);
+	async function loadInboxPushPref(): Promise<void> {
+		prefs = await getNotificationPrefs(getApiBase());
+	}
+
+	// Serialise PATCHes so two near-simultaneous toggles don't race —
+	// the second wait-for-first chain ensures we always merge against the
+	// freshest server state, never a stale `prev` snapshot.
+	let inFlight: Promise<void> = Promise.resolve();
+	async function patchPrefs(patch: NotificationPrefsPatch): Promise<void> {
+		const run = async (): Promise<void> => {
+			const prev = prefs;
+			if (prev) {
+				prefs = {
+					...prev,
+					...(patch.inboxPushEnabled !== undefined ? { inboxPushEnabled: patch.inboxPushEnabled } : {}),
+					...(patch.perMinute !== undefined ? { perMinute: patch.perMinute } : {}),
+					...(patch.perHour !== undefined ? { perHour: patch.perHour } : {}),
+					...(patch.quietHours ? { quietHours: { ...prev.quietHours, ...patch.quietHours } } : {}),
+					...(patch.accounts
+						? { accounts: prev.accounts.map((a) => (
+							patch.accounts && a.id in patch.accounts ? { ...a, muted: patch.accounts[a.id]! } : a
+						)) }
+						: {}),
+				};
+			}
+			const result = await updateNotificationPrefs(getApiBase(), patch);
+			if (result) {
+				prefs = result;
+			} else {
+				prefs = prev;
+				addToast(t('integrations.push_inbox_save_failed'), 'error');
+			}
+		};
+		inFlight = inFlight.then(run, run);
+		await inFlight;
+	}
+
+	/** Drop NaN before it taints optimistic state — `parseInt('')` returns NaN. */
+	function patchThrottle(field: 'perMinute' | 'perHour', raw: string): void {
+		const n = parseInt(raw, 10);
+		if (!Number.isFinite(n)) return;
+		void patchPrefs({ [field]: n } as NotificationPrefsPatch);
+	}
+
+	function defaultBrowserTz(): string {
+		try {
+			return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+		} catch {
+			return 'UTC';
+		}
+	}
 
 	async function copyText(text: string) {
 		await navigator.clipboard.writeText(text);
@@ -516,6 +575,7 @@
 
 	$effect(() => {
 		initNotifications();
+		void loadInboxPushPref();
 		loadManagedStatus();
 		loadGoogleStatus();
 		loadSecretStatuses();
@@ -820,6 +880,118 @@
 					{t('integrations.push_disable')}
 				</button>
 			</div>
+			<!-- Per-category opt-out + Quiet Hours + throttle + per-account
+				mute. All keys live in the same envelope and are PATCHed
+				deltas; backend defaults missing fields. -->
+			{#if prefs}
+			<div class="mt-4 space-y-3 border-t border-border pt-3">
+				<label class="flex items-start gap-2 cursor-pointer text-sm">
+					<input
+						type="checkbox"
+						checked={prefs.inboxPushEnabled}
+						onchange={(e) => void patchPrefs({ inboxPushEnabled: (e.currentTarget as HTMLInputElement).checked })}
+						class="mt-0.5"
+					/>
+					<span>
+						<span class="text-text">{t('integrations.push_inbox_toggle')}</span>
+						<span class="block text-xs text-text-muted">{t('integrations.push_inbox_toggle_hint')}</span>
+					</span>
+				</label>
+
+				<!-- Quiet Hours -->
+				<div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3">
+					<label class="flex items-start gap-2 cursor-pointer text-sm">
+						<input
+							type="checkbox"
+							checked={prefs.quietHours.enabled}
+							onchange={(e) => void patchPrefs({ quietHours: {
+								enabled: (e.currentTarget as HTMLInputElement).checked,
+								// Backfill the user's TZ on first enable so a server
+								// without LYNOX_TZ doesn't silently mute everything in UTC.
+								...(prefs!.quietHours.tz === 'UTC' ? { tz: defaultBrowserTz() } : {}),
+							} })}
+							class="mt-0.5"
+						/>
+						<span>
+							<span class="text-text">{t('integrations.push_quiet_hours_toggle')}</span>
+							<span class="block text-xs text-text-muted">{t('integrations.push_quiet_hours_hint')}</span>
+						</span>
+					</label>
+					{#if prefs.quietHours.enabled}
+						<div class="mt-2 flex items-center gap-2 text-xs text-text-muted pl-6">
+							<label class="flex items-center gap-1">
+								{t('integrations.push_quiet_hours_from')}
+								<input
+									type="time"
+									value={prefs.quietHours.start}
+									onchange={(e) => void patchPrefs({ quietHours: { start: (e.currentTarget as HTMLInputElement).value } })}
+									class="rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-text"
+								/>
+							</label>
+							<label class="flex items-center gap-1">
+								{t('integrations.push_quiet_hours_to')}
+								<input
+									type="time"
+									value={prefs.quietHours.end}
+									onchange={(e) => void patchPrefs({ quietHours: { end: (e.currentTarget as HTMLInputElement).value } })}
+									class="rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-text"
+								/>
+							</label>
+							<span class="text-text-subtle">({prefs.quietHours.tz})</span>
+						</div>
+					{/if}
+				</div>
+
+				<!-- Throttle -->
+				<div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3 text-sm">
+					<div class="text-text mb-2">{t('integrations.push_throttle_title')}</div>
+					<div class="flex items-center gap-3 text-xs text-text-muted">
+						<label class="flex items-center gap-1">
+							<input
+								type="number"
+								min="1"
+								max="10"
+								value={prefs.perMinute}
+								onchange={(e) => patchThrottle('perMinute', (e.currentTarget as HTMLInputElement).value)}
+								class="w-16 rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-text"
+							/>
+							{t('integrations.push_throttle_per_minute')}
+						</label>
+						<label class="flex items-center gap-1">
+							<input
+								type="number"
+								min="1"
+								max="60"
+								value={prefs.perHour}
+								onchange={(e) => patchThrottle('perHour', (e.currentTarget as HTMLInputElement).value)}
+								class="w-16 rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-text"
+							/>
+							{t('integrations.push_throttle_per_hour')}
+						</label>
+					</div>
+				</div>
+
+				<!-- Per-account mute -->
+				{#if prefs.accounts.length > 1}
+				<div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3 text-sm">
+					<div class="text-text mb-2">{t('integrations.push_per_account_title')}</div>
+					<div class="space-y-1.5">
+						{#each prefs.accounts as acct (acct.id)}
+							<label class="flex items-center gap-2 text-xs cursor-pointer">
+								<input
+									type="checkbox"
+									checked={!acct.muted}
+									onchange={(e) => void patchPrefs({ accounts: { [acct.id]: !(e.currentTarget as HTMLInputElement).checked } })}
+								/>
+								<span class="text-text">{acct.displayName}</span>
+								<span class="text-text-subtle">&lt;{acct.address}&gt;</span>
+							</label>
+						{/each}
+					</div>
+				</div>
+				{/if}
+			</div>
+			{/if}
 		{:else if getNotificationPermission() === 'denied'}
 			<p class="text-xs text-text-muted">{t('integrations.push_denied_hint')}</p>
 		{:else}

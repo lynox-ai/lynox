@@ -304,7 +304,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(14);
+    expect(row.v).toBe(15);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -422,6 +422,7 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
       'inbox_item_bodies',
       'inbox_items',
       'inbox_rules',
+      'inbox_settings',
       'inbox_thread_messages',
       'inbox_user_action_log',
     ]);

@@ -967,6 +967,33 @@ export class InboxStateDb {
     return result.changes > 0;
   }
 
+  // ── Settings (KV, v15) ──────────────────────────────────────────────────
+
+  /**
+   * Read a per-user inbox preference. Returns the raw stored string or
+   * the supplied fallback when the key is absent. Single-tenant deploy —
+   * no `tenant_id` filter today; if multi-user-per-instance ever lands
+   * the table grows a tenant column at the same time.
+   */
+  getSetting(key: string, fallback: string | null = null): string | null {
+    const row = this.db
+      .prepare<[string], { value: string }>(
+        `SELECT value FROM inbox_settings WHERE key = ?`,
+      )
+      .get(key);
+    return row?.value ?? fallback;
+  }
+
+  /** Upsert a setting. */
+  setSetting(key: string, value: string): void {
+    this.db
+      .prepare<[string, string, number], unknown>(
+        `INSERT INTO inbox_settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(key, value, Date.now());
+  }
+
   /** Link a draft to its item. Pass `null` to detach. */
   attachDraft(id: string, draftId: string | null): boolean {
     const result = this.db

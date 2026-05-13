@@ -3397,6 +3397,26 @@ export class LynoxHTTPApi {
       sendInbox(res, handleGetCounts(deps!, tenantId !== null ? { tenantId } : {}));
     });
 
+    this.staticRoutes.set('GET /api/inbox/notification-prefs', async (_req, res) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetNotificationPrefs } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleGetNotificationPrefs(deps!));
+    });
+
+    this.staticRoutes.set('PATCH /api/inbox/notification-prefs', async (_req, res, _params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleUpdateNotificationPrefs } = await import('../integrations/inbox/api.js');
+      // Reject non-object payloads (arrays, primitives, null) before they
+      // reach the handler — `Object.entries(['a'])` would otherwise
+      // happily iterate array indices and write garbage settings.
+      const safeBody = body !== null && typeof body === 'object' && !Array.isArray(body)
+        ? (body as import('../integrations/inbox/api.js').NotificationPrefsBody)
+        : {};
+      sendInbox(res, handleUpdateNotificationPrefs(deps!, safeBody));
+    });
+
     this.staticRoutes.set('GET /api/inbox/cold-start', async (_req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;

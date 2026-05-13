@@ -807,3 +807,21 @@ describe('InboxStateDb — listItems with ?q= search', () => {
     expect(list).toHaveLength(0); // No subject contains literal "30%"
   });
 });
+
+describe('InboxStateDb — settings KV (v15)', () => {
+  it('returns the fallback when a key is absent', () => {
+    expect(inbox.getSetting('push.inbox_enabled', 'true')).toBe('true');
+    expect(inbox.getSetting('missing')).toBeNull();
+  });
+
+  it('round-trips a value via setSetting + getSetting', () => {
+    inbox.setSetting('push.inbox_enabled', 'false');
+    expect(inbox.getSetting('push.inbox_enabled', 'true')).toBe('false');
+  });
+
+  it('upserts on a second set without raising', () => {
+    inbox.setSetting('push.inbox_enabled', 'false');
+    inbox.setSetting('push.inbox_enabled', 'true');
+    expect(inbox.getSetting('push.inbox_enabled')).toBe('true');
+  });
+});

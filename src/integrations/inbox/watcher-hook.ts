@@ -53,6 +53,12 @@ export interface InboxClassifierHookOptions {
   rules: InboxRulesLoader;
   queue: HookQueue;
   accounts: AccountResolver;
+  /**
+   * Optional inbox push notifier. Wired the same way as runner.ts —
+   * fires on the rule + sensitive-skip paths that bypass the LLM but
+   * still produce a `requires_user` row.
+   */
+  notifier?: import('./notifier.js').InboxNotifier | undefined;
   /** Single tenant override; falls back to the repository default. */
   tenantId?: string | undefined;
   /**
@@ -156,6 +162,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         bodyMd: env.snippet,
         inboxItemId: itemId,
       });
+      if (opts.notifier && rule.bucket === 'requires_user') {
+        const inserted = opts.state.getItem(itemId);
+        if (inserted) void opts.notifier.notifyNewItem(inserted);
+      }
       return;
     }
 
@@ -199,6 +209,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         bodyMd: undefined,
         inboxItemId: itemId,
       });
+      if (opts.notifier) {
+        const inserted = opts.state.getItem(itemId);
+        if (inserted) void opts.notifier.notifyNewItem(inserted);
+      }
       return;
     }
 

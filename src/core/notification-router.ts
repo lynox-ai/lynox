@@ -17,6 +17,13 @@ export interface NotificationMessage {
     question: string;
     options?: string[] | undefined;
   } | undefined;
+  /**
+   * Channel-specific passthrough data — e.g. the inbox notifier sets
+   * `{ itemId: '<inbox-row-id>' }` so the service worker's
+   * `notificationclick` handler can deep-link to the affected mail.
+   * Keep keys flat-string for JSON serialisation across web-push.
+   */
+  data?: Record<string, string> | undefined;
 }
 
 export interface NotificationChannel {
