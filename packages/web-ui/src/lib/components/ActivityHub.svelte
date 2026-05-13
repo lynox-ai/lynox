@@ -6,16 +6,17 @@
 	import { formatCost, formatDuration, shortModel } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import HistoryView from './HistoryView.svelte';
-	import TasksView from './TasksView.svelte';
 	import UsageDashboard from './UsageDashboard.svelte';
 
 	let { onrerun }: { onrerun?: (task: string) => void } = $props();
 
-	let tab = $state<'dashboard' | 'usage' | 'history' | 'tasks'>('dashboard');
+	// Tasks moved up one level into AutomationHub as its own top-level tab —
+	// this hub now scopes to the run/cost/history slice.
+	let tab = $state<'dashboard' | 'usage' | 'history'>('dashboard');
 
 	$effect(() => {
 		const p = $page.url.searchParams.get('tab');
-		if (p === 'usage' || p === 'history' || p === 'tasks') tab = p;
+		if (p === 'usage' || p === 'history') tab = p;
 		else tab = 'dashboard';
 	});
 
@@ -23,7 +24,6 @@
 		{ id: 'dashboard' as const, labelKey: 'hub.activity.dashboard' },
 		{ id: 'usage' as const,     labelKey: 'hub.activity.usage' },
 		{ id: 'history' as const,   labelKey: 'hub.activity.history' },
-		{ id: 'tasks' as const,     labelKey: 'hub.activity.tasks' },
 	];
 
 	// ── Dashboard data ──────────────────────────────────
@@ -257,7 +257,7 @@
 						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 							<div class="flex items-center justify-between mb-3">
 								<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('hub.activity.open_tasks')}</p>
-								<button type="button" class="text-[10px] text-accent-text hover:opacity-80" onclick={() => tab = 'tasks'}>{t('hub.activity.view_all')}</button>
+								<a href="/app/automation?section=tasks" class="text-[10px] text-accent-text hover:opacity-80">{t('hub.activity.view_all')}</a>
 							</div>
 							<div class="space-y-2">
 								{#each openTasks.slice(0, 5) as task}
@@ -297,10 +297,8 @@
 			<div class="p-6 max-w-3xl mx-auto">
 				<UsageDashboard />
 			</div>
-		{:else if tab === 'history'}
-			<HistoryView {onrerun} />
 		{:else}
-			<TasksView />
+			<HistoryView {onrerun} />
 		{/if}
 	</div>
 </div>
