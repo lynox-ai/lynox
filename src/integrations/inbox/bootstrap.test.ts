@@ -245,3 +245,49 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.budget.snapshot().spentUSD).toBe(0);
   });
 });
+
+describe('bootstrapInbox — push notifier wire', () => {
+  it('routes a requires_user classification to the registered router', async () => {
+    const { NotificationRouter } = await import('../../core/notification-router.js');
+    const router = new NotificationRouter();
+    const send = vi.fn(async () => true);
+    router.register({ name: 'web-push', send });
+
+    const client = makeClient({
+      content: [{ type: 'text', text: JSON.stringify({
+        bucket: 'requires_user',
+        confidence: 0.9,
+        one_line_why_de: 'Kunde fragt nach Termin',
+      }) }],
+    });
+    const runtime = bootstrapInbox({
+      mailStateDb: mail,
+      anthropicClient: client,
+      notificationRouter: router,
+    });
+    await runtime.hook(ACCOUNT.id, envelope());
+    await runtime.queue.drain();
+    expect(send).toHaveBeenCalledTimes(1);
+    const msg = send.mock.calls[0]?.[0] as { data?: { itemId?: string } };
+    expect(msg.data?.itemId).toMatch(/^inb_/);
+  });
+
+  it('does NOT push when no notificationRouter is wired (single-user/headless)', async () => {
+    const client = makeClient({
+      content: [{ type: 'text', text: JSON.stringify({
+        bucket: 'requires_user',
+        confidence: 0.9,
+        one_line_why_de: 'r',
+      }) }],
+    });
+    const runtime = bootstrapInbox({
+      mailStateDb: mail,
+      anthropicClient: client,
+      // notificationRouter intentionally omitted
+    });
+    // Drives the hook without throwing — proves the runner+watcher tolerate
+    // an absent notifier (the `if (opts.notifier)` guards must hold).
+    await runtime.hook(ACCOUNT.id, envelope());
+    await runtime.queue.drain();
+  });
+});

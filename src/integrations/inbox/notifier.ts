@@ -69,7 +69,12 @@ export function sanitisePushText(s: string, maxLen: number = 200): string {
     }
   }
   cleaned = cleaned.trim();
-  if (cleaned.length > maxLen) cleaned = cleaned.slice(0, maxLen - 1) + '…';
+  if (cleaned.length > maxLen) {
+    // Slice on the codepoint array so we never split a surrogate pair
+    // and leave a lone high-surrogate dangling before the ellipsis —
+    // emoji-heavy subjects render as a replacement char otherwise.
+    cleaned = [...cleaned].slice(0, maxLen - 1).join('') + '…';
+  }
   return cleaned;
 }
 
@@ -116,7 +121,12 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
       const tenantId = item.tenantId || DEFAULT_TENANT_ID;
       if (shouldThrottle(tenantId)) return false;
 
-      const fromLabel = item.fromName ? sanitisePushText(item.fromName, 80) : sanitisePushText(item.fromAddress, 80);
+      // Treat empty-string fromName as missing — exactOptionalPropertyTypes
+      // makes `undefined` the canonical "no value", but envelope parsers
+      // sometimes set the field to '' when a header is present-but-empty.
+      const fromLabel = item.fromName !== undefined && item.fromName !== ''
+        ? sanitisePushText(item.fromName, 80)
+        : sanitisePushText(item.fromAddress, 80);
       const subject = sanitisePushText(item.subject || item.reasonDe, 200);
       const body = fromLabel ? `${fromLabel}: ${subject}` : subject;
       const msg: NotificationMessage = {

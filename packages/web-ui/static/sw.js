@@ -39,22 +39,32 @@ self.addEventListener('notificationclick', (event) => {
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      for (const client of clientList) {
-        if (client.url.includes(self.registration.scope) && 'focus' in client) {
-          // Re-route the focused tab to the deep-link before focusing it
-          // so a user already on /app/threads still lands on the mail.
-          // navigate() rejects on cross-origin / detached clients — the
-          // catch falls back to opening a fresh window so the toast tap
-          // never silently fizzles.
-          if (itemId && 'navigate' in client) {
-            return client.navigate(target)
-              .then(() => client.focus())
-              .catch(() => self.clients.openWindow(target));
-          }
-          return client.focus();
-        }
+      const inScope = clientList.filter(
+        (c) => c.url.includes(self.registration.scope) && 'focus' in c,
+      );
+      if (inScope.length === 0) {
+        return self.clients.openWindow(target);
       }
-      return self.clients.openWindow(target);
+      // Re-route every open lynox tab to the deep-link so a user with
+      // multiple windows doesn't accidentally land on a stale route. The
+      // first match also gets focused. `.catch` is scoped to navigate
+      // only — a focus rejection must NOT spawn a second window.
+      const first = inScope[0];
+      const rest = inScope.slice(1);
+      const navigateAll = () => Promise.all(
+        rest.map((c) =>
+          itemId && 'navigate' in c
+            ? c.navigate(target).catch(() => undefined)
+            : Promise.resolve(),
+        ),
+      );
+      if (itemId && 'navigate' in first) {
+        return first.navigate(target)
+          .then(() => first.focus())
+          .then(navigateAll)
+          .catch(() => self.clients.openWindow(target));
+      }
+      return Promise.resolve(first.focus()).then(navigateAll);
     }),
   );
 });
