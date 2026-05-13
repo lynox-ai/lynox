@@ -680,7 +680,7 @@ describe('MailStateDb — sidebar context queries', () => {
     db.recordSentMail({
       accountId: 'acct',
       messageId: '<m2@x>',
-      to: [{ address: 'Roland@WAR.example' }],
+      to: [{ address: 'Mustermann@ACME.example' }],
       subject: 'second',
       bodyChars: 200,
       sentAt: new Date(t0),

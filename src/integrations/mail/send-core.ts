@@ -246,7 +246,7 @@ export async function sendMail(
       ctx.stateDb.recordSentMail(sentLogInput);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.debug(`[mail/send-core] recordSentMail failed: ${msg}`);
+      process.stderr.write(`[mail/send-core] recordSentMail failed: ${msg}\n`);
     }
   }
 
