@@ -593,8 +593,13 @@
 												aria-label={`${t('inbox.reading_open')}: ${item.subject || item.reasonDe}`}
 											>
 												<div class="flex items-baseline justify-between gap-2 mb-0.5">
-													<p class="text-sm font-medium text-text leading-snug truncate" title={item.subject || item.reasonDe}>
-														{inboxHeadline(item)}
+													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.subject || item.reasonDe}>
+														{#if zone === 'snoozed' && item.notifyOnUnsnooze === true}
+															<!-- Reminder badge — distinguishes "remind me at X" from silent
+															     snooze in the same Snoozed zone. -->
+															<span class="shrink-0 text-accent-text" aria-label={t('inbox.reminder_badge_label')} title={t('inbox.reminder_badge_label')}>📌</span>
+														{/if}
+														<span class="truncate">{inboxHeadline(item)}</span>
 													</p>
 													<span class="shrink-0 text-[11px] text-text-subtle tabular-nums">
 														{zone === 'snoozed' && item.snoozeUntil

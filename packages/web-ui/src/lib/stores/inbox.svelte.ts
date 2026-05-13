@@ -65,6 +65,8 @@ export interface InboxItem {
 	snippet?: string | undefined;
 	messageId?: string | undefined;
 	inReplyTo?: string | undefined;
+	notifyOnUnsnooze?: boolean | undefined;
+	notifiedAt?: string | undefined; // ISO
 }
 
 export interface InboxCounts {
@@ -698,6 +700,7 @@ export async function setItemSnooze(
 	condition?: string | null,
 	unsnoozeOnReply = true,
 	preset?: SnoozePreset | null,
+	notifyOnUnsnooze = false,
 ): Promise<boolean> {
 	const found = findItemAcrossBuckets(id);
 	// When a preset is supplied the server resolves it timezone-aware;
@@ -708,6 +711,7 @@ export async function setItemSnooze(
 		until: until?.toISOString() ?? null,
 		condition: condition ?? null,
 		unsnoozeOnReply,
+		notifyOnUnsnooze,
 	};
 	if (preset !== undefined && preset !== null) {
 		body['preset'] = preset;
