@@ -127,7 +127,21 @@ export class CalendarContext {
   }
 
   tools(): ToolEntry[] {
-    return createCalendarTools(this.registry);
+    return createCalendarTools({
+      registry: this.registry,
+      writableResolver: {
+        getDefaultWritableId: () => {
+          const accounts = this.state.listAccounts();
+          const def = accounts.find((a) => a.provider === 'caldav' && a.is_default_writable === true);
+          return def?.id ?? null;
+        },
+        listWritableIds: () => {
+          return this.state.listAccounts()
+            .filter((a) => a.provider === 'caldav')
+            .map((a) => a.id);
+        },
+      },
+    });
   }
 
   listAccounts(): ReadonlyArray<CalendarAccountView> {

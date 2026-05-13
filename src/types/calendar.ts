@@ -112,14 +112,35 @@ export interface CalendarListOptions {
   calendars?: ReadonlyArray<string> | undefined;
 }
 
+/**
+ * Write-direction event shape. Distinct from `CalendarEvent` because text
+ * fields here come FROM the agent (raw, not server-origin) and are persisted
+ * to the user's calendar as-is — applying `wrap()` would inject
+ * `<untrusted_data>` markers into the real event. The read path returns
+ * `CalendarEvent` with `Wrapped<string>` fields per PRD §S2.
+ */
+export interface CalendarEventInput {
+  summary: string;
+  description?: string | undefined;
+  location?: string | undefined;
+  /** ISO 8601 with explicit TZ. */
+  start: string;
+  end: string;
+  all_day?: boolean | undefined;
+  attendees?: ReadonlyArray<{ email: string; name?: string | undefined }> | undefined;
+  organizer?: { email: string; name?: string | undefined } | undefined;
+  recurrence?: ReadonlyArray<string> | undefined;
+  status?: 'confirmed' | 'tentative' | 'cancelled' | undefined;
+}
+
 export interface CalendarProvider {
   readonly name: CalendarProviderKind;
   /** Multi-account-binding source-of-truth (PRD §S11). Tool-wrapper asserts equality. */
   readonly accountId: string;
   readonly authType: 'basic' | 'token' | 'none';
   list(time_min: string, time_max: string, opts?: CalendarListOptions): Promise<ReadonlyArray<CalendarEvent>>;
-  create?(event: Omit<CalendarEvent, 'id' | 'uid' | 'source'>): Promise<CalendarEvent>;
-  update?(event_id: string, updates: Partial<CalendarEvent>): Promise<CalendarEvent>;
+  create?(event: CalendarEventInput): Promise<CalendarEvent>;
+  update?(event_id: string, updates: Partial<CalendarEventInput>): Promise<CalendarEvent>;
   delete?(event_id: string): Promise<void>;
   close(): Promise<void>;
 }

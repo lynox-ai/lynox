@@ -20,6 +20,7 @@
 //     `watch.ts`; CalDAV reads happen on tool call (Phase 1a) and on user-
 //     initiated refresh.
 
+import { randomUUID } from 'node:crypto';
 import ical from 'node-ical';
 import { DAVClient } from 'tsdav';
 import { wrap } from '../../../core/data-boundary.js';
@@ -28,6 +29,7 @@ import { hasDangerousFreq } from './rrule-safety.js';
 import type {
   CalendarAttendee,
   CalendarEvent,
+  CalendarEventInput,
   CalendarListOptions,
   CalendarProvider,
 } from '../../../types/calendar.js';
@@ -145,6 +147,75 @@ export class CalDavCalendarProvider implements CalendarProvider {
     }
 
     return events;
+  }
+
+  async create(event: CalendarEventInput): Promise<CalendarEvent> {
+    await this.ensureLoggedIn();
+
+    let calendars;
+    try {
+      calendars = await this.client.fetchCalendars();
+    } catch (err) {
+      throw asCalendarError(err, 'auth_failed', 'fetchCalendars failed during create');
+    }
+
+    const target = pickWritableCalendar(calendars, this.enabledCalendars);
+    if (!target) {
+      throw new CalendarError('not_found', 'No writable VEVENT calendar found on this account');
+    }
+
+    const uid = `${randomUUID()}@lynox.ai`;
+    const filename = `${uid}.ics`;
+    const iCalString = buildVCalendar(uid, event);
+
+    let res: Response;
+    try {
+      res = await this.client.createCalendarObject({ calendar: target, iCalString, filename });
+    } catch (err) {
+      throw asCalendarError(err, 'network', 'CalDAV create failed');
+    }
+    if (!res.ok) {
+      const code = res.status === 401 ? 'auth_failed'
+        : res.status === 412 ? 'conflict_412'
+        : res.status === 429 ? 'rate_limited'
+        : 'network';
+      throw new CalendarError(code, `CalDAV create HTTP ${res.status}`);
+    }
+
+    const etagHeader = res.headers.get('etag');
+    // Build the response from the input + the new uid. Re-fetching just to
+    // get the server's normalized representation isn't worth a round-trip
+    // for Phase 1b; the caller already has every field it sent.
+    const created: CalendarEvent = {
+      id: uid,
+      uid,
+      summary: wrap(event.summary, TSDAV_SOURCE),
+      start: event.start,
+      end: event.end,
+      source: {
+        account_id: this.accountId,
+        provider: 'caldav',
+        ...(etagHeader !== null ? { etag: etagHeader } : {}),
+      },
+    };
+    if (event.description !== undefined) created.description = wrap(event.description, TSDAV_SOURCE);
+    if (event.location !== undefined) created.location = wrap(event.location, TSDAV_SOURCE);
+    if (event.all_day !== undefined) created.all_day = event.all_day;
+    if (event.recurrence !== undefined) created.recurrence = event.recurrence;
+    if (event.status !== undefined) created.status = event.status;
+    if (event.attendees !== undefined) {
+      created.attendees = event.attendees.map((a) => {
+        const att: CalendarAttendee = { email: a.email };
+        if (a.name !== undefined) att.name = wrap(a.name, TSDAV_SOURCE);
+        return att;
+      });
+    }
+    if (event.organizer !== undefined) {
+      created.organizer = event.organizer.name !== undefined
+        ? { email: event.organizer.email, name: wrap(event.organizer.name, TSDAV_SOURCE) }
+        : { email: event.organizer.email };
+    }
+    return created;
   }
 
   async close(): Promise<void> {
@@ -279,6 +350,90 @@ function occursInWindow(v: ical.VEvent, minDate: Date, maxDate: Date): boolean {
     // RRULE parse error → include defensively; the engine will still see the event.
     return true;
   }
+}
+
+// ── Create-path helpers ─────────────────────────────────────────────────────
+
+type DAVCalendarLike = Awaited<ReturnType<DAVClient['fetchCalendars']>>[number];
+
+function pickWritableCalendar(
+  calendars: ReadonlyArray<DAVCalendarLike>,
+  enabledFilter: ReadonlySet<string> | null,
+): DAVCalendarLike | null {
+  const vevent = calendars.filter((c) => Array.isArray(c.components) && c.components.includes('VEVENT'));
+  if (vevent.length === 0) return null;
+  if (enabledFilter === null) return vevent[0] ?? null;
+  const match = vevent.find((c) => {
+    const url = typeof c.url === 'string' ? c.url : '';
+    const displayName = typeof c.displayName === 'string' ? c.displayName : '';
+    return enabledFilter.has(url) || (displayName !== '' && enabledFilter.has(displayName));
+  });
+  return match ?? vevent[0] ?? null;
+}
+
+/**
+ * Build a minimal RFC 5545 VCALENDAR document for a single VEVENT. CR/LF
+ * line endings are required (RFC 5545 §3.1); some CalDAV servers reject
+ * plain `\n`-separated payloads.
+ */
+function buildVCalendar(uid: string, event: CalendarEventInput): string {
+  const lines: string[] = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//lynox//lynox 1.0//EN',
+    'CALSCALE:GREGORIAN',
+    'BEGIN:VEVENT',
+    `UID:${uid}`,
+    `DTSTAMP:${formatIcalDateTime(new Date().toISOString(), false)}`,
+    `DTSTART${event.all_day ? ';VALUE=DATE' : ''}:${formatIcalDateTime(event.start, event.all_day === true)}`,
+    `DTEND${event.all_day ? ';VALUE=DATE' : ''}:${formatIcalDateTime(event.end, event.all_day === true)}`,
+    `SUMMARY:${escapeIcalText(event.summary)}`,
+  ];
+  if (event.description) lines.push(`DESCRIPTION:${escapeIcalText(event.description)}`);
+  if (event.location) lines.push(`LOCATION:${escapeIcalText(event.location)}`);
+  if (event.status) lines.push(`STATUS:${event.status.toUpperCase()}`);
+  if (event.organizer?.email) {
+    const cn = event.organizer.name ? `;CN=${escapeIcalText(event.organizer.name)}` : '';
+    lines.push(`ORGANIZER${cn}:mailto:${event.organizer.email}`);
+  }
+  if (event.attendees) {
+    for (const a of event.attendees) {
+      const cn = a.name ? `;CN=${escapeIcalText(a.name)}` : '';
+      lines.push(`ATTENDEE;RSVP=TRUE${cn}:mailto:${a.email}`);
+    }
+  }
+  if (event.recurrence) {
+    for (const r of event.recurrence) lines.push(`RRULE:${r}`);
+  }
+  lines.push('END:VEVENT');
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
+
+/**
+ * RFC 5545 §3.3.11 TEXT escaping: backslash, semicolon, comma, and
+ * newlines must be escaped.
+ */
+function escapeIcalText(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+    .replace(/\r?\n/g, '\\n');
+}
+
+/** ISO 8601 → RFC 5545 DATE-TIME (UTC) or DATE format. */
+function formatIcalDateTime(iso: string, dateOnly: boolean): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    throw new CalendarError('malformed_event', `Invalid date in create input: ${iso}`);
+  }
+  const pad = (n: number): string => n.toString().padStart(2, '0');
+  const y = d.getUTCFullYear();
+  const mo = pad(d.getUTCMonth() + 1);
+  const da = pad(d.getUTCDate());
+  if (dateOnly) return `${y}${mo}${da}`;
+  return `${y}${mo}${da}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
 }
 
 function asCalendarError(err: unknown, defaultCode: import('../../../types/calendar.js').CalendarErrorCode, fallbackMessage: string): CalendarError {

@@ -12,6 +12,7 @@ export type {
   CalendarAccount,
   CalendarAttendee,
   CalendarEvent,
+  CalendarEventInput,
   CalendarErrorCode,
   CalendarListOptions,
   CalendarProvider,

@@ -543,6 +543,17 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     return `⚠ ${toolName} — sends external mail`;
   }
 
+  // Calendar write tools — block in autonomous mode. Same pattern as
+  // MAIL_WRITE_TOOLS: interactive mode lets the tool's own confirmation
+  // preview through ToolEntry.requiresConfirmation. PRD-CALENDAR §A2.
+  const CALENDAR_WRITE_TOOLS = new Set(['calendar_create', 'calendar_update', 'calendar_delete']);
+  if (CALENDAR_WRITE_TOOLS.has(toolName)) {
+    if (autonomy === 'autonomous') {
+      return `⚠ ${toolName} [BLOCKED — modifying the calendar needs your OK]`;
+    }
+    return `⚠ ${toolName} — modifies an external calendar`;
+  }
+
   // Google Workspace write actions — block in autonomous mode
   const GOOGLE_TOOLS = ['google_gmail', 'google_drive', 'google_calendar', 'google_sheets', 'google_docs'];
   if (GOOGLE_TOOLS.includes(toolName) && input && typeof input === 'object' && 'action' in input) {

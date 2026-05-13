@@ -110,7 +110,7 @@ export const GOOGLE_PROMPT_SUFFIX = `
 /** Appended when Calendar tools (CalDAV + ICS) are registered */
 export const CALENDAR_PROMPT_SUFFIX = `
 
-**Calendar**: \`calendar_list\` (events in time window) and \`calendar_free_busy\` (busy intervals only). Both are read-only and fan out across all connected accounts when \`account_ids\` is omitted. Pass UUID account IDs only — NEVER raw email addresses (input is rejected). Use ISO 8601 timestamps. The agent infers free slots by complementing the busy list against the requested window.`;
+**Calendar**: \`calendar_list\` (events in window) and \`calendar_free_busy\` (busy intervals) are read-only, fan out across all connected accounts when \`account_ids\` is omitted. \`calendar_create\` creates a VEVENT on the resolved target account — pass \`account_id\` (UUID) explicitly when multiple writable accounts exist, otherwise the user's default applies. NEVER pass email addresses where \`account_id\` is expected (input is rejected). Use ISO 8601 timestamps. \`calendar_create\` requires confirmation; the autonomous mode blocks it. The agent infers free slots by complementing the busy list against the requested window.`;
 
 /** Appended when experience === 'developer' — unlocks technical output style */
 export const DEVELOPER_PROMPT_SUFFIX = `
