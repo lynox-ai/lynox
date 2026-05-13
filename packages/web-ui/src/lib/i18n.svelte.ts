@@ -1238,13 +1238,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.kopilot_start_triage': { de: 'Triage-Modus starten', en: 'Start triage mode' },
 	'inbox.kopilot_pick_hint': { de: 'Oder wähl eine Mail aus der Liste links.', en: 'Or pick a mail from the list on the left.' },
 	'inbox.kopilot_keys_hint': { de: 'Tastatur: j/k navigieren · r antworten · a archivieren · s snooze · t Triage', en: 'Keys: j/k navigate · r reply · a archive · s snooze · t triage' },
-	'inbox.triage_title': { de: 'Triage', en: 'Triage' },
 	'inbox.triage_position': { de: '{pos} von {total}', en: '{pos} of {total}' },
 	'inbox.triage_exit': { de: 'Liste anzeigen', en: 'Back to list' },
 	'inbox.triage_prev': { de: 'Vorherige', en: 'Previous' },
 	'inbox.triage_next': { de: 'Nächste', en: 'Next' },
 	'inbox.triage_done': { de: 'Triage abgeschlossen — Inbox-Zero erreicht.', en: 'Triage done — inbox zero reached.' },
-	'inbox.triage_unavailable': { de: 'Triage-Modus ist nur in „Braucht dich" verfügbar.', en: 'Triage mode is only available in "Needs you".' },
 	'inbox.shortcuts_triage': { de: 'Triage-Modus umschalten', en: 'Toggle triage mode' },
 };
 

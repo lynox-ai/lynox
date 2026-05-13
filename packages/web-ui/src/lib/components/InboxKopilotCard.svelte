@@ -10,9 +10,7 @@
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 
 	interface Props {
-		/** Fires when the user clicks an item in the Top-3 list. */
 		onPickItem?: (item: InboxItem) => void;
-		/** Fires when the user clicks "Start triage". */
 		onStartTriage?: () => void;
 	}
 

@@ -22,24 +22,29 @@
 		onReply?: (item: InboxItem) => void;
 		onActionApplied?: () => void;
 		onExit: () => void;
+		// Bindable so the parent can open the snooze menu via the `s` keyboard
+		// shortcut (the menu lives inside this pane, but the keyboard handler
+		// lives in InboxView).
+		snoozeMenuOpen?: boolean;
 	}
 
-	const { onReply, onActionApplied, onExit }: Props = $props();
+	let {
+		onReply,
+		onActionApplied,
+		onExit,
+		snoozeMenuOpen = $bindable(false),
+	}: Props = $props();
 
-	let snoozeOpen = $state(false);
+	// One source of truth for the actionable queue — both the auto-open effect
+	// and archive/snooze step-forward read it.
+	const queue = $derived(getInboxItems('requires_user').filter((i) => !i.userAction));
 
-	// Auto-pick the first item when triage opens with nothing selected.
-	// Selection is the cursor in triage mode — without one, prev/next has
-	// no anchor and the user just sees an empty pane.
 	$effect(() => {
-		const queue = getInboxItems('requires_user').filter((i) => !i.userAction);
 		if (queue.length === 0) return;
 		if (getSelectedItemId() === null) {
 			void openItem(queue[0]!.id);
 		}
 	});
-
-	const queue = $derived(getInboxItems('requires_user').filter((i) => !i.userAction));
 	const full = $derived(getSelectedFull());
 	const thread = $derived(getSelectedThread());
 	const loading = $derived(isSelectedLoading());
@@ -90,29 +95,27 @@
 		await setItemAction(full.item.id, 'archived');
 		onActionApplied?.();
 		// Step to the next sibling at the same position so triage flows on.
-		const after = getInboxItems('requires_user').filter((i) => !i.userAction);
-		if (after.length === 0) {
+		if (queue.length === 0) {
 			closeItem();
 			addToast(t('inbox.triage_done'), 'success');
 			return;
 		}
-		const nextItem = after[Math.min(beforeIdx, after.length - 1)];
+		const nextItem = queue[Math.min(beforeIdx, queue.length - 1)];
 		if (nextItem) await openItem(nextItem.id);
 	}
 
 	async function snooze(preset: SnoozePreset): Promise<void> {
 		if (!full) return;
 		const beforeIdx = currentIdx;
-		snoozeOpen = false;
+		snoozeMenuOpen = false;
 		await setItemSnooze(full.item.id, null, null, true, preset);
 		onActionApplied?.();
-		const after = getInboxItems('requires_user').filter((i) => !i.userAction);
-		if (after.length === 0) {
+		if (queue.length === 0) {
 			closeItem();
 			addToast(t('inbox.triage_done'), 'success');
 			return;
 		}
-		const nextItem = after[Math.min(beforeIdx, after.length - 1)];
+		const nextItem = queue[Math.min(beforeIdx, queue.length - 1)];
 		if (nextItem) await openItem(nextItem.id);
 	}
 
@@ -224,12 +227,12 @@
 			<div class="relative">
 				<button
 					type="button"
-					onclick={() => (snoozeOpen = !snoozeOpen)}
-					aria-expanded={snoozeOpen}
+					onclick={() => (snoozeMenuOpen = !snoozeMenuOpen)}
+					aria-expanded={snoozeMenuOpen}
 					aria-haspopup="menu"
 					class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-muted hover:text-text"
 				>{t('inbox.action_snooze')}</button>
-				{#if snoozeOpen}
+				{#if snoozeMenuOpen}
 					<ul
 						role="menu"
 						class="absolute bottom-full left-0 mb-1 z-10 min-w-[180px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"

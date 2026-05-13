@@ -58,11 +58,12 @@
 	let searchQuery = $state('');
 	let helpOpen = $state(false);
 	let coldStartButtonBusy = $state(false);
-	// Triage mode is the C-variant single-mail focus view. Toggled via the
-	// zone-rail button or the `t` keyboard shortcut. Resets to false whenever
-	// the user leaves the requires_user zone — triage only makes sense for
-	// the actionable queue.
 	let triageMode = $state(false);
+	// Lifted out of TriagePane so the `s` keyboard shortcut can open the snooze
+	// menu inside the focused-mail pane without bridging refs.
+	let triageSnoozeOpen = $state(false);
+	// Gate items-fetch on counts-loaded so the $effect below doesn't race
+	// onMount's initial load (without this the bucket gets fetched twice).
 	let countsLoaded = $state(false);
 	const touchPrimary = isTouchPrimary();
 
@@ -131,16 +132,21 @@
 		const nextIdx = currentIdx === -1
 			? (delta === 1 ? 0 : items.length - 1)
 			: Math.max(0, Math.min(items.length - 1, currentIdx + delta));
+		// Capture the resolved id BEFORE awaiting tick so a rapid second J/K
+		// can't redirect scrollIntoView to a stale target.
 		const targetId = items[nextIdx]?.id ?? null;
 		selectedItemId = targetId;
 		if (targetId === null) return;
-		// In triage mode, j/k also drives the reader — open the item too.
 		if (triageMode) {
 			void openItem(targetId);
 			return;
 		}
 		await tick();
 		if (typeof document === 'undefined') return;
+		// CSS.escape: the id comes from the API and is well-typed today, but a
+		// malformed upstream value containing `"` or `]` would otherwise corrupt
+		// the attribute selector. `behavior:'auto'` keeps rapid J/K from
+		// stacking smooth-scroll animations.
 		document
 			.querySelector(`[data-inbox-item-id="${CSS.escape(targetId)}"]`)
 			?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
@@ -156,9 +162,17 @@
 		if (!item) return;
 		await setItemAction(item.id, 'archived');
 		const after = visibleItems();
-		selectedItemId = after.length === 0
+		const nextId = after.length === 0
 			? null
 			: after[Math.min(idx, after.length - 1)]?.id ?? null;
+		selectedItemId = nextId;
+		// In triage mode the reader IS the queue cursor — keep it in sync with
+		// the freshly-stepped selection, otherwise the just-archived mail's
+		// body lingers until the user nudges j/k.
+		if (triageMode) {
+			if (nextId !== null) void openItem(nextId);
+			else closeItem();
+		}
 	}
 
 	function openSnoozeForSelected(): void {
@@ -178,9 +192,10 @@
 	function closeOverlays(): void {
 		if (helpOpen) { helpOpen = false; return; }
 		if (getDraftPane() !== null) { closeDraftPane(); return; }
+		if (triageSnoozeOpen) { triageSnoozeOpen = false; return; }
 		if (openSnoozeFor !== null) { openSnoozeFor = null; return; }
 		// In triage mode, Escape exits triage rather than closing the item —
-		// that matches the user's mental model: Esc backs out of the focused mode.
+		// matches the user's mental model: Esc backs out of the focused mode.
 		if (triageMode) { triageMode = false; return; }
 	}
 
@@ -202,16 +217,17 @@
 	}
 
 	function startTriage(): void {
-		// Triage requires the actionable zone and at least one item.
 		if (zone !== 'requires_user') zone = 'requires_user';
 		const queue = visibleItems();
 		if (queue.length === 0) {
 			addToast(t('inbox.triage_done'), 'info');
 			return;
 		}
-		// Pre-select the first item so the triage pane has something to render
-		// immediately — avoids a flash of empty pane while the user waits.
-		if (selectedItemId === null) {
+		// Re-pick the first item when the prior selection is gone from the
+		// queue (archived/snoozed from another tab) — otherwise triage opens
+		// to an empty pane until the user nudges j/k.
+		const stillThere = selectedItemId !== null && queue.some((i) => i.id === selectedItemId);
+		if (!stillThere) {
 			selectedItemId = queue[0]!.id;
 			void openItem(queue[0]!.id);
 		}
@@ -256,7 +272,13 @@
 			case 'next': void moveSelection(1); break;
 			case 'prev': void moveSelection(-1); break;
 			case 'archive': void archiveSelected(); break;
-			case 'snooze': openSnoozeForSelected(); break;
+			case 'snooze':
+				// In triage the list isn't rendered, so the legacy openSnoozeFor
+				// pill would be invisible — drive the TriagePane menu via its
+				// bindable prop instead.
+				if (triageMode) triageSnoozeOpen = !triageSnoozeOpen;
+				else openSnoozeForSelected();
+				break;
 			case 'undo': void undoOrHint(); break;
 			case 'reply': openReplyForSelected(); break;
 		}
@@ -390,6 +412,7 @@
 				onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
 				onActionApplied={refreshAfterAction}
 				onExit={exitTriage}
+				bind:snoozeMenuOpen={triageSnoozeOpen}
 			/>
 		</div>
 	{:else}
@@ -501,7 +524,9 @@
 					{#if zone === 'snoozed' ? isLoadingSnoozed() : isLoading(zone)}
 						<p class="text-text-subtle text-sm">{t('inbox.loading')}</p>
 					{:else}
-						{@const items = zone === 'snoozed' ? getSnoozedItems() : getInboxItems(zone)}
+						<!-- Filter !userAction here too so the list mirrors visibleItems()
+							in the keyboard handler — otherwise just-archived rows flash. -->
+						{@const items = zone === 'snoozed' ? getSnoozedItems() : getInboxItems(zone).filter((i) => !i.userAction)}
 						{#if items.length === 0}
 							<p class="text-text-subtle text-sm">
 								{#if zone === 'requires_user'}{t('inbox.empty_needs_you')}
