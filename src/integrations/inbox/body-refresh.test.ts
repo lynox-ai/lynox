@@ -196,6 +196,47 @@ describe('refreshItemBody', () => {
     expect(sinceArg?.getTime()).toBeGreaterThan(expectedMin.getTime());
     expect(sinceArg?.getTime()).toBeLessThan(expectedMax.getTime());
   });
+
+  it('redacts sensitive content from the refreshed body when sensitiveMode is mask', async () => {
+    // Classifier saw a masked snippet at classify time; without this fix the
+    // refresh-path persisted unmasked content and the generator could read
+    // OTPs that were blocked at classify time (Phase 2 #280 follow-up).
+    const item = { ...inboxItem('imap:<m1@x>'), subject: 'OTP code inside' };
+    const provider = fakeProvider({
+      envelopes: [envelope(7, { messageId: '<m1@x>' })],
+      fetchText: 'Your verification code is 123456. Please enter it within 10 minutes.',
+    });
+    const result = await refreshItemBody({
+      provider,
+      state,
+      item,
+      sensitiveMode: 'mask',
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.bodyMd).not.toContain('123456');
+      expect(result.bodyMd).toContain('[REDACTED:OTP]');
+    }
+    expect(state.getItemBody(item.id)?.bodyMd).not.toContain('123456');
+  });
+
+  it('does not mask when sensitiveMode is allow or undefined', async () => {
+    const item = { ...inboxItem('imap:<m1@x>'), subject: 'OTP code inside' };
+    const provider = fakeProvider({
+      envelopes: [envelope(7, { messageId: '<m1@x>' })],
+      fetchText: 'Your code is 123456.',
+    });
+    const result = await refreshItemBody({
+      provider,
+      state,
+      item,
+      sensitiveMode: 'allow',
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.bodyMd).toContain('123456');
+    }
+  });
 });
 
 describe('refreshWhatsappItemBody', () => {

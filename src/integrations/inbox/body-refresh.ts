@@ -21,6 +21,7 @@
 // envelope's UID. Cross-provider clean.
 
 import type { MailEnvelope, MailProvider } from '../mail/provider.js';
+import { analyzeSensitiveContent, type SensitiveMode } from './sensitive-content.js';
 import { MAX_ITEM_BODY_CHARS, type InboxStateDb } from './state.js';
 import { resolveThreadKey } from './watcher-hook.js';
 import type { WhatsAppMessage } from '../whatsapp/types.js';
@@ -65,10 +66,22 @@ export interface RefreshItemBodyOptions {
     mailDate?: Date | undefined;
     /** v11 RFC 5322 Message-ID — used for direct envelope match before falling back to threadKey. */
     messageId?: string | undefined;
+    /** Subject of the item — fed to the sensitive-content masker when mode='mask'.
+     *  The masker reads both subject + body to catch OTP keywords; passing only
+     *  body would under-detect. Optional because some pre-v11 items have no
+     *  subject; the masker treats empty subject as neutral. */
+    subject?: string | undefined;
   };
   /** Override the 30-day lookup window — tests pass small values. */
   lookupDays?: number | undefined;
   listLimit?: number | undefined;
+  /** When 'mask', re-run the sensitive-content masker on the refreshed body
+   *  before saveItemBody. Without this the classifier saw a masked snippet
+   *  but the refresh-path persisted unmasked content, so the generator could
+   *  later see OTPs/IBANs that were blocked at classify time. Defaults to
+   *  'allow' (no masking) to keep tests deterministic; callers in api.ts
+   *  thread the real env-driven value through. */
+  sensitiveMode?: SensitiveMode | undefined;
 }
 
 export interface RefreshItemBodyResult {
@@ -155,7 +168,18 @@ export async function refreshItemBody(
   // post-write `bytesWritten` back so the response reports the actual
   // bytes in cache rather than the pre-strip char count.
   const truncated = full.length > MAX_ITEM_BODY_CHARS;
-  const body = truncated ? full.slice(0, MAX_ITEM_BODY_CHARS) : full;
+  let body = truncated ? full.slice(0, MAX_ITEM_BODY_CHARS) : full;
+
+  // Re-run the sensitive-content masker when the engine is in mask-mode so
+  // the refreshed full body matches the redaction guarantees the classifier
+  // applied to the snippet at classify time. Without this, refreshItemBody
+  // could persist plaintext OTPs/secrets that the generator then reads,
+  // bypassing the privacy contract.
+  if (opts.sensitiveMode === 'mask') {
+    const analysis = analyzeSensitiveContent({ subject: opts.item.subject ?? '', body });
+    if (analysis.isSensitive) body = analysis.masked.body;
+  }
+
   const persisted = opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
   return {
     ok: true,
@@ -169,9 +193,17 @@ export async function refreshItemBody(
 export interface RefreshWhatsappItemBodyOptions {
   waState: WhatsAppMessageStore;
   state: InboxStateDb;
-  item: { id: string; threadKey: string; channel: 'email' | 'whatsapp' };
+  item: {
+    id: string;
+    threadKey: string;
+    channel: 'email' | 'whatsapp';
+    /** See RefreshItemBodyOptions.item.subject — fed to the masker when mode='mask'. */
+    subject?: string | undefined;
+  };
   /** Override the thread-history depth (mostly for tests). */
   messageLimit?: number | undefined;
+  /** See RefreshItemBodyOptions.sensitiveMode. */
+  sensitiveMode?: SensitiveMode | undefined;
 }
 
 /**
@@ -220,7 +252,16 @@ export async function refreshWhatsappItemBody(
   // we drop the oldest context and keep the tail, so the most recent
   // exchange survives.
   const truncated = full.length > MAX_ITEM_BODY_CHARS;
-  const body = truncated ? full.slice(full.length - MAX_ITEM_BODY_CHARS) : full;
+  let body = truncated ? full.slice(full.length - MAX_ITEM_BODY_CHARS) : full;
+
+  // Same mask-mode guarantee as the email path. WA snippets carry OTPs +
+  // 2FA codes more often than mail does (WhatsApp Business templates),
+  // so this is the higher-leverage masker call of the two.
+  if (opts.sensitiveMode === 'mask') {
+    const analysis = analyzeSensitiveContent({ subject: opts.item.subject ?? '', body });
+    if (analysis.isSensitive) body = analysis.masked.body;
+  }
+
   const persisted = opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
   return {
     ok: true,
