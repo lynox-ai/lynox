@@ -32,21 +32,24 @@
 		startInboxVisibilityRefresh,
 		toggleBulkSelection,
 		undoLastAction,
-		type InboxBucket,
 		type InboxItem,
 		type InboxZone,
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { accountShortLabel } from '../utils/account-label.js';
+	import { inboxHeadline } from '../utils/inbox-headline.js';
 	import { keyToInboxAction, shouldIgnoreShortcut } from '../utils/inbox-shortcuts.js';
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 	import ColdStartBanner from './ColdStartBanner.svelte';
 	import DraftReplyPane from './DraftReplyPane.svelte';
 	import InboxBulkBar from './InboxBulkBar.svelte';
 	import InboxComposePane from './InboxComposePane.svelte';
+	import InboxKopilotCard from './InboxKopilotCard.svelte';
 	import InboxReadingPane from './InboxReadingPane.svelte';
 	import InboxSearchBar from './InboxSearchBar.svelte';
+	import InboxTriagePane from './InboxTriagePane.svelte';
 	import InboxUndoToast from './InboxUndoToast.svelte';
+	import InboxZoneRail from './InboxZoneRail.svelte';
 	import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.svelte';
 
 	let zone = $state<InboxZone>('requires_user');
@@ -55,8 +58,12 @@
 	let searchQuery = $state('');
 	let helpOpen = $state(false);
 	let coldStartButtonBusy = $state(false);
-	// Gate items-fetch on counts-loaded so the $effect doesn't race onMount's
-	// initial load (without this the bucket gets fetched twice on mount).
+	let triageMode = $state(false);
+	// Lifted out of TriagePane so the `s` keyboard shortcut can open the snooze
+	// menu inside the focused-mail pane without bridging refs.
+	let triageSnoozeOpen = $state(false);
+	// Gate items-fetch on counts-loaded so the $effect below doesn't race
+	// onMount's initial load (without this the bucket gets fetched twice).
 	let countsLoaded = $state(false);
 	const touchPrimary = isTouchPrimary();
 
@@ -68,20 +75,13 @@
 	onMount(async () => {
 		await loadInboxCounts();
 		countsLoaded = true;
-		// Polling starts unconditionally so a late flag-flip still surfaces the
-		// banner; the endpoint returns 503 + empty snapshot while disabled.
 		cleanupColdStart = startColdStartPolling();
-		// Auto-refresh the queue when a cold-start run completes (PRD-3 §"Auto-Refresh
-		// on Cold-Start Complete"). Idempotent reloads; brief flicker is acceptable
-		// for the "your inbox just filled up" moment.
 		cleanupColdStartListener = onColdStartCompletion(() => {
 			void loadInboxCounts();
 			if (zone === 'snoozed') void loadSnoozedItems();
 			else void loadInboxItems(zone);
 		});
 		cleanupVisibility = startInboxVisibilityRefresh();
-		// Skip the listener entirely on touch-primary devices — the help
-		// affordance is keyboard-only and the events would be dead weight.
 		if (!touchPrimary && typeof window !== 'undefined') {
 			window.addEventListener('keydown', onKeyDown);
 			cleanupKeyHandler = () => window.removeEventListener('keydown', onKeyDown);
@@ -103,18 +103,21 @@
 			} else {
 				void loadInboxItems(zone, 50, 0, searchQuery);
 			}
-			// Selection only makes sense for the Needs-You actionable list.
 			if (zone !== 'requires_user') selectedItemId = null;
 			openSnoozeFor = null;
 		}
 	});
 
-	function visibleItems(): InboxItem[] {
-		if (zone === 'snoozed') {
-			// Snoozed items keep their snooze_until; userAction stays unhandled
-			// because snoozing is its own first-class state. No userAction filter.
-			return getSnoozedItems();
+	// Triage is needs-you only; force it off when the user navigates away.
+	$effect(() => {
+		if (zone !== 'requires_user' && triageMode) {
+			triageMode = false;
+			triageSnoozeOpen = false;
 		}
+	});
+
+	function visibleItems(): InboxItem[] {
+		if (zone === 'snoozed') return getSnoozedItems();
 		return getInboxItems(zone).filter((i) => !i.userAction);
 	}
 
@@ -135,12 +138,16 @@
 		const targetId = items[nextIdx]?.id ?? null;
 		selectedItemId = targetId;
 		if (targetId === null) return;
+		if (triageMode) {
+			void openItem(targetId);
+			return;
+		}
 		await tick();
 		if (typeof document === 'undefined') return;
-		// CSS.escape: the id comes from the API and is well-typed today, but
-		// a malformed upstream value containing `"` or `]` would otherwise
-		// corrupt the attribute selector. `behavior:'auto'` keeps rapid J/K
-		// from stacking smooth-scroll animations.
+		// CSS.escape: the id comes from the API and is well-typed today, but a
+		// malformed upstream value containing `"` or `]` would otherwise corrupt
+		// the attribute selector. `behavior:'auto'` keeps rapid J/K from
+		// stacking smooth-scroll animations.
 		document
 			.querySelector(`[data-inbox-item-id="${CSS.escape(targetId)}"]`)
 			?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
@@ -155,12 +162,18 @@
 		const item = before[idx];
 		if (!item) return;
 		await setItemAction(item.id, 'archived');
-		// Step selection to the next sibling (or previous when at end), so
-		// J/K can keep rolling through the queue without re-targeting.
 		const after = visibleItems();
-		selectedItemId = after.length === 0
+		const nextId = after.length === 0
 			? null
 			: after[Math.min(idx, after.length - 1)]?.id ?? null;
+		selectedItemId = nextId;
+		// In triage mode the reader IS the queue cursor — keep it in sync with
+		// the freshly-stepped selection, otherwise the just-archived mail's
+		// body lingers until the user nudges j/k.
+		if (triageMode) {
+			if (nextId !== null) void openItem(nextId);
+			else closeItem();
+		}
 	}
 
 	function openSnoozeForSelected(): void {
@@ -180,15 +193,16 @@
 	function closeOverlays(): void {
 		if (helpOpen) { helpOpen = false; return; }
 		if (getDraftPane() !== null) { closeDraftPane(); return; }
+		if (triageSnoozeOpen) { triageSnoozeOpen = false; return; }
 		if (openSnoozeFor !== null) { openSnoozeFor = null; return; }
+		// In triage mode, Escape exits triage rather than closing the item —
+		// matches the user's mental model: Esc backs out of the focused mode.
+		if (triageMode) { triageMode = false; return; }
 	}
 
 	function openReplyForSelected(): void {
 		const item = visibleItems().find((i) => i.id === selectedItemId);
 		if (!item) return;
-		// Pre-load full + thread so DraftReplyPane can render the email-being-
-		// replied-to + thread chain. Without this, mobile users land in the
-		// draft view with no context to verify the LLM-generated reply.
 		void openItem(item.id);
 		void openDraftPane(item.id);
 	}
@@ -198,12 +212,44 @@
 		void openDraftPane(item.id);
 	}
 
+	function pickItem(item: InboxItem): void {
+		selectedItemId = item.id;
+		void openItem(item.id);
+	}
+
+	function startTriage(): void {
+		if (zone !== 'requires_user') zone = 'requires_user';
+		const queue = visibleItems();
+		if (queue.length === 0) {
+			addToast(t('inbox.triage_done'), 'info');
+			return;
+		}
+		// Re-pick the first item when the prior selection is gone from the
+		// queue (archived/snoozed from another tab) — otherwise triage opens
+		// to an empty pane until the user nudges j/k.
+		const stillThere = selectedItemId !== null && queue.some((i) => i.id === selectedItemId);
+		if (!stillThere) {
+			selectedItemId = queue[0]!.id;
+			void openItem(queue[0]!.id);
+		}
+		triageMode = true;
+	}
+
+	function exitTriage(): void {
+		triageMode = false;
+		// Reset the bindable so a future re-entry doesn't propagate a stale
+		// snoozeMenuOpen=true into TriagePane on mount.
+		triageSnoozeOpen = false;
+	}
+
+	function toggleTriage(): void {
+		if (triageMode) exitTriage();
+		else startTriage();
+	}
+
 	function onKeyDown(event: KeyboardEvent): void {
-		// Block synthetic keydowns — only real user input can mutate the inbox.
 		if (!event.isTrusted) return;
 		if (shouldIgnoreShortcut(event.target)) return;
-		// Suppress shortcuts in the other zones — the actions are meaningless
-		// there. The help overlay (`?`) and `Esc` stay available everywhere.
 		const action = keyToInboxAction(event);
 		if (!action) return;
 		if (action.kind === 'toggle_help') {
@@ -212,16 +258,17 @@
 			return;
 		}
 		if (action.kind === 'close') {
-			if (helpOpen || getDraftPane() !== null || openSnoozeFor !== null) {
+			if (helpOpen || getDraftPane() !== null || triageSnoozeOpen || openSnoozeFor !== null || triageMode) {
 				event.preventDefault();
 				closeOverlays();
 			}
 			return;
 		}
-		// Suppress directional + bucket-actions while the pane is open — the
-		// textarea owns the keyboard then. Esc still closes via the branch
-		// above. R from another zone is treated as "open from current
-		// selection if any" — silent no-op when nothing is selected.
+		if (action.kind === 'toggle_triage') {
+			event.preventDefault();
+			toggleTriage();
+			return;
+		}
 		if (getDraftPane() !== null) return;
 		if (zone !== 'requires_user') return;
 		event.preventDefault();
@@ -229,7 +276,13 @@
 			case 'next': void moveSelection(1); break;
 			case 'prev': void moveSelection(-1); break;
 			case 'archive': void archiveSelected(); break;
-			case 'snooze': openSnoozeForSelected(); break;
+			case 'snooze':
+				// In triage the list isn't rendered, so the legacy openSnoozeFor
+				// pill would be invisible — drive the TriagePane menu via its
+				// bindable prop instead.
+				if (triageMode) triageSnoozeOpen = !triageSnoozeOpen;
+				else openSnoozeForSelected();
+				break;
 			case 'undo': void undoOrHint(); break;
 			case 'reply': openReplyForSelected(); break;
 		}
@@ -251,8 +304,6 @@
 
 	const HOUR_MS = 3_600_000;
 	const DAY_MS = 24 * HOUR_MS;
-	// $derived so the array + 4 t() lookups only re-run when locale changes,
-	// not on every reactive re-eval of the snooze panel parent.
 	const snoozePresets = $derived<ReadonlyArray<{ label: string; deltaMs: number }>>([
 		{ label: t('inbox.snooze_1h'), deltaMs: HOUR_MS },
 		{ label: t('inbox.snooze_today'), deltaMs: 6 * HOUR_MS },
@@ -262,8 +313,6 @@
 
 	async function onArchive(item: InboxItem): Promise<void> {
 		await setItemAction(item.id, 'archived');
-		// In the Snoozed zone the optimistic removal isn't wired through
-		// the same path; reload to mirror the server state.
 		if (zone === 'snoozed') {
 			await loadSnoozedItems();
 			await loadInboxCounts();
@@ -276,25 +325,12 @@
 		openSnoozeFor = null;
 	}
 
-	/**
-	 * Un-snooze: clear snooze_until so the item returns to whatever bucket
-	 * it was classified into. The store's setItemSnooze accepts `null` to
-	 * mean "clear" — same wake path the cron uses when wake-time hits.
-	 */
 	async function unsnooze(item: InboxItem): Promise<void> {
 		await setItemSnooze(item.id, null);
-		// Snoozed view doesn't optimistically drop the row; refresh both
-		// the list and counts so the un-snoozed item disappears here and
-		// the snoozed-count badge ticks down.
 		await loadSnoozedItems();
 		await loadInboxCounts();
 	}
 
-	/**
-	 * Short countdown label for snoozed items, e.g. "in 2 Std", "in 3 Tagen".
-	 * Reads locale to switch DE/EN units. Granularity goes minute → hour → day
-	 * → week; anything further falls back to the absolute date.
-	 */
 	function snoozeCountdown(until: string): string {
 		const d = new Date(until);
 		if (Number.isNaN(d.getTime())) return '';
@@ -310,9 +346,6 @@
 		return dateFormat(until);
 	}
 
-	// Resolve the item referenced by the open pane. Each save echo re-renders
-	// InboxView, so a `{@const}` search would scan up to 150 entries per
-	// keystroke-batch — $derived caches until pane id or bucket arrays change.
 	const paneItem = $derived.by((): InboxItem | null => {
 		const pane = getDraftPane();
 		if (!pane) return null;
@@ -324,11 +357,6 @@
 
 	const readingOpen = $derived(getSelectedItemId() !== null);
 
-	// Compose-vs-active-Reply collision (PRD §"Compose-vs active Reply-Draft
-	// collision" round-2 U14). When the user clicks Compose while a reply
-	// draft pane is open, prompt the three-way modal. Reply drafts are
-	// already auto-saved by DraftReplyPane's keystroke handler — the
-	// "Save+New" path just closes the pane, "Discard" same, "Cancel" stays.
 	let composeCollision = $state(false);
 
 	function onComposeClick(): void {
@@ -340,310 +368,306 @@
 	}
 
 	function resolveCollisionSaveAndOpen(): void {
-		// Reply draft is already auto-saved via DraftReplyPane's autosave —
-		// closing the pane is enough. If a future regression breaks autosave,
-		// this is the layering point to add an explicit flush.
 		closeDraftPane();
 		composeCollision = false;
 		openCompose();
 	}
 
 	function resolveCollisionDiscardAndOpen(): void {
-		// Per PRD: lost edits not recoverable beyond the most recent autosave.
 		closeDraftPane();
 		composeCollision = false;
 		openCompose();
 	}
+
+	function refreshAfterAction(): void {
+		void loadInboxCounts();
+		if (zone === 'snoozed') void loadSnoozedItems();
+		else void loadInboxItems(zone);
+	}
 </script>
 
-<!-- Two-pane layout (PR 3b §Architecture):
-     - <md (mobile): the list takes the full screen; clicking an item swaps in
-       the ReadingPane (full-screen), back-button (showBack) closes back to list.
-     - ≥md: list = 30% left column, reading-pane = 70% right column. Reading-pane
-       shows an empty-state until an item is selected.
-     The 25/40/35 three-pane split with the Mail-Context-Sidebar lands in Phase 4. -->
+<!--
+	3-pane layout (Variant B-default + C-toggle):
+	- < md (mobile): single-pane stack. Zone selector lives as horizontal pills
+	  at the top of the list view; clicking an item swaps in the reading pane.
+	  The zone-rail is hidden — its width budget is too expensive on phones.
+	- ≥ md: zone-rail (left, ~180px) + list (mid, fixed ~360-400px) + reader (right, flex-1).
+	  Reader defaults to the Inbox-Kopilot card; selecting an item swaps in
+	  the reading pane.
+	- Triage mode: zone-rail stays, list+reader columns are replaced by the
+	  full-width triage pane (one-mail-at-a-time). Toggle via the rail button
+	  or `t` shortcut. Esc exits.
+-->
 <div class="flex h-full" role="region" aria-label={t('inbox.title')}>
-<div
-	class="{readingOpen ? 'hidden md:flex' : 'flex'} flex-col md:w-[30%] xl:w-[30%] md:border-r md:border-border min-w-0 overflow-y-auto"
-	aria-live="polite"
->
-<div class="p-4 sm:p-6 pb-[max(1rem,env(safe-area-inset-bottom))]">
-	<div class="flex items-center justify-between flex-wrap gap-y-2 mb-4">
-		<h1 class="text-xl font-light tracking-tight">{t('inbox.title')}</h1>
-		<div class="flex items-center gap-3 flex-wrap">
-			<button
-				type="button"
-				onclick={() => onComposeClick()}
-				class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90"
-			>{t('inbox.compose_new')}</button>
-			<a
-				href="/app/inbox/rules"
-				class="text-[11px] text-text-subtle hover:text-text-muted font-mono py-1"
-			>{t('inbox.rules_link')}</a>
-			{#if !touchPrimary}
-				<button
-					type="button"
-					onclick={() => (helpOpen = true)}
-					class="text-[11px] text-text-subtle hover:text-text-muted font-mono py-1"
-					aria-label={t('inbox.shortcuts_title')}
-				>{t('inbox.shortcuts_hint')}</button>
-			{/if}
-		</div>
-	</div>
+	<InboxZoneRail
+		{zone}
+		onZoneChange={(z) => (zone = z)}
+		onCompose={onComposeClick}
+		onTriageToggle={toggleTriage}
+		triageActive={triageMode}
+		onHelp={() => (helpOpen = true)}
+		showHelp={!touchPrimary}
+	/>
 
-	{#if !isInboxAvailable()}
-		<div class="rounded-[var(--radius-md)] bg-bg-subtle border border-border px-4 py-6 text-sm text-text-muted">
-			{t('inbox.unavailable')}
+	{#if triageMode}
+		<!-- Triage mode owns the entire right side on desktop, full screen on mobile. -->
+		<div class="flex-1 flex flex-col min-w-0 overflow-hidden">
+			<InboxTriagePane
+				onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
+				onActionApplied={refreshAfterAction}
+				onExit={exitTriage}
+				bind:snoozeMenuOpen={triageSnoozeOpen}
+			/>
 		</div>
 	{:else}
-		{@const counts = getInboxCounts()}
-		{@const reclassifyBanner = getReclassifyBanner()}
-		<ColdStartBanner />
-		<InboxSearchBar value={searchQuery} onChange={(q) => (searchQuery = q)} />
-		<InboxBulkBar />
-		{#if reclassifyBanner}
-			<div
-				class="mb-3 flex items-center justify-between gap-2 rounded-[var(--radius-md)] border border-accent bg-accent/5 px-3 py-2 text-[12px] text-text"
-				role="status"
-				aria-live="polite"
-			>
-				<span>{t('inbox.reclassify_banner_text').replace('{count}', String(reclassifyBanner.count))}</span>
-				<div class="flex items-center gap-1.5">
-					<button
-						type="button"
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text"
-						onclick={() => {
-							void loadInboxCounts();
-							if (zone === 'snoozed') void loadSnoozedItems();
-							else void loadInboxItems(zone);
-							dismissReclassifyBanner();
-						}}
-					>{t('inbox.reclassify_banner_refresh')}</button>
-					<button
-						type="button"
-						class="rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-text-subtle hover:text-text"
-						onclick={() => dismissReclassifyBanner()}
-						aria-label={t('inbox.reclassify_banner_dismiss')}
-					>×</button>
-				</div>
-			</div>
-		{/if}
+		<!-- List column -->
 		<div
-			class="flex gap-1 mb-4 overflow-x-auto scrollbar-none -mx-4 px-4 py-1 sm:mx-0 sm:px-0"
-			role="tablist"
-			aria-label={t('inbox.title')}
+			class="{readingOpen ? 'hidden md:flex' : 'flex'} flex-col w-full md:w-[360px] lg:w-[400px] shrink-0 md:border-r md:border-border min-w-0 overflow-y-auto"
+			aria-live="polite"
 		>
-			<button
-				role="tab"
-				aria-selected={zone === 'requires_user'}
-				onclick={() => (zone = 'requires_user')}
-				class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'requires_user' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-			>
-				<span>{t('inbox.zone_needs_you')}</span>
-				{#if counts.requires_user > 0}
-					<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono">{counts.requires_user}</span>
-				{/if}
-			</button>
-			<button
-				role="tab"
-				aria-selected={zone === 'draft_ready'}
-				onclick={() => (zone = 'draft_ready')}
-				class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'draft_ready' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-			>
-				<span>{t('inbox.zone_drafted')}</span>
-				{#if counts.draft_ready > 0}
-					<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.draft_ready}</span>
-				{/if}
-			</button>
-			<button
-				role="tab"
-				aria-selected={zone === 'auto_handled'}
-				onclick={() => (zone = 'auto_handled')}
-				class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'auto_handled' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-			>
-				<span>{t('inbox.zone_handled')}</span>
-				{#if counts.auto_handled > 0}
-					<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.auto_handled}</span>
-				{/if}
-			</button>
-			<button
-				role="tab"
-				aria-selected={zone === 'snoozed'}
-				onclick={() => (zone = 'snoozed')}
-				class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'snoozed' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-			>
-				<span>{t('inbox.zone_snoozed')}</span>
-				{#if getSnoozedCount() > 0}
-					<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{getSnoozedCount()}</span>
-				{/if}
-			</button>
-		</div>
+			<div class="p-4 sm:p-5 pb-[max(1rem,env(safe-area-inset-bottom))]">
+				<!-- Mobile-only header with title + compose. The desktop header lives
+					in the zone-rail's bottom section. -->
+				<div class="flex items-center justify-between gap-2 mb-3 md:hidden">
+					<h1 class="text-lg font-light tracking-tight">{t('inbox.title')}</h1>
+					<button
+						type="button"
+						onclick={() => onComposeClick()}
+						class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90"
+					>{t('inbox.compose_new')}</button>
+				</div>
 
-		{#if zone === 'snoozed' ? isLoadingSnoozed() : isLoading(zone)}
-			<p class="text-text-subtle text-sm">{t('inbox.loading')}</p>
-		{:else}
-			{@const items = zone === 'snoozed' ? getSnoozedItems() : getInboxItems(zone)}
-			{#if items.length === 0}
-				<p class="text-text-subtle text-sm">
-					{#if zone === 'requires_user'}{t('inbox.empty_needs_you')}
-					{:else if zone === 'draft_ready'}{t('inbox.empty_drafted')}
-					{:else if zone === 'snoozed'}{t('inbox.empty_snoozed')}
-					{:else}{t('inbox.empty_handled')}
-					{/if}
-				</p>
-				{@const allEmpty = counts.requires_user === 0 && counts.draft_ready === 0 && counts.auto_handled === 0}
-				{#if allEmpty}
-					<div class="mt-3">
-						<button
-							type="button"
-							onclick={async () => {
-								coldStartButtonBusy = true;
-								try { await runColdStartBackfillForAllAccounts(); }
-								finally { coldStartButtonBusy = false; }
-							}}
-							disabled={coldStartButtonBusy}
-							class="text-[12px] px-3 py-1.5 rounded-[var(--radius-sm)] border border-border hover:bg-bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
-						>
-							{coldStartButtonBusy ? t('inbox.cold_start_trigger_busy') : t('inbox.cold_start_trigger_button')}
-						</button>
-						<p class="text-[11px] text-text-subtle mt-1.5">{t('inbox.cold_start_trigger_hint')}</p>
+				{#if !isInboxAvailable()}
+					<div class="rounded-[var(--radius-md)] bg-bg-subtle border border-border px-4 py-6 text-sm text-text-muted">
+						{t('inbox.unavailable')}
 					</div>
-				{/if}
-			{:else}
-				{@const visibleIds = items.map((i) => i.id)}
-				<ul class="space-y-2" role="list">
-					{#each items as item (item.id)}
-						<li
-							role="listitem"
-							data-inbox-item-id={item.id}
-							aria-label={`${zone === 'requires_user' ? t('inbox.zone_needs_you') : ''}: ${item.reasonDe}`}
-							aria-current={zone === 'requires_user' && selectedItemId === item.id ? 'true' : undefined}
-							class="rounded-[var(--radius-md)] border bg-bg-subtle px-4 py-3 transition-colors {zone === 'requires_user' && selectedItemId === item.id ? 'border-accent' : 'border-border'}"
+				{:else}
+					{@const counts = getInboxCounts()}
+					{@const reclassifyBanner = getReclassifyBanner()}
+					<ColdStartBanner />
+					<InboxSearchBar value={searchQuery} onChange={(q) => (searchQuery = q)} />
+					<InboxBulkBar />
+					{#if reclassifyBanner}
+						<div
+							class="mb-3 flex items-center justify-between gap-2 rounded-[var(--radius-md)] border border-accent bg-accent/5 px-3 py-2 text-[12px] text-text"
+							role="status"
+							aria-live="polite"
 						>
-							<div class="flex items-start justify-between gap-3">
-								<input
-									type="checkbox"
-									class="mt-1 shrink-0 cursor-pointer"
-									checked={isSelectedForBulk(item.id)}
-									onclick={(e) => {
-										const evt = e as MouseEvent;
-										toggleBulkSelection(item.id, visibleIds, evt.shiftKey);
-									}}
-									aria-label={`Auswählen: ${item.subject || item.reasonDe}`}
-								/>
+							<span>{t('inbox.reclassify_banner_text').replace('{count}', String(reclassifyBanner.count))}</span>
+							<div class="flex items-center gap-1.5">
 								<button
 									type="button"
-									class="min-w-0 flex-1 text-left cursor-pointer"
+									class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text"
 									onclick={() => {
-										selectedItemId = item.id;
-										void openItem(item.id);
+										refreshAfterAction();
+										dismissReclassifyBanner();
 									}}
-									aria-label={`${t('inbox.reading_open')}: ${item.subject || item.reasonDe}`}
-								>
-									<div class="flex items-center justify-between gap-2 mb-0.5">
-										<span class="text-sm text-text truncate" title={item.fromAddress || item.accountId}>
-											{item.fromName || item.fromAddress || accountShortLabel(item.accountId)}
-										</span>
-										<span class="text-[11px] text-text-subtle shrink-0">
-											{zone === 'snoozed' && item.snoozeUntil
-												? snoozeCountdown(item.snoozeUntil)
-												: dateFormat(item.mailDate ?? item.classifiedAt)}
-										</span>
-									</div>
-									{#if item.subject}
-										<p class="text-sm font-medium text-text leading-tight truncate mb-1" title={item.subject}>
-											{item.subject}
-										</p>
-									{/if}
-									<div class="flex items-center gap-2 text-[11px] text-text-subtle mb-1">
-										<span class="inline-flex items-center gap-1" title={item.accountId}>
-											<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-												<path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
-											</svg>
-											{accountShortLabel(item.accountId)}
-										</span>
-										<span aria-hidden="true">·</span>
-										<span>{channelLabel(item.channel)}</span>
-									</div>
-									<p class="text-sm text-text leading-relaxed">{item.reasonDe}</p>
-									{#if item.classifierVersion === 'sensitive-prefilter'}
-										<p class="text-[11px] text-warning mt-1" aria-label="sensitive content">
-											⚠ {t('inbox.action_reply')}
-										</p>
-									{/if}
-								</button>
+								>{t('inbox.reclassify_banner_refresh')}</button>
+								<button
+									type="button"
+									class="rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-text-subtle hover:text-text"
+									onclick={() => dismissReclassifyBanner()}
+									aria-label={t('inbox.reclassify_banner_dismiss')}
+								>×</button>
 							</div>
-							{#if zone === 'snoozed'}
-								<!-- Snoozed-zone action row: un-snooze (bring it back NOW). Archive
-									is also useful here in case the user decided the deferred mail is
-									actually irrelevant. -->
-								<div class="mt-2 flex flex-wrap items-center gap-1 sm:justify-end pl-7 sm:pl-0">
+						</div>
+					{/if}
+
+					<!-- Mobile-only zone pills (md+ uses InboxZoneRail). -->
+					<div
+						class="md:hidden flex gap-1 mb-3 overflow-x-auto scrollbar-none -mx-4 px-4 py-1"
+						role="tablist"
+						aria-label={t('inbox.title')}
+					>
+						<button
+							role="tab"
+							aria-selected={zone === 'requires_user'}
+							onclick={() => (zone = 'requires_user')}
+							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'requires_user' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+						>
+							<span>{t('inbox.zone_needs_you')}</span>
+							{#if counts.requires_user > 0}
+								<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono">{counts.requires_user}</span>
+							{/if}
+						</button>
+						<button
+							role="tab"
+							aria-selected={zone === 'draft_ready'}
+							onclick={() => (zone = 'draft_ready')}
+							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'draft_ready' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+						>
+							<span>{t('inbox.zone_drafted')}</span>
+							{#if counts.draft_ready > 0}
+								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.draft_ready}</span>
+							{/if}
+						</button>
+						<button
+							role="tab"
+							aria-selected={zone === 'auto_handled'}
+							onclick={() => (zone = 'auto_handled')}
+							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'auto_handled' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+						>
+							<span>{t('inbox.zone_handled')}</span>
+							{#if counts.auto_handled > 0}
+								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.auto_handled}</span>
+							{/if}
+						</button>
+						<button
+							role="tab"
+							aria-selected={zone === 'snoozed'}
+							onclick={() => (zone = 'snoozed')}
+							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'snoozed' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+						>
+							<span>{t('inbox.zone_snoozed')}</span>
+							{#if getSnoozedCount() > 0}
+								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{getSnoozedCount()}</span>
+							{/if}
+						</button>
+					</div>
+
+					{#if zone === 'snoozed' ? isLoadingSnoozed() : isLoading(zone)}
+						<p class="text-text-subtle text-sm">{t('inbox.loading')}</p>
+					{:else}
+						<!-- Filter !userAction here too so the list mirrors visibleItems()
+							in the keyboard handler — otherwise just-archived rows flash. -->
+						{@const items = zone === 'snoozed' ? getSnoozedItems() : getInboxItems(zone).filter((i) => !i.userAction)}
+						{#if items.length === 0}
+							<p class="text-text-subtle text-sm">
+								{#if zone === 'requires_user'}{t('inbox.empty_needs_you')}
+								{:else if zone === 'draft_ready'}{t('inbox.empty_drafted')}
+								{:else if zone === 'snoozed'}{t('inbox.empty_snoozed')}
+								{:else}{t('inbox.empty_handled')}
+								{/if}
+							</p>
+							{@const allEmpty = counts.requires_user === 0 && counts.draft_ready === 0 && counts.auto_handled === 0}
+							{#if allEmpty}
+								<div class="mt-3">
 									<button
-										onclick={() => void unsnooze(item)}
-										class="rounded-[var(--radius-sm)] border border-accent bg-accent/10 text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90 min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-										aria-label={t('inbox.action_unsnooze')}
-									>{t('inbox.action_unsnooze')}</button>
-									<button
-										onclick={() => void onArchive(item)}
-										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-										aria-label={t('inbox.action_archive')}
-									>{t('inbox.action_archive')}</button>
-								</div>
-							{:else if zone === 'requires_user' && !item.userAction}
-								<!-- Action row sits below the card content (sm+ right-justified) so the buttons
-									no longer overlap the sender + AI summary on narrow viewports. Mail clients
-									like Spark / Apple Mail use the same pattern; the reading-pane on desktop
-									has its own inline header buttons. -->
-								<div class="mt-2 flex flex-wrap items-center gap-1 sm:justify-end pl-7 sm:pl-0">
-									<button
-										onclick={() => openReplyFor(item)}
-										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-										aria-label={t('inbox.action_draft_reply')}
-									>{t('inbox.action_draft_reply')}</button>
-									<button
-										onclick={() => void onArchive(item)}
-										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-										aria-label={t('inbox.action_archive')}
-									>{t('inbox.action_archive')}</button>
-									<button
-										onclick={() => (openSnoozeFor = openSnoozeFor === item.id ? null : item.id)}
-										aria-expanded={openSnoozeFor === item.id}
-										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-									>{t('inbox.action_snooze')}</button>
+										type="button"
+										onclick={async () => {
+											coldStartButtonBusy = true;
+											try { await runColdStartBackfillForAllAccounts(); }
+											finally { coldStartButtonBusy = false; }
+										}}
+										disabled={coldStartButtonBusy}
+										class="text-[12px] px-3 py-1.5 rounded-[var(--radius-sm)] border border-border hover:bg-bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+									>
+										{coldStartButtonBusy ? t('inbox.cold_start_trigger_busy') : t('inbox.cold_start_trigger_button')}
+									</button>
+									<p class="text-[11px] text-text-subtle mt-1.5">{t('inbox.cold_start_trigger_hint')}</p>
 								</div>
 							{/if}
-							{#if openSnoozeFor === item.id}
-								<div class="mt-2 flex flex-wrap gap-1.5 pl-1">
-									{#each snoozePresets as preset (preset.label)}
-										<button
-											onclick={() => void onSnoozePreset(item, preset.deltaMs)}
-											class="rounded-[var(--radius-sm)] bg-bg-muted text-text-muted hover:text-text px-3 py-1.5 text-[11px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-										>{preset.label}</button>
-									{/each}
-								</div>
-							{/if}
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		{/if}
-	{/if}
+						{:else}
+							{@const visibleIds = items.map((i) => i.id)}
+							<!-- Mid-density list rows (B-variant): two visible lines per row.
+								Line 1: headline (subject or AI fallback), date.
+								Line 2: sender · channel · account.
+								Action chips removed from the row — the reader has them, bulk bar
+								handles multi-select, snooze opens inline only when explicitly
+								requested. Massive vertical-density win vs. the prior card layout. -->
+							<ul class="space-y-0.5" role="list">
+								{#each items as item (item.id)}
+									{@const isActiveSelection = (zone === 'requires_user' && selectedItemId === item.id) || (readingOpen && getSelectedItemId() === item.id)}
+									<li
+										role="listitem"
+										data-inbox-item-id={item.id}
+										aria-current={isActiveSelection ? 'true' : undefined}
+										class="rounded-[var(--radius-sm)] border transition-colors {isActiveSelection ? 'border-accent bg-accent/5' : 'border-transparent hover:border-border hover:bg-bg-subtle/60'}"
+									>
+										<div class="flex items-start gap-2 px-2 py-2">
+											<input
+												type="checkbox"
+												class="mt-1 shrink-0 cursor-pointer"
+												checked={isSelectedForBulk(item.id)}
+												onclick={(e) => {
+													const evt = e as MouseEvent;
+													toggleBulkSelection(item.id, visibleIds, evt.shiftKey);
+												}}
+												aria-label={`Auswählen: ${item.subject || item.reasonDe}`}
+											/>
+											<button
+												type="button"
+												class="min-w-0 flex-1 text-left cursor-pointer"
+												onclick={() => {
+													selectedItemId = item.id;
+													void openItem(item.id);
+												}}
+												aria-label={`${t('inbox.reading_open')}: ${item.subject || item.reasonDe}`}
+											>
+												<div class="flex items-baseline justify-between gap-2 mb-0.5">
+													<p class="text-sm font-medium text-text leading-snug truncate" title={item.subject || item.reasonDe}>
+														{inboxHeadline(item)}
+													</p>
+													<span class="shrink-0 text-[11px] text-text-subtle tabular-nums">
+														{zone === 'snoozed' && item.snoozeUntil
+															? snoozeCountdown(item.snoozeUntil)
+															: dateFormat(item.mailDate ?? item.classifiedAt)}
+													</span>
+												</div>
+												<div class="flex items-center gap-1.5 text-[11px] text-text-subtle min-w-0">
+													<span class="truncate" title={item.fromAddress || item.accountId}>
+														{item.fromName || item.fromAddress || accountShortLabel(item.accountId)}
+													</span>
+													<span aria-hidden="true">·</span>
+													<span class="shrink-0">{channelLabel(item.channel)}</span>
+													{#if item.classifierVersion === 'sensitive-prefilter'}
+														<span aria-hidden="true">·</span>
+														<span class="shrink-0 text-warning" aria-label="sensitive content">⚠</span>
+													{/if}
+												</div>
+											</button>
+										</div>
+										{#if zone === 'snoozed'}
+											<div class="flex flex-wrap items-center gap-1 px-2 pb-2 pl-9">
+												<button
+													onclick={() => void unsnooze(item)}
+													class="rounded-[var(--radius-sm)] border border-accent bg-accent/10 text-accent-text px-2.5 py-1 text-[11px] hover:opacity-90 min-h-[32px] pointer-coarse:min-h-[44px]"
+													aria-label={t('inbox.action_unsnooze')}
+												>{t('inbox.action_unsnooze')}</button>
+												<button
+													onclick={() => void onArchive(item)}
+													class="rounded-[var(--radius-sm)] border border-border bg-bg px-2.5 py-1 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[32px] pointer-coarse:min-h-[44px]"
+													aria-label={t('inbox.action_archive')}
+												>{t('inbox.action_archive')}</button>
+											</div>
+										{/if}
+										{#if openSnoozeFor === item.id}
+											<div class="flex flex-wrap gap-1.5 px-2 pb-2 pl-9">
+												{#each snoozePresets as preset (preset.label)}
+													<button
+														onclick={() => void onSnoozePreset(item, preset.deltaMs)}
+														class="rounded-[var(--radius-sm)] bg-bg-muted text-text-muted hover:text-text px-2.5 py-1 text-[11px] min-h-[32px] pointer-coarse:min-h-[44px]"
+													>{preset.label}</button>
+												{/each}
+											</div>
+										{/if}
+									</li>
+								{/each}
+							</ul>
+						{/if}
+					{/if}
+				{/if}
+			</div>
 		</div>
-	</div>
-	<!-- Reading-pane column -->
-	<div
-		class="{readingOpen ? 'flex' : 'hidden md:flex'} flex-1 flex-col min-w-0 overflow-hidden"
-	>
-		<InboxReadingPane
-			onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
-			onActionApplied={() => {
-				void loadInboxCounts();
-				if (zone === 'snoozed') void loadSnoozedItems();
-				else void loadInboxItems(zone);
-			}}
-			showBack
-		/>
-	</div>
+
+		<!-- Reader column (md+): defaults to Kopilot card, swaps to ReadingPane when an item is selected. -->
+		<div
+			class="{readingOpen ? 'flex' : 'hidden md:flex'} flex-1 flex-col min-w-0 overflow-hidden"
+		>
+			{#if readingOpen}
+				<InboxReadingPane
+					onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
+					onActionApplied={refreshAfterAction}
+					showBack
+				/>
+			{:else}
+				<InboxKopilotCard
+					onPickItem={pickItem}
+					onStartTriage={startTriage}
+				/>
+			{/if}
+		</div>
+	{/if}
 </div>
 
 <KeyboardShortcutsHelp open={helpOpen} onClose={() => (helpOpen = false)} />
@@ -689,7 +713,4 @@
 	</div>
 {/if}
 
-<!-- InboxUndoToast doesn't refresh the snoozed list — pass requires_user as a safe
-	default when the active zone is the new synthetic 'snoozed' view. -->
 <InboxUndoToast currentZone={zone === 'snoozed' ? 'requires_user' : zone} />
-
