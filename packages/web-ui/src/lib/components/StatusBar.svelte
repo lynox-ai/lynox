@@ -284,7 +284,7 @@
 	<span class="text-border">|</span>
 
 	<!-- Active Tasks -->
-	<a href="/app/activity?tab=tasks" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<a href="/app/automation?section=tasks" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		<span class="text-accent-text">{activeTasks}</span> {t('status.tasks_active')}
 	</a>
 
@@ -293,14 +293,14 @@
 	<!-- Today's Cost — points to the usage dashboard, not the raw run log. -->
 	<!-- Budget + per-model + voice split lives under ?tab=usage; history is a -->
 	<!-- separate tab for users who want the per-run timeline. -->
-	<a href="/app/activity?tab=usage" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<a href="/app/automation?section=activity&tab=usage" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		{formatCost(todayCost)} {t('status.today')}
 	</a>
 
 	<span class="text-border">|</span>
 
 	<!-- Today's Runs -->
-	<a href="/app/activity?tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<a href="/app/automation?section=activity&tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		{todayRuns} {t('status.runs')} {t('status.today')}
 	</a>
 
@@ -468,7 +468,7 @@
 			{#if activeTasks > 0}
 				<div class="flex items-center justify-between text-xs">
 					<span class="text-text-subtle">{t('status.tasks_active')}</span>
-					<a href="/app/activity?tab=tasks" onclick={closePanel} class="text-accent-text hover:underline">{activeTasks} Tasks</a>
+					<a href="/app/automation?section=tasks" onclick={closePanel} class="text-accent-text hover:underline">{activeTasks} Tasks</a>
 				</div>
 			{/if}
 
