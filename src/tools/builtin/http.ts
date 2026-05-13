@@ -154,7 +154,7 @@ function shouldRewriteToGet(status: number, method: string): boolean {
   return (status === 301 || status === 302) && method !== 'GET' && method !== 'HEAD';
 }
 
-async function fetchWithValidatedRedirects(url: string, init: RequestInit): Promise<Response> {
+export async function fetchWithValidatedRedirects(url: string, init: RequestInit): Promise<Response> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   let body = init.body;
@@ -194,7 +194,7 @@ async function fetchWithValidatedRedirects(url: string, init: RequestInit): Prom
   throw new Error('Blocked: redirect handling failed');
 }
 
-async function readBodyLimited(response: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+export async function readBodyLimited(response: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
   if (!response.body) {
     return { text: '', truncated: false };
   }
