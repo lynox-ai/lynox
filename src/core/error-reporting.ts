@@ -21,6 +21,28 @@ const SAFE_CONTEXT_KEYS = new Set([
   'runId', 'sessionId', 'duration', 'durationMs', 'retryCount',
 ]);
 
+// PRD-CALENDAR §S1 — token-bearing URL regex. Matches the path-prefix shapes
+// used by iCloud, Google Workspace, Outlook, and self-host CalDAV servers.
+// Anchored on the path segment (`/ical/`, `/calendar(s)/`, `/webcal/`,
+// `/caldav/`, `/dav/`) because the token / user-identifier sits in the
+// following path segment, not the hostname. The plural `calendars` matches
+// iCloud's principal path (`/<userid>/calendars/<uuid>/`).
+const CALENDAR_TOKEN_URL_RE = /\b(https?|webcal):\/\/[^\s'"<>]+?\/(?:ical|calendars?|webcal|caldav|dav)\/[^\s'"<>]+/gi;
+
+/** Redact token-bearing calendar URLs in free-text. Keeps host for debuggability. */
+function scrubCalendarUrls(text: string): string {
+  return text.replace(CALENDAR_TOKEN_URL_RE, (match) => {
+    try {
+      const url = new URL(match);
+      return `${url.protocol}//${url.host}/<redacted-calendar-token>`;
+    } catch {
+      return '<redacted-calendar-url>';
+    }
+  });
+}
+
+export { scrubCalendarUrls as _scrubCalendarUrlsForTest };
+
 /**
  * Initialize Bugsink error reporting. Safe to call multiple times — only first call has effect.
  * Returns true if error reporting was activated.
@@ -65,6 +87,13 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
           delete breadcrumb.data['content'];
           delete breadcrumb.data['message'];
         }
+        // PRD-CALENDAR §S1 — strip token-bearing calendar URLs from
+        // free-text breadcrumb messages so iCloud/Google ICS Secret-URLs
+        // don't end up in Bugsink. The host stays for debuggability;
+        // only the token-bearing path is redacted.
+        if (typeof breadcrumb.message === 'string') {
+          breadcrumb.message = scrubCalendarUrls(breadcrumb.message);
+        }
         return breadcrumb;
       },
 
@@ -72,6 +101,18 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         // Strip request bodies (may contain user prompts)
         if (event.request) {
           delete event.request.data;
+        }
+        // PRD-CALENDAR §S1 — scrub token-bearing calendar URLs from any
+        // free-text channel that survives the generic prompt/body strip.
+        // tsdav + fetch errors typically embed the URL in `.message` and in
+        // the inner exception chain.
+        if (typeof event.message === 'string') {
+          event.message = scrubCalendarUrls(event.message);
+        }
+        if (event.exception?.values) {
+          for (const ex of event.exception.values) {
+            if (typeof ex.value === 'string') ex.value = scrubCalendarUrls(ex.value);
+          }
         }
         return event;
       },
