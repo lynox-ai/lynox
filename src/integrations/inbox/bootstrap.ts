@@ -23,6 +23,7 @@ import { runColdStartForAccount } from './cold-start-adapter.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxContactResolver } from './contact-resolver.js';
 import { InboxCostBudget, type InboxCostBudgetOptions } from './cost-budget.js';
+import { GenerateRateLimiter } from './generate-rate-limit.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import {
   buildInboxRunner,
@@ -69,6 +70,8 @@ export interface InboxRuntime {
    *  consumers (handleRefreshItemBody) can apply the same masking the
    *  classifier did at classify time. */
   sensitiveMode: SensitiveMode;
+  /** Per-account sliding-window rate-limit for /draft/generate (10/min default). */
+  generateRateLimiter: import('./generate-rate-limit.js').GenerateRateLimiter;
   shutdown(): Promise<void>;
 }
 
@@ -244,6 +247,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     llm,
     accounts,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
+    generateRateLimiter: new GenerateRateLimiter(),
     shutdown: () => queue.drain(),
   };
 }

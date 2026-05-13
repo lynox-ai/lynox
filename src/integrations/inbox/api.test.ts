@@ -1280,6 +1280,40 @@ describe('handleGenerateDraft', () => {
     expect(u.indexOf('IGNORE PREVIOUS')).toBeGreaterThan(u.indexOf('<untrusted_data>'));
     expect(s.toLowerCase()).toContain('untrusted_data');
   });
+
+  it('appends a generation_requested audit row with generatorVersion + tone payload', async () => {
+    const id = insertItem();
+    state.saveItemBody(id, 'Long enough cached body to pass the min-length gate', 'email');
+    const llm: LLMCaller = vi.fn(async () => 'reply body');
+    const r = await handleGenerateDraft({ ...deps, llm, accountResolver }, id, { tone: 'shorter', previousBodyMd: 'prior draft text' });
+    expect(r.status).toBe(200);
+    const audit = state.listAuditForItem(id);
+    const genRow = audit.find((row) => row.action === 'generation_requested');
+    expect(genRow).toBeDefined();
+    expect(genRow!.actor).toBe('user');
+    const payload = JSON.parse(genRow!.payloadJson) as { generatorVersion: string; bodyTruncated: boolean; tone: string | null };
+    expect(payload.generatorVersion).toMatch(/^haiku-/);
+    expect(payload.bodyTruncated).toBe(false);
+    expect(payload.tone).toBe('shorter');
+  });
+
+  it('429 once the rate-limit cap is exceeded; ok again after the window slides', async () => {
+    const { GenerateRateLimiter } = await import('./generate-rate-limit.js');
+    let t = 1_000_000;
+    const limiter = new GenerateRateLimiter({ windowMs: 1000, maxPerWindow: 2, now: () => t });
+    const id = insertItem();
+    state.saveItemBody(id, 'Long enough cached body to pass the min-length gate', 'email');
+    const llm: LLMCaller = vi.fn(async () => 'x');
+    const depsLim = { ...deps, llm, accountResolver, generateRateLimiter: limiter };
+    expect((await handleGenerateDraft(depsLim, id)).status).toBe(200);
+    expect((await handleGenerateDraft(depsLim, id)).status).toBe(200);
+    const blocked = await handleGenerateDraft(depsLim, id);
+    expect(blocked.status).toBe(429);
+    expect((blocked.body as { reason: string }).reason).toBe('rate_limit');
+    t += 1100;
+    // Window slid past — calls allowed again.
+    expect((await handleGenerateDraft(depsLim, id)).status).toBe(200);
+  });
 });
 
 describe('rules endpoints', () => {

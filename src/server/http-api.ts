@@ -3317,6 +3317,7 @@ export class LynoxHTTPApi {
         llm: rt.llm,
         accountResolver: rt.accounts,
         sensitiveMode: rt.sensitiveMode,
+        generateRateLimiter: rt.generateRateLimiter,
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       // Mail provider lookup for the body-refresh handler. The mail

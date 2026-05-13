@@ -32,7 +32,8 @@ export type InboxAuditAction =
   | 'replied'
   | 'snoozed'
   | 'undo'
-  | 'rule_applied';
+  | 'rule_applied'
+  | 'generation_requested';
 
 export type InboxAuditActor = 'classifier' | 'user' | 'rule_engine';
 
