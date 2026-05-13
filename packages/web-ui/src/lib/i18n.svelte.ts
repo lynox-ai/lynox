@@ -72,8 +72,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.inbox': { de: 'Inbox', en: 'Inbox' },
 	'nav.rail_pin': { de: 'Sidebar fixieren', en: 'Pin sidebar' },
 	'nav.rail_unpin': { de: 'Sidebar ausklappbar lassen', en: 'Unpin sidebar' },
-	'nav.rail_expand': { de: 'Sidebar ausklappen', en: 'Expand sidebar' },
-	'nav.rail_collapse': { de: 'Sidebar einklappen', en: 'Collapse sidebar' },
 
 	// Hub tabs
 	'hub.intelligence.wissen': { de: 'Wissen', en: 'Knowledge' },

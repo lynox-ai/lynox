@@ -180,24 +180,15 @@
 		dragNode = null;
 	}
 
-	interface NavSubItem {
-		href: string;
-		labelKey: string;
-		exact: boolean;
-	}
 	interface NavItem {
 		href: string;
 		labelKey: string;
 		exact: boolean;
 		icon: string;
-		descKey?: string;
-		/**
-		 * 'threads' — expand into the live thread list (Chat only).
-		 * 'subnav'  — expand into the static `subnav` list (e.g. Intelligence).
-		 * undefined — leaf entry; clicking navigates.
-		 */
-		type?: 'threads' | 'subnav';
-		subnav?: NavSubItem[];
+		// 'threads' expands into the live thread list (Chat only). Undefined =
+		// leaf entry; clicking navigates. Static sub-navs were retired in the
+		// hub-consolidation refactor — sub-features live as hub-page tabs.
+		type?: 'threads';
 	}
 
 	// Feature-flag gated nav entries. Fetched once on mount from the Engine.
@@ -234,31 +225,15 @@
 		return items;
 	});
 
-	const isThreadsItem = (item: NavItem) => item.type === 'threads';
-	const isSubnavItem = (item: NavItem) => item.type === 'subnav' && (item.subnav?.length ?? 0) > 0;
-	const isExpandable = (item: NavItem) => isThreadsItem(item) || isSubnavItem(item);
+	const isExpandable = (item: NavItem) => item.type === 'threads';
 
 	function isActive(href: string, exact: boolean): boolean {
 		const path = $page.url.pathname;
 		return exact ? path === href : path.startsWith(href);
 	}
 
-	// PARENT_OWNS used to map standalone routes back to their parent; with the
-	// hub-consolidation flat-nav refactor, all sub-features live at /automation
-	// and /intelligence under ?tab/?section query params, so parent matching
-	// via path-prefix is enough. Empty for now.
-	const PARENT_OWNS: Record<string, string[]> = {};
-
 	function isParentActive(item: NavItem): boolean {
-		if (isActive(item.href, item.exact)) return true;
-		const owned = PARENT_OWNS[item.href];
-		if (owned) {
-			const path = $page.url.pathname;
-			for (const p of owned) {
-				if (path === p || path.startsWith(p + '/')) return true;
-			}
-		}
-		return false;
+		return isActive(item.href, item.exact);
 	}
 
 	function handleNavClick(item: NavItem, e: MouseEvent) {
@@ -325,6 +300,9 @@
 
 	function togglePin(): void {
 		railPinned = !railPinned;
+		// Cancel any pending leave-grace; pin makes its outcome irrelevant
+		// and a stray fire could flip railHovered after pinning.
+		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
 		try { localStorage.setItem('lynox-rail-pinned', railPinned ? '1' : '0'); } catch { /* see onMount */ }
 	}
 
@@ -340,7 +318,10 @@
 		railLeaveTimer = setTimeout(() => { railHovered = false; railLeaveTimer = null; }, 150);
 	}
 
-	onDestroy(() => stopVisibilityRefresh?.());
+	onDestroy(() => {
+		stopVisibilityRefresh?.();
+		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
+	});
 
 	$effect(() => {
 		function handleEscape(e: KeyboardEvent) {

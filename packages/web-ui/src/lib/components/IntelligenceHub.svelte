@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { t } from '../i18n.svelte.js';
 	import ContactsView from './ContactsView.svelte';
@@ -8,13 +9,18 @@
 
 	type Tab = 'wissen' | 'graph' | 'contacts' | 'insights';
 
-	let tab = $state<Tab>('wissen');
-
-	$effect(() => {
+	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('tab');
-		if (p === 'graph' || p === 'contacts' || p === 'insights') tab = p;
-		else tab = 'wissen';
-	});
+		if (p === 'graph' || p === 'contacts' || p === 'insights') return p;
+		return 'wissen';
+	})());
+
+	function setTab(next: Tab): void {
+		const url = new URL($page.url);
+		if (next === 'wissen') url.searchParams.delete('tab');
+		else url.searchParams.set('tab', next);
+		void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
+	}
 
 	const tabs: ReadonlyArray<{ id: Tab; labelKey: string }> = [
 		{ id: 'wissen', labelKey: 'hub.intelligence.wissen' },
@@ -30,7 +36,7 @@
 			<button
 				type="button"
 				class="shrink-0 whitespace-nowrap px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-medium transition-colors {tab === t_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
-				onclick={() => (tab = t_item.id)}
+				onclick={() => setTab(t_item.id)}
 			>{t(t_item.labelKey)}</button>
 		{/each}
 	</div>
