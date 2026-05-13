@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import {
 		getInboxCounts,
@@ -18,6 +20,31 @@
 	const touchPrimary = isTouchPrimary();
 	const counts = $derived(getInboxCounts());
 	const snoozedCount = $derived(getSnoozedCount());
+
+	// Reminders due today (task_type='reminder' + next_run_at in today's
+	// local-day window). Fetched once on mount — the typical reminder
+	// volume is too low to warrant a stream. Failure is silent: a missing
+	// "due today" card is preferable to a noisy error toast on this
+	// passive landing surface.
+	interface ReminderRow { id: string; title: string; next_run_at?: string; task_type?: string }
+	let remindersDueToday = $state<ReminderRow[]>([]);
+	onMount(async () => {
+		try {
+			const res = await fetch(`${getApiBase()}/tasks?status=open`);
+			if (!res.ok) return;
+			const data = (await res.json()) as { tasks: ReminderRow[] };
+			const today = new Date();
+			const isToday = (iso: string | undefined): boolean => {
+				if (!iso) return false;
+				const d = new Date(iso);
+				return !Number.isNaN(d.getTime())
+					&& d.getFullYear() === today.getFullYear()
+					&& d.getMonth() === today.getMonth()
+					&& d.getDate() === today.getDate();
+			};
+			remindersDueToday = data.tasks.filter((r) => r.task_type === 'reminder' && isToday(r.next_run_at));
+		} catch { /* silent — passive card, optional */ }
+	});
 
 	const needsItems = $derived(getInboxItems('requires_user').filter((i) => !i.userAction));
 	const topThree = $derived(needsItems.slice(0, 3));
@@ -50,6 +77,27 @@
 					<span>{t('inbox.kopilot_auto_handled').replace('{count}', String(autoCount))}</span>
 				{/if}
 			</div>
+		{/if}
+
+		{#if remindersDueToday.length > 0}
+			<a
+				href="/app/automation?section=reminders"
+				class="mt-4 block rounded-[var(--radius-sm)] border border-accent/30 bg-accent/5 hover:bg-accent/10 px-3 py-2 transition-colors"
+			>
+				<div class="flex items-baseline justify-between gap-2">
+					<p class="text-sm text-accent-text">
+						📌 {(remindersDueToday.length === 1
+							? t('inbox.kopilot_reminders_due_one')
+							: t('inbox.kopilot_reminders_due_many')).replace('{count}', String(remindersDueToday.length))}
+					</p>
+					<span class="text-[11px] text-text-subtle">{t('inbox.kopilot_reminders_all_link')} →</span>
+				</div>
+				<ul class="mt-1.5 space-y-0.5 text-[12px] text-text-muted">
+					{#each remindersDueToday.slice(0, 3) as r (r.id)}
+						<li class="truncate">· {r.title}</li>
+					{/each}
+				</ul>
+			</a>
 		{/if}
 
 		{#if topThree.length > 0}
