@@ -2,6 +2,7 @@
 	import { onDestroy } from 'svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
+	import { clickOutside } from '../utils/click-outside.js';
 	import {
 		closeDraftPane,
 		createDraftForOpenPane,
@@ -514,7 +515,7 @@
 							aria-label={sendLabel}
 							class="flex-1 sm:flex-none rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
 						>{sending ? t('inbox.draft_send_in_flight') : t('inbox.draft_send')} ⌘↵</button>
-						<div class="relative">
+						<div class="relative" use:clickOutside={() => (scheduleMenuOpen = false)}>
 							<button
 								type="button"
 								onclick={() => (scheduleMenuOpen = !scheduleMenuOpen)}
@@ -524,7 +525,7 @@
 								aria-label={t('inbox.draft_schedule_send')}
 								title={t('inbox.draft_schedule_send')}
 								class="rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-2.5 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
-							>⌚</button>
+							>{t('inbox.draft_schedule_send_short')}</button>
 							{#if scheduleMenuOpen}
 								<ul
 									role="menu"

@@ -241,7 +241,7 @@
 				onclick={openReminderPicker}
 				aria-label={t('inbox.action_remind_me')}
 				class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-muted hover:text-text"
-			>📌 {t('inbox.action_remind_me')}</button>
+			>{t("inbox.action_remind_me")}</button>
 			<div class="relative">
 				<button
 					type="button"

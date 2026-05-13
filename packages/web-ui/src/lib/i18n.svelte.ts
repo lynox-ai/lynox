@@ -1152,6 +1152,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.draft_send_in_flight': { de: 'Sende…', en: 'Sending…' },
 	'inbox.draft_send_ok': { de: 'Antwort gesendet', en: 'Reply sent' },
 	'inbox.draft_schedule_send': { de: 'Senden später…', en: 'Schedule send…' },
+	'inbox.draft_schedule_send_short': { de: 'Später', en: 'Later' },
 	'inbox.draft_schedule_tonight': { de: 'Heute Abend (18:00)', en: 'Tonight (6 PM)' },
 	'inbox.draft_schedule_tomorrow': { de: 'Morgen früh (09:00)', en: 'Tomorrow morning (9 AM)' },
 	'inbox.draft_schedule_monday': { de: 'Montag früh (09:00)', en: 'Monday morning (9 AM)' },
