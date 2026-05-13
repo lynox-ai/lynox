@@ -501,6 +501,13 @@ export interface SetSnoozeBody {
   timezone?: string | undefined;
   condition?: string | null | undefined;
   unsnoozeOnReply?: boolean | undefined;
+  /**
+   * When true, the reminder poller fires a notification at unsnooze time
+   * instead of silently resurfacing the item. The flag is auto-cleared on
+   * un-snooze (until=null). Defaults to false — preserves silent-snooze
+   * semantics for callers that don't opt in.
+   */
+  notifyOnUnsnooze?: boolean | undefined;
 }
 
 /**
@@ -627,7 +634,8 @@ export function handleSetSnooze(deps: InboxApiDeps, id: string, body: SetSnoozeB
   }
   const condition = body.condition ?? null;
   const unsnoozeOnReply = body.unsnoozeOnReply ?? true;
-  const ok = deps.state.setSnooze(id, until, condition, unsnoozeOnReply);
+  const notifyOnUnsnooze = body.notifyOnUnsnooze ?? false;
+  const ok = deps.state.setSnooze(id, until, condition, unsnoozeOnReply, notifyOnUnsnooze);
   if (!ok) return notFound('item');
   // Clearing the snooze is logically an undo; logging 'snoozed' on a clear
   // would corrupt the audit trail's meaning. Carry the prior intent in the
@@ -641,6 +649,7 @@ export function handleSetSnooze(deps: InboxApiDeps, id: string, body: SetSnoozeB
       until: until?.toISOString() ?? null,
       condition,
       unsnooze_on_reply: unsnoozeOnReply,
+      notify_on_unsnooze: notifyOnUnsnooze,
     }),
   });
   return { status: 200, body: { ok: true } };

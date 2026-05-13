@@ -235,6 +235,9 @@ interface ItemRow {
   snippet: string | null;
   message_id: string | null;
   in_reply_to: string | null;
+  // v13 reminder columns — 0/null on pre-v13 rows
+  notify_on_unsnooze: number;
+  notified_at: number | null;
 }
 
 interface AuditRow {
@@ -317,6 +320,8 @@ function rowToItem(row: ItemRow): InboxItem {
     snippet: row.snippet ?? undefined,
     messageId: row.message_id ?? undefined,
     inReplyTo: row.in_reply_to ?? undefined,
+    notifyOnUnsnooze: row.notify_on_unsnooze === 1,
+    notifiedAt: row.notified_at !== null ? new Date(row.notified_at) : undefined,
   };
 }
 
@@ -907,19 +912,58 @@ export class InboxStateDb {
     until: Date | null,
     condition: string | null,
     unsnoozeOnReply: boolean = true,
+    notifyOnUnsnooze: boolean = false,
   ): boolean {
     const result = this.db
-      .prepare<[number | null, string | null, number, string], unknown>(
+      .prepare<[number | null, string | null, number, number, string], unknown>(
         `UPDATE inbox_items
-         SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?
+         SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?
          WHERE id = ?`,
       )
       .run(
         until === null ? null : until.getTime(),
         until === null ? null : condition,
         unsnoozeOnReply ? 1 : 0,
+        // Clear the reminder flag when un-snoozing — a manual un-snooze
+        // shouldn't leave the row primed to re-fire on the next snooze.
+        until === null ? 0 : (notifyOnUnsnooze ? 1 : 0),
         id,
       ) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
+   * Items whose reminder is due to fire — `snooze_until <= now` AND the
+   * notify flag is set AND the most recent fire (`notified_at`) is older
+   * than the current snooze. The last condition prevents a re-snooze of
+   * a previously-notified item from re-firing the stale reminder.
+   *
+   * Capped at `limit` to bound a single poller tick — backlog spills to
+   * the next tick rather than flooding the notification channel.
+   */
+  listReminderWakeable(now: Date = new Date(), limit: number = 50): ReadonlyArray<InboxItem> {
+    const rows = this.db
+      .prepare<[number, number], ItemRow>(
+        `SELECT * FROM inbox_items
+         WHERE notify_on_unsnooze = 1
+           AND snooze_until IS NOT NULL
+           AND snooze_until <= ?
+           AND user_action IS NULL
+           AND (notified_at IS NULL OR notified_at < snooze_until)
+         ORDER BY snooze_until ASC
+         LIMIT ?`,
+      )
+      .all(now.getTime(), limit);
+    return rows.map(rowToItem);
+  }
+
+  /** Stamp the fire time so the same wake-up doesn't re-emit. */
+  markReminderNotified(id: string, when: Date = new Date()): boolean {
+    const result = this.db
+      .prepare<[number, string], unknown>(
+        `UPDATE inbox_items SET notified_at = ? WHERE id = ?`,
+      )
+      .run(when.getTime(), id) as { changes: number };
     return result.changes > 0;
   }
 
