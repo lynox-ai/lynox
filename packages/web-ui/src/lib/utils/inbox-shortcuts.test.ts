@@ -29,6 +29,8 @@ describe('keyToInboxAction — wired keys', () => {
 		['R', 'reply'],
 		['Escape', 'close'],
 		['?', 'toggle_help'],
+		['t', 'toggle_triage'],
+		['T', 'toggle_triage'],
 	])('maps %s to %s', (key, expected) => {
 		expect(keyToInboxAction(ev({ key }))?.kind).toBe(expected);
 	});
