@@ -346,7 +346,7 @@ describe('sendInboxReply', () => {
 		installFetch(async () => jsonResponse({ messageId: '<sent@x>', accepted: ['a@x'], rejected: [] }));
 		const result = await sendInboxReply('/api', 'drf_1');
 		expect(result.ok).toBe(true);
-		if (result.ok) {
+		if (result.ok && 'sent' in result) {
 			expect(result.sent.messageId).toBe('<sent@x>');
 			expect(result.sent.accepted).toEqual(['a@x']);
 		}

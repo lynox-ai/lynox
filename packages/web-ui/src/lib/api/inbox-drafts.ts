@@ -254,16 +254,24 @@ export async function sendInboxReply(
 	apiBase: string,
 	draftId: string,
 	body?: string,
-): Promise<{ ok: true; sent: SentReply } | { ok: false; reason: SendReplyFailure }> {
+	scheduledAt?: Date,
+): Promise<{ ok: true; sent: SentReply } | { ok: true; scheduled: { scheduledId: string; scheduledAt: string } } | { ok: false; reason: SendReplyFailure }> {
 	try {
 		const init: RequestInit = { method: 'POST' };
-		if (body !== undefined) {
+		const bodyShape: Record<string, unknown> = {};
+		if (body !== undefined) bodyShape['body'] = body;
+		if (scheduledAt !== undefined) bodyShape['scheduledAt'] = scheduledAt.toISOString();
+		if (Object.keys(bodyShape).length > 0) {
 			init.headers = { 'Content-Type': 'application/json' };
-			init.body = JSON.stringify({ body });
+			init.body = JSON.stringify(bodyShape);
 		}
 		const res = await fetch(`${apiBase}/inbox/drafts/${encodeURIComponent(draftId)}/send`, init);
 		if (res.ok) {
-			const data = (await res.json()) as Partial<SentReply>;
+			const data = (await res.json()) as Partial<SentReply> & Partial<{ scheduled: boolean; scheduledId: string; scheduledAt: string }>;
+			// 202 + scheduled response distinguishes "queued" from "sent now".
+			if (data.scheduled === true && typeof data.scheduledId === 'string' && typeof data.scheduledAt === 'string') {
+				return { ok: true, scheduled: { scheduledId: data.scheduledId, scheduledAt: data.scheduledAt } };
+			}
 			if (typeof data.messageId !== 'string') return { ok: false, reason: { kind: 'network' } };
 			return {
 				ok: true,
