@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { clickOutside } from '../utils/click-outside.js';
 	import {
 		closeItem,
 		getSelectedFull,
@@ -205,8 +206,8 @@
 							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
 							onclick={openReminderPicker}
 							aria-label={t('inbox.action_remind_me')}
-						>📌 {t('inbox.action_remind_me')}</button>
-						<div class="relative">
+						>{t("inbox.action_remind_me")}</button>
+						<div class="relative" use:clickOutside={() => (snoozeOpen = false)}>
 							<button
 								type="button"
 								class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
@@ -272,8 +273,8 @@
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
 						onclick={openReminderPicker}
 						aria-label={t('inbox.action_remind_me')}
-					>📌 {t('inbox.action_remind_me')}</button>
-					<div class="relative">
+					>{t("inbox.action_remind_me")}</button>
+					<div class="relative" use:clickOutside={() => (snoozeOpen = false)}>
 						<button
 							type="button"
 							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"

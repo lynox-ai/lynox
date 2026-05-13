@@ -86,7 +86,7 @@
 			>
 				<div class="flex items-baseline justify-between gap-2">
 					<p class="text-sm text-accent-text">
-						📌 {(remindersDueToday.length === 1
+						{(remindersDueToday.length === 1
 							? t('inbox.kopilot_reminders_due_one')
 							: t('inbox.kopilot_reminders_due_many')).replace('{count}', String(remindersDueToday.length))}
 					</p>
