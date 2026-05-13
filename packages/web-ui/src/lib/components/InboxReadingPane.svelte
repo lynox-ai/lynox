@@ -79,12 +79,24 @@
 		closeItem();
 	}
 
+	// `notifyOnUnsnoozeOnNext` lets the same date-picker drive either a
+	// silent snooze or an active reminder — set true before the user picks
+	// a preset by the "📌 Erinner mich" button, false otherwise.
+	let notifyOnUnsnoozeOnNext = $state(false);
+
 	async function onSnoozePreset(preset: SnoozePreset): Promise<void> {
 		if (!full) return;
 		snoozeOpen = false;
-		await setItemSnooze(full.item.id, null, null, true, preset);
+		const notify = notifyOnUnsnoozeOnNext;
+		notifyOnUnsnoozeOnNext = false;
+		await setItemSnooze(full.item.id, null, null, true, preset, notify);
 		onActionApplied?.();
 		closeItem();
+	}
+
+	function openReminderPicker(): void {
+		notifyOnUnsnoozeOnNext = true;
+		snoozeOpen = true;
 	}
 
 	const snoozePresets: ReadonlyArray<{ label: string; preset: SnoozePreset }> = $derived([
@@ -188,11 +200,17 @@
 							onclick={() => void onArchive()}
 							aria-label={t('inbox.action_archive')}
 						>{t('inbox.action_archive')}</button>
+						<button
+							type="button"
+							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
+							onclick={openReminderPicker}
+							aria-label={t('inbox.action_remind_me')}
+						>📌 {t('inbox.action_remind_me')}</button>
 						<div class="relative">
 							<button
 								type="button"
 								class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
-								onclick={() => (snoozeOpen = !snoozeOpen)}
+								onclick={() => { notifyOnUnsnoozeOnNext = false; snoozeOpen = !snoozeOpen; }}
 								aria-expanded={snoozeOpen}
 								aria-haspopup="menu"
 								aria-label={t('inbox.action_snooze')}
@@ -249,11 +267,17 @@
 						onclick={() => void onArchive()}
 						aria-label={t('inbox.action_archive')}
 					>{t('inbox.action_archive')}</button>
+					<button
+						type="button"
+						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
+						onclick={openReminderPicker}
+						aria-label={t('inbox.action_remind_me')}
+					>📌 {t('inbox.action_remind_me')}</button>
 					<div class="relative">
 						<button
 							type="button"
 							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
-							onclick={() => (snoozeOpen = !snoozeOpen)}
+							onclick={() => { notifyOnUnsnoozeOnNext = false; snoozeOpen = !snoozeOpen; }}
 							aria-expanded={snoozeOpen}
 							aria-haspopup="menu"
 							aria-label={t('inbox.action_snooze')}
