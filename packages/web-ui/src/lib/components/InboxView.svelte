@@ -40,6 +40,7 @@
 	import { inboxHeadline } from '../utils/inbox-headline.js';
 	import { keyToInboxAction, shouldIgnoreShortcut } from '../utils/inbox-shortcuts.js';
 	import { isTouchPrimary } from '../utils/touch-detect.js';
+	import Checkbox from '../primitives/Checkbox.svelte';
 	import ColdStartBanner from './ColdStartBanner.svelte';
 	import DraftReplyPane from './DraftReplyPane.svelte';
 	import InboxBulkBar from './InboxBulkBar.svelte';
@@ -575,16 +576,13 @@
 										class="rounded-[var(--radius-sm)] border transition-colors {isActiveSelection ? 'border-accent bg-accent/5' : 'border-transparent hover:border-border hover:bg-bg-subtle/60'}"
 									>
 										<div class="flex items-start gap-2 px-2 py-2">
-											<input
-												type="checkbox"
-												class="mt-1 shrink-0 cursor-pointer"
-												checked={isSelectedForBulk(item.id)}
-												onclick={(e) => {
-													const evt = e as MouseEvent;
-													toggleBulkSelection(item.id, visibleIds, evt.shiftKey);
-												}}
-												aria-label={`Auswählen: ${item.subject || item.reasonDe}`}
-											/>
+											<div class="mt-1">
+												<Checkbox
+													checked={isSelectedForBulk(item.id)}
+													onclick={(e) => toggleBulkSelection(item.id, visibleIds, e.shiftKey)}
+													ariaLabel={`Auswählen: ${item.subject || item.reasonDe}`}
+												/>
+											</div>
 											<button
 												type="button"
 												class="min-w-0 flex-1 text-left cursor-pointer"
