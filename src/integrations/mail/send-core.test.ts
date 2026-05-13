@@ -290,3 +290,50 @@ describe('buildSendPreview', () => {
     expect(preview).toContain('6 recipients');
   });
 });
+
+describe('sendMail — recordSentMail integration', () => {
+  it('writes one mail_sent_log row per successful send when ctx is wired', async () => {
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    const recordSentMail = vi.fn();
+    const ctx = {
+      stateDb: { recordSentMail },
+      getAccountConfig: () => null,
+    } as unknown as import('./context.js').MailContext;
+    const input: SendCoreInput = {
+      to: [RECIPIENT],
+      subject: 'logged',
+      body: 'body',
+      inReplyTo: '<orig@x>',
+    };
+    const result = await sendMail(registry, input, {}, ctx);
+    expect(result.ok).toBe(true);
+    expect(recordSentMail).toHaveBeenCalledTimes(1);
+    const args = recordSentMail.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(args.accountId).toBe('acct-1');
+    expect(args.messageId).toBe('<sent@x>');
+    expect(args.subject).toBe('logged');
+    expect(args.bodyChars).toBe(4);
+    expect(args.inReplyTo).toBe('<orig@x>');
+  });
+
+  it('does not call recordSentMail when ctx is undefined (CLI/headless callers)', async () => {
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    const result = await sendMail(registry, { to: [RECIPIENT], subject: 's', body: 'b' }, {});
+    expect(result.ok).toBe(true);
+  });
+
+  it('swallows recordSentMail throws — observational write must not fail the user-visible send', async () => {
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    const recordSentMail = vi.fn(() => { throw new Error('disk full'); });
+    const ctx = {
+      stateDb: { recordSentMail },
+      getAccountConfig: () => null,
+    } as unknown as import('./context.js').MailContext;
+    const result = await sendMail(registry, { to: [RECIPIENT], subject: 's', body: 'b' }, {}, ctx);
+    expect(result.ok).toBe(true);
+    expect(recordSentMail).toHaveBeenCalledTimes(1);
+  });
+});

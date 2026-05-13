@@ -354,6 +354,60 @@ export function handleListItemAudit(deps: InboxApiDeps, id: string): ApiResponse
   return { status: 200, body: { entries: deps.state.listAuditForItem(id) } };
 }
 
+/**
+ * Mail-Context-Sidebar backing endpoint (PRD-INBOX-PHASE-4 §Mail-Context-
+ * Sidebar). Deterministic, no LLM. All four sections come from local
+ * state: same-sender items, open follow-ups by recipient, outbound
+ * history (mail_sent_log), and active mail-anchored reminders.
+ *
+ * Sections are independent — a missing mail-context (older instance,
+ * no outbound writes yet) returns empty arrays rather than failing the
+ * whole envelope. UI hides empty sections inline (PRD §"per-section
+ * empty states").
+ */
+export function handleGetItemContext(deps: InboxApiDeps, id: string): ApiResponse {
+  const item = deps.state.getItem(id);
+  if (!item) return notFound('item');
+  // RFC 5321 §4.5.3 caps the local + domain at 320 chars; anything longer
+  // is either malformed envelope data or a crafted DoS amplifier feeding
+  // the LIKE-over-JSON path. Reject the lookup but still return the
+  // (capped) sender so the UI renders something rather than 500.
+  const fromValid = item.fromAddress.length > 0 && item.fromAddress.length <= 320;
+  const recentThreads = fromValid
+    ? deps.state.listRecentByFromAddress(item.fromAddress, {
+        excludeItemId: id,
+        tenantId: item.tenantId,
+        limit: 5,
+      })
+    : [];
+  const reminders = fromValid
+    ? deps.state.listActiveRemindersByFromAddress(item.fromAddress, {
+        excludeItemId: id,
+        tenantId: item.tenantId,
+        limit: 5,
+      })
+    : [];
+  const openFollowups = fromValid && deps.mailContext
+    ? deps.mailContext.stateDb.listOpenFollowupsForRecipient(item.fromAddress, 5)
+    : [];
+  const outboundHistory = fromValid && deps.mailContext
+    ? deps.mailContext.stateDb.listOutboundForAddress(item.fromAddress, {
+        tenantId: item.tenantId,
+        limit: 5,
+      })
+    : [];
+  return {
+    status: 200,
+    body: {
+      sender: { address: item.fromAddress, name: item.fromName ?? null },
+      recentThreads,
+      openFollowups,
+      outboundHistory,
+      reminders,
+    },
+  };
+}
+
 export function handleGetCounts(deps: InboxApiDeps, query: { tenantId?: string | undefined } = {}): ApiResponse {
   // `counts` keeps its three-zone shape for back-compat with the existing
   // smoke spec and clients reading the contract. `snoozed` rides alongside

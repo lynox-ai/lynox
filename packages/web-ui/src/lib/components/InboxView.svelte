@@ -45,6 +45,7 @@
 	import DraftReplyPane from './DraftReplyPane.svelte';
 	import InboxBulkBar from './InboxBulkBar.svelte';
 	import InboxComposePane from './InboxComposePane.svelte';
+	import InboxContextSidebar from './InboxContextSidebar.svelte';
 	import InboxKopilotCard from './InboxKopilotCard.svelte';
 	import InboxReadingPane from './InboxReadingPane.svelte';
 	import InboxSearchBar from './InboxSearchBar.svelte';
@@ -66,6 +67,8 @@
 	// Gate items-fetch on counts-loaded so the $effect below doesn't race
 	// onMount's initial load (without this the bucket gets fetched twice).
 	let countsLoaded = $state(false);
+	// Mail-Context-Sidebar drawer state (md/sm). Always-visible split on lg+.
+	let contextOpen = $state(false);
 	const touchPrimary = isTouchPrimary();
 
 	let cleanupVisibility: (() => void) | undefined;
@@ -653,21 +656,60 @@
 			</div>
 		</div>
 
-		<!-- Reader column (md+): defaults to Kopilot card, swaps to ReadingPane when an item is selected. -->
+		<!-- Reader column (md+): defaults to Kopilot card, swaps to ReadingPane when an item is selected.
+			Mail-Context-Sidebar mounts ONCE — its wrapper switches between an
+			lg+ inline split column and an md/sm drawer overlay via CSS-only
+			positioning so the component fetches context exactly once per item. -->
 		<div
-			class="{readingOpen ? 'flex' : 'hidden md:flex'} flex-1 flex-col min-w-0 overflow-hidden"
+			class="{readingOpen ? 'flex' : 'hidden md:flex'} flex-1 min-w-0 overflow-hidden"
 		>
+			<div class="flex flex-1 flex-col min-w-0 overflow-hidden relative">
+				{#if readingOpen}
+					<InboxReadingPane
+						onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
+						onActionApplied={refreshAfterAction}
+						showBack
+					/>
+					<!-- Drawer toggle (md/sm only). Hidden on lg+ where the sidebar is split. -->
+					<button
+						type="button"
+						class="absolute right-3 top-3 lg:hidden rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-subtle hover:text-text hover:border-border-hover"
+						onclick={() => (contextOpen = !contextOpen)}
+						aria-pressed={contextOpen}
+						aria-label={contextOpen ? t('inbox.context_sidebar_close') : t('inbox.context_sidebar_open')}
+					>≡</button>
+					{#if contextOpen}
+						<!-- md/sm-only backdrop; tap-outside closes. The sidebar itself
+							lives in the lg+ split column below and is positioned over
+							this backdrop on smaller viewports. -->
+						<button
+							type="button"
+							class="absolute inset-0 z-10 lg:hidden bg-bg/40 cursor-default"
+							aria-label={t('inbox.context_sidebar_close')}
+							onclick={() => (contextOpen = false)}
+						></button>
+					{/if}
+				{:else}
+					<InboxKopilotCard
+						onPickItem={pickItem}
+						onStartTriage={startTriage}
+					/>
+				{/if}
+			</div>
 			{#if readingOpen}
-				<InboxReadingPane
-					onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
-					onActionApplied={refreshAfterAction}
-					showBack
-				/>
-			{:else}
-				<InboxKopilotCard
-					onPickItem={pickItem}
-					onStartTriage={startTriage}
-				/>
+				<!-- Sidebar wrapper: inline split on lg+, absolutely-positioned drawer
+					on md/sm. Single mount → single context fetch per item. -->
+				<div
+					class="
+						{contextOpen ? 'absolute z-20 right-0 top-0 h-full w-[85%] max-w-[360px] shadow-xl' : 'hidden'}
+						lg:relative lg:flex lg:z-auto lg:right-auto lg:top-auto lg:h-auto lg:w-[360px] xl:lg:w-[400px] lg:shrink-0 lg:shadow-none lg:max-w-none
+					"
+				>
+					<InboxContextSidebar
+						itemId={getSelectedItemId()}
+						onClose={contextOpen ? () => (contextOpen = false) : undefined}
+					/>
+				</div>
 			{/if}
 		</div>
 	{/if}

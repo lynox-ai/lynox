@@ -31,6 +31,7 @@ import {
 } from './provider.js';
 import type { MailContext } from './context.js';
 import type { MailProvider } from './provider.js';
+import type { SentMailLogInput } from './state.js';
 import { resolveProvider, type MailRegistry } from './tools/registry.js';
 import {
   checkMailRateLimit,
@@ -222,6 +223,30 @@ export async function sendMail(
         // Follow-up registration failure must not fail the send itself.
         followupId = null;
       }
+    }
+  }
+
+  // Persist outbound for the Mail-Context-Sidebar. Observational data —
+  // a write failure must never roll back the user-visible send. Logged
+  // at debug so persistent schema/permission breakage stays diagnosable
+  // (silent swallow once cost us a week of missing sidebar history).
+  if (ctx) {
+    try {
+      const sentLogInput: SentMailLogInput = {
+        accountId: provider.accountId,
+        messageId: result.messageId || `local-${String(Date.now())}`,
+        to: input.to,
+        cc,
+        bcc,
+        subject: input.subject,
+        bodyChars: input.body.length,
+      };
+      if (input.inReplyTo !== undefined) sentLogInput.inReplyTo = input.inReplyTo;
+      if (followupId !== null) sentLogInput.followupId = followupId;
+      ctx.stateDb.recordSentMail(sentLogInput);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.debug(`[mail/send-core] recordSentMail failed: ${msg}`);
     }
   }
 
