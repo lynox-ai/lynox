@@ -14,6 +14,8 @@
 	import SetupBanner from './SetupBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
+	import { isSessionExpired, clearSessionExpired } from '../stores/session.svelte.js';
+	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import type { Snippet } from 'svelte';
 
 	let { children, userSlot }: {
@@ -198,6 +200,11 @@
 	let inboxEnabled = $state(false);
 
 	onMount(async () => {
+		// Catch any /api/* 401 globally so a Safari-PWA cookie eviction
+		// (or 30-day TTL expiry) surfaces as "Session abgelaufen" instead
+		// of generic "Laden fehlgeschlagen" toasts in every view.
+		installApiFetchInterceptor();
+
 		// /inbox/counts returns 503 when the flag is off; treating ok=true as
 		// "enabled" mirrors the store's own probe (see inbox.svelte.ts).
 		try {
@@ -649,6 +656,28 @@
 
 			<!-- Setup warnings -->
 			<SetupBanner />
+
+			<!-- Session-expired banner — fires when any /api/* 401s. Common
+				cause is Safari PWA cookie eviction; engine itself is fine. -->
+			{#if isSessionExpired()}
+				<div class="border-b border-warning bg-warning-subtle px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+					<div class="text-[12px] text-warning">
+						<strong>{t('session.expired_title')}</strong>
+						<span class="ml-2 text-text-muted">{t('session.expired_hint')}</span>
+					</div>
+					<div class="flex items-center gap-2">
+						<button
+							type="button"
+							onclick={() => clearSessionExpired()}
+							class="text-[11px] text-text-subtle hover:text-text px-2 py-1"
+						>{t('session.dismiss')}</button>
+						<a
+							href="/login"
+							class="rounded-[var(--radius-sm)] bg-accent text-text px-3 py-1.5 text-[11px] hover:opacity-90"
+						>{t('session.relogin')}</a>
+					</div>
+				</div>
+			{/if}
 
 			<!-- Main Content -->
 			<main class="flex-1 min-w-0 flex flex-col overflow-hidden">
