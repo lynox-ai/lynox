@@ -605,6 +605,11 @@
 												onclick={() => {
 													selectedItemId = item.id;
 													void openItem(item.id);
+													// Draft-ready zone short-circuit: the whole point of
+													// this zone is "lynox already drafted a reply" — auto-
+													// open the draft pane so the user sees + edits + sends
+													// in one click instead of three.
+													if (zone === 'draft_ready') void openDraftPane(item.id);
 												}}
 												aria-label={`${t('inbox.reading_open')}: ${item.subject || item.reasonDe}`}
 											>
@@ -682,23 +687,18 @@
 						onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
 						onActionApplied={refreshAfterAction}
 						showBack
+						{contextCollapsed}
+						onToggleContext={toggleContextCollapsed}
 					/>
-					<!-- Context toggle: drawer on md/sm, collapse on lg+. Single
-						button, viewport-aware behaviour so the action sits in the
-						same place. Monochrome chevron — no emoji. -->
+					<!-- md/sm-only drawer trigger — lg+ uses the chevron inside the
+						reading-pane header so it never overlaps action buttons. -->
 					<button
 						type="button"
-						class="absolute right-3 top-3 z-30 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-subtle hover:text-text hover:border-border-hover"
-						onclick={() => {
-							if (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches) {
-								toggleContextCollapsed();
-							} else {
-								contextOpen = !contextOpen;
-							}
-						}}
-						aria-pressed={contextOpen || !contextCollapsed}
-						aria-label={contextCollapsed ? t('inbox.context_sidebar_open') : t('inbox.context_sidebar_close')}
-					>{contextCollapsed ? '‹' : '›'}</button>
+						class="absolute right-3 top-3 z-30 lg:hidden rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-subtle hover:text-text hover:border-border-hover"
+						onclick={() => (contextOpen = !contextOpen)}
+						aria-pressed={contextOpen}
+						aria-label={contextOpen ? t('inbox.context_sidebar_close') : t('inbox.context_sidebar_open')}
+					>≡</button>
 					{#if contextOpen}
 						<!-- md/sm-only backdrop; tap-outside closes. -->
 						<button
