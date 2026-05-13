@@ -156,6 +156,7 @@ export class Engine {
   private _toolContext: ToolContext;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
+  private _scheduledSendPoller: import('../integrations/mail/mail-scheduled-poller.js').ScheduledSendPoller | null = null;
   private _inboxRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
   private _whatsappContext: import('../integrations/whatsapp/context.js').WhatsAppContext | null = null;
   private _lastBatchParentId: string | null = null;
@@ -612,6 +613,16 @@ export class Engine {
           this.registry.register(tool);
         }
         this._mailContext = mailCtx;
+        // v14 Send Later — start the scheduled-send poller so queued
+        // mails fire at their scheduled time. Wired here (after MailContext
+        // init so the registry is populated) and stopped on engine shutdown
+        // via the mail-context lifecycle.
+        const { startScheduledSendPoller } = await import('../integrations/mail/mail-scheduled-poller.js');
+        const scheduledPoller = startScheduledSendPoller({
+          state: mailStateDb,
+          registry: mailCtx.registry,
+        });
+        this._scheduledSendPoller = scheduledPoller;
       }
     } catch {
       // Mail init failed — non-critical, continue without it
@@ -1069,6 +1080,13 @@ export class Engine {
     if (this._inboxRuntime) {
       try { await this._inboxRuntime.shutdown(); } catch { /* best-effort */ }
       this._inboxRuntime = null;
+    }
+
+    // Stop the scheduled-send poller — bounded interval, no in-flight
+    // work to drain (sendMail awaits per-row inside the tick).
+    if (this._scheduledSendPoller) {
+      this._scheduledSendPoller.stop();
+      this._scheduledSendPoller = null;
     }
 
     // Stop prompt cleanup timer

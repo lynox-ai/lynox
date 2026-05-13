@@ -982,6 +982,14 @@ export interface SendInboxReplyBody {
    */
   cc?: ReadonlyArray<string> | undefined;
   bcc?: ReadonlyArray<string> | undefined;
+  /**
+   * Send Later — when set to a future ISO timestamp, queue the send into
+   * `mail_scheduled` instead of firing immediately. The mail-scheduled
+   * poller picks it up at the scheduled time. Past + invalid values
+   * return 400 — sending in the past is the same as "now" and that's
+   * what the unset case is for.
+   */
+  scheduledAt?: string | undefined;
 }
 
 export async function handleSendInboxReply(
@@ -1057,6 +1065,32 @@ export async function handleSendInboxReply(
   // v1 we just set References = inReplyTo, which is the most common
   // single-message-deep reply shape.
   if (envelope.messageId) coreInput.references = envelope.messageId;
+
+  // Send Later — short-circuit before sendMail when scheduledAt set.
+  if (body.scheduledAt !== undefined) {
+    const scheduledAt = new Date(body.scheduledAt);
+    if (Number.isNaN(scheduledAt.getTime())) return bad('invalid scheduledAt: not an ISO date');
+    if (scheduledAt.getTime() <= Date.now()) return bad('scheduledAt must be in the future');
+    const scheduledInput: import('../mail/state.js').ScheduledSendInput = {
+      accountId: provider.accountId,
+      to: coreInput.to,
+      subject,
+      bodyMd: replyBody,
+      scheduledAt,
+      replyInboxItemId: item.id,
+    };
+    if (envelope.messageId) scheduledInput.inReplyTo = envelope.messageId;
+    const scheduledId = mailCtx.stateDb.insertScheduledSend(scheduledInput);
+    return {
+      status: 202,
+      body: {
+        ok: true,
+        scheduled: true,
+        scheduledId,
+        scheduledAt: scheduledAt.toISOString(),
+      },
+    };
+  }
 
   // Keep the cross-session rate-limit gate: it's the account-wide
   // ceiling that protects against a stolen-session spam-vector

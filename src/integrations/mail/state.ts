@@ -9,10 +9,11 @@
 // per-module-DB pattern as vault.db, run-history.db and agent-memory.db.
 
 import Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { getLynoxDir } from '../../core/config.js';
 import { ensureDirSync } from '../../core/atomic-write.js';
-import type { MailAccountConfig, MailAccountType, MailAuthType, MailEnvelope, MailPresetSlug } from './provider.js';
+import type { MailAccountConfig, MailAccountType, MailAuthType, MailAddress, MailEnvelope, MailPresetSlug } from './provider.js';
 import { isValidAccountType, isValidAuthType } from './provider.js';
 
 function defaultDbPath(): string {
@@ -466,6 +467,48 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_inbox_items_reminder_wake
      ON inbox_items(tenant_id, notify_on_unsnooze, snooze_until)
      WHERE notify_on_unsnooze = 1 AND snooze_until IS NOT NULL;`,
+
+  // v14: Send Later — outbound mails queued for future delivery.
+  //
+  // mail_scheduled rows are written by the API when the user picks
+  // "Senden später" + a future timestamp. A 60s poller (mail-scheduled-
+  // poller.ts) picks up rows where scheduled_at <= now AND sent_at IS NULL
+  // AND failed_at IS NULL, hands them to the same sendMail() pipeline used
+  // by immediate sends.
+  //
+  // Failure semantics: attempts is incremented on every fire; after
+  // MAX_SCHEDULED_ATTEMPTS the row is marked failed (failed_at + fail_reason
+  // set) and stays in the table for UI visibility. The user can re-queue
+  // via UI which inserts a fresh row.
+  //
+  // No FK to inbox_items on reply_inbox_item_id because compose-fresh
+  // (no inbox-thread parent) uses NULL. The partial index makes the
+  // poller's hot query O(log n) over due rows only.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (14);
+
+   CREATE TABLE IF NOT EXISTS mail_scheduled (
+     id TEXT PRIMARY KEY,
+     tenant_id TEXT NOT NULL DEFAULT 'default',
+     account_id TEXT NOT NULL,
+     to_json TEXT NOT NULL,
+     cc_json TEXT,
+     bcc_json TEXT,
+     subject TEXT NOT NULL,
+     body_md TEXT NOT NULL,
+     in_reply_to TEXT,
+     reply_inbox_item_id TEXT,
+     scheduled_at INTEGER NOT NULL,
+     created_at INTEGER NOT NULL,
+     sent_at INTEGER,
+     failed_at INTEGER,
+     fail_reason TEXT,
+     attempts INTEGER NOT NULL DEFAULT 0
+   );
+   CREATE INDEX IF NOT EXISTS idx_mail_scheduled_due
+     ON mail_scheduled(scheduled_at)
+     WHERE sent_at IS NULL AND failed_at IS NULL;
+   CREATE INDEX IF NOT EXISTS idx_mail_scheduled_account
+     ON mail_scheduled(account_id, created_at DESC);`,
 ];
 
 export interface MailStateDbOptions {
@@ -539,6 +582,83 @@ export interface MailFollowupInput {
   reminderAt: Date;
   expectedBy?: Date | undefined;
   source?: MailFollowupSource | undefined;
+}
+
+// ── mail_scheduled types (Send Later, v14) ──────────────────────────────
+
+export interface ScheduledSendInput {
+  tenantId?: string | undefined;
+  accountId: string;
+  to: ReadonlyArray<MailAddress>;
+  cc?: ReadonlyArray<MailAddress> | undefined;
+  bcc?: ReadonlyArray<MailAddress> | undefined;
+  subject: string;
+  bodyMd: string;
+  /** RFC 5322 in-reply-to for thread-replies. Null on compose-fresh. */
+  inReplyTo?: string | undefined;
+  /** Inbox item the user clicked Send-Later from. Null on compose-fresh. */
+  replyInboxItemId?: string | undefined;
+  /** When the poller should fire the send. Must be in the future. */
+  scheduledAt: Date;
+}
+
+export interface ScheduledSend {
+  id: string;
+  tenantId: string;
+  accountId: string;
+  to: ReadonlyArray<MailAddress>;
+  cc: ReadonlyArray<MailAddress>;
+  bcc: ReadonlyArray<MailAddress>;
+  subject: string;
+  bodyMd: string;
+  inReplyTo: string | undefined;
+  replyInboxItemId: string | undefined;
+  scheduledAt: Date;
+  createdAt: Date;
+  sentAt: Date | undefined;
+  failedAt: Date | undefined;
+  failReason: string | undefined;
+  attempts: number;
+}
+
+interface ScheduledSendRow {
+  id: string;
+  tenant_id: string;
+  account_id: string;
+  to_json: string;
+  cc_json: string | null;
+  bcc_json: string | null;
+  subject: string;
+  body_md: string;
+  in_reply_to: string | null;
+  reply_inbox_item_id: string | null;
+  scheduled_at: number;
+  created_at: number;
+  sent_at: number | null;
+  failed_at: number | null;
+  fail_reason: string | null;
+  attempts: number;
+}
+
+function rowToScheduledSend(row: ScheduledSendRow): ScheduledSend {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    accountId: row.account_id,
+    to: JSON.parse(row.to_json) as MailAddress[],
+    cc: row.cc_json ? (JSON.parse(row.cc_json) as MailAddress[]) : [],
+    bcc: row.bcc_json ? (JSON.parse(row.bcc_json) as MailAddress[]) : [],
+    subject: row.subject,
+    bodyMd: row.body_md,
+    inReplyTo: row.in_reply_to ?? undefined,
+    replyInboxItemId: row.reply_inbox_item_id ?? undefined,
+    scheduledAt: new Date(row.scheduled_at),
+    createdAt: new Date(row.created_at),
+    sentAt: row.sent_at !== null ? new Date(row.sent_at) : undefined,
+    failedAt: row.failed_at !== null ? new Date(row.failed_at) : undefined,
+    failReason: row.fail_reason ?? undefined,
+    attempts: row.attempts,
+  };
 }
 
 interface FollowupRow {
@@ -972,6 +1092,120 @@ export class MailStateDb {
       )
       .all(accountId);
     return rows.map(rowToFollowup);
+  }
+
+  // ── mail_scheduled (Send Later, v14) ──────────────────────────────────
+
+  /**
+   * Insert a queued send. Returns the row id (UUIDv4-ish slice). Caller
+   * has already validated `scheduledAt` is in the future + the payload
+   * fields; this layer is pure persistence.
+   */
+  insertScheduledSend(input: ScheduledSendInput): string {
+    const id = randomUUID().slice(0, 12);
+    this.db
+      .prepare<[string, string, string, string, string | null, string | null, string, string, string | null, string | null, number, number], unknown>(
+        `INSERT INTO mail_scheduled (
+           id, tenant_id, account_id, to_json, cc_json, bcc_json,
+           subject, body_md, in_reply_to, reply_inbox_item_id,
+           scheduled_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.tenantId ?? 'default',
+        input.accountId,
+        JSON.stringify(input.to),
+        input.cc ? JSON.stringify(input.cc) : null,
+        input.bcc ? JSON.stringify(input.bcc) : null,
+        input.subject,
+        input.bodyMd,
+        input.inReplyTo ?? null,
+        input.replyInboxItemId ?? null,
+        input.scheduledAt.getTime(),
+        Date.now(),
+      );
+    return id;
+  }
+
+  /**
+   * Items the poller should fire — `scheduled_at <= now`, not yet sent,
+   * not yet permanently failed. Capped per call so a backlog spills to
+   * the next tick rather than flooding SMTP.
+   */
+  listDueScheduledSends(now: Date = new Date(), limit: number = 25): ReadonlyArray<ScheduledSend> {
+    const rows = this.db
+      .prepare<[number, number], ScheduledSendRow>(
+        `SELECT * FROM mail_scheduled
+         WHERE scheduled_at <= ?
+           AND sent_at IS NULL
+           AND failed_at IS NULL
+         ORDER BY scheduled_at ASC
+         LIMIT ?`,
+      )
+      .all(now.getTime(), limit);
+    return rows.map(rowToScheduledSend);
+  }
+
+  /** Mark a scheduled send as delivered. Stamps sent_at + bumps attempts. */
+  markScheduledSent(id: string, when: Date = new Date()): boolean {
+    const result = this.db
+      .prepare<[number, string], unknown>(
+        `UPDATE mail_scheduled
+         SET sent_at = ?, attempts = attempts + 1
+         WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL`,
+      )
+      .run(when.getTime(), id) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
+   * Increment the attempt counter on a transient failure. The poller
+   * will retry the row on the next tick. After MAX_SCHEDULED_ATTEMPTS
+   * the caller should switch to `markScheduledFailed` instead.
+   */
+  bumpScheduledAttempt(id: string): number {
+    const row = this.db
+      .prepare<[string], { attempts: number }>(
+        `UPDATE mail_scheduled SET attempts = attempts + 1
+         WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL
+         RETURNING attempts`,
+      )
+      .get(id);
+    return row?.attempts ?? 0;
+  }
+
+  /** Mark a scheduled send permanently failed — no further retries. */
+  markScheduledFailed(id: string, reason: string, when: Date = new Date()): boolean {
+    const result = this.db
+      .prepare<[number, string, string], unknown>(
+        `UPDATE mail_scheduled
+         SET failed_at = ?, fail_reason = ?
+         WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL`,
+      )
+      .run(when.getTime(), reason, id) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /** List queued sends for an account — used by the UI to show outbox. */
+  listScheduledForAccount(accountId: string, limit: number = 50): ReadonlyArray<ScheduledSend> {
+    const rows = this.db
+      .prepare<[string, number], ScheduledSendRow>(
+        `SELECT * FROM mail_scheduled WHERE account_id = ?
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(accountId, limit);
+    return rows.map(rowToScheduledSend);
+  }
+
+  /** Cancel a not-yet-sent row — UI delete-from-outbox path. */
+  cancelScheduledSend(id: string): boolean {
+    const result = this.db
+      .prepare<[string], unknown>(
+        `DELETE FROM mail_scheduled WHERE id = ? AND sent_at IS NULL`,
+      )
+      .run(id) as { changes: number };
+    return result.changes > 0;
   }
 
   close(): void {
