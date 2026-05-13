@@ -83,6 +83,14 @@ export interface InboxItem {
   messageId: string | undefined;
   /** Parent Message-ID for sibling reverse-lookup. */
   inReplyTo: string | undefined;
+  // ── v13 reminder fields ────────────────────────────────────────────────
+  /** When true, the reminder poller fires a notification at unsnooze time
+   *  instead of silently resurfacing. Set via setSnooze with the flag. */
+  notifyOnUnsnooze: boolean;
+  /** Last time the poller emitted a notification for this item. Used so a
+   *  re-snooze + unsnooze of the same item doesn't re-fire the stale
+   *  reminder — only fires when the current snooze_until > notified_at. */
+  notifiedAt: Date | undefined;
 }
 
 export interface InboxAuditEntry {

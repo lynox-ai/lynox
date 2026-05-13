@@ -668,6 +668,9 @@ export class Engine {
         if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
         if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
         if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
+        // Wire the notification router so the reminder poller can fire
+        // push when notify_on_unsnooze items wake up.
+        bootOpts.notificationRouter = this._notificationRouter;
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured

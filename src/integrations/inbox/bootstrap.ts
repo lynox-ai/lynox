@@ -20,10 +20,12 @@ import {
 import { createMistralEuLLMCaller } from './classifier/llm-mistral.js';
 import type { ClassifierQueue } from './classifier/queue.js';
 import { runColdStartForAccount } from './cold-start-adapter.js';
+import type { NotificationRouter } from '../../core/notification-router.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxContactResolver } from './contact-resolver.js';
 import { InboxCostBudget, type InboxCostBudgetOptions } from './cost-budget.js';
 import { GenerateRateLimiter } from './generate-rate-limit.js';
+import { startReminderPoller, type ReminderPoller } from './inbox-reminder-poller.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import {
   buildInboxRunner,
@@ -119,6 +121,13 @@ export interface BootstrapInboxOptions {
    */
   requireUsAck?: boolean | undefined;
   privacyAck?: boolean | undefined;
+  /** When wired, the reminder poller is started on bootstrap and stopped
+   *  on runtime.shutdown(). Absent in tests + no-notification deployments
+   *  — the inbox still works, reminders just don't fire push (mail still
+   *  resurfaces in the requires_user bucket). */
+  notificationRouter?: NotificationRouter | undefined;
+  /** Override the poller cadence (tests pass small values). */
+  reminderPollIntervalMs?: number | undefined;
 }
 
 export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
@@ -234,6 +243,22 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     await runColdStartForAccount(adapterOpts);
   };
 
+  // Wire the reminder poller when a notification router is available. The
+  // poller is the only path that turns a `notify_on_unsnooze` flag into a
+  // user-visible push — without it the flag is set but silent (mail still
+  // resurfaces in the requires_user bucket).
+  let reminderPoller: ReminderPoller | undefined;
+  if (opts.notificationRouter) {
+    const pollerOpts: Parameters<typeof startReminderPoller>[0] = {
+      state,
+      router: opts.notificationRouter,
+    };
+    if (opts.reminderPollIntervalMs !== undefined) {
+      pollerOpts.intervalMs = opts.reminderPollIntervalMs;
+    }
+    reminderPoller = startReminderPoller(pollerOpts);
+  }
+
   return {
     state,
     rules,
@@ -248,6 +273,9 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     accounts,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
     generateRateLimiter: new GenerateRateLimiter(),
-    shutdown: () => queue.drain(),
+    shutdown: async () => {
+      reminderPoller?.stop();
+      await queue.drain();
+    },
   };
 }

@@ -448,6 +448,24 @@ const MIGRATIONS: string[] = [
      ON inbox_thread_messages(tenant_id, account_id, thread_key, mail_date DESC);
    CREATE INDEX IF NOT EXISTS idx_thread_messages_item
      ON inbox_thread_messages(inbox_item_id);`,
+
+  // v13: Reminder support on inbox_items.
+  //
+  // The `notify_on_unsnooze` flag makes a snooze into a reminder — when
+  // `snooze_until <= now` AND this flag is set, the reminder poller fires
+  // a notification ("Erinnerung: <subject>") and stamps `notified_at` so
+  // re-snoozing the same item later doesn't re-fire the stale reminder.
+  //
+  // Snooze alone stays silent; this column is purely opt-in. Pre-v13
+  // rows read as 0/null, preserving the existing silent-snooze semantics.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (13);
+
+   ALTER TABLE inbox_items ADD COLUMN notify_on_unsnooze INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE inbox_items ADD COLUMN notified_at INTEGER;
+
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_reminder_wake
+     ON inbox_items(tenant_id, notify_on_unsnooze, snooze_until)
+     WHERE notify_on_unsnooze = 1 AND snooze_until IS NOT NULL;`,
 ];
 
 export interface MailStateDbOptions {
