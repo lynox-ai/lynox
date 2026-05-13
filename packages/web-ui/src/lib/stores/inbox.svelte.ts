@@ -1139,19 +1139,27 @@ export async function refreshOpenPaneBody(): Promise<
  */
 export async function sendOpenPaneDraft(
 	currentBuffer: string,
+	scheduledAt?: Date,
 ): Promise<
-	{ ok: true; messageId: string } | { ok: false; reason: SendReplyFailure }
+	{ ok: true; messageId: string }
+	| { ok: true; scheduled: { scheduledId: string; scheduledAt: string } }
+	| { ok: false; reason: SendReplyFailure }
 > {
 	const pane = draftPane;
 	if (!pane || !pane.draft) return { ok: false, reason: { kind: 'aborted' } };
 	const draftId = pane.draft.id;
 	const itemId = pane.itemId;
-	const result = await apiSendInboxReply(getApiBase(), draftId, currentBuffer);
+	const result = await apiSendInboxReply(getApiBase(), draftId, currentBuffer, scheduledAt);
 	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
 	if (!result.ok) return result;
-	// Refresh counts so the badge updates after the item moves zones.
-	void loadInboxCounts();
-	return { ok: true, messageId: result.sent.messageId };
+	// Refresh counts so the badge updates after the item moves zones (only on
+	// immediate send — scheduled sends don't change zone state until the
+	// poller fires the actual delivery).
+	if ('sent' in result) {
+		void loadInboxCounts();
+		return { ok: true, messageId: result.sent.messageId };
+	}
+	return { ok: true, scheduled: result.scheduled };
 }
 
 /**

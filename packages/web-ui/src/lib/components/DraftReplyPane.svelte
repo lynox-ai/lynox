@@ -130,6 +130,56 @@
 		}
 	}
 
+	let scheduleMenuOpen = $state(false);
+
+	// Send Later presets — same temporal anchoring as snooze (server
+	// resolves preset → ISO with timezone). Heute Abend / Morgen früh /
+	// Montag 09 Uhr cover the common deferred-send scenarios.
+	function presetToDate(preset: 'tonight' | 'tomorrow_morning' | 'monday_9am'): Date {
+		const now = new Date();
+		const d = new Date(now);
+		switch (preset) {
+			case 'tonight':
+				d.setHours(18, 0, 0, 0);
+				if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
+				return d;
+			case 'tomorrow_morning':
+				d.setDate(d.getDate() + 1);
+				d.setHours(9, 0, 0, 0);
+				return d;
+			case 'monday_9am': {
+				const dow = d.getDay();
+				const daysUntilMonday = ((1 - dow + 7) % 7) || 7;
+				d.setDate(d.getDate() + daysUntilMonday);
+				d.setHours(9, 0, 0, 0);
+				return d;
+			}
+		}
+	}
+
+	async function onScheduleSend(preset: 'tonight' | 'tomorrow_morning' | 'monday_9am'): Promise<void> {
+		if (sending) return;
+		scheduleMenuOpen = false;
+		const pane = getDraftPane();
+		if (!pane?.draft) return;
+		const scheduledAt = presetToDate(preset);
+		sending = true;
+		try {
+			const result = await sendOpenPaneDraft(buffer, scheduledAt);
+			if (result.ok && 'scheduled' in result) {
+				addToast(t('inbox.draft_scheduled_ok').replace('{time}', scheduledAt.toLocaleString()), 'success');
+				closeDraftPane();
+				return;
+			}
+			if (!result.ok) {
+				const hint = toastForSendFailure(result.reason);
+				if (!hint.silent) addToast(t(hint.key), hint.level);
+			}
+		} finally {
+			sending = false;
+		}
+	}
+
 	/**
 	 * Map a generator failure to user-facing copy. Recoverable failures
 	 * (unavailable / unsupported / no_body) tell the user we're falling
@@ -455,14 +505,47 @@
 							>{t(opt.label)}</button>
 						{/each}
 					</div>
-					<button
-						type="button"
-						onclick={() => void onSendClick()}
-						disabled={sending || pane.draft === null || pane.generating}
-						title={sendLabel}
-						aria-label={sendLabel}
-						class="w-full sm:w-auto rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
-					>{sending ? t('inbox.draft_send_in_flight') : t('inbox.draft_send')} ⌘↵</button>
+					<div class="flex w-full sm:w-auto items-stretch gap-1">
+						<button
+							type="button"
+							onclick={() => void onSendClick()}
+							disabled={sending || pane.draft === null || pane.generating}
+							title={sendLabel}
+							aria-label={sendLabel}
+							class="flex-1 sm:flex-none rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4 disabled:opacity-50 disabled:cursor-not-allowed"
+						>{sending ? t('inbox.draft_send_in_flight') : t('inbox.draft_send')} ⌘↵</button>
+						<div class="relative">
+							<button
+								type="button"
+								onclick={() => (scheduleMenuOpen = !scheduleMenuOpen)}
+								disabled={sending || pane.draft === null || pane.generating}
+								aria-expanded={scheduleMenuOpen}
+								aria-haspopup="menu"
+								aria-label={t('inbox.draft_schedule_send')}
+								title={t('inbox.draft_schedule_send')}
+								class="rounded-[var(--radius-sm)] bg-accent/15 hover:bg-accent/25 text-accent-text px-2.5 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+							>⌚</button>
+							{#if scheduleMenuOpen}
+								<ul
+									role="menu"
+									class="absolute right-0 bottom-full mb-1 z-10 min-w-[200px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
+								>
+									<li role="none">
+										<button type="button" role="menuitem" onclick={() => void onScheduleSend('tonight')} class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[40px]"
+										>{t('inbox.draft_schedule_tonight')}</button>
+									</li>
+									<li role="none">
+										<button type="button" role="menuitem" onclick={() => void onScheduleSend('tomorrow_morning')} class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[40px]"
+										>{t('inbox.draft_schedule_tomorrow')}</button>
+									</li>
+									<li role="none">
+										<button type="button" role="menuitem" onclick={() => void onScheduleSend('monday_9am')} class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[40px]"
+										>{t('inbox.draft_schedule_monday')}</button>
+									</li>
+								</ul>
+							{/if}
+						</div>
+					</div>
 				</div>
 			</footer>
 		</div>
