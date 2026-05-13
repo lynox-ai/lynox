@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { t } from '../i18n.svelte.js';
+	import Icon from '../primitives/Icon.svelte';
+	import type { IconName } from '../primitives/icons.js';
 	import {
 		getInboxCounts,
 		getSnoozedCount,
@@ -32,15 +34,16 @@
 	interface ZoneEntry {
 		key: InboxZone;
 		labelKey: string;
+		icon: IconName;
 		count: number;
 		highlight: boolean;
 	}
 
 	const zones = $derived<ReadonlyArray<ZoneEntry>>([
-		{ key: 'requires_user', labelKey: 'inbox.zone_needs_you', count: counts.requires_user, highlight: true },
-		{ key: 'draft_ready', labelKey: 'inbox.zone_drafted', count: counts.draft_ready, highlight: false },
-		{ key: 'auto_handled', labelKey: 'inbox.zone_handled', count: counts.auto_handled, highlight: false },
-		{ key: 'snoozed', labelKey: 'inbox.zone_snoozed', count: snoozedCount, highlight: false },
+		{ key: 'requires_user', labelKey: 'inbox.zone_needs_you', icon: 'bolt', count: counts.requires_user, highlight: true },
+		{ key: 'draft_ready', labelKey: 'inbox.zone_drafted', icon: 'pencil', count: counts.draft_ready, highlight: false },
+		{ key: 'auto_handled', labelKey: 'inbox.zone_handled', icon: 'check_circle', count: counts.auto_handled, highlight: false },
+		{ key: 'snoozed', labelKey: 'inbox.zone_snoozed', icon: 'clock', count: snoozedCount, highlight: false },
 	]);
 </script>
 
@@ -59,23 +62,7 @@
 				class="group relative flex items-center justify-between gap-2 rounded-[var(--radius-sm)] px-2.5 py-2 text-left text-sm transition-colors {active ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 			>
 				<span class="flex items-center gap-2 min-w-0">
-					{#if entry.key === 'requires_user'}
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
-						</svg>
-					{:else if entry.key === 'draft_ready'}
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
-						</svg>
-					{:else if entry.key === 'auto_handled'}
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-						</svg>
-					{:else}
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-						</svg>
-					{/if}
+					<Icon name={entry.icon} size="sm" />
 					<span class="truncate">{t(entry.labelKey)}</span>
 				</span>
 				{#if entry.count > 0}

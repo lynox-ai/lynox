@@ -9,6 +9,7 @@
 	import { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from '../stores/voice-autosend.svelte.js';
 	import { getSpeakState } from '../stores/speak.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import Icon from '../primitives/Icon.svelte';
 
 	void ensureVoiceInfoProbed();
 	const ttsAvailable = $derived(isTtsAvailable());
@@ -216,9 +217,9 @@
 			aria-pressed={autoSpeakOn}
 		>
 			{#if autoSpeakOn}
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 {speakState === 'playing' ? 'motion-safe:animate-pulse' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
+				<Icon name="volume_on" size="xs" class={speakState === 'playing' ? 'motion-safe:animate-pulse' : ''} />
 			{:else}
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>
+				<Icon name="volume_off" size="xs" />
 			{/if}
 		</button>
 	{/if}
@@ -235,10 +236,10 @@
 		>
 			{#if autoSendOn}
 				<!-- Paper airplane: voice goes straight to the agent. -->
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+				<Icon name="send" size="xs" />
 			{:else}
 				<!-- Pencil-square: voice lands in the input for review/edit. -->
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+				<Icon name="pencil" size="xs" />
 			{/if}
 		</button>
 	{/if}

@@ -3,6 +3,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
+	import Checkbox from '../primitives/Checkbox.svelte';
 	import UsageDashboard from './UsageDashboard.svelte';
 
 	interface Config {
@@ -1087,7 +1088,7 @@
 				</div>
 				<p class="text-xs text-warning/80">{t('config.vault_key_warning')}</p>
 				<label class="flex items-center gap-2 text-xs text-text-muted cursor-pointer">
-					<input type="checkbox" bind:checked={rotateConfirmed} class="rounded border-border" />
+					<Checkbox bind:checked={rotateConfirmed} size="sm" />
 					{t('config.vault_rotate_confirm')}
 				</label>
 				<div class="flex gap-3 justify-end">

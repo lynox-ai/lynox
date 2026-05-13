@@ -5,6 +5,7 @@
 
 	import { onMount } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
+	import Checkbox from '../primitives/Checkbox.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 
 	interface ServerConfig {
@@ -642,7 +643,7 @@
 							</label>
 						</div>
 						<label class="flex items-center gap-2 text-xs">
-							<input type="checkbox" bind:checked={customImapSecure} />
+							<Checkbox bind:checked={customImapSecure} size="sm" />
 							IMAP implicit TLS (993)
 						</label>
 						<div class="grid grid-cols-2 gap-2">
@@ -656,7 +657,7 @@
 							</label>
 						</div>
 						<label class="flex items-center gap-2 text-xs">
-							<input type="checkbox" bind:checked={customSmtpSecure} />
+							<Checkbox bind:checked={customSmtpSecure} size="sm" />
 							SMTP implicit TLS (465)
 						</label>
 					</div>

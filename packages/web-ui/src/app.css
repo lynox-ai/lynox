@@ -90,23 +90,43 @@ textarea::-webkit-scrollbar {
 	display: none;
 }
 
-/* Thin scrollbar for content areas */
-.scrollbar-thin {
+/* === Default scrollbar — projektweit subtle, brand-tinted ===
+   Browser-default scrollbars (white-on-dark) clashed in every overflow
+   region. This rule applies to every scrollable container without an
+   explicit `scrollbar-none` class. The 6px solid thumb is grabbable
+   without insets; the inset/border trick was tried but produced a
+   ~4px usable thumb that was too thin on trackpads.
+
+   The `*` selector is fine here — `scrollbar-*` properties only paint
+   on actually-scrollable containers, so non-overflow elements pay no
+   layout cost. `textarea`'s `scrollbar-width: none` rule above wins via
+   higher type-selector specificity. */
+* {
 	scrollbar-width: thin;
 	scrollbar-color: var(--color-border) transparent;
 }
-.scrollbar-thin::-webkit-scrollbar {
+*::-webkit-scrollbar {
 	width: 6px;
+	height: 6px;
 }
-.scrollbar-thin::-webkit-scrollbar-track {
+*::-webkit-scrollbar-track {
 	background: transparent;
 }
-.scrollbar-thin::-webkit-scrollbar-thumb {
+*::-webkit-scrollbar-thumb {
 	background-color: var(--color-border);
 	border-radius: 3px;
 }
-.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+*::-webkit-scrollbar-thumb:hover {
 	background-color: var(--color-border-hover);
+}
+*::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+/* `scrollbar-thin` retained as alias for the default — no longer ugly. */
+.scrollbar-thin {
+	scrollbar-width: thin;
+	scrollbar-color: var(--color-border) transparent;
 }
 
 /* Focus styles matching website */

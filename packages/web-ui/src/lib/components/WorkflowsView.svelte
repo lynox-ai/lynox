@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost, formatDuration } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import Icon from '../primitives/Icon.svelte';
 	import { timeAgo } from '../utils/time.js';
 
 	interface PipelineRun {
@@ -124,9 +125,7 @@
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else if !error && runs.length === 0}
 		<div class="text-center py-12 text-text-subtle">
-			<svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 mx-auto mb-3 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
-				<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6z" />
-			</svg>
+			<Icon name="workflow" size="lg" class="mx-auto mb-3 opacity-40" />
 			<p class="text-sm">{t('workflow.empty')}</p>
 			<p class="text-xs mt-2">{t('workflow.empty_hint')}</p>
 		</div>
@@ -161,9 +160,7 @@
 						</span>
 
 						<!-- Expand indicator -->
-						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle transition-transform {selectedRun?.id === run.id ? 'rotate-180' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-						</svg>
+						<Icon name="chevron_down" size="sm" class="text-text-subtle transition-transform {selectedRun?.id === run.id ? 'rotate-180' : ''}" />
 					</button>
 
 					<!-- Expanded detail panel -->

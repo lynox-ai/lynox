@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import Icon from '../primitives/Icon.svelte';
 
 	interface TaskRecord {
 		id: string;
@@ -180,7 +181,7 @@
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if task.schedule_cron}
 									<span class="flex items-center gap-1">
-										<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+										<Icon name="clock" size="xs" />
 										{cronToHuman(task.schedule_cron)}
 									</span>
 								{/if}
