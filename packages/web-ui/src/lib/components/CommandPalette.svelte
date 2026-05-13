@@ -3,6 +3,7 @@
 	import { newChat } from '../stores/chat.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { onMount, onDestroy } from 'svelte';
+	import Icon from '../primitives/Icon.svelte';
 
 	interface PaletteItem {
 		id: string;
@@ -94,9 +95,7 @@
 	<div class="fixed inset-x-2 md:inset-x-4 z-50 mx-auto max-w-lg rounded-[var(--radius-lg)] border border-border bg-bg shadow-2xl overflow-hidden" style="top: calc(1rem + env(safe-area-inset-top, 0px));">
 		<!-- Input -->
 		<div class="flex items-center gap-3 border-b border-border px-4 py-3">
-			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-text-subtle shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-				<path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-			</svg>
+			<Icon name="search" size="sm" class="text-text-subtle" />
 			<input
 				bind:this={inputEl}
 				bind:value={query}
