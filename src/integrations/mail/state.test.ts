@@ -672,7 +672,7 @@ describe('MailStateDb — sidebar context queries', () => {
     db.recordSentMail({
       accountId: 'acct',
       messageId: '<m1@x>',
-      to: [{ address: 'roland@war.example' }],
+      to: [{ address: 'mustermann@acme.example' }],
       subject: 'first',
       bodyChars: 100,
       sentAt: new Date(t0 - 10_000),
@@ -694,19 +694,19 @@ describe('MailStateDb — sidebar context queries', () => {
       sentAt: new Date(t0 + 1_000),
     });
 
-    const list = db.listOutboundForAddress('roland@war.example', { limit: 5 });
+    const list = db.listOutboundForAddress('mustermann@acme.example', { limit: 5 });
 
     expect(list).toHaveLength(2);
     expect(list[0]?.subject).toBe('second');
     expect(list[1]?.subject).toBe('first');
   });
 
-  it('does not match a substring address (rolands@x must not match roland@x)', () => {
+  it('does not match a substring address (mustermanns@x must not match mustermann@x)', () => {
     const t0 = Date.now();
     db.recordSentMail({
       accountId: 'acct',
       messageId: '<exact@x>',
-      to: [{ address: 'roland@war.example' }],
+      to: [{ address: 'mustermann@acme.example' }],
       subject: 'exact match',
       bodyChars: 10,
       sentAt: new Date(t0),
@@ -714,7 +714,7 @@ describe('MailStateDb — sidebar context queries', () => {
     db.recordSentMail({
       accountId: 'acct',
       messageId: '<longer@x>',
-      to: [{ address: 'rolands@war.example' }],
+      to: [{ address: 'mustermanns@acme.example' }],
       subject: 'plural — longer suffix',
       bodyChars: 10,
       sentAt: new Date(t0 + 1_000),
@@ -722,12 +722,12 @@ describe('MailStateDb — sidebar context queries', () => {
     db.recordSentMail({
       accountId: 'acct',
       messageId: '<prefix@x>',
-      to: [{ address: 'pre.roland@war.example' }],
+      to: [{ address: 'pre.mustermann@acme.example' }],
       subject: 'prefix',
       bodyChars: 10,
       sentAt: new Date(t0 + 2_000),
     });
-    const list = db.listOutboundForAddress('roland@war.example');
+    const list = db.listOutboundForAddress('mustermann@acme.example');
     expect(list).toHaveLength(1);
     expect(list[0]?.subject).toBe('exact match');
   });
