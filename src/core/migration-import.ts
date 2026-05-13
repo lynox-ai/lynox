@@ -98,17 +98,14 @@ const SAFE_CONFIG_FIELDS = new Set([
 export class MigrationImporter {
   private readonly lynoxDir: string;
   private readonly vaultKey: string;
-  private readonly httpSecret: string;
   private session: MigrationSession | null = null;
 
   constructor(options: {
     lynoxDir?: string | undefined;
     vaultKey: string;
-    httpSecret: string;
   }) {
     this.lynoxDir = options.lynoxDir ?? getLynoxDir();
     this.vaultKey = options.vaultKey;
-    this.httpSecret = options.httpSecret;
   }
 
   /** Whether a migration session is currently active. */
@@ -127,10 +124,15 @@ export class MigrationImporter {
    * Start the ECDH handshake — generate server keypair and signed payload.
    * The client will use the public key for key agreement.
    *
+   * Signature is keyed off the per-session migration token, which both sides
+   * hold after the bootstrap. Binding the signature to this shared secret
+   * lets the client detect a substituted server public key (MITM).
+   *
+   * @param migrationToken - 64-hex-char migration token verified by the caller
    * @returns Payload to send to the client
    * @throws If a session is already active
    */
-  startHandshake(): HandshakeServerPayload {
+  startHandshake(migrationToken: string): HandshakeServerPayload {
     if (this.isActive) {
       throw new Error('Migration session already active. Finalize or cleanup first.');
     }
@@ -139,8 +141,7 @@ export class MigrationImporter {
     const challengeNonce = randomBytes(32);
     const serverPubKey = serializePublicKey(keypair.publicKey);
 
-    // Sign the public key with instance-specific signing key
-    const signingKey = deriveSigningKey(this.httpSecret);
+    const signingKey = deriveSigningKey(migrationToken);
     const signature = signHandshake(serverPubKey, signingKey);
     zeroize(signingKey); // Key material no longer needed
 

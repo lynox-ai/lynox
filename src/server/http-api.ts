@@ -4352,6 +4352,15 @@ export class LynoxHTTPApi {
         }
         const handshake = await hsRes.json() as { serverPubKey: string; signature: string; challengeNonce: string };
 
+        // Verify the server's signature over its public key — without this, a MITM
+        // can substitute the responder's keypair and decrypt the entire transfer.
+        const signingKey = crypto.deriveSigningKey(migrationToken);
+        const handshakeValid = crypto.verifyHandshake(handshake.serverPubKey, handshake.signature, signingKey);
+        crypto.zeroize(signingKey);
+        if (!handshakeValid) {
+          throw new Error('Handshake signature invalid — refusing to derive transfer key');
+        }
+
         // Client key agreement
         const clientKp = crypto.generateEphemeralKeypair();
         const serverPub = crypto.deserializePublicKey(handshake.serverPubKey);
@@ -4441,7 +4450,7 @@ export class LynoxHTTPApi {
       try {
         const importer = await this._getOrCreateMigrationImporter();
         if (!importer) {
-          errorResponse(res, 503, 'Migration not available — missing vault key or HTTP secret');
+          errorResponse(res, 503, 'Migration not available — missing vault key');
           return;
         }
 
@@ -4458,7 +4467,7 @@ export class LynoxHTTPApi {
           return;
         }
 
-        const payload = importer.startHandshake();
+        const payload = importer.startHandshake(storedToken);
         jsonResponse(res, 200, payload);
       } catch (err: unknown) {
         errorResponse(res, 400, err instanceof Error ? err.message : 'Handshake failed');
@@ -4590,11 +4599,10 @@ export class LynoxHTTPApi {
     if (this._migrationImporter?.isActive) return this._migrationImporter;
 
     const vaultKey = process.env['LYNOX_VAULT_KEY'];
-    const httpSecret = process.env['LYNOX_HTTP_SECRET'];
-    if (!vaultKey || !httpSecret) return null;
+    if (!vaultKey) return null;
 
     const { MigrationImporter } = await import('../core/migration-import.js');
-    this._migrationImporter = new MigrationImporter({ vaultKey, httpSecret });
+    this._migrationImporter = new MigrationImporter({ vaultKey });
     return this._migrationImporter;
   }
 
