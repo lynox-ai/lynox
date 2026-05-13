@@ -417,6 +417,29 @@ describe('GoogleAuth', () => {
       vi.mocked(fs.readFileSync).mockReturnValue('{}');
     });
 
+    it('rejects a service-account key with attacker-controlled token_uri', async () => {
+      const fs = await import('node:fs');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.statSync).mockReturnValue({ mode: 0o100600 } as ReturnType<typeof fs.statSync>);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        type: 'service_account',
+        project_id: 'p',
+        private_key: 'k',
+        client_email: 'e',
+        private_key_id: 'pk',
+        client_id: 'ci',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        token_uri: 'http://169.254.169.254/latest/meta-data/',
+      }));
+      const saAuth = new GoogleAuth({
+        clientId: 'id', clientSecret: 'secret',
+        serviceAccountKeyPath: '/tmp/key.json',
+      });
+      await expect(saAuth.getAccessToken()).rejects.toThrow(/unexpected token_uri/i);
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(fs.readFileSync).mockReturnValue('{}');
+    });
+
     it('warns on loose permissions', async () => {
       const fs = await import('node:fs');
       vi.mocked(fs.existsSync).mockReturnValue(true);
