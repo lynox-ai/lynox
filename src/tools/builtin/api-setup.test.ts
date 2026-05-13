@@ -219,12 +219,9 @@ describe('api_setup tool', () => {
     });
 
     it('parses an OpenAPI 3.x spec into a draft profile', async () => {
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-        ok: true,
-        status: 200,
-        statusText: 'OK',
-        text: async () => JSON.stringify(FAKE_OPENAPI),
-      } as Response);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify(FAKE_OPENAPI), { status: 200, statusText: 'OK' }),
+      );
 
       try {
         const agent = createMockAgent(new ApiStore());
@@ -248,12 +245,12 @@ describe('api_setup tool', () => {
     });
 
     it('rejects non-OpenAPI-3 specs', async () => {
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-        ok: true,
-        status: 200,
-        statusText: 'OK',
-        text: async () => JSON.stringify({ swagger: '2.0', info: { title: 'old' } }),
-      } as Response);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ swagger: '2.0', info: { title: 'old' } }), {
+          status: 200,
+          statusText: 'OK',
+        }),
+      );
 
       try {
         const agent = createMockAgent(new ApiStore());
@@ -268,12 +265,9 @@ describe('api_setup tool', () => {
     });
 
     it('reports a fetch failure', async () => {
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-        ok: false,
-        status: 404,
-        statusText: 'Not Found',
-        text: async () => '',
-      } as Response);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('', { status: 404, statusText: 'Not Found' }),
+      );
 
       try {
         const agent = createMockAgent(new ApiStore());
@@ -283,6 +277,43 @@ describe('api_setup tool', () => {
         );
         expect(result).toContain('failed to fetch');
         expect(result).toContain('404');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('refuses to fetch a private-IP openapi_url (SSRF guard)', async () => {
+      // No fetch mock — validateUrl must reject before any network call.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        new Error('fetch should never be invoked for a private-IP URL'),
+      );
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'http://169.254.169.254/latest/meta-data/' },
+          agent,
+        );
+        expect(result.toLowerCase()).toMatch(/blocked|private ip/);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('refuses to follow a redirect to a private IP', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'http://10.0.0.1/spec.json' },
+        }),
+      );
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+          agent,
+        );
+        expect(result.toLowerCase()).toMatch(/blocked|private ip/);
       } finally {
         fetchSpy.mockRestore();
       }

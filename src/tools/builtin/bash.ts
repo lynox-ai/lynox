@@ -1,5 +1,6 @@
 import { execSync } from 'node:child_process';
-import type { ToolEntry } from '../../types/index.js';
+import type { ToolEntry, IAgent } from '../../types/index.js';
+import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
 
@@ -23,28 +24,31 @@ const ENV_SAFE_PREFIXES = [
   'DOCKER_', 'COMPOSE_',
 ];
 
-// === Isolation env overrides ===
-
-let _isolationEnvOverride: Record<string, string> | undefined;
-let _isolationMinimalEnv = false;
-
-export function setIsolationEnv(envVars: Record<string, string> | undefined, minimal: boolean): void {
-  _isolationEnvOverride = envVars;
-  _isolationMinimalEnv = minimal;
-}
-
-export function clearIsolationEnv(): void {
-  _isolationEnvOverride = undefined;
-  _isolationMinimalEnv = false;
-}
-
-export function buildSafeEnv(): NodeJS.ProcessEnv {
-  // Air-gapped: minimal env
-  if (_isolationMinimalEnv) {
+/**
+ * Build the env that subprocesses inherit.
+ *
+ * Isolation source of truth is the calling agent's `isolation` config:
+ *  - `air-gapped` collapses to PATH/HOME/TMPDIR only — no secrets, no Bedrock
+ *    credentials, no Telegram token, nothing the parent process holds.
+ *  - `envVars` (any level) is merged on top of the allow-listed env, letting
+ *    `spawn_agent` inject the deliberately-scoped variables it wants the child
+ *    bash invocation to see.
+ *
+ * Pre-isolation behaviour (no agent, or `isolation` unset) is the previous
+ * allow-listed env minus NODE_OPTIONS / NODE_EXTRA_CA_CERTS.
+ */
+export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
+  // Air-gapped: minimal env, nothing inherited beyond the bare essentials.
+  if (isolation?.level === 'air-gapped') {
     const minEnv: NodeJS.ProcessEnv = {};
     for (const key of ['PATH', 'HOME', 'TMPDIR']) {
       if (process.env[key] !== undefined) {
         minEnv[key] = process.env[key];
+      }
+    }
+    if (isolation.envVars) {
+      for (const [key, value] of Object.entries(isolation.envVars)) {
+        minEnv[key] = value;
       }
     }
     return minEnv;
@@ -61,9 +65,9 @@ export function buildSafeEnv(): NodeJS.ProcessEnv {
   delete safeEnv.NODE_OPTIONS;
   delete safeEnv.NODE_EXTRA_CA_CERTS;
 
-  // Merge isolation env vars
-  if (_isolationEnvOverride) {
-    for (const [key, value] of Object.entries(_isolationEnvOverride)) {
+  // Per-spawn env overrides for scoped/sandboxed levels.
+  if (isolation?.envVars) {
+    for (const [key, value] of Object.entries(isolation.envVars)) {
       safeEnv[key] = value;
     }
   }
@@ -91,8 +95,8 @@ export const bashTool: ToolEntry<BashInput> = {
   },
   // NOTE: execSync is intentional — this is a bash tool requiring shell features.
   // Input comes from the LLM agent, not untrusted external users.
-  handler: async (input: BashInput): Promise<string> => {
-    const safeEnv = buildSafeEnv();
+  handler: async (input: BashInput, agent: IAgent): Promise<string> => {
+    const safeEnv = buildSafeEnv(agent.isolation);
 
     try {
       const output = execSync(input.command, {

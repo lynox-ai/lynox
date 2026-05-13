@@ -132,4 +132,44 @@ describe('buildSafeEnv', () => {
     expect(env['LYNOX_WORKSPACE']).toBe('/workspace');
     delete process.env['LYNOX_WORKSPACE'];
   });
+
+  it('air-gapped isolation collapses env to PATH/HOME/TMPDIR only', () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-leak';
+    process.env['LYNOX_VAULT_KEY'] = 'vault-leak';
+    process.env['LYNOX_WORKSPACE'] = '/workspace';
+    try {
+      const env = buildSafeEnv({ level: 'air-gapped' });
+      expect(env['ANTHROPIC_API_KEY']).toBeUndefined();
+      expect(env['LYNOX_VAULT_KEY']).toBeUndefined();
+      expect(env['LYNOX_WORKSPACE']).toBeUndefined();
+      expect(env['PATH']).toBe(process.env['PATH']);
+    } finally {
+      delete process.env['ANTHROPIC_API_KEY'];
+      delete process.env['LYNOX_VAULT_KEY'];
+      delete process.env['LYNOX_WORKSPACE'];
+    }
+  });
+
+  it('air-gapped isolation merges envVars on top of minimal env', () => {
+    const env = buildSafeEnv({
+      level: 'air-gapped',
+      envVars: { CHILD_ONLY: 'set-by-spawn' },
+    });
+    expect(env['CHILD_ONLY']).toBe('set-by-spawn');
+    expect(env['ANTHROPIC_API_KEY']).toBeUndefined();
+  });
+
+  it('scoped isolation envVars override env without enabling air-gap collapse', () => {
+    process.env['LYNOX_WORKSPACE'] = '/parent-workspace';
+    try {
+      const env = buildSafeEnv({
+        level: 'scoped',
+        envVars: { LYNOX_WORKSPACE: '/child-workspace' },
+      });
+      expect(env['LYNOX_WORKSPACE']).toBe('/child-workspace');
+      expect(env['PATH']).toBe(process.env['PATH']); // not collapsed
+    } finally {
+      delete process.env['LYNOX_WORKSPACE'];
+    }
+  });
 });

@@ -19,6 +19,11 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
+import { fetchWithValidatedRedirects, readBodyLimited } from './http.js';
+
+/** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. */
+const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
+const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 
 type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine';
 
@@ -311,11 +316,21 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
       }
       let spec: OpenApiDoc;
       try {
-        const resp = await fetch(input.openapi_url, { redirect: 'follow' });
+        const ac = new AbortController();
+        const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
+        let resp: Response;
+        try {
+          resp = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal });
+        } finally {
+          clearTimeout(timer);
+        }
         if (!resp.ok) {
           return `Error: failed to fetch OpenAPI spec (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL or pass a direct link to the JSON spec.`;
         }
-        const text = await resp.text();
+        const { text, truncated } = await readBodyLimited(resp, OPENAPI_SPEC_MAX_BYTES);
+        if (truncated) {
+          return `Error: OpenAPI spec body exceeds ${String(OPENAPI_SPEC_MAX_BYTES)} bytes. Point at a smaller spec or split the API into multiple profiles.`;
+        }
         spec = JSON.parse(text) as OpenApiDoc;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
