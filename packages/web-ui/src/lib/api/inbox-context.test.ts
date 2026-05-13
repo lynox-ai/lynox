@@ -81,4 +81,11 @@ describe('getItemContext', () => {
 		installFetch(async () => jsonResponse({ recentThreads: [] }));
 		expect(await getItemContext('/api', 'inb_1')).toBeNull();
 	});
+
+	it('coerces sender.name to null when the backend omits the key entirely', async () => {
+		installFetch(async () => jsonResponse({ sender: { address: 'x@example.com' }, recentThreads: [] }));
+		const res = await getItemContext('/api', 'inb_1');
+		expect(res?.sender.name).toBeNull();
+		expect(res?.sender.address).toBe('x@example.com');
+	});
 });

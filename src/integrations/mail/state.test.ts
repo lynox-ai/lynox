@@ -701,6 +701,37 @@ describe('MailStateDb — sidebar context queries', () => {
     expect(list[1]?.subject).toBe('first');
   });
 
+  it('does not match a substring address (rolands@x must not match roland@x)', () => {
+    const t0 = Date.now();
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<exact@x>',
+      to: [{ address: 'roland@war.example' }],
+      subject: 'exact match',
+      bodyChars: 10,
+      sentAt: new Date(t0),
+    });
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<longer@x>',
+      to: [{ address: 'rolands@war.example' }],
+      subject: 'plural — longer suffix',
+      bodyChars: 10,
+      sentAt: new Date(t0 + 1_000),
+    });
+    db.recordSentMail({
+      accountId: 'acct',
+      messageId: '<prefix@x>',
+      to: [{ address: 'pre.roland@war.example' }],
+      subject: 'prefix',
+      bodyChars: 10,
+      sentAt: new Date(t0 + 2_000),
+    });
+    const list = db.listOutboundForAddress('roland@war.example');
+    expect(list).toHaveLength(1);
+    expect(list[0]?.subject).toBe('exact match');
+  });
+
   it('escapes LIKE wildcards in the address needle (no false-match on _ or %)', () => {
     const t0 = Date.now();
     db.recordSentMail({

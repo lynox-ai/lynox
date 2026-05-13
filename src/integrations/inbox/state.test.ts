@@ -860,6 +860,21 @@ describe('InboxStateDb — sidebar context queries', () => {
     expect(list).toHaveLength(1);
   });
 
+  it('orders reminders by snooze_until ASC and excludes the open item', () => {
+    const me = 'sender@acme.example';
+    const open = seedItemFromAddress(me);
+    const farFuture = new Date(Date.now() + 14 * 86_400_000);
+    const nearFuture = new Date(Date.now() + 1 * 86_400_000);
+    const far = seedItemFromAddress(me);
+    inbox.setSnooze(far, farFuture, null, true, true);
+    const near = seedItemFromAddress(me);
+    inbox.setSnooze(near, nearFuture, null, true, true);
+
+    const list = inbox.listActiveRemindersByFromAddress(me, { excludeItemId: open, limit: 5 });
+
+    expect(list.map((i) => i.id)).toEqual([near, far]);
+  });
+
   it('returns only active mail-anchored reminders for the sender', () => {
     const me = 'sender@acme.example';
     const future = new Date(Date.now() + 7 * 86_400_000);
