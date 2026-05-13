@@ -112,6 +112,16 @@ export class CalendarStateDb {
     this.db.close();
   }
 
+  /**
+   * Internal accessor for cross-module reads that need raw DB access (e.g.
+   * the ICS-feed adapter's cache + poll-state queries). Public-facing
+   * callers should prefer the typed CRUD methods on this class. Marked as
+   * exposing the underlying handle so reviewers can grep for usage.
+   */
+  internalGetDb(): Database.Database {
+    return this.db;
+  }
+
   // ── Account CRUD ──────────────────────────────────────────────────────────
 
   /**

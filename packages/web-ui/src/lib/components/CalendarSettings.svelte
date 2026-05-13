@@ -171,8 +171,8 @@
 			}
 			const calendarCount = result.account.enabled_calendars?.length;
 			const msg = calendarCount !== undefined && calendarCount > 0
-				? `Connected: ${calendarCount} Kalender erkannt`
-				: 'Calendar verbunden';
+				? `${calendarCount} Kalender verbunden`
+				: 'Kalender verbunden';
 			addToast(msg, 'success');
 			cancelWizard();
 			await reload();
@@ -189,7 +189,7 @@
 			addToast('Löschen fehlgeschlagen', 'error');
 			return;
 		}
-		addToast('Calendar entfernt', 'success');
+		addToast('Kalender entfernt', 'success');
 		await reload();
 	}
 

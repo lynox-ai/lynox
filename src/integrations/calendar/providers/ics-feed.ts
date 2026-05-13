@@ -167,7 +167,7 @@ export async function pollIcsFeed(
   // Wrap upserts in a single SQLite transaction — without it each upsertEvent
   // becomes its own implicit transaction (one fsync per VEVENT). Real feeds
   // can carry hundreds of events; the loop went from O(N) fsyncs to 1.
-  const db = (state as unknown as { db: import('better-sqlite3').Database }).db;
+  const db = state.internalGetDb();
   db.transaction(() => {
     for (const v of parsed) {
       if (v.type !== 'VEVENT') continue;
@@ -301,14 +301,16 @@ function readCachedEvents(state: CalendarStateDb, accountId: string): CalendarEv
 // here avoids leaking SQLite types into the public state API.
 interface CacheRow { event_uid: string; payload: string }
 function readCacheRows(state: CalendarStateDb, accountId: string): CacheRow[] {
-  const db = (state as unknown as { db: import('better-sqlite3').Database }).db;
-  return db.prepare('SELECT event_uid, payload FROM calendar_event_cache WHERE account_id = ?').all(accountId) as CacheRow[];
+  return state.internalGetDb()
+    .prepare('SELECT event_uid, payload FROM calendar_event_cache WHERE account_id = ?')
+    .all(accountId) as CacheRow[];
 }
 
 interface PollPrevState { etag: string | null; last_modified: string | null; circuit_open_until: string | null }
 function readPrevState(state: CalendarStateDb, accountId: string): PollPrevState | null {
-  const db = (state as unknown as { db: import('better-sqlite3').Database }).db;
-  const row = db.prepare('SELECT etag, last_modified, circuit_open_until FROM calendar_poll_state WHERE account_id = ?').get(accountId) as PollPrevState | undefined;
+  const row = state.internalGetDb()
+    .prepare('SELECT etag, last_modified, circuit_open_until FROM calendar_poll_state WHERE account_id = ?')
+    .get(accountId) as PollPrevState | undefined;
   return row ?? null;
 }
 

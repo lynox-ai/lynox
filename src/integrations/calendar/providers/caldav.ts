@@ -374,9 +374,9 @@ function pickWritableCalendar(
 /**
  * Build a minimal RFC 5545 VCALENDAR document for a single VEVENT. CR/LF
  * line endings are required (RFC 5545 §3.1); some CalDAV servers reject
- * plain `\n`-separated payloads.
+ * plain `\n`-separated payloads. Exported for direct unit testing.
  */
-function buildVCalendar(uid: string, event: CalendarEventInput): string {
+export function buildVCalendar(uid: string, event: CalendarEventInput): string {
   const lines: string[] = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -418,7 +418,7 @@ function buildVCalendar(uid: string, event: CalendarEventInput): string {
  * blocks. We normalize all of them to a safe `\n` literal escape first, then
  * apply the standard TEXT escapes.
  */
-function escapeIcalText(value: string): string {
+export function escapeIcalText(value: string): string {
   return value
     // 1. Strip ASCII C0 control chars EXCEPT TAB (\x09) — these have no place in iCal TEXT.
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')

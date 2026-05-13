@@ -158,7 +158,8 @@ export function createCalendarCreateTool(
   };
 }
 
-function resolveCreateTarget(
+/** Exported for direct unit testing of the PRD §U2 fallback contract. */
+export function resolveCreateTarget(
   registry: CalendarRegistry,
   resolver: CalendarWritableResolver,
   account_id: string | undefined,
