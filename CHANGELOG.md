@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.4.0 — 2026-05-14
+
+Major feature release: Unified Inbox (Phase 1–4) ships as the new default mail surface, plus the Wave 1 security audit fixes.
+
+### Added
+
+- **Unified Inbox** — single inbox for mail + WhatsApp, classifier-driven triage with confidence-aware zone rail, snooze-with-mail-anchor, schedule-send, push notifications, three-pane reading-first layout with mail-context sidebar. Built across Phase 1a/1b/2/3/4. (#266, #268, #270, #271, #272, #274, #275, #283, #285, #286, #287, #288, #290, #291, #292, #293, #309, #314, #316, #318, #319, #320, #321, #322, #323)
+- **Mail-anchored reminders** — `setSnooze(item, until, unsnoozeOnReply)` re-surfaces inbox items either at a wall-clock time or when the contact replies; standalone reminders without mail anchor work the same way via the new `inbox-reminder-poller`. Erinner-mich button in Reading-Pane + Triage rail, Kopilot top-card surfacing the next reminder, slash-command from chat. (#314, #316, #318, #319)
+- **Push notifications for inbox** — classifier outcome → web-push to registered devices (per-account toggle + quiet hours + throttle), opt-in from the Integrations page. (#323)
+- **Send Later** — schedule-send dropdown on the draft pane, persistent SQLite-backed poller fires the actual send. (#320, #321)
+- **Operator-driven cold-start** — empty-inbox state shows a "fetch existing mail" button that triggers backfill against the connected mail account; the same path auto-fires on first account connect. (#275, #287, #288)
+- **Sidebar redesign** — icon-rail hub with Chat / Automation / Intelligence / Artefakte sections, sticky-prompt anchor + persistent pipeline-status bar. Checkbox + Icon design-system primitives, brand-tinted scrollbar. (#265, #310, #311)
+- **`mint-staging-cookie.sh` helper + phase-4 visual smoke spec** — Playwright runs against `engine.lynox.cloud` with a pre-minted 30-day staging cookie. (#326)
+- **Sidebar improvements** — kebab menu rendered at root with fixed positioning (escapes the `<li overflow-hidden>` clip), Intelligence sub-nav + chat-thread kebab + search + icon polish. (#305, #306)
+- **LLM cost observability for /draft/generate** — per-tenant audit row + rate-limit visibility. (#313)
+- **Playwright smoke job in CI** — every PR runs the full smoke suite against a freshly built docker-compose stack. (#298, #300, #301)
+- **Greenmail integration tests in CI** — IMAPS / SMTPS round-trip against the live test container as part of every push. (#300)
+
+### Changed
+
+- **Sidebar flattened** — Chat / Automation / Intelligence / Artefakte at the top level; sub-nav promoted to icon rail. (#265, #310)
+- **Sidebar inbox entry** swapped to `/app/inbox` (was the legacy WhatsAppInboxView). (#274)
+- **Mobile UX overhaul** for the Phase 3 layout — reading-pane header, thread expand affordance, draft footer alignment, sidebar safe-area handling. (#302, #303, #304, #307, #308)
+- **`bash` air-gapped isolation now actually fires in production.** The previous module-level `_isolationEnvOverride` + `setIsolationEnv()` setter pair was registered but never invoked by any production code; `spawn_agent({ isolation: { level: 'air-gapped' } })` therefore inherited the full parent env (provider keys, vault key, Telegram token). The handler now reads `agent.isolation` directly, collapses env to `PATH`/`HOME`/`TMPDIR` for air-gapped, merges `isolation.envVars` for scoped/sandboxed. **BREAKING**: `setIsolationEnv` and `clearIsolationEnv` exports removed from `tools/builtin/index.ts` — no production caller existed; if your custom wiring used them, migrate to setting `agent.isolation` directly. (#329)
+- **`MigrationImporter` constructor signature** — `httpSecret` parameter removed (was unused after the handshake-token refactor); `startHandshake` now takes the per-session migration token as an explicit argument. **BREAKING** for any external consumer constructing `MigrationImporter` directly. (#328)
+- **Removed bedrock references** — managed-tier docs + provider strings now consistently reference Mistral (eu-sovereign) and Vertex; the historical `managed_bedrock` path stays in the provider enum for back-compat but is deprecated. (#267)
+
+### Fixed
+
+- **Migration handshake signature verification** — the X25519 ECDH handshake used by the zero-knowledge migration flow signed the server's ephemeral public key with an instance-local HMAC, but the source side never called `verifyHandshake`. A network attacker between source and destination could substitute their own keypair in the handshake response and decrypt the full DB + vault stream. Source side now `verifyHandshake`s before deriving the transfer key; signing key derives from the per-session migration token (shared bootstrap secret) instead of each side's `LYNOX_HTTP_SECRET`. (#328)
+- **`api_setup` bootstrap SSRF + DoS** — the tool fetched its OpenAPI URL via raw `fetch()` with no protocol filter, no private-IP check, no redirect revalidation, no body cap, no timeout. An LLM-controllable URL could reach AWS/GCP metadata or the internal Docker bridge. Now routed through `fetchWithValidatedRedirects` + `readBodyLimited` with a 5 MB cap and 15 s AbortController. (#329)
+- **Integration SSRF cluster** — three call sites were fetching/connecting to caller-influenced targets without checking they were on the public internet: (1) Google service-account JWT mint trusted `token_uri` from the operator-supplied JSON (could be redirected to GCP metadata), (2) WhatsApp `fetchMedia` trusted the URL returned by the Meta API (compromised/MITM'd response could redirect internal), (3) custom mail accounts opened TCP/TLS to any user-supplied IMAP/SMTP host (authenticated user could probe the internal Docker network). New shared `core/network-guard.ts` module with `isPrivateIP` (IPv4 + IPv6 + IPv4-mapped IPv6 hex form incl. `::ffff:7f00:1`), `assertPublicHost`, `assertPublicUrl`, `fetchWithPublicRedirects`. (#330)
+- **Inbox: `cc`/`bcc` forwarded to send-reply handler.** Replies sent from the draft pane were dropping CCs and BCCs because the handler signature stopped at `{to, subject, body}`. (#284)
+- **Inbox: snoozed items hidden from list + counters** until the snooze expires. (#285)
+- **Inbox: sensitive-content masker re-runs on refresh path** when `sensitive_mode = 'mask'` — previously the masker only fired at classification time, so a body refresh re-exposed the raw text. (#312)
+- **Inbox: collapsible context sidebar** + click-outside dismisses the menu + monochrome icon scheme aligned with the rest of the rail. (#327)
+- **Web UI: permission card stays visible** after click until the tool actually starts, instead of vanishing on the same render tick. (#260)
+- **Web UI: 409 fast-fail when client already holds a pending prompt** — prevents a double-submission when the previous turn's `ask_user` is still open. (#261)
+- **Web UI: chat input gated on pending prompt**, duplicate anchor hidden. (#259)
+- **Smoke runner: session cookie propagated** to Playwright's `APIRequestContext` so API-only calls inside browser tests authenticate correctly. (#298)
+- **Tool-call row state** — running / done / error visual state propagated through grouped rows. (#262)
+
+### Security (Wave 1)
+
+This release closes 13 Critical/High findings from the codebase-wide audit run on 2026-05-13. All five Wave 1 PRs (#328, #329, #330 in core; #117, #118 in pro) ship together. See the Changed/Fixed sections above for #328/#329/#330; pro's #117 splits `MANAGED_ADMIN_TOKEN` so an admin-token leak no longer forges customer sessions or Google OAuth state, and #118 envelope-encrypts the four operator-sensitive Postgres columns (`instance_secret`, `restic_password`, `backup_repo_password`, `ssh_private_key`) with AES-256-GCM keyed off the new **required** `MANAGED_SECRETS_MASTER_KEY` env var.
+
+Production deploy of the pro changes requires:
+1. Generating the prod `MANAGED_SECRETS_MASTER_KEY` (`openssl rand -hex 32`) and backing it up to the secret store BEFORE deploying — losing this key makes all tenant backups un-decryptable.
+2. Optionally generating `MANAGED_CUSTOMER_SESSION_SECRET` and `MANAGED_GOOGLE_OAUTH_STATE_SECRET` (HMAC fallback works without, but dedicated secrets are recommended for production).
+3. A maintenance window that tolerates a 1h forced customer re-auth (#117 invalidates currently-active customer sessions; OTP re-login resolves it).
+
+
 ## 1.3.12 — 2026-05-06
 
 ### Added
