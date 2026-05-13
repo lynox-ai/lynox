@@ -34,6 +34,7 @@ import { checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,
   GOOGLE_PROMPT_SUFFIX,
+  CALENDAR_PROMPT_SUFFIX,
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
   CRM_PROMPT_SUFFIX,
@@ -882,6 +883,10 @@ export class Session {
     // Append Google Workspace docs only when Google tools are registered
     if (engine.getGoogleAuth()) {
       basePrompt += GOOGLE_PROMPT_SUFFIX;
+    }
+    // Append Calendar (CalDAV + ICS) docs only when calendar tools are registered
+    if (engine.getCalendarContext()) {
+      basePrompt += CALENDAR_PROMPT_SUFFIX;
     }
     // Append pipeline docs only when pipeline tools are registered
     if (engine.getPipelinesEnabled()) {

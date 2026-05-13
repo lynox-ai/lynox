@@ -3301,6 +3301,125 @@ export class LynoxHTTPApi {
       }
     }));
 
+    // ── Calendar (CalDAV + ICS read-only — PRD-CALENDAR-INTEGRATION) ──
+
+    this.staticRoutes.set('GET /api/calendar/presets', async (_req, res) => {
+      const { listCalDavPresets } = await import('../integrations/calendar/providers/presets.js');
+      jsonResponse(res, 200, { presets: listCalDavPresets() });
+    });
+
+    this.staticRoutes.set('GET /api/calendar/accounts', async (_req, res) => {
+      const ctx = engine.getCalendarContext();
+      if (!ctx) { jsonResponse(res, 200, { accounts: [] }); return; }
+      jsonResponse(res, 200, { accounts: ctx.listAccounts() });
+    });
+
+    // Rate limiter for /api/calendar/accounts/test — closes the credential-probe
+    // oracle on CalDAV. 10 probes / 60s rolling per remote address.
+    const calTestRateLimit = new Map<string, number[]>();
+    const CAL_TEST_WINDOW_MS = 60_000;
+    const CAL_TEST_MAX_PROBES = 10;
+    const calTestRateCheck = (req: IncomingMessage): string | null => {
+      const ip = req.socket.remoteAddress ?? 'unknown';
+      const now = Date.now();
+      const history = calTestRateLimit.get(ip) ?? [];
+      const recent = history.filter(t => now - t < CAL_TEST_WINDOW_MS);
+      if (recent.length >= CAL_TEST_MAX_PROBES) {
+        return `Rate limit exceeded: max ${String(CAL_TEST_MAX_PROBES)} test probes per minute`;
+      }
+      recent.push(now);
+      calTestRateLimit.set(ip, recent);
+      if (recent.length === 1 && calTestRateLimit.size > 100) {
+        for (const [k, v] of calTestRateLimit.entries()) {
+          const stillRecent = v.filter(t => now - t < CAL_TEST_WINDOW_MS);
+          if (stillRecent.length === 0) calTestRateLimit.delete(k);
+          else calTestRateLimit.set(k, stillRecent);
+        }
+      }
+      return null;
+    };
+
+    const parseAddCalendarInput = (b: Record<string, unknown> | null): import('../integrations/calendar/context.js').AddAccountInput | { error: string } => {
+      if (!b) return { error: 'Missing request body' };
+      const provider = typeof b['provider'] === 'string' ? b['provider'] : '';
+      const display_name = typeof b['display_name'] === 'string' ? b['display_name'] : '';
+      if (!display_name) return { error: 'display_name is required' };
+
+      if (provider === 'caldav') {
+        const preset_slug = typeof b['preset_slug'] === 'string' ? b['preset_slug'] : '';
+        const username = typeof b['username'] === 'string' ? b['username'] : '';
+        const password = typeof b['password'] === 'string' ? b['password'] : '';
+        if (!preset_slug || !username || !password) return { error: 'preset_slug, username, password required for caldav' };
+        const enabled_calendars = Array.isArray(b['enabled_calendars']) && (b['enabled_calendars'] as unknown[]).every(v => typeof v === 'string')
+          ? (b['enabled_calendars'] as string[])
+          : undefined;
+        const server_url = typeof b['server_url'] === 'string' ? b['server_url'] : undefined;
+        const is_default_writable = b['is_default_writable'] === true;
+        return {
+          provider: 'caldav',
+          display_name,
+          preset_slug: preset_slug as import('../types/calendar.js').CalDavPresetSlug | 'custom',
+          username,
+          password,
+          ...(server_url ? { server_url } : {}),
+          ...(enabled_calendars ? { enabled_calendars } : {}),
+          ...(is_default_writable ? { is_default_writable } : {}),
+        };
+      }
+      if (provider === 'ics-feed') {
+        const ics_url = typeof b['ics_url'] === 'string' ? b['ics_url'] : '';
+        if (!ics_url) return { error: 'ics_url is required for ics-feed' };
+        const poll_interval_minutes = typeof b['poll_interval_minutes'] === 'number' ? b['poll_interval_minutes'] : undefined;
+        return {
+          provider: 'ics-feed',
+          display_name,
+          ics_url,
+          ...(poll_interval_minutes !== undefined ? { poll_interval_minutes } : {}),
+        };
+      }
+      return { error: 'provider must be "caldav" or "ics-feed"' };
+    };
+
+    this.staticRoutes.set('POST /api/calendar/accounts', async (_req, res, _params, body) => {
+      const ctx = engine.getCalendarContext();
+      if (!requireService(res, ctx, 'Calendar integration')) return;
+      const parsed = parseAddCalendarInput(body as Record<string, unknown> | null);
+      if ('error' in parsed) { errorResponse(res, 400, parsed.error); return; }
+      try {
+        const account = await ctx!.addAccount(parsed);
+        jsonResponse(res, 200, { ok: true, account });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errorResponse(res, 500, msg);
+      }
+    });
+
+    this.staticRoutes.set('POST /api/calendar/accounts/test', async (req, res, _params, body) => {
+      const rateErr = calTestRateCheck(req);
+      if (rateErr) { errorResponse(res, 429, rateErr); return; }
+      const ctx = engine.getCalendarContext();
+      if (!requireService(res, ctx, 'Calendar integration')) return;
+      const parsed = parseAddCalendarInput(body as Record<string, unknown> | null);
+      if ('error' in parsed) { errorResponse(res, 400, parsed.error); return; }
+      const result = await ctx!.testAccount(parsed);
+      jsonResponse(res, 200, result);
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/calendar/accounts/:id', async (_req, res, params) => {
+      const ctx = engine.getCalendarContext();
+      if (!requireService(res, ctx, 'Calendar integration')) return;
+      const removed = await ctx!.removeAccount(params['id']!);
+      if (!removed) { errorResponse(res, 404, `Calendar account "${params['id']}" not found`); return; }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/calendar/accounts/:id/default', async (_req, res, params) => {
+      const ctx = engine.getCalendarContext();
+      if (!requireService(res, ctx, 'Calendar integration')) return;
+      ctx!.setDefaultWritable(params['id']!);
+      jsonResponse(res, 200, { ok: true, accounts: ctx!.listAccounts() });
+    }));
+
     // ── /api/inbox/* (PRD-UNIFIED-INBOX Phase 1a) ───────────────────────────
     //
     // Pure handlers live in `integrations/inbox/api.ts`; these routes are

@@ -12,7 +12,9 @@ export type FeatureFlag =
   | 'plugins'
   | 'flat-file-memory'
   | 'whatsapp-inbox'
-  | 'unified-inbox';
+  | 'unified-inbox'
+  | 'calendar'
+  | 'calendar-kg-integration';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -20,6 +22,8 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'flat-file-memory': 'LYNOX_FEATURE_FLAT_FILE_MEMORY',
   'whatsapp-inbox': 'LYNOX_FEATURE_WHATSAPP_INBOX',
   'unified-inbox': 'LYNOX_FEATURE_UNIFIED_INBOX',
+  'calendar': 'LYNOX_FEATURE_CALENDAR',
+  'calendar-kg-integration': 'LYNOX_FEATURE_CALENDAR_KG_INTEGRATION',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -30,6 +34,14 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // PRD-UNIFIED-INBOX Phase 1a foundation. Off by default — flip on when the
   // /app/inbox UI ships in Phase 1b and the classifier has been piloted.
   'unified-inbox': false,
+  // PRD-CALENDAR-INTEGRATION Phase 1a (CalDAV + ICS read-only).
+  // Off by default until canary on rafael's iCloud verifies the time-range
+  // workaround (PRD §Risk 7) and Phase 1b ships create.
+  'calendar': false,
+  // Gates Event→Person/Place KG Subject linkage. Deferred until Foundation-Rework
+  // taxonomy registers `Event` + `Place` kinds (PRD §A8/X12). Phase 1 ships the
+  // no-op call site so retro-enabling is a one-flag flip.
+  'calendar-kg-integration': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

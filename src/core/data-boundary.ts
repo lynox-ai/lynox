@@ -1,4 +1,5 @@
 import { channels } from './observability.js';
+import type { Wrapped } from '../types/calendar.js';
 
 interface InjectionResult {
   detected: boolean;
@@ -112,4 +113,22 @@ ${safe}
   return `<untrusted_data source="${source}">
 ${safe}
 </untrusted_data>`;
+}
+
+/**
+ * Brand-typed wrapper for untrusted strings flowing to LLM context.
+ *
+ * Use for new code (calendar integration onwards). Returns a `Wrapped<T>` so
+ * downstream type signatures can enforce "must be wrapped before passing to
+ * LLM". Throws on double-wrap to prevent silent <untrusted_data> nesting from
+ * Subject re-retrieval paths (PRD §S2 + §S13).
+ *
+ * Legacy callers (mail, google, etc.) keep using {@link wrapUntrustedData} —
+ * they accept plain `string` returns. New code should prefer `wrap()`.
+ */
+export function wrap<T extends string>(content: T, source: string): Wrapped<T> {
+  if (content.includes('<untrusted_data>')) {
+    throw new Error(`wrap(): double-wrap detected (source=${source}). Content already wrapped — call sites must wrap exactly once.`);
+  }
+  return wrapUntrustedData(content, source) as Wrapped<T>;
 }

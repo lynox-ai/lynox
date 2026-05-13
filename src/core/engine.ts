@@ -156,6 +156,7 @@ export class Engine {
   private _toolContext: ToolContext;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
+  private _calendarContext: import('../integrations/calendar/context.js').CalendarContext | null = null;
   private _inboxRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
   private _whatsappContext: import('../integrations/whatsapp/context.js').WhatsAppContext | null = null;
   private _lastBatchParentId: string | null = null;
@@ -617,6 +618,26 @@ export class Engine {
       // Mail init failed — non-critical, continue without it
     }
 
+    // PRD-CALENDAR-INTEGRATION Phase 1a — CalDAV + ICS read-only calendar
+    // tools. Gated on the `calendar` feature flag; requires a vault for
+    // credentials. Init failure is non-critical — the rest of the engine
+    // continues to boot.
+    if (this.secretVault && isFeatureEnabled('calendar')) {
+      try {
+        const { CalendarContext } = await import('../integrations/calendar/context.js');
+        const { CalendarStateDb } = await import('../integrations/calendar/state.js');
+        const calendarStateDb = new CalendarStateDb();
+        const calCtx = new CalendarContext(calendarStateDb, this.secretVault);
+        await calCtx.init();
+        for (const tool of calCtx.tools()) {
+          this.registry.register(tool);
+        }
+        this._calendarContext = calCtx;
+      } catch {
+        // Calendar init failed — non-critical, continue without it
+      }
+    }
+
     // PRD-UNIFIED-INBOX Phase 1a — wire the classifier hook on top of the
     // mail state DB (the MailContext is optional; without a vault we still
     // bootstrap the inbox so classification works as soon as a vault lands).
@@ -917,6 +938,7 @@ export class Engine {
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
+  getCalendarContext(): import('../integrations/calendar/context.js').CalendarContext | null { return this._calendarContext; }
   getInboxRuntime(): import('../integrations/inbox/bootstrap.js').InboxRuntime | null { return this._inboxRuntime; }
   getWhatsAppContext(): import('../integrations/whatsapp/context.js').WhatsAppContext | null { return this._whatsappContext; }
 
@@ -1072,6 +1094,13 @@ export class Engine {
     if (this._promptCleanupTimer) {
       clearInterval(this._promptCleanupTimer);
       this._promptCleanupTimer = null;
+    }
+
+    // Stop calendar ICS pollers before process exit so test runs don't
+    // leak open timers.
+    if (this._calendarContext) {
+      try { await this._calendarContext.close(); } catch { /* best-effort */ }
+      this._calendarContext = null;
     }
 
     // Save file manifest for next session's diff

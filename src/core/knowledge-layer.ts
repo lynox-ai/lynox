@@ -515,4 +515,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   consolidateMemories(namespace: MemoryNamespace, scopeType: string, scopeId: string): number {
     return this.db.consolidateMemories(namespace, scopeType, scopeId);
   }
+
+  /**
+   * Delete all Subjects originating from a specific provider + account.
+   *
+   * Phase 1a no-op stub for PRD-CALENDAR-INTEGRATION §S4. The real Subject
+   * store lands with the Foundation-Rework universal-Subject-model sprint;
+   * this method shell exists today so callers (CalendarContext.removeAccount)
+   * can wire to it once, and retro-enabling is a one-flag flip
+   * (`calendar-kg-integration` defaults off until Foundation-Rework ships).
+   *
+   * Currently a no-op — no Subject rows exist yet, so nothing to cascade.
+   * Implementations must be idempotent.
+   */
+  async deleteSubjectsByProvenance(_provider: string, _accountId: string): Promise<void> {
+    // When implemented: delete from subjects WHERE source.provider = ? AND
+    // source.account_id = ? plus cascade edges to Person/Place/etc.
+    return Promise.resolve();
+  }
 }

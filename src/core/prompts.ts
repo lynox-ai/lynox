@@ -105,7 +105,12 @@ Do NOT create contacts for:
 /** Appended when Google Workspace tools are registered */
 export const GOOGLE_PROMPT_SUFFIX = `
 
-**Google Workspace**: \`google_sheets\` (read/write/append), \`google_drive\` (search/read/upload), \`google_calendar\` (list/create/update), \`google_docs\` (read/create/append). Send/modify require confirmation. Gmail is part of the unified mail interface — use \`mail_triage\`, \`mail_search\`, \`mail_read\`, \`mail_send\`, \`mail_reply\` (they span Gmail OAuth + IMAP/SMTP transparently).`;
+**Google Workspace**: \`google_sheets\` (read/write/append), \`google_drive\` (search/read/upload), \`google_docs\` (read/create/append). Send/modify require confirmation. Gmail is part of the unified mail interface — use \`mail_triage\`, \`mail_search\`, \`mail_read\`, \`mail_send\`, \`mail_reply\` (they span Gmail OAuth + IMAP/SMTP transparently). For calendar operations, prefer the universal \`calendar_list\` / \`calendar_free_busy\` tools (they cover CalDAV + ICS + Google). The legacy \`google_calendar\` tool stays available for users who opted into Google OAuth themselves.`;
+
+/** Appended when Calendar tools (CalDAV + ICS) are registered */
+export const CALENDAR_PROMPT_SUFFIX = `
+
+**Calendar**: \`calendar_list\` (events in time window) and \`calendar_free_busy\` (busy intervals only). Both are read-only and fan out across all connected accounts when \`account_ids\` is omitted. Pass UUID account IDs only — NEVER raw email addresses (input is rejected). Use ISO 8601 timestamps. The agent infers free slots by complementing the busy list against the requested window.`;
 
 /** Appended when experience === 'developer' — unlocks technical output style */
 export const DEVELOPER_PROMPT_SUFFIX = `
