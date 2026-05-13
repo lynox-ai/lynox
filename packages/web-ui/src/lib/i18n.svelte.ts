@@ -820,6 +820,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.push_inbox_toggle': { de: 'Bei Mails, die deine Aktion brauchen', en: 'When mail needs your action' },
 	'integrations.push_inbox_toggle_hint': { de: 'Nur „Braucht dich"-Mails — automatisch erledigte oder Entwurf-bereite werden nie gepusht. Erinnerungen und geplante Sendungen sind separat.', en: 'Only "Needs you" mail — auto-handled and drafted-for-you items never push. Reminders and scheduled sends are separate.' },
 	'integrations.push_inbox_save_failed': { de: 'Konnte Einstellung nicht speichern', en: 'Could not save preference' },
+	'integrations.push_quiet_hours_toggle': { de: 'Ruhezeiten aktivieren', en: 'Enable quiet hours' },
+	'integrations.push_quiet_hours_hint': { de: 'In diesem Zeitfenster werden keine Mail-Pushs gesendet.', en: 'No mail pushes during this window.' },
+	'integrations.push_quiet_hours_from': { de: 'von', en: 'from' },
+	'integrations.push_quiet_hours_to': { de: 'bis', en: 'to' },
+	'integrations.push_throttle_title': { de: 'Maximale Häufigkeit', en: 'Maximum frequency' },
+	'integrations.push_throttle_per_minute': { de: 'pro Minute', en: 'per minute' },
+	'integrations.push_throttle_per_hour': { de: 'pro Stunde', en: 'per hour' },
+	'integrations.push_per_account_title': { de: 'Pro Konto', en: 'Per account' },
 
 	// Telegram
 	'integrations.telegram': { de: 'Telegram Bot', en: 'Telegram Bot' },

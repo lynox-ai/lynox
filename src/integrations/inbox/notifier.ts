@@ -24,10 +24,12 @@ import type { InboxItem } from '../../types/index.js';
 
 export interface InboxNotifierOptions {
   router: NotificationRouter;
-  /** Max pushes per minute. PRD default 1. */
-  perMinute?: number | undefined;
-  /** Max pushes per hour. PRD default 10. */
-  perHour?: number | undefined;
+  /**
+   * Throttle thunks read on every fire so a settings UI change takes
+   * effect without restart. `perMinute` defaults to 1, `perHour` to 10.
+   */
+  perMinute?: (() => number) | undefined;
+  perHour?: (() => number) | undefined;
   /** Injectable clock for tests. */
   now?: (() => number) | undefined;
   /**
@@ -37,6 +39,60 @@ export interface InboxNotifierOptions {
    * throttle bucket. Absent → always-on (legacy callers).
    */
   isEnabled?: (() => boolean) | undefined;
+  /**
+   * Per-account mute. Returns true to suppress this account's pushes
+   * without touching the global enable flag — e.g. work@ pushes, but
+   * private@ stays silent. Absent → no per-account filtering.
+   */
+  isAccountMuted?: ((accountId: string) => boolean) | undefined;
+  /**
+   * Quiet-hours window. Returns null when disabled or `{start,end,tz}`
+   * with HH:MM strings + IANA tz. Overnight windows (e.g. 22:00→07:00)
+   * are handled. Absent → no quiet-hours gate.
+   */
+  quietHours?: (() => { start: string; end: string; tz: string } | null) | undefined;
+}
+
+/**
+ * Returns true when `now` (in `tz`) falls inside [start, end). HH:MM
+ * strings are user-local; an end < start window crosses midnight (the
+ * common case: "22:00 to 07:00").
+ */
+export function isInQuietHours(now: Date, start: string, end: string, tz: string): boolean {
+  const startMin = parseHHMM(start);
+  const endMin = parseHHMM(end);
+  if (startMin === null || endMin === null) return false;
+  if (startMin === endMin) return false; // empty window — never quiet
+  let h: number;
+  let m: number;
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(now);
+    h = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10);
+    m = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
+  } catch {
+    // Invalid TZ → fall back to UTC; better to occasionally push during
+    // quiet hours than to silently drop everything from a typo.
+    h = now.getUTCHours();
+    m = now.getUTCMinutes();
+  }
+  const cur = h * 60 + m;
+  if (startMin < endMin) return cur >= startMin && cur < endMin;
+  return cur >= startMin || cur < endMin;
+}
+
+function parseHHMM(s: string): number | null {
+  const m = s.match(/^([0-2]?\d):([0-5]\d)$/);
+  if (!m) return null;
+  const h = parseInt(m[1] ?? '', 10);
+  const mm = parseInt(m[2] ?? '', 10);
+  if (h > 23) return null;
+  return h * 60 + mm;
 }
 
 export interface InboxNotifier {
@@ -85,15 +141,14 @@ export function sanitisePushText(s: string, maxLen: number = 200): string {
  * tenancy is handled at the container level (separate engine per user).
  */
 export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
-  const perMinute = opts.perMinute ?? 1;
-  const perHour = opts.perHour ?? 10;
   const now = opts.now ?? Date.now;
   /** Recent push timestamps (ms). Bounded by `perHour` after each prune. */
   let history: number[] = [];
 
   function shouldThrottle(): boolean {
+    const perMinute = opts.perMinute?.() ?? 1;
+    const perHour = opts.perHour?.() ?? 10;
     const t = now();
-    // Single-pass prune + last-minute count — no second filter scan.
     history = history.filter((ts) => t - ts < 3_600_000);
     if (history.length >= perHour) return true;
     let lastMinuteCount = 0;
@@ -109,6 +164,11 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
       // User-flipped opt-out (settings UI). Reminders + scheduled-send
       // pings live on a separate channel and ignore this gate.
       if (opts.isEnabled && !opts.isEnabled()) return false;
+      if (opts.isAccountMuted && opts.isAccountMuted(item.accountId)) return false;
+      if (opts.quietHours) {
+        const window = opts.quietHours();
+        if (window && isInQuietHours(new Date(now()), window.start, window.end, window.tz)) return false;
+      }
       if (shouldThrottle()) return false;
 
       // Treat empty-string fromName as missing — exactOptionalPropertyTypes

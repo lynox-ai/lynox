@@ -1511,23 +1511,54 @@ describe('handleComposeSend', () => {
 });
 
 describe('handleGetNotificationPrefs / handleUpdateNotificationPrefs', () => {
-  it('defaults inboxPushEnabled=true when no setting has been written', () => {
+  it('returns the full envelope with sane defaults when nothing has been set', () => {
     const r = handleGetNotificationPrefs(deps);
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ inboxPushEnabled: true });
+    expect(r.body).toMatchObject({
+      inboxPushEnabled: true,
+      quietHours: { enabled: false, start: '22:00', end: '07:00', tz: 'UTC' },
+      perMinute: 1,
+      perHour: 10,
+      accounts: [], // mailContext absent in this fixture
+    });
   });
 
-  it('round-trips a toggle via PATCH', () => {
+  it('round-trips inboxPushEnabled', () => {
     const off = handleUpdateNotificationPrefs(deps, { inboxPushEnabled: false });
-    expect(off.body).toEqual({ inboxPushEnabled: false });
-    expect(handleGetNotificationPrefs(deps).body).toEqual({ inboxPushEnabled: false });
-    const on = handleUpdateNotificationPrefs(deps, { inboxPushEnabled: true });
-    expect(on.body).toEqual({ inboxPushEnabled: true });
+    expect((off.body as { inboxPushEnabled: boolean }).inboxPushEnabled).toBe(false);
+    handleUpdateNotificationPrefs(deps, { inboxPushEnabled: true });
+    expect((handleGetNotificationPrefs(deps).body as { inboxPushEnabled: boolean }).inboxPushEnabled).toBe(true);
   });
 
-  it('ignores non-boolean values (no-op when client sends garbage)', () => {
-    handleUpdateNotificationPrefs(deps, { inboxPushEnabled: false });
-    handleUpdateNotificationPrefs(deps, {} as { inboxPushEnabled?: boolean });
-    expect(handleGetNotificationPrefs(deps).body).toEqual({ inboxPushEnabled: false });
+  it('updates quietHours fields independently and validates HH:MM', () => {
+    handleUpdateNotificationPrefs(deps, {
+      quietHours: { enabled: true, start: '23:00', end: '06:30', tz: 'Europe/Berlin' },
+    });
+    let qh = (handleGetNotificationPrefs(deps).body as {
+      quietHours: { enabled: boolean; start: string; end: string; tz: string };
+    }).quietHours;
+    expect(qh).toEqual({ enabled: true, start: '23:00', end: '06:30', tz: 'Europe/Berlin' });
+
+    // Invalid HH:MM → silently ignored, prior values stay.
+    handleUpdateNotificationPrefs(deps, { quietHours: { start: 'bogus', end: '99:99' } });
+    qh = (handleGetNotificationPrefs(deps).body as { quietHours: { start: string; end: string } }).quietHours;
+    expect(qh.start).toBe('23:00');
+    expect(qh.end).toBe('06:30');
+  });
+
+  it('clamps perMinute to [1,10] and perHour to [1,60]', () => {
+    handleUpdateNotificationPrefs(deps, { perMinute: 999, perHour: -5 });
+    const r = handleGetNotificationPrefs(deps).body as { perMinute: number; perHour: number };
+    expect(r.perMinute).toBe(10); // clamped
+    expect(r.perHour).toBe(1); // clamped from -5
+  });
+
+  it('per-account mute writes the namespaced key + rejects invalid account ids', () => {
+    handleUpdateNotificationPrefs(deps, {
+      accounts: { [ACCOUNT.id]: true, 'evil/key:with-bad chars': true },
+    });
+    expect(state.getSetting(`push.account.${ACCOUNT.id}.muted`)).toBe('true');
+    // The bad-shape id is silently dropped — its setting key stays absent.
+    expect(state.getSetting('push.account.evil/key:with-bad chars.muted')).toBeNull();
   });
 });

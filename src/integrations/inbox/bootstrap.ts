@@ -131,6 +131,12 @@ export interface BootstrapInboxOptions {
   reminderPollIntervalMs?: number | undefined;
 }
 
+function parseIntSetting(raw: string | null, fallback: number): number {
+  if (raw === null) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const region = opts.llmRegion ?? 'us';
   // Hard-fail when the operator opted into ack-enforcement but did not
@@ -184,13 +190,24 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   // Build the inbox notifier when a router is wired. Created here (not
   // in runner.ts) so the same instance throttles across both LLM-driven
   // (runner) and rule/sensitive-skip (watcher-hook) classification paths.
-  // `isEnabled` reads the v15 setting on every fire so toggling the UI
-  // checkbox takes effect without a restart. Default true — explicit
-  // 'false' disables; any other value (or absent row) keeps it on.
+  // All thunks read v15 settings on every fire so toggling the UI takes
+  // effect without restart. Defaults match the constants the UI shows
+  // (1/min, 10/h, no quiet hours, no per-account mute).
   const notifier = opts.notificationRouter
     ? createInboxNotifier({
         router: opts.notificationRouter,
         isEnabled: () => state.getSetting('push.inbox_enabled', 'true') !== 'false',
+        perMinute: () => parseIntSetting(state.getSetting('push.per_minute'), 1),
+        perHour: () => parseIntSetting(state.getSetting('push.per_hour'), 10),
+        isAccountMuted: (accountId) =>
+          state.getSetting(`push.account.${accountId}.muted`, 'false') === 'true',
+        quietHours: () => {
+          if (state.getSetting('push.quiet_hours_enabled', 'false') !== 'true') return null;
+          const start = state.getSetting('push.quiet_hours_start', '22:00') ?? '22:00';
+          const end = state.getSetting('push.quiet_hours_end', '07:00') ?? '07:00';
+          const tz = state.getSetting('push.quiet_hours_tz', 'UTC') ?? 'UTC';
+          return { start, end, tz };
+        },
       })
     : undefined;
 

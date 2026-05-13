@@ -227,19 +227,70 @@ export function handleGetItemThread(
 }
 
 /**
- * Notification preferences (v15). The Mail-Context-Sidebar PRD's main
- * concern is that a noisy new-mail push doesn't make the user
- * unsubscribe wholesale and lose Reminders + Send-Later failure pings.
- * One boolean today; future per-zone keys land in the same envelope.
+ * Notification preferences (v15). One envelope, one PATCH endpoint —
+ * keeps the UI simple. All keys live in `inbox_settings` so adding a
+ * new pref means another key, not a new column.
+ *
+ * - `inboxPushEnabled` — master gate for new-mail pushes
+ * - `quietHours` — local-time window during which we silently skip
+ * - `perMinute` / `perHour` — user-tunable throttle (defaults 1/10)
+ * - `accounts` — per-account mute list; mailContext supplies the names
  */
 export function handleGetNotificationPrefs(deps: InboxApiDeps): ApiResponse {
   const enabled = deps.state.getSetting('push.inbox_enabled', 'true') !== 'false';
-  return { status: 200, body: { inboxPushEnabled: enabled } };
+  const quietEnabled = deps.state.getSetting('push.quiet_hours_enabled', 'false') === 'true';
+  const start = deps.state.getSetting('push.quiet_hours_start', '22:00') ?? '22:00';
+  const end = deps.state.getSetting('push.quiet_hours_end', '07:00') ?? '07:00';
+  const tz = deps.state.getSetting('push.quiet_hours_tz', 'UTC') ?? 'UTC';
+  const perMinute = parsePositiveInt(deps.state.getSetting('push.per_minute'), 1);
+  const perHour = parsePositiveInt(deps.state.getSetting('push.per_hour'), 10);
+
+  const accountList = deps.mailContext
+    ? deps.mailContext.stateDb.listAccounts().map((a) => ({
+        id: a.id,
+        displayName: a.displayName,
+        address: a.address,
+        muted: deps.state.getSetting(`push.account.${a.id}.muted`, 'false') === 'true',
+      }))
+    : [];
+
+  return {
+    status: 200,
+    body: {
+      inboxPushEnabled: enabled,
+      quietHours: { enabled: quietEnabled, start, end, tz },
+      perMinute,
+      perHour,
+      accounts: accountList,
+    },
+  };
+}
+
+function parsePositiveInt(raw: string | null, fallback: number): number {
+  if (raw === null) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 export interface NotificationPrefsBody {
   inboxPushEnabled?: boolean | undefined;
+  quietHours?: {
+    enabled?: boolean | undefined;
+    start?: string | undefined;
+    end?: string | undefined;
+    tz?: string | undefined;
+  } | undefined;
+  perMinute?: number | undefined;
+  perHour?: number | undefined;
+  /** Map of accountId → muted boolean. Only listed ids are touched. */
+  accounts?: Record<string, boolean> | undefined;
 }
+
+const HHMM_RE = /^([0-2]?\d):([0-5]\d)$/;
+/** Throttle ranges keep a buggy UI from setting absurd values. */
+const THROTTLE_MIN = 1;
+const THROTTLE_MAX_PER_MINUTE = 10;
+const THROTTLE_MAX_PER_HOUR = 60;
 
 export function handleUpdateNotificationPrefs(
   deps: InboxApiDeps,
@@ -247,6 +298,36 @@ export function handleUpdateNotificationPrefs(
 ): ApiResponse {
   if (typeof body.inboxPushEnabled === 'boolean') {
     deps.state.setSetting('push.inbox_enabled', body.inboxPushEnabled ? 'true' : 'false');
+  }
+  if (body.quietHours) {
+    if (typeof body.quietHours.enabled === 'boolean') {
+      deps.state.setSetting('push.quiet_hours_enabled', body.quietHours.enabled ? 'true' : 'false');
+    }
+    if (typeof body.quietHours.start === 'string' && HHMM_RE.test(body.quietHours.start)) {
+      deps.state.setSetting('push.quiet_hours_start', body.quietHours.start);
+    }
+    if (typeof body.quietHours.end === 'string' && HHMM_RE.test(body.quietHours.end)) {
+      deps.state.setSetting('push.quiet_hours_end', body.quietHours.end);
+    }
+    if (typeof body.quietHours.tz === 'string' && body.quietHours.tz.length > 0 && body.quietHours.tz.length < 64) {
+      deps.state.setSetting('push.quiet_hours_tz', body.quietHours.tz);
+    }
+  }
+  if (typeof body.perMinute === 'number' && Number.isFinite(body.perMinute)) {
+    const clamped = Math.min(Math.max(Math.floor(body.perMinute), THROTTLE_MIN), THROTTLE_MAX_PER_MINUTE);
+    deps.state.setSetting('push.per_minute', String(clamped));
+  }
+  if (typeof body.perHour === 'number' && Number.isFinite(body.perHour)) {
+    const clamped = Math.min(Math.max(Math.floor(body.perHour), THROTTLE_MIN), THROTTLE_MAX_PER_HOUR);
+    deps.state.setSetting('push.per_hour', String(clamped));
+  }
+  if (body.accounts && typeof body.accounts === 'object') {
+    for (const [accountId, muted] of Object.entries(body.accounts)) {
+      // Defensive: only allow alnum-ish account ids so a crafted key
+      // can't collide with another setting namespace.
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(accountId)) continue;
+      deps.state.setSetting(`push.account.${accountId}.muted`, muted ? 'true' : 'false');
+    }
   }
   return handleGetNotificationPrefs(deps);
 }

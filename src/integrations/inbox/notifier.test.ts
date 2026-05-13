@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { NotificationRouter, type NotificationMessage } from '../../core/notification-router.js';
-import { createInboxNotifier, sanitisePushText } from './notifier.js';
+import { createInboxNotifier, isInQuietHours, sanitisePushText } from './notifier.js';
 import type { InboxItem } from '../../types/index.js';
 
 function fakeItem(over: Partial<InboxItem> = {}): InboxItem {
@@ -111,7 +111,7 @@ describe('createInboxNotifier — throttle', () => {
     const send = vi.fn(async () => true);
     router.register({ name: 'web-push', send });
     let t = 1_000_000;
-    const notifier = createInboxNotifier({ router, perMinute: 1, perHour: 10, now: () => t });
+    const notifier = createInboxNotifier({ router, perMinute: () => 1, perHour: () => 10, now: () => t });
 
     expect(await notifier.notifyNewItem(fakeItem({ id: 'a' }))).toBe(true);
     t += 30_000; // 30s later
@@ -126,7 +126,7 @@ describe('createInboxNotifier — throttle', () => {
     const send = vi.fn(async () => true);
     router.register({ name: 'web-push', send });
     let t = 1_000_000;
-    const notifier = createInboxNotifier({ router, perMinute: 100, perHour: 3, now: () => t });
+    const notifier = createInboxNotifier({ router, perMinute: () => 100, perHour: () => 3, now: () => t });
 
     for (let i = 0; i < 5; i++) {
       await notifier.notifyNewItem(fakeItem({ id: `i${String(i)}` }));
@@ -144,7 +144,7 @@ describe('createInboxNotifier — throttle', () => {
     // (forgot-to-register) blocks every legitimate push for a full minute.
     const router = new NotificationRouter();
     let t = 1_000_000;
-    const notifier = createInboxNotifier({ router, perMinute: 1, perHour: 10, now: () => t });
+    const notifier = createInboxNotifier({ router, perMinute: () => 1, perHour: () => 10, now: () => t });
 
     expect(await notifier.notifyNewItem(fakeItem({ id: 'a' }))).toBe(false);
     expect(await notifier.notifyNewItem(fakeItem({ id: 'b' }))).toBe(false);
@@ -161,7 +161,7 @@ describe('createInboxNotifier — throttle', () => {
     let t = 1_000_000;
     let enabled = false;
     const notifier = createInboxNotifier({
-      router, perMinute: 1, perHour: 10, now: () => t, isEnabled: () => enabled,
+      router, perMinute: () => 1, perHour: () => 10, now: () => t, isEnabled: () => enabled,
     });
 
     expect(await notifier.notifyNewItem(fakeItem({ id: 'a' }))).toBe(false);
@@ -181,11 +181,108 @@ describe('createInboxNotifier — throttle', () => {
       return true;
     } });
     let t = 1_000_000;
-    const notifier = createInboxNotifier({ router, perMinute: 1, perHour: 10, now: () => t });
+    const notifier = createInboxNotifier({ router, perMinute: () => 1, perHour: () => 10, now: () => t });
 
     expect(await notifier.notifyNewItem(fakeItem({ id: 'a' }))).toBe(false);
     throws = false;
     // Same minute window — would be throttled if the failure had counted.
     expect(await notifier.notifyNewItem(fakeItem({ id: 'b' }))).toBe(true);
+  });
+});
+
+describe('isInQuietHours', () => {
+  // 2026-05-13 14:00 UTC → 16:00 Europe/Berlin (CEST = UTC+2 in May)
+  const dayUtc14 = new Date('2026-05-13T14:00:00Z');
+  // 2026-05-14 02:00 UTC → 04:00 Europe/Berlin (mid-night-window)
+  const nightUtc02 = new Date('2026-05-14T02:00:00Z');
+
+  it('returns false outside the window (daytime, 22-07 quiet)', () => {
+    expect(isInQuietHours(dayUtc14, '22:00', '07:00', 'Europe/Berlin')).toBe(false);
+  });
+
+  it('returns true inside an overnight window (22:00 → 07:00)', () => {
+    expect(isInQuietHours(nightUtc02, '22:00', '07:00', 'Europe/Berlin')).toBe(true);
+  });
+
+  it('returns false at the exact end boundary (window is half-open)', () => {
+    // 07:00 Berlin == 05:00 UTC
+    expect(isInQuietHours(new Date('2026-05-14T05:00:00Z'), '22:00', '07:00', 'Europe/Berlin')).toBe(false);
+  });
+
+  it('returns true at the exact start boundary', () => {
+    // 22:00 Berlin == 20:00 UTC
+    expect(isInQuietHours(new Date('2026-05-13T20:00:00Z'), '22:00', '07:00', 'Europe/Berlin')).toBe(true);
+  });
+
+  it('handles a same-day window (e.g. 12:00–14:00 lunch quiet)', () => {
+    expect(isInQuietHours(new Date('2026-05-13T11:00:00Z'), '12:00', '14:00', 'Europe/Berlin')).toBe(true); // 13:00 Berlin
+    expect(isInQuietHours(new Date('2026-05-13T13:00:00Z'), '12:00', '14:00', 'Europe/Berlin')).toBe(false); // 15:00 Berlin
+  });
+
+  it('returns false for malformed start/end (defensive parse)', () => {
+    expect(isInQuietHours(dayUtc14, 'bogus', '07:00', 'UTC')).toBe(false);
+    expect(isInQuietHours(dayUtc14, '22:00', '99:99', 'UTC')).toBe(false);
+  });
+
+  it('falls back to UTC when the tz string is invalid', () => {
+    // 14:00 UTC ∈ [12:00, 17:00) → quiet under UTC fallback
+    expect(isInQuietHours(dayUtc14, '12:00', '17:00', 'Not/A/Real/Zone')).toBe(true);
+  });
+});
+
+describe('createInboxNotifier — quiet hours / per-account / dynamic throttle', () => {
+  it('skips dispatch during quiet hours without burning the throttle', async () => {
+    const router = new NotificationRouter();
+    const send = vi.fn(async () => true);
+    router.register({ name: 'web-push', send });
+    let t = new Date('2026-05-14T02:00:00Z').getTime(); // 04:00 Berlin
+    let quietEnabled = true;
+    const notifier = createInboxNotifier({
+      router, now: () => t,
+      quietHours: () => quietEnabled ? { start: '22:00', end: '07:00', tz: 'Europe/Berlin' } : null,
+    });
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'a' }))).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    // Quiet ends at 07:00 Berlin = 05:00 UTC.
+    t = new Date('2026-05-14T07:00:00Z').getTime(); // 09:00 Berlin
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'b' }))).toBe(true);
+    // Disabling the window also lets us through (1h later → throttle clear).
+    t = new Date('2026-05-14T08:30:00Z').getTime();
+    quietEnabled = false;
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'c' }))).toBe(true);
+  });
+
+  it('mutes a specific accountId without affecting others', async () => {
+    const router = new NotificationRouter();
+    const send = vi.fn(async () => true);
+    router.register({ name: 'web-push', send });
+    const muted = new Set(['acct-private']);
+    const notifier = createInboxNotifier({
+      router,
+      isAccountMuted: (id) => muted.has(id),
+    });
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'a', accountId: 'acct-private' }))).toBe(false);
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'b', accountId: 'acct-work' }))).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads perMinute / perHour thunks on every fire (settings change at runtime)', async () => {
+    const router = new NotificationRouter();
+    const send = vi.fn(async () => true);
+    router.register({ name: 'web-push', send });
+    let perMinute = 1;
+    let t = 1_000_000;
+    const notifier = createInboxNotifier({
+      router, now: () => t,
+      perMinute: () => perMinute,
+      perHour: () => 100,
+    });
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'a' }))).toBe(true);
+    // Same minute, perMinute=1 → throttled.
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'b' }))).toBe(false);
+    // Bump live: thunk picks up the new value on the next call.
+    perMinute = 5;
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'c' }))).toBe(true);
+    expect(send).toHaveBeenCalledTimes(2);
   });
 });
