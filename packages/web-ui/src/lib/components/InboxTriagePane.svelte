@@ -104,11 +104,18 @@
 		if (nextItem) await openItem(nextItem.id);
 	}
 
+	// Toggles whether the next preset-pick fires a reminder notification at
+	// resurface time or just resurfaces silently. Set by the "📌 Erinner mich"
+	// button; reset to false after each snooze fires.
+	let notifyOnUnsnoozeOnNext = $state(false);
+
 	async function snooze(preset: SnoozePreset): Promise<void> {
 		if (!full) return;
 		const beforeIdx = currentIdx;
 		snoozeMenuOpen = false;
-		await setItemSnooze(full.item.id, null, null, true, preset);
+		const notify = notifyOnUnsnoozeOnNext;
+		notifyOnUnsnoozeOnNext = false;
+		await setItemSnooze(full.item.id, null, null, true, preset, notify);
 		onActionApplied?.();
 		if (queue.length === 0) {
 			closeItem();
@@ -117,6 +124,11 @@
 		}
 		const nextItem = queue[Math.min(beforeIdx, queue.length - 1)];
 		if (nextItem) await openItem(nextItem.id);
+	}
+
+	function openReminderPicker(): void {
+		notifyOnUnsnoozeOnNext = true;
+		snoozeMenuOpen = true;
 	}
 
 	const snoozePresets: ReadonlyArray<{ label: string; preset: SnoozePreset }> = $derived([
@@ -224,10 +236,16 @@
 			>
 				{t('inbox.action_archive')}
 			</button>
+			<button
+				type="button"
+				onclick={openReminderPicker}
+				aria-label={t('inbox.action_remind_me')}
+				class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-muted hover:text-text"
+			>📌 {t('inbox.action_remind_me')}</button>
 			<div class="relative">
 				<button
 					type="button"
-					onclick={() => (snoozeMenuOpen = !snoozeMenuOpen)}
+					onclick={() => { notifyOnUnsnoozeOnNext = false; snoozeMenuOpen = !snoozeMenuOpen; }}
 					aria-expanded={snoozeMenuOpen}
 					aria-haspopup="menu"
 					class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-muted hover:text-text"
