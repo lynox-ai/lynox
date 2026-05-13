@@ -940,6 +940,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'common.save_failed': { de: 'Speichern fehlgeschlagen. Bitte erneut versuchen.', en: 'Save failed. Please try again.' },
 	'common.load_failed': { de: 'Laden fehlgeschlagen. Ist die Engine erreichbar?', en: 'Failed to load. Is the engine reachable?' },
 	'common.copied': { de: 'Kopiert', en: 'Copied' },
+	'session.expired_title': { de: 'Sitzung abgelaufen', en: 'Session expired' },
+	'session.expired_hint': { de: 'Die Engine läuft, deine Anmeldung muss erneuert werden.', en: 'The engine is running, your login needs to be refreshed.' },
+	'session.relogin': { de: 'Neu anmelden', en: 'Sign in again' },
+	'session.dismiss': { de: 'Später', en: 'Dismiss' },
 	'common.copy': { de: 'Kopieren', en: 'Copy' },
 	'common.cancel': { de: 'Abbrechen', en: 'Cancel' },
 
