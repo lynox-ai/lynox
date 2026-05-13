@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { clickOutside } from '../utils/click-outside.js';
 	import {
 		closeItem,
 		getInboxItems,
@@ -126,11 +127,6 @@
 		if (nextItem) await openItem(nextItem.id);
 	}
 
-	function openReminderPicker(): void {
-		notifyOnUnsnoozeOnNext = true;
-		snoozeMenuOpen = true;
-	}
-
 	const snoozePresets: ReadonlyArray<{ label: string; preset: SnoozePreset }> = $derived([
 		{ label: t('inbox.snooze_today'), preset: 'later_today' as const },
 		{ label: t('inbox.snooze_tomorrow'), preset: 'tomorrow_morning' as const },
@@ -236,36 +232,38 @@
 			>
 				{t('inbox.action_archive')}
 			</button>
-			<button
-				type="button"
-				onclick={openReminderPicker}
-				aria-label={t('inbox.action_remind_me')}
-				class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-muted hover:text-text"
-			>{t("inbox.action_remind_me")}</button>
-			<div class="relative">
+			<div class="relative" use:clickOutside={() => (snoozeMenuOpen = false)}>
 				<button
 					type="button"
-					onclick={() => { notifyOnUnsnoozeOnNext = false; snoozeMenuOpen = !snoozeMenuOpen; }}
+					onclick={() => (snoozeMenuOpen = !snoozeMenuOpen)}
 					aria-expanded={snoozeMenuOpen}
 					aria-haspopup="menu"
 					class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[12px] text-text-muted hover:text-text"
 				>{t('inbox.action_snooze')}</button>
 				{#if snoozeMenuOpen}
-					<ul
+					<div
 						role="menu"
-						class="absolute bottom-full left-0 mb-1 z-10 min-w-[180px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
+						class="absolute bottom-full left-0 mb-1 z-10 min-w-[220px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
 					>
 						{#each snoozePresets as p (p.preset)}
-							<li role="none">
-								<button
-									type="button"
-									role="menuitem"
-									class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text"
-									onclick={() => void snooze(p.preset)}
-								>{p.label}</button>
-							</li>
+							<button
+								type="button"
+								role="menuitem"
+								class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text"
+								onclick={() => void snooze(p.preset)}
+							>{p.label}</button>
 						{/each}
-					</ul>
+						<label class="flex items-start gap-2 border-t border-border px-3 py-2 cursor-pointer text-[12px] text-text-muted hover:bg-bg-subtle">
+							<input
+								type="checkbox"
+								checked={notifyOnUnsnoozeOnNext}
+								onchange={(e) => (notifyOnUnsnoozeOnNext = (e.currentTarget as HTMLInputElement).checked)}
+								class="mt-0.5"
+								onclick={(e) => e.stopPropagation()}
+							/>
+							<span>{t('inbox.action_notify_on_unsnooze')}</span>
+						</label>
+					</div>
 				{/if}
 			</div>
 			<span class="ml-auto text-[10px] font-mono text-text-subtle hidden sm:inline">
