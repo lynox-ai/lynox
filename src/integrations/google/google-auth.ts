@@ -711,6 +711,19 @@ export class GoogleAuth {
       throw new Error(`Service account key file has unexpected type: "${String(obj['type'])}". Expected "service_account".`);
     }
 
+    // token_uri is used as a `fetch()` target when minting access tokens. A
+    // crafted or tampered key file could redirect the JWT assertion (and its
+    // implicit `aud` binding) to an internal address. Pin to Google's published
+    // OAuth token endpoint — workload-identity-federation has its own flow and
+    // does not reach this code path. Missing or empty also rejected (fail-closed).
+    const tokenUri = typeof obj['token_uri'] === 'string' ? obj['token_uri'] : '';
+    if (tokenUri !== 'https://oauth2.googleapis.com/token') {
+      throw new Error(
+        `Service account key has unexpected token_uri "${tokenUri}". ` +
+        `Expected "https://oauth2.googleapis.com/token". Refusing to use this key.`,
+      );
+    }
+
     return parsed as ServiceAccountKey;
   }
 

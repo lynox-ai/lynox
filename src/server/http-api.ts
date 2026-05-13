@@ -54,6 +54,11 @@ interface ProviderStatus {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
+
+/** Reject out-of-range port numbers before they reach the socket layer. */
+function isValidMailPort(n: number): boolean {
+  return Number.isInteger(n) && n >= 1 && n <= 65535;
+}
 const PKG_VERSION: string = (() => {
   try {
     const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../package.json'), 'utf-8');
@@ -3165,6 +3170,16 @@ export class LynoxHTTPApi {
           if (!imapHost || !smtpHost) {
             errorResponse(res, 400, 'custom preset requires non-empty imap.host and smtp.host'); return;
           }
+          if (!isValidMailPort(imapPort) || !isValidMailPort(smtpPort)) {
+            errorResponse(res, 400, 'imap.port and smtp.port must be 1..65535'); return;
+          }
+          try {
+            const { assertPublicHost } = await import('../core/network-guard.js');
+            await assertPublicHost(imapHost);
+            await assertPublicHost(smtpHost);
+          } catch (err: unknown) {
+            errorResponse(res, 400, err instanceof Error ? err.message : 'host validation failed'); return;
+          }
           account = buildCustomAccount({
             id, displayName, address, type, personaPrompt,
             imap: { host: imapHost, port: imapPort, secure: imapSecure },
@@ -3258,6 +3273,16 @@ export class LynoxHTTPApi {
           const smtpPort = typeof custom?.smtp?.port === 'number' ? custom.smtp.port : 465;
           const smtpSecure = custom?.smtp?.secure !== false;
           if (!imapHost || !smtpHost) { errorResponse(res, 400, 'custom preset requires imap.host + smtp.host'); return; }
+          if (!isValidMailPort(imapPort) || !isValidMailPort(smtpPort)) {
+            errorResponse(res, 400, 'imap.port and smtp.port must be 1..65535'); return;
+          }
+          try {
+            const { assertPublicHost } = await import('../core/network-guard.js');
+            await assertPublicHost(imapHost);
+            await assertPublicHost(smtpHost);
+          } catch (err: unknown) {
+            errorResponse(res, 400, err instanceof Error ? err.message : 'host validation failed'); return;
+          }
           account = buildCustomAccount({
             id, displayName, address, type,
             imap: { host: imapHost, port: imapPort, secure: imapSecure },

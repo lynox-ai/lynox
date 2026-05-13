@@ -4,6 +4,7 @@
 // BYOK: the customer's access token + phone-number-id are injected.
 
 import type { WhatsAppCredentials } from './types.js';
+import { fetchWithPublicRedirects } from '../../core/network-guard.js';
 
 const GRAPH_VERSION = 'v22.0';
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -84,7 +85,11 @@ export class WhatsAppClient {
     const mimeType = typeof metaRes['mime_type'] === 'string' ? metaRes['mime_type'] : 'application/octet-stream';
     if (!url) throw new Error(`Meta API: no media url returned for id ${mediaId}`);
 
-    const binRes = await fetch(url, {
+    // The media URL is server-controlled (returned in step 1's response body).
+    // Without revalidation, a compromised or MITM'd Meta response could redirect
+    // the binary fetch to an internal address. Route through the public-host
+    // guard so every hop (initial + redirects) is checked.
+    const binRes = await fetchWithPublicRedirects(url, {
       headers: { Authorization: `Bearer ${this.creds.accessToken}` },
       signal: AbortSignal.timeout(META_MEDIA_DOWNLOAD_TIMEOUT_MS),
     });
