@@ -27,6 +27,7 @@ import ical from 'node-ical';
 import { wrap } from '../../../core/data-boundary.js';
 import { CalendarError } from '../provider.js';
 import { hasDangerousFreq, recurrenceEndedBefore } from './rrule-safety.js';
+import { assertSafeUrl } from './ssrf-safe.js';
 import type { CalendarStateDb } from '../state.js';
 import type { CalendarAttendee, CalendarEvent, CalendarListOptions, CalendarProvider } from '../../../types/calendar.js';
 
@@ -110,6 +111,16 @@ export async function pollIcsFeed(
     }
   }
 
+  // PRD §S2 — SSRF guard before any network fetch. User-supplied ICS URLs
+  // could target cloud-metadata, RFC1918, loopback. Counts circuit-breaker
+  // failures so a misconfigured private URL doesn't burn quota on each poll.
+  try {
+    await assertSafeUrl(url, 'ICS feed url');
+  } catch (err) {
+    failWithCircuit(state, accountId);
+    throw err;
+  }
+
   const headers: Record<string, string> = { Accept: 'text/calendar, application/calendar+xml;q=0.9, */*;q=0.5' };
   if (previous?.etag) headers['If-None-Match'] = previous.etag;
   if (previous?.last_modified) headers['If-Modified-Since'] = previous.last_modified;
@@ -132,8 +143,10 @@ export async function pollIcsFeed(
   }
   if (res.status === 404) {
     failWithCircuit(state, accountId);
-    // PRD §S15: surface this distinctly so the UI can show the admin-block hint.
-    throw new CalendarError('not_found', 'ICS feed returned 404. The URL may be invalid, the token may have been revoked, or the calendar provider (e.g. Google Workspace) may have admin-disabled external sharing.');
+    // PRD §S15 — surface the admin-block hint to the user via publicMessage,
+    // not just stderr. The hint is generic enough to be safe (no URL/host leak).
+    const hint = 'ICS feed returned 404. The URL may be invalid, the token may have been revoked, or the calendar provider (e.g. Google Workspace) may have admin-disabled external sharing.';
+    throw new CalendarError('not_found', hint, undefined, hint);
   }
   if (res.status === 429) {
     failWithCircuit(state, accountId);
@@ -193,6 +206,11 @@ export async function pollIcsFeed(
  * account-add time (PRD §S15). Reads at most the first 16 KB.
  */
 export async function testIcsFeed(url: string, signal?: AbortSignal): Promise<void> {
+  // PRD §S2 — SSRF guard. testIcsFeed is an UNAUTHENTICATED 10/min probe,
+  // so an attacker could otherwise use it as a port-scanner against
+  // 127.0.0.1, 169.254.169.254, or RFC1918 addresses on the same host.
+  await assertSafeUrl(url, 'ICS feed url');
+
   let res: Response;
   try {
     res = await fetch(url, { method: 'GET', signal: signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
@@ -203,7 +221,10 @@ export async function testIcsFeed(url: string, signal?: AbortSignal): Promise<vo
     throw new CalendarError('auth_failed', `ICS feed unauthorized (HTTP ${res.status})`);
   }
   if (res.status === 404) {
-    throw new CalendarError('not_found', 'ICS feed returned 404. Verify the Secret-iCal URL and that your provider allows external sharing.');
+    {
+      const hint = 'ICS feed returned 404. Verify the Secret-iCal URL and that your provider allows external sharing.';
+      throw new CalendarError('not_found', hint, undefined, hint);
+    }
   }
   if (!res.ok) {
     throw new CalendarError('network', `ICS feed HTTP ${res.status}`);

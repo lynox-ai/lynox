@@ -197,7 +197,10 @@ export function resolveCreateTarget(
 }
 
 function errorMessage(err: unknown): string {
-  if (err instanceof CalendarError) return `calendar_create error: ${err.code} — ${err.message}`;
+  if (err instanceof CalendarError) {
+    const debug = process.env['LYNOX_DEBUG'] === '1' ? ` [debug: ${err.message}]` : '';
+    return `calendar_create error: ${err.publicMessage()} (${err.code})${debug}`;
+  }
   return `calendar_create error: ${err instanceof Error ? err.message : String(err)}`;
 }
 

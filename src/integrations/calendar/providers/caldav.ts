@@ -26,6 +26,7 @@ import { DAVClient } from 'tsdav';
 import { wrap } from '../../../core/data-boundary.js';
 import { CalendarError } from '../provider.js';
 import { hasDangerousFreq } from './rrule-safety.js';
+import { assertSafeUrl } from './ssrf-safe.js';
 import type {
   CalendarAttendee,
   CalendarEvent,
@@ -58,11 +59,13 @@ export class CalDavCalendarProvider implements CalendarProvider {
   readonly authType = 'basic' as const;
 
   private readonly client: DAVClient;
+  private readonly serverUrl: string;
   private readonly enabledCalendars: ReadonlySet<string> | null;
   private loggedIn = false;
 
   constructor(init: CalDavProviderInit) {
     this.accountId = init.accountId;
+    this.serverUrl = init.serverUrl;
     this.client = new DAVClient({
       serverUrl: init.serverUrl,
       credentials: { username: init.credentials.username, password: init.credentials.password },
@@ -225,6 +228,11 @@ export class CalDavCalendarProvider implements CalendarProvider {
 
   private async ensureLoggedIn(): Promise<void> {
     if (this.loggedIn) return;
+    // PRD §S2 — SSRF guard runs BEFORE login so a user-supplied serverUrl
+    // pointing at 169.254.169.254 / 127.0.0.1 / RFC1918 never reaches the
+    // network. Cached after first successful login since serverUrl is
+    // immutable on this instance.
+    await assertSafeUrl(this.serverUrl, 'CalDAV server_url');
     try {
       await this.client.login();
       this.loggedIn = true;

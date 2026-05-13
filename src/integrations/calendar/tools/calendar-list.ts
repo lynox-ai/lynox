@@ -121,12 +121,14 @@ function renderEventList(
 }
 
 function renderError(err: unknown, where: string): string {
-  if (err instanceof CalendarError) return `calendar_list error in ${where}: ${err.code} — ${err.message}`;
   return `calendar_list error in ${where}: ${errorMessage(err)}`;
 }
 
 function errorMessage(err: unknown): string {
-  if (err instanceof CalendarError) return `${err.code}: ${err.message}`;
+  if (err instanceof CalendarError) {
+    const debug = process.env['LYNOX_DEBUG'] === '1' ? ` [debug: ${err.message}]` : '';
+    return `${err.publicMessage()} (${err.code})${debug}`;
+  }
   return err instanceof Error ? err.message : String(err);
 }
 
