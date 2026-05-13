@@ -28,6 +28,13 @@
 	let renamingThreadId = $state<string | null>(null);
 	let renameValue = $state('');
 	let langDropdownOpen = $state(false);
+	// Icon-rail collapse state (variant B). Pinned wins; otherwise hovered
+	// keeps the rail expanded while the cursor is over it. Pin survives
+	// reloads via localStorage so the user's preference sticks.
+	let railPinned = $state(false);
+	let railHovered = $state(false);
+	let railLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+	const railExpanded = $derived(railPinned || railHovered);
 
 	function focusOnMount(node: HTMLElement) { node.focus(); }
 
@@ -209,38 +216,20 @@
 		}
 	});
 
+	// Flat nav: no sidebar sub-nav (per PR #265). Sub-features live as tabs
+	// inside each hub page. Chat keeps its threads dropdown — that's not a
+	// sub-nav, it's the conversation history.
 	const nav: NavItem[] = $derived.by(() => {
 		const items: NavItem[] = [
-			{
-				href: '/app', labelKey: 'nav.chat', exact: true, icon: 'chat',
-				descKey: 'nav.desc.chat', type: 'threads',
-			},
+			{ href: '/app', labelKey: 'nav.chat', exact: true, icon: 'chat', type: 'threads' },
 		];
 		if (inboxEnabled) {
-			items.push({
-				href: '/app/inbox', labelKey: 'nav.inbox', exact: false, icon: 'inbox',
-				descKey: 'nav.desc.inbox',
-			});
+			items.push({ href: '/app/inbox', labelKey: 'nav.inbox', exact: false, icon: 'inbox' });
 		}
 		items.push(
-			{
-				href: '/app/workflows', labelKey: 'nav.automation', exact: false, icon: 'workflow',
-				descKey: 'nav.desc.automation',
-			},
-			{
-				href: '/app/knowledge', labelKey: 'nav.intelligence', exact: false, icon: 'brain',
-				descKey: 'nav.desc.intelligence',
-				type: 'subnav',
-				subnav: [
-					{ href: '/app/knowledge', labelKey: 'nav.intelligence_kg', exact: true },
-					{ href: '/app/contacts', labelKey: 'nav.intelligence_contacts', exact: false },
-					{ href: '/app/insights', labelKey: 'nav.intelligence_insights', exact: false },
-				],
-			},
-			{
-				href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts',
-				descKey: 'nav.desc.artifacts',
-			},
+			{ href: '/app/automation', labelKey: 'nav.automation', exact: false, icon: 'workflow' },
+			{ href: '/app/intelligence', labelKey: 'nav.intelligence', exact: false, icon: 'brain' },
+			{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts' },
 		);
 		return items;
 	});
@@ -254,13 +243,11 @@
 		return exact ? path === href : path.startsWith(href);
 	}
 
-	// Routes without their own sidebar entry highlight their parent. The
-	// Intelligence subnav children are listed here too so the parent stays
-	// highlighted (and auto-expanded on mount) when the user navigates to one.
-	const PARENT_OWNS: Record<string, string[]> = {
-		'/app/workflows': ['/app/activity'],
-		'/app/knowledge': ['/app/contacts', '/app/insights'],
-	};
+	// PARENT_OWNS used to map standalone routes back to their parent; with the
+	// hub-consolidation flat-nav refactor, all sub-features live at /automation
+	// and /intelligence under ?tab/?section query params, so parent matching
+	// via path-prefix is enough. Empty for now.
+	const PARENT_OWNS: Record<string, string[]> = {};
 
 	function isParentActive(item: NavItem): boolean {
 		if (isActive(item.href, item.exact)) return true;
@@ -325,14 +312,33 @@
 	onMount(() => {
 		void loadThreads();
 		stopVisibilityRefresh = startVisibilityRefresh();
-		// Expand the active section so the user can see siblings without
-		// re-clicking the parent: works for both threads (Chat) and subnav
-		// (Intelligence).
 		const match = nav.find(item => isExpandable(item) && isParentActive(item));
 		if (match) {
 			expandedSection = match.href;
 		}
+		// Restore pin preference. Default = unpinned (collapsed icon-rail) so
+		// new users see the maximum-content layout.
+		try {
+			railPinned = localStorage.getItem('lynox-rail-pinned') === '1';
+		} catch { /* localStorage may be blocked; collapsed default is fine */ }
 	});
+
+	function togglePin(): void {
+		railPinned = !railPinned;
+		try { localStorage.setItem('lynox-rail-pinned', railPinned ? '1' : '0'); } catch { /* see onMount */ }
+	}
+
+	function onRailEnter(): void {
+		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
+		railHovered = true;
+	}
+
+	function onRailLeave(): void {
+		// Small grace period so a quick mouse jitter near the rail edge or a
+		// dive into the sub-nav popover doesn't snap the rail closed mid-click.
+		if (railLeaveTimer) clearTimeout(railLeaveTimer);
+		railLeaveTimer = setTimeout(() => { railHovered = false; railLeaveTimer = null; }, 150);
+	}
 
 	onDestroy(() => stopVisibilityRefresh?.());
 
@@ -357,34 +363,43 @@
 			></button>
 		{/if}
 
-		<!-- Left Sidebar -->
+		<!-- Left Sidebar — variant B icon-rail.
+			Mobile: full 64-wide drawer (sidebarOpen toggle), unchanged from before.
+			≥ md: 56px collapsed, 240px expanded on hover. Pin button locks open. -->
 		<nav
-			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle pb-3 transition-transform md:static md:w-56 md:translate-x-0
-			{sidebarOpen ? 'translate-x-0' : '-translate-x-full'}"
+			onmouseenter={onRailEnter}
+			onmouseleave={onRailLeave}
+			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle pb-3 transition-[width,transform] duration-150 md:static md:translate-x-0
+			{sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+			{railExpanded ? 'md:w-60' : 'md:w-14'}"
 			style="padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem);"
 		>
 			<!-- New Chat -->
-			<div class="px-3 mb-2">
+			<div class="px-2 mb-2">
 				<button
 					onclick={() => { newChat(); void loadThreads(); sidebarOpen = false; if ($page.url.pathname !== '/app') goto('/app'); }}
-					class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all text-left flex items-center gap-2"
+					class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all flex items-center gap-2 {railExpanded ? 'justify-start' : 'md:justify-center md:px-2'}"
+					title={t('nav.new_chat')}
+					aria-label={t('nav.new_chat')}
 				>
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
 					</svg>
-					{t('nav.new_chat')}
+					<span class="{railExpanded ? '' : 'md:hidden'}">{t('nav.new_chat')}</span>
 				</button>
 			</div>
 
 			<!-- Nav Items -->
-			<ul class="flex-1 space-y-0.5 px-3 overflow-y-auto scrollbar-thin">
+			<ul class="flex-1 space-y-0.5 px-2 overflow-y-auto scrollbar-none">
 				{#each nav as item}
 					<li>
 						<!-- Parent nav item -->
 						<a
 							href={item.href}
 							onclick={(e) => handleNavClick(item, e)}
-							class="flex items-center gap-2.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm transition-all
+							title={t(item.labelKey)}
+							class="flex items-center gap-2.5 rounded-[var(--radius-sm)] py-2 text-sm transition-all
+							{railExpanded ? 'px-3' : 'md:justify-center md:px-2 px-3'}
 							{isParentActive(item)
 								? 'bg-accent/10 text-accent-text border-l-2 border-accent'
 								: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
@@ -404,13 +419,10 @@
 							{:else if item.icon === 'inbox'}
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 13.5l3.86-7.72A2.25 2.25 0 018.13 4.5h7.74a2.25 2.25 0 012.02 1.28l3.86 7.72M2.25 13.5v5.25A2.25 2.25 0 004.5 21h15a2.25 2.25 0 002.25-2.25V13.5M2.25 13.5h5.25a.75.75 0 01.75.75v.75a3 3 0 006 0v-.75a.75.75 0 01.75-.75h5.25" /></svg>
 							{/if}
-							<div class="flex-1 min-w-0">
+							<div class="flex-1 min-w-0 {railExpanded ? '' : 'md:hidden'}">
 								<span>{t(item.labelKey)}</span>
-								{#if item.descKey}
-									<span class="block text-xs text-text-subtle font-normal tracking-normal">{t(item.descKey)}</span>
-								{/if}
 							</div>
-							{#if isExpandable(item)}
+							{#if isExpandable(item) && railExpanded}
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
 									class="h-3 w-3 shrink-0 text-text-subtle transition-transform duration-150 {expandedSection === item.href ? 'rotate-90' : ''}"
@@ -419,25 +431,9 @@
 							{/if}
 						</a>
 
-						<!-- Static sub-nav (Intelligence): explicit child routes -->
-						{#if expandedSection === item.href && isSubnavItem(item) && item.subnav}
-							<ul transition:slide={{ duration: 150 }} class="mt-1 space-y-0.5 ml-7">
-								{#each item.subnav as sub (sub.href)}
-									<li>
-										<a
-											href={sub.href}
-											onclick={() => { sidebarOpen = false; }}
-											class="block rounded-[var(--radius-sm)] px-2 py-1.5 text-sm transition-colors {isActive(sub.href, sub.exact)
-												? 'bg-accent/10 text-accent-text'
-												: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
-										>{t(sub.labelKey)}</a>
-									</li>
-								{/each}
-							</ul>
-						{/if}
-
-						<!-- Sub-items: threads list (Chat only). Hub sub-tabs render inside the page. -->
-						{#if expandedSection === item.href && item.type === 'threads'}
+						<!-- Sub-items: threads list (Chat only). Only when expanded —
+							 collapsed rail hides the threads dropdown to save space. -->
+						{#if railExpanded && expandedSection === item.href && item.type === 'threads'}
 							<div transition:slide={{ duration: 150 }}>
 								{#if getThreads().length > 0}
 									<!-- Thread search: client-side filter on title. Tiny enough to drop
@@ -455,7 +451,7 @@
 									{#if visibleThreads.length === 0}
 										<p class="px-2 py-2 text-[11px] text-text-subtle">{t('threads.search_empty')}</p>
 									{:else}
-									<ul class="mt-1 space-y-0.5 max-h-72 overflow-y-auto scrollbar-thin" aria-label={t('threads.recent')}>
+									<ul class="mt-1 space-y-0.5 max-h-72 overflow-y-auto scrollbar-none" aria-label={t('threads.recent')}>
 										{#each visibleThreads as thread (thread.id)}
 											{@const isThreadActive = getSessionId() === thread.id}
 											<li class="relative overflow-hidden rounded-[var(--radius-sm)]">
@@ -550,19 +546,39 @@
 				 the user perceived as a layout bug. The Home Indicator zone is
 				 reserved for system gestures but not off-limits; the Settings
 				 link's tap target still sits above the indicator bar. -->
-			<div class="border-t border-border px-3 py-3">
-				<div class="flex items-center gap-1">
+			<div class="border-t border-border px-2 py-3">
+				<div class="flex items-center gap-1 {railExpanded ? '' : 'md:flex-col md:gap-0.5'}">
 					<a
 						href="/app/settings"
 						onclick={() => { sidebarOpen = false; expandedSection = null; }}
-						class="flex flex-1 items-center gap-2.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm transition-all
+						title={t('nav.settings')}
+						class="flex flex-1 items-center gap-2.5 rounded-[var(--radius-sm)] py-2 text-sm transition-all
+						{railExpanded ? 'px-3' : 'md:flex-none md:justify-center md:px-2 md:w-10 px-3'}
 						{isActive('/app/settings', false)
 							? 'bg-accent/10 text-accent-text border-l-2 border-accent'
 							: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-						{t('nav.settings')}
+						<span class="{railExpanded ? '' : 'md:hidden'}">{t('nav.settings')}</span>
 					</a>
+					<!-- Pin/unpin rail (desktop only). Shows the current state's
+						action label so the user knows what clicking will do. -->
+					<button
+						type="button"
+						onclick={togglePin}
+						title={railPinned ? t('nav.rail_unpin') : t('nav.rail_pin')}
+						aria-label={railPinned ? t('nav.rail_unpin') : t('nav.rail_pin')}
+						aria-pressed={railPinned}
+						class="hidden md:flex items-center justify-center h-10 w-10 rounded-[var(--radius-sm)] {railPinned ? 'text-accent-text bg-accent/10' : 'text-text-subtle hover:text-text hover:bg-bg-muted'} transition-colors"
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+							{#if railPinned}
+								<path stroke-linecap="round" stroke-linejoin="round" d="M9 9l6 6m0-6l-6 6M5.25 5.25h13.5v13.5H5.25z" />
+							{:else}
+								<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+							{/if}
+						</svg>
+					</button>
 					<a
 						href="/logout"
 						class="flex items-center justify-center min-h-[40px] min-w-[40px] rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
@@ -681,7 +697,7 @@
 			<!-- Main Content -->
 			<main class="flex-1 min-w-0 flex flex-col overflow-hidden">
 				<div class="flex-1 min-h-0 flex overflow-hidden">
-					<div class="flex-1 min-w-0 overflow-y-auto scrollbar-thin">
+					<div class="flex-1 min-w-0 overflow-y-auto scrollbar-none">
 						{@render children()}
 					</div>
 
