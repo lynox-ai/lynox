@@ -18,6 +18,7 @@
 
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import { CalendarError } from '../provider.js';
+import { hasDangerousFreq } from '../providers/rrule-safety.js';
 import type { CalendarEventInput, CalendarProvider } from '../../../types/calendar.js';
 import type { CalendarRegistry } from './registry.js';
 
@@ -89,7 +90,24 @@ export function createCalendarCreateTool(
         required: ['summary', 'start', 'end'],
       },
     },
-    handler: async (input: CalendarCreateInput, _agent: IAgent): Promise<string> => {
+    requiresConfirmation: true,
+    handler: async (input: CalendarCreateInput, agent: IAgent): Promise<string> => {
+      // Fail-closed: write-tools require interactive user confirmation. The
+      // permission-guard already blocks `calendar_create` in autonomous mode
+      // (PRD §A2 + permission-guard.ts), but a missing promptUser hook
+      // would otherwise let the call slip through in environments that
+      // bypass the guard. Match the mail_send pattern (mail-send.ts:92).
+      if (!agent.promptUser) {
+        return 'calendar_create error: writing to a calendar requires interactive user confirmation, which is not available in this mode.';
+      }
+      const promptUser = agent.promptUser;
+
+      // Validate inputs BEFORE building the preview. Each helper returns null
+      // on success or an error message string. Order is least-to-most-expensive
+      // so cheap rejects (empty summary, bad date) short-circuit before SQL.
+      const inputError = validateCreateInput(input);
+      if (inputError) return inputError;
+
       let provider: CalendarProvider;
       try {
         provider = resolveCreateTarget(registry, resolver, input.account_id);
@@ -99,14 +117,9 @@ export function createCalendarCreateTool(
       if (provider.create === undefined) {
         return `Account ${provider.accountId} is read-only (provider=${provider.name}). Use a CalDAV account for new events.`;
       }
-      // Basic input sanity — fields are agent-supplied raw strings; the
-      // adapter handles iCal escaping. Date-shape validation reuses Date.parse.
-      if (!input.summary.trim()) return 'calendar_create error: summary is required';
-      if (!Number.isFinite(Date.parse(input.start))) return `calendar_create error: invalid start "${input.start}"`;
-      if (!Number.isFinite(Date.parse(input.end))) return `calendar_create error: invalid end "${input.end}"`;
 
       const event: CalendarEventInput = {
-        summary: input.summary,
+        summary: input.summary.trim(),
         start: input.start,
         end: input.end,
       };
@@ -117,6 +130,12 @@ export function createCalendarCreateTool(
       if (input.recurrence && input.recurrence.length > 0) event.recurrence = input.recurrence;
       if (input.attendees && input.attendees.length > 0) {
         event.attendees = input.attendees.map((a) => (a.name ? { email: a.email, name: a.name } : { email: a.email }));
+      }
+
+      const preview = buildCreatePreview(provider.accountId, event);
+      const answer = await promptUser(preview, ['Yes', 'No']);
+      if (!isApproval(answer)) {
+        return 'calendar_create: User declined the event-creation prompt — no event was written.';
       }
 
       try {
@@ -136,7 +155,6 @@ export function createCalendarCreateTool(
         return errorMessage(err);
       }
     },
-    requiresConfirmation: true,
   };
 }
 
@@ -180,4 +198,116 @@ function resolveCreateTarget(
 function errorMessage(err: unknown): string {
   if (err instanceof CalendarError) return `calendar_create error: ${err.code} — ${err.message}`;
   return `calendar_create error: ${err instanceof Error ? err.message : String(err)}`;
+}
+
+// ── Input validation (PRD §S1/§S2/§S3/§S4/§K3) ──────────────────────────────
+//
+// All agent-supplied text flows into the CalDAV server's iCal payload. The
+// adapter's `escapeIcalText` handles RFC 5545 TEXT escapes, but two surfaces
+// bypass it: email-shaped fields go directly into `mailto:` lines, and RRULE
+// strings go directly into `RRULE:` lines. Validate both at write-time to
+// close VEVENT-smuggling via CRLF injection and CPU-DoS via FREQ=SECONDLY.
+
+const MAX_SUMMARY = 512;
+const MAX_DESCRIPTION = 32 * 1024;
+const MAX_LOCATION = 512;
+const MAX_ATTENDEES = 100;
+const MAX_RRULES = 25;
+const MAX_RRULE_LEN = 512;
+
+// Strict email shape: no whitespace, no CRLF, no `,`/`;`/`<>`/`"` that would
+// break a mailto: or CN= parameter. Pragmatic — not RFC 5321 in full — but
+// closes the smuggling surface for ATTENDEE/ORGANIZER lines.
+const EMAIL_RE = /^[^\s@,;:<>"]+@[^\s@,;:<>"]+$/;
+// Forbids any line-break or smuggling delimiter in RRULE strings.
+const RRULE_FORBIDDEN_RE = /[\r\n]/;
+
+function validateCreateInput(input: CalendarCreateInput): string | null {
+  if (!input.summary || !input.summary.trim()) {
+    return 'calendar_create error: summary is required';
+  }
+  if (input.summary.length > MAX_SUMMARY) {
+    return `calendar_create error: summary exceeds ${MAX_SUMMARY} chars`;
+  }
+  if (input.description !== undefined && input.description.length > MAX_DESCRIPTION) {
+    return `calendar_create error: description exceeds ${MAX_DESCRIPTION} chars`;
+  }
+  if (input.location !== undefined && input.location.length > MAX_LOCATION) {
+    return `calendar_create error: location exceeds ${MAX_LOCATION} chars`;
+  }
+
+  const startMs = Date.parse(input.start);
+  const endMs = Date.parse(input.end);
+  if (!Number.isFinite(startMs)) return `calendar_create error: invalid start "${input.start}"`;
+  if (!Number.isFinite(endMs)) return `calendar_create error: invalid end "${input.end}"`;
+  if (endMs < startMs) {
+    return `calendar_create error: end (${input.end}) must be on or after start (${input.start})`;
+  }
+
+  if (input.attendees) {
+    if (input.attendees.length > MAX_ATTENDEES) {
+      return `calendar_create error: max ${MAX_ATTENDEES} attendees per event`;
+    }
+    for (const a of input.attendees) {
+      if (typeof a.email !== 'string' || !EMAIL_RE.test(a.email)) {
+        return `calendar_create error: attendee email "${a.email}" is not a valid address (no whitespace/CRLF/<>;,: allowed — PRD §S1)`;
+      }
+      if (a.name !== undefined && /[\r\n]/.test(a.name)) {
+        return `calendar_create error: attendee name must not contain newlines (PRD §S1)`;
+      }
+    }
+  }
+
+  if (input.recurrence) {
+    if (input.recurrence.length > MAX_RRULES) {
+      return `calendar_create error: max ${MAX_RRULES} RRULE entries per event`;
+    }
+    for (const rule of input.recurrence) {
+      if (typeof rule !== 'string' || rule.length === 0) {
+        return 'calendar_create error: recurrence entries must be non-empty RRULE strings';
+      }
+      if (rule.length > MAX_RRULE_LEN) {
+        return `calendar_create error: RRULE entry exceeds ${MAX_RRULE_LEN} chars`;
+      }
+      if (RRULE_FORBIDDEN_RE.test(rule)) {
+        return `calendar_create error: RRULE must not contain line breaks (PRD §S2 — VEVENT-smuggling)`;
+      }
+      if (hasDangerousFreq(rule)) {
+        return `calendar_create error: sub-hourly recurrences (FREQ=SECONDLY/MINUTELY) are not allowed (PRD §S4 — CPU-DoS)`;
+      }
+    }
+  }
+
+  return null;
+}
+
+// ── Confirmation flow ───────────────────────────────────────────────────────
+
+function buildCreatePreview(accountId: string, event: CalendarEventInput): string {
+  const lines = [
+    'Termin anlegen?',
+    `Titel:       ${event.summary}`,
+    `Zeitraum:    ${event.start} → ${event.end}${event.all_day ? ' (ganztägig)' : ''}`,
+    `Kalender:    ${accountId}`,
+  ];
+  if (event.location) lines.push(`Ort:         ${event.location}`);
+  if (event.description) {
+    const preview = event.description.length > 200 ? `${event.description.slice(0, 200)}…` : event.description;
+    lines.push(`Beschreibung: ${preview}`);
+  }
+  if (event.attendees && event.attendees.length > 0) {
+    const list = event.attendees.map((a) => (a.name ? `${a.name} <${a.email}>` : a.email)).join(', ');
+    lines.push(`Teilnehmer:  ${list}`);
+    lines.push('             (Einladungen werden via CalDAV-Server verschickt, sofern unterstützt)');
+  }
+  if (event.recurrence && event.recurrence.length > 0) {
+    lines.push(`Wiederholung: ${event.recurrence.join('; ')}`);
+  }
+  return lines.join('\n');
+}
+
+function isApproval(answer: string | null | undefined): boolean {
+  if (!answer) return false;
+  const normalized = answer.trim().toLowerCase();
+  return normalized === 'yes' || normalized === 'y' || normalized === 'ja';
 }

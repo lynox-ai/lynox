@@ -3416,7 +3416,16 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/calendar/accounts/:id/default', async (_req, res, params) => {
       const ctx = engine.getCalendarContext();
       if (!requireService(res, ctx, 'Calendar integration')) return;
-      ctx!.setDefaultWritable(params['id']!);
+      const id = params['id'] ?? '';
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+        errorResponse(res, 400, 'Account id must be a UUID v4');
+        return;
+      }
+      if (ctx!.getAccount(id) === null) {
+        errorResponse(res, 404, `Calendar account "${id}" not found`);
+        return;
+      }
+      ctx!.setDefaultWritable(id);
       jsonResponse(res, 200, { ok: true, accounts: ctx!.listAccounts() });
     }));
 

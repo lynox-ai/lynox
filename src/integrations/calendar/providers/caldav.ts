@@ -411,15 +411,28 @@ function buildVCalendar(uid: string, event: CalendarEventInput): string {
 }
 
 /**
- * RFC 5545 §3.3.11 TEXT escaping: backslash, semicolon, comma, and
- * newlines must be escaped.
+ * RFC 5545 §3.3.11 TEXT escaping plus defensive control-char + line-separator
+ * stripping. Bare `\r`, NUL, and Unicode line-separators (U+2028/U+2029/U+0085)
+ * can survive a naive newline-only escape and let an attacker break line
+ * folding on stricter CalDAV parsers — a smuggling vector for forged VEVENT
+ * blocks. We normalize all of them to a safe `\n` literal escape first, then
+ * apply the standard TEXT escapes.
  */
 function escapeIcalText(value: string): string {
   return value
+    // 1. Strip ASCII C0 control chars EXCEPT TAB (\x09) — these have no place in iCal TEXT.
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+    // 2. Normalize Unicode line-separators (NEL U+0085, LS U+2028, PS U+2029)
+    //    to LF before line-collapse. NOTE: U+2028 and U+2029 are ECMAScript
+    //    line-terminators inside a regex literal, so we must use escape
+    //    sequences here, not the raw characters.
+    .replace(/[\u0085\u2028\u2029]/g, '\n')
+    // 3. Escape backslash FIRST so the subsequent replacements don't double-escape themselves.
     .replace(/\\/g, '\\\\')
     .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')
-    .replace(/\r?\n/g, '\\n');
+    // 4. Collapse all newlines (CR, LF, CRLF) into the literal escape sequence.
+    .replace(/\r\n|\r|\n/g, '\\n');
 }
 
 /** ISO 8601 → RFC 5545 DATE-TIME (UTC) or DATE format. */

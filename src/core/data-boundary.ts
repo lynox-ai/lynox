@@ -126,8 +126,13 @@ ${safe}
  * Legacy callers (mail, google, etc.) keep using {@link wrapUntrustedData} —
  * they accept plain `string` returns. New code should prefer `wrap()`.
  */
+// `wrapUntrustedData` emits `<untrusted_data source="...">` (always with an
+// attribute), so a substring check for the bare tag without the trailing
+// space silently fails. Match the prefix that the wrapper actually produces.
+const WRAPPED_PREFIX_RE = /<untrusted_data(?:\s|>)/;
+
 export function wrap<T extends string>(content: T, source: string): Wrapped<T> {
-  if (content.includes('<untrusted_data>')) {
+  if (WRAPPED_PREFIX_RE.test(content)) {
     throw new Error(`wrap(): double-wrap detected (source=${source}). Content already wrapped — call sites must wrap exactly once.`);
   }
   return wrapUntrustedData(content, source) as Wrapped<T>;
