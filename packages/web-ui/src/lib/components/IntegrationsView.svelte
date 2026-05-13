@@ -4,6 +4,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import MailSettings from './MailSettings.svelte';
 	import WhatsAppSettings from './WhatsAppSettings.svelte';
+	import CalendarSettings from './CalendarSettings.svelte';
 	import {
 		initNotifications,
 		enablePushNotifications,
@@ -596,6 +597,11 @@
 
 	<!-- WhatsApp Business (Coexistence, BYOK) -->
 	<WhatsAppSettings />
+
+	<!-- Calendar (CalDAV + ICS read-only — PRD-CALENDAR-INTEGRATION Phase 1a) -->
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+		<CalendarSettings />
+	</div>
 
 	<!-- Google Workspace -->
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
