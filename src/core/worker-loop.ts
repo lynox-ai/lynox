@@ -159,6 +159,13 @@ export class WorkerLoop {
       await workerTaskStorage.run(taskCtx, async () => {
         if (task.task_type === 'backup') {
           await this.executeBackup(task);
+        } else if (task.task_type === 'reminder') {
+          // Standalone reminder — fire notification only, no agent run.
+          // The mail-anchored variant lives in inbox-reminder-poller.ts;
+          // this branch handles user-created reminders (chat /reminder
+          // slash, AutomationHub-create) that may or may not link to
+          // an inbox item.
+          await this.executeReminder(task);
         } else if (task.pipeline_id) {
           await this.executePipeline(task);
         } else if (task.task_type === 'watch') {
@@ -252,6 +259,25 @@ export class WorkerLoop {
 
     if (!result.success) {
       throw new Error(result.error ?? 'Backup failed');
+    }
+  }
+
+  /**
+   * Standalone reminder — emit a notification, record success. No agent
+   * run, no LLM cost. The optional `inbox_item_id` link is documented in
+   * the payload for the UI to deep-link, but firing logic stays simple:
+   * a reminder = "tell the user something at time X".
+   */
+  private async executeReminder(task: TaskRecord): Promise<void> {
+    await this.notificationRouter.notify({
+      title: 'Erinnerung',
+      body: task.title,
+      taskId: task.id,
+      priority: 'normal',
+    });
+    const taskManager = this.engine.getTaskManager();
+    if (taskManager) {
+      taskManager.recordTaskRun(task.id, 'reminder fired', 'success');
     }
   }
 

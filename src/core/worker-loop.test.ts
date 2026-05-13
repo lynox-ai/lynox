@@ -632,4 +632,24 @@ describe('WorkerLoop', () => {
         .executePipeline(task),
     ).rejects.toThrow(/only runs 'autonomous' pipelines/);
   });
+
+  // ---- task_type: 'reminder' branch (Phase-4 standalone reminders) ----
+
+  it('executes a reminder by firing notify + recordTaskRun, no agent run', async () => {
+    const task = makeTask({ task_type: 'reminder', title: 'Roland anrufen' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession();
+    const engine = makeEngine({ taskManager: tm, session });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await (loop as unknown as { executeTask: (t: TaskRecord) => Promise<void> }).executeTask(task);
+    // Reminder fired → notify called once, recordTaskRun stamped success.
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
+    expect(msg?.title).toBe('Erinnerung');
+    expect(msg?.body).toBe('Roland anrufen');
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'reminder fired', 'success');
+    // No agent invocation — session.run never called.
+    expect(session.run).not.toHaveBeenCalled();
+  });
 });

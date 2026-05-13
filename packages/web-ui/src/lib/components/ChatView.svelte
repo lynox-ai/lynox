@@ -1316,6 +1316,8 @@
 		'/history': '/app/automation?section=activity&tab=history',
 		'/tasks': '/app/automation?section=tasks',
 		'/activity': '/app/automation?section=activity',
+		'/reminder': '/app/automation?section=tasks',
+		'/reminders': '/app/automation?section=tasks',
 		'/workflows': '/app/automation',
 		'/automation': '/app/automation',
 		'/intelligence': '/app/intelligence',
