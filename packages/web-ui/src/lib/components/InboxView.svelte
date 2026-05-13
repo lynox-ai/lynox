@@ -112,6 +112,7 @@
 	$effect(() => {
 		if (zone !== 'requires_user' && triageMode) {
 			triageMode = false;
+			triageSnoozeOpen = false;
 		}
 	});
 
@@ -236,6 +237,9 @@
 
 	function exitTriage(): void {
 		triageMode = false;
+		// Reset the bindable so a future re-entry doesn't propagate a stale
+		// snoozeMenuOpen=true into TriagePane on mount.
+		triageSnoozeOpen = false;
 	}
 
 	function toggleTriage(): void {
@@ -254,7 +258,7 @@
 			return;
 		}
 		if (action.kind === 'close') {
-			if (helpOpen || getDraftPane() !== null || openSnoozeFor !== null || triageMode) {
+			if (helpOpen || getDraftPane() !== null || triageSnoozeOpen || openSnoozeFor !== null || triageMode) {
 				event.preventDefault();
 				closeOverlays();
 			}
