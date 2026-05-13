@@ -35,6 +35,11 @@ export { default as ColdStartBanner } from './components/ColdStartBanner.svelte'
 export { default as KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp.svelte';
 export { default as RulesView } from './components/RulesView.svelte';
 
+// Design-system primitives
+export { default as Checkbox } from './primitives/Checkbox.svelte';
+export { default as Icon } from './primitives/Icon.svelte';
+export type { IconName } from './primitives/icons.js';
+
 // Toast
 export { addToast, getToasts } from './stores/toast.svelte.js';
 export type { Toast } from './stores/toast.svelte.js';

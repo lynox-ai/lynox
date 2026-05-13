@@ -1,3 +1,7 @@
+<script lang="ts" module>
+	const SIZE_CLASS = { sm: 'h-3.5 w-3.5', md: 'h-4 w-4' } as const;
+</script>
+
 <script lang="ts">
 	interface Props {
 		checked?: boolean;
@@ -9,7 +13,7 @@
 		// Optional id for label-binding — leave empty when the checkbox sits
 		// inside a <label> that wraps it.
 		id?: string;
-		size?: 'sm' | 'md';
+		size?: keyof typeof SIZE_CLASS;
 	}
 
 	let {
@@ -21,7 +25,7 @@
 		size = 'md',
 	}: Props = $props();
 
-	const sizeClass = $derived(size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4');
+	const sizeClass = $derived(SIZE_CLASS[size]);
 </script>
 
 <input

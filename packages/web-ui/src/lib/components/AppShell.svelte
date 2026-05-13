@@ -537,7 +537,7 @@
 						aria-pressed={railPinned}
 						class="hidden md:flex items-center justify-center h-10 w-10 rounded-[var(--radius-sm)] {railPinned ? 'text-accent-text bg-accent/10' : 'text-text-subtle hover:text-text hover:bg-bg-muted'} transition-colors"
 					>
-						<Icon name={railPinned ? 'x' : 'hamburger'} size="sm" />
+						<Icon name={railPinned ? 'pin' : 'hamburger'} size="sm" />
 					</button>
 					<a
 						href="/logout"
@@ -565,7 +565,7 @@
 
 				<!-- Center: Cmd+K hint -->
 				<button onclick={() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))} aria-label={t('cmd.placeholder')} class="hidden md:flex items-center gap-2 text-xs text-text-subtle hover:text-text transition-colors rounded-[var(--radius-md)] border border-border px-3 py-1.5">
-					<Icon name="search" size="xs" />
+					<Icon name="search" size="sm" />
 					<span>{t('cmd.placeholder')}</span>
 					<kbd class="text-[10px] font-mono bg-bg-muted px-1 py-0.5 rounded">⌘K</kbd>
 				</button>
