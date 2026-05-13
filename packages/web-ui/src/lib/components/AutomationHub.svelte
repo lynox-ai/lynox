@@ -6,14 +6,14 @@
 	import TasksView from './TasksView.svelte';
 	import WorkflowsView from './WorkflowsView.svelte';
 
-	type Tab = 'workflows' | 'tasks' | 'activity';
+	type Tab = 'workflows' | 'tasks' | 'reminders' | 'activity';
 
 	// `?section=` (not `?tab=`) is intentional — the embedded ActivityHub uses
 	// `?tab=` for its own dashboard/usage/history sub-tabs and a single
 	// param-name would collide.
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('section');
-		if (p === 'tasks' || p === 'activity') return p;
+		if (p === 'tasks' || p === 'reminders' || p === 'activity') return p;
 		return 'workflows';
 	})());
 
@@ -30,6 +30,7 @@
 	const tabs: ReadonlyArray<{ id: Tab; labelKey: string }> = [
 		{ id: 'workflows', labelKey: 'hub.automation.workflows' },
 		{ id: 'tasks', labelKey: 'hub.automation.tasks' },
+		{ id: 'reminders', labelKey: 'hub.automation.reminders' },
 		{ id: 'activity', labelKey: 'hub.automation.activity' },
 	];
 </script>
@@ -49,6 +50,8 @@
 			<WorkflowsView />
 		{:else if tab === 'tasks'}
 			<TasksView />
+		{:else if tab === 'reminders'}
+			<TasksView filterTaskType="reminder" />
 		{:else}
 			<ActivityHub />
 		{/if}
