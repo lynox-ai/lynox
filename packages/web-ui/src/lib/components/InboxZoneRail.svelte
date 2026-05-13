@@ -48,7 +48,7 @@
 	class="hidden md:flex md:w-44 lg:w-48 shrink-0 flex-col border-r border-border bg-bg-subtle/40"
 	aria-label={t('inbox.title')}
 >
-	<div class="flex flex-col gap-0.5 p-2 pt-3">
+	<div class="flex flex-col gap-0.5 p-2 pt-3" role="tablist" aria-orientation="vertical" aria-label={t('inbox.title')}>
 		{#each zones as entry (entry.key)}
 			{@const active = zone === entry.key}
 			<button

@@ -97,10 +97,13 @@ test.describe('Unified Inbox Phase 2 smoke', () => {
     const res = await page.goto('/app/inbox');
     expect(res?.status(), 'GET /app/inbox should return 200').toBe(200);
 
-    const tablist = page.getByRole('tablist').first();
+    // Post-3-pane refactor renders both a desktop zone-rail and a mobile
+    // zone-pill row in the DOM (CSS-hidden one or the other by viewport).
+    // Scope to the visible tablist so the tab-count stays at 4 zones.
+    const tablist = page.locator('[role="tablist"]:visible').first();
     await expect(tablist).toBeVisible();
-    const tabs = page.getByRole('tab');
-    // 4 zones now (Phase 3): requires_user / draft_ready / auto_handled / snoozed
+    const tabs = tablist.getByRole('tab');
+    // 4 zones (requires_user / draft_ready / auto_handled / snoozed)
     await expect(tabs).toHaveCount(4);
 
     expect(errors, `unexpected JS errors:\n${errors.join('\n')}`).toEqual([]);
