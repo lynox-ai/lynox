@@ -22,7 +22,7 @@ import {
 
 const SRC_VAULT_KEY = 'source-vault-key-for-testing-migration-2026';
 const DST_VAULT_KEY = 'destination-vault-key-for-managed-instance-2026';
-const HTTP_SECRET = 'test-instance-http-secret-abc123';
+const MIGRATION_TOKEN = 'a'.repeat(64); // 64-hex-char token shared between source and destination
 
 function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-migration-test-'));
@@ -73,10 +73,10 @@ function createTestConfig(dir: string, config: Record<string, unknown>): void {
 
 /** Simulate the full ECDH handshake between exporter (client) and importer (server). */
 function performHandshake(importer: MigrationImporter): { clientTransferKey: Buffer; serverHandshake: ReturnType<MigrationImporter['startHandshake']> } {
-  const serverHandshake = importer.startHandshake();
+  const serverHandshake = importer.startHandshake(MIGRATION_TOKEN);
 
   // Client: verify signature
-  const signingKey = deriveSigningKey(HTTP_SECRET);
+  const signingKey = deriveSigningKey(MIGRATION_TOKEN);
   expect(verifyHandshake(serverHandshake.serverPubKey, serverHandshake.signature, signingKey)).toBe(true);
 
   // Client: generate keypair, derive transfer key
@@ -166,7 +166,7 @@ describe('migration E2E', () => {
 
       // Create exporter and importer
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       // Perform ECDH handshake
       const { clientTransferKey } = performHandshake(importer);
@@ -231,7 +231,7 @@ describe('migration E2E', () => {
 
     it('handles empty installation gracefully', () => {
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       const { clientTransferKey } = performHandshake(importer);
       const { manifest, chunks } = exporter.export(clientTransferKey);
@@ -257,7 +257,7 @@ describe('migration E2E', () => {
       createTestConfig(dstDir, { plugins: ['test'], default_tier: 'haiku' });
 
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       const { clientTransferKey } = performHandshake(importer);
       const { manifest, chunks } = exporter.export(clientTransferKey);
@@ -286,7 +286,7 @@ describe('migration E2E', () => {
       createTestDatabase(srcDir, 'history.db', [{ id: 1, text: 'data' }]);
 
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       const { clientTransferKey } = performHandshake(importer);
       return { exporter, importer, clientTransferKey };
@@ -346,7 +346,7 @@ describe('migration E2E', () => {
     it('rejects chunk with wrong transfer key (MITM)', () => {
       createTestVault(srcDir, SRC_VAULT_KEY, [{ name: 'SECRET', value: 'value' }]);
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       const { clientTransferKey } = performHandshake(importer);
 
@@ -367,7 +367,7 @@ describe('migration E2E', () => {
 
   describe('hardening', () => {
     it('rejects manifest with too many chunks', () => {
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
       performHandshake(importer);
 
       const chunks = Array.from({ length: 100 }, (_, i) => ({
@@ -382,7 +382,7 @@ describe('migration E2E', () => {
     });
 
     it('rejects manifest with disallowed database name', () => {
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
       performHandshake(importer);
 
       const chunks = [{ seq: 0, type: 'sqlite_db' as const, name: '../../etc/passwd', originalSize: 100, checksum: 'abc' }];
@@ -395,7 +395,7 @@ describe('migration E2E', () => {
     });
 
     it('rejects manifest with excessive total size', () => {
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
       performHandshake(importer);
 
       const chunks = [{ seq: 0, type: 'sqlite_db' as const, name: 'history.db', originalSize: 600 * 1024 * 1024, checksum: 'abc' }];
@@ -416,7 +416,7 @@ describe('migration E2E', () => {
       });
 
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
       const { clientTransferKey } = performHandshake(importer);
       const { manifest, chunks } = exporter.export(clientTransferKey);
       importer.setManifest(manifest);
@@ -434,7 +434,7 @@ describe('migration E2E', () => {
 
   describe('protocol state machine', () => {
     it('rejects manifest before handshake', () => {
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       const manifest = {
         version: 1 as const,
@@ -449,8 +449,8 @@ describe('migration E2E', () => {
     });
 
     it('rejects chunk before manifest', () => {
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
-      importer.startHandshake();
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+      importer.startHandshake(MIGRATION_TOKEN);
 
       expect(() => importer.receiveChunk({ seq: 0, iv: '', authTag: '', data: '' })).toThrow('Handshake and manifest required');
 
@@ -460,7 +460,7 @@ describe('migration E2E', () => {
     it('rejects restore before all chunks received', () => {
       createTestDatabase(srcDir, 'history.db', [{ id: 1, text: 'data' }]);
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       const { clientTransferKey } = performHandshake(importer);
       const { manifest, chunks } = exporter.export(clientTransferKey);
@@ -477,17 +477,17 @@ describe('migration E2E', () => {
     });
 
     it('rejects double handshake', () => {
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
-      importer.startHandshake();
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+      importer.startHandshake(MIGRATION_TOKEN);
 
-      expect(() => importer.startHandshake()).toThrow('already active');
+      expect(() => importer.startHandshake(MIGRATION_TOKEN)).toThrow('already active');
 
       importer.cleanup();
     });
 
     it('rejects double completeHandshake', () => {
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
-      importer.startHandshake();
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+      importer.startHandshake(MIGRATION_TOKEN);
 
       const clientKp = generateEphemeralKeypair();
       importer.completeHandshake(serializePublicKey(clientKp.publicKey));
@@ -498,18 +498,37 @@ describe('migration E2E', () => {
     });
 
     it('cleanup resets session and allows new handshake', () => {
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
-      importer.startHandshake();
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+      importer.startHandshake(MIGRATION_TOKEN);
       expect(importer.isActive).toBe(true);
 
       importer.cleanup();
       expect(importer.isActive).toBe(false);
 
       // Should be able to start a new session
-      const payload = importer.startHandshake();
+      const payload = importer.startHandshake(MIGRATION_TOKEN);
       expect(payload.serverPubKey).toBeDefined();
 
       importer.cleanup();
+    });
+
+    it('rejects substituted server public key (MITM)', () => {
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+      const real = importer.startHandshake(MIGRATION_TOKEN);
+
+      // Attacker substitutes a different X25519 public key while keeping the
+      // genuine signature (collected from a recorded session, etc.).
+      const attackerPub = serializePublicKey(generateEphemeralKeypair().publicKey);
+      const signingKey = deriveSigningKey(MIGRATION_TOKEN);
+      expect(verifyHandshake(attackerPub, real.signature, signingKey)).toBe(false);
+    });
+
+    it('rejects handshake signed with a different migration token', () => {
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+      const payload = importer.startHandshake(MIGRATION_TOKEN);
+
+      const wrongTokenKey = deriveSigningKey('b'.repeat(64));
+      expect(verifyHandshake(payload.serverPubKey, payload.signature, wrongTokenKey)).toBe(false);
     });
   });
 
@@ -522,7 +541,7 @@ describe('migration E2E', () => {
       ]);
 
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       const { clientTransferKey } = performHandshake(importer);
       const { manifest, chunks } = exporter.export(clientTransferKey);
@@ -560,7 +579,7 @@ describe('migration E2E', () => {
       });
 
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
-      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY, httpSecret: HTTP_SECRET });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
 
       const { clientTransferKey } = performHandshake(importer);
       const { manifest, chunks } = exporter.export(clientTransferKey);
