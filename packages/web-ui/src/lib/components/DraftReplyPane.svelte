@@ -77,8 +77,29 @@
 	function onBufferInput(event: Event): void {
 		const target = event.target as HTMLTextAreaElement;
 		buffer = target.value;
+		autosizeTextarea(target);
 		scheduleSave();
 	}
+
+	/**
+	 * Resize the textarea to fit its content. Called on input + when a new
+	 * draft populates the buffer. Capped at the CSS `max-h-[60vh]` so very
+	 * long drafts get an inner scroll-bar instead of pushing the footer
+	 * off-screen.
+	 */
+	function autosizeTextarea(el: HTMLTextAreaElement): void {
+		el.style.height = 'auto';
+		el.style.height = `${el.scrollHeight}px`;
+	}
+
+	// Auto-size whenever the buffer changes externally (draft load,
+	// regenerate). $effect fires after DOM updates so scrollHeight is real.
+	$effect(() => {
+		// Read `buffer` to subscribe; refireing in the same tick is fine —
+		// DOM is up-to-date by the time this runs.
+		void buffer;
+		if (textareaRef) autosizeTextarea(textareaRef);
+	});
 
 	function onTextareaKeyDown(event: KeyboardEvent): void {
 		// ⌘/Ctrl+Enter: explicit user-confirm to send the draft as a reply.
@@ -472,7 +493,7 @@
 						oninput={onBufferInput}
 						onkeydown={onTextareaKeyDown}
 						placeholder={t('inbox.draft_body_placeholder')}
-						class="w-full min-h-[280px] resize-y bg-bg border border-border rounded-[var(--radius-md)] p-3 text-sm leading-relaxed text-text font-sans focus:border-accent focus:outline-none"
+						class="w-full min-h-[160px] max-h-[60vh] resize-y bg-bg border border-border rounded-[var(--radius-md)] p-3 text-sm leading-relaxed text-text font-sans focus:border-accent focus:outline-none overflow-y-auto"
 					></textarea>
 					<div class="flex items-center justify-between text-[11px] text-text-subtle mt-2 gap-3 flex-wrap">
 						<span>{t('inbox.draft_edits_count').replace('{count}', String(pane.draft.userEditsCount))}</span>
@@ -491,8 +512,8 @@
 					on ONE line instead of wrapping to multiple rows (used to eat ~3 rows
 					of vertical space on iPhone). Send button on its own line below for
 					tap accuracy. On sm+ everything goes on one line like before. -->
-				<div class="flex sm:flex-row flex-col gap-2 sm:items-center sm:justify-between">
-					<div class="flex items-center gap-1.5 overflow-x-auto scrollbar-none -mx-1 px-1 sm:overflow-visible">
+				<div class="flex flex-col gap-2">
+					<div class="flex items-center gap-1.5 overflow-x-auto scrollbar-none -mx-1 px-1">
 						{#each [
 							{ tone: 'shorter', label: 'inbox.draft_tone_shorter' },
 							{ tone: 'formal', label: 'inbox.draft_tone_formal' },
