@@ -817,8 +817,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.push_denied_hint': { de: 'Benachrichtigungen wurden im Browser blockiert. Setze die Berechtigung in den Browser-Einstellungen zurück.', en: 'Notifications are blocked in your browser. Reset the permission in browser settings.' },
 	'integrations.push_ios_hint': { de: 'Füge lynox zum Homescreen hinzu, um Push-Benachrichtigungen zu aktivieren: Teilen → Zum Home-Bildschirm.', en: 'Add lynox to your home screen to enable push notifications: Share → Add to Home Screen.' },
 	'integrations.push_ios_hint_short': { de: 'Homescreen nötig', en: 'Homescreen required' },
-	'integrations.push_inbox_toggle': { de: 'Bei neuen Inbox-Mails benachrichtigen', en: 'Notify me about new inbox mail' },
-	'integrations.push_inbox_toggle_hint': { de: 'Erinnerungen und geplante Sendungen werden davon NICHT beeinflusst.', en: 'Reminders and scheduled sends are NOT affected by this.' },
+	'integrations.push_inbox_toggle': { de: 'Bei Mails, die deine Aktion brauchen', en: 'When mail needs your action' },
+	'integrations.push_inbox_toggle_hint': { de: 'Nur „Braucht dich"-Mails — automatisch erledigte oder Entwurf-bereite werden nie gepusht. Erinnerungen und geplante Sendungen sind separat.', en: 'Only "Needs you" mail — auto-handled and drafted-for-you items never push. Reminders and scheduled sends are separate.' },
 	'integrations.push_inbox_save_failed': { de: 'Konnte Einstellung nicht speichern', en: 'Could not save preference' },
 
 	// Telegram
