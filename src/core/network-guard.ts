@@ -10,7 +10,23 @@ import { promises as dns } from 'node:dns';
  */
 export function isPrivateIP(ip: string): boolean {
   // IPv4-mapped IPv6 — strip the prefix and run the v4 checks.
-  const mapped = ip.toLowerCase().startsWith('::ffff:') ? ip.slice(7) : ip;
+  // Accepts both dotted (`::ffff:127.0.0.1`) and hex (`::ffff:7f00:1`) forms;
+  // hex is normalised to dotted by parsing the last two colon-separated groups
+  // as the high/low 16 bits of the embedded IPv4.
+  const lowered = ip.toLowerCase();
+  let mapped = lowered.startsWith('::ffff:') ? lowered.slice(7) : lowered;
+  if (!mapped.includes('.') && mapped.includes(':') && lowered.startsWith('::ffff:')) {
+    const groups = mapped.split(':');
+    if (groups.length === 2) {
+      const hi = groups[0] ?? '';
+      const lo = groups[1] ?? '';
+      if (/^[0-9a-f]{1,4}$/.test(hi) && /^[0-9a-f]{1,4}$/.test(lo)) {
+        const hiN = parseInt(hi, 16);
+        const loN = parseInt(lo, 16);
+        mapped = `${String((hiN >> 8) & 0xff)}.${String(hiN & 0xff)}.${String((loN >> 8) & 0xff)}.${String(loN & 0xff)}`;
+      }
+    }
+  }
   const v4Parts = mapped.split('.');
   if (v4Parts.length === 4 && v4Parts.every(p => /^\d{1,3}$/.test(p))) {
     const nums = v4Parts.map(Number);

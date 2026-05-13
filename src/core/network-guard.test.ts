@@ -52,6 +52,17 @@ describe('isPrivateIP', () => {
       expect(isPrivateIP('::ffff:192.168.1.1')).toBe(true);
       expect(isPrivateIP('::ffff:169.254.169.254')).toBe(true);
     });
+
+    it('catches IPv4-mapped IPv6 in hex-pair form (::ffff:7f00:1 = 127.0.0.1)', () => {
+      // WHATWG URL parser keeps these in hex; the dotted-only check would miss them.
+      expect(isPrivateIP('::ffff:7f00:1')).toBe(true);     // 127.0.0.1
+      expect(isPrivateIP('::ffff:7f00:0001')).toBe(true);
+      expect(isPrivateIP('::ffff:a00:1')).toBe(true);      // 10.0.0.1
+      expect(isPrivateIP('::ffff:a9fe:a9fe')).toBe(true);  // 169.254.169.254 (metadata)
+      expect(isPrivateIP('::FFFF:7F00:1')).toBe(true);     // upper-case
+      // A public IPv4-mapped address must still pass the check.
+      expect(isPrivateIP('::ffff:808:808')).toBe(false);   // 8.8.8.8
+    });
   });
 });
 
