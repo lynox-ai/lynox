@@ -85,6 +85,8 @@ export interface InboxApiDeps {
    * env-driven value through.
    */
   sensitiveMode?: import('./sensitive-content.js').SensitiveMode | undefined;
+  /** Per-account rate limiter for /draft/generate. Absent → no rate limit. */
+  generateRateLimiter?: import('./generate-rate-limit.js').GenerateRateLimiter | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -742,6 +744,21 @@ function unprocessable(message: string, reason?: string): ApiResponse {
   return { status: 422, body: reason ? { error: message, reason } : { error: message } };
 }
 
+function tooManyRequests(retryAt: Date): ApiResponse {
+  // Date header in the body so clients can render a localised "retry in
+  // X" hint without parsing an HTTP-only Retry-After header (the route
+  // adapter could echo it via headers too — kept body-only for shape
+  // symmetry with the other handlers' responses).
+  return {
+    status: 429,
+    body: {
+      error: 'rate limit exceeded for draft generation',
+      reason: 'rate_limit',
+      retryAt: retryAt.toISOString(),
+    },
+  };
+}
+
 /**
  * Minimum cached-body length below which generation is short-circuited.
  * A 5-character snippet ("yes." or "ok thx") cannot drive a meaningful
@@ -799,6 +816,12 @@ export async function handleGenerateDraft(
   }
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
+  // Rate-limit check fires AFTER existence + shape validation so 400/404
+  // can't be used as a probing oracle that bypasses the limit.
+  if (deps.generateRateLimiter) {
+    const gate = deps.generateRateLimiter.check(item.accountId);
+    if (!gate.ok && gate.retryAt) return tooManyRequests(gate.retryAt);
+  }
   // Both email and WA items have a cached body — the classifier writes
   // the snippet for either channel and Reload optionally fetches the
   // full body. KNOWN LIMITATION: `buildGeneratorPrompt` still emits
@@ -829,6 +852,21 @@ export async function handleGenerateDraft(
   if (body.previousBodyMd !== undefined) input.previousBodyMd = body.previousBodyMd;
   if (body.tone !== undefined) input.tone = body.tone;
   const result = await generateDraft(input, deps.llm);
+  // Observability hook — record that a generation happened, with enough
+  // payload to reconstruct cost-attribution (generatorVersion gates which
+  // prompt was sent; bodyTruncated reveals when the LLM saw a clipped
+  // body; tone tells whether this was a rewrite or a fresh draft).
+  deps.state.appendAudit({
+    itemId: item.id,
+    tenantId: item.tenantId,
+    action: 'generation_requested',
+    actor: 'user',
+    payloadJson: JSON.stringify({
+      generatorVersion: result.generatorVersion,
+      bodyTruncated: result.bodyTruncated,
+      tone: body.tone ?? null,
+    }),
+  });
   return {
     status: 200,
     body: { bodyMd: result.bodyMd, generatorVersion: result.generatorVersion, bodyTruncated: result.bodyTruncated },
