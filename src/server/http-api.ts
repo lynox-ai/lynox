@@ -4354,9 +4354,15 @@ export class LynoxHTTPApi {
 
         // Verify the server's signature over its public key — without this, a MITM
         // can substitute the responder's keypair and decrypt the entire transfer.
+        // try/finally so the derived key is zeroed even if verifyHandshake throws
+        // on malformed input rather than returning false.
         const signingKey = crypto.deriveSigningKey(migrationToken);
-        const handshakeValid = crypto.verifyHandshake(handshake.serverPubKey, handshake.signature, signingKey);
-        crypto.zeroize(signingKey);
+        let handshakeValid = false;
+        try {
+          handshakeValid = crypto.verifyHandshake(handshake.serverPubKey, handshake.signature, signingKey);
+        } finally {
+          crypto.zeroize(signingKey);
+        }
         if (!handshakeValid) {
           throw new Error('Handshake signature invalid — refusing to derive transfer key');
         }
@@ -4464,6 +4470,15 @@ export class LynoxHTTPApi {
         const { verifyMigrationToken } = await import('../core/migration-crypto.js');
         if (!verifyMigrationToken(token, storedToken)) {
           errorResponse(res, 403, 'Invalid migration token');
+          return;
+        }
+
+        // Belt-and-braces: verifyMigrationToken already enforces the 64-hex-char
+        // shape (it parses both sides as hex Buffers and length-checks them), but
+        // re-assert here so a future change that loosens that check can't slip a
+        // low-entropy stored token straight into deriveSigningKey.
+        if (!/^[0-9a-f]{64}$/i.test(storedToken)) {
+          errorResponse(res, 500, 'Migration token has invalid format');
           return;
         }
 
