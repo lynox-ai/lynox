@@ -65,6 +65,10 @@ export interface InboxRuntime {
   llm: LLMCaller;
   /** Account resolver — turns an accountId into address + display name. */
   accounts: { resolve: (id: string) => { address: string; displayName: string } | null };
+  /** Sensitive-content mode echoed from BootstrapInboxOptions so HTTP-layer
+   *  consumers (handleRefreshItemBody) can apply the same masking the
+   *  classifier did at classify time. */
+  sensitiveMode: SensitiveMode;
   shutdown(): Promise<void>;
 }
 
@@ -239,6 +243,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     runColdStart,
     llm,
     accounts,
+    sensitiveMode: opts.sensitiveMode ?? 'skip',
     shutdown: () => queue.drain(),
   };
 }

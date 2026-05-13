@@ -78,6 +78,13 @@ export interface InboxApiDeps {
    * enforces a 409 if one is already running.
    */
   backfillMetadataRunner?: (accountId: string) => Promise<import('./backfill-metadata.js').BackfillMetadataReport>;
+  /**
+   * Sensitive-content mode for body-refresh paths. Without this the
+   * classifier's redaction guarantees would not apply to the refreshed
+   * full body. Defaults to 'allow' when absent — bootstrap.ts threads the
+   * env-driven value through.
+   */
+  sensitiveMode?: import('./sensitive-content.js').SensitiveMode | undefined;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -860,7 +867,10 @@ export async function handleRefreshItemBody(
         // reconstructing the threadKey across providers.
         ...(item.mailDate !== undefined ? { mailDate: item.mailDate } : {}),
         ...(item.messageId !== undefined && item.messageId !== '' ? { messageId: item.messageId } : {}),
+        // Subject feeds the sensitive-content masker (OTP keyword detection).
+        ...(item.subject !== undefined && item.subject !== '' ? { subject: item.subject } : {}),
       },
+      ...(deps.sensitiveMode !== undefined ? { sensitiveMode: deps.sensitiveMode } : {}),
     });
   } else {
     if (!deps.whatsappStore) return unavailable('whatsapp message store not wired');
@@ -871,7 +881,9 @@ export async function handleRefreshItemBody(
         id: item.id,
         threadKey: item.threadKey,
         channel: item.channel,
+        ...(item.subject !== undefined && item.subject !== '' ? { subject: item.subject } : {}),
       },
+      ...(deps.sensitiveMode !== undefined ? { sensitiveMode: deps.sensitiveMode } : {}),
     });
   }
   if (!result.ok) {

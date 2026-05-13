@@ -3316,6 +3316,7 @@ export class LynoxHTTPApi {
         coldStartTracker: rt.coldStartTracker,
         llm: rt.llm,
         accountResolver: rt.accounts,
+        sensitiveMode: rt.sensitiveMode,
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       // Mail provider lookup for the body-refresh handler. The mail
