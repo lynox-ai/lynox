@@ -226,6 +226,31 @@ export function handleGetItemThread(
   return { status: 200, body: { messages, partial } };
 }
 
+/**
+ * Notification preferences (v15). The Mail-Context-Sidebar PRD's main
+ * concern is that a noisy new-mail push doesn't make the user
+ * unsubscribe wholesale and lose Reminders + Send-Later failure pings.
+ * One boolean today; future per-zone keys land in the same envelope.
+ */
+export function handleGetNotificationPrefs(deps: InboxApiDeps): ApiResponse {
+  const enabled = deps.state.getSetting('push.inbox_enabled', 'true') !== 'false';
+  return { status: 200, body: { inboxPushEnabled: enabled } };
+}
+
+export interface NotificationPrefsBody {
+  inboxPushEnabled?: boolean | undefined;
+}
+
+export function handleUpdateNotificationPrefs(
+  deps: InboxApiDeps,
+  body: NotificationPrefsBody,
+): ApiResponse {
+  if (typeof body.inboxPushEnabled === 'boolean') {
+    deps.state.setSetting('push.inbox_enabled', body.inboxPushEnabled ? 'true' : 'false');
+  }
+  return handleGetNotificationPrefs(deps);
+}
+
 export function handleListItemAudit(deps: InboxApiDeps, id: string): ApiResponse {
   if (!deps.state.getItem(id)) return notFound('item');
   return { status: 200, body: { entries: deps.state.listAuditForItem(id) } };

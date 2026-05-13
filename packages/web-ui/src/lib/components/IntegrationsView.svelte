@@ -15,6 +15,22 @@
 		isSupported as isPushSupported,
 		isIosWithoutPwa,
 	} from '../stores/notifications.svelte.js';
+	import { getNotificationPrefs, updateNotificationPrefs } from '../api/inbox-notifications.js';
+
+	let inboxPushEnabled = $state(true);
+	async function loadInboxPushPref(): Promise<void> {
+		const p = await getNotificationPrefs(getApiBase());
+		if (p) inboxPushEnabled = p.inboxPushEnabled;
+	}
+	async function toggleInboxPush(next: boolean): Promise<void> {
+		const prev = inboxPushEnabled;
+		inboxPushEnabled = next; // optimistic
+		const result = await updateNotificationPrefs(getApiBase(), { inboxPushEnabled: next });
+		if (!result) {
+			inboxPushEnabled = prev;
+			addToast(t('integrations.push_inbox_save_failed'), 'error');
+		}
+	}
 
 	async function copyText(text: string) {
 		await navigator.clipboard.writeText(text);
@@ -516,6 +532,7 @@
 
 	$effect(() => {
 		initNotifications();
+		void loadInboxPushPref();
 		loadManagedStatus();
 		loadGoogleStatus();
 		loadSecretStatuses();
@@ -820,6 +837,21 @@
 					{t('integrations.push_disable')}
 				</button>
 			</div>
+			<!-- Per-category opt-out: muting inbox-mail pings without
+				unsubscribing the device, so reminders + scheduled-send
+				failures still reach the user. -->
+			<label class="mt-4 flex items-start gap-2 cursor-pointer text-sm">
+				<input
+					type="checkbox"
+					checked={inboxPushEnabled}
+					onchange={(e) => void toggleInboxPush((e.currentTarget as HTMLInputElement).checked)}
+					class="mt-0.5"
+				/>
+				<span>
+					<span class="text-text">{t('integrations.push_inbox_toggle')}</span>
+					<span class="block text-xs text-text-muted">{t('integrations.push_inbox_toggle_hint')}</span>
+				</span>
+			</label>
 		{:else if getNotificationPermission() === 'denied'}
 			<p class="text-xs text-text-muted">{t('integrations.push_denied_hint')}</p>
 		{:else}

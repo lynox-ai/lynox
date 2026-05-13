@@ -184,8 +184,14 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   // Build the inbox notifier when a router is wired. Created here (not
   // in runner.ts) so the same instance throttles across both LLM-driven
   // (runner) and rule/sensitive-skip (watcher-hook) classification paths.
+  // `isEnabled` reads the v15 setting on every fire so toggling the UI
+  // checkbox takes effect without a restart. Default true — explicit
+  // 'false' disables; any other value (or absent row) keeps it on.
   const notifier = opts.notificationRouter
-    ? createInboxNotifier({ router: opts.notificationRouter })
+    ? createInboxNotifier({
+        router: opts.notificationRouter,
+        isEnabled: () => state.getSetting('push.inbox_enabled', 'true') !== 'false',
+      })
     : undefined;
 
   const queue = buildInboxRunner({

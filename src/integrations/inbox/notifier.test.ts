@@ -138,18 +138,6 @@ describe('createInboxNotifier — throttle', () => {
     expect(send).toHaveBeenCalledTimes(4);
   });
 
-  it('isolates throttle state per tenant', async () => {
-    const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
-    router.register({ name: 'web-push', send });
-    let t = 1_000_000;
-    const notifier = createInboxNotifier({ router, perMinute: 1, perHour: 10, now: () => t });
-
-    await notifier.notifyNewItem(fakeItem({ tenantId: 'tA' }));
-    await notifier.notifyNewItem(fakeItem({ tenantId: 'tB' }));
-    expect(send).toHaveBeenCalledTimes(2);
-  });
-
   it('does not consume throttle budget when no web-push channel is registered', async () => {
     // Bare router → sendTo('web-push', …) returns false. The throttle
     // budget must NOT burn on a non-delivery, otherwise a single misconfig
@@ -164,6 +152,25 @@ describe('createInboxNotifier — throttle', () => {
     // still in the same minute as the two no-channel attempts.
     router.register({ name: 'web-push', send: async () => true });
     expect(await notifier.notifyNewItem(fakeItem({ id: 'c' }))).toBe(true);
+  });
+
+  it('skips dispatch when isEnabled returns false, without burning the throttle bucket', async () => {
+    const router = new NotificationRouter();
+    const send = vi.fn(async () => true);
+    router.register({ name: 'web-push', send });
+    let t = 1_000_000;
+    let enabled = false;
+    const notifier = createInboxNotifier({
+      router, perMinute: 1, perHour: 10, now: () => t, isEnabled: () => enabled,
+    });
+
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'a' }))).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    // Flip the toggle — the next fire should succeed even within the
+    // same minute as the disabled-state call.
+    enabled = true;
+    expect(await notifier.notifyNewItem(fakeItem({ id: 'b' }))).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it('does not consume throttle budget when the channel.send throws', async () => {

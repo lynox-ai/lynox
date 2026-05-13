@@ -3397,6 +3397,20 @@ export class LynoxHTTPApi {
       sendInbox(res, handleGetCounts(deps!, tenantId !== null ? { tenantId } : {}));
     });
 
+    this.staticRoutes.set('GET /api/inbox/notification-prefs', async (_req, res) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleGetNotificationPrefs } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleGetNotificationPrefs(deps!));
+    });
+
+    this.staticRoutes.set('PATCH /api/inbox/notification-prefs', async (_req, res, _params, body) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleUpdateNotificationPrefs } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleUpdateNotificationPrefs(deps!, (body ?? {}) as { inboxPushEnabled?: boolean | undefined }));
+    });
+
     this.staticRoutes.set('GET /api/inbox/cold-start', async (_req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;

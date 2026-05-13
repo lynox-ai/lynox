@@ -14,8 +14,10 @@ import {
   handleGetDraft,
   handleGetItem,
   handleGetItemDraft,
+  handleGetNotificationPrefs,
   handleListItemAudit,
   handleRunColdStart,
+  handleUpdateNotificationPrefs,
   handleRunBackfillMetadata,
   _resetBackfillMutex,
   handleBulkAction,
@@ -1505,5 +1507,27 @@ describe('handleComposeSend', () => {
       { accountId: 'a', to: 'malformed\r\ninjected', subject: 's', body: 'b' },
     );
     expect(r.status).toBe(400);
+  });
+});
+
+describe('handleGetNotificationPrefs / handleUpdateNotificationPrefs', () => {
+  it('defaults inboxPushEnabled=true when no setting has been written', () => {
+    const r = handleGetNotificationPrefs(deps);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ inboxPushEnabled: true });
+  });
+
+  it('round-trips a toggle via PATCH', () => {
+    const off = handleUpdateNotificationPrefs(deps, { inboxPushEnabled: false });
+    expect(off.body).toEqual({ inboxPushEnabled: false });
+    expect(handleGetNotificationPrefs(deps).body).toEqual({ inboxPushEnabled: false });
+    const on = handleUpdateNotificationPrefs(deps, { inboxPushEnabled: true });
+    expect(on.body).toEqual({ inboxPushEnabled: true });
+  });
+
+  it('ignores non-boolean values (no-op when client sends garbage)', () => {
+    handleUpdateNotificationPrefs(deps, { inboxPushEnabled: false });
+    handleUpdateNotificationPrefs(deps, {} as { inboxPushEnabled?: boolean });
+    expect(handleGetNotificationPrefs(deps).body).toEqual({ inboxPushEnabled: false });
   });
 });

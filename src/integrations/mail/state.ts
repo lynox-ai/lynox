@@ -509,6 +509,19 @@ const MIGRATIONS: string[] = [
      WHERE sent_at IS NULL AND failed_at IS NULL;
    CREATE INDEX IF NOT EXISTS idx_mail_scheduled_account
      ON mail_scheduled(account_id, created_at DESC);`,
+
+  // v15: Inbox-side per-user preferences. Today's only key is
+  // `push.inbox_enabled` (default 'true') so the user can mute new-mail
+  // pushes without unsubscribing the device — otherwise reminders +
+  // scheduled-send failure pings get muted by the same toggle. Tiny
+  // KV table keeps this simple; extend by adding more keys, not columns.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (15);
+
+   CREATE TABLE IF NOT EXISTS inbox_settings (
+     key TEXT PRIMARY KEY,
+     value TEXT NOT NULL,
+     updated_at INTEGER NOT NULL
+   );`,
 ];
 
 export interface MailStateDbOptions {

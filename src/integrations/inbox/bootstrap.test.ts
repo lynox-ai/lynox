@@ -272,6 +272,44 @@ describe('bootstrapInbox — push notifier wire', () => {
     expect(msg.data?.itemId).toMatch(/^inb_/);
   });
 
+  it('respects inbox_push_enabled=false: notifier silently skips even with router wired', async () => {
+    const { NotificationRouter } = await import('../../core/notification-router.js');
+    const router = new NotificationRouter();
+    const send = vi.fn(async () => true);
+    router.register({ name: 'web-push', send });
+    const client = makeClient({
+      content: [{ type: 'text', text: JSON.stringify({
+        bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'r',
+      }) }],
+    });
+    const runtime = bootstrapInbox({
+      mailStateDb: mail, anthropicClient: client, notificationRouter: router,
+    });
+    runtime.state.setSetting('push.inbox_enabled', 'false');
+    await runtime.hook(ACCOUNT.id, envelope());
+    await runtime.queue.drain();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('respects inbox_push_enabled=true (default): notifier dispatches as usual', async () => {
+    const { NotificationRouter } = await import('../../core/notification-router.js');
+    const router = new NotificationRouter();
+    const send = vi.fn(async () => true);
+    router.register({ name: 'web-push', send });
+    const client = makeClient({
+      content: [{ type: 'text', text: JSON.stringify({
+        bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'r',
+      }) }],
+    });
+    const runtime = bootstrapInbox({
+      mailStateDb: mail, anthropicClient: client, notificationRouter: router,
+    });
+    // Default = absent setting → isEnabled returns true.
+    await runtime.hook(ACCOUNT.id, envelope());
+    await runtime.queue.drain();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT push when no notificationRouter is wired (single-user/headless)', async () => {
     const client = makeClient({
       content: [{ type: 'text', text: JSON.stringify({

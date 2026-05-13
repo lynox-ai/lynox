@@ -22,21 +22,21 @@
 import type { NotificationRouter, NotificationMessage } from '../../core/notification-router.js';
 import type { InboxItem } from '../../types/index.js';
 
-const DEFAULT_TENANT_ID = 'default';
-
 export interface InboxNotifierOptions {
   router: NotificationRouter;
-  /** Max pushes per minute per tenant. PRD default 1. */
+  /** Max pushes per minute. PRD default 1. */
   perMinute?: number | undefined;
-  /** Max pushes per hour per tenant. PRD default 10. */
+  /** Max pushes per hour. PRD default 10. */
   perHour?: number | undefined;
   /** Injectable clock for tests. */
   now?: (() => number) | undefined;
-}
-
-interface RateState {
-  /** Recent push timestamps (ms). Trimmed on each notify call. */
-  history: number[];
+  /**
+   * Gate the user has flipped to mute new-mail pushes without
+   * unsubscribing the device (Reminders + Send-Later results stay live).
+   * Returns true → we fire; false → we silently skip without burning the
+   * throttle bucket. Absent → always-on (legacy callers).
+   */
+  isEnabled?: (() => boolean) | undefined;
 }
 
 export interface InboxNotifier {
@@ -81,36 +81,24 @@ export function sanitisePushText(s: string, maxLen: number = 200): string {
 /**
  * Build a long-lived notifier. The returned object holds the rate-limit
  * state — re-create it across processes (or instances) and limits reset.
+ * Single-tenant by design: a lynox instance is always one user, multi-
+ * tenancy is handled at the container level (separate engine per user).
  */
 export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
   const perMinute = opts.perMinute ?? 1;
   const perHour = opts.perHour ?? 10;
   const now = opts.now ?? Date.now;
-  const buckets = new Map<string, RateState>();
+  /** Recent push timestamps (ms). Bounded by `perHour` after each prune. */
+  let history: number[] = [];
 
-  function getState(tenantId: string): RateState {
-    let state = buckets.get(tenantId);
-    if (!state) {
-      state = { history: [] };
-      buckets.set(tenantId, state);
-    }
-    return state;
-  }
-
-  function shouldThrottle(tenantId: string): boolean {
-    const state = getState(tenantId);
+  function shouldThrottle(): boolean {
     const t = now();
-    // Drop entries older than 1h on every call — keeps the array
-    // bounded (worst case: perHour entries) without a separate sweep.
-    state.history = state.history.filter((ts) => t - ts < 3_600_000);
-    if (state.history.length >= perHour) return true;
-    const lastMinuteCount = state.history.filter((ts) => t - ts < 60_000).length;
-    if (lastMinuteCount >= perMinute) return true;
-    return false;
-  }
-
-  function recordSent(tenantId: string): void {
-    getState(tenantId).history.push(now());
+    // Single-pass prune + last-minute count — no second filter scan.
+    history = history.filter((ts) => t - ts < 3_600_000);
+    if (history.length >= perHour) return true;
+    let lastMinuteCount = 0;
+    for (const ts of history) if (t - ts < 60_000) lastMinuteCount++;
+    return lastMinuteCount >= perMinute;
   }
 
   return {
@@ -118,8 +106,10 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
       // Defensive contract check — caller is expected to filter, but
       // a wider deploy of the notifier shouldn't blast every bucket.
       if (item.bucket !== 'requires_user') return false;
-      const tenantId = item.tenantId || DEFAULT_TENANT_ID;
-      if (shouldThrottle(tenantId)) return false;
+      // User-flipped opt-out (settings UI). Reminders + scheduled-send
+      // pings live on a separate channel and ignore this gate.
+      if (opts.isEnabled && !opts.isEnabled()) return false;
+      if (shouldThrottle()) return false;
 
       // Treat empty-string fromName as missing — exactOptionalPropertyTypes
       // makes `undefined` the canonical "no value", but envelope parsers
@@ -142,7 +132,7 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
         // Other channels (telegram, etc.) are addressed via their own
         // notifier path — inbox push is web-push specifically.
         const ok = await opts.router.sendTo('web-push', msg);
-        if (ok) recordSent(tenantId);
+        if (ok) history.push(now());
         return ok;
       } catch {
         return false;
