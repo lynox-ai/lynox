@@ -88,7 +88,7 @@
 			<p class="text-[11px] text-text-subtle">{t('inbox.context_unavailable')}</p>
 		{:else if context}
 			{#if context.sender.address}
-				<div class="text-[11px] text-text-muted truncate" title={context.sender.address}>
+				<div class="text-[11px] text-text-muted break-words" title={context.sender.address}>
 					{#if context.sender.name}
 						<span class="text-text">{context.sender.name}</span>
 						<span class="text-text-subtle">&lt;{context.sender.address}&gt;</span>

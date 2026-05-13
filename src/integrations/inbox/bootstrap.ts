@@ -129,6 +129,13 @@ export interface BootstrapInboxOptions {
   notificationRouter?: NotificationRouter | undefined;
   /** Override the poller cadence (tests pass small values). */
   reminderPollIntervalMs?: number | undefined;
+  /**
+   * RunHistory the engine keeps for the chat-session usage dashboard.
+   * When wired, every classifier LLM call also lands here so the
+   * "$X today" status-bar reflects classifier spend (not just chat).
+   * Absent on tests + no-history deployments.
+   */
+  runHistory?: import('../../core/run-history.js').RunHistory | undefined;
 }
 
 function parseIntSetting(raw: string | null, fallback: number): number {
@@ -167,6 +174,39 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
 
   const onUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
     budget.recordUsage(usage.inputTokens, usage.outputTokens);
+    // Also bridge to RunHistory so the "$X today" status-bar (which reads
+    // from /api/history/cost/daily) reflects classifier spend, not just
+    // interactive chat. Without this, every classifier call costs real
+    // money the user can't see — and that's the bug rafael flagged.
+    if (opts.runHistory) {
+      try {
+        const inputCostPerMtok = opts.budget?.inputCostPerMtok ?? 0.80; // matches DEFAULT_INPUT_COST_PER_MTOK
+        const outputCostPerMtok = opts.budget?.outputCostPerMtok ?? 4.00; // matches DEFAULT_OUTPUT_COST_PER_MTOK
+        const costUsd =
+          (usage.inputTokens / 1_000_000) * inputCostPerMtok
+          + (usage.outputTokens / 1_000_000) * outputCostPerMtok;
+        const id = opts.runHistory.insertRun({
+          taskText: 'inbox classifier',
+          modelTier: 'haiku',
+          modelId: opts.modelIdOverride ?? 'haiku-default',
+          runType: 'single',
+          tenantId: opts.tenantId,
+          kind: 'llm',
+        });
+        opts.runHistory.updateRun(id, {
+          tokensIn: usage.inputTokens,
+          tokensOut: usage.outputTokens,
+          costUsd,
+          status: 'completed',
+        });
+      } catch (err) {
+        // RunHistory write failure must not affect the budget gate or
+        // the classifier itself. Logged loud-ish so a persistent schema
+        // mismatch is diagnosable.
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[inbox/bootstrap] RunHistory bridge failed: ${msg}\n`);
+      }
+    }
   };
   let llm: LLMCaller;
   if (opts.llmRegion === 'eu') {

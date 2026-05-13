@@ -108,10 +108,6 @@
 		closeItem();
 	}
 
-	function openReminderPicker(): void {
-		notifyOnUnsnoozeOnNext = true;
-		snoozeOpen = true;
-	}
 
 	const snoozePresets: ReadonlyArray<{ label: string; preset: SnoozePreset }> = $derived([
 		{ label: t('inbox.snooze_today'), preset: 'later_today' as const },
@@ -147,16 +143,6 @@
 						<span aria-hidden="true">←</span>
 						<span class="hidden sm:inline">{t('inbox.reading_back')}</span>
 					</button>
-				{/if}
-				{#if full}
-					<button
-						type="button"
-						onclick={() => void onRefreshBody()}
-						disabled={refreshing}
-						title={refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_body')}
-						aria-label={t('inbox.draft_refresh_body')}
-						class="shrink-0 text-text-subtle hover:text-text text-[12px] font-mono p-1.5 min-h-[36px] min-w-[36px] disabled:opacity-50 disabled:cursor-not-allowed"
-					>{refreshing ? '⟳' : '↻'}</button>
 				{/if}
 				<div class="min-w-0 flex-1">
 					{#if loading && !full}
@@ -201,7 +187,10 @@
 			{/if}
 
 			<!-- Row 3 (sm+): action buttons. flex-wrap so a narrow viewport
-				stacks them onto two lines instead of clipping. -->
+				stacks them onto two lines instead of clipping. Snooze and
+				"Erinner mich" used to be two buttons opening the same preset
+				menu — consolidated into one Snooze button with a "+ benachrich-
+				tigen wenn fällig" checkbox at the foot of the menu. -->
 			{#if full}
 				<div class="hidden sm:flex flex-wrap items-center gap-1.5 mt-3">
 					<button
@@ -216,39 +205,49 @@
 						onclick={() => void onArchive()}
 						aria-label={t('inbox.action_archive')}
 					>{t('inbox.action_archive')}</button>
-					<button
-						type="button"
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
-						onclick={openReminderPicker}
-						aria-label={t('inbox.action_remind_me')}
-					>{t("inbox.action_remind_me")}</button>
 					<div class="relative" use:clickOutside={() => (snoozeOpen = false)}>
 						<button
 							type="button"
 							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
-							onclick={() => { notifyOnUnsnoozeOnNext = false; snoozeOpen = !snoozeOpen; }}
+							onclick={() => (snoozeOpen = !snoozeOpen)}
 							aria-expanded={snoozeOpen}
 							aria-haspopup="menu"
 							aria-label={t('inbox.action_snooze')}
 						>{t('inbox.action_snooze')}</button>
 						{#if snoozeOpen}
-							<ul
+							<div
 								role="menu"
-								class="absolute right-0 z-10 mt-1 min-w-[180px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
+								class="absolute right-0 z-10 mt-1 min-w-[220px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
 							>
 								{#each snoozePresets as p (p.preset)}
-									<li role="none">
-										<button
-											type="button"
-											role="menuitem"
-											class="block w-full px-3 py-2 text-left text-[11px] text-text-muted hover:bg-bg-subtle hover:text-text"
-											onclick={() => void onSnoozePreset(p.preset)}
-										>{p.label}</button>
-									</li>
+									<button
+										type="button"
+										role="menuitem"
+										class="block w-full px-3 py-2 text-left text-[11px] text-text-muted hover:bg-bg-subtle hover:text-text"
+										onclick={() => void onSnoozePreset(p.preset)}
+									>{p.label}</button>
 								{/each}
-							</ul>
+								<label class="flex items-start gap-2 border-t border-border px-3 py-2 cursor-pointer text-[11px] text-text-muted hover:bg-bg-subtle">
+									<input
+										type="checkbox"
+										checked={notifyOnUnsnoozeOnNext}
+										onchange={(e) => (notifyOnUnsnoozeOnNext = (e.currentTarget as HTMLInputElement).checked)}
+										class="mt-0.5"
+										onclick={(e) => e.stopPropagation()}
+									/>
+									<span>{t('inbox.action_notify_on_unsnooze')}</span>
+								</label>
+							</div>
 						{/if}
 					</div>
+					<button
+						type="button"
+						onclick={() => void onRefreshBody()}
+						disabled={refreshing}
+						title={t('inbox.draft_refresh_body_hint')}
+						aria-label={t('inbox.draft_refresh_body')}
+						class="ml-auto rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[36px] disabled:opacity-50 disabled:cursor-not-allowed"
+					>{refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_full_body')}</button>
 				</div>
 			{/if}
 
@@ -256,14 +255,6 @@
 				starve the content of horizontal space. Touch-sized (min-h-[44px]). -->
 			{#if full}
 				<div class="mt-3 flex items-center gap-1.5 sm:hidden">
-					<button
-						type="button"
-						onclick={() => void onRefreshBody()}
-						disabled={refreshing}
-						title={refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_body')}
-						aria-label={t('inbox.draft_refresh_body')}
-						class="text-text-subtle hover:text-text text-base font-mono p-2 min-h-[44px] min-w-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
-					>{refreshing ? '⟳' : '↻'}</button>
 					<button
 						type="button"
 						class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
@@ -276,39 +267,49 @@
 						onclick={() => void onArchive()}
 						aria-label={t('inbox.action_archive')}
 					>{t('inbox.action_archive')}</button>
-					<button
-						type="button"
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
-						onclick={openReminderPicker}
-						aria-label={t('inbox.action_remind_me')}
-					>{t("inbox.action_remind_me")}</button>
 					<div class="relative" use:clickOutside={() => (snoozeOpen = false)}>
 						<button
 							type="button"
 							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
-							onclick={() => { notifyOnUnsnoozeOnNext = false; snoozeOpen = !snoozeOpen; }}
+							onclick={() => (snoozeOpen = !snoozeOpen)}
 							aria-expanded={snoozeOpen}
 							aria-haspopup="menu"
 							aria-label={t('inbox.action_snooze')}
 						>{t('inbox.action_snooze')}</button>
 						{#if snoozeOpen}
-							<ul
+							<div
 								role="menu"
-								class="absolute right-0 z-10 mt-1 min-w-[180px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
+								class="absolute right-0 z-10 mt-1 min-w-[220px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
 							>
 								{#each snoozePresets as p (p.preset)}
-									<li role="none">
-										<button
-											type="button"
-											role="menuitem"
-											class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[44px]"
-											onclick={() => void onSnoozePreset(p.preset)}
-										>{p.label}</button>
-									</li>
+									<button
+										type="button"
+										role="menuitem"
+										class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[44px]"
+										onclick={() => void onSnoozePreset(p.preset)}
+									>{p.label}</button>
 								{/each}
-							</ul>
+								<label class="flex items-start gap-2 border-t border-border px-3 py-2 cursor-pointer text-[12px] text-text-muted hover:bg-bg-subtle">
+									<input
+										type="checkbox"
+										checked={notifyOnUnsnoozeOnNext}
+										onchange={(e) => (notifyOnUnsnoozeOnNext = (e.currentTarget as HTMLInputElement).checked)}
+										class="mt-0.5"
+										onclick={(e) => e.stopPropagation()}
+									/>
+									<span>{t('inbox.action_notify_on_unsnooze')}</span>
+								</label>
+							</div>
 						{/if}
 					</div>
+					<button
+						type="button"
+						onclick={() => void onRefreshBody()}
+						disabled={refreshing}
+						title={t('inbox.draft_refresh_body_hint')}
+						aria-label={t('inbox.draft_refresh_body')}
+						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+					>{refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_full_body')}</button>
 				</div>
 			{/if}
 		</header>
