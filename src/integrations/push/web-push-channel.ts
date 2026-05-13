@@ -189,6 +189,10 @@ export class WebPushNotificationChannel implements NotificationChannel {
       data: {
         priority: msg.priority,
         taskId: msg.taskId,
+        // Channel passthrough — inbox notifier sets `itemId`; SW reads
+        // it for the deep-link. Spread last so callers can override
+        // priority/taskId only when they intentionally restate them.
+        ...(msg.data ?? {}),
       },
     };
 

@@ -21,6 +21,7 @@ import { createMistralEuLLMCaller } from './classifier/llm-mistral.js';
 import type { ClassifierQueue } from './classifier/queue.js';
 import { runColdStartForAccount } from './cold-start-adapter.js';
 import type { NotificationRouter } from '../../core/notification-router.js';
+import { createInboxNotifier } from './notifier.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxContactResolver } from './contact-resolver.js';
 import { InboxCostBudget, type InboxCostBudgetOptions } from './cost-budget.js';
@@ -180,11 +181,19 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     );
   }
 
+  // Build the inbox notifier when a router is wired. Created here (not
+  // in runner.ts) so the same instance throttles across both LLM-driven
+  // (runner) and rule/sensitive-skip (watcher-hook) classification paths.
+  const notifier = opts.notificationRouter
+    ? createInboxNotifier({ router: opts.notificationRouter })
+    : undefined;
+
   const queue = buildInboxRunner({
     state,
     llm,
     budget,
     policy: opts.policy,
+    ...(notifier ? { notifier } : {}),
   });
 
   const accounts: AccountResolver = {
@@ -211,6 +220,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   };
   if (opts.folderBlacklist !== undefined) hookOpts.folderBlacklist = opts.folderBlacklist;
   if (opts.disabledAccounts !== undefined) hookOpts.disabledAccounts = opts.disabledAccounts;
+  if (notifier !== undefined) hookOpts.notifier = notifier;
   const hook = createInboxClassifierHook(hookOpts);
 
   // Disabled accounts must not get a backfill — same opt-out as the

@@ -361,3 +361,53 @@ describe('createInboxClassifierHook — sensitiveMode = allow', () => {
     });
   });
 });
+
+describe('createInboxClassifierHook — push notifier wire', () => {
+  it('fires notifier on the rule path when the rule lands in requires_user', async () => {
+    inbox.insertRule({
+      accountId: ACCOUNT.id,
+      matcherKind: 'from',
+      matcherValue: 'mustermann@example.com',
+      bucket: 'requires_user',
+      action: 'show',
+      source: 'on_demand',
+    });
+    const notifyNewItem = vi.fn(async () => true);
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts, notifier: { notifyNewItem },
+    });
+    await hook(ACCOUNT.id, envelope());
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(notifyNewItem.mock.calls[0]?.[0]).toMatchObject({ bucket: 'requires_user' });
+  });
+
+  it('does NOT fire on the rule path when rule routes to auto_handled', async () => {
+    inbox.insertRule({
+      accountId: ACCOUNT.id,
+      matcherKind: 'from',
+      matcherValue: 'mustermann@example.com',
+      bucket: 'auto_handled',
+      action: 'archive',
+      source: 'on_demand',
+    });
+    const notifyNewItem = vi.fn(async () => true);
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts, notifier: { notifyNewItem },
+    });
+    await hook(ACCOUNT.id, envelope());
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('fires notifier on the sensitive-skip path (always lands in requires_user)', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue, accounts, notifier: { notifyNewItem },
+    });
+    await hook(ACCOUNT.id, envelope({
+      subject: 'Your verification code',
+      snippet: 'Your one-time code is 123456. Do not share.',
+    }));
+    expect(queueCalls).toHaveLength(0); // sensitive-skip → no LLM
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+  });
+});

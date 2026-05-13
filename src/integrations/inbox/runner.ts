@@ -27,6 +27,7 @@ import {
 export { scrubErrorMessage } from './sensitive-content.js';
 import { scrubErrorMessage as _scrubErrorMessage } from './sensitive-content.js';
 import type { InboxCostBudget } from './cost-budget.js';
+import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
 
 /**
@@ -91,6 +92,11 @@ export interface BuildInboxRunnerOptions {
    * caller's `onUsage` hook so the SDK-reported tokens flow back.
    */
   budget?: InboxCostBudget | undefined;
+  /**
+   * Optional inbox push notifier. Fires on a NEW classification with
+   * bucket=`requires_user`. Absent on instances without web-push wiring.
+   */
+  notifier?: InboxNotifier | undefined;
 }
 
 /**
@@ -170,6 +176,10 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
         state.saveItemBody(itemId, body, payload.channel ?? 'email');
       }
       _writeThreadMessage(state, payload, itemId, body);
+      if (opts.notifier && result.bucket === 'requires_user') {
+        const item = state.getItem(itemId);
+        if (item) void opts.notifier.notifyNewItem(item);
+      }
     },
     onDeadLetter: (payload, error) => {
       // PRD fail-closed default: surface to Needs You so the user sees it.
@@ -205,6 +215,10 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       // see what arrived even when classify failed. No body (none was
       // successfully classified).
       _writeThreadMessage(state, payload, itemId, undefined);
+      if (opts.notifier) {
+        const item = state.getItem(itemId);
+        if (item) void opts.notifier.notifyNewItem(item);
+      }
     },
   };
   if (policy.maxConcurrency !== undefined) queueOptions.maxConcurrency = policy.maxConcurrency;
