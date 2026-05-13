@@ -682,6 +682,11 @@ export class Engine {
         // Wire the notification router so the reminder poller can fire
         // push when notify_on_unsnooze items wake up.
         bootOpts.notificationRouter = this._notificationRouter;
+        // Bridge classifier spend into RunHistory so "$X today" reflects it.
+        // Without this the classifier costs real money that never shows up
+        // in the dashboard.
+        const runHistoryForInbox = this.getRunHistory();
+        if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured

@@ -88,7 +88,6 @@
 			labelKey: 'settings.section_access',
 			items: [
 				{ href: '/app/settings/mobile', titleKey: 'mobile.title', descKey: 'mobile.settings_desc', hideOnMobile: true },
-				{ href: '/app/settings/tasks', titleKey: 'settings.tasks', descKey: 'settings.tasks' },
 				{ href: '/app/migration', titleKey: 'migration.title', descKey: 'migration.subtitle', selfHostOnly: true },
 			],
 		},
