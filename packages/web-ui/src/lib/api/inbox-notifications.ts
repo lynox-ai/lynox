@@ -35,7 +35,26 @@ export interface NotificationPrefsPatch {
 	accounts?: Record<string, boolean> | undefined;
 }
 
+function normaliseAccount(raw: unknown): NotificationPrefsAccount | null {
+	if (raw === null || typeof raw !== 'object') return null;
+	const r = raw as Record<string, unknown>;
+	if (typeof r['id'] !== 'string' || typeof r['displayName'] !== 'string' || typeof r['address'] !== 'string') {
+		return null;
+	}
+	return {
+		id: r['id'],
+		displayName: r['displayName'],
+		address: r['address'],
+		// String "false" or anything non-true coerces to false — the
+		// checkbox is the user's truth, not the wire payload.
+		muted: r['muted'] === true,
+	};
+}
+
 function normalisePrefs(raw: Partial<NotificationPrefs>): NotificationPrefs {
+	const accounts = Array.isArray(raw.accounts)
+		? raw.accounts.map(normaliseAccount).filter((a): a is NotificationPrefsAccount => a !== null)
+		: [];
 	return {
 		inboxPushEnabled: raw.inboxPushEnabled !== false,
 		quietHours: {
@@ -46,7 +65,7 @@ function normalisePrefs(raw: Partial<NotificationPrefs>): NotificationPrefs {
 		},
 		perMinute: typeof raw.perMinute === 'number' && raw.perMinute > 0 ? raw.perMinute : 1,
 		perHour: typeof raw.perHour === 'number' && raw.perHour > 0 ? raw.perHour : 10,
-		accounts: Array.isArray(raw.accounts) ? raw.accounts : [],
+		accounts,
 	};
 }
 

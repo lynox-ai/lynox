@@ -1546,6 +1546,24 @@ describe('handleGetNotificationPrefs / handleUpdateNotificationPrefs', () => {
     expect(qh.end).toBe('06:30');
   });
 
+  it('partial PATCH leaves other quietHours fields untouched', () => {
+    handleUpdateNotificationPrefs(deps, {
+      quietHours: { enabled: true, start: '23:00', end: '06:30', tz: 'Europe/Berlin' },
+    });
+    handleUpdateNotificationPrefs(deps, { quietHours: { start: '21:30' } });
+    const qh = (handleGetNotificationPrefs(deps).body as {
+      quietHours: { enabled: boolean; start: string; end: string; tz: string };
+    }).quietHours;
+    expect(qh).toEqual({ enabled: true, start: '21:30', end: '06:30', tz: 'Europe/Berlin' });
+  });
+
+  it('rejects invalid IANA tz strings (no silent UTC fallback at write time)', () => {
+    handleUpdateNotificationPrefs(deps, { quietHours: { tz: 'Europe/Berlin' } });
+    handleUpdateNotificationPrefs(deps, { quietHours: { tz: 'Not/A/Real/Zone' } });
+    const qh = (handleGetNotificationPrefs(deps).body as { quietHours: { tz: string } }).quietHours;
+    expect(qh.tz).toBe('Europe/Berlin'); // bad value never overwrote the good one
+  });
+
   it('clamps perMinute to [1,10] and perHour to [1,60]', () => {
     handleUpdateNotificationPrefs(deps, { perMinute: 999, perHour: -5 });
     const r = handleGetNotificationPrefs(deps).body as { perMinute: number; perHour: number };
@@ -1560,5 +1578,28 @@ describe('handleGetNotificationPrefs / handleUpdateNotificationPrefs', () => {
     expect(state.getSetting(`push.account.${ACCOUNT.id}.muted`)).toBe('true');
     // The bad-shape id is silently dropped — its setting key stays absent.
     expect(state.getSetting('push.account.evil/key:with-bad chars.muted')).toBeNull();
+  });
+
+  it('per-account mute round-trips both true and false', () => {
+    handleUpdateNotificationPrefs(deps, { accounts: { [ACCOUNT.id]: true } });
+    expect(state.getSetting(`push.account.${ACCOUNT.id}.muted`)).toBe('true');
+    handleUpdateNotificationPrefs(deps, { accounts: { [ACCOUNT.id]: false } });
+    expect(state.getSetting(`push.account.${ACCOUNT.id}.muted`)).toBe('false');
+  });
+
+  it('rejects non-boolean account values (string "false" must NOT flip mute=true)', () => {
+    handleUpdateNotificationPrefs(deps, {
+      // String "false" is truthy under naive coercion; the guard must drop it.
+      accounts: { [ACCOUNT.id]: 'false' as unknown as boolean },
+    });
+    expect(state.getSetting(`push.account.${ACCOUNT.id}.muted`)).toBeNull();
+  });
+
+  it('ignores arrays passed as accounts (no garbage push.account.0.muted writes)', () => {
+    handleUpdateNotificationPrefs(deps, {
+      accounts: [true, false] as unknown as Record<string, boolean>,
+    });
+    expect(state.getSetting('push.account.0.muted')).toBeNull();
+    expect(state.getSetting('push.account.1.muted')).toBeNull();
   });
 });

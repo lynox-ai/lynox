@@ -26,30 +26,45 @@
 	async function loadInboxPushPref(): Promise<void> {
 		prefs = await getNotificationPrefs(getApiBase());
 	}
+
+	// Serialise PATCHes so two near-simultaneous toggles don't race —
+	// the second wait-for-first chain ensures we always merge against the
+	// freshest server state, never a stale `prev` snapshot.
+	let inFlight: Promise<void> = Promise.resolve();
 	async function patchPrefs(patch: NotificationPrefsPatch): Promise<void> {
-		const prev = prefs;
-		// Optimistic merge so the UI snaps before the round-trip.
-		if (prev) {
-			prefs = {
-				...prev,
-				...(patch.inboxPushEnabled !== undefined ? { inboxPushEnabled: patch.inboxPushEnabled } : {}),
-				...(patch.perMinute !== undefined ? { perMinute: patch.perMinute } : {}),
-				...(patch.perHour !== undefined ? { perHour: patch.perHour } : {}),
-				...(patch.quietHours ? { quietHours: { ...prev.quietHours, ...patch.quietHours } } : {}),
-				...(patch.accounts
-					? { accounts: prev.accounts.map((a) => (
-						patch.accounts && a.id in patch.accounts ? { ...a, muted: patch.accounts[a.id]! } : a
-					)) }
-					: {}),
-			};
-		}
-		const result = await updateNotificationPrefs(getApiBase(), patch);
-		if (result) {
-			prefs = result;
-		} else {
-			prefs = prev;
-			addToast(t('integrations.push_inbox_save_failed'), 'error');
-		}
+		const run = async (): Promise<void> => {
+			const prev = prefs;
+			if (prev) {
+				prefs = {
+					...prev,
+					...(patch.inboxPushEnabled !== undefined ? { inboxPushEnabled: patch.inboxPushEnabled } : {}),
+					...(patch.perMinute !== undefined ? { perMinute: patch.perMinute } : {}),
+					...(patch.perHour !== undefined ? { perHour: patch.perHour } : {}),
+					...(patch.quietHours ? { quietHours: { ...prev.quietHours, ...patch.quietHours } } : {}),
+					...(patch.accounts
+						? { accounts: prev.accounts.map((a) => (
+							patch.accounts && a.id in patch.accounts ? { ...a, muted: patch.accounts[a.id]! } : a
+						)) }
+						: {}),
+				};
+			}
+			const result = await updateNotificationPrefs(getApiBase(), patch);
+			if (result) {
+				prefs = result;
+			} else {
+				prefs = prev;
+				addToast(t('integrations.push_inbox_save_failed'), 'error');
+			}
+		};
+		inFlight = inFlight.then(run, run);
+		await inFlight;
+	}
+
+	/** Drop NaN before it taints optimistic state — `parseInt('')` returns NaN. */
+	function patchThrottle(field: 'perMinute' | 'perHour', raw: string): void {
+		const n = parseInt(raw, 10);
+		if (!Number.isFinite(n)) return;
+		void patchPrefs({ [field]: n } as NotificationPrefsPatch);
 	}
 
 	function defaultBrowserTz(): string {
@@ -937,7 +952,7 @@
 								min="1"
 								max="10"
 								value={prefs.perMinute}
-								onchange={(e) => void patchPrefs({ perMinute: parseInt((e.currentTarget as HTMLInputElement).value, 10) })}
+								onchange={(e) => patchThrottle('perMinute', (e.currentTarget as HTMLInputElement).value)}
 								class="w-16 rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-text"
 							/>
 							{t('integrations.push_throttle_per_minute')}
@@ -948,7 +963,7 @@
 								min="1"
 								max="60"
 								value={prefs.perHour}
-								onchange={(e) => void patchPrefs({ perHour: parseInt((e.currentTarget as HTMLInputElement).value, 10) })}
+								onchange={(e) => patchThrottle('perHour', (e.currentTarget as HTMLInputElement).value)}
 								class="w-16 rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-text"
 							/>
 							{t('integrations.push_throttle_per_hour')}

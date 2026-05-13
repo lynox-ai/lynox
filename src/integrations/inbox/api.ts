@@ -309,7 +309,12 @@ export function handleUpdateNotificationPrefs(
     if (typeof body.quietHours.end === 'string' && HHMM_RE.test(body.quietHours.end)) {
       deps.state.setSetting('push.quiet_hours_end', body.quietHours.end);
     }
-    if (typeof body.quietHours.tz === 'string' && body.quietHours.tz.length > 0 && body.quietHours.tz.length < 64) {
+    if (
+      typeof body.quietHours.tz === 'string'
+      && body.quietHours.tz.length > 0
+      && body.quietHours.tz.length < 64
+      && isValidIanaTz(body.quietHours.tz)
+    ) {
       deps.state.setSetting('push.quiet_hours_tz', body.quietHours.tz);
     }
   }
@@ -321,15 +326,27 @@ export function handleUpdateNotificationPrefs(
     const clamped = Math.min(Math.max(Math.floor(body.perHour), THROTTLE_MIN), THROTTLE_MAX_PER_HOUR);
     deps.state.setSetting('push.per_hour', String(clamped));
   }
-  if (body.accounts && typeof body.accounts === 'object') {
+  if (body.accounts && typeof body.accounts === 'object' && !Array.isArray(body.accounts)) {
     for (const [accountId, muted] of Object.entries(body.accounts)) {
       // Defensive: only allow alnum-ish account ids so a crafted key
       // can't collide with another setting namespace.
       if (!/^[A-Za-z0-9_-]{1,64}$/.test(accountId)) continue;
+      // Boolean guard — `"false"` (string) is truthy and would silently
+      // flip mute=true under naive coercion.
+      if (typeof muted !== 'boolean') continue;
       deps.state.setSetting(`push.account.${accountId}.muted`, muted ? 'true' : 'false');
     }
   }
   return handleGetNotificationPrefs(deps);
+}
+
+function isValidIanaTz(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function handleListItemAudit(deps: InboxApiDeps, id: string): ApiResponse {

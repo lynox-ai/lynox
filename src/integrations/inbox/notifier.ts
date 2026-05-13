@@ -66,12 +66,7 @@ export function isInQuietHours(now: Date, start: string, end: string, tz: string
   let h: number;
   let m: number;
   try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
+    const fmt = formatterFor(tz);
     const parts = fmt.formatToParts(now);
     h = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10);
     m = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
@@ -84,6 +79,26 @@ export function isInQuietHours(now: Date, start: string, end: string, tz: string
   const cur = h * 60 + m;
   if (startMin < endMin) return cur >= startMin && cur < endMin;
   return cur >= startMin || cur < endMin;
+}
+
+/**
+ * Cached formatter per IANA tz — formatter construction is non-trivial
+ * in V8 and the notifier fires on every classified mail. Keyed by tz
+ * string; the cache is unbounded but tz cardinality is 1 per user
+ * (single-tenant) so the Map effectively holds one entry.
+ */
+const _formatterCache = new Map<string, Intl.DateTimeFormat>();
+function formatterFor(tz: string): Intl.DateTimeFormat {
+  const cached = _formatterCache.get(tz);
+  if (cached) return cached;
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  _formatterCache.set(tz, fmt);
+  return fmt;
 }
 
 function parseHHMM(s: string): number | null {
