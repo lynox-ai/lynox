@@ -5,8 +5,8 @@ sidebar:
   order: 8
 ---
 
-:::caution[Private beta — request access]
-WhatsApp Inbox is in **private beta** in v1.2.0. The integration is gated behind a feature flag (`WHATSAPP_FEATURE_ENABLED`) and not enabled on customer instances by default. If you'd like to be in the pilot, contact us at [hello@lynox.ai](mailto:hello@lynox.ai). General availability follows after the pilot validates the Coexistence Mode flow on production traffic.
+:::caution[Available on request]
+WhatsApp Inbox is currently available on request — contact us at [hello@lynox.ai](mailto:hello@lynox.ai) if you'd like access. General availability follows once the Coexistence Mode flow is validated on production traffic.
 :::
 
 lynox can read and reply to your WhatsApp Business messages alongside the Mobile App. Voice notes are transcribed automatically; replies can be typed in the lynox Web UI or drafted by the assistant via the `whatsapp` tool.
