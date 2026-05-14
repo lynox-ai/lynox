@@ -303,12 +303,23 @@ describe('buildAnswerKeyboard', () => {
     expect(allButtons[2]!.text).toContain('Stop');
   });
 
-  it('uses compact JSON callback_data', () => {
+  it('encodes the option index (not the full string) into callback_data', () => {
     const kb = buildAnswerKeyboard(['Yes']);
     const button = kb.inline_keyboard[0]![0]!;
     const parsed = JSON.parse(button.callback_data);
     expect(parsed.t).toBe('a');
-    expect(parsed.v).toBe('Yes');
+    expect(parsed.i).toBe(0);
+    // No `v` — the runner resolves the index against run.pendingInput.options.
+    expect(parsed.v).toBeUndefined();
+  });
+
+  it('keeps callback_data under Telegram\'s 64-byte limit for long options (audit K-LE-06)', () => {
+    const longOption = 'A very long answer that previously blew past Telegram\'s 64-byte callback_data hard limit';
+    const kb = buildAnswerKeyboard([longOption]);
+    const button = kb.inline_keyboard[0]![0]!;
+    expect(button.text).toBe(longOption);
+    // Encoded payload should be tiny — `{"t":"a","i":0}` is 15 bytes.
+    expect(Buffer.byteLength(button.callback_data, 'utf8')).toBeLessThanOrEqual(64);
   });
 
   it('arranges buttons in rows', () => {

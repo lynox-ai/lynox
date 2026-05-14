@@ -154,6 +154,37 @@ function deleteTokenData(vault?: SecretVault | undefined): void {
   }
 }
 
+/**
+ * Classify a /token refresh failure as permanent (refresh token itself
+ * is dead → wipe the vault) vs transient (503/429/network → keep the
+ * token, surface a retry-friendly error).
+ *
+ * Google returns a JSON body like `{"error":"invalid_grant", ...}` for
+ * permanent failures and a 4xx/5xx status with no useful body or
+ * different `error` codes for transient ones. Anchoring on the `error`
+ * field is what every Google client library does; the HTTP status
+ * alone is ambiguous (invalid_grant returns 400 just like a transient
+ * billing-limit-exceeded would). See memory
+ * `feedback_oauth_refresh_token_loss.md`.
+ */
+function isPermanentRefreshFailure(httpStatus: number, body: string): boolean {
+  if (httpStatus >= 500 || httpStatus === 429) return false;
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    if (typeof parsed.error === 'string') {
+      return parsed.error === 'invalid_grant' || parsed.error === 'invalid_client';
+    }
+  } catch {
+    // Non-JSON body — Google may be returning an HTML error page from a
+    // proxy. Don't wipe the token on the basis of unparseable output.
+    return false;
+  }
+  // 4xx with a JSON body that doesn't say invalid_grant/invalid_client →
+  // unknown failure mode. Conservative default: keep the token, force
+  // an explicit re-auth only on the recognised permanent codes.
+  return false;
+}
+
 function base64url(input: string | Buffer): string {
   const buf = typeof input === 'string' ? Buffer.from(input) : input;
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -649,9 +680,18 @@ export class GoogleAuth {
 
     if (!response.ok) {
       const text = await response.text();
-      this.tokenData = null;
-      deleteTokenData(this.vault);
-      throw new Error(`Token refresh failed: ${response.status} ${text}. Re-connect your Google account in Settings → Integrations.`);
+      // Only wipe the vault when Google says the refresh token itself is
+      // dead (invalid_grant) or our client credentials are bad
+      // (invalid_client). Transient errors — 503, 429, network blips — used
+      // to delete the token too, forcing the user back through the full
+      // OAuth flow for what was a recoverable failure (memory:
+      // `feedback_oauth_refresh_token_loss.md`).
+      const isPermanent = isPermanentRefreshFailure(response.status, text);
+      if (isPermanent) {
+        this.tokenData = null;
+        deleteTokenData(this.vault);
+      }
+      throw new Error(`Token refresh failed: ${response.status} ${text}.${isPermanent ? ' Re-connect your Google account in Settings → Integrations.' : ' Retry in a moment — the refresh token is still on file.'}`);
     }
 
     const refreshed = validateTokenResponse(await response.json());

@@ -3,7 +3,7 @@
 
 import { Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
-import { executeRun, hasActiveRun, resolveInput, abortRun, getFollowUpTask } from './telegram-runner.js';
+import { executeRun, hasActiveRun, resolveInput, resolveInputByIndex, abortRun, getFollowUpTask } from './telegram-runner.js';
 import { getTaskInquiry, clearTaskInquiry, getTaskFollowUp } from './telegram-callbacks.js';
 import { sessionMap, startEvictionTimer, stopEvictionTimer } from './telegram-session.js';
 import type { TelegramEngine } from './telegram-session.js';
@@ -430,6 +430,19 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
 
     switch (parsed.t) {
       case 'a': // Answer
+        // Preferred encoding: integer index against run.pendingInput.options
+        // (callback_data stays ≤12 bytes regardless of option length).
+        if (typeof parsed.i === 'number') {
+          if (resolveInputByIndex(chatId, parsed.i)) {
+            ack('Selected');
+          } else {
+            ack('Question expired');
+          }
+          break;
+        }
+        // Legacy fallback: full value in `v`. Kept so a Telegram client
+        // that still has an old in-flight prompt button can answer; new
+        // prompts emit only the index form.
         if (parsed.v) {
           resolveInput(chatId, parsed.v);
           ack(`Selected: ${parsed.v}`);

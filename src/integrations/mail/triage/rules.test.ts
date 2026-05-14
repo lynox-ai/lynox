@@ -45,11 +45,23 @@ describe('prefilter — sender patterns', () => {
     expect(prefilter(env('hello@newsletter.acme.com')).category).toBe('noise');
   });
 
-  it('flags marketing/bulk subdomains as noise', () => {
-    expect(prefilter(env('updates@mail.uber.com')).category).toBe('noise');
-    expect(prefilter(env('hello@email.airbnb.com')).category).toBe('noise');
-    expect(prefilter(env('news@news.economist.com')).category).toBe('noise');
-    expect(prefilter(env('marketing@marketing.salesforce.com')).category).toBe('noise');
+  it('flags marketing/bulk subdomains with 3+ subdomain levels as noise', () => {
+    // 3+ subdomain levels is the new threshold — these are unambiguous
+    // marketing infrastructure.
+    expect(prefilter(env('news@mail.notifications.uber.com')).category).toBe('noise');
+    expect(prefilter(env('promo@email.marketing.airbnb.com')).category).toBe('noise');
+    expect(prefilter(env('news@news.list.economist.com')).category).toBe('noise');
+  });
+
+  it('keeps 2-level transactional bulk senders (audit K-LE-08: Stripe/DocuSign)', () => {
+    // The previous 2-level heuristic silently dropped Stripe invoices,
+    // DocuSign signing requests, Outlook protection rewrites. These have
+    // to reach the inbox; List-Unsubscribe handles the actual marketing
+    // case via Rule 1.
+    expect(prefilter(env('invoice@mail.stripe.com')).category).toBe('unknown');
+    expect(prefilter(env('signing@info.docusign.com')).category).toBe('unknown');
+    expect(prefilter(env('postmaster-quarantine@mail.protection.outlook.com')).category).toBe('unknown');
+    expect(prefilter(env('receipt@email.notion.com')).category).toBe('unknown');
   });
 
   it('preserves legitimate mail.* provider addresses', () => {
