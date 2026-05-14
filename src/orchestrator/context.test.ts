@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildStepContext, resolveTaskTemplate } from './context.js';
-import type { ManifestStep, AgentOutput } from './types.js';
+import type { ManifestStep, AgentOutput } from '../types/orchestration.js';
 
 function makeOutput(stepId: string, result: string, skipped = false): AgentOutput {
   const now = new Date().toISOString();

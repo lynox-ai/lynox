@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { channel } from 'node:diagnostics_channel';
 import { runManifest, retryManifest } from './runner.js';
-import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from './types.js';
+import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig } from '../types/index.js';
 
 const CONFIG: LynoxUserConfig = { api_key: 'test-key' };

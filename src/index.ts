@@ -41,7 +41,7 @@ export { PluginManager } from './core/plugins.js';
 export { runManifest, loadManifestFile, validateManifest } from './orchestrator/runner.js';
 export type {
   Manifest, ManifestStep, AgentDef, AgentOutput, RunState, RunHooks,
-} from './orchestrator/types.js';
+} from './types/orchestration.js';
 export { globToRegex, extractMatchString, matchesPreApproval, buildApprovalSet, isCriticalTool } from './core/pre-approve.js';
 
 export { planDAG, estimatePipelineCost } from './core/dag-planner.js';
@@ -411,7 +411,7 @@ Docs: https://docs.lynox.ai
     const { LocalGateAdapter: LocalAdapter } = await import('./orchestrator/gates.js');
     const { loadConfig: getConfig } = await import('./core/config.js');
     const cfg = getConfig();
-    let gateAdapter: import('./orchestrator/types.js').GateAdapter | undefined;
+    let gateAdapter: import('./types/orchestration.js').GateAdapter | undefined;
     if (stdin.isTTY) {
       const { confirm } = await import('./cli/interactive.js');
       gateAdapter = new LocalAdapter(async (q: string) => {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { getByPath, evaluateCondition, shouldRunStep, buildConditionContext } from './conditions.js';
-import type { ManifestCondition, AgentOutput } from './types.js';
+import type { ManifestCondition, AgentOutput } from '../types/orchestration.js';
 
 function makeOutput(stepId: string, result: string, opts: Partial<AgentOutput> = {}): AgentOutput {
   const now = new Date().toISOString();

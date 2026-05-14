@@ -11,8 +11,8 @@ import { shouldRunStep, buildConditionContext } from './conditions.js';
 import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, type SubAgentPromptHandles } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
-import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from './types.js';
-import { GateRejectedError, GateExpiredError } from './types.js';
+import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
+import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, DEFAULT_PROMPT_BUDGET } from './prompt-budget.js';
 

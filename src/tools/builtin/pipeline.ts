@@ -2,7 +2,7 @@ import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, Pi
 import { validateManifest } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest } from '../../orchestrator/runner.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
-import type { Manifest, AgentOutput, RunState, RunHooks } from '../../orchestrator/types.js';
+import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';

@@ -6,7 +6,7 @@ import {
   validateGraph,
   CycleError,
 } from './graph.js';
-import type { ManifestStep } from './types.js';
+import type { ManifestStep } from '../types/orchestration.js';
 
 function step(id: string, input_from?: string[]): ManifestStep {
   return { id, agent: `agent-${id}`, runtime: 'mock', input_from };
