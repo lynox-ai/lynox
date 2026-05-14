@@ -294,8 +294,41 @@ update_changelog() {
     pro_commits=$(git -C "$PRO_DIR"  log --no-merges --format='- %s' -20)
   fi
 
+  # Merge both lists, drop blanks, bin by conventional-commit prefix.
+  # Unprefixed commits land in "Uncategorised" so the editor can re-bin them
+  # manually — auto-binning of those would lie in user-facing release notes.
+  local all_commits
+  all_commits=$(printf '%s\n%s\n' "$core_commits" "$pro_commits" | sed '/^$/d')
+
+  # `grep -E ... || true` because grep exits 1 when no match — set -e would
+  # abort. Patterns require leading `- ` (commit format), prefix, optional
+  # `(scope)`, then `:`. Case-insensitive for human-typed prefixes.
+  local added_commits changed_commits fixed_commits other_commits
+  added_commits=$(  printf '%s\n' "$all_commits" | grep -iE '^- (feat|feature)(\([^)]*\))?:' || true)
+  fixed_commits=$(  printf '%s\n' "$all_commits" | grep -iE '^- (fix|bug)(\([^)]*\))?:'      || true)
+  changed_commits=$(printf '%s\n' "$all_commits" | grep -iE '^- (refactor|perf|chore|style|docs|test|ci|build|revert)(\([^)]*\))?:' || true)
+  other_commits=$(  printf '%s\n' "$all_commits" | grep -ivE '^- (feat|feature|fix|bug|refactor|perf|chore|style|docs|test|ci|build|revert)(\([^)]*\))?:' || true)
+
+  # Placeholder markers make empty sections obvious to the editor.
+  : "${added_commits:=<!-- no feat: commits since ${prev_tag:-<first release>} -->}"
+  : "${changed_commits:=<!-- no refactor/perf/chore/docs/test/ci/build/revert/style commits since ${prev_tag:-<first release>} -->}"
+  : "${fixed_commits:=<!-- no fix: commits since ${prev_tag:-<first release>} -->}"
+
   local today
   today=$(date +%Y-%m-%d)
+
+  local uncategorised_block=""
+  if [[ -n "$other_commits" ]]; then
+    uncategorised_block=$(cat <<UNCAT
+
+<!-- Uncategorised — commits without a conventional prefix. Move each line
+     into Added / Changed / Fixed above, then delete this block. -->
+
+$other_commits
+
+UNCAT
+)
+  fi
 
   local draft
   draft=$(cat <<DRAFT
@@ -303,25 +336,16 @@ update_changelog() {
 
 ### Added
 
-<!-- new features -->
+$added_commits
 
 ### Changed
 
-<!-- existing features touched -->
+$changed_commits
 
 ### Fixed
 
-<!-- bug fixes -->
-
-<!-- Reference — raw commits since ${prev_tag:-<first release>} (delete this block before saving):
-
-Core:
-$core_commits
-
-Pro:
-$pro_commits
--->
-
+$fixed_commits
+$uncategorised_block
 DRAFT
 )
 
