@@ -190,6 +190,36 @@ describe('InboxStateDb — items', () => {
       expect(inbox.deleteRule(ruleId, 'other-tenant')).toBe(false);
       expect(inbox.deleteRule(ruleId)).toBe(true);
     });
+
+    it('getDraftById returns null for the wrong tenant', () => {
+      const itemId = insertSampleItem();
+      const draftId = inbox.insertDraft({
+        itemId,
+        bodyMd: 'Hi there',
+        generatedAt: new Date(),
+        generatorVersion: 'haiku-2026-05',
+      });
+      expect(inbox.getDraftById(draftId, DEFAULT_TENANT_ID)).not.toBeNull();
+      expect(inbox.getDraftById(draftId, 'other-tenant')).toBeNull();
+    });
+
+    it('listAuditForItem returns empty for the wrong tenant', () => {
+      const itemId = insertSampleItem();
+      inbox.appendAudit({
+        itemId,
+        action: 'archived',
+        actor: 'user',
+        payloadJson: '{}',
+      });
+      expect(inbox.listAuditForItem(itemId).length).toBe(1);
+      expect(inbox.listAuditForItem(itemId, 'other-tenant').length).toBe(0);
+    });
+
+    it('markReminderNotified is a no-op for the wrong tenant', () => {
+      const itemId = insertSampleItem();
+      expect(inbox.markReminderNotified(itemId, new Date(), 'other-tenant')).toBe(false);
+      expect(inbox.markReminderNotified(itemId)).toBe(true);
+    });
   });
 
   it('hasAnyItemForAccount returns false for an empty account and true after one insert', () => {
