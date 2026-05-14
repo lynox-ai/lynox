@@ -164,11 +164,11 @@
 							<div class="h-4 w-1/2 animate-pulse rounded bg-bg-subtle"></div>
 						</div>
 					{:else if full}
-						<h2 class="truncate text-base sm:text-lg font-semibold text-text" title={full.item.subject || full.item.snippet || full.item.reasonDe}>
+						<h2 class="text-base sm:text-lg font-semibold text-text break-words" title={full.item.subject || full.item.snippet || full.item.reasonDe}>
 							{inboxHeadline(full.item)}
 						</h2>
 						<div class="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] text-text-subtle">
-							<span class="text-text-muted truncate max-w-full">
+							<span class="text-text-muted break-words min-w-0">
 								{full.item.fromName || full.item.fromAddress}
 								{#if full.item.fromName}
 									<span class="text-text-subtle">&lt;{full.item.fromAddress}&gt;</span>
@@ -187,8 +187,11 @@
 							disabled={refreshing}
 							title={refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_body')}
 							aria-label={t('inbox.draft_refresh_body')}
-							class="text-text-subtle hover:text-text text-[11px] font-mono p-2 min-h-[36px] disabled:opacity-50 disabled:cursor-not-allowed"
-						>{refreshing ? '⟳' : '↻'}</button>
+							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] inline-flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+						>
+							<span class="font-mono leading-none" aria-hidden="true">{refreshing ? '⟳' : '↻'}</span>
+							<span>{t('inbox.draft_refresh_body')}</span>
+						</button>
 						<button
 							type="button"
 							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"

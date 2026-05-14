@@ -467,11 +467,12 @@
 					<textarea
 						bind:this={textareaRef}
 						id="draft-body"
+						rows="12"
 						value={buffer}
 						oninput={onBufferInput}
 						onkeydown={onTextareaKeyDown}
 						placeholder={t('inbox.draft_body_placeholder')}
-						class="w-full h-full min-h-[280px] resize-none bg-bg border border-border rounded-[var(--radius-md)] p-3 text-sm leading-relaxed text-text font-sans focus:border-accent focus:outline-none"
+						class="w-full min-h-[280px] resize-y bg-bg border border-border rounded-[var(--radius-md)] p-3 text-sm leading-relaxed text-text font-sans focus:border-accent focus:outline-none"
 					></textarea>
 					<div class="flex items-center justify-between text-[11px] text-text-subtle mt-2 gap-3 flex-wrap">
 						<span>{t('inbox.draft_edits_count').replace('{count}', String(pane.draft.userEditsCount))}</span>
