@@ -81,7 +81,12 @@ function createMockResponse(options: {
 beforeEach(() => {
   vi.restoreAllMocks();
   testCtx = createToolContext(TEST_USER_CONFIG);
-  testCounters = { httpRequests: 0, writeBytes: 0 };
+  testCounters = {
+    httpRequests: 0,
+    writeBytes: 0,
+    approvedOutboundDomains: new Set<string>(),
+    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+  };
 });
 
 describe('httpRequestTool', () => {
@@ -373,7 +378,12 @@ describe('httpRequestTool', () => {
         await handler({ url: 'http://example.com' }, makeAgent());
       }
       // Swap in a fresh counters object — Session-equivalent of "new session".
-      testCounters = { httpRequests: 0, writeBytes: 0 };
+      testCounters = {
+        httpRequests: 0,
+        writeBytes: 0,
+        approvedOutboundDomains: new Set<string>(),
+        pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+      };
       const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
