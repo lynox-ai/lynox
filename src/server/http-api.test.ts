@@ -142,6 +142,19 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
 }
 
+/**
+ * Pull a single `name=value` pair out of a response's Set-Cookie header,
+ * suitable for echoing back as a Cookie request header. Strips the
+ * attributes (Path, HttpOnly, …) which a real browser would manage but
+ * which Node's fetch does not auto-jar.
+ */
+function extractFirstCookiePair(res: Response, name: string): string | null {
+  const raw = res.headers.get('set-cookie');
+  if (!raw) return null;
+  const match = raw.match(new RegExp(`(${name}=[^;]+)`));
+  return match?.[1] ?? null;
+}
+
 // === Setup/Teardown ===
 
 beforeAll(async () => {
@@ -1064,14 +1077,19 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('successful exchange renders meta-refresh (not inline script — engine API CSP blocks it)', async () => {
-      // Prime singleton state by invoking the auth-start endpoint
+      // Start the flow — the server now sets a signed cookie carrying the
+      // state (replaces the legacy instance-level _googleOAuthState slot).
       const startRes = await jsonFetch('/api/google/auth', {
         method: 'POST',
         body: JSON.stringify({ scopeMode: 'read' }),
       });
       expect(startRes.status).toBe(200);
+      const oauthCookie = extractFirstCookiePair(startRes, 'lynox_oauth_state');
+      expect(oauthCookie, 'auth endpoint must set lynox_oauth_state cookie').toBeTruthy();
 
-      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid-code&state=test-state`);
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid-code&state=test-state`, {
+        headers: { cookie: oauthCookie! },
+      });
       expect(cbRes.status).toBe(200);
       expect(cbRes.headers.get('content-type')).toContain('text/html');
 
@@ -1131,17 +1149,56 @@ describe('LynoxHTTPApi', () => {
       expect(body).toContain('&lt;script&gt;');
     });
 
-    it('exchange failure → 500 with sanitized error message', async () => {
-      // Prime state so the request passes the state check and hits the try/catch
+    it('callback without the state cookie → 400 (cookie now required for CSRF guard)', async () => {
+      // No /api/google/auth call → no cookie. The legacy instance-state
+      // approach would have failed via `state !== this._googleOAuthState`
+      // returning undefined; the cookie approach fails because the cookie
+      // is absent. Same outcome (400), different code path.
+      mockGoogleIsAuthenticated.mockReturnValue(false);
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid-code&state=test-state`);
+      expect(cbRes.status).toBe(400);
+      expect(await cbRes.text()).toContain('Invalid callback');
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('callback with tampered cookie → 400 (HMAC verify rejects)', async () => {
+      // The legacy approach was satisfied by knowing the state value alone.
+      // The signed cookie binds state to its issuance — flipping a byte
+      // of the cookie value invalidates the HMAC and the state is rejected
+      // even when the query state is correct.
+      mockGoogleIsAuthenticated.mockReturnValue(false);
       const startRes = await jsonFetch('/api/google/auth', {
         method: 'POST',
         body: JSON.stringify({}),
       });
       expect(startRes.status).toBe(200);
+      const real = extractFirstCookiePair(startRes, 'lynox_oauth_state');
+      expect(real).toBeTruthy();
+      // Flip the last hex digit of the HMAC suffix
+      const tampered = real!.replace(/.$/, (c) => (c === '0' ? '1' : '0'));
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`, {
+        headers: { cookie: tampered },
+      });
+      expect(cbRes.status).toBe(400);
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('exchange failure → 500 with sanitized error message', async () => {
+      // Prime the cookie so the request passes the state check and hits the try/catch.
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      expect(startRes.status).toBe(200);
+      const oauthCookie = extractFirstCookiePair(startRes, 'lynox_oauth_state');
+      expect(oauthCookie).toBeTruthy();
 
       mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error('token endpoint unreachable'));
 
-      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`);
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`, {
+        headers: { cookie: oauthCookie! },
+      });
       expect(cbRes.status).toBe(500);
 
       const body = await cbRes.text();
