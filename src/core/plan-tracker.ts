@@ -123,7 +123,9 @@ export function checkAndFinalize(
   const plan = toolContext.activePlan;
   if (!plan) return false;
 
-  const allDone = plan.steps.every(s => plan.stepResults.has(s.id));
+  // Entries pre-seeded by markStepStarted exist but have completedAt === '';
+  // only recordStepComplete sets a non-empty completedAt, so use that as the predicate.
+  const allDone = plan.steps.every(s => !!plan.stepResults.get(s.id)?.completedAt);
   if (!allDone) return false;
 
   finalizeTrackedPlan(toolContext, runHistory);
