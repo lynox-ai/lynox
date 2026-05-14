@@ -302,7 +302,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         },
         profile: {
           type: 'object',
-          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: basic|bearer|header|query}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}.',
+          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: basic|bearer|header|query|oauth2, basic_format: user_pass_split|pre_encoded_b64, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
         },
         id: {
           type: 'string',

@@ -1,10 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, mkdtempSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
 import { ApiStore } from './api-store.js';
 import type { ApiProfile } from './api-store.js';
 
@@ -272,6 +270,8 @@ describe('ApiStore', () => {
   });
 
   describe('formatProfile v2 fields', () => {
+    beforeEach(() => { store = new ApiStore(); });
+
     it('renders concurrency, output_volume, cost, provenance, vault_keys, basic_format', () => {
       const p: ApiProfile = {
         ...SAMPLE_PROFILE,

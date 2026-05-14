@@ -473,6 +473,23 @@ describe('api_setup tool', () => {
       expect(result).toContain('cost.model');
     });
 
+    it('accepts cost.rate_usd: 0 (free-tier API)', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            id: 'free-tier',
+            cost: { model: 'per_call', rate_usd: 0 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('Created API profile');
+      expect(store.get('free-tier')?.cost?.rate_usd).toBe(0);
+    });
+
     it('rejects negative cost.rate_usd', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler(

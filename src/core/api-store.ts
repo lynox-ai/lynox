@@ -157,8 +157,10 @@ export interface ApiProfile {
 function migrateV1Profile(profile: ApiProfile): ApiProfile {
   if (profile.provenance?.schema_version === 2) return profile;
 
+  // JSON-stringify the id so any control chars / ANSI in a hand-edited profile
+  // file can't inject fake log lines or terminal sequences via stderr.
   process.stderr.write(
-    `[lynox:api-store] profile "${profile.id}" is v1; v2 fields default to {concurrency.parallel_ok=true, output_volume=undefined}\n`,
+    `[lynox:api-store] profile ${JSON.stringify(profile.id)} is v1; v2 fields default to {concurrency.parallel_ok=true, output_volume=undefined}\n`,
   );
 
   const out: ApiProfile = { ...profile };
