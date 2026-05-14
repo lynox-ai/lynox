@@ -40,6 +40,13 @@ type RouteHandler = (
 
 interface DynamicRoute {
   method: string;
+  /**
+   * Auth scope this route belongs to. The dispatch loop reads scope off the
+   * matched route — replaces the old `requiresAdmin(method, pathname)`
+   * path-matching enumeration so every new admin route is declared once,
+   * at registration. See `addDynamic` / `parseDynamicRoute`.
+   */
+  scope: AuthScope;
   pattern: RegExp;
   paramNames: string[];
   handler: RouteHandler;
@@ -72,48 +79,18 @@ const REDACTED_CONFIG_KEYS = new Set([
   'search_api_key', 'google_client_id', 'google_client_secret',
 ]);
 
-// Two-tier auth: when LYNOX_HTTP_ADMIN_SECRET is set, these routes require admin scope.
-// When only LYNOX_HTTP_SECRET is set (single-token mode), it grants admin implicitly.
+// Two-tier auth: when LYNOX_HTTP_ADMIN_SECRET is set, admin-scoped routes
+// require the admin token; user-scoped routes accept either. When only
+// LYNOX_HTTP_SECRET is set (single-token mode), it grants admin implicitly.
+//
+// Each route declares its scope at registration via `addStatic` /
+// `addDynamic` (or as the first arg to `parseDynamicRoute`) — the dispatch
+// loop reads scope off the matched route. This replaces the old
+// `requiresAdmin(method, pathname)` path-prefix enumeration, which had the
+// fragility that adding a new admin route required updating TWO places (the
+// route registration AND the path matcher), and the second was easy to
+// forget — turning a destructive route into a user-scope footgun.
 type AuthScope = 'admin' | 'user';
-
-function requiresAdmin(method: string, pathname: string): boolean {
-  if (method === 'PUT' && pathname === '/api/config') return true;
-  if (method === 'GET' && pathname === '/api/vault/key') return true;
-  if (method === 'POST' && pathname === '/api/vault/rotate') return true;
-  // All file operations require admin scope (read, download, delete)
-  if (pathname.startsWith('/api/files')) return true;
-  if (method === 'GET' && pathname === '/api/secrets') return true;
-  if (method === 'PUT' && pathname.startsWith('/api/secrets/')) return true;
-  if (method === 'DELETE' && pathname.startsWith('/api/secrets/')) return true;
-  if (method === 'GET' && pathname === '/api/auth/token') return true;
-  // GDPR endpoints require admin scope
-  if (method === 'GET' && pathname === '/api/export') return true;
-  if (method === 'DELETE' && pathname === '/api/data') return true;
-  // Migration endpoints require admin scope (except preview which is read-only)
-  if (pathname.startsWith('/api/migration') && pathname !== '/api/migration/preview') return true;
-  // WhatsApp credential mutations are admin-scope; read-only status stays user-scope.
-  if ((method === 'POST' || method === 'DELETE') && pathname === '/api/whatsapp/credentials') return true;
-  // KG cleanup is destructive (deletes entities + their relations) — admin only.
-  if (method === 'POST' && pathname === '/api/kg/cleanup') return true;
-  // Backup restore calls process.exit() to force a clean boot — a user-scope
-  // bearer should never be able to kill the tenant engine on demand. Listing
-  // stays user-scope; only the restore is admin-only.
-  if (method === 'POST' && pathname.startsWith('/api/backups/') && pathname.endsWith('/restore')) return true;
-  // Mail account mutations stage IMAP/SMTP credentials the engine then uses
-  // for outbound mail. Under two-tier auth, a user-scope bearer must not be
-  // able to swap them out (silent re-routing of replies). Read stays
-  // user-scope; mutations + the connectivity-probe endpoint are admin-only.
-  //
-  // The trailing-slash variants are also gated here so a hypothetical
-  // future router normalisation can't silently lift the admin check off a
-  // `POST /api/mail/accounts/` request. The dynamic-route matcher today
-  // returns 404 for these paths, but we defend at the gate.
-  if (method === 'POST' && (pathname === '/api/mail/accounts' || pathname === '/api/mail/accounts/')) return true;
-  if (method === 'POST' && (pathname === '/api/mail/accounts/test' || pathname === '/api/mail/accounts/test/')) return true;
-  if (method === 'DELETE' && pathname.startsWith('/api/mail/accounts/')) return true;
-  if (method === 'POST' && pathname.startsWith('/api/mail/accounts/') && (pathname.endsWith('/default') || pathname.endsWith('/default/'))) return true;
-  return false;
-}
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
@@ -209,13 +186,13 @@ async function parseBodyWithRaw(req: IncomingMessage, maxBytes: number): Promise
   });
 }
 
-function parseDynamicRoute(method: string, path: string, handler: RouteHandler): DynamicRoute {
+function parseDynamicRoute(scope: AuthScope, method: string, path: string, handler: RouteHandler): DynamicRoute {
   const paramNames: string[] = [];
   const pattern = path.replace(/:([^/]+)/g, (_match, name: string) => {
     paramNames.push(name);
     return '([^/]+)';
   });
-  return { method, pattern: new RegExp(`^${pattern}$`), paramNames, handler };
+  return { method, scope, pattern: new RegExp(`^${pattern}$`), paramNames, handler };
 }
 
 // ── Server Class ─────────────────────────────────────────────────────────────
@@ -232,6 +209,13 @@ export class LynoxHTTPApi {
   private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void }>();
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
+  /**
+   * Parallel scope map for static routes. Kept separate from
+   * `staticRoutes` so the existing `Map<string, RouteHandler>` shape stays
+   * stable for all existing call sites — see `addStatic` which writes
+   * both. Lookup happens once per request in the dispatch path.
+   */
+  private readonly staticRouteScopes = new Map<string, AuthScope>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
@@ -247,6 +231,54 @@ export class LynoxHTTPApi {
 
   /** Whether the Web UI handler is loaded (determines default port and bind behavior). */
   hasWebUi(): boolean { return this.webUiHandler !== null; }
+
+  // ── Route registration helpers ─────────────────────────────────────────────
+  // Replaces direct `staticRoutes.set` / `dynamicRoutes.push` calls so every
+  // route declares its scope at the registration site. The dispatcher reads
+  // scope off the matched route; there's no separate `requiresAdmin(method,
+  // pathname)` enumeration to drift out of sync.
+
+  /** Register a fixed-path route. Scope MUST be set per route. */
+  private addStatic(scope: AuthScope, key: string, handler: RouteHandler): void {
+    this.staticRoutes.set(key, handler);
+    this.staticRouteScopes.set(key, scope);
+  }
+
+  /** Register a parameterised route (`/api/x/:id`). Scope MUST be set per route. */
+  private addDynamic(scope: AuthScope, method: string, path: string, handler: RouteHandler): void {
+    this.dynamicRoutes.push(parseDynamicRoute(scope, method, path, handler));
+  }
+
+  /**
+   * Look up the matched route's scope. Returns `null` if no route matches —
+   * the dispatcher uses this to decide whether to 404 or 403.
+   *
+   * Trailing-slash variants of admin paths return the canonical scope even
+   * though the dispatcher's own router 404s them today. Reason: if a
+   * future router normalisation makes `POST /api/mail/accounts/` route to
+   * the same handler as `POST /api/mail/accounts`, the admin gate must
+   * still fire. The previous path-prefix enumeration had this guarantee
+   * by accident (it tested `pathname === '…/'`); we keep it here by
+   * intent.
+   */
+  private _lookupRouteScope(method: string, pathname: string): AuthScope | null {
+    const dispatchMethods = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
+    const candidates: string[] = [pathname];
+    if (pathname.endsWith('/') && pathname.length > 1) {
+      candidates.push(pathname.slice(0, -1));
+    }
+    for (const candidate of candidates) {
+      const key = `${method} ${candidate}`;
+      const staticScope = this.staticRouteScopes.get(key)
+        ?? (method === 'HEAD' ? this.staticRouteScopes.get(`GET ${candidate}`) : undefined);
+      if (staticScope !== undefined) return staticScope;
+      for (const route of this.dynamicRoutes) {
+        if (!dispatchMethods.includes(route.method)) continue;
+        if (route.pattern.test(candidate)) return route.scope;
+      }
+    }
+    return null;
+  }
 
   /** Collect system + process metrics for the health endpoint. Cached 10s. */
   private async _collectHealthMetrics(): Promise<Record<string, unknown>> {
@@ -716,10 +748,16 @@ export class LynoxHTTPApi {
       } // end migration-token else
     }
 
-    // Admin scope check for destructive endpoints
-    if (requiresAdmin(method, pathname) && authScope !== 'admin') {
-      errorResponse(res, 403, 'Admin scope required');
-      return;
+    // Admin scope check — read scope off the matched route's registration.
+    // Falls through (no 403) for unmatched paths so the 404 path stays
+    // reachable as a non-leaking response (consistent with the previous
+    // behaviour where requiresAdmin returned false for unknown paths).
+    {
+      const routeScope = this._lookupRouteScope(method, pathname);
+      if (routeScope === 'admin' && authScope !== 'admin') {
+        errorResponse(res, 403, 'Admin scope required');
+        return;
+      }
     }
 
     // Content-Length check (guard against NaN/negative from malformed headers)
@@ -980,7 +1018,7 @@ export class LynoxHTTPApi {
     const engine = this.engine!;
 
     // ── Sessions ──
-    this.staticRoutes.set('POST /api/sessions', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/sessions', async (_req, res, _params, body) => {
       const opts = body && typeof body === 'object' ? body as Record<string, unknown> : {};
       const threadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
       const sessionId = threadId ?? randomUUID();
@@ -1001,7 +1039,7 @@ export class LynoxHTTPApi {
       });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/sessions/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/sessions/:id', async (_req, res, params) => {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
@@ -1010,7 +1048,7 @@ export class LynoxHTTPApi {
     }));
 
     // ── Runs (SSE) ──
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/run', async (req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/run', async (req, res, params, body) => {
       const sessionId = params['id']!;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
@@ -1303,7 +1341,7 @@ export class LynoxHTTPApi {
     }));
 
     // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/sessions/:id/pending-prompt', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/pending-prompt', async (_req, res, params) => {
       const ps = this.engine?.getPromptStore();
       if (!ps) { jsonResponse(res, 200, { pending: false }); return; }
       const row = ps.getPending(params['id']!);
@@ -1326,7 +1364,7 @@ export class LynoxHTTPApi {
       });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/reply', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/reply', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
       if (!ps) { errorResponse(res, 404, 'No pending prompt'); return; }
 
@@ -1361,7 +1399,7 @@ export class LynoxHTTPApi {
     // POST /sessions/:id/reply-tabs — one-shot reply for multi-question tabs prompts.
     // Body: { promptId: string, answers: string[] }. Each answer corresponds
     // to a question in order; '__dismissed__' is the canonical skip marker.
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/reply-tabs', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/reply-tabs', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
       if (!ps) { errorResponse(res, 404, 'No pending prompt'); return; }
 
@@ -1397,7 +1435,7 @@ export class LynoxHTTPApi {
     // POST /sessions/:id/tab-progress — persist partial answers (optional).
     // Called by the client as the user answers individual tabs so a mid-batch
     // reconnect restores progress. Does NOT settle the prompt.
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/tab-progress', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/tab-progress', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
       if (!ps) { errorResponse(res, 404, 'No pending prompt'); return; }
 
@@ -1418,7 +1456,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/secret-saved', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/secret-saved', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
       if (!ps) { errorResponse(res, 404, 'No pending secret prompt'); return; }
 
@@ -1440,7 +1478,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/abort', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
@@ -1448,7 +1486,7 @@ export class LynoxHTTPApi {
     }));
 
     // ── Changeset review ──
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/sessions/:id/changeset', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/changeset', async (_req, res, params) => {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       const csm = session.getChangesetManager();
@@ -1470,7 +1508,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { hasChanges: true, files });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       const csm = session.getChangesetManager();
@@ -1521,7 +1559,7 @@ export class LynoxHTTPApi {
     }));
 
     // ── Compact (context management) ──
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/sessions/:id/compact', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/compact', async (_req, res, params, body) => {
       const sessionId = params['id']!;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
@@ -1536,7 +1574,7 @@ export class LynoxHTTPApi {
     }));
 
     // ── Threads ──
-    this.staticRoutes.set('GET /api/threads', async (req, res) => {
+    this.addStatic('user', 'GET /api/threads', async (req, res) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const url = new URL(req.url ?? '', 'http://localhost');
@@ -1546,7 +1584,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { threads });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/threads/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
@@ -1554,7 +1592,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { thread });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/threads/:id', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
@@ -1591,7 +1629,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/threads/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
@@ -1602,7 +1640,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/threads/:id/messages', async (req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/messages', async (req, res, params) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
@@ -1622,7 +1660,7 @@ export class LynoxHTTPApi {
     const VALID_MEMORY_NS = new Set(['knowledge', 'methods', 'status', 'learnings']);
     type MemoryNs = 'knowledge' | 'methods' | 'status' | 'learnings';
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/memory/:ns', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/memory/:ns', async (_req, res, params) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
@@ -1631,7 +1669,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { content });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/memory/:ns', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
@@ -1641,7 +1679,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
@@ -1652,7 +1690,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/memory/:ns', async (req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/memory/:ns', async (req, res, params) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
@@ -1663,7 +1701,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { deleted });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
@@ -1677,7 +1715,7 @@ export class LynoxHTTPApi {
 
     // ── Secrets ──
     // Full name list — admin-scoped (enforced by requiresAdmin)
-    this.staticRoutes.set('GET /api/secrets', async (_req, res) => {
+    this.addStatic('admin', 'GET /api/secrets', async (_req, res) => {
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const names = store.listNames();
@@ -1685,7 +1723,7 @@ export class LynoxHTTPApi {
     });
 
     // Category-level booleans — available to all authenticated users
-    this.staticRoutes.set('GET /api/secrets/status', async (_req, res) => {
+    this.addStatic('user', 'GET /api/secrets/status', async (_req, res) => {
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const names = new Set(store.listNames());
@@ -1725,7 +1763,7 @@ export class LynoxHTTPApi {
       });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('PUT', '/api/secrets/:name', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('admin', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const b = body as Record<string, unknown> | null;
@@ -1746,7 +1784,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/secrets/:name', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('admin', 'DELETE', '/api/secrets/:name', async (_req, res, params) => {
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const deleted = store.deleteSecret(params['name']!);
@@ -1754,7 +1792,7 @@ export class LynoxHTTPApi {
     }));
 
     // SearXNG health check — validates a SearXNG URL is reachable
-    this.staticRoutes.set('POST /api/searxng/check', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/searxng/check', async (_req, res, _params, body) => {
       const b = body as Record<string, unknown> | null;
       const url = b && typeof b['url'] === 'string' ? b['url'].replace(/\/+$/, '') : '';
       if (!url) { errorResponse(res, 400, 'Missing url'); return; }
@@ -1783,7 +1821,7 @@ export class LynoxHTTPApi {
     });
 
     // ── Config ──
-    this.staticRoutes.set('GET /api/config', async (_req, res) => {
+    this.addStatic('user', 'GET /api/config', async (_req, res) => {
       const { readUserConfig } = await import('../core/config.js');
       const config = readUserConfig();
       const redacted: Record<string, unknown> = { ...config };
@@ -1809,7 +1847,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, redacted);
     });
 
-    this.staticRoutes.set('PUT /api/config', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'PUT /api/config', async (_req, res, _params, body) => {
       const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       const parsed = LynoxUserConfigSchema.safeParse(body);
@@ -1856,7 +1894,7 @@ export class LynoxHTTPApi {
     });
 
     // ── History ──
-    this.staticRoutes.set('GET /api/history/runs', async (req, res) => {
+    this.addStatic('user', 'GET /api/history/runs', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -1883,7 +1921,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/history/runs/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/history/runs/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const run = history.getRun(params['id']!);
@@ -1891,21 +1929,21 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, run);
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/history/runs/:id/tool-calls', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/history/runs/:id/tool-calls', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const toolCalls = history.getRunToolCalls(params['id']!);
       jsonResponse(res, 200, { toolCalls });
     }));
 
-    this.staticRoutes.set('GET /api/history/stats', async (_req, res) => {
+    this.addStatic('user', 'GET /api/history/stats', async (_req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const stats = history.getStats();
       jsonResponse(res, 200, stats);
     });
 
-    this.staticRoutes.set('GET /api/history/cost/daily', async (req, res) => {
+    this.addStatic('user', 'GET /api/history/cost/daily', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -1920,7 +1958,7 @@ export class LynoxHTTPApi {
     // local-only view; the control-plane included-credit integration
     // is Phase 3. 30-second instance-scoped TTL cache so repeated tab
     // opens don't re-hammer SQLite for the same window.
-    this.staticRoutes.set('GET /api/usage/summary', async (req, res) => {
+    this.addStatic('user', 'GET /api/usage/summary', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const { readUserConfig } = await import('../core/config.js');
@@ -2032,7 +2070,7 @@ export class LynoxHTTPApi {
     });
 
     // ── Pipelines ──
-    this.staticRoutes.set('GET /api/pipelines', async (req, res) => {
+    this.addStatic('user', 'GET /api/pipelines', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -2041,7 +2079,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { runs });
     });
 
-    this.staticRoutes.set('GET /api/pipelines/stats/steps', async (req, res) => {
+    this.addStatic('user', 'GET /api/pipelines/stats/steps', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -2050,7 +2088,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { stats });
     });
 
-    this.staticRoutes.set('GET /api/pipelines/stats/cost', async (req, res) => {
+    this.addStatic('user', 'GET /api/pipelines/stats/cost', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -2059,7 +2097,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { stats });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/pipelines/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/pipelines/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const run = history.getPipelineRun(params['id']!);
@@ -2067,7 +2105,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, run);
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/pipelines/:id/steps', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/pipelines/:id/steps', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const steps = history.getPipelineStepResults(params['id']!);
@@ -2075,7 +2113,7 @@ export class LynoxHTTPApi {
     }));
 
     // ── Tasks ──
-    this.staticRoutes.set('GET /api/tasks', async (req, res) => {
+    this.addStatic('user', 'GET /api/tasks', async (req, res) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -2084,7 +2122,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { tasks });
     });
 
-    this.staticRoutes.set('POST /api/tasks', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/tasks', async (_req, res, _params, body) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid task'); return; }
@@ -2110,7 +2148,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/tasks/:id', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/tasks/:id', async (_req, res, params, body) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
@@ -2119,7 +2157,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, task);
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/tasks/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/tasks/:id', async (_req, res, params) => {
       const runHistory = engine.getRunHistory();
       if (!requireService(res, runHistory, 'History')) return;
       const deleted = runHistory.deleteTask(params['id']!);
@@ -2127,7 +2165,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { deleted: true });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/tasks/:id/complete', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/complete', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       const task = taskManager.complete(params['id']!);
@@ -2136,13 +2174,13 @@ export class LynoxHTTPApi {
     }));
 
     // ── Artifacts ──
-    this.staticRoutes.set('GET /api/artifacts', async (_req, res) => {
+    this.addStatic('user', 'GET /api/artifacts', async (_req, res) => {
       const store = engine.getArtifactStore();
       if (!requireService(res, store, 'Artifact store')) return;
       jsonResponse(res, 200, { artifacts: store.list() });
     });
 
-    this.staticRoutes.set('POST /api/artifacts', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/artifacts', async (_req, res, _params, body) => {
       const store = engine.getArtifactStore();
       if (!requireService(res, store, 'Artifact store')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid artifact'); return; }
@@ -2169,7 +2207,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 201, artifact);
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/artifacts/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/artifacts/:id', async (_req, res, params) => {
       const store = engine.getArtifactStore();
       if (!requireService(res, store, 'Artifact store')) return;
       const artifact = store.get(params['id']!);
@@ -2177,7 +2215,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, artifact);
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/artifacts/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/artifacts/:id', async (_req, res, params) => {
       const store = engine.getArtifactStore();
       if (!requireService(res, store, 'Artifact store')) return;
       const deleted = store.delete(params['id']!);
@@ -2186,7 +2224,7 @@ export class LynoxHTTPApi {
     }));
 
     // ── Transcription (provider info for UI hint) ──
-    this.staticRoutes.set('GET /api/transcribe/info', async (_req, res) => {
+    this.addStatic('user', 'GET /api/transcribe/info', async (_req, res) => {
       const { getActiveTranscribeProvider, hasTranscribeProvider } = await import('../core/transcribe.js');
       const provider = getActiveTranscribeProvider();
       jsonResponse(res, 200, {
@@ -2200,7 +2238,7 @@ export class LynoxHTTPApi {
     // Settings → Compliance voice pickers. Prefer this over the legacy
     // /api/transcribe/info for new callers — the old path stays for
     // back-compat with existing clients.
-    this.staticRoutes.set('GET /api/voice/info', async (_req, res) => {
+    this.addStatic('user', 'GET /api/voice/info', async (_req, res) => {
       const [transcribeMod, speakMod] = await Promise.all([
         import('../core/transcribe.js'),
         import('../core/speak.js'),
@@ -2266,7 +2304,7 @@ export class LynoxHTTPApi {
     // and plays via <audio>. See pro/docs/internal/prd/voice-tts.md for the
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
-    this.staticRoutes.set('POST /api/speak', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
       const [{ hasSpeakProvider, speakStream }, { recordSessionCost }] = await Promise.all([
         import('../core/speak.js'),
         import('../core/session-budget.js'),
@@ -2363,7 +2401,7 @@ export class LynoxHTTPApi {
     });
 
     // ── Transcription (streaming via SSE) ──
-    this.staticRoutes.set('POST /api/transcribe', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/transcribe', async (_req, res, _params, body) => {
       const {
         HAS_WHISPER,
         transcribeWithStream,
@@ -2455,7 +2493,7 @@ export class LynoxHTTPApi {
     // Respond with hub.challenge as plain text if verify_token matches what the
     // customer configured in their Meta App webhook setup.
     // Returns 404 when the `whatsapp-inbox` feature flag is off (waCtx is null).
-    this.staticRoutes.set('GET /api/webhooks/whatsapp', async (req, res) => {
+    this.addStatic('user', 'GET /api/webhooks/whatsapp', async (req, res) => {
       const waCtx = this.engine?.getWhatsAppContext();
       if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
       if (!waCtx.isConfigured()) {
@@ -2476,7 +2514,7 @@ export class LynoxHTTPApi {
     });
 
     // Meta webhook event POST — HMAC-verified raw body, dispatched to context.
-    this.staticRoutes.set('POST /api/webhooks/whatsapp', async (req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/webhooks/whatsapp', async (req, res, _params, body) => {
       const waCtx = this.engine?.getWhatsAppContext();
       if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
       if (!waCtx.isConfigured()) {
@@ -2510,7 +2548,7 @@ export class LynoxHTTPApi {
     // `featureEnabled` = the `whatsapp-inbox` feature flag is on in this instance.
     // `available` = the backend context initialized (flag on AND vault present).
     // When featureEnabled is false, the UI hides all WhatsApp surfaces entirely.
-    this.staticRoutes.set('GET /api/whatsapp/status', async (_req, res) => {
+    this.addStatic('user', 'GET /api/whatsapp/status', async (_req, res) => {
       const { isFeatureEnabled } = await import('../core/features.js');
       const featureEnabled = isFeatureEnabled('whatsapp-inbox');
       const waCtx = this.engine?.getWhatsAppContext();
@@ -2523,7 +2561,7 @@ export class LynoxHTTPApi {
     });
 
     // Save BYOK credentials (admin-scope in requiresAdmin() — see below).
-    this.staticRoutes.set('POST /api/whatsapp/credentials', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/whatsapp/credentials', async (_req, res, _params, body) => {
       const waCtx = this.engine?.getWhatsAppContext();
       if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
       const b = body as Record<string, unknown> | null;
@@ -2557,7 +2595,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { saved: true, verified, probeError });
     });
 
-    this.staticRoutes.set('DELETE /api/whatsapp/credentials', async (_req, res) => {
+    this.addStatic('admin', 'DELETE /api/whatsapp/credentials', async (_req, res) => {
       const waCtx = this.engine?.getWhatsAppContext();
       if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
       waCtx.clearCredentials();
@@ -2565,7 +2603,7 @@ export class LynoxHTTPApi {
     });
 
     // Inbox API — for the Web UI inbox view.
-    this.staticRoutes.set('GET /api/whatsapp/threads', async (req, res) => {
+    this.addStatic('user', 'GET /api/whatsapp/threads', async (req, res) => {
       const waCtx = this.engine?.getWhatsAppContext();
       if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
       const url = new URL(req.url ?? '', 'http://localhost');
@@ -2577,6 +2615,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push({
       method: 'GET',
+      scope: 'user',
       pattern: /^\/api\/whatsapp\/threads\/([^/]+)$/,
       paramNames: ['threadId'],
       handler: async (_req, res, params) => {
@@ -2592,6 +2631,7 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push({
       method: 'POST',
+      scope: 'user',
       pattern: /^\/api\/whatsapp\/threads\/([^/]+)\/read$/,
       paramNames: ['threadId'],
       handler: async (_req, res, params) => {
@@ -2609,7 +2649,7 @@ export class LynoxHTTPApi {
     // tool handler enforces it for LLM-initiated sends.
     // Optional `replyTo` carries the wa_id of the message being quoted — Meta
     // renders it as a tappable preview above the reply for the recipient.
-    this.staticRoutes.set('POST /api/whatsapp/send', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/whatsapp/send', async (_req, res, _params, body) => {
       const waCtx = this.engine?.getWhatsAppContext();
       if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
       if (!waCtx.isConfigured()) { errorResponse(res, 503, 'WhatsApp not configured'); return; }
@@ -2650,6 +2690,7 @@ export class LynoxHTTPApi {
     // guessed-resistant (Meta's wa_id is a long opaque string).
     this.dynamicRoutes.push({
       method: 'GET',
+      scope: 'user',
       pattern: /^\/api\/whatsapp\/media\/([^/]+)$/,
       paramNames: ['messageId'],
       handler: async (_req, res, params) => {
@@ -2691,7 +2732,7 @@ export class LynoxHTTPApi {
 
     const TG_SETUP_TIMEOUT_MS = 120_000; // 2 min
 
-    this.staticRoutes.set('POST /api/telegram/setup', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/telegram/setup', async (_req, res, _params, body) => {
       const b = body as Record<string, unknown> | null;
       const token = b && typeof b['token'] === 'string' ? b['token'].trim() : '';
       if (!token) { errorResponse(res, 400, 'token required'); return; }
@@ -2731,7 +2772,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { botName, botUsername });
     });
 
-    this.staticRoutes.set('GET /api/telegram/setup', async (_req, res) => {
+    this.addStatic('user', 'GET /api/telegram/setup', async (_req, res) => {
       if (!tgSetup) { jsonResponse(res, 200, { status: 'idle' }); return; }
 
       // Timeout check
@@ -2793,14 +2834,14 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { status: 'waiting' });
     });
 
-    this.staticRoutes.set('DELETE /api/telegram/setup', async (_req, res) => {
+    this.addStatic('user', 'DELETE /api/telegram/setup', async (_req, res) => {
       tgSetup = null;
       jsonResponse(res, 200, { ok: true });
     });
 
     // ── Push Notifications ──
 
-    this.staticRoutes.set('GET /api/push/vapid-key', async (_req, res) => {
+    this.addStatic('user', 'GET /api/push/vapid-key', async (_req, res) => {
       if (!this.pushChannel) {
         errorResponse(res, 503, 'Push notifications not available');
         return;
@@ -2808,7 +2849,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { publicKey: this.pushChannel.getPublicKey() });
     });
 
-    this.staticRoutes.set('POST /api/push/subscribe', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/push/subscribe', async (_req, res, _params, body) => {
       if (!this.pushChannel) {
         errorResponse(res, 503, 'Push notifications not available');
         return;
@@ -2856,7 +2897,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 201, { ok: true });
     });
 
-    this.staticRoutes.set('POST /api/push/unsubscribe', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/push/unsubscribe', async (_req, res, _params, body) => {
       if (!this.pushChannel) {
         errorResponse(res, 503, 'Push notifications not available');
         return;
@@ -2871,7 +2912,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true });
     });
 
-    this.staticRoutes.set('POST /api/push/test', async (_req, res) => {
+    this.addStatic('user', 'POST /api/push/test', async (_req, res) => {
       if (!this.pushChannel) {
         errorResponse(res, 503, 'Push notifications not available');
         return;
@@ -2894,7 +2935,7 @@ export class LynoxHTTPApi {
     });
 
     // ── Google Auth ──
-    this.staticRoutes.set('GET /api/google/status', async (_req, res) => {
+    this.addStatic('user', 'GET /api/google/status', async (_req, res) => {
       const google = engine.getGoogleAuth();
       if (!google) { jsonResponse(res, 200, { available: false }); return; }
       jsonResponse(res, 200, {
@@ -2904,7 +2945,7 @@ export class LynoxHTTPApi {
       });
     });
 
-    this.staticRoutes.set('POST /api/google/auth', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/google/auth', async (_req, res, _params, body) => {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
 
@@ -2951,7 +2992,7 @@ export class LynoxHTTPApi {
     });
 
     // Google OAuth callback — handles redirect from Google after user consent
-    this.staticRoutes.set('GET /api/google/callback', async (req, res) => {
+    this.addStatic('user', 'GET /api/google/callback', async (req, res) => {
       const google = engine.getGoogleAuth();
       if (!google) {
         res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -3009,7 +3050,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('POST /api/google/revoke', async (_req, res) => {
+    this.addStatic('user', 'POST /api/google/revoke', async (_req, res) => {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
       await google.revoke();
@@ -3017,13 +3058,13 @@ export class LynoxHTTPApi {
     });
 
     // Reload Google integration after credentials change
-    this.staticRoutes.set('POST /api/google/reload', async (_req, res) => {
+    this.addStatic('user', 'POST /api/google/reload', async (_req, res) => {
       const ok = await engine.reloadGoogle();
       jsonResponse(res, 200, { ok });
     });
 
     // Get Google OAuth start URL (managed instances — redirects via control plane)
-    this.staticRoutes.set('GET /api/google/oauth-url', async (_req, res) => {
+    this.addStatic('user', 'GET /api/google/oauth-url', async (_req, res) => {
       const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
       const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
 
@@ -3037,7 +3078,7 @@ export class LynoxHTTPApi {
     });
 
     // Claim Google tokens from managed control plane OAuth broker
-    this.staticRoutes.set('POST /api/google/claim-managed', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/google/claim-managed', async (_req, res, _params, body) => {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
 
@@ -3090,7 +3131,7 @@ export class LynoxHTTPApi {
 
     // ── Knowledge Graph ──────────────────────────────────────────
 
-    this.staticRoutes.set('GET /api/kg/stats', async (_req, res) => {
+    this.addStatic('user', 'GET /api/kg/stats', async (_req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!kg) { jsonResponse(res, 200, { entityCount: 0, relationCount: 0, memoryCount: 0, communityCount: 0 }); return; }
       const stats = await kg.stats();
@@ -3101,7 +3142,7 @@ export class LynoxHTTPApi {
     // Pre-v2 extractor wrote rows like "in" (person), "tools" (location),
     // "39/mo" (project). v2 prevents new ones; this endpoint cleans the past.
     // ?dryRun=true previews without deleting.
-    this.staticRoutes.set('POST /api/kg/cleanup', async (req, res) => {
+    this.addStatic('admin', 'POST /api/kg/cleanup', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!requireService(res, kg, 'Knowledge graph')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -3113,7 +3154,7 @@ export class LynoxHTTPApi {
 
     // ── Mail (provider-agnostic IMAP/SMTP + app-password) ──
 
-    this.staticRoutes.set('GET /api/mail/presets', async (_req, res) => {
+    this.addStatic('user', 'GET /api/mail/presets', async (_req, res) => {
       const { listPresets } = await import('../integrations/mail/providers/presets.js');
       const { ALL_ACCOUNT_TYPES, defaultPersonaFor, isReceiveOnlyType } = await import('../integrations/mail/provider.js');
       const accountTypes = ALL_ACCOUNT_TYPES.map(type => ({
@@ -3126,7 +3167,7 @@ export class LynoxHTTPApi {
 
     // Autodiscover for custom preset: given an email address, try to find
     // IMAP/SMTP servers via autoconfig.thunderbird.net. Returns a draft config.
-    this.staticRoutes.set('POST /api/mail/autodiscover', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/mail/autodiscover', async (_req, res, _params, body) => {
       const b = body as Record<string, unknown> | null;
       const address = typeof b?.['address'] === 'string' ? b['address'] : '';
       if (!address) { errorResponse(res, 400, 'address is required'); return; }
@@ -3144,13 +3185,13 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('GET /api/mail/accounts', async (_req, res) => {
+    this.addStatic('user', 'GET /api/mail/accounts', async (_req, res) => {
       const ctx = engine.getMailContext();
       if (!ctx) { jsonResponse(res, 200, { accounts: [] }); return; }
       jsonResponse(res, 200, { accounts: ctx.listAccounts() });
     });
 
-    this.staticRoutes.set('POST /api/mail/accounts', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/mail/accounts', async (_req, res, _params, body) => {
       const ctx = engine.getMailContext();
       if (!requireService(res, ctx, 'Mail integration')) return;
 
@@ -3257,7 +3298,7 @@ export class LynoxHTTPApi {
       return null;
     };
 
-    this.staticRoutes.set('POST /api/mail/accounts/test', async (req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/mail/accounts/test', async (req, res, _params, body) => {
       const rateErr = mailTestRateCheck(req);
       if (rateErr) { errorResponse(res, 429, rateErr); return; }
 
@@ -3322,7 +3363,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/mail/accounts/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('admin', 'DELETE', '/api/mail/accounts/:id', async (_req, res, params) => {
       const ctx = engine.getMailContext();
       if (!requireService(res, ctx, 'Mail integration')) return;
       const removed = await ctx!.removeAccount(params['id']!);
@@ -3333,7 +3374,7 @@ export class LynoxHTTPApi {
     // Set the default mailbox. Persists `is_default=1` on the target row and
     // updates the in-memory registry so subsequent tool calls fall back to
     // this account when none is explicitly named.
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/mail/accounts/:id/default', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('admin', 'POST', '/api/mail/accounts/:id/default', async (_req, res, params) => {
       const ctx = engine.getMailContext();
       if (!requireService(res, ctx, 'Mail integration')) return;
       try {
@@ -3412,7 +3453,7 @@ export class LynoxHTTPApi {
       }
     };
 
-    this.staticRoutes.set('GET /api/inbox/items', async (req, res) => {
+    this.addStatic('user', 'GET /api/inbox/items', async (req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleListItems } = await import('../integrations/inbox/api.js');
@@ -3433,7 +3474,7 @@ export class LynoxHTTPApi {
       sendInbox(res, handleListItems(deps!, query));
     });
 
-    this.staticRoutes.set('GET /api/inbox/counts', async (req, res) => {
+    this.addStatic('user', 'GET /api/inbox/counts', async (req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetCounts } = await import('../integrations/inbox/api.js');
@@ -3442,14 +3483,14 @@ export class LynoxHTTPApi {
       sendInbox(res, handleGetCounts(deps!, tenantId !== null ? { tenantId } : {}));
     });
 
-    this.staticRoutes.set('GET /api/inbox/notification-prefs', async (_req, res) => {
+    this.addStatic('user', 'GET /api/inbox/notification-prefs', async (_req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetNotificationPrefs } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetNotificationPrefs(deps!));
     });
 
-    this.staticRoutes.set('PATCH /api/inbox/notification-prefs', async (_req, res, _params, body) => {
+    this.addStatic('user', 'PATCH /api/inbox/notification-prefs', async (_req, res, _params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleUpdateNotificationPrefs } = await import('../integrations/inbox/api.js');
@@ -3462,14 +3503,14 @@ export class LynoxHTTPApi {
       sendInbox(res, handleUpdateNotificationPrefs(deps!, safeBody));
     });
 
-    this.staticRoutes.set('GET /api/inbox/cold-start', async (_req, res) => {
+    this.addStatic('user', 'GET /api/inbox/cold-start', async (_req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetColdStart } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetColdStart(deps!));
     });
 
-    this.staticRoutes.set('POST /api/inbox/cold-start/run', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/inbox/cold-start/run', async (_req, res, _params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleRunColdStart } = await import('../integrations/inbox/api.js');
@@ -3481,7 +3522,7 @@ export class LynoxHTTPApi {
       sendInbox(res, await handleRunColdStart(deps!, runBody));
     });
 
-    this.staticRoutes.set('POST /api/inbox/compose-send', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/inbox/compose-send', async (_req, res, _params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleComposeSend } = await import('../integrations/inbox/api.js');
@@ -3497,7 +3538,7 @@ export class LynoxHTTPApi {
       sendInbox(res, await handleComposeSend(deps!, composeBody));
     });
 
-    this.staticRoutes.set('POST /api/inbox/items/bulk-action', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/inbox/items/bulk-action', async (_req, res, _params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleBulkAction } = await import('../integrations/inbox/api.js');
@@ -3509,21 +3550,21 @@ export class LynoxHTTPApi {
       sendInbox(res, handleBulkAction(deps!, bulkBody));
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/undo/:bulkId', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/undo/:bulkId', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleUndoBulk } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleUndoBulk(deps!, params['bulkId']!));
     }));
 
-    this.staticRoutes.set('GET /api/inbox/undo/recent', async (_req, res) => {
+    this.addStatic('user', 'GET /api/inbox/undo/recent', async (_req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleListRecentBulks } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleListRecentBulks(deps!));
     });
 
-    this.staticRoutes.set('POST /api/inbox/backfill-metadata', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/inbox/backfill-metadata', async (_req, res, _params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleRunBackfillMetadata } = await import('../integrations/inbox/api.js');
@@ -3534,21 +3575,21 @@ export class LynoxHTTPApi {
       sendInbox(res, await handleRunBackfillMetadata(deps!, runBody));
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetItem } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetItem(deps!, params['id']!));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/full', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/full', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetItemFull } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetItemFull(deps!, params['id']!));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/thread', async (req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/thread', async (req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetItemThread } = await import('../integrations/inbox/api.js');
@@ -3559,21 +3600,21 @@ export class LynoxHTTPApi {
       sendInbox(res, handleGetItemThread(deps!, params['id']!, opts));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/audit', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/audit', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleListItemAudit } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleListItemAudit(deps!, params['id']!));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/context', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/context', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetItemContext } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetItemContext(deps!, params['id']!));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/inbox/items/:id/action', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/inbox/items/:id/action', async (_req, res, params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const b = (body ?? {}) as Record<string, unknown>;
@@ -3587,7 +3628,7 @@ export class LynoxHTTPApi {
       sendInbox(res, handleSetAction(deps!, params['id']!, setActionBody));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/inbox/items/:id/snooze', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/inbox/items/:id/snooze', async (_req, res, params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const b = (body ?? {}) as Record<string, unknown>;
@@ -3610,7 +3651,7 @@ export class LynoxHTTPApi {
       sendInbox(res, handleSetSnooze(deps!, params['id']!, snoozeBody));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/contacts/:email', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/contacts/:email', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleResolveContact } = await import('../integrations/inbox/api.js');
@@ -3628,14 +3669,14 @@ export class LynoxHTTPApi {
       sendInbox(res, handleResolveContact(deps!, email));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/items/:id/draft', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/draft', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetItemDraft } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetItemDraft(deps!, params['id']!));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/draft', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/items/:id/draft', async (_req, res, params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleCreateDraft } = await import('../integrations/inbox/api.js');
@@ -3653,14 +3694,14 @@ export class LynoxHTTPApi {
       sendInbox(res, handleCreateDraft(deps!, params['id']!, createBody));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/inbox/drafts/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/drafts/:id', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetDraft } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetDraft(deps!, params['id']!));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('PATCH', '/api/inbox/drafts/:id', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/inbox/drafts/:id', async (_req, res, params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleUpdateDraft } = await import('../integrations/inbox/api.js');
@@ -3671,14 +3712,14 @@ export class LynoxHTTPApi {
       sendInbox(res, handleUpdateDraft(deps!, params['id']!, updateBody));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/body/refresh', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/items/:id/body/refresh', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleRefreshItemBody } = await import('../integrations/inbox/api.js');
       sendInbox(res, await handleRefreshItemBody(deps!, params['id']!));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/items/:id/draft/generate', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/items/:id/draft/generate', async (_req, res, params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGenerateDraft } = await import('../integrations/inbox/api.js');
@@ -3693,7 +3734,7 @@ export class LynoxHTTPApi {
       sendInbox(res, await handleGenerateDraft(deps!, params['id']!, generateBody));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/inbox/drafts/:id/send', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/drafts/:id/send', async (_req, res, params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleSendInboxReply } = await import('../integrations/inbox/api.js');
@@ -3717,7 +3758,7 @@ export class LynoxHTTPApi {
       sendInbox(res, await handleSendInboxReply(deps!, params['id']!, sendBody));
     }));
 
-    this.staticRoutes.set('GET /api/inbox/rules', async (req, res) => {
+    this.addStatic('user', 'GET /api/inbox/rules', async (req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleListRules } = await import('../integrations/inbox/api.js');
@@ -3729,7 +3770,7 @@ export class LynoxHTTPApi {
       sendInbox(res, handleListRules(deps!, query));
     });
 
-    this.staticRoutes.set('POST /api/inbox/rules', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/inbox/rules', async (_req, res, _params, body) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleCreateRule } = await import('../integrations/inbox/api.js');
@@ -3749,14 +3790,14 @@ export class LynoxHTTPApi {
       sendInbox(res, handleCreateRule(deps!, finalRuleBody));
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('DELETE', '/api/inbox/rules/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/inbox/rules/:id', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleDeleteRule } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleDeleteRule(deps!, params['id']!));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities', async (req, res) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/entities', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!kg) { jsonResponse(res, 200, { entities: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
@@ -3780,7 +3821,7 @@ export class LynoxHTTPApi {
       }
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/kg/entities/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/entities/:id', async (_req, res, params) => {
       const kg = engine.getKnowledgeLayer();
       if (!requireService(res, kg, 'Knowledge graph')) return;
       try {
@@ -3795,7 +3836,7 @@ export class LynoxHTTPApi {
 
     // ── Thread Insights + Metrics ──────────────────────────────────
 
-    this.staticRoutes.set('GET /api/thread-insights', async (req, res) => {
+    this.addStatic('user', 'GET /api/thread-insights', async (req, res) => {
       const rh = engine.getRunHistory();
       if (!rh) { jsonResponse(res, 200, { threadInsights: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
@@ -3804,14 +3845,14 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { threadInsights });
     });
 
-    this.staticRoutes.set('GET /api/patterns', async (_req, res) => {
+    this.addStatic('user', 'GET /api/patterns', async (_req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!kg) { jsonResponse(res, 200, { patterns: [] }); return; }
       const patterns = kg.getPatterns();
       jsonResponse(res, 200, { patterns });
     });
 
-    this.staticRoutes.set('GET /api/metrics', async (req, res) => {
+    this.addStatic('user', 'GET /api/metrics', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!kg) { jsonResponse(res, 200, { metrics: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
@@ -3826,7 +3867,7 @@ export class LynoxHTTPApi {
 
     // ── CRM ──────────────────────────────────────────────────────
 
-    this.staticRoutes.set('GET /api/crm/contacts', async (req, res) => {
+    this.addStatic('user', 'GET /api/crm/contacts', async (req, res) => {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { contacts: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
@@ -3838,7 +3879,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { contacts });
     });
 
-    this.staticRoutes.set('GET /api/crm/deals', async (req, res) => {
+    this.addStatic('user', 'GET /api/crm/deals', async (req, res) => {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
@@ -3851,7 +3892,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { deals: result });
     });
 
-    this.staticRoutes.set('GET /api/crm/stats', async (_req, res) => {
+    this.addStatic('user', 'GET /api/crm/stats', async (_req, res) => {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { contacts: 0, pipeline: [] }); return; }
       const stats = crm.getContactStats();
@@ -3859,14 +3900,14 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { contacts: stats, pipeline });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/crm/contacts/:name/interactions', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/crm/contacts/:name/interactions', async (_req, res, params) => {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { interactions: [] }); return; }
       const interactions = crm.getInteractions(decodeURIComponent(params['name']!), 50);
       jsonResponse(res, 200, { interactions });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/crm/contacts/:name/deals', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/crm/contacts/:name/deals', async (_req, res, params) => {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
       const deals = crm.getDealsForContact(decodeURIComponent(params['name']!), 50);
@@ -3875,14 +3916,14 @@ export class LynoxHTTPApi {
 
     // ── Backups ──────────────────────────────────────────────────
 
-    this.staticRoutes.set('GET /api/backups', async (_req, res) => {
+    this.addStatic('user', 'GET /api/backups', async (_req, res) => {
       const bm = engine.getBackupManager();
       if (!bm) { jsonResponse(res, 200, { backups: [] }); return; }
       const backups = bm.listBackups();
       jsonResponse(res, 200, { backups });
     });
 
-    this.staticRoutes.set('POST /api/backups', async (_req, res) => {
+    this.addStatic('user', 'POST /api/backups', async (_req, res) => {
       const bm = engine.getBackupManager();
       if (!requireService(res, bm, 'Backup manager')) return;
       try {
@@ -3893,7 +3934,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('POST', '/api/backups/:id/restore', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('admin', 'POST', '/api/backups/:id/restore', async (_req, res, params) => {
       const bm = engine.getBackupManager();
       if (!requireService(res, bm, 'Backup manager')) return;
       const backupPath = bm.getBackupPath(params['id']!);
@@ -3912,14 +3953,14 @@ export class LynoxHTTPApi {
 
     // ── API Store ────────────────────────────────────────────────
 
-    this.staticRoutes.set('GET /api/api-profiles', async (_req, res) => {
+    this.addStatic('user', 'GET /api/api-profiles', async (_req, res) => {
       const store = engine.getApiStore();
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
       const profiles = store.getAll();
       jsonResponse(res, 200, { profiles });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/api-profiles/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const profile = store.get(params['id']!);
@@ -3929,14 +3970,14 @@ export class LynoxHTTPApi {
 
     // ── DataStore ────────────────────────────────────────────────
 
-    this.staticRoutes.set('GET /api/datastore/collections', async (_req, res) => {
+    this.addStatic('user', 'GET /api/datastore/collections', async (_req, res) => {
       const ds = engine.getDataStore();
       if (!ds) { jsonResponse(res, 200, { collections: [] }); return; }
       const collections = ds.listCollections();
       jsonResponse(res, 200, { collections });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('GET', '/api/datastore/:collection', async (req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/datastore/:collection', async (req, res, params) => {
       const ds = engine.getDataStore();
       if (!requireService(res, ds, 'DataStore')) return;
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
@@ -3953,7 +3994,7 @@ export class LynoxHTTPApi {
     // ── GDPR Data Export & Erasure ─────────────────────────────────
 
     // GET /api/export — GDPR Art. 15 (Right of Access) + Art. 20 (Data Portability)
-    this.staticRoutes.set('GET /api/export', async (_req, res) => {
+    this.addStatic('admin', 'GET /api/export', async (_req, res) => {
       const exportData: Record<string, unknown> = {
         exported_at: new Date().toISOString(),
         version: PKG_VERSION,
@@ -4074,7 +4115,7 @@ export class LynoxHTTPApi {
     });
 
     // DELETE /api/data — GDPR Art. 17 (Right to Erasure)
-    this.staticRoutes.set('DELETE /api/data', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'DELETE /api/data', async (_req, res, _params, body) => {
       const b = body as Record<string, unknown> | null;
       const confirm = b && typeof b['confirm'] === 'string' ? b['confirm'] : '';
       if (confirm !== 'DELETE_ALL_DATA') {
@@ -4146,7 +4187,7 @@ export class LynoxHTTPApi {
 
     // ── Vault ─────────────────────────────────────────────────────
 
-    this.staticRoutes.set('GET /api/vault/key', async (req, res) => {
+    this.addStatic('admin', 'GET /api/vault/key', async (req, res) => {
       const key = process.env['LYNOX_VAULT_KEY'];
       if (!key) {
         jsonResponse(res, 200, { configured: false });
@@ -4166,7 +4207,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('POST /api/vault/rotate', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/vault/rotate', async (_req, res, _params, body) => {
       if (process.env['LYNOX_MANAGED_MODE']) {
         errorResponse(res, 403, 'Managed instance: vault rotation is system-controlled');
         return;
@@ -4196,7 +4237,7 @@ export class LynoxHTTPApi {
 
     // ── Access token (read-only, for Settings UI) ────────────────
 
-    this.staticRoutes.set('GET /api/auth/token', async (req, res) => {
+    this.addStatic('admin', 'GET /api/auth/token', async (req, res) => {
       const secret = process.env['LYNOX_HTTP_SECRET'];
       if (!secret) {
         jsonResponse(res, 200, { configured: false });
@@ -4218,7 +4259,7 @@ export class LynoxHTTPApi {
 
     const HIDDEN_PATTERNS = new Set(['.git', '.env', '.DS_Store', 'node_modules', '.cache', '__pycache__', 'thumbs.db']);
 
-    this.staticRoutes.set('GET /api/files', async (req, res) => {
+    this.addStatic('admin', 'GET /api/files', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const dirPath = url.searchParams.get('path') ?? '.';
       const showHidden = url.searchParams.get('hidden') === '1';
@@ -4266,7 +4307,7 @@ export class LynoxHTTPApi {
       return resolved;
     }
 
-    this.staticRoutes.set('GET /api/files/download', async (req, res) => {
+    this.addStatic('admin', 'GET /api/files/download', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
@@ -4291,7 +4332,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('GET /api/files/read', async (req, res) => {
+    this.addStatic('admin', 'GET /api/files/read', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
@@ -4309,7 +4350,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('DELETE /api/files', async (req, res) => {
+    this.addStatic('admin', 'DELETE /api/files', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
@@ -4328,7 +4369,7 @@ export class LynoxHTTPApi {
 
     // ── Migration (zero-knowledge self-hosted → managed) ─────────────
 
-    this.staticRoutes.set('GET /api/migration/preview', async (_req, res) => {
+    this.addStatic('user', 'GET /api/migration/preview', async (_req, res) => {
       try {
         const { MigrationExporter } = await import('../core/migration-export.js');
         const exporter = new MigrationExporter();
@@ -4339,7 +4380,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('POST /api/migration/export', async (req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/migration/export', async (req, res, _params, body) => {
       // Orchestrated migration: engine handles ECDH + export + transfer to target.
       // Browser is just the orchestrator — progress reported via SSE.
       const b = body as Record<string, unknown> | null;
@@ -4485,7 +4526,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('GET /api/migration/handshake', async (req, res) => {
+    this.addStatic('admin', 'GET /api/migration/handshake', async (req, res) => {
       // Only available on managed instances receiving a migration
       if (!process.env['LYNOX_MANAGED_MODE']) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
@@ -4534,7 +4575,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('POST /api/migration/handshake', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/migration/handshake', async (_req, res, _params, body) => {
       if (!process.env['LYNOX_MANAGED_MODE']) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
@@ -4561,7 +4602,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('POST /api/migration/manifest', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/migration/manifest', async (_req, res, _params, body) => {
       if (!process.env['LYNOX_MANAGED_MODE']) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
@@ -4582,7 +4623,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('POST /api/migration/chunk', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/migration/chunk', async (_req, res, _params, body) => {
       if (!process.env['LYNOX_MANAGED_MODE']) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
@@ -4608,7 +4649,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('POST /api/migration/restore', async (_req, res) => {
+    this.addStatic('admin', 'POST /api/migration/restore', async (_req, res) => {
       if (!process.env['LYNOX_MANAGED_MODE']) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
@@ -4641,7 +4682,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.staticRoutes.set('DELETE /api/migration', async (_req, res) => {
+    this.addStatic('admin', 'DELETE /api/migration', async (_req, res) => {
       // Cancel an in-progress migration (cleanup keys + memory)
       if (this._migrationImporter) {
         this._migrationImporter.cleanup();
