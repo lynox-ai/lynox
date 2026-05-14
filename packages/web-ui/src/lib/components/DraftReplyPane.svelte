@@ -86,10 +86,23 @@
 	 * draft populates the buffer. Capped at the CSS `max-h-[60vh]` so very
 	 * long drafts get an inner scroll-bar instead of pushing the footer
 	 * off-screen.
+	 *
+	 * Grow-only on keystrokes — resetting height to 'auto' before every
+	 * measurement causes a layout pass per character and shows up as jank
+	 * on iOS Safari with ~10k+ char drafts. We only reset when the buffer
+	 * shrinks (delete/backspace/replace), detected by buffer length going
+	 * down vs. the last measurement.
 	 */
+	let _lastMeasuredLength = 0;
 	function autosizeTextarea(el: HTMLTextAreaElement): void {
-		el.style.height = 'auto';
-		el.style.height = `${el.scrollHeight}px`;
+		const grew = el.value.length >= _lastMeasuredLength;
+		_lastMeasuredLength = el.value.length;
+		if (!grew) {
+			el.style.height = 'auto'; // allow shrink
+		}
+		if (el.scrollHeight > el.clientHeight || !grew) {
+			el.style.height = `${el.scrollHeight}px`;
+		}
 	}
 
 	// Auto-size whenever the buffer changes externally (draft load,

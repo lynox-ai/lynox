@@ -122,7 +122,7 @@
 				{#if showBack}
 					<button
 						type="button"
-						class="shrink-0 flex items-center gap-1 text-text-subtle hover:text-text text-[12px] min-h-[36px] -ml-1 px-2"
+						class="shrink-0 flex items-center gap-1 text-text-subtle hover:text-text text-[12px] min-h-[44px] sm:min-h-[36px] -ml-1 px-2"
 						onclick={() => closeItem()}
 						aria-label={t('inbox.reading_back')}
 					>
@@ -153,7 +153,7 @@
 				</div>
 				<button
 					type="button"
-					class="shrink-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[36px]"
+					class="shrink-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] sm:min-h-[36px] sm:min-w-0 min-w-[44px]"
 					onclick={() => closeItem()}
 					aria-label={t('inbox.reading_close')}
 				>×</button>

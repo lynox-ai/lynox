@@ -24,7 +24,12 @@ import type { NotificationRouter } from '../../core/notification-router.js';
 import { createInboxNotifier } from './notifier.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxContactResolver } from './contact-resolver.js';
-import { InboxCostBudget, type InboxCostBudgetOptions } from './cost-budget.js';
+import {
+  DEFAULT_INPUT_COST_PER_MTOK,
+  DEFAULT_OUTPUT_COST_PER_MTOK,
+  InboxCostBudget,
+  type InboxCostBudgetOptions,
+} from './cost-budget.js';
 import { GenerateRateLimiter } from './generate-rate-limit.js';
 import { startReminderPoller, type ReminderPoller } from './inbox-reminder-poller.js';
 import { InboxRulesLoader } from './rules-loader.js';
@@ -180,8 +185,14 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     // money the user can't see — and that's the bug rafael flagged.
     if (opts.runHistory) {
       try {
-        const inputCostPerMtok = opts.budget?.inputCostPerMtok ?? 0.80; // matches DEFAULT_INPUT_COST_PER_MTOK
-        const outputCostPerMtok = opts.budget?.outputCostPerMtok ?? 4.00; // matches DEFAULT_OUTPUT_COST_PER_MTOK
+        // Reuse the same constants InboxCostBudget uses so the daily-spend
+        // dashboard matches the per-classifier budget exactly. A future
+        // refactor must NOT also route classifier calls through
+        // Session.callLLM (which inserts into RunHistory itself) — that
+        // would double-count. The `taskText` prefix 'inbox classifier' is
+        // the agreed sentinel for grepping if a dedup gate gets needed.
+        const inputCostPerMtok = opts.budget?.inputCostPerMtok ?? DEFAULT_INPUT_COST_PER_MTOK;
+        const outputCostPerMtok = opts.budget?.outputCostPerMtok ?? DEFAULT_OUTPUT_COST_PER_MTOK;
         const costUsd =
           (usage.inputTokens / 1_000_000) * inputCostPerMtok
           + (usage.outputTokens / 1_000_000) * outputCostPerMtok;
