@@ -318,6 +318,29 @@ describe('api_setup tool', () => {
         fetchSpy.mockRestore();
       }
     });
+
+    it('honors network deny-all from ToolContext (no agent escape)', async () => {
+      // Regression: before this PR, fetchWithValidatedRedirects was called
+      // without the agent's ToolContext, so air-gapped engines could still
+      // pull arbitrary OpenAPI specs via api_setup. Now ctx is threaded.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        new Error('fetch should never be invoked when network is denied'),
+      );
+      try {
+        const agent = createMockAgent(new ApiStore()) as unknown as {
+          toolContext: { networkPolicy: 'deny-all' };
+        };
+        agent.toolContext.networkPolicy = 'deny-all';
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+          agent as never,
+        );
+        expect(result.toLowerCase()).toMatch(/network|air-gapped|denied|blocked/);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
   });
 
   describe('refine', () => {
