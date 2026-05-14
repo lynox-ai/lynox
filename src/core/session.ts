@@ -110,15 +110,19 @@ export class Session {
   private _tenantId: string | null = null;
   private _skipMemoryExtractionOverride: boolean | null = null;
   /**
-   * Mutable per-Session counters (http_request count, write_file bytes).
-   * Owned here so the same reference flows into the main Agent and every
-   * spawned sub-agent — one budget per conversation, reset between sessions.
-   * Previously these lived as module-level state in tools/builtin/http.ts
-   * and tools/builtin/fs.ts and grew for the lifetime of the process.
+   * Mutable per-Session state — counters (http_request count, write_file
+   * bytes) plus outbound-host approvals + in-flight prompt dedup. Owned
+   * here so the same reference flows into the main Agent and every
+   * spawned sub-agent — one budget + one approval set per conversation,
+   * reset between sessions. Previously these lived as module-level
+   * state in tools/builtin/http.ts and tools/builtin/fs.ts and grew
+   * (or, in the Set/Map's case, leaked) for the lifetime of the process.
    */
   private readonly _sessionCounters: import('../types/agent.js').SessionCounters = {
     httpRequests: 0,
     writeBytes: 0,
+    approvedOutboundDomains: new Set<string>(),
+    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
   private _userTimezone: string | null = null;
 

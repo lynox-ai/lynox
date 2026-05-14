@@ -210,18 +210,13 @@ export async function readBodyLimited(response: Response, maxBytes: number): Pro
   }
 }
 
-/** Domains approved for outbound data requests (POST/PUT/PATCH) in this session. */
-const approvedOutboundDomains = new Set<string>();
-/**
- * In-flight permission prompts keyed by hostname. Parallel `http_request`
- * tool_use blocks against the same hostname must share one prompt — the
- * PromptStore has a UNIQUE index per session_id WHERE status='pending', so
- * a second concurrent insertAskUser throws PromptConflictError. Without a
- * shared promise, calls 2..N of a five-way parallel batch all fail with
- * "Session already has a pending prompt" before the user even sees the
- * first prompt. See feedback_2026-04-23 (Keyword-Research run).
- */
-const pendingOutboundPrompts = new Map<string, Promise<boolean>>();
+// `approvedOutboundDomains` (per-Session approved hosts) and
+// `pendingOutboundPrompts` (per-Session in-flight prompt dedup) used to
+// live as module-level state. They moved onto `agent.sessionCounters`
+// in step 3 of the Wave 4.1 migration — approval no longer leaks
+// between conversations, and dedup is naturally bounded to the Session
+// that issued the prompt. See SessionCounters JSDoc on types/agent.ts
+// for the per-Session ownership contract.
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 /**
@@ -451,17 +446,20 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
 
     // First-use consent for outbound data requests (POST/PUT/PATCH).
-    // Concurrent tool_use blocks against the same hostname share one prompt
-    // via `pendingOutboundPrompts` so we don't collide on PromptStore's
-    // per-session unique index.
+    // Approvals + in-flight dedup live on this Session's counters object so
+    // they don't leak between conversations. Concurrent tool_use blocks
+    // against the same hostname share one prompt so we don't collide on
+    // PromptStore's per-session unique index.
     if (WRITE_METHODS.has(method)) {
       const hostname = new URL(input.url).hostname;
-      if (!approvedOutboundDomains.has(hostname)) {
+      const approved = agent.sessionCounters.approvedOutboundDomains;
+      const pendingMap = agent.sessionCounters.pendingOutboundPrompts;
+      if (!approved.has(hostname)) {
         if (!agent.promptUser) {
           return `Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).`;
         }
         const promptUser = agent.promptUser;
-        let pending = pendingOutboundPrompts.get(hostname);
+        let pending = pendingMap.get(hostname);
         if (!pending) {
           pending = (async () => {
             try {
@@ -470,13 +468,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
                 ['Allow', 'Deny', '\x00'],
               );
               const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
-              if (allowed) approvedOutboundDomains.add(hostname);
+              if (allowed) approved.add(hostname);
               return allowed;
             } finally {
-              pendingOutboundPrompts.delete(hostname);
+              pendingMap.delete(hostname);
             }
           })();
-          pendingOutboundPrompts.set(hostname, pending);
+          pendingMap.set(hostname, pending);
         }
         const allowed = await pending;
         if (!allowed) {

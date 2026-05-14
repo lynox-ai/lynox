@@ -170,7 +170,12 @@ export class Agent implements IAgent {
     this.activeScopes = config.activeScopes;
     this.isolation = config.isolation;
     this.toolContext = config.toolContext ?? createToolContext({});
-    this.sessionCounters = config.sessionCounters ?? { httpRequests: 0, writeBytes: 0 };
+    this.sessionCounters = config.sessionCounters ?? {
+      httpRequests: 0,
+      writeBytes: 0,
+      approvedOutboundDomains: new Set<string>(),
+      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+    };
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
     this.costGuard = config.costGuard

@@ -18,7 +18,12 @@ function makeAgent(): never {
 }
 
 beforeEach(() => {
-  testCounters = { httpRequests: 0, writeBytes: 0 };
+  testCounters = {
+    httpRequests: 0,
+    writeBytes: 0,
+    approvedOutboundDomains: new Set<string>(),
+    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+  };
 });
 
 afterEach(async () => {
