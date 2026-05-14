@@ -67,6 +67,17 @@ const VALID_PRIORITIES = new Set<string>(['low', 'medium', 'high', 'urgent']);
 export class TaskManager {
   constructor(private history: RunHistory) {}
 
+  /**
+   * Look up a task by id (or id-prefix, for UX convenience). Exposed so the
+   * tool layer can run an ownership check against the caller's
+   * `agent.activeScopes` BEFORE mutating — `update()`/`complete()` resolve
+   * via prefix-match without any scope binding, which is IDOR-shaped in a
+   * multi-scope deployment. Single-user installs are unaffected.
+   */
+  getTask(id: string): TaskRecord | undefined {
+    return this.history.getTask(id);
+  }
+
   create(params: TaskCreateParams): TaskRecord {
     const id = randomUUID().slice(0, 8);
 

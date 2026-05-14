@@ -543,6 +543,25 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     return `⚠ ${toolName} — sends external mail`;
   }
 
+  // Structured-data destructive tools. `data_store_drop` wipes an entire
+  // table, `data_store_delete` removes matching rows, `artifact_delete`
+  // wipes a stored artifact. Their bash-equivalents (`DROP TABLE`, `rm -rf`)
+  // are blocked via CRITICAL_BASH — without an analogous gate here a
+  // sub-agent could silently destroy the same data through the structured
+  // tool. Block in autonomous mode; warn in interactive mode so the user
+  // gets a confirmation prompt.
+  const STRUCTURED_DESTRUCTIVE_TOOLS = new Set([
+    'data_store_drop',
+    'data_store_delete',
+    'artifact_delete',
+  ]);
+  if (STRUCTURED_DESTRUCTIVE_TOOLS.has(toolName)) {
+    if (autonomy === 'autonomous') {
+      return `⚠ ${toolName} [BLOCKED — destructive data operation needs your OK]`;
+    }
+    return `⚠ ${toolName} — destroys stored data`;
+  }
+
   // Google Workspace write actions — block in autonomous mode
   const GOOGLE_TOOLS = ['google_gmail', 'google_drive', 'google_calendar', 'google_sheets', 'google_docs'];
   if (GOOGLE_TOOLS.includes(toolName) && input && typeof input === 'object' && 'action' in input) {

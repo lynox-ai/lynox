@@ -890,6 +890,69 @@ describe('LynoxHTTPApi', () => {
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
       }
     });
+
+    // Audit S1: backup restore calls process.exit() — must be admin-gated
+    // so a user-scope bearer can't kill the tenant engine on demand once
+    // the HTTP_SECRET split rolls.
+    it('rejects POST /api/backups/:id/restore with user-scope token', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      try {
+        const res = await jsonFetch('/api/backups/some-id/restore', {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        expect(res.status).toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
+
+    // Audit S2: mail account mutations swap IMAP/SMTP credentials — a
+    // user-scope bearer must NOT be able to silently re-route outbound
+    // mail. Listing stays user-scope; mutations + the connectivity probe
+    // are admin-only.
+    it('rejects POST /api/mail/accounts with user-scope token', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      try {
+        const res = await jsonFetch('/api/mail/accounts', {
+          method: 'POST',
+          body: JSON.stringify({ preset: 'gmail' }),
+        });
+        expect(res.status).toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
+
+    it('rejects DELETE /api/mail/accounts/:id with user-scope token', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      try {
+        const res = await jsonFetch('/api/mail/accounts/acct-1', {
+          method: 'DELETE',
+        });
+        expect(res.status).toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
+
+    it('keeps GET /api/mail/accounts user-scope (read-only is fine)', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      try {
+        const res = await jsonFetch('/api/mail/accounts', { method: 'GET' });
+        // Should NOT be 403 — listing remains user-scope. May return
+        // 503 if no mail backend is wired in the test harness; the only
+        // thing this assertion is locking is that requiresAdmin doesn't
+        // mistakenly trip on the GET.
+        expect(res.status).not.toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
   });
 
   describe('Google OAuth callback', () => {

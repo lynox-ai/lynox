@@ -625,17 +625,30 @@ export class Agent implements IAgent {
 
   private static readonly MAX_PARALLEL_TOOL_CALLS = 10;
 
-  /** Tools whose results are guaranteed internal — NOT scanned for injection.
-   *  Everything else (MCP tools, bash, http, google, etc.) IS scanned. */
+  /**
+   * Tools whose results are guaranteed internal — NOT scanned for injection.
+   * Everything else (MCP tools, bash, http, google, etc.) IS scanned.
+   *
+   * The audit (`A-PD-01`) caught five stale names here: `list_files`,
+   * `data_store`, `pipeline_run`, `pipeline_list`, `watch_url`. None of
+   * those exact strings match a registered tool — `data_store` is a
+   * prefix for six tools, `pipeline_run` was renamed to `run_pipeline`,
+   * and the others never existed. Because the gate uses exact-match
+   * Set.has(), results from `run_pipeline`, `data_store_*` etc. were
+   * needlessly running through the injection scanner. The right names
+   * are the actual registered tool ids — keep them in sync with
+   * `src/tools/registry.ts`.
+   */
   private static readonly INTERNAL_TOOLS = new Set([
-    'read_file', 'write_file', 'list_files', 'batch_files',
+    'read_file', 'write_file', 'batch_files',
     'memory_store', 'memory_recall', 'memory_update', 'memory_delete', 'memory_list', 'memory_promote',
     'ask_user', 'ask_secret', 'spawn_agent',
     'artifact_save', 'artifact_list', 'artifact_delete',
     'task_create', 'task_update', 'task_list',
-    'api_setup', 'data_store',
-    'pipeline_run', 'pipeline_list',
-    'watch_url',
+    'api_setup',
+    'data_store_create', 'data_store_insert', 'data_store_query',
+    'data_store_list', 'data_store_delete', 'data_store_drop',
+    'plan_task', 'run_pipeline', 'step_complete',
   ]);
 
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {
