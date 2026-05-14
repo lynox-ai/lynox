@@ -110,6 +110,54 @@ set_pkg_version() {
   "
 }
 
+# Inform the operator which doc trees were (not) touched since the previous
+# release and reiterate the public/internal split policy. Purely advisory —
+# never blocks the cut. Catches "shipped a feature, forgot the user docs" and
+# its inverse "internal-only change accidentally documented in public docs".
+#
+# Doc split (see CLAUDE.md):
+#   - core/docs/             — public user docs (Astro Starlight, ships to OSS).
+#                              How-to material only. Must not leak internal
+#                              endpoints, admin runbooks, threat models, secret-
+#                              handling internals, or exploit-shaped detail.
+#   - pro/docs/internal/     — private PRDs, runbooks, infra specifics, threat
+#                              models. Everything user-impacting should be
+#                              mirrored to core/docs/ at a higher level.
+check_docs_coverage() {
+  local prev_tag="$1" since_date="$2"
+  local core_changed=0 pro_changed=0
+  if [[ -n "$prev_tag" ]]; then
+    core_changed=$(git -C "$CORE_DIR" diff --name-only "$prev_tag..HEAD" -- 'docs/' 2>/dev/null | grep -c . || true)
+  fi
+  if [[ -n "$since_date" ]]; then
+    pro_changed=$(git -C "$PRO_DIR" log --since="$since_date" --name-only --format='' 2>/dev/null \
+      | grep -E '^docs/internal/' | sort -u | grep -c . || true)
+  fi
+
+  printf '\n  Docs coverage since %s:\n' "${prev_tag:-<first release>}"
+  if [[ "$core_changed" -eq 0 ]]; then
+    c_yellow "    core/docs/ (public):           0 files — confirm no user-facing change needs documenting"
+  else
+    printf '    core/docs/ (public):           %s file(s) changed\n' "$core_changed"
+  fi
+  if [[ "$pro_changed" -eq 0 ]]; then
+    c_yellow "    pro/docs/internal/ (private):  0 files — confirm no internal detail needs recording"
+  else
+    printf '    pro/docs/internal/ (private):  %s file(s) changed\n' "$pro_changed"
+  fi
+  cat <<'POLICY'
+
+  Doc-split policy (review before editing CHANGELOG):
+    - Public docs (core/docs/) — user-facing how-to, ships with OSS. Must not
+      leak internal endpoints, admin runbooks, secret-handling internals, or
+      exploit-shaped detail. Sensitive material goes to the internal repo.
+    - Internal docs (pro/docs/internal/) — PRDs, runbooks, infra specifics,
+      threat models. Mirror anything user-impacting to core/docs/ at a higher,
+      sanitised level.
+
+POLICY
+}
+
 # ─────────────────────────────────────────────────────────────────────
 # Globals set by steps
 # ─────────────────────────────────────────────────────────────────────
@@ -294,8 +342,43 @@ update_changelog() {
     pro_commits=$(git -C "$PRO_DIR"  log --no-merges --format='- %s' -20)
   fi
 
+  check_docs_coverage "$prev_tag" "$since_date"
+
+  # Merge both lists, drop blanks, bin by conventional-commit prefix.
+  # Unprefixed commits land in "Uncategorised" so the editor can re-bin them
+  # manually — auto-binning of those would lie in user-facing release notes.
+  local all_commits
+  all_commits=$(printf '%s\n%s\n' "$core_commits" "$pro_commits" | sed '/^$/d')
+
+  # `grep -E ... || true` because grep exits 1 when no match — set -e would
+  # abort. Patterns require leading `- ` (commit format), prefix, optional
+  # `(scope)`, then `:`. Case-insensitive for human-typed prefixes.
+  local added_commits changed_commits fixed_commits other_commits
+  added_commits=$(  printf '%s\n' "$all_commits" | grep -iE '^- (feat|feature)(\([^)]*\))?:' || true)
+  fixed_commits=$(  printf '%s\n' "$all_commits" | grep -iE '^- (fix|bug)(\([^)]*\))?:'      || true)
+  changed_commits=$(printf '%s\n' "$all_commits" | grep -iE '^- (refactor|perf|chore|style|docs|test|ci|build|revert)(\([^)]*\))?:' || true)
+  other_commits=$(  printf '%s\n' "$all_commits" | grep -ivE '^- (feat|feature|fix|bug|refactor|perf|chore|style|docs|test|ci|build|revert)(\([^)]*\))?:' || true)
+
+  # Placeholder markers make empty sections obvious to the editor.
+  : "${added_commits:=<!-- no feat: commits since ${prev_tag:-<first release>} -->}"
+  : "${changed_commits:=<!-- no refactor/perf/chore/docs/test/ci/build/revert/style commits since ${prev_tag:-<first release>} -->}"
+  : "${fixed_commits:=<!-- no fix: commits since ${prev_tag:-<first release>} -->}"
+
   local today
   today=$(date +%Y-%m-%d)
+
+  local uncategorised_block=""
+  if [[ -n "$other_commits" ]]; then
+    uncategorised_block=$(cat <<UNCAT
+
+<!-- Uncategorised — commits without a conventional prefix. Move each line
+     into Added / Changed / Fixed above, then delete this block. -->
+
+$other_commits
+
+UNCAT
+)
+  fi
 
   local draft
   draft=$(cat <<DRAFT
@@ -303,25 +386,16 @@ update_changelog() {
 
 ### Added
 
-<!-- new features -->
+$added_commits
 
 ### Changed
 
-<!-- existing features touched -->
+$changed_commits
 
 ### Fixed
 
-<!-- bug fixes -->
-
-<!-- Reference — raw commits since ${prev_tag:-<first release>} (delete this block before saving):
-
-Core:
-$core_commits
-
-Pro:
-$pro_commits
--->
-
+$fixed_commits
+$uncategorised_block
 DRAFT
 )
 
