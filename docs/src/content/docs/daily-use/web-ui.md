@@ -9,6 +9,18 @@ The Web UI is where you interact with lynox day-to-day. It runs at [localhost:30
 
 **Phone access:** Open Settings → Mobile Access, scan the QR code with your phone — you're logged in instantly. For access outside your WiFi, see [Remote Access](/setup/remote-access/).
 
+## Navigation
+
+The left side of the screen is an **icon rail**. Each icon opens a hub:
+
+- **Chat** — the conversation surface (default view)
+- **Inbox** — the [Unified Inbox](/features/unified-inbox/) for mail and WhatsApp triage
+- **Automation** — workflows, scheduled reminders, and the AutomationHub tab
+- **Intelligence** — memory, knowledge graph, CRM contacts and deals
+- **Artefakte** — files, code, and other outputs lynox has produced
+
+Each hub opens to a flat list with the sub-navigation right under the title — no nested folder trees. Click the kebab (`⋯`) at the rail root for settings, integrations, and account.
+
 ## Chat
 
 The main view. Type a message or drop a file to start a conversation. lynox streams responses in real time, showing tool calls inline as they happen.
