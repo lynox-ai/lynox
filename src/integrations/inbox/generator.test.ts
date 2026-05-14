@@ -18,16 +18,27 @@ const SAMPLE: GenerateDraftInput = {
 };
 
 describe('buildGeneratorPrompt', () => {
-  it('wraps the body in <untrusted_data> and includes all sender + account headers', () => {
+  it('wraps subject + sender + body in <untrusted_data>; keeps trusted account context outside', () => {
     const built = buildGeneratorPrompt(SAMPLE);
-    expect(built.user).toContain('<untrusted_data>');
+    expect(built.user).toContain('<untrusted_data source="mail-generator">');
     expect(built.user).toContain('</untrusted_data>');
     expect(built.user).toContain('Max Muster <max@acme.example>');
+    // Account identity (the receiving mailbox we trust) stays in the frame.
     expect(built.user).toContain('Rafael <me@x.example>');
     expect(built.user).toContain('Termin nächste Woche?');
     expect(built.user).toContain('Kunde fragt nach Termin');
     expect(built.user).toContain('hast du am Mittwoch');
     expect(built.bodyTruncated).toBe(false);
+
+    // The attacker-controlled triplet (sender, subject, body) must all be
+    // inside the wrap; trusted account + classifier reason must stay
+    // outside it.
+    const matched = built.user.match(/<untrusted_data[^>]*>([\s\S]*?)<\/untrusted_data>/);
+    expect(matched?.[1]).toContain('Max Muster <max@acme.example>');
+    expect(matched?.[1]).toContain('Termin nächste Woche?');
+    expect(matched?.[1]).toContain('hast du am Mittwoch');
+    expect(matched?.[1]).not.toContain('Antwortendes Postfach');
+    expect(matched?.[1]).not.toContain('Klassifizierer-Kontext');
   });
 
   it('falls back to address-only when fromDisplayName is missing', () => {

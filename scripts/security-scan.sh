@@ -25,17 +25,19 @@ else
   echo "✓ No hardcoded secrets"
 fi
 
-# Check external tools have wrapUntrustedData
+# Check external tools wrap untrusted content. Either helper qualifies:
+# wrapUntrustedData (single-string) or wrapChannelMessage (structured
+# multi-field). Both produce the same <untrusted_data> boundary.
 WRAP_OK=true
 for file in src/tools/builtin/http.ts src/integrations/search/web-search-tool.ts src/integrations/google/google-gmail.ts src/integrations/google/google-sheets.ts src/integrations/google/google-drive.ts src/integrations/google/google-calendar.ts src/integrations/google/google-docs.ts; do
-  if [ -f "$file" ] && ! grep -q 'wrapUntrustedData' "$file"; then
-    echo "❌ $file missing wrapUntrustedData"
+  if [ -f "$file" ] && ! grep -qE 'wrapUntrustedData|wrapChannelMessage' "$file"; then
+    echo "❌ $file missing wrapUntrustedData or wrapChannelMessage"
     WRAP_OK=false
     ERRORS=$((ERRORS + 1))
   fi
 done
 if [ "$WRAP_OK" = true ]; then
-  echo "✓ External tools use wrapUntrustedData"
+  echo "✓ External tools wrap untrusted content"
 fi
 
 # Check SSRF protection on worker watch

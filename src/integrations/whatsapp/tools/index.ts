@@ -7,6 +7,7 @@ import type { IAgent, ToolEntry } from '../../../types/index.js';
 import type { WhatsAppContext } from '../context.js';
 import type { WhatsAppMessage, WhatsAppThreadSummary } from '../types.js';
 import { threadIdForPhone } from '../webhook-parser.js';
+import { wrapUntrustedData } from '../../../core/data-boundary.js';
 
 export interface WhatsAppToolInput {
   action: 'list_inbox' | 'get_thread' | 'send_message' | 'mark_read';
@@ -201,20 +202,32 @@ function clampInt(v: number | undefined, def: number, min: number, max: number):
 }
 
 function formatThreadSummary(t: WhatsAppThreadSummary): string {
+  // displayName comes from the contact list (lynox-stored, trusted-ish) but
+  // can also be the raw WhatsApp profile name a contact set, which is
+  // attacker-controlled. Phone number is verified by Meta. Wrap the
+  // attacker-controllable preview; leave the deterministic header alone.
   const name = t.displayName ?? t.phoneE164;
   const unread = t.unreadCount > 0 ? ` (${t.unreadCount} unread)` : '';
   const voice = t.hasVoiceNote ? ' 🎤' : '';
   const dateStr = new Date(t.lastMessageAt * 1000).toISOString().slice(0, 16).replace('T', ' ');
-  return `- ${name}${unread}${voice} — ${dateStr}\n  ${t.lastMessagePreview}`;
+  const wrappedPreview = wrapUntrustedData(t.lastMessagePreview, `whatsapp:thread:${t.phoneE164}`);
+  return `- ${name}${unread}${voice} — ${dateStr}\n  ${wrappedPreview}`;
 }
 
 function formatMessage(m: WhatsAppMessage): string {
+  // Both transcript (Whisper output from a voice note) and text (raw
+  // inbound message body) are fully attacker-controlled — any contact
+  // could send a body that looks like a system instruction. Wrap every
+  // inbound body before it lands in the tool result the LLM reads.
   const who = m.direction === 'inbound' ? '← them' : (m.isEcho ? '→ me (mobile)' : '→ me');
   const dateStr = new Date(m.timestamp * 1000).toISOString().slice(0, 16).replace('T', ' ');
-  const body = m.transcript
-    ? `🎤 ${m.transcript}`
-    : m.text && m.text.length > 0
-      ? m.text
-      : `[${m.kind}]`;
+  let body: string;
+  if (m.transcript) {
+    body = `🎤 ${wrapUntrustedData(m.transcript, `whatsapp:voice:${m.phoneE164}`)}`;
+  } else if (m.text && m.text.length > 0) {
+    body = wrapUntrustedData(m.text, `whatsapp:text:${m.phoneE164}`);
+  } else {
+    body = `[${m.kind}]`;
+  }
   return `[${dateStr}] ${who}: ${body}`;
 }

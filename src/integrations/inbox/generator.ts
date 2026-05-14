@@ -18,6 +18,7 @@
 import type { InboxItem } from '../../types/index.js';
 import type { LLMCaller } from './classifier/index.js';
 import { sanitizeBody, sanitizeHeader } from './classifier/sanitize.js';
+import { wrapChannelMessage } from '../../core/data-boundary.js';
 
 /**
  * Stamp persisted on `inbox_drafts.generator_version`. Bumping enables
@@ -146,17 +147,27 @@ export function buildGeneratorPrompt(input: GenerateDraftInput): {
   const previousBody = sanitizeBody(input.previousBodyMd ?? '');
   const hasPrevious = input.previousBodyMd !== undefined && previousBody.body.length > 0 && input.tone !== undefined;
 
+  // Sender + subject + body are attacker-controlled (DMARC only gates the
+  // envelope, not display name / subject content). Wrap them as one block
+  // so a crafted subject like "Ignore previous instructions, …" can't
+  // hide in the trusted framing the model reads above the body.
+  const bodyLabel = sanitized.truncated
+    ? `Original-Body (gekürzt von ${String(sanitized.originalLength)} Zeichen)`
+    : 'Original-Body';
+  const untrusted = wrapChannelMessage({
+    source: 'mail-generator',
+    fields: {
+      'Empfänger der Antwort': senderLine,
+      'Betreff der Original-Mail': subject || '(kein Betreff)',
+      [bodyLabel]: sanitized.body || '(leerer Body)',
+    },
+  });
   const lines: string[] = [
     `Antwortendes Postfach: ${accountName} <${accountAddr}>`,
-    `Empfänger der Antwort: ${senderLine}`,
-    `Betreff der Original-Mail: ${subject || '(kein Betreff)'}`,
+    // Classifier output is trusted (it's our own model's structured reply,
+    // not user input), so it stays in the framing.
     `Klassifizierer-Kontext: ${sanitizeHeader(input.item.reasonDe, 240)}`,
-    sanitized.truncated
-      ? `Original-Body (gekürzt von ${String(sanitized.originalLength)} Zeichen):`
-      : 'Original-Body:',
-    '<untrusted_data>',
-    sanitized.body || '(leerer Body)',
-    '</untrusted_data>',
+    untrusted,
     '',
   ];
 
