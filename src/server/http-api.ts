@@ -2371,10 +2371,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const [{ hasSpeakProvider, speakStream }, { recordSessionCost }] = await Promise.all([
-        import('../core/speak.js'),
-        import('../core/session-budget.js'),
-      ]);
+      const { hasSpeakProvider, speakStream } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -2426,12 +2423,14 @@ export class LynoxHTTPApi {
       });
 
       if (meta) {
-        // Bill the post-prep character count into the session-budget counter so
-        // TTS usage shares a ceiling with LLM runs + spawns. Mistral doesn't
-        // surface usage headers — $0.016/1 000 chars is the documented rate,
-        // applied after text-prep has stripped Markdown noise.
+        // Bill the post-prep character count to RunHistory so the Usage
+        // Dashboard line-items voice TTS separately from chat runs. Mistral
+        // doesn't surface usage headers — $0.016/1 000 chars is the
+        // documented rate, applied after text-prep has stripped Markdown
+        // noise. (TTS no longer increments the in-memory session-cost
+        // counter — it isn't tied to a chat Session, and the dashboard's
+        // daily/monthly caps still pick the cost up via RunHistory.)
         const costUsd = meta.characters * SPEAK_USD_PER_CHAR;
-        recordSessionCost(costUsd);
         // Persist as a RunRecord so the Usage Dashboard can show voice TTS
         // cost as its own line item. See prd/usage-dashboard.md. Best-effort:
         // history failure must not break audio streaming to the client.

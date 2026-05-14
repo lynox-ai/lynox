@@ -4,6 +4,7 @@ import { MODEL_MAP } from '../types/index.js';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry } from '../types/index.js';
 import { calculateCost } from '../core/pricing.js';
 import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js';
+import type { SessionCounters } from '../types/agent.js';
 import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate } from './context.js';
@@ -49,6 +50,15 @@ export interface RunManifestOptions {
    * `parentAgent.userTimezone`.
    */
   userTimezone?: string | undefined;
+  /**
+   * Parent Session's counters object. When the pipeline tool is invoked
+   * from a chat turn, this points at the Session's `_sessionCounters` so
+   * step costs roll into the same per-Session budget the parent agent +
+   * spawned sub-agents share. Optional for headless callers (worker-loop
+   * scheduled runs, ad-hoc validate-and-run paths) — they pass their own
+   * fresh counters object so cost still has somewhere to land.
+   */
+  parentSessionCounters?: SessionCounters | undefined;
 }
 
 const MAX_PIPELINE_DEPTH = 3;
@@ -85,6 +95,21 @@ export async function runManifest(
     parentPrompt = { ...parentPrompt, promptBudget: budget };
   }
 
+  // Session counters for this pipeline run. When invoked from a chat
+  // turn the pipeline tool threads the parent Session's counters; for
+  // headless callers (worker-loop scheduled pipelines, ad-hoc test
+  // harnesses) we allocate a fresh object so cost still has somewhere
+  // to land. Either way `checkSessionBudget` + `adjustSessionCost`
+  // operate on a real per-run counter rather than the deleted module
+  // global.
+  const stepCounters: SessionCounters = options.parentSessionCounters ?? {
+    httpRequests: 0,
+    writeBytes: 0,
+    costUSD: 0,
+    approvedOutboundDomains: new Set<string>(),
+    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+  };
+
   const runId = randomUUID();
   const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');
 
@@ -115,9 +140,9 @@ export async function runManifest(
 
   const mode = getExecutionMode(manifest);
   if (mode === 'parallel') {
-    await runParallel(manifest, state, config, agentsDir, effectiveOptions);
+    await runParallel(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
   } else {
-    await runSequential(manifest, state, config, agentsDir, effectiveOptions);
+    await runSequential(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
   }
 
   if (state.status === 'running') {
@@ -159,9 +184,10 @@ async function runSequential(
   config: LynoxUserConfig,
   agentsDir: string,
   options: RunManifestOptions,
+  stepCounters: SessionCounters,
 ): Promise<void> {
   for (const step of manifest.agents) {
-    const result = await executeStep(step, manifest, state, config, agentsDir, options);
+    const result = await executeStep(step, manifest, state, config, agentsDir, options, stepCounters);
     if (result === 'halt') return;
   }
 }
@@ -174,6 +200,7 @@ async function runParallel(
   config: LynoxUserConfig,
   agentsDir: string,
   options: RunManifestOptions,
+  stepCounters: SessionCounters,
 ): Promise<void> {
   const { phases } = computePhases(manifest.agents);
   const stepsById = new Map(manifest.agents.map(s => [s.id, s]));
@@ -183,7 +210,7 @@ async function runParallel(
 
     const promises = phase.stepIds.map(async (stepId) => {
       const step = stepsById.get(stepId)!;
-      return executeStep(step, manifest, state, config, agentsDir, options);
+      return executeStep(step, manifest, state, config, agentsDir, options, stepCounters);
     });
 
     const settled = await Promise.allSettled(promises);
@@ -216,6 +243,7 @@ async function executeStep(
   config: LynoxUserConfig,
   agentsDir: string,
   options: RunManifestOptions,
+  stepCounters: SessionCounters,
 ): Promise<StepResult> {
   // Check cached outputs for retry (skip already-completed steps)
   if (options.cachedOutputs?.has(step.id)) {
@@ -261,7 +289,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -273,19 +301,19 @@ async function executeStep(
       // Check session budget before spawning step agent
       const stepModel = resolveModelForCost(step, 'sonnet');
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
-      checkSessionBudget(stepEstimate);
+      checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
-      adjustSessionCost(costUsd - stepEstimate); // correct estimate to actual
+      adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
       const agentDef = await loadAgentDef(step.agent, agentsDir);
       // Check session budget before spawning step agent
       const stepModel = resolveModelForCost(step, agentDef.defaultTier);
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
-      checkSessionBudget(stepEstimate);
+      checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
-      adjustSessionCost(costUsd - stepEstimate); // correct estimate to actual
+      adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }
 
     // Gate point check after step completes (real and mock paths)

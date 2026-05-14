@@ -1,47 +1,69 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  checkSessionBudget, recordSessionCost, getSessionCost, resetSessionCost,
+  checkSessionBudget, recordSessionCost, getSessionCost,
   configurePersistentBudget, checkPersistentBudget, resetPersistentBudget,
   type CostQueryProvider,
 } from './session-budget.js';
+import type { SessionCounters } from '../types/index.js';
+
+function makeCounters(): SessionCounters {
+  return {
+    httpRequests: 0,
+    writeBytes: 0,
+    costUSD: 0,
+    approvedOutboundDomains: new Set<string>(),
+    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+  };
+}
 
 describe('session-budget', () => {
+  let counters: SessionCounters;
+
   beforeEach(() => {
-    resetSessionCost();
+    counters = makeCounters();
     resetPersistentBudget();
   });
 
   it('starts at zero', () => {
-    expect(getSessionCost()).toBe(0);
+    expect(getSessionCost(counters)).toBe(0);
   });
 
   it('recordSessionCost increments', () => {
-    recordSessionCost(5);
-    expect(getSessionCost()).toBe(5);
-    recordSessionCost(3);
-    expect(getSessionCost()).toBe(8);
+    recordSessionCost(counters, 5);
+    expect(getSessionCost(counters)).toBe(5);
+    recordSessionCost(counters, 3);
+    expect(getSessionCost(counters)).toBe(8);
   });
 
   it('checkSessionBudget passes under ceiling', () => {
-    recordSessionCost(10);
-    expect(() => checkSessionBudget(30)).not.toThrow();
+    recordSessionCost(counters, 10);
+    expect(() => checkSessionBudget(counters, 30)).not.toThrow();
   });
 
   it('checkSessionBudget throws when over ceiling', () => {
-    recordSessionCost(45);
-    expect(() => checkSessionBudget(10)).toThrow(/Session cost ceiling/);
+    recordSessionCost(counters, 45);
+    expect(() => checkSessionBudget(counters, 10)).toThrow(/Session cost ceiling/);
   });
 
   it('checkSessionBudget throws at exact boundary', () => {
-    recordSessionCost(50);
-    expect(() => checkSessionBudget(0.01)).toThrow(/Session cost ceiling/);
+    recordSessionCost(counters, 50);
+    expect(() => checkSessionBudget(counters, 0.01)).toThrow(/Session cost ceiling/);
   });
 
-  it('resetSessionCost clears counter', () => {
-    recordSessionCost(25);
-    resetSessionCost();
-    expect(getSessionCost()).toBe(0);
-    expect(() => checkSessionBudget(40)).not.toThrow();
+  it('fresh counters object starts at zero (replaces process-wide reset)', () => {
+    recordSessionCost(counters, 25);
+    counters = makeCounters();
+    expect(getSessionCost(counters)).toBe(0);
+    expect(() => checkSessionBudget(counters, 40)).not.toThrow();
+  });
+
+  it('counters are isolated per Session — two counters do not see each other', () => {
+    const sessionA = makeCounters();
+    const sessionB = makeCounters();
+    recordSessionCost(sessionA, 45);
+    // Session A is near its cap; Session B is fresh
+    expect(() => checkSessionBudget(sessionA, 10)).toThrow();
+    expect(() => checkSessionBudget(sessionB, 10)).not.toThrow();
   });
 });
 

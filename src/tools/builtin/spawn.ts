@@ -8,7 +8,7 @@ import { channels } from '../../core/observability.js';
 import { getRole, getRoleNames, applyTierGate } from '../../core/roles.js';
 import { resolveTools } from '../resolve-tools.js';
 
-import { checkSessionBudget, resetSessionCost } from '../../core/session-budget.js';
+import { checkSessionBudget } from '../../core/session-budget.js';
 import { escapeXml } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix } from '../../core/prompts.js';
 
@@ -33,9 +33,13 @@ const DEFAULT_SPAWN_MAX_TURNS = 10;
 /** Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the per-spawn cost guard. */
 const SPAWN_OUTPUT_FILL_RATIO = 0.3;
 
-/** Reset the session spawn cost counter (for testing). */
-export function resetSessionSpawnCost(): void {
-  resetSessionCost();
+/**
+ * Reset a Session's spawn-cost counter (for testing). The counter now
+ * lives on `SessionCounters.costUSD` — pass the counters object to clear
+ * just that Session, rather than a process-wide reset.
+ */
+export function resetSessionSpawnCost(counters: import('../../types/index.js').SessionCounters): void {
+  counters.costUSD = 0;
 }
 
 /** Active child agents — aborted when parent is interrupted. */
@@ -315,8 +319,10 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       return sum + estimateSpawnCost(resolvedModel, iters);
     }, 0);
 
-    // Enforce global session cost ceiling (shared with pipeline steps)
-    checkSessionBudget(totalEstimate);
+    // Enforce session cost ceiling (shared with pipeline steps) against
+    // this Session's counters object so concurrent spawns on different
+    // Sessions don't see each other's reservations.
+    checkSessionBudget(agent.sessionCounters, totalEstimate);
 
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
 

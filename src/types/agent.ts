@@ -46,6 +46,15 @@ export interface SessionCounters {
   /** Total bytes written by write_file in this Session. */
   writeBytes: number;
   /**
+   * Cumulative USD cost spent by this Session's LLM runs + spawned
+   * sub-agents + pipeline steps. Used by `checkSessionBudget()` to
+   * refuse fan-outs that would breach the session cap (default $50,
+   * configurable via `max_session_cost_usd`). Reset between sessions —
+   * previously a module-level `sessionCostUSD` that accumulated for
+   * the lifetime of the engine process.
+   */
+  costUSD: number;
+  /**
    * Hostnames the user has approved for outbound writes (POST/PUT/PATCH)
    * within this Session. Approval does not carry between Sessions — a
    * new conversation re-prompts.

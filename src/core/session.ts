@@ -121,6 +121,7 @@ export class Session {
   private readonly _sessionCounters: import('../types/agent.js').SessionCounters = {
     httpRequests: 0,
     writeBytes: 0,
+    costUSD: 0,
     approvedOutboundDomains: new Set<string>(),
     pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };

@@ -6,46 +6,53 @@
  * in a single process session.
  */
 
-import type { PersistentBudgetCheck } from '../types/index.js';
+import type { PersistentBudgetCheck, SessionCounters } from '../types/index.js';
 
 const DEFAULT_SESSION_COST_USD = 50;
 
+/**
+ * Per-Session cumulative cost lives on `SessionCounters.costUSD` (owned by
+ * Session, propagated through Agent + sub-agents). Previously a
+ * module-level `sessionCostUSD` that accumulated for the lifetime of the
+ * engine process across every Session — the audit's T1 finding called it
+ * out as "masquerades as per-session state."
+ *
+ * `_maxSessionCostUSD` stays module-level: it's process-wide config set
+ * once at engine init (engine = 1 tenant per [[feedback_one_engine_per_tenant]])
+ * and read against every Session's counters object on the hot path.
+ */
 let _maxSessionCostUSD = DEFAULT_SESSION_COST_USD;
-let sessionCostUSD = 0;
 
 /**
  * Check if the estimated cost would exceed the session ceiling.
  * Throws if it would. Reserves the estimated cost immediately to prevent
- * race conditions when parallel spawns both pass the check before either records.
+ * race conditions when parallel spawns both pass the check before either
+ * records — both reservations write to the same Session's counters, so
+ * the second check sees the first reservation.
  */
-export function checkSessionBudget(estimatedCostUSD: number): void {
-  if (sessionCostUSD + estimatedCostUSD > _maxSessionCostUSD) {
+export function checkSessionBudget(counters: SessionCounters, estimatedCostUSD: number): void {
+  if (counters.costUSD + estimatedCostUSD > _maxSessionCostUSD) {
     throw new Error(
       `Session cost ceiling ($${String(_maxSessionCostUSD)}) would be exceeded. ` +
-      `Current: $${sessionCostUSD.toFixed(2)}, estimated: $${estimatedCostUSD.toFixed(2)}.`,
+      `Current: $${counters.costUSD.toFixed(2)}, estimated: $${estimatedCostUSD.toFixed(2)}.`,
     );
   }
-  sessionCostUSD += estimatedCostUSD; // reserve immediately
+  counters.costUSD += estimatedCostUSD; // reserve immediately
 }
 
 /** Record cost spent by an agent (spawn or pipeline step). */
-export function recordSessionCost(costUSD: number): void {
-  sessionCostUSD += costUSD;
+export function recordSessionCost(counters: SessionCounters, costUSD: number): void {
+  counters.costUSD += costUSD;
 }
 
 /** Adjust session cost (e.g., correct after reservation vs actual). */
-export function adjustSessionCost(delta: number): void {
-  sessionCostUSD += delta;
+export function adjustSessionCost(counters: SessionCounters, delta: number): void {
+  counters.costUSD += delta;
 }
 
 /** Get the current session cost. */
-export function getSessionCost(): number {
-  return sessionCostUSD;
-}
-
-/** Reset the session cost counter (for testing). */
-export function resetSessionCost(): void {
-  sessionCostUSD = 0;
+export function getSessionCost(counters: SessionCounters): number {
+  return counters.costUSD;
 }
 
 // === Persistent daily/monthly budget enforcement ===
