@@ -1,12 +1,14 @@
 ---
 title: WhatsApp Inbox
 description: Connect your WhatsApp Business number to lynox via Meta Coexistence Mode — read, transcribe voice notes, and reply from the Web UI.
+draft: true
 sidebar:
-  order: 8
+  order: 9
+  hidden: true
 ---
 
-:::caution[Private beta — request access]
-WhatsApp Inbox is in **private beta** in v1.2.0. The integration is gated behind a feature flag (`WHATSAPP_FEATURE_ENABLED`) and not enabled on customer instances by default. If you'd like to be in the pilot, contact us at [hello@lynox.ai](mailto:hello@lynox.ai). General availability follows after the pilot validates the Coexistence Mode flow on production traffic.
+:::caution[Alpha — not generally available]
+WhatsApp Inbox is **alpha** and not enabled on customer instances. The integration is gated behind the `WHATSAPP_FEATURE_ENABLED` feature flag, end-to-end test coverage is not yet complete, and this page is excluded from production doc builds (`draft: true`). Preserved for internal reference only. Contact [hello@lynox.ai](mailto:hello@lynox.ai) for pilot inquiries.
 :::
 
 lynox can read and reply to your WhatsApp Business messages alongside the Mobile App. Voice notes are transcribed automatically; replies can be typed in the lynox Web UI or drafted by the assistant via the `whatsapp` tool.

@@ -75,6 +75,27 @@ Watch tasks are cost-efficient — lynox fetches the URL and computes a hash. On
 
 You can target specific parts of a page with CSS selectors for more precise monitoring.
 
+## Interactive vs. Autonomous Pipelines
+
+Pipelines (multi-step workflows) run in one of two modes:
+
+| Mode | When to use | Behavior on `ask_user` |
+|------|-------------|------------------------|
+| **interactive** | Default for chat-initiated pipelines | Step pauses, you answer the prompt, the step resumes. Survives page refreshes via resumable prompts. |
+| **autonomous** | Background tasks, watch triggers, cron-scheduled runs | `ask_user` is treated as a soft signal — the step uses defaults or skips, the run never blocks waiting for a human. |
+
+The mode is set on the pipeline at creation time (`PlannedPipeline.mode`). Most tasks pick it up automatically: pipelines you start by talking to lynox in the Web UI are interactive; pipelines triggered by a cron or watch task are autonomous.
+
+### Prompt budget
+
+Even in interactive mode, a pipeline has a **prompt budget** (default 5) — the maximum number of `ask_user` / `ask_secret` calls across all steps in one run. This prevents a step from looping into endless clarification rounds. When the budget is exhausted, further prompts are treated as autonomous (use defaults or skip).
+
+Each prompt is anchored to the step that asked it, so the chat shows *which step* needs your input. You can answer prompts from any step in any order — the pipeline resumes each step independently as answers arrive.
+
+### Sub-agents and prompts
+
+When a step spawns a sub-agent (e.g. the operator delegates to a researcher), the sub-agent inherits the parent's prompt mode and budget. Prompts from the sub-agent propagate up to the user; answers propagate back down. There is no separate prompt channel for sub-agents.
+
 ## Process Capture
 
 When you work through a task interactively, lynox can capture the workflow as a reusable template:

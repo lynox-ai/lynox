@@ -257,6 +257,47 @@ GET  /api/pipelines/stats/steps   # Step statistics
 GET  /api/pipelines/stats/cost    # Pipeline cost stats
 ```
 
+### Inbox
+
+The Unified Inbox surface (`/app/inbox` in the Web UI). Classifies incoming items into Decision-Queue buckets (`requires_user` / `auto_handled`), generates LLM drafts on demand, sends via the underlying channel tool.
+
+```
+GET    /api/inbox/items                          # List items (filter by bucket, channel)
+GET    /api/inbox/counts                         # Bucket counts for sidebar badges
+GET    /api/inbox/items/:id                      # Item detail + cached body snippet
+GET    /api/inbox/items/:id/audit                # Classification audit trail
+PATCH  /api/inbox/items/:id/action               # archive | unarchive | mark_handled
+PATCH  /api/inbox/items/:id/snooze               # { snoozeUntil: ISO8601 }
+POST   /api/inbox/items/:id/body/refresh         # Re-fetch full body from provider
+
+GET    /api/inbox/items/:id/draft                # Get current draft (if any)
+POST   /api/inbox/items/:id/draft                # Save user-edited draft
+POST   /api/inbox/items/:id/draft/generate       # LLM generate (tone: neutral|shorter|formal|warm)
+GET    /api/inbox/drafts/:id                     # Get draft by id
+PATCH  /api/inbox/drafts/:id                     # Update draft (body, subject, cc, bcc)
+POST   /api/inbox/drafts/:id/send                # Send via mail_send (or channel tool)
+
+GET    /api/inbox/contacts/:email                # Sender enrichment (last threads + KG)
+
+GET    /api/inbox/cold-start                     # Cold-start backfill status
+POST   /api/inbox/cold-start/run                 # Trigger one-time backfill (operator-driven)
+
+GET    /api/inbox/rules                          # List learned classification rules
+POST   /api/inbox/rules                          # Add a rule
+DELETE /api/inbox/rules/:id                      # Remove a rule
+```
+
+Drafts form a superseded chain — generating a new tone variant supersedes the previous draft instead of overwriting, preserving an audit trail. `POST /api/inbox/drafts/:id/send` routes through `mail_send` for email items; other channels are gated behind feature flags and not yet wired in stable releases.
+
+### Audio
+
+```
+POST /api/speak                   # Text-to-speech (SSE stream of MP3 chunks)
+POST /api/transcribe              # Speech-to-text (base64 audio in)
+```
+
+`POST /api/speak` body: `{ "text": "...", "voice": "en_paul_neutral" }`. Returns `audio/mpeg` chunked. See [Voice Output](/features/voice-output/) for provider and pricing details.
+
 ### DataStore
 
 ```
@@ -308,7 +349,6 @@ POST /api/sessions/:id/changeset/review   # Accept/rollback file changes
 ### Other
 
 ```
-POST /api/transcribe              # Transcribe audio (base64)
 GET  /api/thread-insights         # Thread analytics
 GET  /api/patterns                # Detected patterns
 GET  /api/metrics                 # Metrics data
