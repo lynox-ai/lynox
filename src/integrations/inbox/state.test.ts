@@ -134,6 +134,17 @@ describe('InboxStateDb — items', () => {
     });
   });
 
+  it('excludes items the user has already actioned — counter must match the visible list', () => {
+    const a = insertSampleItem({ bucket: 'requires_user', threadKey: 'a' });
+    insertSampleItem({ bucket: 'requires_user', threadKey: 'b' });
+    inbox.updateUserAction(a, 'archived');
+    expect(inbox.countItemsByBucket().requires_user).toBe(1);
+
+    // UNDO restores it to the count
+    inbox.updateUserAction(a, null);
+    expect(inbox.countItemsByBucket().requires_user).toBe(2);
+  });
+
   it('hasAnyItemForAccount returns false for an empty account and true after one insert', () => {
     expect(inbox.hasAnyItemForAccount(TEST_ACCOUNT.id)).toBe(false);
     insertSampleItem();

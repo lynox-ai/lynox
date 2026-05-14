@@ -715,14 +715,18 @@ export class InboxStateDb {
   }
 
   countItemsByBucket(tenantId: string = DEFAULT_TENANT_ID): Record<InboxBucket, number> {
-    // Mirrors listItems' snooze filter so a snoozed item can never make the
-    // badge count disagree with the visible list.
+    // Mirrors listItems' snooze filter AND the client-side `!userAction`
+    // filter applied in InboxView.svelte. Without the user_action exclusion
+    // the badge sticks at the pre-archive number because SQL counts every
+    // row regardless of whether the user already archived / replied /
+    // marked-unhandled it.
     const now = Date.now();
     const rows = this.db
       .prepare<[string, number], { bucket: string; c: number }>(
         `SELECT bucket, COUNT(*) as c FROM inbox_items
          WHERE tenant_id = ?
            AND (snooze_until IS NULL OR snooze_until <= ?)
+           AND user_action IS NULL
          GROUP BY bucket`,
       )
       .all(tenantId, now);
