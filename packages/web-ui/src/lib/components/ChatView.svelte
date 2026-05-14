@@ -1743,7 +1743,7 @@
 			</div>
 		{/if}
 
-		<div class="mx-auto max-w-3xl space-y-5">
+		<div class="mx-auto max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
 			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.role === 'user'}
 					{@const userText = stripNowMarker(msg.content)}
@@ -2029,7 +2029,7 @@
 	<!-- Pipeline progress: sticky above input during active execution only -->
 	{#if activePipeline && isStreaming && pipelineRunning}
 		<div class="border-t border-border bg-bg-subtle px-4 py-2">
-			<div class="max-w-3xl mx-auto">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto">
 				<PipelineProgress pipeline={activePipeline} waitingOnUser={waitingOnUser} />
 			</div>
 		</div>
@@ -2038,7 +2038,7 @@
 	<!-- Changeset review: show after run completes with file changes -->
 	{#if !isStreaming && (pendingChangeset || changesetLoading)}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3" data-changeset-review>
-			<div class="max-w-3xl mx-auto">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto">
 				{#if changesetLoading}
 					<div class="text-xs text-text-muted font-mono animate-pulse">{t('changeset.loading')}</div>
 				{:else if pendingChangeset && pendingChangeset.length > 0}
@@ -2056,7 +2056,7 @@
 	{#if inBatchMode && (pendingPermission || pendingTabsPrompt)}
 		<div role="dialog" aria-label={t('chat.batch_mode')} tabindex="-1" data-pending-prompt data-prompt-kind="tabs" class="border-t border-border bg-bg-subtle px-4 py-3"
 			onkeydown={(e) => { if (e.key === 'Escape') answerPrompt('__dismissed__'); }}>
-			<div class="max-w-3xl mx-auto space-y-1">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-1">
 				{#each batchQuestions as q, i}
 					{#if batchFocusIdx === i}
 						<!-- Focused question: expanded -->
@@ -2135,7 +2135,7 @@
 	<!-- Answered prompts stack (single-question mode only) -->
 	{#if answeredPrompts.length > 0 && pendingPermission && !inBatchMode}
 		<div class="border-t border-border bg-bg-subtle/50 px-4 py-2">
-			<div class="max-w-3xl mx-auto space-y-1">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-1">
 				{#each answeredPrompts as ap}
 					<div class="flex items-center gap-2 text-xs group">
 						<span class="text-text-subtle flex-1">{ap.question}</span>
@@ -2159,7 +2159,7 @@
 	     left wondering whether the click registered. -->
 	{#if approvalInflight && !pendingPermission && !inBatchMode}
 		<div class="border-t border-border bg-bg-subtle px-4 py-3" role="status" aria-live="polite">
-			<div class="max-w-3xl mx-auto flex items-start gap-2">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-start gap-2">
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mt-0.5 shrink-0 {approvalInflight.answer === 'y' ? 'text-success' : 'text-text-subtle'}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 					{#if approvalInflight.answer === 'y'}
 						<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
@@ -2187,7 +2187,7 @@
 		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
 		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
-			<div class="max-w-3xl mx-auto space-y-2">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				<div class="flex items-start gap-2">
 					{#if isPermissionGuard}
 						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
@@ -2234,7 +2234,7 @@
 	<!-- Secure Secret Prompt -->
 	{#if pendingSecret}
 		<div data-pending-prompt data-prompt-kind="secret" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
-			<div class="max-w-3xl mx-auto space-y-3">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
 					<span class="text-sm font-medium text-text">{pendingSecret.prompt}</span>
@@ -2272,7 +2272,7 @@
 	<!-- Per-session artifact shelf — silent unless artifacts exist in this thread -->
 	{#if sessionArtifacts.length > 0}
 		<div class="border-t border-border bg-bg-subtle px-4 py-1.5 text-xs">
-			<div class="max-w-3xl mx-auto">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto">
 				<button
 					type="button"
 					onclick={() => { artifactShelfExpanded = !artifactShelfExpanded; }}
@@ -2311,7 +2311,7 @@
 			role="status"
 			aria-live="polite"
 		>
-			<div class="max-w-3xl mx-auto flex items-center gap-2">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-2">
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3l-6.93-12a2 2 0 00-3.48 0l-6.93 12a2 2 0 001.74 3z" />
 				</svg>
@@ -2368,7 +2368,7 @@
 	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
-			<div class="max-w-3xl mx-auto flex flex-wrap gap-2 mb-2">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap gap-2 mb-2">
 				{#each pendingFiles as file, i}
 					<div class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-xs text-text-muted">
 						<span class="truncate max-w-24 md:max-w-32" title={file.name}>{file.name}</span>
@@ -2380,7 +2380,7 @@
 			</div>
 		{/if}
 
-		<div class="max-w-3xl mx-auto flex items-center gap-1.5 md:gap-2">
+		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-1.5 md:gap-2">
 			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 
 			{#if transcribing}
@@ -2455,12 +2455,12 @@
 			{/if}
 		</div>
 		{#if (recording || transcribing) && voicePrivacyKey}
-			<p class="mt-1.5 max-w-3xl mx-auto text-[11px] text-text-subtle px-3 leading-snug">
+			<p class="mt-1.5 max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto text-[11px] text-text-subtle px-3 leading-snug">
 				{t(voicePrivacyKey)}
 			</p>
 		{/if}
 		{#if isStreaming && queueLength > 0}
-			<div class="flex mt-1.5 max-w-3xl mx-auto items-center gap-3">
+			<div class="flex mt-1.5 max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto items-center gap-3">
 				<p class="text-[11px] font-mono uppercase tracking-widest text-text-subtle shrink-0">
 					{queueLength} {t('chat.hint_queued')}
 				</p>
