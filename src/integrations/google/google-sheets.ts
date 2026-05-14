@@ -81,8 +81,21 @@ function valuesToMarkdownTable(values: string[][]): string {
 
 // === Tool Creation ===
 
+// NOTE: keeps strict parity with the legacy enumerated guard list (write, append).
+// `create` and `format` are also writes but are NOT gated here today — an audit
+// follow-up will broaden coverage. Do not silently expand this set: changing
+// it changes user-visible permission prompts.
+const SHEETS_WRITE_ACTIONS = new Set<SheetsInput['action']>(['write', 'append']);
+
 export function createSheetsTool(auth: GoogleAuth): ToolEntry<SheetsInput> {
   return {
+    destructive: {
+      mode: 'external',
+      check: (input) => {
+        const action = (input as { action?: unknown } | null)?.action;
+        return typeof action === 'string' && (SHEETS_WRITE_ACTIONS as Set<string>).has(action) ? action : null;
+      },
+    },
     definition: {
       name: 'google_sheets',
       description: 'Interact with Google Sheets: read data as markdown table, write/overwrite ranges (requires confirmation), append rows, create new spreadsheets, list spreadsheets, apply formatting. Use action "read" with spreadsheet_id and range (A1 notation), "write" to overwrite a range with values, "append" to add rows after existing data, "create" with title and optional sheet_names, "list" to find spreadsheets, "format" with batchUpdate requests.',

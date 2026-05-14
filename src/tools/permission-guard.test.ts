@@ -1,6 +1,57 @@
 import { describe, it, expect } from 'vitest';
 import { isDangerous, normalizeCommand, splitCommandSegments } from './permission-guard.js';
-import type { PreApprovalSet } from '../types/index.js';
+import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
+
+// Stub ToolEntry fixtures mirroring the real `destructive` declarations
+// in data-store.ts / artifact.ts / memory.ts / google-{drive,calendar,sheets,docs}.ts.
+// Kept in sync manually: when a tool's destructive shape changes, update here.
+function makeEntry(name: string, destructive: ToolEntry['destructive']): ToolEntry {
+  return {
+    definition: { name, description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+    handler: async () => '',
+    destructive,
+  };
+}
+
+const TEST_TOOL_ENTRIES = new Map<string, ToolEntry>([
+  ['data_store_drop',   makeEntry('data_store_drop',   { mode: 'data' })],
+  ['data_store_delete', makeEntry('data_store_delete', { mode: 'data' })],
+  ['artifact_delete',   makeEntry('artifact_delete',   { mode: 'data' })],
+  ['memory_delete',     makeEntry('memory_delete',     { mode: 'data' })],
+  ['google_drive', makeEntry('google_drive', {
+    mode: 'external',
+    check: (input) => {
+      const a = (input as { action?: unknown } | null)?.action;
+      return typeof a === 'string' && ['upload', 'create_doc', 'move', 'share'].includes(a) ? a : null;
+    },
+  })],
+  ['google_calendar', makeEntry('google_calendar', {
+    mode: 'external',
+    check: (input) => {
+      const a = (input as { action?: unknown } | null)?.action;
+      return typeof a === 'string' && ['create_event', 'update_event', 'delete_event'].includes(a) ? a : null;
+    },
+  })],
+  ['google_sheets', makeEntry('google_sheets', {
+    mode: 'external',
+    check: (input) => {
+      const a = (input as { action?: unknown } | null)?.action;
+      return typeof a === 'string' && ['write', 'append'].includes(a) ? a : null;
+    },
+  })],
+  ['google_docs', makeEntry('google_docs', {
+    mode: 'external',
+    check: (input) => {
+      const a = (input as { action?: unknown } | null)?.action;
+      return typeof a === 'string' && ['create', 'replace'].includes(a) ? a : null;
+    },
+  })],
+]);
+
+/** Test wrapper that resolves the ToolEntry from the fixture registry. */
+function check(toolName: string, input: unknown, autonomy?: AutonomyLevel): string | null {
+  return isDangerous(toolName, input, autonomy, undefined, undefined, TEST_TOOL_ENTRIES.get(toolName));
+}
 
 describe('isDangerous', () => {
   describe('bash danger patterns', () => {
@@ -99,10 +150,10 @@ describe('isDangerous', () => {
       ['twilio api:messages:create', 'messaging platform CLI'],
     ];
 
-    // Google Workspace write actions (tested separately — not bash commands)
+    // Google Workspace write actions (tested separately — not bash commands).
+    // Note: `google_gmail` was retired (Gmail now flows through unified mail_* tools)
+    // so the legacy gmail entries from the enumerated guard list were dropped here too.
     const googleCases: Array<[string, string, string]> = [
-      ['google_gmail', 'send', 'modifies external data'],
-      ['google_gmail', 'reply', 'modifies external data'],
       ['google_drive', 'share', 'modifies external data'],
       ['google_drive', 'upload', 'modifies external data'],
       ['google_calendar', 'create_event', 'modifies external data'],
@@ -114,7 +165,7 @@ describe('isDangerous', () => {
 
     for (const [tool, action, label] of googleCases) {
       it(`detects "${tool}.${action}" as dangerous`, () => {
-        const result = isDangerous(tool, { action });
+        const result = check(tool, { action });
         expect(result).not.toBeNull();
         expect(result).toContain(label);
       });
@@ -122,8 +173,6 @@ describe('isDangerous', () => {
 
     // Google read actions are safe
     const googleSafeCases: Array<[string, string]> = [
-      ['google_gmail', 'search'],
-      ['google_gmail', 'read'],
       ['google_drive', 'search'],
       ['google_drive', 'read'],
       ['google_calendar', 'list_events'],
@@ -133,7 +182,7 @@ describe('isDangerous', () => {
 
     for (const [tool, action] of googleSafeCases) {
       it(`allows "${tool}.${action}" (read-only)`, () => {
-        expect(isDangerous(tool, { action })).toBeNull();
+        expect(check(tool, { action })).toBeNull();
       });
     }
 
@@ -774,49 +823,38 @@ describe('isDangerous', () => {
       expect(result).toBeNull();
     });
 
-    // Google Workspace — CRITICAL in autonomous
-    it('BLOCKS google_gmail send in autonomous mode', () => {
-      const result = isDangerous('google_gmail', { action: 'send' }, 'autonomous');
-      expect(result).not.toBeNull();
-      expect(result).toContain('[BLOCKED');
-    });
-
+    // Google Workspace — CRITICAL in autonomous (gmail retired; goes through mail_*)
     it('BLOCKS google_drive share in autonomous mode', () => {
-      const result = isDangerous('google_drive', { action: 'share' }, 'autonomous');
+      const result = check('google_drive', { action: 'share' }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });
 
     it('BLOCKS google_calendar delete_event in autonomous mode', () => {
-      const result = isDangerous('google_calendar', { action: 'delete_event' }, 'autonomous');
+      const result = check('google_calendar', { action: 'delete_event' }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });
 
     it('BLOCKS google_sheets write in autonomous mode', () => {
-      const result = isDangerous('google_sheets', { action: 'write' }, 'autonomous');
+      const result = check('google_sheets', { action: 'write' }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });
 
     it('BLOCKS google_docs replace in autonomous mode', () => {
-      const result = isDangerous('google_docs', { action: 'replace' }, 'autonomous');
+      const result = check('google_docs', { action: 'replace' }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });
 
-    it('ALLOWS google_gmail search in autonomous mode (read-only)', () => {
-      const result = isDangerous('google_gmail', { action: 'search' }, 'autonomous');
-      expect(result).toBeNull();
-    });
-
     it('ALLOWS google_drive search in autonomous mode (read-only)', () => {
-      const result = isDangerous('google_drive', { action: 'search' }, 'autonomous');
+      const result = check('google_drive', { action: 'search' }, 'autonomous');
       expect(result).toBeNull();
     });
 
     it('ALLOWS google_calendar list_events in autonomous mode (read-only)', () => {
-      const result = isDangerous('google_calendar', { action: 'list_events' }, 'autonomous');
+      const result = check('google_calendar', { action: 'list_events' }, 'autonomous');
       expect(result).toBeNull();
     });
 
@@ -857,40 +895,49 @@ describe('isDangerous', () => {
 
     // Structured data-destructive tools (audit S-AT-04). Their bash-
     // equivalents (DROP TABLE, rm -rf) are blocked via CRITICAL_BASH —
-    // these mirror that gate at the tool layer.
+    // these mirror that gate at the tool layer via ToolEntry.destructive.
     it('BLOCKS data_store_drop in autonomous mode', () => {
-      const result = isDangerous('data_store_drop', { name: 'orders' }, 'autonomous');
+      const result = check('data_store_drop', { name: 'orders' }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });
 
     it('BLOCKS data_store_delete in autonomous mode', () => {
-      const result = isDangerous('data_store_delete', { name: 'orders', where: { id: 1 } }, 'autonomous');
+      const result = check('data_store_delete', { name: 'orders', where: { id: 1 } }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });
 
     it('BLOCKS artifact_delete in autonomous mode', () => {
-      const result = isDangerous('artifact_delete', { id: 'art-1' }, 'autonomous');
+      const result = check('artifact_delete', { id: 'art-1' }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });
 
     it('BLOCKS memory_delete in autonomous mode', () => {
-      const result = isDangerous('memory_delete', { id: 'mem-1' }, 'autonomous');
+      const result = check('memory_delete', { id: 'mem-1' }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });
 
     it('warns on data_store_drop in interactive mode (agent prompts user)', () => {
-      const result = isDangerous('data_store_drop', { name: 'orders' });
+      const result = check('data_store_drop', { name: 'orders' });
       expect(result).not.toBeNull();
       expect(result).toContain('destroys stored data');
       expect(result).not.toContain('[BLOCKED');
     });
 
     it('ALLOWS data_store_query in autonomous mode (read-only)', () => {
+      // No ToolEntry registered → guard sees no destructive declaration → safe.
       const result = isDangerous('data_store_query', { name: 'orders' }, 'autonomous');
+      expect(result).toBeNull();
+    });
+
+    it('skips destructive warning when ToolEntry omits the declaration', () => {
+      // Same toolName as a destructive registry entry but called without an entry —
+      // the guard cannot infer destructive intent and stays silent. This documents
+      // the regression: forgetting `destructive` at registration disables the gate.
+      const result = isDangerous('data_store_drop', { name: 'orders' }, 'autonomous');
       expect(result).toBeNull();
     });
 
@@ -1679,6 +1726,49 @@ describe('isDangerous', () => {
       }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('XML system tag injection');
+    });
+  });
+
+  // Regression backstop: the destructive gate now reads from
+  // ToolEntry.destructive at the registration site. If a real tool ships
+  // without that declaration, the guard silently no-ops. These tests
+  // import the real factories and assert the declarations are in place,
+  // so forgetting to flag a new destructive tool fails the test suite.
+  describe('regression: real tool registrations declare destructive', () => {
+    it('builtin data/artifact/memory delete tools all declare destructive', async () => {
+      const [{ dataStoreDeleteTool, dataStoreDropTool }, { artifactDeleteTool }, { memoryDeleteTool }] = await Promise.all([
+        import('./builtin/data-store.js'),
+        import('./builtin/artifact.js'),
+        import('./builtin/memory.js'),
+      ]);
+      for (const tool of [dataStoreDeleteTool, dataStoreDropTool, artifactDeleteTool, memoryDeleteTool]) {
+        expect(tool.destructive, `${tool.definition.name} must declare destructive`).toBeTruthy();
+        expect(tool.destructive?.mode).toBe('data');
+      }
+    });
+
+    it('google tools declare destructive with action-discriminated checks', async () => {
+      // Import dynamically so this test does not pull GoogleAuth env into the rest of the suite.
+      const [{ createDriveTool }, { createCalendarTool }, { createSheetsTool }, { createDocsTool }] = await Promise.all([
+        import('../integrations/google/google-drive.js'),
+        import('../integrations/google/google-calendar.js'),
+        import('../integrations/google/google-sheets.js'),
+        import('../integrations/google/google-docs.js'),
+      ]);
+      const fakeAuth = {} as Parameters<typeof createDriveTool>[0];
+
+      const cases: Array<{ tool: ToolEntry; write: string; safe: string }> = [
+        { tool: createDriveTool(fakeAuth),    write: 'upload',       safe: 'search' },
+        { tool: createCalendarTool(fakeAuth), write: 'create_event', safe: 'list_events' },
+        { tool: createSheetsTool(fakeAuth),   write: 'write',        safe: 'read' },
+        { tool: createDocsTool(fakeAuth),     write: 'create',       safe: 'read' },
+      ];
+      for (const { tool, write, safe } of cases) {
+        expect(tool.destructive, `${tool.definition.name} must declare destructive`).toBeTruthy();
+        expect(tool.destructive?.mode).toBe('external');
+        expect(tool.destructive?.check?.({ action: write })).toBe(write);
+        expect(tool.destructive?.check?.({ action: safe })).toBeNull();
+      }
     });
   });
 });

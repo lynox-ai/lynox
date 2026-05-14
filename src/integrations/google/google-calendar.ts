@@ -107,8 +107,17 @@ function formatAttendees(attendees: CalendarEvent['attendees']): string {
 
 // === Tool Creation ===
 
+const CALENDAR_WRITE_ACTIONS = new Set<CalendarInput['action']>(['create_event', 'update_event', 'delete_event']);
+
 export function createCalendarTool(auth: GoogleAuth): ToolEntry<CalendarInput> {
   return {
+    destructive: {
+      mode: 'external',
+      check: (input) => {
+        const action = (input as { action?: unknown } | null)?.action;
+        return typeof action === 'string' && (CALENDAR_WRITE_ACTIONS as Set<string>).has(action) ? action : null;
+      },
+    },
     definition: {
       name: 'google_calendar',
       description: 'Interact with Google Calendar: list upcoming events, create/update/delete events, check free/busy times. Use action "list_events" to see upcoming events (default: next 7 days), "create_event" with summary, start, end times, "update_event" to modify an existing event, "delete_event" to remove an event, "free_busy" to check availability across calendars.',

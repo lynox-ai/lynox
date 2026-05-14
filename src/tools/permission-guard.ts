@@ -1,6 +1,6 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
-import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike } from '../types/index.js';
+import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry } from '../types/index.js';
 import { isWorkspaceActive } from '../core/workspace.js';
 import { channels } from '../core/observability.js';
 import { extractMatchString, globToRegex } from '../core/pre-approve.js';
@@ -260,8 +260,8 @@ function isPathWithin(childPath: string, parentPath: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike): string | null {
-  const warning = _detectDanger(toolName, input, autonomy);
+export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry): string | null {
+  const warning = _detectDanger(toolName, input, autonomy, entry);
   if (!warning) return null;
 
   // Pre-approval can override non-critical dangers.
@@ -420,7 +420,7 @@ function _checkPatterns(segments: string[], patterns: Array<{ pattern: RegExp; l
   return null;
 }
 
-function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel): string | null {
+function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry): string | null {
   if (toolName === 'bash' && input && typeof input === 'object' && 'command' in input) {
     const rawCmd = String((input as { command: unknown }).command);
     // Truncate for regex matching to prevent ReDoS; the actual command still executes in full.
@@ -543,44 +543,28 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     return `⚠ ${toolName} — sends external mail`;
   }
 
-  // Structured-data destructive tools. `data_store_drop` wipes an entire
-  // table, `data_store_delete` removes matching rows, `artifact_delete`
-  // wipes a stored artifact. Their bash-equivalents (`DROP TABLE`, `rm -rf`)
-  // are blocked via CRITICAL_BASH — without an analogous gate here a
-  // sub-agent could silently destroy the same data through the structured
-  // tool. Block in autonomous mode; warn in interactive mode so the user
-  // gets a confirmation prompt.
-  const STRUCTURED_DESTRUCTIVE_TOOLS = new Set([
-    'data_store_drop',
-    'data_store_delete',
-    'artifact_delete',
-    // memory_delete wipes user-scope agent memory records. Same threat
-    // shape as artifact_delete — no existing guard before this change.
-    'memory_delete',
-  ]);
-  if (STRUCTURED_DESTRUCTIVE_TOOLS.has(toolName)) {
-    if (autonomy === 'autonomous') {
-      return `⚠ ${toolName} [BLOCKED — destructive data operation needs your OK]`;
-    }
-    return `⚠ ${toolName} — destroys stored data`;
-  }
-
-  // Google Workspace write actions — block in autonomous mode
-  const GOOGLE_TOOLS = ['google_gmail', 'google_drive', 'google_calendar', 'google_sheets', 'google_docs'];
-  if (GOOGLE_TOOLS.includes(toolName) && input && typeof input === 'object' && 'action' in input) {
-    const action = String((input as { action: unknown }).action);
-    const GOOGLE_WRITE_ACTIONS = new Set([
-      'send', 'reply', 'archive', 'draft',                   // gmail
-      'upload', 'create_doc', 'move', 'share',              // drive
-      'create_event', 'update_event', 'delete_event',       // calendar
-      'write', 'append',                                    // sheets
-      'create', 'replace',                                  // docs
-    ]);
-    if (GOOGLE_WRITE_ACTIONS.has(action)) {
+  // Declarative destructive-tool gate. Each tool registers
+  // `ToolEntry.destructive` next to its schema; this block reads that
+  // metadata so writes/deletes can be added at the tool's source-of-truth.
+  //
+  // Covers structured-data destructive tools (data_store_drop, _delete,
+  // artifact_delete, memory_delete — bash equivalents like DROP TABLE /
+  // rm -rf are blocked via CRITICAL_BASH; without this gate a sub-agent
+  // could destroy the same data through the structured tool) and Google
+  // Workspace write actions.
+  if (entry?.destructive) {
+    const { mode, check } = entry.destructive;
+    const detail = check ? check(input) : '';
+    if (detail !== null) {
+      const suffix = detail ? `: ${detail}` : '';
       if (autonomy === 'autonomous') {
-        return `⚠ ${toolName}: ${action} [BLOCKED — I need your OK before doing this]`;
+        const blockReason = mode === 'data'
+          ? '[BLOCKED — destructive data operation needs your OK]'
+          : '[BLOCKED — I need your OK before doing this]';
+        return `⚠ ${toolName}${suffix} ${blockReason}`;
       }
-      return `⚠ ${toolName}: ${action} — modifies external data`;
+      const label = mode === 'data' ? 'destroys stored data' : 'modifies external data';
+      return `⚠ ${toolName}${suffix} — ${label}`;
     }
   }
 

@@ -29,6 +29,26 @@ export interface ToolEntry<TInput = unknown> {
    * Returning the input unchanged is equivalent to omitting the hook.
    */
   redactInputForAudit?: ((input: TInput) => unknown) | undefined;
+  /**
+   * Declares this tool as destructive. The Permission Guard warns in
+   * interactive mode and BLOCKS in autonomous mode based on this flag.
+   *
+   * - `mode: 'data'`     → "destroys stored data" (e.g. data_store_drop)
+   * - `mode: 'external'` → "modifies external data" (e.g. google_calendar create_event)
+   *
+   * For action-discriminated tools (e.g. google_drive: only "upload"/"share"
+   * are destructive, "search"/"read" are safe), provide `check`. It returns
+   * the action label for destructive inputs, or `null` for safe ones. Omit
+   * `check` for always-destructive tools.
+   *
+   * Colocating this with the tool registration keeps the write-action
+   * set next to the input schema — adding a new write action no longer
+   * requires updating a separate enumerated list in the guard.
+   */
+  destructive?: {
+    mode: 'data' | 'external';
+    check?: (input: TInput) => string | null;
+  } | undefined;
 }
 
 // === 4.3 Stream Event Union ===

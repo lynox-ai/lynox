@@ -73,6 +73,7 @@ export const artifactListTool: ToolEntry<ArtifactListInput> = {
 };
 
 export const artifactDeleteTool: ToolEntry<ArtifactDeleteInput> = {
+  destructive: { mode: 'data' },
   definition: {
     name: 'artifact_delete',
     description: 'Delete a saved artifact by ID.',

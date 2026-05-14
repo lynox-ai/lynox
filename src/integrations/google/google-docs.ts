@@ -46,8 +46,21 @@ async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): 
 
 // === Tool Creation ===
 
+// NOTE: keeps strict parity with the legacy enumerated guard list (create, replace).
+// `append` is also a write but is NOT gated here today — an audit follow-up
+// will broaden coverage. Do not silently expand this set: changing it
+// changes user-visible permission prompts.
+const DOCS_WRITE_ACTIONS = new Set<DocsInput['action']>(['create', 'replace']);
+
 export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
   return {
+    destructive: {
+      mode: 'external',
+      check: (input) => {
+        const action = (input as { action?: unknown } | null)?.action;
+        return typeof action === 'string' && (DOCS_WRITE_ACTIONS as Set<string>).has(action) ? action : null;
+      },
+    },
     definition: {
       name: 'google_docs',
       description: 'Interact with Google Docs: read documents as markdown, create new documents from markdown, append text to existing documents, find and replace text. Use action "read" with document_id, "create" with title and content (markdown), "append" with document_id and content, "replace" with document_id, find, and replace_with.',
