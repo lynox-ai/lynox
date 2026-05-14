@@ -20,10 +20,18 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
 import { fetchWithValidatedRedirects, readBodyLimited } from './http.js';
+import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
+import { isFeatureEnabled } from '../../core/features.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. */
 const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
 const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
+
+/** Cap on the docs-page body pre-Haiku. 250 KB matches PRD-UNIFIED-API-PROFILE-V2. */
+const DOCS_BODY_MAX_BYTES = 250 * 1024;
+const DOCS_FETCH_TIMEOUT_MS = 15_000;
+/** Hard $ budget per Haiku extraction. PRD requires ≤ $0.05. */
+const DOCS_EXTRACT_BUDGET_USD = 0.05;
 
 type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine';
 
@@ -42,8 +50,15 @@ interface ApiSetupInput {
   profile?: ApiProfile | undefined;
   /** Profile ID (required for delete/view/refine). */
   id?: string | undefined;
-  /** OpenAPI spec URL (required for bootstrap). */
+  /** OpenAPI spec URL — preferred bootstrap source when an OpenAPI 3.x JSON spec exists. */
   openapi_url?: string | undefined;
+  /**
+   * Human-readable docs landing page URL — bootstrap path for APIs without an
+   * OpenAPI spec. Gated behind the `api-setup-v2` feature flag. Fetches the
+   * page, runs a single Haiku call to extract auth / rate limits / cost /
+   * concurrency / endpoints, and returns a draft v2 profile.
+   */
+  docs_url?: string | undefined;
   /** Additive patch (required for refine). */
   refine?: RefinePatch | undefined;
 }
@@ -256,6 +271,320 @@ function slugify(input: string): string {
     .slice(0, 64) || 'api';
 }
 
+// ── docs_url bootstrap (PRD-UNIFIED-API-PROFILE-V2 Phase B) ──────────────────
+
+/**
+ * Strict whitelist of fields Haiku is allowed to populate. Anything outside
+ * this shape is dropped silently after extraction (S1 from the PRD).
+ *
+ * Notably absent:
+ *   - id / name / base_url — derived from docs_url, never trusted from the model.
+ *   - auth.vault_keys      — must be populated by the agent via `ask_secret`.
+ *   - response_shape       — added later via `refine` once real responses land.
+ *   - provenance           — written by this tool, not by the model.
+ */
+const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
+  type: 'object',
+  properties: {
+    description: { type: 'string' },
+    auth: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['basic', 'bearer', 'header', 'query', 'oauth2'] as const },
+        basic_format: { type: 'string', enum: ['user_pass_split', 'pre_encoded_b64'] as const },
+        header_name: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9-]*$' },
+        query_param: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_-]*$' },
+        instructions: { type: 'string' },
+      },
+      required: ['type'],
+    },
+    rate_limit: {
+      type: 'object',
+      properties: {
+        requests_per_second: { type: 'number', minimum: 0 },
+        requests_per_minute: { type: 'number', minimum: 0 },
+        requests_per_hour: { type: 'number', minimum: 0 },
+        requests_per_day: { type: 'number', minimum: 0 },
+      },
+    },
+    concurrency: {
+      type: 'object',
+      properties: {
+        parallel_ok: { type: 'boolean' },
+        max_in_flight: { type: 'integer', minimum: 1, maximum: 100 },
+        batchable_via_endpoint: { type: 'string' },
+      },
+      required: ['parallel_ok'],
+    },
+    output_volume: { type: 'string', enum: ['small', 'medium', 'large', 'streaming'] as const },
+    cost: {
+      type: 'object',
+      properties: {
+        model: { type: 'string', enum: ['per_call', 'per_token', 'per_unit'] as const },
+        rate_usd: { type: 'number', minimum: 0, maximum: 100 },
+        output_ratio: { type: 'number', minimum: 0 },
+      },
+      required: ['model', 'rate_usd'],
+    },
+    endpoints: {
+      type: 'array',
+      maxItems: 20,
+      items: {
+        type: 'object',
+        properties: {
+          method: { type: 'string', enum: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'] as const },
+          path: { type: 'string' },
+          description: { type: 'string' },
+        },
+        required: ['method', 'path'],
+      },
+    },
+    guidelines: { type: 'array', maxItems: 20, items: { type: 'string' } },
+    avoid: { type: 'array', maxItems: 20, items: { type: 'string' } },
+    notes: { type: 'array', maxItems: 20, items: { type: 'string' } },
+  },
+};
+
+interface DocsExtracted {
+  description?: string;
+  auth?: {
+    type: 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
+    basic_format?: 'user_pass_split' | 'pre_encoded_b64';
+    header_name?: string;
+    query_param?: string;
+    instructions?: string;
+    /** Untrusted field — always dropped post-extraction. Declared so we can detect injection attempts. */
+    vault_keys?: unknown;
+  };
+  rate_limit?: ApiProfile['rate_limit'];
+  concurrency?: ApiProfile['concurrency'];
+  output_volume?: ApiProfile['output_volume'];
+  cost?: ApiProfile['cost'];
+  endpoints?: ApiEndpoint[];
+  guidelines?: string[];
+  avoid?: string[];
+  notes?: string[];
+  /** Untrusted — always dropped. */
+  id?: unknown;
+  name?: unknown;
+  base_url?: unknown;
+}
+
+const DOCS_EXTRACT_SYSTEM = `You read API documentation pages and extract a structured profile that helps another agent call the API correctly.
+
+Rules:
+- Only populate fields you can support with explicit evidence from the docs. Leave a field unset rather than guessing.
+- If the docs say "no parallel calls", "one request at a time", "per-token concurrency cap = 1", or similar, set concurrency.parallel_ok=false. Otherwise set parallel_ok=true ONLY if the docs explicitly confirm concurrent calls are supported.
+- When you set parallel_ok=true OR parallel_ok=false, append one notes[] entry quoting the docs sentence that supports the claim (≤200 chars, use straight quotes).
+- For cost: prefer per_call when the docs list a fixed price per request; per_token when pricing is per input/output token; per_unit for other unit-priced models.
+- For output_volume: choose 'small' (<1KB), 'medium' (<10KB), 'large' (>10KB), or 'streaming' based on the API's typical response shape.
+- Use uppercase HTTP methods for endpoints.method.
+- Do NOT populate id, name, base_url, or any auth.vault_keys field. Those are derived from the URL by the caller.
+- Keep guidelines / avoid / notes to short sentences (≤200 chars each).`;
+
+/** Registrable origin (scheme + host) derived from a docs URL. Used as the
+ *  authoritative base_url; we never trust an extracted value. */
+function deriveBaseUrlFromDocs(docsUrl: string): string {
+  const u = new URL(docsUrl);
+  return `${u.protocol}//${u.host}`;
+}
+
+/** Strip query + fragment so URLs with credentials (e.g. `?api_key=…`) don't
+ *  leak into error messages or logs. Falls back to a safe sentinel on parse fail. */
+function safeUrlForLogging(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return '<unparseable url>';
+  }
+}
+
+/**
+ * Strip every field outside the extraction whitelist and force the trusted
+ * values that come from the caller (base_url, vault_keys, provenance, id, name).
+ * Returns a draft ApiProfile ready for the agent to enrich and then `create`.
+ */
+function buildDraftFromExtraction(
+  extracted: DocsExtracted,
+  docsUrl: string,
+  injectedFields: string[],
+): ApiProfile {
+  const baseUrl = deriveBaseUrlFromDocs(docsUrl);
+  const host = new URL(baseUrl).hostname;
+  const idCandidate = slugify(host.replace(/^api\.|^docs\./, '').replace(/\.[^.]+$/, ''));
+
+  const draft: ApiProfile = {
+    id: idCandidate,
+    name: host,
+    base_url: baseUrl,
+    description: typeof extracted.description === 'string'
+      ? extracted.description.slice(0, 300)
+      : `${host} API`,
+  };
+
+  if (extracted.auth) {
+    const auth: ApiAuth = { type: extracted.auth.type };
+    if (extracted.auth.basic_format) auth.basic_format = extracted.auth.basic_format;
+    if (extracted.auth.header_name) auth.header_name = extracted.auth.header_name;
+    if (extracted.auth.query_param) auth.query_param = extracted.auth.query_param;
+    if (extracted.auth.instructions) {
+      // Prefix with a provenance marker so an attacker-controlled docs page can't
+      // smuggle "ignore previous instructions" into the agent's later context via
+      // formatProfile's "Auth note:" rendering.
+      auth.instructions = `[from docs page] ${extracted.auth.instructions.slice(0, 300)}`;
+    }
+    // vault_keys deliberately omitted — agent must populate via ask_secret.
+    draft.auth = auth;
+  }
+
+  if (extracted.rate_limit) draft.rate_limit = extracted.rate_limit;
+  if (extracted.concurrency) draft.concurrency = extracted.concurrency;
+  if (extracted.output_volume) draft.output_volume = extracted.output_volume;
+  if (extracted.cost) draft.cost = extracted.cost;
+
+  if (extracted.endpoints?.length) {
+    draft.endpoints = extracted.endpoints.map(ep => ({
+      method: ep.method.toUpperCase(),
+      path: ep.path.startsWith('/') ? ep.path : `/${ep.path}`,
+      description: (ep.description ?? '').slice(0, 200),
+    }));
+  }
+  // Schema already caps arrays at maxItems=20, so the post-validation arrays are
+  // bounded; only the per-string slice is load-bearing here.
+  if (extracted.guidelines?.length) draft.guidelines = extracted.guidelines.map(s => s.slice(0, 200));
+  if (extracted.avoid?.length) draft.avoid = extracted.avoid.map(s => s.slice(0, 200));
+  if (extracted.notes?.length) draft.notes = extracted.notes.map(s => s.slice(0, 200));
+
+  if (injectedFields.length > 0) {
+    const warning = `bootstrap dropped fields outside whitelist: ${injectedFields.join(', ')}`;
+    draft.notes = [...(draft.notes ?? []), warning];
+  }
+
+  draft.provenance = {
+    source: 'docs_url',
+    source_url: docsUrl,
+    schema_version: 2,
+  };
+  return draft;
+}
+
+/** Inspect raw extracted output and report any forbidden fields the model tried to set. */
+function findInjectedFields(extracted: DocsExtracted): string[] {
+  const injected: string[] = [];
+  if (extracted.id !== undefined) injected.push('id');
+  if (extracted.name !== undefined) injected.push('name');
+  if (extracted.base_url !== undefined) injected.push('base_url');
+  if (extracted.auth?.vault_keys !== undefined) injected.push('auth.vault_keys');
+  return injected;
+}
+
+/** Compose a short human-readable sentence summarising the draft for the agent. */
+function buildNlSummary(draft: ApiProfile, docsUrl: string): string {
+  const parts: string[] = [`${draft.name}: ${draft.description}`];
+  if (draft.auth) {
+    const authBits: string[] = [`auth=${draft.auth.type}`];
+    if (draft.auth.basic_format) authBits.push(`basic_format=${draft.auth.basic_format}`);
+    parts.push(authBits.join(' '));
+  }
+  if (draft.rate_limit) {
+    const rl: string[] = [];
+    if (draft.rate_limit.requests_per_second) rl.push(`${String(draft.rate_limit.requests_per_second)}/s`);
+    if (draft.rate_limit.requests_per_minute) rl.push(`${String(draft.rate_limit.requests_per_minute)}/min`);
+    if (draft.rate_limit.requests_per_hour) rl.push(`${String(draft.rate_limit.requests_per_hour)}/h`);
+    if (draft.rate_limit.requests_per_day) rl.push(`${String(draft.rate_limit.requests_per_day)}/day`);
+    if (rl.length > 0) parts.push(`rate=${rl.join(',')}`);
+  }
+  if (draft.concurrency) parts.push(`parallel_ok=${String(draft.concurrency.parallel_ok)}`);
+  if (draft.output_volume) parts.push(`output_volume=${draft.output_volume}`);
+  if (draft.cost) parts.push(`cost=${draft.cost.model} $${String(draft.cost.rate_usd)}`);
+  parts.push(`source=${docsUrl}`);
+  return parts.join(' · ');
+}
+
+async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string> {
+  if (!isFeatureEnabled('api-setup-v2')) {
+    return 'Error: docs_url bootstrap is gated behind the `api-setup-v2` feature flag (off by default). Set LYNOX_FEATURE_API_SETUP_V2=1 to enable, or use `openapi_url` if the API has an OpenAPI 3.x spec.';
+  }
+
+  let docsText: string;
+  let truncated: boolean;
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
+    try {
+      const resp = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, agent.toolContext);
+      if (!resp.ok) {
+        return `Error: failed to fetch docs page (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL and try again.`;
+      }
+      const body = await readBodyLimited(resp, DOCS_BODY_MAX_BYTES);
+      docsText = body.text;
+      truncated = body.truncated;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Strip query + fragment so a docs_url with a credential pasted as ?api_key=…
+    // doesn't leak into the agent transcript / stderr via the error path.
+    const safeUrl = safeUrlForLogging(docsUrl);
+    return `Error: docs fetch failed for ${safeUrl} — ${msg}`;
+  }
+
+  let extracted: DocsExtracted;
+  let costUsd: number;
+  try {
+    const result = await callForStructuredJson<DocsExtracted>({
+      system: DOCS_EXTRACT_SYSTEM,
+      user: `Docs URL: ${docsUrl}\n\n---\n\n${docsText}`,
+      schema: DOCS_EXTRACT_SCHEMA,
+      budgetUsd: DOCS_EXTRACT_BUDGET_USD,
+    });
+    extracted = result.data;
+    costUsd = result.costUsd;
+  } catch (err: unknown) {
+    if (err instanceof BudgetError) {
+      return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: docs extraction failed — ${msg}`;
+  }
+
+  const injectedFields = findInjectedFields(extracted);
+  const draft = buildDraftFromExtraction(extracted, docsUrl, injectedFields);
+
+  if (truncated) {
+    draft.notes = [
+      ...(draft.notes ?? []),
+      `docs page exceeded ${String(DOCS_BODY_MAX_BYTES)} bytes and was truncated — verify rate limits and pricing manually before relying on this profile`,
+    ];
+  }
+
+  const summary = buildNlSummary(draft, docsUrl);
+  const draftJson = JSON.stringify(draft, null, 2);
+  const injectedNote = injectedFields.length > 0
+    ? `\nSecurity note: dropped ${String(injectedFields.length)} field(s) the docs page tried to inject (${injectedFields.join(', ')}). base_url is always derived from the docs host, never extracted.`
+    : '';
+  const truncatedNote = truncated
+    ? `\nDocs body was truncated at ${String(DOCS_BODY_MAX_BYTES)} bytes — verify rate limits and pricing before trusting this draft.`
+    : '';
+
+  return `Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).
+
+${summary}${injectedNote}${truncatedNote}
+
+DRAFT JSON (review, fill auth.vault_keys via ask_secret, then call action="create"):
+\`\`\`json
+${draftJson}
+\`\`\`
+
+Next steps:
+1. Inspect the draft. Add or remove guidelines / avoid / notes based on what you learn from a test call.
+2. Use \`ask_secret\` to collect credentials (a single secret name like ${draft.id.toUpperCase()}_API_KEY usually suffices; OAuth needs a refresh-token slot).
+3. Fire one test \`http_request\` against the most innocent endpoint to confirm the auth scheme.
+4. Call \`api_setup\` action="create" with the finished profile.`;
+}
+
 // ── Refine merge ─────────────────────────────────────────────────────────────
 
 function applyRefine(existing: ApiProfile, patch: RefinePatch): ApiProfile {
@@ -291,7 +620,7 @@ function applyRefine(existing: ApiProfile, patch: RefinePatch): ApiProfile {
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   definition: {
     name: 'api_setup',
-    description: 'Create, update, delete, list, view, bootstrap, or refine API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: pass `openapi_url` pointing to an OpenAPI 3.x JSON spec. Returns a draft profile; enrich it with guidelines/avoid/response_shape (from reading docs) and then call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit). Use when a call teaches you something new.\n- delete: pass `id`.',
+    description: 'Create, update, delete, list, view, bootstrap, or refine API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). Returns a draft profile; enrich it with extra guidelines/avoid/response_shape (from reading the docs) and then call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit). Use when a call teaches you something new.\n- delete: pass `id`.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -310,7 +639,11 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         },
         openapi_url: {
           type: 'string',
-          description: 'OpenAPI 3.x JSON spec URL. Required for bootstrap action.',
+          description: 'OpenAPI 3.x JSON spec URL. Use this for bootstrap when an OpenAPI spec is available — most accurate path.',
+        },
+        docs_url: {
+          type: 'string',
+          description: 'Human-readable docs landing page URL. Use for bootstrap when the API has no OpenAPI spec. Gated behind feature flag `api-setup-v2`. Runs one Haiku extraction (≤ $0.05) to populate auth / rate_limit / concurrency / cost / output_volume from the page.',
         },
         refine: {
           type: 'object',
@@ -356,8 +689,11 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
     }
 
     if (input.action === 'bootstrap') {
+      if (input.docs_url) {
+        return bootstrapFromDocs(input.docs_url, agent);
+      }
       if (!input.openapi_url) {
-        return 'Error: "openapi_url" is required for bootstrap action. Pass a URL pointing to the API\'s OpenAPI 3.x JSON spec. If the API has no OpenAPI spec, read the docs via web_research and build a profile manually with action "create".';
+        return 'Error: bootstrap requires either "openapi_url" (OpenAPI 3.x JSON spec, preferred) or "docs_url" (human-readable docs page; gated behind feature flag `api-setup-v2`). If neither is available, read the docs via web_research and build a profile manually with action "create".';
       }
       let spec: OpenApiDoc;
       try {

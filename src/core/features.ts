@@ -12,7 +12,8 @@ export type FeatureFlag =
   | 'plugins'
   | 'flat-file-memory'
   | 'whatsapp-inbox'
-  | 'unified-inbox';
+  | 'unified-inbox'
+  | 'api-setup-v2';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -20,6 +21,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'flat-file-memory': 'LYNOX_FEATURE_FLAT_FILE_MEMORY',
   'whatsapp-inbox': 'LYNOX_FEATURE_WHATSAPP_INBOX',
   'unified-inbox': 'LYNOX_FEATURE_UNIFIED_INBOX',
+  'api-setup-v2': 'LYNOX_FEATURE_API_SETUP_V2',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -30,6 +32,10 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // PRD-UNIFIED-INBOX Phase 1a foundation. Off by default — flip on when the
   // /app/inbox UI ships in Phase 1b and the classifier has been piloted.
   'unified-inbox': false,
+  // PRD-UNIFIED-API-PROFILE-V2 Phase B. Gates `api_setup bootstrap docs_url=…`
+  // (Haiku-extracted v2 profile draft). Off by default — staging burn-in first,
+  // then rafael canary, then cat/war after 48h soak.
+  'api-setup-v2': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags
