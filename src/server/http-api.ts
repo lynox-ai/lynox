@@ -145,6 +145,7 @@ async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknow
       if (bytes > maxBytes) {
         req.destroy();
         reject(new Error('Body too large'));
+        return;
       }
       chunks.push(chunk);
     });
@@ -174,6 +175,7 @@ async function parseBodyWithRaw(req: IncomingMessage, maxBytes: number): Promise
       if (bytes > maxBytes) {
         req.destroy();
         reject(new Error('Body too large'));
+        return;
       }
       chunks.push(chunk);
     });
@@ -1277,6 +1279,7 @@ export class LynoxHTTPApi {
           res.end();
         }
       } finally {
+        clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         this.runningSessions.delete(sessionId);
       }
