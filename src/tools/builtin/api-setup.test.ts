@@ -846,6 +846,68 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('emits tool_progress events at fetching_docs → extracting → finalizing phases', async () => {
+      const fetchSpy = mockFetchOk('<html>docs</html>');
+      stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+
+      const events: Array<{ type: string; phase?: string; tool?: string }> = [];
+      const agent = createMockAgent(new ApiStore()) as unknown as {
+        toolContext: { streamHandler: (e: Record<string, unknown>) => void };
+        name: string;
+      };
+      agent.name = 'test-agent';
+      agent.toolContext.streamHandler = (e: Record<string, unknown>) => {
+        events.push({
+          type: String(e['type']),
+          phase: e['phase'] === undefined ? undefined : String(e['phase']),
+          tool: e['tool'] === undefined ? undefined : String(e['tool']),
+        });
+      };
+
+      try {
+        await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com' },
+          agent as never,
+        );
+        const progressEvents = events.filter(e => e.type === 'tool_progress');
+        expect(progressEvents.map(e => e.phase)).toEqual(['fetching_docs', 'extracting', 'finalizing']);
+        expect(progressEvents.every(e => e.tool === 'api_setup')).toBe(true);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('omits the finalizing tool_progress event when the fetch fails', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('', { status: 404, statusText: 'Not Found' }),
+      );
+
+      const events: Array<{ type: string; phase?: string }> = [];
+      const agent = createMockAgent(new ApiStore()) as unknown as {
+        toolContext: { streamHandler: (e: Record<string, unknown>) => void };
+        name: string;
+      };
+      agent.name = 'test-agent';
+      agent.toolContext.streamHandler = (e: Record<string, unknown>) => {
+        events.push({
+          type: String(e['type']),
+          phase: e['phase'] === undefined ? undefined : String(e['phase']),
+        });
+      };
+
+      try {
+        await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com/missing' },
+          agent as never,
+        );
+        const phases = events.filter(e => e.type === 'tool_progress').map(e => e.phase);
+        // fetching_docs is emitted before the fetch; extracting + finalizing never fire on a 404.
+        expect(phases).toEqual(['fetching_docs']);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('honors network deny-all from ToolContext on the docs_url path', async () => {
       // Mirror of the openapi_url regression test: ensure ctx is threaded into
       // fetchWithValidatedRedirects so air-gapped engines can't pull arbitrary docs pages.

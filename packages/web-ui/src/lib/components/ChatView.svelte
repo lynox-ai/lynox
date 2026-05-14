@@ -13,6 +13,7 @@
 		getIsStreaming,
 		getStreamingActivity,
 		getStreamingToolName,
+		getStreamingToolPhase,
 		getCurrentToolStartedAt,
 		getLastEventAt,
 		getCompletedTextBlockGen,
@@ -1081,6 +1082,7 @@
 	const isStreaming = $derived(getIsStreaming());
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());
+	const streamToolPhase = $derived(getStreamingToolPhase());
 	const currentToolStartedAt = $derived(getCurrentToolStartedAt());
 	const lastEventAt = $derived(getLastEventAt());
 
@@ -1198,6 +1200,17 @@
 		if (streamActivity === 'writing') return t('chat.activity.writing');
 		if (streamActivity === 'thinking') return t('chat.activity.thinking');
 		if (streamActivity === 'tool' && streamToolName) {
+			// Sub-phase label from a tool that emits tool_progress (currently
+			// only api_setup bootstrap docs_url path) wins over the generic
+			// per-tool label — otherwise a 5-8s extraction sits on a static
+			// "Setting up API..." until the result lands.
+			if (streamToolPhase && streamToolPhase.tool === streamToolName) {
+				const phaseKey = `chat.activity.tool.${streamToolPhase.tool}.${streamToolPhase.phase}`;
+				const translated = t(phaseKey);
+				// Fall through to the per-tool label only if the i18n key was
+				// missing (t() returns the key verbatim on miss).
+				if (translated !== phaseKey) return translated;
+			}
 			// Specific tool label, fall back to generic "Arbeitet...". Tools
 			// missing here were the gap users hit during research sessions —
 			// web_crawl, write_artifact, spawn_agent, etc. all fell through to

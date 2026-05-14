@@ -314,6 +314,13 @@ let sessionId = $state<string | null>(persisted.sessionId);
 let isStreaming = $state(false);
 let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
 let streamingToolName = $state<string | null>(null);
+// Sub-phase emitted by the running tool itself (currently only `api_setup`
+// bootstrap with `docs_url`). When set, the activity bar prefers the
+// phase label over the generic tool label so a 5–8s extraction shows
+// "Reading API docs..." → "Extracting auth..." → "Finalizing draft..."
+// instead of a static "Setting up API...". Cleared on tool_result and on
+// the next tool_call.
+let streamingToolPhase = $state<{ tool: string; phase: string } | null>(null);
 // Wall-clock when the currently-running tool call began. Set on each
 // tool_call event, cleared when the activity returns to writing/thinking/idle.
 // Drives the elapsed-time display in the streaming indicator and sticky
@@ -946,6 +953,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg._toolSinceText = true;
 			streamingActivity = 'tool';
 			streamingToolName = toolName;
+			streamingToolPhase = null;
 			currentToolStartedAt = Date.now();
 			// Skip sidebar update for tools whose dedicated stream event carries
 			// richer live state. spawn_agent emits a separate 'spawn' event a
@@ -954,6 +962,19 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// generic tool card before the spawn view takes over.
 			if (toolName !== 'ask_user' && toolName !== 'ask_secret' && toolName !== 'spawn_agent') {
 				setContext({ type: 'tool', toolName, toolInput, title: toolName });
+			}
+			break;
+		}
+		case 'tool_progress': {
+			// A running tool emitted a sub-phase. Right now only `api_setup`
+			// bootstrap (docs_url path) does this so the agent doesn't sit on
+			// a static label for ~5–8s while the docs fetch + Haiku call run.
+			// We don't gate on tool name here — any future tool that emits
+			// progress events will just light up automatically.
+			const tool = String(data['tool'] ?? '');
+			const phase = String(data['phase'] ?? '');
+			if (tool && phase) {
+				streamingToolPhase = { tool, phase };
 			}
 			break;
 		}
@@ -974,6 +995,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				});
 				persistChat();
 			}
+			streamingToolPhase = null;
 			break;
 		}
 		case 'spawn': {
@@ -1520,6 +1542,12 @@ export function getStreamingActivity() {
 }
 export function getStreamingToolName() {
 	return streamingToolName;
+}
+/** Active sub-phase for the running tool, or null if the tool hasn't
+ *  emitted any progress events. Consumers should prefer this label over
+ *  the generic `streamingToolName` mapping when set. */
+export function getStreamingToolPhase(): { tool: string; phase: string } | null {
+	return streamingToolPhase;
 }
 /** Wall-clock when the currently running tool call began. Null between
  *  tool calls (text/thinking). Consumers should also gate on isStreaming. */
