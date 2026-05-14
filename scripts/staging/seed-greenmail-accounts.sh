@@ -67,7 +67,7 @@ post_account() {
             address: $address,
             preset: "custom",
             type: "personal",
-            credentials: { user: "staging", pass: "staging" },
+            credentials: { user: $address, pass: "staging" },
             custom: {
               imap: { host: $host, port: 3143, secure: false },
               smtp: { host: $host, port: 3025, secure: false }
