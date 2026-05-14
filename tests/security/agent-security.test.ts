@@ -22,9 +22,13 @@ describe('Agent Security Audit', () => {
 
   describe('Prompt Injection Defense', () => {
 
-    it('all external tool handlers wrap results with wrapUntrustedData', () => {
+    it('all external tool handlers wrap results with wrapUntrustedData or wrapChannelMessage', () => {
       // External tools that process untrusted data from the internet or third-party APIs.
       // bash is excluded — its output comes from the local system.
+      // wrapChannelMessage is the structured variant for channels with
+      // multiple attacker-controllable fields (title + body, subject + body, …);
+      // both produce the same <untrusted_data> boundary so either satisfies
+      // the contract.
       const externalToolFiles = [
         'tools/builtin/http.ts',
         'integrations/search/web-search-tool.ts',
@@ -42,7 +46,8 @@ describe('Agent Security Audit', () => {
 
       for (const file of externalToolFiles) {
         const content = readFileSync(join(SRC, file), 'utf-8');
-        expect(content, `${file} should import wrapUntrustedData`).toContain('wrapUntrustedData');
+        const wraps = content.includes('wrapUntrustedData') || content.includes('wrapChannelMessage');
+        expect(wraps, `${file} should import wrapUntrustedData or wrapChannelMessage`).toBe(true);
       }
     });
 
@@ -69,7 +74,10 @@ describe('Agent Security Audit', () => {
 
     it('Telegram voice transcription is wrapped as untrusted data', () => {
       const tgContent = readFileSync(join(SRC, 'integrations/telegram/telegram-bot.ts'), 'utf-8');
-      expect(tgContent).toContain('wrapUntrustedData');
+      // wrapChannelMessage produces the same untrusted_data boundary
+      // and is now used so the caption + transcript wrap together.
+      const wraps = tgContent.includes('wrapUntrustedData') || tgContent.includes('wrapChannelMessage');
+      expect(wraps, 'telegram-bot.ts must wrap voice transcription').toBe(true);
     });
 
     it('HTTP redirect SSRF protection on watch fetch', () => {

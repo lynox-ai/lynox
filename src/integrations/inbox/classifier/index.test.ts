@@ -40,11 +40,19 @@ describe('classifyMail', () => {
     expect(llm).toHaveBeenCalledTimes(1);
     const call = llm.mock.calls[0]![0];
     expect(call.system).toContain('lynox');
+    // Account context (trusted) stays outside the untrusted_data block.
     expect(call.user).toContain('Empfänger-Postfach: Me (Acme) <me@acme.example>');
+    // Sender + subject + body now sit inside the untrusted_data block so a
+    // crafted subject can't bleed into the trusted framing.
+    expect(call.user).toContain('<untrusted_data source="mail-classifier">');
     expect(call.user).toContain('Absender: Max Mustermann <mustermann@example.com>');
-    expect(call.user).toContain('<untrusted_data>');
     expect(call.user).toContain('</untrusted_data>');
     expect(call.user).toContain('Strategie-Gespräch');
+    // Belt-and-braces: the trusted account line must NOT appear inside the
+    // wrap (otherwise we leaked trusted context into the attacker's
+    // surface).
+    const matched = call.user.match(/<untrusted_data[^>]*>([\s\S]*?)<\/untrusted_data>/);
+    expect(matched?.[1]).not.toContain('Empfänger-Postfach');
   });
 
   it('forwards the abort signal to the LLM caller', async () => {

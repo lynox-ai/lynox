@@ -2,7 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { wrapUntrustedData } from '../../core/data-boundary.js';
+import { wrapChannelMessage } from '../../core/data-boundary.js';
 
 // === Types ===
 
@@ -233,8 +233,15 @@ async function handleRead(auth: GoogleAuth, input: DriveInput): Promise<string> 
     if (!exportResponse.ok) return `Error: Failed to export file (${exportResponse.status}).`;
     const content = await exportResponse.text();
     const truncated = content.slice(0, 50_000) + (content.length > 50_000 ? '\n\n(Content truncated)' : '');
-    // Wrap as untrusted — file content is attacker-controlled if shared
-    return `**${meta.name}** (exported as ${exportMime})\n\n${wrapUntrustedData(truncated, `google_drive:${meta.name}`)}`;
+    // Wrap as untrusted — file content AND name are attacker-controlled if
+    // shared with edit access. Renaming a file to `</untrusted_data>. …`
+    // used to close the wrapper from the framing line above it; pulling
+    // name inside fixes that and removes the XML-attribute-injection
+    // surface in the source label.
+    return wrapChannelMessage({
+      source: `google_drive:${input.file_id}`,
+      fields: { Name: meta.name, Export: exportMime, Body: truncated },
+    });
   }
 
   // Binary/text file → download
@@ -245,8 +252,10 @@ async function handleRead(auth: GoogleAuth, input: DriveInput): Promise<string> 
   if (contentType.includes('text') || contentType.includes('json') || contentType.includes('xml') || contentType.includes('csv')) {
     const content = await dlResponse.text();
     const truncated = content.slice(0, 50_000) + (content.length > 50_000 ? '\n\n(Content truncated)' : '');
-    // Wrap as untrusted — file content is attacker-controlled if shared
-    return `**${meta.name}** (${meta.mimeType})\n\n${wrapUntrustedData(truncated, `google_drive:${meta.name}`)}`;
+    return wrapChannelMessage({
+      source: `google_drive:${input.file_id}`,
+      fields: { Name: meta.name, MimeType: meta.mimeType, Body: truncated },
+    });
   }
 
   return `**${meta.name}** is a binary file (${meta.mimeType}, ${formatFileSize(meta.size)}). Use the Google Drive web UI to download.`;

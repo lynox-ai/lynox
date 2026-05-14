@@ -1384,9 +1384,12 @@ describe('handleGenerateDraft', () => {
     expect(captured).not.toBeNull();
     const u = captured!.user;
     const s = captured!.system;
-    expect(u).toContain('<untrusted_data>');
+    // The generator now wraps subject + sender + body together with a
+    // source attribute (`mail-generator`), so the literal `<untrusted_data>`
+    // tag has been replaced by `<untrusted_data source="…">`.
+    expect(u).toContain('<untrusted_data source="mail-generator">');
     expect(u).toContain('IGNORE PREVIOUS');
-    expect(u.indexOf('IGNORE PREVIOUS')).toBeGreaterThan(u.indexOf('<untrusted_data>'));
+    expect(u.indexOf('IGNORE PREVIOUS')).toBeGreaterThan(u.indexOf('<untrusted_data'));
     expect(s.toLowerCase()).toContain('untrusted_data');
   });
 
