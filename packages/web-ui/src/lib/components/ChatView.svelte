@@ -1209,6 +1209,7 @@
 				web_search: t('chat.activity.tool.web_search'),
 				web_crawl: t('chat.activity.tool.web_crawl'),
 				crawl_batch: t('chat.activity.tool.crawl_batch'),
+				web_research: t('chat.activity.tool.web_research'),
 				artifact_save: t('chat.activity.tool.artifact_save'),
 				write_artifact: t('chat.activity.tool.write_artifact'),
 				artifact_list: t('chat.activity.tool.artifact_list'),

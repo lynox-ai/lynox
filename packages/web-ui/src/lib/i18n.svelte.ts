@@ -336,6 +336,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.activity.tool.calendar': { de: 'Prüft Kalender...', en: 'Checking calendar...' },
 	'chat.activity.tool.web_crawl': { de: 'Crawlt Webseite...', en: 'Crawling page...' },
 	'chat.activity.tool.crawl_batch': { de: 'Liest Webseiten...', en: 'Reading pages...' },
+	'chat.activity.tool.web_research': { de: 'Recherchiert Quellen...', en: 'Researching sources...' },
 	'chat.activity.tool.write_artifact': { de: 'Schreibt Artefakt...', en: 'Writing artifact...' },
 	'chat.activity.tool.artifact_list': { de: 'Sucht Artefakte...', en: 'Searching artifacts...' },
 	'chat.activity.tool.artifact_delete': { de: 'Löscht Artefakt...', en: 'Deleting artifact...' },
