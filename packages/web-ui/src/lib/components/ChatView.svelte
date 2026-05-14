@@ -13,6 +13,8 @@
 		getIsStreaming,
 		getStreamingActivity,
 		getStreamingToolName,
+		getCurrentToolStartedAt,
+		getLastEventAt,
 		getCompletedTextBlockGen,
 		getCompletedTextBlock,
 		getQueueLength,
@@ -58,6 +60,7 @@
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
 	import PromptAnchor from './PromptAnchor.svelte';
+	import StreamingActivityBar from './StreamingActivityBar.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -1078,6 +1081,8 @@
 	const isStreaming = $derived(getIsStreaming());
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());
+	const currentToolStartedAt = $derived(getCurrentToolStartedAt());
+	const lastEventAt = $derived(getLastEventAt());
 
 	// Once the run is fully done — or a new prompt fires — the post-approval
 	// confirmation is stale. (We can't use streamToolName as a signal because
@@ -1193,19 +1198,44 @@
 		if (streamActivity === 'writing') return t('chat.activity.writing');
 		if (streamActivity === 'thinking') return t('chat.activity.thinking');
 		if (streamActivity === 'tool' && streamToolName) {
-			// Try specific tool label, fall back to generic "Arbeitet..."
+			// Specific tool label, fall back to generic "Arbeitet...". Tools
+			// missing here were the gap users hit during research sessions —
+			// web_crawl, write_artifact, spawn_agent, etc. all fell through to
+			// the generic label, which gave no signal during minute-long calls.
 			const toolLabels: Record<string, string> = {
 				memory_recall: t('chat.activity.tool.memory_recall'),
 				memory_store: t('chat.activity.tool.memory_store'),
 				http_request: t('chat.activity.tool.http_request'),
 				web_search: t('chat.activity.tool.web_search'),
+				web_crawl: t('chat.activity.tool.web_crawl'),
+				crawl_batch: t('chat.activity.tool.crawl_batch'),
+				web_research: t('chat.activity.tool.web_research'),
 				artifact_save: t('chat.activity.tool.artifact_save'),
+				write_artifact: t('chat.activity.tool.write_artifact'),
+				artifact_list: t('chat.activity.tool.artifact_list'),
+				artifact_delete: t('chat.activity.tool.artifact_delete'),
 				ask_user: t('chat.activity.tool.ask_user'),
+				ask_secret: t('chat.activity.tool.ask_secret'),
 				bash: t('chat.activity.tool.bash'),
 				task_list: t('chat.activity.tool.task_list'),
 				send_email: t('chat.activity.tool.send_email'),
 				read_email: t('chat.activity.tool.read_email'),
 				calendar: t('chat.activity.tool.calendar'),
+				spawn_agent: t('chat.activity.tool.spawn_agent'),
+				read_file: t('chat.activity.tool.read_file'),
+				write_file: t('chat.activity.tool.write_file'),
+				list_files: t('chat.activity.tool.list_files'),
+				api_setup: t('chat.activity.tool.api_setup'),
+				api_call: t('chat.activity.tool.api_call'),
+				run_pipeline: t('chat.activity.tool.run_pipeline'),
+				knowledge_recall: t('chat.activity.tool.knowledge_recall'),
+				knowledge_store: t('chat.activity.tool.knowledge_store'),
+				contacts_search: t('chat.activity.tool.contacts_search'),
+				contacts_save: t('chat.activity.tool.contacts_save'),
+				deals_search: t('chat.activity.tool.deals_search'),
+				deals_save: t('chat.activity.tool.deals_save'),
+				datastore_query: t('chat.activity.tool.datastore_query'),
+				datastore_write: t('chat.activity.tool.datastore_write'),
 			};
 			return toolLabels[streamToolName] ?? t('chat.activity.tool.default');
 		}
@@ -1864,13 +1894,6 @@
 				{/if}
 			{/each}
 
-			{#if isStreaming && !pendingPermission}
-				<div class="flex items-center gap-2 text-xs text-text-subtle">
-					<span class="inline-block h-2 w-2 animate-pulse rounded-full bg-accent"></span>
-					{streamingLabel}
-				</div>
-			{/if}
-
 			{#if messages.length > 0}
 				<div class="flex items-center gap-3 flex-wrap">
 					{#if hasToolCalls}
@@ -2325,6 +2348,16 @@
 	     reply surfaces — and the [Antworten] button is only a scroll-locator. -->
 	{#if pipelineStatusV2 && pendingPromptHead && pendingPromptHead.kind === 'tabs' && !inBatchMode}
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
+	{:else if isStreaming && !pendingPermission && !pendingSecret && !pendingTabsPrompt}
+		<!-- Sticky activity surface above the input. Stays visible during
+		     long tool calls where the inline pulsing-dot indicator would
+		     scroll out of view. Suppressed during pending prompts (any kind)
+		     because the agent is waiting on the user, not working. -->
+		<StreamingActivityBar
+			label={streamingLabel}
+			currentToolStartedAt={currentToolStartedAt}
+			lastEventAt={lastEventAt}
+		/>
 	{/if}
 
 	<!-- Input. NO safe-area-inset-bottom here — the StatusBar below this row
