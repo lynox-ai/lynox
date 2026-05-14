@@ -502,11 +502,38 @@ function buildNlSummary(draft: ApiProfile, docsUrl: string): string {
   return parts.join(' · ');
 }
 
+/** Surface a sub-phase update on the streamHandler so the activity bar can
+ *  swap its generic "api_setup" label for "Reading API docs..." etc. No-op
+ *  when no handler is attached (CLI / headless runs).
+ *
+ *  Defensive try/catch + caught Promise.rejection: a misbehaving stream
+ *  handler must never turn a successful bootstrap into an error string nor
+ *  produce an unhandledRejection. The progress event is fire-and-forget
+ *  UX polish — its failure path should be silent. */
+function emitBootstrapProgress(agent: IAgent, phase: 'fetching_docs' | 'extracting' | 'finalizing'): void {
+  const handler = agent.toolContext.streamHandler;
+  if (!handler) return;
+  try {
+    const result = handler({
+      type: 'tool_progress',
+      tool: 'api_setup',
+      phase,
+      agent: agent.name,
+    });
+    if (result instanceof Promise) {
+      result.catch(() => { /* swallow — progress emission is best-effort */ });
+    }
+  } catch {
+    /* swallow synchronous throws too */
+  }
+}
+
 async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string> {
   if (!isFeatureEnabled('api-setup-v2')) {
     return 'Error: docs_url bootstrap is gated behind the `api-setup-v2` feature flag (off by default). Set LYNOX_FEATURE_API_SETUP_V2=1 to enable, or use `openapi_url` if the API has an OpenAPI 3.x spec.';
   }
 
+  emitBootstrapProgress(agent, 'fetching_docs');
   let docsText: string;
   let truncated: boolean;
   try {
@@ -531,6 +558,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     return `Error: docs fetch failed for ${safeUrl} — ${msg}`;
   }
 
+  emitBootstrapProgress(agent, 'extracting');
   let extracted: DocsExtracted;
   let costUsd: number;
   try {
@@ -550,6 +578,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     return `Error: docs extraction failed — ${msg}`;
   }
 
+  emitBootstrapProgress(agent, 'finalizing');
   const injectedFields = findInjectedFields(extracted);
   const draft = buildDraftFromExtraction(extracted, docsUrl, injectedFields);
 

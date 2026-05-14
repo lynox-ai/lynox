@@ -689,15 +689,25 @@ describe('api_setup tool', () => {
       }
     });
 
-    it('returns a feature-flag error when api-setup-v2 is off', async () => {
+    it('returns a feature-flag error when api-setup-v2 is off (and emits no progress events)', async () => {
       delete process.env.LYNOX_FEATURE_API_SETUP_V2;
-      const agent = createMockAgent(new ApiStore());
+      const events: Array<{ type: string }> = [];
+      const agent = createMockAgent(new ApiStore()) as unknown as {
+        toolContext: { streamHandler: (e: Record<string, unknown>) => void };
+        name: string;
+      };
+      agent.name = 'test-agent';
+      agent.toolContext.streamHandler = (e: Record<string, unknown>) => {
+        events.push({ type: String(e['type']) });
+      };
       const result = await apiSetupTool.handler(
         { action: 'bootstrap', docs_url: 'https://docs.dataforseo.com/v3/' },
-        agent,
+        agent as never,
       );
       expect(result).toContain('feature flag');
       expect(result).toContain('api-setup-v2');
+      // Gate runs before any emitBootstrapProgress call, so streamHandler must stay untouched.
+      expect(events.filter(e => e.type === 'tool_progress')).toEqual([]);
     });
 
     it('surfaces a clear error when the docs page returns 404', async () => {
@@ -717,7 +727,7 @@ describe('api_setup tool', () => {
       }
     });
 
-    it('surfaces a budget-exceeded error from the extractor', async () => {
+    it('surfaces a budget-exceeded error from the extractor (and skips finalizing progress)', async () => {
       const fetchSpy = mockFetchOk('<html>some docs</html>');
       mockedExtract.mockRejectedValueOnce(
         new llmHelper.BudgetError('Input estimate 200000 tokens exceeds maxInputTokens=100000', {
@@ -727,11 +737,26 @@ describe('api_setup tool', () => {
       );
 
       try {
-        const agent = createMockAgent(new ApiStore());
+        const events: Array<{ type: string; phase?: string }> = [];
+        const agent = createMockAgent(new ApiStore()) as unknown as {
+          toolContext: { streamHandler: (e: Record<string, unknown>) => void };
+          name: string;
+        };
+        agent.name = 'test-agent';
+        agent.toolContext.streamHandler = (e: Record<string, unknown>) => {
+          events.push({
+            type: String(e['type']),
+            phase: e['phase'] === undefined ? undefined : String(e['phase']),
+          });
+        };
         const result = await apiSetupTool.handler(
           { action: 'bootstrap', docs_url: 'https://docs.huge.example.com' },
-          agent,
+          agent as never,
         );
+        // BudgetError aborts mid-bootstrap; finalizing must never fire because
+        // the extraction try-block returned early.
+        const phases = events.filter(e => e.type === 'tool_progress').map(e => e.phase);
+        expect(phases).toEqual(['fetching_docs', 'extracting']);
         expect(result).toContain('extraction budget exceeded');
       } finally {
         fetchSpy.mockRestore();
@@ -841,6 +866,68 @@ describe('api_setup tool', () => {
         expect(result).toContain('docs fetch failed');
         expect(result).not.toContain('super-secret-token');
         expect(result).not.toContain('#frag');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('emits tool_progress events at fetching_docs → extracting → finalizing phases', async () => {
+      const fetchSpy = mockFetchOk('<html>docs</html>');
+      stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+
+      const events: Array<{ type: string; phase?: string; tool?: string }> = [];
+      const agent = createMockAgent(new ApiStore()) as unknown as {
+        toolContext: { streamHandler: (e: Record<string, unknown>) => void };
+        name: string;
+      };
+      agent.name = 'test-agent';
+      agent.toolContext.streamHandler = (e: Record<string, unknown>) => {
+        events.push({
+          type: String(e['type']),
+          phase: e['phase'] === undefined ? undefined : String(e['phase']),
+          tool: e['tool'] === undefined ? undefined : String(e['tool']),
+        });
+      };
+
+      try {
+        await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com' },
+          agent as never,
+        );
+        const progressEvents = events.filter(e => e.type === 'tool_progress');
+        expect(progressEvents.map(e => e.phase)).toEqual(['fetching_docs', 'extracting', 'finalizing']);
+        expect(progressEvents.every(e => e.tool === 'api_setup')).toBe(true);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('omits the finalizing tool_progress event when the fetch fails', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('', { status: 404, statusText: 'Not Found' }),
+      );
+
+      const events: Array<{ type: string; phase?: string }> = [];
+      const agent = createMockAgent(new ApiStore()) as unknown as {
+        toolContext: { streamHandler: (e: Record<string, unknown>) => void };
+        name: string;
+      };
+      agent.name = 'test-agent';
+      agent.toolContext.streamHandler = (e: Record<string, unknown>) => {
+        events.push({
+          type: String(e['type']),
+          phase: e['phase'] === undefined ? undefined : String(e['phase']),
+        });
+      };
+
+      try {
+        await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com/missing' },
+          agent as never,
+        );
+        const phases = events.filter(e => e.type === 'tool_progress').map(e => e.phase);
+        // fetching_docs is emitted before the fetch; extracting + finalizing never fire on a 404.
+        expect(phases).toEqual(['fetching_docs']);
       } finally {
         fetchSpy.mockRestore();
       }
