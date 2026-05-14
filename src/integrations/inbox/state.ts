@@ -921,9 +921,17 @@ export class InboxStateDb {
   }
 
   /**
-   * Set or clear the snooze. Passing `until = null` clears all three snooze
+   * Set or clear the snooze. Passing `until = null` clears the snooze
    * fields atomically — used by the auto-unsnooze-on-reply path. Scoped
    * to tenant.
+   *
+   * On clear (until=null) we deliberately do NOT touch `unsnooze_on_reply`.
+   * The previous version rewrote it to the default `true` whenever the
+   * snooze was cleared, which left the column with misleading data on a
+   * cleared row (the flag should only matter while a snooze is active,
+   * and a future audit grep over `unsnooze_on_reply = 1` would otherwise
+   * surface phantom intent). We zero `notify_on_unsnooze` on clear since
+   * a manual un-snooze shouldn't leave a reminder primed to re-fire.
    */
   setSnooze(
     id: string,
@@ -933,19 +941,29 @@ export class InboxStateDb {
     notifyOnUnsnooze: boolean = false,
     tenantId: string = DEFAULT_TENANT_ID,
   ): boolean {
+    // Two branches because the SQL column set differs: clear-snooze leaves
+    // unsnooze_on_reply alone, set-snooze writes it.
+    if (until === null) {
+      const result = this.db
+        .prepare<[string, string], unknown>(
+          `UPDATE inbox_items
+           SET snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0
+           WHERE id = ? AND tenant_id = ?`,
+        )
+        .run(id, tenantId) as { changes: number };
+      return result.changes > 0;
+    }
     const result = this.db
-      .prepare<[number | null, string | null, number, number, string, string], unknown>(
+      .prepare<[number, string | null, number, number, string, string], unknown>(
         `UPDATE inbox_items
          SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?
          WHERE id = ? AND tenant_id = ?`,
       )
       .run(
-        until === null ? null : until.getTime(),
-        until === null ? null : condition,
+        until.getTime(),
+        condition,
         unsnoozeOnReply ? 1 : 0,
-        // Clear the reminder flag when un-snoozing — a manual un-snooze
-        // shouldn't leave the row primed to re-fire on the next snooze.
-        until === null ? 0 : (notifyOnUnsnooze ? 1 : 0),
+        notifyOnUnsnooze ? 1 : 0,
         id,
         tenantId,
       ) as { changes: number };
@@ -1167,24 +1185,24 @@ export class InboxStateDb {
     return row ? rowToDraft(row) : null;
   }
 
-  /** The current (non-superseded) draft for an item, or null. */
-  getActiveDraftForItem(itemId: string): InboxDraft | null {
+  /** The current (non-superseded) draft for an item, or null. Scoped to tenant. */
+  getActiveDraftForItem(itemId: string, tenantId: string = DEFAULT_TENANT_ID): InboxDraft | null {
     const row = this.db
-      .prepare<[string], DraftRow>(
+      .prepare<[string, string], DraftRow>(
         `SELECT * FROM inbox_drafts
-         WHERE item_id = ? AND superseded_by IS NULL
+         WHERE item_id = ? AND tenant_id = ? AND superseded_by IS NULL
          ORDER BY generated_at DESC
          LIMIT 1`,
       )
-      .get(itemId);
+      .get(itemId, tenantId);
     return row ? rowToDraft(row) : null;
   }
 
-  /** Track keystroke-batches for the tone-change "edit-loss" guard. */
-  incrementDraftEdits(id: string): boolean {
+  /** Track keystroke-batches for the tone-change "edit-loss" guard. Scoped to tenant. */
+  incrementDraftEdits(id: string, tenantId: string = DEFAULT_TENANT_ID): boolean {
     const result = this.db
-      .prepare(`UPDATE inbox_drafts SET user_edits_count = user_edits_count + 1 WHERE id = ?`)
-      .run(id) as { changes: number };
+      .prepare(`UPDATE inbox_drafts SET user_edits_count = user_edits_count + 1 WHERE id = ? AND tenant_id = ?`)
+      .run(id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 

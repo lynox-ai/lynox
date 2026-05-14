@@ -350,8 +350,9 @@ function isValidIanaTz(tz: string): boolean {
 }
 
 export function handleListItemAudit(deps: InboxApiDeps, id: string): ApiResponse {
-  if (!deps.state.getItem(id)) return notFound('item');
-  return { status: 200, body: { entries: deps.state.listAuditForItem(id) } };
+  const item = deps.state.getItem(id);
+  if (!item) return notFound('item');
+  return { status: 200, body: { entries: deps.state.listAuditForItem(id, item.tenantId) } };
 }
 
 /**
@@ -514,7 +515,7 @@ export function handleBulkAction(deps: InboxApiDeps, body: BulkActionBody): ApiR
       action: body.action,
       performedAt,
     });
-    deps.state.updateUserAction(id, body.action, performedAt);
+    deps.state.updateUserAction(id, body.action, performedAt, item.tenantId);
     // 'unhandled' is a soft revert and is not in InboxAuditAction —
     // the inbox_user_action_log row already records the per-id state
     // change with the shared bulk_id, so we skip the audit row for it.
@@ -873,8 +874,9 @@ function checkBodyMd(bodyMd: unknown): ApiResponse | null {
 }
 
 export function handleGetItemDraft(deps: InboxApiDeps, itemId: string): ApiResponse {
-  if (!deps.state.getItem(itemId)) return notFound('item');
-  const draft = deps.state.getActiveDraftForItem(itemId);
+  const item = deps.state.getItem(itemId);
+  if (!item) return notFound('item');
+  const draft = deps.state.getActiveDraftForItem(itemId, item.tenantId);
   return { status: 200, body: { draft } };
 }
 
@@ -900,9 +902,11 @@ export function handleCreateDraft(
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
   // Supersede target must belong to the same item — otherwise a bug in the
-  // UI could supersede a draft from an unrelated thread.
+  // UI could supersede a draft from an unrelated thread. Scope to the
+  // item's tenant so a leaked draft id from another tenant can't be used
+  // to supersede here.
   if (body.supersededDraftId !== undefined) {
-    const prior = deps.state.getDraftById(body.supersededDraftId);
+    const prior = deps.state.getDraftById(body.supersededDraftId, item.tenantId);
     if (!prior) return bad('supersededDraftId not found');
     if (prior.itemId !== itemId) return bad('supersededDraftId belongs to a different item');
   }
@@ -1185,7 +1189,9 @@ export async function handleSendInboxReply(
   }
   const draft = deps.state.getDraftById(draftId);
   if (!draft) return notFound('draft');
-  const item = deps.state.getItem(draft.itemId);
+  // Now that we have draft.tenantId, scope subsequent reads to it so a
+  // future request-tenant boundary can't cross-resolve item rows.
+  const item = deps.state.getItem(draft.itemId, draft.tenantId);
   if (!item) return notFound('item');
   if (item.channel !== 'email') {
     return { status: 501, body: { error: `send not supported for channel: ${item.channel}` } };
@@ -1299,7 +1305,7 @@ export async function handleSendInboxReply(
   // the item out of the Needs-You zone on next list refresh. If the
   // item vanished between the earlier getItem() and now (Art-17 race),
   // skip the audit so it never references a missing row.
-  if (!deps.state.updateUserAction(item.id, 'replied')) {
+  if (!deps.state.updateUserAction(item.id, 'replied', new Date(), item.tenantId)) {
     return notFound('item');
   }
   deps.state.appendAudit({

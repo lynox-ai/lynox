@@ -220,6 +220,30 @@ describe('InboxStateDb — items', () => {
       expect(inbox.markReminderNotified(itemId, new Date(), 'other-tenant')).toBe(false);
       expect(inbox.markReminderNotified(itemId)).toBe(true);
     });
+
+    it('getActiveDraftForItem returns null for the wrong tenant', () => {
+      const itemId = insertSampleItem();
+      inbox.insertDraft({
+        itemId,
+        bodyMd: 'Draft body',
+        generatedAt: new Date(),
+        generatorVersion: 'haiku-2026-05',
+      });
+      expect(inbox.getActiveDraftForItem(itemId, DEFAULT_TENANT_ID)).not.toBeNull();
+      expect(inbox.getActiveDraftForItem(itemId, 'other-tenant')).toBeNull();
+    });
+
+    it('incrementDraftEdits is a no-op for the wrong tenant', () => {
+      const itemId = insertSampleItem();
+      const draftId = inbox.insertDraft({
+        itemId,
+        bodyMd: 'Draft body',
+        generatedAt: new Date(),
+        generatorVersion: 'haiku-2026-05',
+      });
+      expect(inbox.incrementDraftEdits(draftId, 'other-tenant')).toBe(false);
+      expect(inbox.incrementDraftEdits(draftId)).toBe(true);
+    });
   });
 
   it('hasAnyItemForAccount returns false for an empty account and true after one insert', () => {
@@ -249,7 +273,7 @@ describe('InboxStateDb — user actions and snooze', () => {
     expect(inbox.updateUserAction('missing', 'archived')).toBe(false);
   });
 
-  it('sets and clears snooze atomically — null clears all three fields', () => {
+  it('sets and clears snooze atomically — null clears the snooze + condition, preserves unsnooze_on_reply', () => {
     const id = insertSampleItem();
     expect(inbox.setSnooze(id, new Date('2026-05-15'), 'if_no_reply', false)).toBe(true);
     let item = inbox.getItem(id);
@@ -257,12 +281,16 @@ describe('InboxStateDb — user actions and snooze', () => {
     expect(item?.snoozeCondition).toBe('if_no_reply');
     expect(item?.unsnoozeOnReply).toBe(false);
 
-    // Clear — until=null wipes condition too
+    // Clear — until=null wipes the snooze fields but deliberately leaves
+    // unsnooze_on_reply alone. The flag has no semantic meaning on a
+    // cleared row (no snooze to wake from), and previously rewriting it
+    // to the default `true` left misleading data that future audit greps
+    // would surface as phantom intent.
     expect(inbox.setSnooze(id, null, null)).toBe(true);
     item = inbox.getItem(id);
     expect(item?.snoozeUntil).toBeUndefined();
     expect(item?.snoozeCondition).toBeUndefined();
-    expect(item?.unsnoozeOnReply).toBe(true); // default restored
+    expect(item?.unsnoozeOnReply).toBe(false); // preserved from prior set
   });
 
   it('attaches and detaches a draft id', () => {
