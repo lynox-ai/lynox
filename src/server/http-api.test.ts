@@ -986,6 +986,63 @@ describe('LynoxHTTPApi', () => {
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
       }
     });
+
+    // Audit T3 regression backstop. Locks the declarative-scope coverage
+    // against drift: if a future refactor accidentally downgrades any of
+    // these routes to user-scope, the missing 403 surfaces here. The list
+    // mirrors the old `requiresAdmin` enumeration verbatim so a code-search
+    // for `requiresAdmin` lands on this guard.
+    describe('admin-scope coverage (T3 regression backstop)', () => {
+      const ADMIN_ROUTES: Array<[method: string, path: string]> = [
+        ['PUT',    '/api/config'],
+        ['GET',    '/api/vault/key'],
+        ['POST',   '/api/vault/rotate'],
+        ['GET',    '/api/files'],
+        ['GET',    '/api/files/download'],
+        ['GET',    '/api/files/read'],
+        ['DELETE', '/api/files'],
+        ['GET',    '/api/secrets'],
+        ['PUT',    '/api/secrets/foo'],
+        ['DELETE', '/api/secrets/foo'],
+        ['GET',    '/api/auth/token'],
+        ['GET',    '/api/export'],
+        ['DELETE', '/api/data'],
+        ['POST',   '/api/migration/export'],
+        ['GET',    '/api/migration/handshake'],
+        ['POST',   '/api/migration/handshake'],
+        ['POST',   '/api/migration/manifest'],
+        ['POST',   '/api/migration/chunk'],
+        ['POST',   '/api/migration/restore'],
+        ['DELETE', '/api/migration'],
+        ['POST',   '/api/whatsapp/credentials'],
+        ['DELETE', '/api/whatsapp/credentials'],
+        ['POST',   '/api/kg/cleanup'],
+        ['POST',   '/api/backups/some-id/restore'],
+        ['POST',   '/api/mail/accounts'],
+        ['POST',   '/api/mail/accounts/test'],
+        ['DELETE', '/api/mail/accounts/acct-1'],
+        ['POST',   '/api/mail/accounts/acct-1/default'],
+      ];
+
+      for (const [method, path] of ADMIN_ROUTES) {
+        it(`gates ${method} ${path} behind admin scope`, async () => {
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          try {
+            const init: RequestInit = { method };
+            // Methods that require a JSON body get a stub one so the
+            // server doesn't 400 us before reaching the scope check.
+            if (method === 'PUT' || method === 'POST' || method === 'PATCH') {
+              init.body = JSON.stringify({});
+            }
+            const res = await jsonFetch(path, init);
+            expect(res.status, `${method} ${path}`).toBe(403);
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        });
+      }
+    });
   });
 
   describe('Google OAuth callback', () => {
