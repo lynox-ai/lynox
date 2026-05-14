@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import { mkdtempSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, mkdtempSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { ApiStore } from './api-store.js';
 import type { ApiProfile } from './api-store.js';
 
@@ -182,6 +182,138 @@ describe('ApiStore', () => {
       store.register(SAMPLE_PROFILE);
       store.register({ ...SAMPLE_PROFILE, id: 'other', base_url: 'https://other.com' });
       expect(store.getAll()).toHaveLength(2);
+    });
+  });
+
+  describe('v2 schema migration', () => {
+    let tmpDir: string;
+    let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      tmpDir = createTmpDir();
+      stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    });
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true });
+      stderrSpy.mockRestore();
+    });
+
+    it('injects {parallel_ok: true} default for v1 profiles and emits migration log', () => {
+      writeFileSync(join(tmpDir, 'legacy.json'), JSON.stringify(SAMPLE_PROFILE));
+      const loaded = store.loadFromDirectory(tmpDir);
+      expect(loaded).toBe(1);
+      const profile = store.get('test-api');
+      expect(profile?.concurrency).toEqual({ parallel_ok: true });
+      expect(profile?.output_volume).toBeUndefined();
+
+      const logs = stderrSpy.mock.calls.flat().filter((s): s is string => typeof s === 'string');
+      expect(logs.some(s => s.includes('profile "test-api" is v1'))).toBe(true);
+    });
+
+    it('does not migrate or log when profile is already v2', () => {
+      const v2Profile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'v2-api',
+        concurrency: { parallel_ok: false, max_in_flight: 1 },
+        output_volume: 'large',
+        cost: { model: 'per_call', rate_usd: 0.0006 },
+        provenance: { source: 'manual', schema_version: 2 },
+      };
+      writeFileSync(join(tmpDir, 'v2.json'), JSON.stringify(v2Profile));
+      const loaded = store.loadFromDirectory(tmpDir);
+      expect(loaded).toBe(1);
+
+      const profile = store.get('v2-api');
+      expect(profile?.concurrency?.parallel_ok).toBe(false);
+      expect(profile?.concurrency?.max_in_flight).toBe(1);
+      expect(profile?.output_volume).toBe('large');
+      expect(profile?.cost?.rate_usd).toBe(0.0006);
+      expect(profile?.provenance?.schema_version).toBe(2);
+
+      const logs = stderrSpy.mock.calls.flat().filter((s): s is string => typeof s === 'string');
+      expect(logs.some(s => s.includes('is v1'))).toBe(false);
+    });
+
+    it('preserves explicit v1 concurrency override even without provenance', () => {
+      const profileWithConcurrency: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'pinned',
+        concurrency: { parallel_ok: false },
+      };
+      writeFileSync(join(tmpDir, 'pinned.json'), JSON.stringify(profileWithConcurrency));
+      store.loadFromDirectory(tmpDir);
+
+      const profile = store.get('pinned');
+      expect(profile?.concurrency?.parallel_ok).toBe(false);
+    });
+
+    it('loads the reference DataForSEO v2 profile from examples/', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const refPath = resolve(here, '../../examples/api-profiles/dataforseo.v2.json');
+      const raw = readFileSync(refPath, 'utf-8');
+      const profile = JSON.parse(raw) as ApiProfile;
+
+      writeFileSync(join(tmpDir, 'dataforseo.json'), raw);
+      const loaded = store.loadFromDirectory(tmpDir);
+      expect(loaded).toBe(1);
+
+      expect(profile.concurrency?.parallel_ok).toBe(false);
+      expect(profile.auth?.type).toBe('basic');
+      expect(profile.auth?.basic_format).toBe('pre_encoded_b64');
+      expect(profile.cost?.model).toBe('per_call');
+      expect(profile.output_volume).toBe('large');
+      expect(profile.provenance?.schema_version).toBe(2);
+
+      const logs = stderrSpy.mock.calls.flat().filter((s): s is string => typeof s === 'string');
+      expect(logs.some(s => s.includes('is v1'))).toBe(false);
+    });
+  });
+
+  describe('formatProfile v2 fields', () => {
+    beforeEach(() => { store = new ApiStore(); });
+
+    it('renders concurrency, output_volume, cost, provenance, vault_keys, basic_format', () => {
+      const p: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'rendered',
+        auth: {
+          type: 'basic',
+          basic_format: 'pre_encoded_b64',
+          vault_keys: ['DATAFORSEO_TOKEN'],
+        },
+        concurrency: { parallel_ok: false, max_in_flight: 1, batchable_via_endpoint: '/v3/batch' },
+        output_volume: 'large',
+        cost: { model: 'per_call', rate_usd: 0.0006 },
+        provenance: {
+          source: 'manual',
+          source_url: 'https://docs.example.com',
+          validated_at: '2026-05-14T22:30:00Z',
+          schema_version: 2,
+        },
+      };
+      store.register(p);
+      const out = store.formatProfile(store.get('rendered')!);
+      expect(out).toContain('pre-encoded Base64');
+      expect(out).toContain('DATAFORSEO_TOKEN');
+      expect(out).toContain('parallel_ok=false');
+      expect(out).toContain('max_in_flight: 1');
+      expect(out).toContain('batchable_via_endpoint: /v3/batch');
+      expect(out).toContain('Output volume: large');
+      expect(out).toContain('Cost: per_call @ $0.0006');
+      expect(out).toContain('source=manual');
+      expect(out).toContain('schema_version=2');
+    });
+
+    it('renders oauth2 auth label without leaking vault_keys when absent', () => {
+      const p: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'oauth-render',
+        auth: { type: 'oauth2', vault_keys: ['GOOGLE_REFRESH_TOKEN'] },
+      };
+      store.register(p);
+      const out = store.formatProfile(store.get('oauth-render')!);
+      expect(out).toContain('OAuth2');
+      expect(out).toContain('GOOGLE_REFRESH_TOKEN');
     });
   });
 });

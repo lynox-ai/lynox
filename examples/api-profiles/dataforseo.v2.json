@@ -1,0 +1,51 @@
+{
+  "id": "dataforseo",
+  "name": "DataForSEO",
+  "base_url": "https://api.dataforseo.com",
+  "description": "REST API for SEO data (SERP, keyword volume, competitors, backlinks). DACH-friendly via location_code 2756 (CH) / 2276 (DE) / 2040 (AT).",
+  "auth": {
+    "type": "basic",
+    "basic_format": "pre_encoded_b64",
+    "instructions": "Combine login:password and Base64-encode the result. Send as `Authorization: Basic <encoded>`. The secret stored in the vault is the pre-encoded token, not the raw login/password pair."
+  },
+  "rate_limit": {
+    "requests_per_second": 2
+  },
+  "concurrency": {
+    "parallel_ok": false
+  },
+  "output_volume": "large",
+  "cost": {
+    "model": "per_call",
+    "rate_usd": 0.0006
+  },
+  "endpoints": [
+    { "method": "POST", "path": "/v3/serp/google/organic/live/advanced", "description": "Live SERP for a keyword on Google. Pass tasks[] with keyword + location_code + language_code." },
+    { "method": "POST", "path": "/v3/keywords_data/google_ads/search_volume/live", "description": "Search volume + CPC for an array of keywords. Best for keyword-research workflows." },
+    { "method": "POST", "path": "/v3/dataforseo_labs/google/related_keywords/live", "description": "Related-keyword expansions via DataForSEO Labs (Standard tier)." },
+    { "method": "POST", "path": "/v3/backlinks/summary/live", "description": "Backlink-profile summary for a target domain." }
+  ],
+  "guidelines": [
+    "Wrap one keyword (or one target) per task object in the POST body; DataForSEO accepts arrays of tasks per call.",
+    "Use Switzerland location_code (2756) + language 'de' for DACH-relevant queries.",
+    "Always use the /live/ variant for synchronous responses; avoid the queue-based endpoints for interactive workflows.",
+    "Re-use the same login:password pair across calls; rotation requires re-encoding the Base64 token."
+  ],
+  "avoid": [
+    "Never fire parallel requests — DataForSEO blocks concurrent calls per credential and the second call returns 429.",
+    "Don't pass HTML-encoded characters in keywords; use raw UTF-8.",
+    "Don't shape the request body as a flat object — it must always be a tasks[] array.",
+    "Don't store the raw login/password split as two vault entries; the auth flow expects the pre-combined Base64 token."
+  ],
+  "notes": [
+    "Per docs https://docs.dataforseo.com/v3/auth: no parallel requests, ~2 req/s soft cap per account.",
+    "Pricing (Standard tier, 2026-05): ~$0.0006 per SERP task. Confirm per endpoint via /merchant pricing call.",
+    "Response shape nests tasks[0].result[0].items[] — agent should apply response_shape projection to keep the LLM context lean."
+  ],
+  "provenance": {
+    "source": "manual",
+    "source_url": "https://docs.dataforseo.com/v3/",
+    "validated_at": "2026-05-14T22:30:00Z",
+    "schema_version": 2
+  }
+}

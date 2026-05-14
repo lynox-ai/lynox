@@ -28,14 +28,22 @@ export interface ApiRateLimit {
 }
 
 export interface ApiAuth {
-  /** Auth type: basic, bearer, header, query */
-  type: 'basic' | 'bearer' | 'header' | 'query';
+  /** Auth type: basic, bearer, header, query, oauth2 (oauth2 reserved for managed OAuth onboarding). */
+  type: 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
+  /**
+   * For 'basic': how the credential is stored.
+   * - 'user_pass_split' — separate username + password fields combined at call time.
+   * - 'pre_encoded_b64' — single secret already Base64-encoded as `user:pass` (DataForSEO pattern).
+   */
+  basic_format?: 'user_pass_split' | 'pre_encoded_b64' | undefined;
   /** Header name for 'header' type (e.g. 'X-Api-Key'). Default: 'Authorization'. */
   header_name?: string | undefined;
   /** Query parameter name for 'query' type. */
   query_param?: string | undefined;
   /** Instructions for the agent on how to authenticate. */
   instructions?: string | undefined;
+  /** Vault key name(s) holding the secret material. Required for `type='oauth2'` (refresh-token slot). */
+  vault_keys?: string[] | undefined;
 }
 
 export type ShapeReducer = 'avg' | 'peak' | 'avg+peak' | 'count' | 'first_n' | 'last_n';
@@ -97,6 +105,69 @@ export interface ApiProfile {
   notes?: string[] | undefined;
   /** Declarative response-shaping rules, applied by `http_request` when responses are JSON. */
   response_shape?: ResponseShape | undefined;
+
+  // ── v2 additions ──
+
+  /** Concurrency model. Drives the routing layer's sub-agent decision (Phase D). */
+  concurrency?: {
+    /** Can two requests for this API be in flight on the same credential simultaneously? */
+    parallel_ok: boolean;
+    /** Soft cap on N parallel calls per token, when parallel_ok=true. */
+    max_in_flight?: number | undefined;
+    /** If parallel_ok=false, can the API batch N items into a single call? Endpoint path or ID. */
+    batchable_via_endpoint?: string | undefined;
+  } | undefined;
+
+  /**
+   * Output volume class. Drives "should we delegate the call to a sub-agent?"
+   * - small      <1 KB JSON / <500 tokens — never delegate
+   * - medium     <10 KB                   — delegate only if multiple calls
+   * - large      >10 KB                   — always delegate (extract in sub-agent)
+   * - streaming                           — must be consumed where opened (no delegate)
+   */
+  output_volume?: 'small' | 'medium' | 'large' | 'streaming' | undefined;
+
+  /** Cost model. Drives budget gates, per-call accounting, and Phase E cost display. */
+  cost?: {
+    model: 'per_call' | 'per_token' | 'per_unit';
+    rate_usd: number;
+    /** For per_token, ratio between input and output tokens (often ~3:1). */
+    output_ratio?: number | undefined;
+  } | undefined;
+
+  /** Provenance — audit + refresh trigger. Presence of `schema_version: 2` marks a v2 profile. */
+  provenance?: {
+    source: 'openapi' | 'docs_url' | 'manual';
+    source_url?: string | undefined;
+    /** ISO timestamp of the last successful validate-call. */
+    validated_at?: string | undefined;
+    schema_version: 2;
+  } | undefined;
+}
+
+/**
+ * Detect a v1 profile (missing `provenance.schema_version`) and inject conservative
+ * v2 defaults so consumers can treat the loaded shape uniformly. Logs once per file.
+ *
+ * - `concurrency` → `{parallel_ok: true}` (v1 profiles were always called serially
+ *   anyway; before Phase D's routing layer ships, parallel_ok has no runtime effect).
+ * - `output_volume` → left undefined (consumers treat as `medium`).
+ * - No provenance is fabricated — that would falsely claim a v2 origin.
+ */
+function migrateV1Profile(profile: ApiProfile): ApiProfile {
+  if (profile.provenance?.schema_version === 2) return profile;
+
+  // JSON-stringify the id so any control chars / ANSI in a hand-edited profile
+  // file can't inject fake log lines or terminal sequences via stderr.
+  process.stderr.write(
+    `[lynox:api-store] profile ${JSON.stringify(profile.id)} is v1; v2 fields default to {concurrency.parallel_ok=true, output_volume=undefined}\n`,
+  );
+
+  const out: ApiProfile = { ...profile };
+  if (!out.concurrency) {
+    out.concurrency = { parallel_ok: true };
+  }
+  return out;
 }
 
 // ── Rate Limiter (per-API, in-memory) ──
@@ -186,7 +257,8 @@ export class ApiStore {
           process.stderr.write(`[lynox:api-store] Skipping ${file}: missing required fields (id, name, base_url, description)\n`);
           continue;
         }
-        this.register(profile);
+        const migrated = migrateV1Profile(profile);
+        this.register(migrated);
         loaded++;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -271,11 +343,18 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     lines.push(`Base URL: ${p.base_url}`);
 
     if (p.auth) {
-      const authDesc = p.auth.type === 'basic' ? 'Basic Auth (username:password base64)'
+      const authDesc = p.auth.type === 'basic'
+          ? p.auth.basic_format === 'pre_encoded_b64'
+            ? 'Basic Auth (pre-encoded Base64 secret — send as-is in Authorization header)'
+            : 'Basic Auth (username:password base64)'
         : p.auth.type === 'bearer' ? 'Bearer Token in Authorization header'
         : p.auth.type === 'header' ? `API key in header: ${p.auth.header_name ?? 'X-Api-Key'}`
+        : p.auth.type === 'oauth2' ? 'OAuth2 (managed refresh-token flow)'
         : `API key in query param: ${p.auth.query_param ?? 'key'}`;
       lines.push(`Auth: ${authDesc}`);
+      if (p.auth.vault_keys?.length) {
+        lines.push(`Auth vault keys: ${p.auth.vault_keys.join(', ')}`);
+      }
       if (p.auth.instructions) {
         lines.push(`Auth note: ${p.auth.instructions}`);
       }
@@ -333,6 +412,34 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
       if (p.response_shape.max_chars !== undefined) {
         lines.push(`  max_chars: ${String(p.response_shape.max_chars)}`);
       }
+    }
+
+    if (p.concurrency) {
+      lines.push('');
+      lines.push(`Concurrency: parallel_ok=${String(p.concurrency.parallel_ok)}`);
+      if (p.concurrency.max_in_flight !== undefined) {
+        lines.push(`  max_in_flight: ${String(p.concurrency.max_in_flight)}`);
+      }
+      if (p.concurrency.batchable_via_endpoint) {
+        lines.push(`  batchable_via_endpoint: ${p.concurrency.batchable_via_endpoint}`);
+      }
+    }
+
+    if (p.output_volume) {
+      lines.push(`Output volume: ${p.output_volume}`);
+    }
+
+    if (p.cost) {
+      const ratio = p.cost.output_ratio !== undefined ? ` (output_ratio=${String(p.cost.output_ratio)})` : '';
+      lines.push(`Cost: ${p.cost.model} @ $${String(p.cost.rate_usd)}${ratio}`);
+    }
+
+    if (p.provenance) {
+      const parts: string[] = [`source=${p.provenance.source}`];
+      if (p.provenance.source_url) parts.push(`url=${p.provenance.source_url}`);
+      if (p.provenance.validated_at) parts.push(`validated_at=${p.provenance.validated_at}`);
+      parts.push(`schema_version=${String(p.provenance.schema_version)}`);
+      lines.push(`Provenance: ${parts.join(', ')}`);
     }
 
     return lines.join('\n');

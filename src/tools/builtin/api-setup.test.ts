@@ -123,7 +123,7 @@ describe('api_setup tool', () => {
         { action: 'create', profile: { ...SAMPLE_PROFILE, auth: { type: 'oauth' as 'bearer' } } },
         agent,
       );
-      expect(result).toContain('Invalid auth type');
+      expect(result).toContain('Invalid auth.type');
     });
 
     it('requires profile object', async () => {
@@ -340,6 +340,210 @@ describe('api_setup tool', () => {
       } finally {
         fetchSpy.mockRestore();
       }
+    });
+  });
+
+  describe('create — v2 schema validation', () => {
+    function withV2(overrides: Partial<ApiProfile>): ApiProfile {
+      return { ...SAMPLE_PROFILE, ...overrides };
+    }
+
+    it('accepts a fully-populated v2 profile', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            concurrency: { parallel_ok: false, max_in_flight: 1 },
+            output_volume: 'large',
+            cost: { model: 'per_call', rate_usd: 0.0006 },
+            provenance: { source: 'manual', schema_version: 2 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('Created API profile');
+      expect(store.get('test-api')?.cost?.rate_usd).toBe(0.0006);
+    });
+
+    it('rejects oauth2 without vault_keys', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({ auth: { type: 'oauth2' } }),
+        },
+        agent,
+      );
+      expect(result).toContain('auth.vault_keys is required for auth.type="oauth2"');
+    });
+
+    it('accepts oauth2 with vault_keys', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({ auth: { type: 'oauth2', vault_keys: ['GOOGLE_REFRESH_TOKEN'] } }),
+        },
+        agent,
+      );
+      expect(result).toContain('Created API profile');
+    });
+
+    it('rejects invalid auth.basic_format', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            auth: { type: 'basic', basic_format: 'hex' as 'pre_encoded_b64' },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('Invalid auth.basic_format');
+    });
+
+    it('rejects non-boolean concurrency.parallel_ok', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            concurrency: { parallel_ok: 'yes' as unknown as boolean },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('concurrency.parallel_ok');
+    });
+
+    it('rejects negative concurrency.max_in_flight', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            concurrency: { parallel_ok: true, max_in_flight: -1 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('concurrency.max_in_flight');
+    });
+
+    it('rejects non-integer concurrency.max_in_flight', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            concurrency: { parallel_ok: true, max_in_flight: 1.5 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('concurrency.max_in_flight');
+    });
+
+    it('rejects unknown output_volume', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({ output_volume: 'huge' as 'large' }),
+        },
+        agent,
+      );
+      expect(result).toContain('output_volume');
+    });
+
+    it('rejects unknown cost.model', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            cost: { model: 'per_sneeze' as 'per_call', rate_usd: 0.01 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('cost.model');
+    });
+
+    it('accepts cost.rate_usd: 0 (free-tier API)', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            id: 'free-tier',
+            cost: { model: 'per_call', rate_usd: 0 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('Created API profile');
+      expect(store.get('free-tier')?.cost?.rate_usd).toBe(0);
+    });
+
+    it('rejects negative cost.rate_usd', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            cost: { model: 'per_call', rate_usd: -0.01 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('cost.rate_usd');
+    });
+
+    it('rejects non-positive cost.output_ratio', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            cost: { model: 'per_token', rate_usd: 0.001, output_ratio: 0 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('cost.output_ratio');
+    });
+
+    it('rejects unknown provenance.source', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            provenance: { source: 'scraped' as 'manual', schema_version: 2 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('provenance.source');
+    });
+
+    it('rejects wrong provenance.schema_version', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            provenance: { source: 'manual', schema_version: 3 as 2 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('schema_version');
     });
   });
 
