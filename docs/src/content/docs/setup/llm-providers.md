@@ -39,7 +39,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | Typical monthly | $30–150 | $30–150 | $10–50 | $150 fixed |
 
 :::note[BYOK only]
-AWS Bedrock is supported as a **Bring-Your-Own-Key** option for Self-Hosted and Hosted tier customers who already run on AWS. lynox's own Managed / Managed Pro tiers ship with Anthropic Direct as the primary model and Mistral AI as the secondary model — AWS Bedrock is not part of those managed offerings.
+AWS Bedrock is a **Bring-Your-Own-Key** option for users who already run on AWS. lynox's own managed plans handle provider selection automatically — contact us at [hello@lynox.ai](mailto:hello@lynox.ai) for details.
 :::
 
 ## Claude (Anthropic) — Default
