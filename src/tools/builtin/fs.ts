@@ -1,16 +1,19 @@
 import { readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
-import type { ToolEntry } from '../../types/index.js';
+import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
 
+/**
+ * Per-Session byte budget for write_file. Previously enforced via the
+ * module-level `sessionWriteBytes`; that masqueraded as per-session but
+ * actually accumulated for the lifetime of the process (no reset between
+ * Sessions outside the test-only `resetWriteByteCounter` helper). Now
+ * charged against `agent.sessionCounters.writeBytes`, which the owning
+ * Session allocates fresh on construction and the spawn-agent path
+ * shares with sub-agents.
+ */
 const MAX_WRITE_BYTES_PER_SESSION = 100 * 1024 * 1024; // 100MB
-let sessionWriteBytes = 0;
-
-/** Reset the session write byte counter (for testing). */
-export function resetWriteByteCounter(): void {
-  sessionWriteBytes = 0;
-}
 
 interface ReadFileInput {
   path: string;
@@ -73,10 +76,10 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       required: ['path', 'content'],
     },
   },
-  handler: async (input: WriteFileInput): Promise<string> => {
+  handler: async (input: WriteFileInput, agent: IAgent): Promise<string> => {
     try {
       const contentBytes = Buffer.byteLength(input.content, 'utf-8');
-      if (sessionWriteBytes + contentBytes > MAX_WRITE_BYTES_PER_SESSION) {
+      if (agent.sessionCounters.writeBytes + contentBytes > MAX_WRITE_BYTES_PER_SESSION) {
         throw new Error(`Session write limit (${MAX_WRITE_BYTES_PER_SESSION} bytes) exceeded.`);
       }
       // Without active workspace: ALL paths → ~/.lynox/workspace/ (strip leading /)
@@ -108,7 +111,7 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       }
       mkdirSync(dirname(realPath), { recursive: true });
       writeFileSync(realPath, input.content, 'utf-8');
-      sessionWriteBytes += contentBytes;
+      agent.sessionCounters.writeBytes += contentBytes;
       return `Written to ${realPath}`;
     } catch (err: unknown) {
       const cause = err instanceof Error ? err : new Error(String(err));

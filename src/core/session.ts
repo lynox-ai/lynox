@@ -109,6 +109,17 @@ export class Session {
   private _promptSecret: PromptSecretFn | null = null;
   private _tenantId: string | null = null;
   private _skipMemoryExtractionOverride: boolean | null = null;
+  /**
+   * Mutable per-Session counters (http_request count, write_file bytes).
+   * Owned here so the same reference flows into the main Agent and every
+   * spawned sub-agent — one budget per conversation, reset between sessions.
+   * Previously these lived as module-level state in tools/builtin/http.ts
+   * and tools/builtin/fs.ts and grew for the lifetime of the process.
+   */
+  private readonly _sessionCounters: import('../types/agent.js').SessionCounters = {
+    httpRequests: 0,
+    writeBytes: 0,
+  };
   private _userTimezone: string | null = null;
 
   // Per-session config (copied from engine.config at creation, mutated independently)
@@ -947,6 +958,7 @@ export class Session {
       activeScopes: engine.getActiveScopes().length > 0 ? engine.getActiveScopes() : undefined,
       changesetManager: this._changesetManager ?? undefined,
       toolContext,
+      sessionCounters: this._sessionCounters,
       userTimezone: this._userTimezone ?? undefined,
     });
 

@@ -57,6 +57,15 @@ export interface AgentConfig {
   openaiAuth?:         'static' | 'google-vertex' | undefined;
   /** IANA timezone (e.g. 'Europe/Zurich') for the human user. Threaded through the per-turn `[Now: …]` marker so the model presents scheduled times in the user's wallclock, not UTC. */
   userTimezone?:       string | undefined;
+  /**
+   * Session-scoped counters (http_request count, write_file bytes). When the
+   * Session creates its main Agent it allocates one object and passes the
+   * same reference into every spawned sub-agent so the conversation
+   * accumulates a single budget. Defaults to a fresh zero-counter object —
+   * useful for ad-hoc agent construction outside a Session, less useful in
+   * production where the Session should own the budget.
+   */
+  sessionCounters?:    import('./agent.js').SessionCounters | undefined;
 }
 
 /** Minimal interface to avoid circular deps between agent and changeset module */
