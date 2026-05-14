@@ -349,9 +349,16 @@ export function formatToolGroup(
 // ---------------------------------------------------------------------------
 
 export function buildAnswerKeyboard(options: string[]): InlineKeyboardMarkup {
-  const buttons = options.map(opt => ({
+  // Telegram's callback_data has a hard 64-byte limit. The previous encoding
+  // serialised the full option string into the payload (`{t:'a',v:opt}`) —
+  // any option over ~48 chars produced a `BUTTON_DATA_INVALID` and silently
+  // killed the agent turn. Index-based encoding (already used by
+  // formatFollowUpKeyboard below) keeps callback_data 12 bytes regardless of
+  // option length; the bot handler resolves the index against
+  // run.pendingInput.options[].
+  const buttons = options.map((opt, i) => ({
     text: opt,
-    callback_data: JSON.stringify({ t: 'a', v: opt }),
+    callback_data: JSON.stringify({ t: 'a', i }),
   }));
 
   // Add Stop button (always English label — callback_data is language-independent)

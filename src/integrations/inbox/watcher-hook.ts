@@ -111,9 +111,28 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const threadKey = resolveThreadKey(env);
 
     // 1. Skip duplicate work — Phase 1a always inserts on miss; re-classify on
-    //    new replies is Phase 3+.
+    //    new replies is Phase 3+. Before short-circuiting, run the
+    //    auto-unsnooze-on-reply check: if the existing item is snoozed AND
+    //    the user opted into unsnooze-on-reply when snoozing, a new mail in
+    //    the same thread is the signal to wake it up. Without this the flag
+    //    that the schema, the API, and the UI all support was a dead feature
+    //    — set, stored, never read (audit K-SR-01).
     const existing = opts.state.findItemByThread(accountId, threadKey);
-    if (existing) return;
+    if (existing) {
+      const snoozeUntilMs = existing.snoozeUntil?.getTime();
+      const stillSnoozed = snoozeUntilMs !== undefined && snoozeUntilMs > Date.now();
+      if (stillSnoozed && existing.unsnoozeOnReply) {
+        opts.state.setSnooze(existing.id, null, null);
+        opts.state.appendAudit({
+          tenantId: opts.tenantId,
+          itemId: existing.id,
+          action: 'unsnoozed_on_reply',
+          actor: 'system',
+          payloadJson: JSON.stringify({ trigger: 'inbound_mail' }),
+        });
+      }
+      return;
+    }
 
     // 2. User-confirmed rule short-circuits the LLM.
     const rule = opts.rules.match({

@@ -146,6 +146,56 @@ describe('createInboxClassifierHook — short-circuit and skip', () => {
     await hook(ACCOUNT.id, envelope());
     expect(queueCalls).toHaveLength(0);
   });
+
+  // Audit K-SR-01: unsnooze_on_reply was schema-+API-supported but never
+  // actuated. A reply on a snoozed thread should auto-clear the snooze
+  // when the user opted into reply-wake.
+  it('auto-unsnoozes on reply when unsnooze_on_reply is set', async () => {
+    const itemId = inbox.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'imap:thread-1',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'pre-existing',
+      classifiedAt: new Date(),
+      classifierVersion: 'haiku-2026-05',
+    });
+    const future = new Date(Date.now() + 7 * 24 * 60_000 * 60); // 7d out
+    inbox.setSnooze(itemId, future, null, /* unsnoozeOnReply */ true);
+
+    // Sanity: row is snoozed before the hook fires.
+    expect(inbox.getItem(itemId)?.snoozeUntil).toBeDefined();
+
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope());
+
+    expect(queueCalls).toHaveLength(0); // still short-circuited
+    const after = inbox.getItem(itemId);
+    expect(after?.snoozeUntil).toBeUndefined(); // ← was cleared
+    const audit = inbox.listAuditForItem(itemId);
+    expect(audit.map(a => a.action)).toContain('unsnoozed_on_reply');
+  });
+
+  it('does NOT auto-unsnooze when unsnooze_on_reply is off', async () => {
+    const itemId = inbox.insertItem({
+      accountId: ACCOUNT.id,
+      channel: 'email',
+      threadKey: 'imap:thread-1',
+      bucket: 'requires_user',
+      confidence: 0.9,
+      reasonDe: 'pre-existing',
+      classifiedAt: new Date(),
+      classifierVersion: 'haiku-2026-05',
+    });
+    const future = new Date(Date.now() + 7 * 24 * 60_000 * 60);
+    inbox.setSnooze(itemId, future, null, /* unsnoozeOnReply */ false);
+
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope());
+
+    expect(inbox.getItem(itemId)?.snoozeUntil).toBeDefined(); // ← preserved
+  });
 });
 
 describe('createInboxClassifierHook — rule short-circuit', () => {

@@ -32,10 +32,11 @@ export type InboxAuditAction =
   | 'replied'
   | 'snoozed'
   | 'undo'
+  | 'unsnoozed_on_reply'
   | 'rule_applied'
   | 'generation_requested';
 
-export type InboxAuditActor = 'classifier' | 'user' | 'rule_engine';
+export type InboxAuditActor = 'classifier' | 'user' | 'rule_engine' | 'system';
 
 export type InboxRuleMatcherKind = 'from' | 'subject_contains' | 'list_id';
 

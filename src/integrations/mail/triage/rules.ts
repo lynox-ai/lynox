@@ -43,7 +43,21 @@ export function prefilter(env: MailEnvelope, headers?: ReadonlyMap<string, strin
     }
   }
 
-  // Rule 3: bulk-sender domains by convention (newsletter.*, mail.*-but-not-mail-providers)
+  // Rule 3: bulk-sender domains by convention.
+  //
+  // `newsletter.*` always counts — there's no legitimate transactional use
+  // of that prefix. For other bulk-typical prefixes (`mail.*`, `info.*`,
+  // `marketing.*`, …) we used to fire on ANY 2-level subdomain match,
+  // which silently swallowed `mail.stripe.com`, `info.docusign.com`,
+  // `mail.protection.outlook.com` etc. — invoices and signing requests
+  // that absolutely need to reach the inbox (audit K-LE-08). The fix:
+  //
+  // - Transactional bulk senders use a 2-level subdomain
+  //   (`mail.stripe.com`) AND set `List-Unsubscribe` only sometimes;
+  //   real marketing campaigns use 3+ levels (`mail.notifications.…`)
+  //   or carry `List-Unsubscribe`. Require 3+ subdomain levels here so
+  //   genuine transactional 2-level domains pass through; List-Unsubscribe
+  //   sends are already caught by Rule 1.
   for (const addr of env.from) {
     const at = addr.address.lastIndexOf('@');
     if (at < 0) continue;
@@ -51,7 +65,13 @@ export function prefilter(env: MailEnvelope, headers?: ReadonlyMap<string, strin
     if (/^newsletter\./.test(domain)) {
       return { category: 'noise', reason: `newsletter domain: ${domain}` };
     }
-    if (/^(mail|email|m|e|news|info|marketing|promo)\./.test(domain) && !LEGITIMATE_MAIL_DOMAINS.has(domain)) {
+    const parts = domain.split('.');
+    const hasThreePlusSubdomainLevels = parts.length >= 4;
+    if (
+      hasThreePlusSubdomainLevels
+      && /^(mail|email|m|e|news|info|marketing|promo)\./.test(domain)
+      && !LEGITIMATE_MAIL_DOMAINS.has(domain)
+    ) {
       return { category: 'noise', reason: `bulk-sender subdomain: ${domain}` };
     }
   }
@@ -72,4 +92,7 @@ const LEGITIMATE_MAIL_DOMAINS: ReadonlySet<string> = new Set([
   'mail.proton.me',
   'mail.protonmail.com',
   'mail.tutanota.com',
+  // Microsoft's outbound rewriter — exempts EOP-stamped mail (legitimate
+  // transactional traffic that the recipient absolutely needs to see).
+  'mail.protection.outlook.com',
 ]);

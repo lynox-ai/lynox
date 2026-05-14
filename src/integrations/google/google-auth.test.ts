@@ -175,6 +175,51 @@ describe('GoogleAuth', () => {
       expect(t2).toBe('second-refresh-eeeeeeee');
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
+
+    // Audit S-CR-M2 / memory feedback_oauth_refresh_token_loss:
+    // transient 5xx/429 must NOT wipe the refresh token. Only the
+    // permanent `invalid_grant` / `invalid_client` cases delete the vault.
+    it('keeps the refresh token on a 503 transient failure', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(new Response('Service unavailable', { status: 503 }));
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/503/);
+      // Vault still has the token — only a re-tryable error was thrown.
+      expect(vault.delete).not.toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+    });
+
+    it('keeps the refresh token on a 429 rate limit', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(new Response('quota exceeded', { status: 429 }));
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/429/);
+      expect(vault.delete).not.toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+    });
+
+    it('DOES wipe the vault on invalid_grant — the token is truly dead', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'Token has been expired or revoked' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_grant/);
+      expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+    });
   });
 
   describe('getAccountInfo', () => {

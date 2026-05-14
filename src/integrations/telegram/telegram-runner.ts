@@ -161,6 +161,25 @@ export function resolveInput(chatId: number, answer: string): boolean {
   return true;
 }
 
+/**
+ * Resolve a pending input by option index. Used by the callback handler
+ * because Telegram's 64-byte callback_data limit forces buildAnswerKeyboard
+ * to encode an integer index instead of the full answer string. Returns
+ * false when there's no pending input OR the index is out of range OR the
+ * pending input has no options (free-form prompt) — in any of those cases
+ * the caller should ack the callback as expired.
+ */
+export function resolveInputByIndex(chatId: number, index: number): boolean {
+  const run = activeRuns.get(chatId);
+  if (!run?.pendingInput) return false;
+  const options = run.pendingInput.options;
+  if (!options || index < 0 || index >= options.length) return false;
+  const answer = options[index]!;
+  run.pendingInput.resolve(answer);
+  run.pendingInput = null;
+  return true;
+}
+
 export async function abortRun(chatId: number, session: TelegramSession, bot?: Telegraf): Promise<void> {
   const run = activeRuns.get(chatId);
   if (!run) return;
