@@ -425,11 +425,23 @@ interface LinkedSection {
 /** Scan a landing-page HTML body for same-host links whose anchor text or
  *  pathname mentions one of the LINKED_SECTION_KEYWORDS. Returns up to
  *  LINKED_SECTION_MAX_COUNT deduplicated candidates, highest keyword-hit count
- *  first. Pure function — no network IO, safe to run on truncated bodies. */
+ *  first. Pure function — no network IO, safe to run on truncated bodies.
+ *
+ *  Trust boundary: same-host means "same host as the user-supplied docs URL".
+ *  If the user passes an attacker-controlled docs URL, this function can fan
+ *  out to that attacker's other paths by design — the user opted in by
+ *  supplying the URL. The filter only blocks lateral movement to a *different*
+ *  domain (e.g. an attacker docs page linking to `evil.com/leak`). */
 function findLinkedSections(html: string, baseUrl: string): LinkedSection[] {
   let base: URL;
+  let baseCanonical: string;
   try {
     base = new URL(baseUrl);
+    // Canonicalise the input so a candidate with a different fragment / trailing
+    // detail still matches and is deduped against the URL we already fetched.
+    const baseForDedup = new URL(baseUrl);
+    baseForDedup.hash = '';
+    baseCanonical = baseForDedup.toString();
   } catch {
     return [];
   }
@@ -450,12 +462,13 @@ function findLinkedSections(html: string, baseUrl: string): LinkedSection[] {
       continue;
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
-    // Same-host only — never cross to a different domain (closes the
-    // "attacker docs links to attacker.com/leak" exfil path).
-    if (parsed.host !== base.host) continue;
+    // Same-host only. Use `hostname` (not `host`) so `example.com` and
+    // `example.com:443` compare equal — explicit default ports must not
+    // silently drop legitimate same-effective-host links.
+    if (parsed.hostname !== base.hostname) continue;
     parsed.hash = '';
     const normalized = parsed.toString();
-    if (normalized === baseUrl) continue;
+    if (normalized === baseCanonical) continue;
     if (seen.has(normalized)) continue;
 
     const anchorText = rawAnchor.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -672,12 +685,18 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   let extracted: DocsExtracted;
   let costUsd: number;
   try {
+    // Defense-in-depth: an attacker docs page can plant the literal section
+    // marker inside its body to spoof provenance. Neutralise the trigger
+    // string in any source body BEFORE concatenation. Impact today is low
+    // (the whitelist post-validator still strips id/name/base_url/vault_keys),
+    // but keeping section provenance unforgeable costs almost nothing.
+    const sanitizeBody = (text: string): string => text.replaceAll('=== Linked section:', '=== Linked-section-(escaped):');
     const linkedBlobs = fetchedSections
-      .map(s => `\n\n=== Linked section: ${s.url} ===\n\n${s.text}`)
+      .map(s => `\n\n=== Linked section: ${s.url} ===\n\n${sanitizeBody(s.text)}`)
       .join('');
     const result = await callForStructuredJson<DocsExtracted>({
       system: DOCS_EXTRACT_SYSTEM,
-      user: `Docs URL: ${docsUrl}\n\n---\n\n${docsText}${linkedBlobs}`,
+      user: `Docs URL: ${docsUrl}\n\n---\n\n${sanitizeBody(docsText)}${linkedBlobs}`,
       schema: DOCS_EXTRACT_SCHEMA,
       budgetUsd: DOCS_EXTRACT_BUDGET_USD,
     });
