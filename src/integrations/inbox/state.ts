@@ -484,10 +484,17 @@ export class InboxStateDb {
     return txn();
   }
 
-  getItem(id: string): InboxItem | null {
+  /**
+   * Look up an item by id. Always scoped to a tenant: callers that don't
+   * pass one get the default tenant, so single-user installs are
+   * unaffected. The `tenant_id` clause is the gate Phase-5 team-inbox
+   * needs — without it a request authenticated as tenant A could mutate
+   * tenant B's items just by guessing/leaking an id.
+   */
+  getItem(id: string, tenantId: string = DEFAULT_TENANT_ID): InboxItem | null {
     const row = this.db
-      .prepare<[string], ItemRow>('SELECT * FROM inbox_items WHERE id = ?')
-      .get(id);
+      .prepare<[string, string], ItemRow>('SELECT * FROM inbox_items WHERE id = ? AND tenant_id = ?')
+      .get(id, tenantId);
     return row ? rowToItem(row) : null;
   }
 
@@ -896,20 +903,27 @@ export class InboxStateDb {
 
   /**
    * Record a user action on an item. Pass `action: null` to revert (the
-   * UNDO path) — that also clears `user_action_at`.
+   * UNDO path) — that also clears `user_action_at`. Scoped to tenant so
+   * cross-tenant id-guessing can't archive someone else's items.
    */
-  updateUserAction(id: string, action: InboxUserAction | null, at: Date | null = new Date()): boolean {
+  updateUserAction(
+    id: string,
+    action: InboxUserAction | null,
+    at: Date | null = new Date(),
+    tenantId: string = DEFAULT_TENANT_ID,
+  ): boolean {
     const result = this.db
-      .prepare<[string | null, number | null, string], unknown>(
-        `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ?`,
+      .prepare<[string | null, number | null, string, string], unknown>(
+        `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ? AND tenant_id = ?`,
       )
-      .run(action, action === null ? null : (at ?? new Date()).getTime(), id) as { changes: number };
+      .run(action, action === null ? null : (at ?? new Date()).getTime(), id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 
   /**
    * Set or clear the snooze. Passing `until = null` clears all three snooze
-   * fields atomically — used by the auto-unsnooze-on-reply path.
+   * fields atomically — used by the auto-unsnooze-on-reply path. Scoped
+   * to tenant.
    */
   setSnooze(
     id: string,
@@ -917,12 +931,13 @@ export class InboxStateDb {
     condition: string | null,
     unsnoozeOnReply: boolean = true,
     notifyOnUnsnooze: boolean = false,
+    tenantId: string = DEFAULT_TENANT_ID,
   ): boolean {
     const result = this.db
-      .prepare<[number | null, string | null, number, number, string], unknown>(
+      .prepare<[number | null, string | null, number, number, string, string], unknown>(
         `UPDATE inbox_items
          SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?
-         WHERE id = ?`,
+         WHERE id = ? AND tenant_id = ?`,
       )
       .run(
         until === null ? null : until.getTime(),
@@ -932,6 +947,7 @@ export class InboxStateDb {
         // shouldn't leave the row primed to re-fire on the next snooze.
         until === null ? 0 : (notifyOnUnsnooze ? 1 : 0),
         id,
+        tenantId,
       ) as { changes: number };
     return result.changes > 0;
   }
@@ -1017,13 +1033,17 @@ export class InboxStateDb {
     return rows.map(rowToItem);
   }
 
-  /** Stamp the fire time so the same wake-up doesn't re-emit. */
-  markReminderNotified(id: string, when: Date = new Date()): boolean {
+  /** Stamp the fire time so the same wake-up doesn't re-emit. Scoped to tenant. */
+  markReminderNotified(
+    id: string,
+    when: Date = new Date(),
+    tenantId: string = DEFAULT_TENANT_ID,
+  ): boolean {
     const result = this.db
-      .prepare<[number, string], unknown>(
-        `UPDATE inbox_items SET notified_at = ? WHERE id = ?`,
+      .prepare<[number, string, string], unknown>(
+        `UPDATE inbox_items SET notified_at = ? WHERE id = ? AND tenant_id = ?`,
       )
-      .run(when.getTime(), id) as { changes: number };
+      .run(when.getTime(), id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 
@@ -1054,13 +1074,17 @@ export class InboxStateDb {
       .run(key, value, Date.now());
   }
 
-  /** Link a draft to its item. Pass `null` to detach. */
-  attachDraft(id: string, draftId: string | null): boolean {
+  /** Link a draft to its item. Pass `null` to detach. Scoped to tenant. */
+  attachDraft(
+    id: string,
+    draftId: string | null,
+    tenantId: string = DEFAULT_TENANT_ID,
+  ): boolean {
     const result = this.db
-      .prepare<[string | null, string], unknown>(
-        `UPDATE inbox_items SET draft_id = ? WHERE id = ?`,
+      .prepare<[string | null, string, string], unknown>(
+        `UPDATE inbox_items SET draft_id = ? WHERE id = ? AND tenant_id = ?`,
       )
-      .run(draftId, id) as { changes: number };
+      .run(draftId, id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 
@@ -1080,12 +1104,19 @@ export class InboxStateDb {
     return id;
   }
 
-  listAuditForItem(itemId: string): ReadonlyArray<InboxAuditEntry> {
+  listAuditForItem(
+    itemId: string,
+    tenantId: string = DEFAULT_TENANT_ID,
+  ): ReadonlyArray<InboxAuditEntry> {
+    // Secondary sort by SQLite's implicit rowid (monotonic insert order)
+    // keeps ordering stable when two audits land in the same millisecond.
+    // The string `id` column embeds a random suffix so it isn't safe as a
+    // secondary key.
     const rows = this.db
-      .prepare<[string], AuditRow>(
-        'SELECT * FROM inbox_audit_log WHERE item_id = ? ORDER BY created_at ASC',
+      .prepare<[string, string], AuditRow>(
+        'SELECT * FROM inbox_audit_log WHERE item_id = ? AND tenant_id = ? ORDER BY created_at ASC, rowid ASC',
       )
-      .all(itemId);
+      .all(itemId, tenantId);
     return rows.map(rowToAudit);
   }
 
@@ -1129,10 +1160,10 @@ export class InboxStateDb {
     })();
   }
 
-  getDraftById(id: string): InboxDraft | null {
+  getDraftById(id: string, tenantId: string = DEFAULT_TENANT_ID): InboxDraft | null {
     const row = this.db
-      .prepare<[string], DraftRow>('SELECT * FROM inbox_drafts WHERE id = ?')
-      .get(id);
+      .prepare<[string, string], DraftRow>('SELECT * FROM inbox_drafts WHERE id = ? AND tenant_id = ?')
+      .get(id, tenantId);
     return row ? rowToDraft(row) : null;
   }
 
@@ -1383,8 +1414,10 @@ export class InboxStateDb {
     return rows.map(rowToRule);
   }
 
-  deleteRule(id: string): boolean {
-    const result = this.db.prepare('DELETE FROM inbox_rules WHERE id = ?').run(id) as { changes: number };
+  deleteRule(id: string, tenantId: string = DEFAULT_TENANT_ID): boolean {
+    const result = this.db
+      .prepare('DELETE FROM inbox_rules WHERE id = ? AND tenant_id = ?')
+      .run(id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 }
