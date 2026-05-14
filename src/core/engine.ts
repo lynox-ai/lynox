@@ -252,6 +252,18 @@ export class Engine {
   }
 
   async init(): Promise<this> {
+    await this._initBootstrap();
+    await this._initPersistence();
+    await this._initContextAndIdentity();
+    await this._initKnowledge();
+    await this._initCoreTools();
+    await this._initIntegrations();
+    await this._initPipelineAndBackup();
+    return this;
+  }
+
+  /** Debug logging, LLM provider SDK, Bugsink error reporting. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
+  private async _initBootstrap(): Promise<void> {
     // Activate debug logging early (before any channel publishing)
     initDebugSubscriber();
 
@@ -287,6 +299,10 @@ export class Engine {
         // Bugsink init failed — non-critical, continue without it
       }
     }
+  }
+
+  /** RunHistory, ThreadStore, PromptStore, SecurityAudit, persistent budget + HTTP rate limits. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
+  private async _initPersistence(): Promise<void> {
 
     // Initialize run history (optional — fails gracefully)
     try {
@@ -340,6 +356,10 @@ export class Engine {
     if (this.runHistory) {
       configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
     }
+  }
+
+  /** Context resolution, workspace, briefing, secrets, API client recreate, user ID + scopes. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
+  private async _initContextAndIdentity(): Promise<void> {
 
     // Resolve context (CLI: project detection, others: explicit)
     this.context = resolveContext(this.config);
@@ -375,6 +395,10 @@ export class Engine {
     if (scopeResult.briefingPart) {
       this.briefing = this.briefing ? `${this.briefing}\n\n${scopeResult.briefingPart}` : scopeResult.briefingPart;
     }
+  }
+
+  /** Memory, embedding provider, knowledge graph, DataStore↔KG bridge, KPI briefing injection, memory:store subscriber. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
+  private async _initKnowledge(): Promise<void> {
 
     // Initialize memory
     this.memory = await initMemoryInstance(
@@ -422,6 +446,10 @@ export class Engine {
       this.knowledgeLayer, this.embeddingProvider, this.runHistory,
       this.context?.id ?? '', () => null,
     );
+  }
+
+  /** API profile loading, builtin tool registration, TaskManager wiring, DataStore + ArtifactStore. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
+  private async _initCoreTools(): Promise<void> {
 
     // Load API profiles (teaches agent how to use external APIs)
     try {
@@ -517,6 +545,10 @@ export class Engine {
       process.stderr.write(`[lynox] ArtifactStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._artifactStore = null;
     }
+  }
+
+  /** Web search provider, Google Workspace, Mail (IMAP/SMTP + OAuth-Gmail), Inbox classifier (Phase 1a), WhatsApp Business Cloud (Coexistence Mode). Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
+  private async _initIntegrations(): Promise<void> {
 
     // Web search tool (conditional)
     // Priority: explicit search_provider > SearXNG URL (if configured) > Tavily API key > none
@@ -741,6 +773,10 @@ export class Engine {
         // WhatsApp init failed — non-critical, continue without it
       }
     }
+  }
+
+  /** Pipeline tools, MCP servers, plugins, CRM, backup manager, version-change auto-backup, Google Drive uploader, plugin session start, managed-hosting hook, orchestrator lifecycle hooks. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
+  private async _initPipelineAndBackup(): Promise<void> {
 
     // Pipeline tools registered conditionally
     this._pipelinesEnabled = false;
@@ -871,9 +907,8 @@ export class Engine {
         await hook.onInit(this).catch(() => { /* best-effort */ });
       }
     }
-
-    return this;
   }
+
 
   /** Create a new per-conversation session. */
   createSession(opts?: SessionOptions): Session {
