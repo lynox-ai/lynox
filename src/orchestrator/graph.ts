@@ -1,4 +1,4 @@
-import type { ManifestStep } from './types.js';
+import type { ManifestStep } from '../types/orchestration.js';
 
 export interface ExecutionPhase {
   phaseIndex: number;

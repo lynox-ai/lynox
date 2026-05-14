@@ -4,7 +4,7 @@ import { MODEL_MAP, getModelId, clampTier } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import { getActiveProvider } from '../core/llm-client.js';
-import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from './types.js';
+import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
 import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';

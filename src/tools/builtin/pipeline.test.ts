@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { RunState, AgentOutput } from '../../orchestrator/types.js';
+import type { RunState, AgentOutput } from '../../types/orchestration.js';
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 
 // Mock DAG planner

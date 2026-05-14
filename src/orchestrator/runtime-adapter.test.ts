@@ -23,7 +23,7 @@ vi.mock('../core/roles.js', () => ({
 import { Agent } from '../core/agent.js';
 import { spawnInline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, type SubAgentPromptHandles } from './runtime-adapter.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
-import type { ManifestStep } from './types.js';
+import type { ManifestStep } from '../types/orchestration.js';
 
 const mockConfig = { api_key: 'test-key' } as unknown as LynoxUserConfig;
 

@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentDef } from './types.js';
+import type { AgentDef } from '../types/orchestration.js';
 
 const SAFE_AGENT_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 

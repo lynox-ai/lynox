@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { LocalGateAdapter } from './gates.js';
-import type { GateSubmitParams } from './types.js';
+import type { GateSubmitParams } from '../types/orchestration.js';
 
 const TEST_PARAMS: GateSubmitParams = {
   manifestName: 'test-manifest',

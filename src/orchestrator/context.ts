@@ -1,4 +1,4 @@
-import type { ManifestStep, AgentOutput } from './types.js';
+import type { ManifestStep, AgentOutput } from '../types/orchestration.js';
 import { getByPath } from './conditions.js';
 import { channels } from '../core/observability.js';
 import { detectInjectionAttempt, wrapUntrustedData } from '../core/data-boundary.js';

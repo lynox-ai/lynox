@@ -1,4 +1,4 @@
-import type { ManifestCondition, AgentOutput } from './types.js';
+import type { ManifestCondition, AgentOutput } from '../types/orchestration.js';
 
 /**
  * Resolve a dot-notation path into an object.

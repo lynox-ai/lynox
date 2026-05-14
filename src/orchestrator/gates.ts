@@ -1,4 +1,4 @@
-import type { GateAdapter, GateSubmitParams, GateDecision } from './types.js';
+import type { GateAdapter, GateSubmitParams, GateDecision } from '../types/orchestration.js';
 
 type PromptFn = (q: string, opts?: string[]) => Promise<string>;
 

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { validateGraph } from './graph.js';
-import type { Manifest } from './types.js';
+import type { Manifest } from '../types/orchestration.js';
 import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
 import { findAutonomousViolations } from './human-in-the-loop.js';
 
