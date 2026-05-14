@@ -100,6 +100,43 @@ describe('extractContent', () => {
     await expect(extractContent('file:///etc/passwd')).rejects.toThrow('Blocked');
   });
 
+  it('honors ToolContext.networkPolicy="deny-all"', async () => {
+    // Regression: before this PR, extractContent ran its own validateUrl
+    // that only checked private IPs. Air-gapped engines could still pull
+    // arbitrary external URLs via web_research action="read". Now the ctx
+    // propagates and deny-all blocks the request before fetch.
+    const ctx = {
+      networkPolicy: 'deny-all',
+      allowedHosts: undefined,
+      allowedWildcards: [] as string[],
+      enforceHttps: false,
+    } as never;
+    await expect(extractContent('https://example.com', undefined, ctx))
+      .rejects.toThrow(/air-gapped|denied|blocked/i);
+  });
+
+  it('honors ToolContext.networkPolicy="allow-list" — blocks unlisted hosts', async () => {
+    const ctx = {
+      networkPolicy: 'allow-list',
+      allowedHosts: new Set(['allowed.example.com']),
+      allowedWildcards: [] as string[],
+      enforceHttps: false,
+    } as never;
+    await expect(extractContent('https://denied.example.com/path', undefined, ctx))
+      .rejects.toThrow(/allow-list|blocked/i);
+  });
+
+  it('honors ToolContext.enforceHttps for plain-HTTP requests', async () => {
+    const ctx = {
+      networkPolicy: undefined,
+      allowedHosts: undefined,
+      allowedWildcards: [] as string[],
+      enforceHttps: true,
+    } as never;
+    await expect(extractContent('http://example.com', undefined, ctx))
+      .rejects.toThrow(/HTTPS|enforce_https|blocked/i);
+  });
+
   it('truncates long content', async () => {
     // Override the mock for this test
     const readability = await import('@mozilla/readability');

@@ -1,4 +1,5 @@
 import { promises as dns } from 'node:dns';
+import type { ToolContext } from '../../core/tool-context.js';
 
 export interface ExtractedContent {
   title: string;
@@ -43,12 +44,42 @@ function isPrivateIP(ip: string): boolean {
   return false;
 }
 
-async function validateUrl(rawUrl: string): Promise<void> {
+async function validateUrl(rawUrl: string, ctx?: ToolContext | undefined): Promise<void> {
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+
+  // Honor the session's network policy. enforceHttps is checked first so the
+  // error message guides the user to the actual config knob; deny-all and
+  // allow-list mirror tools/builtin/http.ts so web_research / web_page read
+  // can't bypass an air-gapped or restricted policy via the search path.
+  if (ctx?.enforceHttps && parsed.protocol === 'http:') {
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
+      throw new Error('Blocked: HTTP not allowed — enforce_https is enabled. Use HTTPS.');
+    }
+  }
+  if (ctx?.networkPolicy === 'deny-all') {
+    throw new Error('Network access denied: air-gapped isolation');
+  }
+  if (ctx?.networkPolicy === 'allow-list') {
+    let allowed = false;
+    if (ctx.allowedHosts?.has(hostname)) {
+      allowed = true;
+    } else if (ctx.allowedWildcards.length > 0) {
+      for (const domain of ctx.allowedWildcards) {
+        if (hostname === domain || hostname.endsWith(`.${domain}`)) {
+          allowed = true;
+          break;
+        }
+      }
+    }
+    if (!allowed) {
+      throw new Error(`Blocked: hostname "${hostname}" not in network allow-list`);
+    }
+  }
+
   if (isPrivateIP(hostname)) {
     throw new Error(`Blocked: private IP address "${hostname}"`);
   }
@@ -62,10 +93,10 @@ async function validateUrl(rawUrl: string): Promise<void> {
 
 // --- Fetch with redirect validation ---
 
-async function fetchWithRedirects(url: string): Promise<Response> {
+async function fetchWithRedirects(url: string, ctx?: ToolContext | undefined): Promise<Response> {
   let currentUrl = url;
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    await validateUrl(currentUrl);
+    await validateUrl(currentUrl, ctx);
     const response = await fetch(currentUrl, {
       redirect: 'manual',
       headers: {
@@ -133,10 +164,10 @@ function stripHtmlTags(html: string): string {
     .trim();
 }
 
-export async function extractContent(url: string, maxChars?: number): Promise<ExtractedContent> {
+export async function extractContent(url: string, maxChars?: number, ctx?: ToolContext | undefined): Promise<ExtractedContent> {
   const limit = maxChars ?? DEFAULT_MAX_CHARS;
 
-  const response = await fetchWithRedirects(url);
+  const response = await fetchWithRedirects(url, ctx);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} ${response.statusText}`);
   }
