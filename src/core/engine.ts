@@ -338,7 +338,7 @@ export class Engine {
     // Configure persistent budget caps and HTTP rate limits
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     if (this.runHistory) {
-      configureBudgetAndRateLimits(this.runHistory, this.userConfig);
+      configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
     }
 
     // Resolve context (CLI: project detection, others: explicit)

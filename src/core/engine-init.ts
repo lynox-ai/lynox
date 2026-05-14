@@ -26,7 +26,8 @@ import { SecretStore } from './secret-store.js';
 import { setVaultApiKeyExists } from './config.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget } from './session-budget.js';
-import { configureHttpRateLimits, configureEnforceHttps } from '../tools/builtin/http.js';
+import { applyHttpRateLimits, applyEnforceHttps } from './tool-context.js';
+import type { ToolContext } from './tool-context.js';
 import { configureMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
 import { resolveActiveScopes } from './scope-resolver.js';
 import { createEmbeddingProvider } from './embedding.js';
@@ -50,6 +51,7 @@ import { getWorkspaceDir, isWorkspaceActive } from './workspace.js';
 export function configureBudgetAndRateLimits(
   runHistory: RunHistory,
   userConfig: LynoxUserConfig,
+  toolContext: ToolContext,
 ): void {
   // Env vars override config (managed hosting sets tier-specific limits via env)
   const envFloat = (key: string): number | undefined => {
@@ -67,11 +69,12 @@ export function configureBudgetAndRateLimits(
     dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
     monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
   });
-  configureHttpRateLimits({
-    provider: runHistory,
-    hourlyLimit: envInt('LYNOX_MAX_HTTP_REQUESTS_PER_HOUR') ?? userConfig.max_http_requests_per_hour,
-    dailyLimit: envInt('LYNOX_MAX_HTTP_REQUESTS_PER_DAY') ?? userConfig.max_http_requests_per_day,
-  });
+  applyHttpRateLimits(
+    toolContext,
+    runHistory,
+    envInt('LYNOX_MAX_HTTP_REQUESTS_PER_HOUR') ?? userConfig.max_http_requests_per_hour,
+    envInt('LYNOX_MAX_HTTP_REQUESTS_PER_DAY') ?? userConfig.max_http_requests_per_day,
+  );
   // Dedup window: ENV accepts 0 to disable (envInt() rejects non-positive).
   const dedupEnv = process.env['LYNOX_MAIL_DEDUP_WINDOW_SEC'];
   const dedupEnvNum = dedupEnv !== undefined ? parseInt(dedupEnv, 10) : NaN;
@@ -84,7 +87,7 @@ export function configureBudgetAndRateLimits(
     dailyLimit: envInt('LYNOX_MAX_MAIL_SENDS_PER_DAY') ?? userConfig.max_mail_sends_per_day,
     dedupWindowMs: dedupSec !== undefined ? dedupSec * 1000 : undefined,
   });
-  configureEnforceHttps(userConfig.enforce_https === true);
+  applyEnforceHttps(toolContext, userConfig.enforce_https === true);
 }
 
 export function setupHistorySubscriptions(
