@@ -31,9 +31,10 @@ Project configs cannot override security-sensitive fields like API keys or vault
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `provider` | `anthropic`, `bedrock`, `custom`, `openai` | `anthropic` |
-| `aws_region` | AWS region for Bedrock (e.g. `eu-central-1`) | — |
-| `api_base_url` | Custom proxy URL | — |
+| `provider` | `anthropic`, `vertex`, `custom`, `openai` | `anthropic` |
+| `gcp_project_id` | GCP project ID (provider: `vertex`) | — |
+| `gcp_region` | Vertex region, e.g. `europe-west4` (provider: `vertex`) | — |
+| `api_base_url` | Custom proxy URL (provider: `custom` / `openai`) | — |
 
 Only configure the fields relevant to your provider. See [LLM Providers](/setup/llm-providers/) for full setup guides.
 
@@ -61,13 +62,13 @@ Only configure the fields relevant to your provider. See [LLM Providers](/setup/
 
 ```json
 {
-  "max_session_cost_usd": 5.00,
-  "max_daily_cost_usd": 20.00,
-  "max_monthly_cost_usd": 200.00
+  "max_session_cost_usd": 50.00,
+  "max_daily_cost_usd": 100.00,
+  "max_monthly_cost_usd": 500.00
 }
 ```
 
-lynox tracks token usage per session, day, and month. When a limit is reached, it pauses and asks before continuing.
+lynox tracks token usage per session, day, and month. Defaults shown above are the engine's built-in ceilings; lower them in `config.json` if you want a tighter budget. When a limit is reached, it pauses and asks before continuing.
 
 ### Web Search
 
@@ -194,15 +195,15 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider) |
 | `ANTHROPIC_BASE_URL` | Custom API base URL (for LiteLLM/proxy) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `bedrock`, `custom`, `openai` |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `vertex`, `custom`, `openai` |
 
-### AWS Bedrock (BYOK)
+### Google Vertex AI (BYOK)
 
 | Variable | Purpose |
 |----------|---------|
-| `AWS_ACCESS_KEY_ID` | IAM access key with Bedrock InvokeModel permission |
-| `AWS_SECRET_ACCESS_KEY` | IAM secret for the same user/role |
-| `AWS_REGION` | AWS region, e.g. `eu-central-1`, `us-east-1` |
+| `GCP_PROJECT_ID` | GCP project ID |
+| `CLOUD_ML_REGION` | Vertex region, e.g. `europe-west4`, `us-east5` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCP service-account JSON |
 
 ### OpenAI-Compatible
 

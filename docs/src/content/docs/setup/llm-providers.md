@@ -13,10 +13,10 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 
 ## At a Glance
 
-| | **Claude (Anthropic)** | **Claude (AWS Bedrock)** | **OpenAI-Compatible** | **Custom Proxy** |
+| | **Claude (Anthropic)** | **Claude (Google Vertex)** | **OpenAI-Compatible** | **Custom Proxy** |
 |---|---|---|---|---|
 | **Status** | Stable | Stable | Stable | Experimental |
-| **Setup** | API key | AWS IAM credentials | API key + base URL | Proxy URL |
+| **Setup** | API key | GCP project + service account | API key + base URL | Proxy URL |
 | **AI quality** | Claude | Claude (same models) | Model-dependent | Model-dependent |
 | | | | | |
 | **Features** | | | | |
@@ -29,8 +29,8 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | MCP Server-Side | ✅ | ❌ | ❌ | ❌ |
 | | | | | |
 | **Privacy** | | | | |
-| Data residency | US | Your AWS region | Provider-dependent | 🏠 Your server |
-| DPA available | ✅ Auto | ✅ AWS | Provider-dependent | N/A |
+| Data residency | US | Your GCP region (EU available) | Provider-dependent | 🏠 Your server |
+| DPA available | ✅ Auto | ✅ GCP | Provider-dependent | N/A |
 | Training on data | ❌ Never | ❌ Never | Provider-dependent | ❌ Never |
 | | | | | |
 | **Cost** | | | | |
@@ -39,7 +39,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | Typical monthly | $30–150 | $30–150 | $10–50 | $150 fixed |
 
 :::note[BYOK only]
-AWS Bedrock is a **Bring-Your-Own-Key** option for users who already run on AWS. lynox's own managed plans handle provider selection automatically — contact us at [hello@lynox.ai](mailto:hello@lynox.ai) for details.
+Google Vertex AI is a **Bring-Your-Own-Key** option for GCP-native organizations. lynox's own managed plans handle provider selection automatically — contact us at [hello@lynox.ai](mailto:hello@lynox.ai) for details.
 :::
 
 ## Claude (Anthropic) — Default
@@ -63,31 +63,36 @@ Direct connection to the Anthropic API. Simplest setup, recommended for most use
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-## Claude (AWS Bedrock) — BYOK
+## Claude (Google Vertex AI) — BYOK
 
-Same Claude models, hosted in your own AWS account. Useful if you already have an AWS footprint, need to keep LLM billing inside AWS, or have a regional residency requirement that your AWS region covers.
+Same Claude models, hosted in your own GCP project. Useful if you already have a GCP footprint, need to keep LLM billing inside GCP, or have a regional residency requirement that a Vertex EU region (e.g. `europe-west4`) covers.
 
 ```json
 {
-  "provider": "bedrock",
-  "aws_region": "eu-central-1"
+  "provider": "vertex",
+  "gcp_project_id": "your-gcp-project",
+  "gcp_region": "europe-west4"
 }
 ```
 
 **Setup:**
-1. Enable Claude models in **AWS Bedrock → Model Access**
-2. Create an IAM user (or role) with `bedrock:InvokeModel` + `bedrock:InvokeModelWithResponseStream`
-3. Generate access keys for that user
+1. Enable the **Vertex AI API** in your GCP project
+2. Enable Claude models in **Vertex AI → Model Garden → Anthropic** (request access if first time)
+3. Create a service account with `roles/aiplatform.user`, generate a JSON key
+4. Install the Vertex SDK peer-dep:
+   ```bash
+   pnpm add @anthropic-ai/vertex-sdk
+   ```
 
 **Environment:**
 ```bash
-LYNOX_LLM_PROVIDER=bedrock
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=eu-central-1
+LYNOX_LLM_PROVIDER=vertex
+GCP_PROJECT_ID=your-gcp-project
+CLOUD_ML_REGION=europe-west4
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
-**Trade-offs vs. Anthropic Direct:** Prompt cache TTL is 5 minutes on Bedrock vs. 1 hour on Anthropic, which materially affects costs on cache-heavy workflows. A region surcharge may apply depending on your AWS region. Web Search (built-in) and MCP server-side are not available through the Bedrock path.
+**Trade-offs vs. Anthropic Direct:** Prompt cache TTL is 5 minutes on Vertex vs. 1 hour on Anthropic, which materially affects costs on cache-heavy workflows. A region surcharge may apply depending on your GCP region. Web Search (built-in) and MCP server-side are not available through the Vertex path.
 
 ## OpenAI-Compatible Providers — Mistral & Gemini
 

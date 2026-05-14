@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-lynox implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — an open standard for connecting AI tools. Supports stdio and Streamable HTTP transports. This lets you use lynox's memory, knowledge, and capabilities directly from your IDE or AI assistant.
+lynox implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — an open standard for connecting AI tools. Supports stdio and SSE (HTTP Server-Sent Events) transports. This lets you use lynox's memory, knowledge, and capabilities directly from your IDE or AI assistant.
 
 ## What This Enables
 

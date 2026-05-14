@@ -11,7 +11,7 @@ lynox has four built-in roles, each optimized for a different type of work:
 
 | Role | Model | Strengths | Restrictions |
 |------|-------|-----------|-------------|
-| **Researcher** | Opus | Deep analysis, source citation, thorough exploration | Read-only — can't modify files or run commands |
+| **Researcher** | Sonnet | Deep analysis, source citation, thorough exploration | Read-only — can't modify files or run commands |
 | **Creator** | Sonnet | Content creation, writing, tone adaptation | No system commands |
 | **Operator** | Haiku | Fast status checks, concise reporting | Read-only |
 | **Collector** | Haiku | Structured Q&A, data gathering | Minimal tools — memory and user interaction only |

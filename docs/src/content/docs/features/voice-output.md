@@ -30,7 +30,7 @@ Toggling the speaker off mid-stream stops current audio and clears the queue.
 | Default voice         | `en_paul_neutral` (English)             |
 | Languages             | 9 supported; voice catalog currently EN-only |
 | Streaming             | SSE; ~1 s time-to-first-audio from Zurich |
-| Pricing (as of 2026)  | $0.016 / 1 000 characters (~$0.02/min spoken) |
+| Pricing               | $0.016 / 1 000 characters (~$0.02/min spoken). See [Mistral pricing](https://docs.mistral.ai/getting-started/models/) for the current number. |
 | Training              | Customer text is not used to train models (per Mistral's terms) |
 
 German text is read with an English voice. The accent is light and acceptable for business replies — long inputs read with noticeably more prosodic nuance than very short ones (prosody is planned over the whole input). A dedicated German voice will become the default once Mistral ships one.
