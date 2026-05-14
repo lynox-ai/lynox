@@ -198,4 +198,52 @@ describe('telegram-bot', () => {
 
     await stopTelegramBot();
   });
+
+  // Regression: a stale click on an answer button whose run already ended
+  // used to ack "Selected: …" because the legacy v-branch echoed the value
+  // unconditionally. The fix checks resolveInput's return so the user sees
+  // "Question expired" instead of a misleading confirmation.
+  it('acks "Question expired" for legacy v-payload when resolveInput returns false', async () => {
+    const runner = await import('./telegram-runner.js');
+    vi.mocked(runner.resolveInput).mockReturnValue(false);
+
+    const engine = createMockEngine();
+    await startTelegramBot({ token: 'test-token', allowedChatIds: [123], engine: engine as never });
+
+    const cbCall = mockOn.mock.calls.find((c: unknown[]) => c[0] === 'callback_query');
+    const cbHandler = cbCall![1] as (ctx: unknown) => Promise<void> | void;
+    const mockCtx = {
+      callbackQuery: { data: JSON.stringify({ t: 'a', v: 'Option A' }) },
+      chat: { id: 123 },
+      answerCbQuery: vi.fn().mockResolvedValue(undefined),
+    };
+    await cbHandler(mockCtx);
+
+    expect(mockCtx.answerCbQuery).toHaveBeenCalledWith('Question expired');
+    // Make sure we did NOT mislead the user with "Selected: Option A".
+    expect(mockCtx.answerCbQuery).not.toHaveBeenCalledWith('Selected: Option A');
+
+    await stopTelegramBot();
+  });
+
+  it('acks "Selected: …" for legacy v-payload when resolveInput returns true', async () => {
+    const runner = await import('./telegram-runner.js');
+    vi.mocked(runner.resolveInput).mockReturnValue(true);
+
+    const engine = createMockEngine();
+    await startTelegramBot({ token: 'test-token', allowedChatIds: [123], engine: engine as never });
+
+    const cbCall = mockOn.mock.calls.find((c: unknown[]) => c[0] === 'callback_query');
+    const cbHandler = cbCall![1] as (ctx: unknown) => Promise<void> | void;
+    const mockCtx = {
+      callbackQuery: { data: JSON.stringify({ t: 'a', v: 'Option A' }) },
+      chat: { id: 123 },
+      answerCbQuery: vi.fn().mockResolvedValue(undefined),
+    };
+    await cbHandler(mockCtx);
+
+    expect(mockCtx.answerCbQuery).toHaveBeenCalledWith('Selected: Option A');
+
+    await stopTelegramBot();
+  });
 });

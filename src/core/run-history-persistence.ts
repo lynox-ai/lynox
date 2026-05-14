@@ -531,7 +531,7 @@ export function updateTask(db: Database.Database, id: string, params: {
   completedAt?: string | undefined;
   nextRunAt?: string | undefined;
   scheduleCron?: string | undefined;
-}): boolean {
+}, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
   const sets: string[] = [];
   const values: unknown[] = [];
   if (params.title !== undefined) { sets.push('title = ?'); values.push(params.title); }
@@ -549,14 +549,34 @@ export function updateTask(db: Database.Database, id: string, params: {
   if (params.scheduleCron !== undefined) { sets.push('schedule_cron = ?'); values.push(params.scheduleCron || null); }
   if (sets.length === 0) return false;
   sets.push("updated_at = datetime('now')");
+
+  // Optional scope guard. When provided, fold the (scope_type, scope_id)
+  // check INTO the UPDATE's WHERE clause so check + mutation are a single
+  // SQL statement — the row never gets written if its scope is outside
+  // the caller's active set, even under a hostile race. The tool layer
+  // does an upfront getTask() for a friendlier error message, but this
+  // WHERE is the canonical guard.
+  const where: string[] = ['id = ?'];
   values.push(id);
-  return db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...values).changes > 0;
+  if (opts?.scopeFilter && opts.scopeFilter.length > 0) {
+    const ors = opts.scopeFilter.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
+    where.push(`(${ors})`);
+    for (const s of opts.scopeFilter) { values.push(s.type, s.id); }
+  }
+  return db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE ${where.join(' AND ')}`).run(...values).changes > 0;
 }
 
-export function getTask(db: Database.Database, id: string): TaskRecord | undefined {
+export function getTask(db: Database.Database, id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
+  const where: string[] = ['(id = ? OR id LIKE ?)'];
+  const params: unknown[] = [id, `${id}%`];
+  if (opts?.scopeFilter && opts.scopeFilter.length > 0) {
+    const ors = opts.scopeFilter.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
+    where.push(`(${ors})`);
+    for (const s of opts.scopeFilter) { params.push(s.type, s.id); }
+  }
   return db.prepare(
-    'SELECT * FROM tasks WHERE id = ? OR id LIKE ?'
-  ).get(id, `${id}%`) as TaskRecord | undefined;
+    `SELECT * FROM tasks WHERE ${where.join(' AND ')}`
+  ).get(...params) as TaskRecord | undefined;
 }
 
 export function deleteTask(db: Database.Database, id: string): boolean {

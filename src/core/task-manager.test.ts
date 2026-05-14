@@ -163,6 +163,68 @@ describe('TaskManager', () => {
       expect(() => tm.update(task.id, { status: 'invalid' as never }))
         .toThrow('Invalid status');
     });
+
+    // Sub-agents carry their parent's activeScopes; without an atomic
+    // scope guard, a sub-agent in scope A could mutate a task in scope B
+    // just by guessing a short id-prefix. The scopeFilter folds the
+    // ownership check into the same SQL WHERE as the UPDATE so check +
+    // mutation commit atomically.
+    describe('scope filter', () => {
+      it('refuses update when task scope is outside the filter', () => {
+        const taskInA = tm.create({ title: 'A-side', scopeType: 'client', scopeId: 'acme' });
+        const result = tm.update(
+          taskInA.id,
+          { title: 'pwned' },
+          [{ type: 'client', id: 'other' }],
+        );
+        expect(result).toBeUndefined();
+        // The row must remain untouched (no half-mutated state from a
+        // cross-scope write).
+        const row = history.getTask(taskInA.id);
+        expect(row?.title).toBe('A-side');
+      });
+
+      it('allows update when task scope matches the filter', () => {
+        const task = tm.create({ title: 'A-side', scopeType: 'client', scopeId: 'acme' });
+        const updated = tm.update(
+          task.id,
+          { title: 'changed' },
+          [{ type: 'client', id: 'acme' }],
+        );
+        expect(updated?.title).toBe('changed');
+      });
+
+      it('refuses complete when task scope is outside the filter', () => {
+        const task = tm.create({ title: 'A-side', scopeType: 'client', scopeId: 'acme' });
+        const result = tm.complete(task.id, [{ type: 'client', id: 'other' }]);
+        expect(result).toBeUndefined();
+        const row = history.getTask(task.id);
+        expect(row?.status).toBe('open');
+      });
+
+      it('allows complete when task scope matches the filter', () => {
+        const task = tm.create({ title: 'A-side', scopeType: 'client', scopeId: 'acme' });
+        const done = tm.complete(task.id, [{ type: 'client', id: 'acme' }]);
+        expect(done?.status).toBe('completed');
+      });
+
+      it('treats empty scopeFilter as no filter (single-user installs)', () => {
+        const task = tm.create({ title: 'no-scope', scopeType: 'client', scopeId: 'acme' });
+        const updated = tm.update(task.id, { title: 'changed' }, []);
+        expect(updated?.title).toBe('changed');
+      });
+
+      it('matches when any of multiple active scopes covers the task', () => {
+        const taskA = tm.create({ title: 'in A', scopeType: 'client', scopeId: 'acme' });
+        const taskB = tm.create({ title: 'in B', scopeType: 'project', scopeId: 'site' });
+        const filter = [
+          { type: 'client', id: 'acme' },
+          { type: 'project', id: 'site' },
+        ];
+        expect(tm.update(taskA.id, { title: 'a2' }, filter)?.title).toBe('a2');
+        expect(tm.update(taskB.id, { title: 'b2' }, filter)?.title).toBe('b2');
+      });
+    });
   });
 
   describe('list', () => {

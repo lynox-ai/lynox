@@ -442,10 +442,15 @@ export async function startTelegramBot(options: TelegramBotOptions): Promise<voi
         }
         // Legacy fallback: full value in `v`. Kept so a Telegram client
         // that still has an old in-flight prompt button can answer; new
-        // prompts emit only the index form.
+        // prompts emit only the index form. Check the resolve result so a
+        // stale click after the run has ended acks "Question expired"
+        // instead of misleadingly echoing "Selected: …".
         if (parsed.v) {
-          resolveInput(chatId, parsed.v);
-          ack(`Selected: ${parsed.v}`);
+          if (resolveInput(chatId, parsed.v)) {
+            ack(`Selected: ${parsed.v}`);
+          } else {
+            ack('Question expired');
+          }
         } else {
           ack();
         }

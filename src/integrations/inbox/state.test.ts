@@ -372,6 +372,51 @@ describe('InboxStateDb — audit log', () => {
       expect(name).not.toMatch(/^(update|delete|remove|clear)Audit/);
     }
   });
+
+  // The audit row that records a snooze action must commit together with
+  // the state change itself — if a caller appends to the audit log AFTER
+  // setSnooze without a transaction, a throw between the two leaves the
+  // snooze live but unaudited (or vice versa). runInTransaction is the
+  // shared wrapper for both pair sites (api.ts setSnooze + watcher-hook
+  // unsnooze-on-reply); these tests pin its rollback semantics.
+  describe('runInTransaction', () => {
+    it('rolls back the state mutation if the audit insert throws', () => {
+      const id = insertSampleItem();
+      expect(() => {
+        inbox.runInTransaction(() => {
+          inbox.setSnooze(id, new Date(Date.now() + 3600_000), null, true, false);
+          // Force the second op to throw — simulates a corrupt audit
+          // payload or a downstream DB constraint kicking in.
+          throw new Error('boom');
+        });
+      }).toThrow('boom');
+      // Snooze must NOT have landed.
+      const item = inbox.getItem(id);
+      expect(item?.snoozeUntil).toBeUndefined();
+    });
+
+    it('commits both mutations when the callback returns', () => {
+      const id = insertSampleItem();
+      const until = new Date(Date.now() + 3600_000);
+      const auditId = inbox.runInTransaction(() => {
+        inbox.setSnooze(id, until, null, true, false);
+        return inbox.appendAudit({
+          itemId: id,
+          action: 'snoozed',
+          actor: 'user',
+          payloadJson: '{}',
+        });
+      });
+      expect(auditId).toBeTruthy();
+      const entries = inbox.listAuditForItem(id);
+      expect(entries.some((e) => e.id === auditId && e.action === 'snoozed')).toBe(true);
+    });
+
+    it('returns the callback value through', () => {
+      const out = inbox.runInTransaction(() => 'sentinel');
+      expect(out).toBe('sentinel');
+    });
+  });
 });
 
 describe('InboxStateDb — drafts', () => {

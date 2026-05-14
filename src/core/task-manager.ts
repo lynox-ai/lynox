@@ -68,14 +68,14 @@ export class TaskManager {
   constructor(private history: RunHistory) {}
 
   /**
-   * Look up a task by id (or id-prefix, for UX convenience). Exposed so the
-   * tool layer can run an ownership check against the caller's
-   * `agent.activeScopes` BEFORE mutating — `update()`/`complete()` resolve
-   * via prefix-match without any scope binding, which is IDOR-shaped in a
-   * multi-scope deployment. Single-user installs are unaffected.
+   * Look up a task by id (or id-prefix, for UX convenience). The optional
+   * `scopeFilter` folds the ownership check into the same SQL read used by
+   * the mutation path, so a sub-agent in scope A can never resolve a task
+   * in scope B via short-prefix guess. Single-user installs leave it
+   * undefined and skip the check.
    */
-  getTask(id: string): TaskRecord | undefined {
-    return this.history.getTask(id);
+  getTask(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | undefined {
+    return this.history.getTask(id, scopeFilter ? { scopeFilter } : undefined);
   }
 
   create(params: TaskCreateParams): TaskRecord {
@@ -145,22 +145,29 @@ export class TaskManager {
     return this.history.getTask(id)!;
   }
 
-  complete(id: string): TaskRecord | undefined {
-    const task = this.history.getTask(id);
+  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | undefined {
+    const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
+    const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
 
     const now = new Date().toISOString();
-    this.history.updateTask(task.id, { status: 'completed', completedAt: now });
+    // Carry the scope guard into the UPDATE so a concurrent re-scope
+    // between getTask() above and updateTask() below cannot let the write
+    // land on a now-out-of-scope row.
+    const ok = this.history.updateTask(task.id, { status: 'completed', completedAt: now }, scopeOpts);
+    if (!ok) return undefined;
 
-    // Complete subtasks too
+    // Subtasks inherit the parent's scope at creation time, so the same
+    // filter applies. If a subtask was re-scoped out from under the parent
+    // its update silently no-ops, which is the desired safe failure.
     const subtasks = this.history.getTasks({ parentTaskId: task.id });
     for (const sub of subtasks) {
       if (sub.status !== 'completed') {
-        this.history.updateTask(sub.id, { status: 'completed', completedAt: now });
+        this.history.updateTask(sub.id, { status: 'completed', completedAt: now }, scopeOpts);
       }
     }
 
-    return this.history.getTask(task.id);
+    return this.history.getTask(task.id, scopeOpts);
   }
 
   reopen(id: string): TaskRecord | undefined {
@@ -171,8 +178,9 @@ export class TaskManager {
     return this.history.getTask(task.id);
   }
 
-  update(id: string, params: TaskUpdateParams): TaskRecord | undefined {
-    const task = this.history.getTask(id);
+  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | undefined {
+    const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
+    const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
 
     if (params.status && !VALID_STATUSES.has(params.status)) {
@@ -253,8 +261,9 @@ export class TaskManager {
       updateParams.completedAt = '';
     }
 
-    this.history.updateTask(task.id, updateParams);
-    return this.history.getTask(task.id);
+    const ok = this.history.updateTask(task.id, updateParams, scopeOpts);
+    if (!ok) return undefined;
+    return this.history.getTask(task.id, scopeOpts);
   }
 
   list(opts?: { status?: TaskStatus | undefined; scope?: MemoryScopeRef | undefined; assignee?: string | undefined }): TaskRecord[] {

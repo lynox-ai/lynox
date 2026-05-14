@@ -206,24 +206,20 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
     const managerRef = agent.toolContext.taskManager;
     if (!managerRef) return 'Error: Task manager not available.';
 
-    // Scope check before mutation. The persistence layer's getTask resolves
-    // via `id = ? OR id LIKE ?`, so a sub-agent in one scope can mutate a
-    // task in another scope just by guessing a short prefix. Look up the
-    // task here and refuse if its scope is outside the caller's
-    // activeScopes. Single-user installs have activeScopes undefined and
-    // skip the check (all tasks belong to the same user).
-    if (agent.activeScopes && agent.activeScopes.length > 0) {
-      const existing = managerRef.getTask(input.task_id);
-      if (!existing) return `Task not found: ${input.task_id}`;
-      const inScope = agent.activeScopes.some(s =>
-        s.type === existing.scope_type && s.id === existing.scope_id,
-      );
-      if (!inScope) return `Task not found: ${input.task_id}`;
-    }
+    // Scope guard. The persistence layer's getTask resolves via
+    // `id = ? OR id LIKE ?`, so a sub-agent in one scope could otherwise
+    // mutate a task in another scope just by guessing a short prefix.
+    // The scopeFilter is threaded into the SAME SQL WHERE used by the
+    // UPDATE (see run-history-persistence.ts), so check and mutation
+    // commit atomically — no TOCTOU window between resolve and write.
+    // Single-user installs leave activeScopes undefined and skip entirely.
+    const scopeFilter = agent.activeScopes && agent.activeScopes.length > 0
+      ? agent.activeScopes
+      : undefined;
 
     try {
       if (input.status === 'completed') {
-        const task = managerRef.complete(input.task_id);
+        const task = managerRef.complete(input.task_id, scopeFilter);
         if (!task) return `Task not found: ${input.task_id}`;
         return `Task completed: ${formatTaskLine(task)}`;
       }
@@ -238,7 +234,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         tags: input.tags,
         nextRunAt: input.run_at,
         scheduleCron: input.schedule,
-      });
+      }, scopeFilter);
       if (!task) return `Task not found: ${input.task_id}`;
       // Surface the new schedule when it changed so the agent can confirm
       // the reschedule landed (mirrors the create path's "scheduled for …"

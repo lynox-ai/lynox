@@ -122,13 +122,17 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       const snoozeUntilMs = existing.snoozeUntil?.getTime();
       const stillSnoozed = snoozeUntilMs !== undefined && snoozeUntilMs > Date.now();
       if (stillSnoozed && existing.unsnoozeOnReply) {
-        opts.state.setSnooze(existing.id, null, null);
-        opts.state.appendAudit({
-          tenantId: opts.tenantId,
-          itemId: existing.id,
-          action: 'unsnoozed_on_reply',
-          actor: 'system',
-          payloadJson: JSON.stringify({ trigger: 'inbound_mail' }),
+        // Snooze clear + audit must commit together — if the audit insert
+        // throws the snooze should still be live, and vice versa.
+        opts.state.runInTransaction(() => {
+          opts.state.setSnooze(existing.id, null, null);
+          opts.state.appendAudit({
+            tenantId: opts.tenantId,
+            itemId: existing.id,
+            action: 'unsnoozed_on_reply',
+            actor: 'system',
+            payloadJson: JSON.stringify({ trigger: 'inbound_mail' }),
+          });
         });
       }
       return;

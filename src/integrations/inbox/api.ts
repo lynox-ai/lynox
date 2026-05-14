@@ -813,23 +813,29 @@ export function handleSetSnooze(deps: InboxApiDeps, id: string, body: SetSnoozeB
   const condition = body.condition ?? null;
   const unsnoozeOnReply = body.unsnoozeOnReply ?? true;
   const notifyOnUnsnooze = body.notifyOnUnsnooze ?? false;
-  const ok = deps.state.setSnooze(id, until, condition, unsnoozeOnReply, notifyOnUnsnooze);
-  if (!ok) return notFound('item');
-  // Clearing the snooze is logically an undo; logging 'snoozed' on a clear
-  // would corrupt the audit trail's meaning. Carry the prior intent in the
-  // payload so downstream consumers can distinguish set vs unsnooze.
-  deps.state.appendAudit({
-    itemId: id,
-    action: until === null ? 'undo' : 'snoozed',
-    actor: 'user',
-    payloadJson: JSON.stringify({
-      intent: until === null ? 'unsnooze' : 'snooze',
-      until: until?.toISOString() ?? null,
-      condition,
-      unsnooze_on_reply: unsnoozeOnReply,
-      notify_on_unsnooze: notifyOnUnsnooze,
-    }),
+  // Snooze + audit are paired atomically — an appendAudit failure rolls
+  // back the snooze write so we never end up with a state change missing
+  // its audit row (or vice versa). Clearing the snooze is logically an
+  // undo; logging 'snoozed' on a clear would corrupt the audit trail's
+  // meaning, so the action is conditional.
+  const ok = deps.state.runInTransaction(() => {
+    const updated = deps.state.setSnooze(id, until, condition, unsnoozeOnReply, notifyOnUnsnooze);
+    if (!updated) return false;
+    deps.state.appendAudit({
+      itemId: id,
+      action: until === null ? 'undo' : 'snoozed',
+      actor: 'user',
+      payloadJson: JSON.stringify({
+        intent: until === null ? 'unsnooze' : 'snooze',
+        until: until?.toISOString() ?? null,
+        condition,
+        unsnooze_on_reply: unsnoozeOnReply,
+        notify_on_unsnooze: notifyOnUnsnooze,
+      }),
+    });
+    return true;
   });
+  if (!ok) return notFound('item');
   return { status: 200, body: { ok: true } };
 }
 
