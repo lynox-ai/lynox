@@ -855,6 +855,45 @@ describe('isDangerous', () => {
       expect(result).toBeNull();
     });
 
+    // Structured data-destructive tools (audit S-AT-04). Their bash-
+    // equivalents (DROP TABLE, rm -rf) are blocked via CRITICAL_BASH —
+    // these mirror that gate at the tool layer.
+    it('BLOCKS data_store_drop in autonomous mode', () => {
+      const result = isDangerous('data_store_drop', { name: 'orders' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('BLOCKS data_store_delete in autonomous mode', () => {
+      const result = isDangerous('data_store_delete', { name: 'orders', where: { id: 1 } }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('BLOCKS artifact_delete in autonomous mode', () => {
+      const result = isDangerous('artifact_delete', { id: 'art-1' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('BLOCKS memory_delete in autonomous mode', () => {
+      const result = isDangerous('memory_delete', { id: 'mem-1' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('warns on data_store_drop in interactive mode (agent prompts user)', () => {
+      const result = isDangerous('data_store_drop', { name: 'orders' });
+      expect(result).not.toBeNull();
+      expect(result).toContain('destroys stored data');
+      expect(result).not.toContain('[BLOCKED');
+    });
+
+    it('ALLOWS data_store_query in autonomous mode (read-only)', () => {
+      const result = isDangerous('data_store_query', { name: 'orders' }, 'autonomous');
+      expect(result).toBeNull();
+    });
+
     // http_request — DELETE blocked in autonomous
     it('BLOCKS http_request DELETE in autonomous mode', () => {
       const result = isDangerous('http_request', { method: 'DELETE', url: 'https://api.example.com/item/1' }, 'autonomous');

@@ -206,6 +206,21 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
     const managerRef = agent.toolContext.taskManager;
     if (!managerRef) return 'Error: Task manager not available.';
 
+    // Scope check before mutation. The persistence layer's getTask resolves
+    // via `id = ? OR id LIKE ?`, so a sub-agent in one scope can mutate a
+    // task in another scope just by guessing a short prefix. Look up the
+    // task here and refuse if its scope is outside the caller's
+    // activeScopes. Single-user installs have activeScopes undefined and
+    // skip the check (all tasks belong to the same user).
+    if (agent.activeScopes && agent.activeScopes.length > 0) {
+      const existing = managerRef.getTask(input.task_id);
+      if (!existing) return `Task not found: ${input.task_id}`;
+      const inScope = agent.activeScopes.some(s =>
+        s.type === existing.scope_type && s.id === existing.scope_id,
+      );
+      if (!inScope) return `Task not found: ${input.task_id}`;
+    }
+
     try {
       if (input.status === 'completed') {
         const task = managerRef.complete(input.task_id);

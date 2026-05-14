@@ -95,6 +95,23 @@ function requiresAdmin(method: string, pathname: string): boolean {
   if ((method === 'POST' || method === 'DELETE') && pathname === '/api/whatsapp/credentials') return true;
   // KG cleanup is destructive (deletes entities + their relations) — admin only.
   if (method === 'POST' && pathname === '/api/kg/cleanup') return true;
+  // Backup restore calls process.exit() to force a clean boot — a user-scope
+  // bearer should never be able to kill the tenant engine on demand. Listing
+  // stays user-scope; only the restore is admin-only.
+  if (method === 'POST' && pathname.startsWith('/api/backups/') && pathname.endsWith('/restore')) return true;
+  // Mail account mutations stage IMAP/SMTP credentials the engine then uses
+  // for outbound mail. Under two-tier auth, a user-scope bearer must not be
+  // able to swap them out (silent re-routing of replies). Read stays
+  // user-scope; mutations + the connectivity-probe endpoint are admin-only.
+  //
+  // The trailing-slash variants are also gated here so a hypothetical
+  // future router normalisation can't silently lift the admin check off a
+  // `POST /api/mail/accounts/` request. The dynamic-route matcher today
+  // returns 404 for these paths, but we defend at the gate.
+  if (method === 'POST' && (pathname === '/api/mail/accounts' || pathname === '/api/mail/accounts/')) return true;
+  if (method === 'POST' && (pathname === '/api/mail/accounts/test' || pathname === '/api/mail/accounts/test/')) return true;
+  if (method === 'DELETE' && pathname.startsWith('/api/mail/accounts/')) return true;
+  if (method === 'POST' && pathname.startsWith('/api/mail/accounts/') && (pathname.endsWith('/default') || pathname.endsWith('/default/'))) return true;
   return false;
 }
 const RATE_WINDOW_MS = 60_000;
