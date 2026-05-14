@@ -49,10 +49,14 @@ interface ApiSetupInput {
 }
 
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
-const VALID_AUTH_TYPES = new Set(['basic', 'bearer', 'header', 'query']);
+const VALID_AUTH_TYPES = new Set(['basic', 'bearer', 'header', 'query', 'oauth2']);
+const VALID_BASIC_FORMATS = new Set(['user_pass_split', 'pre_encoded_b64']);
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const VALID_SHAPE_KINDS = new Set(['reduce', 'passthrough']);
 const VALID_REDUCERS = new Set(['avg', 'peak', 'avg+peak', 'count', 'first_n', 'last_n']);
+const VALID_OUTPUT_VOLUMES = new Set(['small', 'medium', 'large', 'streaming']);
+const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
+const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
 function validateProfile(profile: ApiProfile): string | null {
   for (const field of REQUIRED_FIELDS) {
@@ -68,8 +72,16 @@ function validateProfile(profile: ApiProfile): string | null {
   } catch {
     return `Invalid base_url: "${profile.base_url}" is not a valid URL`;
   }
-  if (profile.auth && !VALID_AUTH_TYPES.has(profile.auth.type)) {
-    return `Invalid auth type "${profile.auth.type}": must be basic, bearer, header, or query`;
+  if (profile.auth) {
+    if (!VALID_AUTH_TYPES.has(profile.auth.type)) {
+      return `Invalid auth.type "${profile.auth.type}": must be basic, bearer, header, query, or oauth2`;
+    }
+    if (profile.auth.basic_format !== undefined && !VALID_BASIC_FORMATS.has(profile.auth.basic_format)) {
+      return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;
+    }
+    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
+      return 'auth.vault_keys is required for auth.type="oauth2" (refresh-token slot)';
+    }
   }
   if (profile.rate_limit) {
     const rl = profile.rate_limit;
@@ -83,6 +95,39 @@ function validateProfile(profile: ApiProfile): string | null {
   if (profile.response_shape) {
     const shapeErr = validateShape(profile.response_shape);
     if (shapeErr) return shapeErr;
+  }
+  if (profile.concurrency) {
+    if (typeof profile.concurrency.parallel_ok !== 'boolean') {
+      return 'Invalid concurrency.parallel_ok: must be boolean';
+    }
+    if (profile.concurrency.max_in_flight !== undefined) {
+      const m = profile.concurrency.max_in_flight;
+      if (!Number.isInteger(m) || m < 1) {
+        return 'Invalid concurrency.max_in_flight: must be positive integer';
+      }
+    }
+  }
+  if (profile.output_volume !== undefined && !VALID_OUTPUT_VOLUMES.has(profile.output_volume)) {
+    return `Invalid output_volume "${profile.output_volume}": must be small, medium, large, or streaming`;
+  }
+  if (profile.cost) {
+    if (!VALID_COST_MODELS.has(profile.cost.model)) {
+      return `Invalid cost.model "${profile.cost.model}": must be per_call, per_token, or per_unit`;
+    }
+    if (!Number.isFinite(profile.cost.rate_usd) || profile.cost.rate_usd < 0) {
+      return 'Invalid cost.rate_usd: must be non-negative number';
+    }
+    if (profile.cost.output_ratio !== undefined && (!Number.isFinite(profile.cost.output_ratio) || profile.cost.output_ratio <= 0)) {
+      return 'Invalid cost.output_ratio: must be positive number';
+    }
+  }
+  if (profile.provenance) {
+    if (!VALID_PROVENANCE_SOURCES.has(profile.provenance.source)) {
+      return `Invalid provenance.source "${profile.provenance.source}": must be openapi, docs_url, or manual`;
+    }
+    if (profile.provenance.schema_version !== 2) {
+      return `Invalid provenance.schema_version "${String(profile.provenance.schema_version)}": only schema_version=2 is supported in v2 profiles`;
+    }
   }
   return null;
 }
