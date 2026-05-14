@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.4.2 — 2026-05-14
+
+Patch — UI clarity for long-running agent turns + the root-cause fix for the "Verbindung zum Server verloren" toast that surfaced on cat.lynox.cloud + Wave 3/4 security and refactor convergence.
+
+### Added
+
+- **StreamingActivityBar**: sticky surface above the chat input — replaces the pulsing-dot indicator that scrolled out of view during minute-long tool calls. Shows current tool label, elapsed seconds (1s tick), and a soft "Verbindung scheint langsam" hint when the server heartbeat goes silent for >25s. Visible during any streaming activity except pending prompts. (#363)
+- **24 new tool-activity labels** (DE + EN) — `web_crawl`, `web_research`, `crawl_batch`, `write_artifact`, `spawn_agent`, `knowledge_*`, `contacts_*`, `deals_*`, `datastore_*`, `api_setup`, `read_file`, `write_file`, `ask_secret`, and more. Closes the generic "Arbeitet..." fallback users saw during research-heavy turns. (#363)
+- **Responsive chat width**: `max-w-3xl` (768px) on mobile/tablet → `lg:max-w-4xl` (896px) → `xl:max-w-5xl` (1024px). Reclaims the empty real estate where the right-rail context sidebar used to live. (#364)
+- Server SSE protocol: `event: heartbeat` every 10s carrying `{sentAt}` replaces the silent `: keepalive` comment. Client uses it to bump `lastEventAt` and detect stalled streams without a hard disconnect. (#363)
+- Staging Greenmail end-to-end smoke scaffolding (#341, #342, pro #123)
+
+### Fixed
+
+- **Orphan stream timer and body-size reject paths** — the root cause for the "Verbindung zum Server verloren" toast that surfaced on cat.lynox.cloud. The 30-min SSE timer was not cleared on normal stream end, killing random later sessions. (#334)
+- Telegram pending input resolved when the stale-prompt timer aborts the run (#336)
+- Plan finalization gates on `completedAt`, not map presence — fixes the rare case of a plan finalising at step 2 of N (#335)
+- Inbox: consolidation pass + textarea autogrow + session-expired banner (#337)
+- Inbox: wrap + refresh-button + accurate counter restored (#332)
+- ToolContext threading — `api_setup` OpenAPI fetch (#355) and `web_research` content extractor (#357) now receive the request-scoped context that earlier Wave 4 work introduced
+- Google OAuth state bound to a signed HttpOnly cookie (#351)
+- **Multi-tenant security (Wave 3)**: inbox `getItem` + 6 mutations scoped to `tenant_id` (#339); admin-gating + destructive-tool gaps closed (#338); tactical bundle of 4 audit findings (#340); 3 review nits across Wave 2/3 (#344); tenant-id threading from api.ts handlers through subsequent mutations (#343)
+
+### Refactored (Wave 4 — Session-centric + declarative-by-default convergence)
+
+- Engine `init()` split into 7 phases (#356, addresses the god-method finding)
+- Config singletons → `ToolContext` (Wave 4.1 step 1, #350)
+- Session counters → `Session` (Wave 4.1 step 2, #352)
+- Outbound approvals + prompt dedup → `Session` (Wave 4.1 step 3, #353)
+- Orchestrator types extracted to `src/types/orchestration` (#354)
+- `sessionCostUSD` → `SessionCounters.costUSD` (#358)
+- Declarative destructive flag on `ToolEntry` (#347)
+- Declarative scope at route registration (#346)
+- Single channel-wrap helper for untrusted external data (#345)
+
+### Pro / Managed Hosting
+
+- **Traefik websecure `idleTimeout` pinned to 300s** — defense-in-depth for long-running SSE turns (pro #129)
+- **Stripe webhook dedup persisted across CP restarts** — prevents replay-on-restart duplicate billing actions (pro #119)
+- **Billing lifecycle math + customer messaging** corrections (pro #120)
+- **Provisioning optimistic-lock state-machine** transitions — Hetzner double-create gate (pro #121)
+- **Per-file migration tracking** via `managed_drizzle_migrations` table — re-running the apply loop is idempotent now (pro #122)
+- Gatus: `GATUS_OPS_ENABLED='false'` actually disables (zod-coerce trap fix, pro #125); env-guard for the ops config writer on staging (pro #124)
+- Greenmail in staging CP compose for inbox e2e smoke (pro #123)
+
+### Security / Dependencies
+
+- `hono` override bumped to 4.12.18 + `ip-address >=10.1.1` (closes audit findings, #349 + pro #126)
+- Channel-wrap helper for untrusted-data boundaries unified into a single implementation (#345)
+
+### Docs & Internal
+
+- PRD: **Unified API Profile v2 + sub-agent fetching** drafted (sprint-ready for v1.5.0). Smart bootstrap via docs-URL reading, constrained `fetch_url` tool for sub-agents with spawn-time URL allowlist, advisory routing layer, per-call cost display (Phase E, v1.6.0). (pro #130)
+- Positioning: managed-plan provider-routing section (pro #128)
+- CHANGELOG categorisation script per conventional-commit prefix (closes `project_cut_release_categorise`, #348)
+
 ## 1.4.1 — 2026-05-14
 
 Patch — version-sync only. v1.4.0 `release-cut` bumped `core/package.json` and `pro/packages/managed/package.json` to 1.4.0 but missed `core/packages/web-ui/package.json`. StatusBar's stale-bundle check fires when the bundle's build-time `BUILT_VERSION` (baked from web-ui/package.json) does not match the engine's runtime `/api/health.version` (= core/package.json), so users on v1.4.0 saw a permanent "Neue lynox-Version verfügbar" toast that did not clear on reload (rebuilt bundle still had BUILT_VERSION=1.3.12 baked in). v1.4.1 aligns the three packages and patches the `/release-cut` skill so future releases bump all three together.

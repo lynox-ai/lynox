@@ -1,6 +1,6 @@
 {
   "name": "@lynox-ai/core",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Run your business, not your tools — AI runtime for CRM, workflows, research, monitoring. Self-hosted or managed EU. Source-available (ELv2).",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
