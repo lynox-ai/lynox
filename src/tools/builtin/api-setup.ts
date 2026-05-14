@@ -400,6 +400,100 @@ function safeUrlForLogging(rawUrl: string): string {
   }
 }
 
+/** Keyword fragments that mark a deeper docs section worth pulling in for
+ *  v2 profile extraction. Matched case-insensitively against both the anchor
+ *  text and the URL pathname. */
+const LINKED_SECTION_KEYWORDS: readonly string[] = [
+  'rate limit', 'rate-limit', 'ratelimit',
+  'authentication', 'auth',
+  'pricing', 'price',
+  'errors', 'error code',
+  'quota', 'limits',
+];
+
+/** Hard cap on linked sub-pages per bootstrap. PRD specifies 1–2 deeper reads. */
+const LINKED_SECTION_MAX_COUNT = 2;
+/** Don't bother fetching a sub-page if the remaining body budget would leave
+ *  it shorter than ~1 KB — the Haiku call won't learn enough to be useful. */
+const LINKED_SECTION_MIN_BUDGET = 1024;
+
+interface LinkedSection {
+  url: string;
+  anchor: string;
+}
+
+/** Scan a landing-page HTML body for same-host links whose anchor text or
+ *  pathname mentions one of the LINKED_SECTION_KEYWORDS. Returns up to
+ *  LINKED_SECTION_MAX_COUNT deduplicated candidates, highest keyword-hit count
+ *  first. Pure function — no network IO, safe to run on truncated bodies. */
+function findLinkedSections(html: string, baseUrl: string): LinkedSection[] {
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return [];
+  }
+
+  const anchorRegex = /<a\s[^>]*href=["']([^"']+)["'][^>]*>([\s\S]{0,300}?)<\/a>/gi;
+  const seen = new Set<string>();
+  const candidates: Array<LinkedSection & { score: number }> = [];
+
+  for (const match of html.matchAll(anchorRegex)) {
+    const href = match[1] ?? '';
+    const rawAnchor = match[2] ?? '';
+    if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) continue;
+
+    let parsed: URL;
+    try {
+      parsed = new URL(href, baseUrl);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+    // Same-host only — never cross to a different domain (closes the
+    // "attacker docs links to attacker.com/leak" exfil path).
+    if (parsed.host !== base.host) continue;
+    parsed.hash = '';
+    const normalized = parsed.toString();
+    if (normalized === baseUrl) continue;
+    if (seen.has(normalized)) continue;
+
+    const anchorText = rawAnchor.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    const haystack = `${anchorText} ${parsed.pathname.toLowerCase()}`;
+    let score = 0;
+    for (const kw of LINKED_SECTION_KEYWORDS) {
+      if (haystack.includes(kw)) score += 1;
+    }
+    if (score === 0) continue;
+
+    seen.add(normalized);
+    candidates.push({ url: normalized, anchor: anchorText.slice(0, 80), score });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates.slice(0, LINKED_SECTION_MAX_COUNT).map(c => ({ url: c.url, anchor: c.anchor }));
+}
+
+/** Fetch one linked docs section honouring the remaining body budget. Returns
+ *  the empty string on any failure — sub-page reads are best-effort. */
+async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: number): Promise<string> {
+  if (remainingBudget < LINKED_SECTION_MIN_BUDGET) return '';
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
+    try {
+      const resp = await fetchWithValidatedRedirects(url, { signal: ac.signal }, agent.toolContext);
+      if (!resp.ok) return '';
+      const { text } = await readBodyLimited(resp, remainingBudget);
+      return text;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Strip every field outside the extraction whitelist and force the trusted
  * values that come from the caller (base_url, vault_keys, provenance, id, name).
@@ -558,13 +652,32 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     return `Error: docs fetch failed for ${safeUrl} — ${msg}`;
   }
 
+  // Fan out 1–2 same-host linked-section reads (rate-limits / auth / pricing)
+  // so the Haiku extractor sees details the landing page often only links to.
+  // Each sub-fetch is bounded by the remaining 250 KB body budget, so the
+  // combined Haiku prompt cannot exceed DOCS_BODY_MAX_BYTES.
+  const linkedSections = findLinkedSections(docsText, docsUrl);
+  const fetchedSections: Array<{ url: string; text: string }> = [];
+  let remainingBudget = DOCS_BODY_MAX_BYTES - Buffer.byteLength(docsText, 'utf8');
+  for (const section of linkedSections) {
+    if (remainingBudget < LINKED_SECTION_MIN_BUDGET) break;
+    const text = await fetchLinkedSection(section.url, agent, remainingBudget);
+    if (text) {
+      fetchedSections.push({ url: section.url, text });
+      remainingBudget -= Buffer.byteLength(text, 'utf8');
+    }
+  }
+
   emitBootstrapProgress(agent, 'extracting');
   let extracted: DocsExtracted;
   let costUsd: number;
   try {
+    const linkedBlobs = fetchedSections
+      .map(s => `\n\n=== Linked section: ${s.url} ===\n\n${s.text}`)
+      .join('');
     const result = await callForStructuredJson<DocsExtracted>({
       system: DOCS_EXTRACT_SYSTEM,
-      user: `Docs URL: ${docsUrl}\n\n---\n\n${docsText}`,
+      user: `Docs URL: ${docsUrl}\n\n---\n\n${docsText}${linkedBlobs}`,
       schema: DOCS_EXTRACT_SCHEMA,
       budgetUsd: DOCS_EXTRACT_BUDGET_USD,
     });
@@ -597,10 +710,13 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   const truncatedNote = truncated
     ? `\nDocs body was truncated at ${String(DOCS_BODY_MAX_BYTES)} bytes — verify rate limits and pricing before trusting this draft.`
     : '';
+  const linkedNote = fetchedSections.length > 0
+    ? `\nIncluded ${String(fetchedSections.length)} linked section(s): ${fetchedSections.map(s => s.url).join(', ')}`
+    : '';
 
   return `Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).
 
-${summary}${injectedNote}${truncatedNote}
+${summary}${injectedNote}${truncatedNote}${linkedNote}
 
 DRAFT JSON (review, fill auth.vault_keys via ask_secret, then call action="create"):
 \`\`\`json
