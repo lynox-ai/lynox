@@ -876,6 +876,12 @@ describe('isDangerous', () => {
       expect(result).toContain('[BLOCKED');
     });
 
+    it('BLOCKS memory_delete in autonomous mode', () => {
+      const result = isDangerous('memory_delete', { id: 'mem-1' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
     it('warns on data_store_drop in interactive mode (agent prompts user)', () => {
       const result = isDangerous('data_store_drop', { name: 'orders' });
       expect(result).not.toBeNull();

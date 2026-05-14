@@ -953,6 +953,39 @@ describe('LynoxHTTPApi', () => {
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
       }
     });
+
+    // Defense-in-depth: a trailing slash on the admin-gated path must
+    // not lift the admin check, even if the dynamic-route matcher
+    // happens to 404 the request today.
+    it('admin-gates POST /api/mail/accounts/ (trailing slash) with user-scope token', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      try {
+        const res = await jsonFetch('/api/mail/accounts/', {
+          method: 'POST',
+          body: JSON.stringify({ preset: 'gmail' }),
+        });
+        expect(res.status).toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
+
+    it('admin-gates POST /api/backups/foo/restore?x=1 (query string) with user-scope token', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      try {
+        const res = await jsonFetch('/api/backups/foo/restore?x=1', {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        // url.pathname strips query — the path-based check sees `.../restore`
+        // and admin-gates it.
+        expect(res.status).toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
   });
 
   describe('Google OAuth callback', () => {

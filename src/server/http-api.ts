@@ -103,10 +103,15 @@ function requiresAdmin(method: string, pathname: string): boolean {
   // for outbound mail. Under two-tier auth, a user-scope bearer must not be
   // able to swap them out (silent re-routing of replies). Read stays
   // user-scope; mutations + the connectivity-probe endpoint are admin-only.
-  if (method === 'POST' && pathname === '/api/mail/accounts') return true;
-  if (method === 'POST' && pathname === '/api/mail/accounts/test') return true;
+  //
+  // The trailing-slash variants are also gated here so a hypothetical
+  // future router normalisation can't silently lift the admin check off a
+  // `POST /api/mail/accounts/` request. The dynamic-route matcher today
+  // returns 404 for these paths, but we defend at the gate.
+  if (method === 'POST' && (pathname === '/api/mail/accounts' || pathname === '/api/mail/accounts/')) return true;
+  if (method === 'POST' && (pathname === '/api/mail/accounts/test' || pathname === '/api/mail/accounts/test/')) return true;
   if (method === 'DELETE' && pathname.startsWith('/api/mail/accounts/')) return true;
-  if (method === 'POST' && pathname.startsWith('/api/mail/accounts/') && pathname.endsWith('/default')) return true;
+  if (method === 'POST' && pathname.startsWith('/api/mail/accounts/') && (pathname.endsWith('/default') || pathname.endsWith('/default/'))) return true;
   return false;
 }
 const RATE_WINDOW_MS = 60_000;

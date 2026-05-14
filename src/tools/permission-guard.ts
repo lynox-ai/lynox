@@ -554,6 +554,9 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     'data_store_drop',
     'data_store_delete',
     'artifact_delete',
+    // memory_delete wipes user-scope agent memory records. Same threat
+    // shape as artifact_delete — no existing guard before this change.
+    'memory_delete',
   ]);
   if (STRUCTURED_DESTRUCTIVE_TOOLS.has(toolName)) {
     if (autonomy === 'autonomous') {
