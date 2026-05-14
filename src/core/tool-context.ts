@@ -44,6 +44,12 @@ export interface ToolContext {
   rateLimitProvider: ToolCallCountProvider | null;
   hourlyRateLimit: number;
   dailyRateLimit: number;
+  /**
+   * When true, plain-HTTP requests are rejected (HTTPS-only). Localhost is
+   * always exempted so dev servers work. Engine-init wires this from
+   * `userConfig.enforce_https`.
+   */
+  enforceHttps: boolean;
 
   // ── API Store (per-API rate limiting + knowledge) ──
   apiStore: import('./api-store.js').ApiStore | null;
@@ -96,6 +102,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     rateLimitProvider: null,
     hourlyRateLimit: Infinity,
     dailyRateLimit: Infinity,
+    enforceHttps: false,
     apiStore: null,
     artifactStore: null,
     isolationEnvOverride: undefined,
@@ -145,4 +152,13 @@ export function applyHttpRateLimits(
   ctx.rateLimitProvider = provider;
   ctx.hourlyRateLimit = hourlyLimit ?? Infinity;
   ctx.dailyRateLimit = dailyLimit ?? Infinity;
+}
+
+/**
+ * Enable or disable HTTPS-only enforcement on a ToolContext. Plain HTTP
+ * requests to non-localhost hosts will be rejected at validateUrl when
+ * enabled. Engine-init wires this from `userConfig.enforce_https`.
+ */
+export function applyEnforceHttps(ctx: ToolContext, enforce: boolean): void {
+  ctx.enforceHttps = enforce;
 }

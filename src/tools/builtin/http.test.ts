@@ -7,13 +7,28 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import dns from 'node:dns/promises';
-import { httpRequestTool, resetHttpRequestCount, configureHttpRateLimits, resetHttpRateLimits, detectSecretInContent, configureEnforceHttps, resetEnforceHttps } from './http.js';
-import type { ToolCallCountProvider } from '../../core/tool-context.js';
+import { httpRequestTool, resetHttpRequestCount, detectSecretInContent } from './http.js';
+import { applyHttpRateLimits, createToolContext } from '../../core/tool-context.js';
+import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
+import type { LynoxUserConfig } from '../../types/index.js';
 
 const handler = httpRequestTool.handler;
 
+// Each test gets a fresh ToolContext via the beforeEach. The handler reads
+// network policy / enforce_https / rate-limits from `agent.toolContext`,
+// so tests mutate `testCtx` (or call applyHttpRateLimits on it) and pass
+// `makeAgent()` as the agent argument.
+const TEST_USER_CONFIG = {} as LynoxUserConfig;
+let testCtx: ToolContext;
+
+function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn> } = {}): never {
+  return { promptUser: extras.promptUser, toolContext: testCtx } as never;
+}
+
 /** Mock agent with auto-approve promptUser for write method tests */
-const agentWithPrompt = { promptUser: vi.fn().mockResolvedValue('Allow') } as never;
+function agentWithPromptFn(): never {
+  return makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') });
+}
 
 function mockDnsPublic(): void {
   vi.mocked(dns.lookup).mockResolvedValue(
@@ -61,81 +76,82 @@ function createMockResponse(options: {
 beforeEach(() => {
   vi.restoreAllMocks();
   resetHttpRequestCount();
+  testCtx = createToolContext(TEST_USER_CONFIG);
 });
 
 describe('httpRequestTool', () => {
   describe('SSRF Protection', () => {
     it('blocks ftp:// protocol', async () => {
-      await expect(handler({ url: 'ftp://example.com' }, {} as never))
+      await expect(handler({ url: 'ftp://example.com' }, makeAgent()))
         .rejects.toThrow('Only HTTP and HTTPS');
     });
 
     it('blocks file:// protocol', async () => {
-      await expect(handler({ url: 'file:///etc/passwd' }, {} as never))
+      await expect(handler({ url: 'file:///etc/passwd' }, makeAgent()))
         .rejects.toThrow('Only HTTP and HTTPS');
     });
 
     it('blocks direct private IP 127.0.0.1', async () => {
-      await expect(handler({ url: 'http://127.0.0.1' }, {} as never))
+      await expect(handler({ url: 'http://127.0.0.1' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks direct private IP 10.0.0.1', async () => {
-      await expect(handler({ url: 'http://10.0.0.1' }, {} as never))
+      await expect(handler({ url: 'http://10.0.0.1' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks direct private IP 172.16.0.1', async () => {
-      await expect(handler({ url: 'http://172.16.0.1' }, {} as never))
+      await expect(handler({ url: 'http://172.16.0.1' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks direct private IP 192.168.1.1', async () => {
-      await expect(handler({ url: 'http://192.168.1.1' }, {} as never))
+      await expect(handler({ url: 'http://192.168.1.1' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks direct private IP 169.254.1.1', async () => {
-      await expect(handler({ url: 'http://169.254.1.1' }, {} as never))
+      await expect(handler({ url: 'http://169.254.1.1' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks direct private IP 0.0.0.0', async () => {
-      await expect(handler({ url: 'http://0.0.0.0' }, {} as never))
+      await expect(handler({ url: 'http://0.0.0.0' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks IPv6 loopback [::1]', async () => {
-      await expect(handler({ url: 'http://[::1]' }, {} as never))
+      await expect(handler({ url: 'http://[::1]' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks IPv6 link-local [fe80::1]', async () => {
-      await expect(handler({ url: 'http://[fe80::1]' }, {} as never))
+      await expect(handler({ url: 'http://[fe80::1]' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks IPv4-mapped IPv6 that resolves to 127.0.0.1', async () => {
       mockDnsIpv6Private('::ffff:127.0.0.1');
-      await expect(handler({ url: 'http://evil.com' }, {} as never))
+      await expect(handler({ url: 'http://evil.com' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks DNS-resolved private IP (127.0.0.1)', async () => {
       mockDnsPrivate('127.0.0.1');
-      await expect(handler({ url: 'http://evil.com' }, {} as never))
+      await expect(handler({ url: 'http://evil.com' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks DNS-resolved private IP (10.0.0.1)', async () => {
       mockDnsPrivate('10.0.0.1');
-      await expect(handler({ url: 'http://evil.com' }, {} as never))
+      await expect(handler({ url: 'http://evil.com' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
 
     it('blocks DNS-resolved private IP (192.168.1.100)', async () => {
       mockDnsPrivate('192.168.1.100');
-      await expect(handler({ url: 'http://evil.com' }, {} as never))
+      await expect(handler({ url: 'http://evil.com' }, makeAgent()))
         .rejects.toThrow('internal network');
     });
   });
@@ -150,7 +166,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200 OK');
       expect(result).toContain('Hello World');
     });
@@ -165,7 +181,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(mockResp);
       vi.stubGlobal('fetch', fetchMock);
 
-      await handler({ url: 'http://example.com/api', method: 'POST', body: '{"key":"value"}' }, agentWithPrompt);
+      await handler({ url: 'http://example.com/api', method: 'POST', body: '{"key":"value"}' }, agentWithPromptFn());
 
       expect(fetchMock).toHaveBeenCalledWith('http://example.com/api', expect.objectContaining({
         method: 'POST',
@@ -179,7 +195,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(mockResp);
       vi.stubGlobal('fetch', fetchMock);
 
-      await handler({ url: 'http://example.com', method: 'GET', body: 'should-be-ignored' }, {} as never);
+      await handler({ url: 'http://example.com', method: 'GET', body: 'should-be-ignored' }, makeAgent());
 
       const callArgs = fetchMock.mock.calls[0]![1] as RequestInit;
       expect(callArgs.body).toBeUndefined();
@@ -191,7 +207,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(mockResp);
       vi.stubGlobal('fetch', fetchMock);
 
-      await handler({ url: 'http://example.com', method: 'HEAD', body: 'should-be-ignored' }, {} as never);
+      await handler({ url: 'http://example.com', method: 'HEAD', body: 'should-be-ignored' }, makeAgent());
 
       const callArgs = fetchMock.mock.calls[0]![1] as RequestInit;
       expect(callArgs.body).toBeUndefined();
@@ -204,7 +220,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const result = await handler({ url: 'http://example.com/api' }, {} as never);
+      const result = await handler({ url: 'http://example.com/api' }, makeAgent());
       expect(result).toContain('"name": "test"');
       expect(result).toContain('"value": 42');
     });
@@ -216,7 +232,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const result = await handler({ url: 'http://example.com/page' }, {} as never);
+      const result = await handler({ url: 'http://example.com/page' }, makeAgent());
       expect(result).toContain('plain text content here');
     });
 
@@ -226,7 +242,7 @@ describe('httpRequestTool', () => {
       const mockResp = createMockResponse({ body: longBody });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const result = await handler({ url: 'http://example.com/big' }, {} as never);
+      const result = await handler({ url: 'http://example.com/big' }, makeAgent());
       expect(result).toContain('[truncated');
       expect(result).toContain('http_response_limit');
       expect(result.length).toBeLessThan(150_000);
@@ -238,7 +254,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(mockResp);
       vi.stubGlobal('fetch', fetchMock);
 
-      await handler({ url: 'http://example.com/resource', method: 'PUT', body: 'data' }, agentWithPrompt);
+      await handler({ url: 'http://example.com/resource', method: 'PUT', body: 'data' }, agentWithPromptFn());
 
       expect(fetchMock).toHaveBeenCalledWith('http://example.com/resource', expect.objectContaining({
         method: 'PUT',
@@ -252,7 +268,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(mockResp);
       vi.stubGlobal('fetch', fetchMock);
 
-      const result = await handler({ url: 'http://example.com/resource', method: 'DELETE' }, {} as never);
+      const result = await handler({ url: 'http://example.com/resource', method: 'DELETE' }, makeAgent());
       expect(result).toContain('HTTP 204 No Content');
       expect(fetchMock).toHaveBeenCalledWith('http://example.com/resource', expect.objectContaining({
         method: 'DELETE',
@@ -265,7 +281,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(mockResp);
       vi.stubGlobal('fetch', fetchMock);
 
-      await handler({ url: 'http://example.com/resource', method: 'PATCH', body: '{"field":"new"}' }, agentWithPrompt);
+      await handler({ url: 'http://example.com/resource', method: 'PATCH', body: '{"field":"new"}' }, agentWithPromptFn());
 
       expect(fetchMock).toHaveBeenCalledWith('http://example.com/resource', expect.objectContaining({
         method: 'PATCH',
@@ -282,7 +298,7 @@ describe('httpRequestTool', () => {
       await handler({
         url: 'http://example.com',
         headers: { 'Authorization': 'Bearer token', 'X-Custom': 'value' },
-      }, {} as never);
+      }, makeAgent());
 
       const callArgs = fetchMock.mock.calls[0]![1] as RequestInit;
       expect(callArgs.headers).toEqual({ 'Authorization': 'Bearer token', 'X-Custom': 'value' });
@@ -296,7 +312,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('x-request-id: abc-123');
     });
 
@@ -306,7 +322,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(mockResp);
       vi.stubGlobal('fetch', fetchMock);
 
-      await handler({ url: 'http://example.com' }, {} as never);
+      await handler({ url: 'http://example.com' }, makeAgent());
 
       expect(fetchMock).toHaveBeenCalledWith('http://example.com', expect.objectContaining({
         method: 'GET',
@@ -320,7 +336,7 @@ describe('httpRequestTool', () => {
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
 
@@ -331,10 +347,10 @@ describe('httpRequestTool', () => {
 
       // Make 100 successful requests (counter incremented on each fetch)
       for (let i = 0; i < 100; i++) {
-        await handler({ url: 'http://example.com' }, {} as never);
+        await handler({ url: 'http://example.com' }, makeAgent());
       }
       // Next should be blocked (counter is at 100, >= MAX)
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('Request limit reached');
     });
 
@@ -344,10 +360,10 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
       for (let i = 0; i < 100; i++) {
-        await handler({ url: 'http://example.com' }, {} as never);
+        await handler({ url: 'http://example.com' }, makeAgent());
       }
       resetHttpRequestCount();
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
   });
@@ -362,19 +378,19 @@ describe('httpRequestTool', () => {
     }
 
     beforeEach(() => {
-      resetHttpRateLimits();
+      // testCtx already reset by outer beforeEach; rate limits start unset.
       resetHttpRequestCount();
     });
 
     it('blocks when hourly limit exceeded', async () => {
-      configureHttpRateLimits({ provider: mockProvider({ 1: 50 }), hourlyLimit: 50 });
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      applyHttpRateLimits(testCtx, mockProvider({ 1: 50 }), 50);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('Hourly request limit reached');
     });
 
     it('blocks when daily limit exceeded', async () => {
-      configureHttpRateLimits({ provider: mockProvider({ 24: 200 }), dailyLimit: 200 });
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      applyHttpRateLimits(testCtx, mockProvider({ 24: 200 }), undefined, 200);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('Daily request limit reached');
     });
 
@@ -382,8 +398,8 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
-      configureHttpRateLimits({ provider: mockProvider({ 1: 5, 24: 10 }), hourlyLimit: 50, dailyLimit: 200 });
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      applyHttpRateLimits(testCtx, mockProvider({ 1: 5, 24: 10 }), 50, 200);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
 
@@ -391,18 +407,22 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
-      configureHttpRateLimits({ provider: mockProvider({ 1: 100 }) });
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      applyHttpRateLimits(testCtx, mockProvider({ 1: 100 }));
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
 
-    it('resetHttpRateLimits clears config', async () => {
-      configureHttpRateLimits({ provider: mockProvider({ 1: 100 }), hourlyLimit: 10 });
-      resetHttpRateLimits();
+    it('fresh ToolContext has no rate limits set (unlimited)', async () => {
+      // Replaces the legacy `resetHttpRateLimits clears config` test —
+      // because rate limits live on the ToolContext, the equivalent assertion
+      // is "a freshly-created ctx never blocks". The provider is wired but
+      // the limits remain Infinity unless applyHttpRateLimits sets them.
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      // ctx has rateLimitProvider=null + hourly/daily=Infinity by default,
+      // so even an "exceeded" count provider can't trigger a block.
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
   });
@@ -436,7 +456,6 @@ describe('httpRequestTool', () => {
   describe('egress control: request body secret blocking', () => {
     beforeEach(() => {
       resetHttpRequestCount();
-      resetHttpRateLimits();
     });
 
     it('blocks POST with API key in body', async () => {
@@ -445,7 +464,7 @@ describe('httpRequestTool', () => {
         url: 'http://example.com/api',
         method: 'POST',
         body: JSON.stringify({ key: 'sk-ant-api03-abc123def456ghi789jkl012mno345pqr678' }),
-      }, agentWithPrompt);
+      }, agentWithPromptFn());
       expect(result).toContain('Blocked');
       expect(result).toContain('Anthropic API key');
     });
@@ -456,7 +475,7 @@ describe('httpRequestTool', () => {
         url: 'http://example.com/upload',
         method: 'PUT',
         body: '-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqh...',
-      }, agentWithPrompt);
+      }, agentWithPromptFn());
       expect(result).toContain('Blocked');
       expect(result).toContain('private key');
     });
@@ -469,7 +488,7 @@ describe('httpRequestTool', () => {
         url: 'http://example.com/api',
         method: 'POST',
         body: JSON.stringify({ message: 'hello world' }),
-      }, agentWithPrompt);
+      }, agentWithPromptFn());
       expect(result).toContain('HTTP 200');
     });
   });
@@ -477,7 +496,6 @@ describe('httpRequestTool', () => {
   describe('egress control: GET exfiltration detection', () => {
     beforeEach(() => {
       resetHttpRequestCount();
-      resetHttpRateLimits();
     });
 
     it('blocks GET with very long query string (no promptUser)', async () => {
@@ -485,7 +503,7 @@ describe('httpRequestTool', () => {
       const longParam = 'a'.repeat(600);
       const result = await handler({
         url: `http://example.com/api?data=${longParam}`,
-      }, {} as never);
+      }, makeAgent());
       expect(result).toContain('Blocked');
       expect(result).toContain('query string');
     });
@@ -495,7 +513,7 @@ describe('httpRequestTool', () => {
       const b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==';
       const result = await handler({
         url: `http://example.com/api?data=${b64}`,
-      }, {} as never);
+      }, makeAgent());
       expect(result).toContain('Blocked');
       expect(result).toContain('base64');
     });
@@ -507,7 +525,7 @@ describe('httpRequestTool', () => {
       const longParam = 'a'.repeat(600);
       const result = await handler({
         url: `http://example.com/api?data=${longParam}`,
-      }, agentWithPrompt);
+      }, agentWithPromptFn());
       expect(result).toContain('HTTP 200');
     });
 
@@ -517,37 +535,36 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
       const result = await handler({
         url: 'http://example.com/api?q=search+term',
-      }, {} as never);
+      }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
   });
 
   describe('enforce_https', () => {
-    afterEach(() => {
-      resetEnforceHttps();
-    });
+    // No afterEach reset needed — the outer beforeEach gives each test a
+    // fresh ToolContext with enforceHttps=false.
 
     it('blocks http:// when enforce_https is enabled', async () => {
-      configureEnforceHttps(true);
+      testCtx.enforceHttps = true;
       mockDnsPublic();
-      await expect(handler({ url: 'http://example.com' }, {} as never))
+      await expect(handler({ url: 'http://example.com' }, makeAgent()))
         .rejects.toThrow('HTTPS connections are allowed');
     });
 
     it('allows https:// when enforce_https is enabled', async () => {
-      configureEnforceHttps(true);
+      testCtx.enforceHttps = true;
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
-      const result = await handler({ url: 'https://example.com' }, {} as never);
+      const result = await handler({ url: 'https://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
 
     it('allows http://localhost when enforce_https is enabled', async () => {
-      configureEnforceHttps(true);
+      testCtx.enforceHttps = true;
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
-      const result = await handler({ url: 'http://localhost:3000' }, {} as never);
+      const result = await handler({ url: 'http://localhost:3000' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
 
@@ -555,7 +572,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
-      const result = await handler({ url: 'http://example.com' }, {} as never);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
   });

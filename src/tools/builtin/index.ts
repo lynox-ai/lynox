@@ -5,7 +5,7 @@ export { spawnAgentTool } from './spawn.js';
 export { askUserTool } from './ask-user.js';
 export { askSecretTool } from './ask-secret.js';
 export { batchFilesTool } from './batch-files.js';
-export { httpRequestTool, setNetworkPolicy, clearNetworkPolicy } from './http.js';
+export { httpRequestTool } from './http.js';
 export { runPipelineTool } from './pipeline.js';
 export { taskCreateTool, taskUpdateTool, taskListTool } from './task.js';
 export { planTaskTool } from './plan-task.js';

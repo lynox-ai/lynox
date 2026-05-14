@@ -1,52 +1,16 @@
 import dns from 'node:dns/promises';
-import type { ToolEntry, NetworkPolicy } from '../../types/index.js';
+import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 
-// === Network policy enforcement ===
-
-let _networkPolicy: NetworkPolicy | undefined;
-let _allowedHosts: ReadonlySet<string> | undefined;
-let _allowedWildcards: string[] | undefined;
-
-// === HTTPS enforcement ===
-
-let _enforceHttps = false;
-
-export function configureEnforceHttps(enforce: boolean): void {
-  _enforceHttps = enforce;
-}
-
-export function resetEnforceHttps(): void {
-  _enforceHttps = false;
-}
-
-export function setNetworkPolicy(policy: NetworkPolicy | undefined, hosts: string[] | undefined): void {
-  _networkPolicy = policy;
-  if (hosts && hosts.length > 0) {
-    const exact = new Set<string>();
-    const wildcards: string[] = [];
-    for (const h of hosts) {
-      if (h.startsWith('*.')) {
-        wildcards.push(h.slice(2));
-      } else {
-        exact.add(h);
-      }
-    }
-    _allowedHosts = exact;
-    _allowedWildcards = wildcards;
-  } else {
-    _allowedHosts = undefined;
-    _allowedWildcards = undefined;
-  }
-}
-
-export function clearNetworkPolicy(): void {
-  _networkPolicy = undefined;
-  _allowedHosts = undefined;
-  _allowedWildcards = undefined;
-}
+// Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
+// HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
+// (`rateLimitProvider`, `hourlyRateLimit`, `dailyRateLimit`) live on
+// ToolContext. Engine-init wires them via applyNetworkPolicy() /
+// applyHttpRateLimits() / applyEnforceHttps() in tool-context.ts. The
+// tool handler reads from `agent.toolContext` and threads it into
+// validateUrl() + fetchWithValidatedRedirects().
 
 function isPrivateIP(ip: string): boolean {
   // Handle IPv4-mapped IPv6 (::ffff:x.x.x.x)
@@ -95,7 +59,7 @@ function friendlyBlockMessage(technical: string): string {
   return technical;
 }
 
-async function validateUrl(rawUrl: string): Promise<void> {
+async function validateUrl(rawUrl: string, ctx?: ToolContext | undefined): Promise<void> {
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
@@ -103,22 +67,22 @@ async function validateUrl(rawUrl: string): Promise<void> {
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
 
   // HTTPS enforcement (localhost exempted for development)
-  if (_enforceHttps && parsed.protocol === 'http:') {
+  if (ctx?.enforceHttps && parsed.protocol === 'http:') {
     if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
       throw new Error('Blocked: HTTP not allowed — enforce_https is enabled. Use HTTPS.');
     }
   }
 
   // Network policy enforcement
-  if (_networkPolicy === 'deny-all') {
+  if (ctx?.networkPolicy === 'deny-all') {
     throw new Error('Network access denied: air-gapped isolation');
   }
-  if (_networkPolicy === 'allow-list') {
+  if (ctx?.networkPolicy === 'allow-list') {
     let allowed = false;
-    if (_allowedHosts?.has(hostname)) {
+    if (ctx.allowedHosts?.has(hostname)) {
       allowed = true;
-    } else if (_allowedWildcards) {
-      for (const domain of _allowedWildcards) {
+    } else if (ctx.allowedWildcards.length > 0) {
+      for (const domain of ctx.allowedWildcards) {
         if (hostname === domain || hostname.endsWith(`.${domain}`)) {
           allowed = true;
           break;
@@ -154,13 +118,13 @@ function shouldRewriteToGet(status: number, method: string): boolean {
   return (status === 301 || status === 302) && method !== 'GET' && method !== 'HEAD';
 }
 
-export async function fetchWithValidatedRedirects(url: string, init: RequestInit): Promise<Response> {
+export async function fetchWithValidatedRedirects(url: string, init: RequestInit, ctx?: ToolContext | undefined): Promise<Response> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   let body = init.body;
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-    await validateUrl(currentUrl);
+    await validateUrl(currentUrl, ctx);
     const requestInit: RequestInit = {
       ...init,
       method,
@@ -268,33 +232,18 @@ export function resetHttpRequestCount(): void {
   sessionHttpRequestCount = 0;
 }
 
-// === Persistent cross-session rate limiting ===
+// Cross-session rate limits live on ToolContext (rateLimitProvider,
+// hourlyRateLimit, dailyRateLimit). Engine-init configures them via
+// applyHttpRateLimits().
 
-import type { ToolCallCountProvider } from '../../core/tool-context.js';
-
-let _rateLimitProvider: ToolCallCountProvider | null = null;
-const DEFAULT_HOURLY_LIMIT = 200;
-const DEFAULT_DAILY_LIMIT = 2000;
-let _hourlyLimit = DEFAULT_HOURLY_LIMIT;
-let _dailyLimit = DEFAULT_DAILY_LIMIT;
-
-/** Configure cross-session HTTP rate limits. Called once at orchestrator init. */
-export function configureHttpRateLimits(opts: {
-  provider: ToolCallCountProvider;
-  hourlyLimit?: number | undefined;
-  dailyLimit?: number | undefined;
-}): void {
-  _rateLimitProvider = opts.provider;
-  _hourlyLimit = opts.hourlyLimit ?? DEFAULT_HOURLY_LIMIT;
-  _dailyLimit = opts.dailyLimit ?? DEFAULT_DAILY_LIMIT;
-}
-
-/** Reset rate limit config (for testing). */
-export function resetHttpRateLimits(): void {
-  _rateLimitProvider = null;
-  _hourlyLimit = DEFAULT_HOURLY_LIMIT;
-  _dailyLimit = DEFAULT_DAILY_LIMIT;
-}
+/**
+ * Default cross-session rate limits exposed for engine-init.ts. The
+ * handler defaults to `Infinity` (i.e. no limit) when the ToolContext
+ * fields are unset, so changing these only affects new orchestrator
+ * instances that opt in via applyHttpRateLimits.
+ */
+export const DEFAULT_HOURLY_LIMIT = 200;
+export const DEFAULT_DAILY_LIMIT = 2000;
 
 // === Egress control: detect data exfiltration attempts ===
 
@@ -414,18 +363,23 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     },
   },
   handler: async (input: HttpRequestInput, agent: import('../../types/index.js').IAgent): Promise<string> => {
-    // Check persistent cross-session rate limits
-    if (_rateLimitProvider && (_hourlyLimit < Infinity || _dailyLimit < Infinity)) {
-      if (_hourlyLimit < Infinity) {
-        const hourlyCount = _rateLimitProvider.getToolCallCountSince('http_request', 1);
-        if (hourlyCount >= _hourlyLimit) {
-          return friendlyBlockMessage(`Blocked: hourly HTTP request limit (${_hourlyLimit}) exceeded. Count: ${hourlyCount}.`);
+    const toolContext = agent.toolContext;
+
+    // Check persistent cross-session rate limits (sourced from ToolContext)
+    const rateLimitProvider = toolContext?.rateLimitProvider ?? null;
+    const hourlyLimit = toolContext?.hourlyRateLimit ?? Infinity;
+    const dailyLimit = toolContext?.dailyRateLimit ?? Infinity;
+    if (rateLimitProvider && (hourlyLimit < Infinity || dailyLimit < Infinity)) {
+      if (hourlyLimit < Infinity) {
+        const hourlyCount = rateLimitProvider.getToolCallCountSince('http_request', 1);
+        if (hourlyCount >= hourlyLimit) {
+          return friendlyBlockMessage(`Blocked: hourly HTTP request limit (${hourlyLimit}) exceeded. Count: ${hourlyCount}.`);
         }
       }
-      if (_dailyLimit < Infinity) {
-        const dailyCount = _rateLimitProvider.getToolCallCountSince('http_request', 24);
-        if (dailyCount >= _dailyLimit) {
-          return friendlyBlockMessage(`Blocked: daily HTTP request limit (${_dailyLimit}) exceeded. Count: ${dailyCount}.`);
+      if (dailyLimit < Infinity) {
+        const dailyCount = rateLimitProvider.getToolCallCountSince('http_request', 24);
+        if (dailyCount >= dailyLimit) {
+          return friendlyBlockMessage(`Blocked: daily HTTP request limit (${dailyLimit}) exceeded. Count: ${dailyCount}.`);
         }
       }
     }
@@ -436,7 +390,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
 
     // Per-API rate limiting + profile enforcement (from API Store)
-    const toolContext = agent.toolContext;
     if (toolContext?.apiStore && toolContext.apiStore.size > 0) {
       try {
         const reqHostname = new URL(input.url).hostname;
@@ -540,7 +493,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
     try {
       sessionHttpRequestCount++;
-      const response = await fetchWithValidatedRedirects(input.url, opts);
+      const response = await fetchWithValidatedRedirects(input.url, opts, toolContext);
       const status = `${response.status} ${response.statusText}`;
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
