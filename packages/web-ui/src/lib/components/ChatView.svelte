@@ -1893,11 +1893,6 @@
 				{/if}
 			{/each}
 
-			<!-- Inline indicator removed; StreamingActivityBar below the message
-			     stream now carries this signal so it stays visible during long
-			     tool calls (web_crawl, DataForSEO, write_artifact) instead of
-			     scrolling out of view with the last message. -->
-
 			{#if messages.length > 0}
 				<div class="flex items-center gap-3 flex-wrap">
 					{#if hasToolCalls}
@@ -2352,11 +2347,11 @@
 	     reply surfaces — and the [Antworten] button is only a scroll-locator. -->
 	{#if pipelineStatusV2 && pendingPromptHead && pendingPromptHead.kind === 'tabs' && !inBatchMode}
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
-	{:else if isStreaming}
+	{:else if isStreaming && !pendingPermission && !pendingSecret && !pendingTabsPrompt}
 		<!-- Sticky activity surface above the input. Stays visible during
-		     long tool calls (web_crawl, DataForSEO) where the inline
-		     pulsing-dot indicator would scroll out of view. Suppressed when
-		     PromptAnchor is showing — that's the actionable case. -->
+		     long tool calls where the inline pulsing-dot indicator would
+		     scroll out of view. Suppressed during pending prompts (any kind)
+		     because the agent is waiting on the user, not working. -->
 		<StreamingActivityBar
 			label={streamingLabel}
 			currentToolStartedAt={currentToolStartedAt}
