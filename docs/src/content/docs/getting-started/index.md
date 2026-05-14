@@ -9,7 +9,7 @@ sidebar:
 
 - **An LLM API key** for at least one of:
   - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended primary, direct API
-  - [Claude (AWS Bedrock)](https://console.aws.amazon.com/bedrock/) — BYOK for customers already on AWS
+  - [Claude (Google Vertex AI)](https://console.cloud.google.com/vertex-ai) — BYOK for customers already on GCP
   - [Mistral AI](https://console.mistral.ai/) — EU-based alternative / background tasks
   - OpenAI-compatible (Gemini, local models) — for specialized tasks
   - Custom Proxy (LiteLLM, OpenRouter) — experimental
