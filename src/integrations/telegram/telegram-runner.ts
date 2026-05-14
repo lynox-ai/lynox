@@ -277,7 +277,15 @@ async function executeRunInner(
     if (Date.now() - run.lastActivityAt > STALE_TIMEOUT_MS) {
       clearInterval(staleTimer);
       process.stderr.write(`LYNOX Telegram: run stale for chat ${chatId}, aborting\n`);
+      run.aborted = true;
       session.abort();
+      // If the agent is parked on promptUser(), unblock it so the run can
+      // unwind and free the chat's RunQueue slot — otherwise subsequent
+      // messages stay queued behind a Promise that never resolves.
+      if (run.pendingInput) {
+        run.pendingInput.resolve('[ABORTED]');
+        run.pendingInput = null;
+      }
       void bot.telegram.sendMessage(chatId, t('msg.timeout', run.lang)).catch(() => {});
     }
   }, STALE_CHECK_INTERVAL_MS);

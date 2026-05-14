@@ -424,6 +424,37 @@ describe('telegram-runner', () => {
 
       vi.useRealTimers();
     });
+
+    it('unblocks pendingInput when stale-timer fires during promptUser', async () => {
+      vi.useFakeTimers();
+
+      const blockingSession = createMockSession();
+      let promptResolution: string | null = null;
+      blockingSession.run.mockImplementation(async () => {
+        if (blockingSession.promptUser) {
+          promptResolution = await (blockingSession.promptUser as (q: string) => Promise<string>)(
+            'Awaiting answer',
+          );
+        }
+        return 'done';
+      });
+
+      const runPromise = executeRun(bot, blockingSession as never, 601, 'stale-prompt task');
+
+      // Let executeRunInner install promptUser and reach the await.
+      await vi.advanceTimersByTimeAsync(50);
+
+      // Stale check interval is 30s; stale timeout is 5 min. Advance past it.
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 30_000);
+
+      // Drain microtasks for the promptUser promise resolution + run completion.
+      vi.useRealTimers();
+      await runPromise;
+
+      expect(blockingSession.abort).toHaveBeenCalled();
+      expect(promptResolution).toBe('[ABORTED]');
+      expect(hasActiveRun(601)).toBe(false);
+    });
   });
 
   describe('handler restoration', () => {
