@@ -228,6 +228,9 @@ async function executeThinker(
     openaiModelId: profile?.model_id,
     openaiAuth: profile?.auth,
     userTimezone: parentAgent.userTimezone,
+    // Share the parent's Session counters so one conversation accumulates
+    // a single http/write budget across the main agent + all sub-agents.
+    sessionCounters: parentAgent.sessionCounters,
   });
 
   // Track child for abort propagation

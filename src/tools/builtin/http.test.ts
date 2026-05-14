@@ -7,22 +7,27 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import dns from 'node:dns/promises';
-import { httpRequestTool, resetHttpRequestCount, detectSecretInContent } from './http.js';
+import { httpRequestTool, detectSecretInContent } from './http.js';
 import { applyHttpRateLimits, createToolContext } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
-import type { LynoxUserConfig } from '../../types/index.js';
+import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
 
 const handler = httpRequestTool.handler;
 
-// Each test gets a fresh ToolContext via the beforeEach. The handler reads
-// network policy / enforce_https / rate-limits from `agent.toolContext`,
-// so tests mutate `testCtx` (or call applyHttpRateLimits on it) and pass
-// `makeAgent()` as the agent argument.
+// Each test gets a fresh ToolContext + a fresh SessionCounters object via
+// beforeEach. The handler reads network policy / rate-limits from
+// `agent.toolContext` and the per-session http counter from
+// `agent.sessionCounters`. Both flow into the agent stub via `makeAgent()`.
 const TEST_USER_CONFIG = {} as LynoxUserConfig;
 let testCtx: ToolContext;
+let testCounters: SessionCounters;
 
 function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn> } = {}): never {
-  return { promptUser: extras.promptUser, toolContext: testCtx } as never;
+  return {
+    promptUser: extras.promptUser,
+    toolContext: testCtx,
+    sessionCounters: testCounters,
+  } as never;
 }
 
 /** Mock agent with auto-approve promptUser for write method tests */
@@ -75,8 +80,8 @@ function createMockResponse(options: {
 
 beforeEach(() => {
   vi.restoreAllMocks();
-  resetHttpRequestCount();
   testCtx = createToolContext(TEST_USER_CONFIG);
+  testCounters = { httpRequests: 0, writeBytes: 0 };
 });
 
 describe('httpRequestTool', () => {
@@ -354,7 +359,12 @@ describe('httpRequestTool', () => {
       expect(result).toContain('Request limit reached');
     });
 
-    it('reset clears counter', async () => {
+    it('fresh Session counter object → counter starts at 0', async () => {
+      // Replaces the legacy resetHttpRequestCount-based test. Counter now
+      // lives on `agent.sessionCounters` (sourced from the per-test
+      // `testCounters` fixture), so "resetting" a session means assigning
+      // a new counters object — which is what a new Session would do in
+      // production.
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
@@ -362,7 +372,8 @@ describe('httpRequestTool', () => {
       for (let i = 0; i < 100; i++) {
         await handler({ url: 'http://example.com' }, makeAgent());
       }
-      resetHttpRequestCount();
+      // Swap in a fresh counters object — Session-equivalent of "new session".
+      testCounters = { httpRequests: 0, writeBytes: 0 };
       const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
@@ -379,7 +390,6 @@ describe('httpRequestTool', () => {
 
     beforeEach(() => {
       // testCtx already reset by outer beforeEach; rate limits start unset.
-      resetHttpRequestCount();
     });
 
     it('blocks when hourly limit exceeded', async () => {
@@ -455,7 +465,6 @@ describe('httpRequestTool', () => {
 
   describe('egress control: request body secret blocking', () => {
     beforeEach(() => {
-      resetHttpRequestCount();
     });
 
     it('blocks POST with API key in body', async () => {
@@ -495,7 +504,6 @@ describe('httpRequestTool', () => {
 
   describe('egress control: GET exfiltration detection', () => {
     beforeEach(() => {
-      resetHttpRequestCount();
     });
 
     it('blocks GET with very long query string (no promptUser)', async () => {
@@ -604,7 +612,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store } } as never;
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/search' }, agent);
 
       expect(result).toContain('keyword');
@@ -631,7 +639,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store } } as never;
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/any' }, agent);
 
       expect(result).toContain('"foo": "bar"');
@@ -649,7 +657,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store } } as never;
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/x' }, agent);
 
       expect(result).toContain('"a": 1');
@@ -680,7 +688,7 @@ describe('httpRequestTool', () => {
           resolvePrompt = res;
         }),
       );
-      const agent = { promptUser } as never;
+      const agent = { promptUser, sessionCounters: testCounters } as never;
 
       const url = `https://api-parallel-consent-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
@@ -714,7 +722,7 @@ describe('httpRequestTool', () => {
       const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>(() =>
         new Promise<string>((res) => { resolvePrompt = res; }),
       );
-      const agent = { promptUser } as never;
+      const agent = { promptUser, sessionCounters: testCounters } as never;
 
       const url = `https://api-parallel-deny-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
@@ -741,7 +749,7 @@ describe('httpRequestTool', () => {
       const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>()
         .mockResolvedValueOnce('Deny')
         .mockResolvedValueOnce('Allow');
-      const agent = { promptUser } as never;
+      const agent = { promptUser, sessionCounters: testCounters } as never;
 
       const url = `https://api-reprompt-${Date.now()}.example.com/v1/x`;
       const first = await handler({ url, method: 'POST', body: '{}' }, agent);

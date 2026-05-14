@@ -224,13 +224,16 @@ const approvedOutboundDomains = new Set<string>();
 const pendingOutboundPrompts = new Map<string, Promise<boolean>>();
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
-const MAX_REQUESTS_PER_SESSION = 100;
-let sessionHttpRequestCount = 0;
-
-/** Reset the session HTTP request counter (for testing). */
-export function resetHttpRequestCount(): void {
-  sessionHttpRequestCount = 0;
-}
+/**
+ * Max http_request invocations per Session. Previously enforced via the
+ * module-level `sessionHttpRequestCount`; that masqueraded as per-session
+ * but actually accumulated for the lifetime of the process (no reset
+ * between Sessions outside the test-only `resetHttpRequestCount` helper).
+ * Now charged against `agent.sessionCounters.httpRequests`, which the
+ * owning Session allocates fresh on construction and the spawn-agent path
+ * shares with sub-agents.
+ */
+export const MAX_REQUESTS_PER_SESSION = 100;
 
 // Cross-session rate limits live on ToolContext (rateLimitProvider,
 // hourlyRateLimit, dailyRateLimit). Engine-init configures them via
@@ -385,7 +388,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
 
     // Check session rate limit before any validation — only increment on actual request attempt
-    if (sessionHttpRequestCount >= MAX_REQUESTS_PER_SESSION) {
+    if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
       return friendlyBlockMessage(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
@@ -492,7 +495,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     opts.signal = controller.signal;
 
     try {
-      sessionHttpRequestCount++;
+      agent.sessionCounters.httpRequests++;
       const response = await fetchWithValidatedRedirects(input.url, opts, toolContext);
       const status = `${response.status} ${response.statusText}`;
       // Strip sensitive response headers to prevent credential leakage to agent
