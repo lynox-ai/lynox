@@ -226,8 +226,14 @@ export class LynoxHTTPApi {
   // the period window itself rolls forward and evicts old entries.
   private readonly _usageSummaryCache = new Map<string, { summary: import('../core/run-history.js').UsageSummary; expiresAt: number }>();
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
-  private _googleOAuthState: string | undefined;
-  private _googleRedirectUri: string | undefined;
+  // OAuth state previously lived as `_googleOAuthState` + `_googleRedirectUri`
+  // instance fields, which:
+  //   1. raced when two OAuth attempts started in parallel (second overwrote first)
+  //   2. wasn't tied to the requesting user-agent, so any caller who knew the
+  //      state could complete the callback
+  // The state now travels in an HMAC-signed cookie set on /api/google/auth and
+  // verified on /api/google/callback (sameSite=lax for the cross-site OAuth
+  // dance, HttpOnly, Path scoped to the callback, 10-minute TTL).
 
   /** Whether the Web UI handler is loaded (determines default port and bind behavior). */
   hasWebUi(): boolean { return this.webUiHandler !== null; }
@@ -430,6 +436,66 @@ export class LynoxHTTPApi {
     } catch {
       return false;
     }
+  }
+
+  // ── Google OAuth state cookie (CSRF guard for /api/google/callback) ───
+  //
+  // Cookie format: `<state>.<ts>.<hmac>`. State is a UUID (no dots), ts is a
+  // unix-second integer, hmac uses HKDF-style key derivation off
+  // LYNOX_HTTP_SECRET (purpose "lynox-oauth-state") to keep the OAuth secret
+  // separate from the session-cookie secret. 10-minute TTL — long enough for
+  // any human OAuth flow, short enough that a stolen cookie expires before
+  // it's useful.
+
+  private static readonly OAUTH_STATE_COOKIE = 'lynox_oauth_state';
+  private static readonly OAUTH_STATE_TTL_SEC = 10 * 60;
+
+  private _signOAuthStateCookie(state: string, secret: string): string {
+    const ts = Math.floor(Date.now() / 1000).toString();
+    const payload = `${state}.${ts}`;
+    const key = createHmac('sha256', 'lynox-oauth-state').update(secret).digest();
+    const sig = createHmac('sha256', key).update(payload).digest('hex');
+    return `${payload}.${sig}`;
+  }
+
+  private _verifyOAuthStateCookie(req: IncomingMessage, secret: string): string | null {
+    const cookieHeader = req.headers['cookie'];
+    if (!cookieHeader) return null;
+    const matched = cookieHeader.match(new RegExp(`(?:^|;\\s*)${LynoxHTTPApi.OAUTH_STATE_COOKIE}=([^;]+)`));
+    if (!matched?.[1]) return null;
+
+    const token = decodeURIComponent(matched[1]);
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const [stateRaw, tsStr, sig] = parts;
+    if (!stateRaw || !tsStr || !sig) return null;
+
+    const ts = parseInt(tsStr, 10);
+    if (Number.isNaN(ts)) return null;
+    if (Math.floor(Date.now() / 1000) - ts > LynoxHTTPApi.OAUTH_STATE_TTL_SEC) return null;
+
+    try {
+      const key = createHmac('sha256', 'lynox-oauth-state').update(secret).digest();
+      const expected = createHmac('sha256', key).update(`${stateRaw}.${tsStr}`).digest('hex');
+      const sigBuf = Buffer.from(sig, 'hex');
+      const expBuf = Buffer.from(expected, 'hex');
+      if (sigBuf.length !== expBuf.length) return null;
+      return timingSafeEqual(sigBuf, expBuf) ? stateRaw : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private _buildOAuthStateSetCookie(state: string, secret: string): string {
+    const value = this._signOAuthStateCookie(state, secret);
+    // SameSite=Lax so the cookie survives the Google → callback redirect.
+    // Strict would drop it, Lax preserves it for top-level GET (which is
+    // exactly the callback redirect's request mode).
+    return `${LynoxHTTPApi.OAUTH_STATE_COOKIE}=${encodeURIComponent(value)}; Path=/api/google/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=${LynoxHTTPApi.OAUTH_STATE_TTL_SEC}`;
+  }
+
+  private _clearOAuthStateCookie(): string {
+    return `${LynoxHTTPApi.OAUTH_STATE_COOKIE}=; Path=/api/google/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
   }
 
   private async _tryStartTelegram(config: ReturnType<typeof loadConfig>): Promise<void> {
@@ -2964,9 +3030,16 @@ export class LynoxHTTPApi {
         try {
           const redirectUri = `${origin}/api/google/callback`;
           const { authUrl, state } = google.startRedirectAuth(redirectUri, scopes);
-          // Store state for CSRF validation
-          this._googleOAuthState = state;
-          this._googleRedirectUri = redirectUri;
+          // Sign the state into a short-TTL cookie so the callback can
+          // verify it came from this user-agent. Replaces the previous
+          // instance-level _googleOAuthState slot which raced when two
+          // OAuth attempts started in parallel.
+          const httpSecret = process.env['LYNOX_HTTP_SECRET'];
+          if (!httpSecret) {
+            errorResponse(res, 500, 'LYNOX_HTTP_SECRET must be set for redirect-mode OAuth');
+            return;
+          }
+          res.setHeader('Set-Cookie', this._buildOAuthStateSetCookie(state, httpSecret));
           jsonResponse(res, 200, { authUrl });
           return;
         } catch (err: unknown) {
@@ -3024,9 +3097,12 @@ export class LynoxHTTPApi {
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${escaped}"><title>Connected</title></head><body><p>Google connected. Returning to settings…</p><p><a href="${escaped}">Click here if not redirected.</a></p></body></html>`);
       };
 
-      if (!code || !state || state !== this._googleOAuthState) {
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'] ?? '';
+      const cookieState = httpSecret ? this._verifyOAuthStateCookie(req, httpSecret) : null;
+
+      if (!code || !state || state !== cookieState) {
         // Idempotency: if the user reloads the callback URL after a successful
-        // exchange, the state slot is already cleared but the engine is already
+        // exchange, the cookie is already cleared but the engine is already
         // authenticated. Render the same success page instead of a confusing error.
         if (code && state && google.isAuthenticated()) {
           sendSuccessRedirect();
@@ -3038,9 +3114,12 @@ export class LynoxHTTPApi {
       }
 
       try {
-        await google.exchangeRedirectCode(code, this._googleRedirectUri ?? '');
-        this._googleOAuthState = undefined;
-        this._googleRedirectUri = undefined;
+        // Rebuild redirectUri from ORIGIN — same construction site as the
+        // /api/google/auth handler, so the values always match.
+        const origin = process.env['ORIGIN'] ?? '';
+        const redirectUri = `${origin}/api/google/callback`;
+        await google.exchangeRedirectCode(code, redirectUri);
+        res.setHeader('Set-Cookie', this._clearOAuthStateCookie());
         sendSuccessRedirect();
       } catch (err: unknown) {
         const msg = (err instanceof Error ? err.message : String(err))
