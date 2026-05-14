@@ -412,6 +412,7 @@ export async function spawnPipeline(
   depth: number,
   parentPrompt?: SubAgentPromptHandles | undefined,
   userTimezone?: string | undefined,
+  parentSessionCounters?: import('../types/agent.js').SessionCounters | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -453,6 +454,7 @@ export async function spawnPipeline(
     depth: depth + 1,
     parentPrompt,
     userTimezone,
+    parentSessionCounters,
   });
 
   // Aggregate results

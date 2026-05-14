@@ -43,6 +43,12 @@ function makeTool(name: string): ToolEntry {
   };
 }
 
+// Per-test counters object so the spawn-cost test ("respects session ceiling")
+// can replay independent of any other test. Each test gets a fresh counters
+// reference assigned in beforeEach; makeAgent stamps the live reference onto
+// the returned agent stub.
+let testCounters: import('../../types/index.js').SessionCounters;
+
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   return {
     name: 'parent',
@@ -57,6 +63,8 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     onStream: null,
     currentRunId: undefined,
     spawnDepth: 0,
+    toolContext: { sessionCounters: testCounters } as unknown as import('../../core/tool-context.js').ToolContext,
+    sessionCounters: testCounters,
     ...overrides,
   };
 }
@@ -68,7 +76,14 @@ describe('spawn_agent tool', () => {
     vi.clearAllMocks();
     mockSend.mockResolvedValue('sub-agent result');
     mockGetRole.mockReturnValue(undefined);
-    resetSessionSpawnCost();
+    testCounters = {
+      httpRequests: 0,
+      writeBytes: 0,
+      costUSD: 0,
+      approvedOutboundDomains: new Set<string>(),
+      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+    };
+    resetSessionSpawnCost(testCounters);
   });
 
   it('spawns a sub-agent and returns result', async () => {
@@ -553,15 +568,16 @@ describe('spawn_agent tool', () => {
       ).rejects.toThrow(/Session cost ceiling/);
     });
 
-    it('resetSessionSpawnCost clears the counter', async () => {
+    it('resetSessionSpawnCost clears the counter on the supplied Session', async () => {
       const agent = makeAgent();
       // First spawn
       await spawnAgentTool.handler(
         { agents: [{ name: 'w1', task: 'Think' }] },
         agent,
       );
-      // Reset
-      resetSessionSpawnCost();
+      // Reset this Session's counters specifically (no process-wide reset
+      // anymore — pass the live counters object).
+      resetSessionSpawnCost(testCounters);
       // Should pass again (counter is reset)
       const result = await spawnAgentTool.handler(
         { agents: [{ name: 'w2', task: 'Think' }] },

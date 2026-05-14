@@ -331,6 +331,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       runHistory: deps.runHistory ?? undefined,
       parentPrompt: deps.parentPrompt,
       userTimezone: deps.userTimezone,
+      parentSessionCounters: deps.sessionCounters,
     });
 
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
@@ -379,6 +380,14 @@ interface PipelineDeps {
   toolContext?: ToolContext | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;
   userTimezone?: string | undefined;
+  /**
+   * Parent Session's counters object — threaded into runManifest so step
+   * cost shares the same per-Session budget as the calling agent + its
+   * spawns. Absent when the pipeline tool is exercised outside a real
+   * Session (e.g. unit tests); runManifest then allocates a fresh
+   * counters object.
+   */
+  sessionCounters?: import('../../types/agent.js').SessionCounters | undefined;
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
@@ -410,6 +419,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         hooks,
         runHistory: deps.runHistory ?? undefined,
         parentPrompt: deps.parentPrompt,
+        parentSessionCounters: deps.sessionCounters,
       });
 
       executedStates.set(planned.id, { manifest: prev.manifest, state });
@@ -458,6 +468,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       runHistory: deps.runHistory ?? undefined,
       parentPrompt: deps.parentPrompt,
       userTimezone: deps.userTimezone,
+      parentSessionCounters: deps.sessionCounters,
     });
 
     executedStates.set(planned.id, { manifest, state });
@@ -590,6 +601,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         toolContext: pipelineToolContext,
         parentPrompt,
         userTimezone: agent.userTimezone,
+        sessionCounters: agent.sessionCounters,
       });
     }
 
@@ -597,6 +609,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         config: pipelineConfig,
         tools: pipelineTools,
         streamHandler: pipelineStreamHandler,
+        sessionCounters: agent.sessionCounters,
         runHistory: pipelineRunHistory,
         toolContext: pipelineToolContext,
         parentPrompt,
