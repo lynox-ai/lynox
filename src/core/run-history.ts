@@ -1533,12 +1533,12 @@ export class RunHistory {
     completedAt?: string | undefined;
     nextRunAt?: string | undefined;
     scheduleCron?: string | undefined;
-  }): boolean {
-    return persistence.updateTask(this.db, id, params);
+  }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
+    return persistence.updateTask(this.db, id, params, opts);
   }
 
-  getTask(id: string): TaskRecord | undefined {
-    return persistence.getTask(this.db, id);
+  getTask(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
+    return persistence.getTask(this.db, id, opts);
   }
 
   deleteTask(id: string): boolean {

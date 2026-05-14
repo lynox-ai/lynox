@@ -601,6 +601,16 @@ export class InboxStateDb {
   }
 
   /**
+   * Generic transaction wrapper. Used by callers that need to pair a state
+   * mutation with its audit row atomically (so an audit-write failure
+   * rolls back the state change, and vice versa). better-sqlite3 catches
+   * exceptions and rolls back; the return value flows through.
+   */
+  runInTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  /**
    * Queue listing for the UI. Defaults to most-recently-classified-first
    * within a bucket, falling back to all buckets when `bucket` is omitted.
    */
