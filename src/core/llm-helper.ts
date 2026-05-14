@@ -92,12 +92,19 @@ function computeCostUsd(inputTokens: number, outputTokens: number): number {
   return (inputTokens * HAIKU_INPUT_USD_PER_MTOK + outputTokens * HAIKU_OUTPUT_USD_PER_MTOK) / 1_000_000;
 }
 
+/** Defensive cap on schema-recursion depth so a malformed schema with circular
+ *  `properties` references can't infinite-loop the validator. */
+const MAX_SCHEMA_DEPTH = 32;
+
 /**
  * Validate parsed data structurally against the schema. Throws on mismatch
  * with a path-pointer error (`field.subfield`). Not a full JSON-Schema validator —
  * just the subset this helper supports.
  */
-export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path = ''): void {
+export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path = '', depth = 0): void {
+  if (depth > MAX_SCHEMA_DEPTH) {
+    throw new Error(`Schema recursion depth exceeded ${String(MAX_SCHEMA_DEPTH)} at "${path || '<root>'}"`);
+  }
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     throw new Error(`Expected object at "${path || '<root>'}", got ${data === null ? 'null' : typeof data}`);
   }
@@ -111,11 +118,11 @@ export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path
   }
   for (const [key, prop] of Object.entries(schema.properties)) {
     if (!(key in obj)) continue;
-    validateProperty(obj[key], prop, path ? `${path}.${key}` : key);
+    validateProperty(obj[key], prop, path ? `${path}.${key}` : key, depth + 1);
   }
 }
 
-function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: string): void {
+function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: string, depth: number): void {
   switch (prop.type) {
     case 'string':
       if (typeof value !== 'string') throw new Error(`Expected string at "${path}", got ${typeof value}`);
@@ -149,10 +156,10 @@ function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: str
       if (prop.maxItems !== undefined && value.length > prop.maxItems) {
         throw new Error(`Array at "${path}" has ${String(value.length)} items, max ${String(prop.maxItems)}`);
       }
-      value.forEach((item, i) => { validateProperty(item, prop.items, `${path}[${String(i)}]`); });
+      value.forEach((item, i) => { validateProperty(item, prop.items, `${path}[${String(i)}]`, depth + 1); });
       break;
     case 'object':
-      validateAgainstSchema(value, prop as unknown as ExtractSchema, path);
+      validateAgainstSchema(value, prop as unknown as ExtractSchema, path, depth);
       break;
   }
 }

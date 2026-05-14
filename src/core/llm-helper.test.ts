@@ -138,6 +138,19 @@ describe('validateAgainstSchema', () => {
     };
     expect(() => validateAgainstSchema({ outer: {} }, nested)).toThrow(/Missing required field "outer.inner"/);
   });
+
+  it('rejects wrong-typed nested property at the inner path', () => {
+    const nested: ExtractSchema = {
+      type: 'object',
+      properties: {
+        outer: {
+          type: 'object',
+          properties: { inner: { type: 'string' } },
+        },
+      },
+    };
+    expect(() => validateAgainstSchema({ outer: 'not-an-object' }, nested)).toThrow(/Expected object at "outer"/);
+  });
 });
 
 describe('callForStructuredJson', () => {

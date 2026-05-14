@@ -389,6 +389,17 @@ function deriveBaseUrlFromDocs(docsUrl: string): string {
   return `${u.protocol}//${u.host}`;
 }
 
+/** Strip query + fragment so URLs with credentials (e.g. `?api_key=…`) don't
+ *  leak into error messages or logs. Falls back to a safe sentinel on parse fail. */
+function safeUrlForLogging(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return '<unparseable url>';
+  }
+}
+
 /**
  * Strip every field outside the extraction whitelist and force the trusted
  * values that come from the caller (base_url, vault_keys, provenance, id, name).
@@ -417,7 +428,12 @@ function buildDraftFromExtraction(
     if (extracted.auth.basic_format) auth.basic_format = extracted.auth.basic_format;
     if (extracted.auth.header_name) auth.header_name = extracted.auth.header_name;
     if (extracted.auth.query_param) auth.query_param = extracted.auth.query_param;
-    if (extracted.auth.instructions) auth.instructions = extracted.auth.instructions.slice(0, 300);
+    if (extracted.auth.instructions) {
+      // Prefix with a provenance marker so an attacker-controlled docs page can't
+      // smuggle "ignore previous instructions" into the agent's later context via
+      // formatProfile's "Auth note:" rendering.
+      auth.instructions = `[from docs page] ${extracted.auth.instructions.slice(0, 300)}`;
+    }
     // vault_keys deliberately omitted — agent must populate via ask_secret.
     draft.auth = auth;
   }
@@ -434,9 +450,11 @@ function buildDraftFromExtraction(
       description: (ep.description ?? '').slice(0, 200),
     }));
   }
-  if (extracted.guidelines?.length) draft.guidelines = extracted.guidelines.map(s => s.slice(0, 200)).slice(0, 20);
-  if (extracted.avoid?.length) draft.avoid = extracted.avoid.map(s => s.slice(0, 200)).slice(0, 20);
-  if (extracted.notes?.length) draft.notes = extracted.notes.map(s => s.slice(0, 200)).slice(0, 20);
+  // Schema already caps arrays at maxItems=20, so the post-validation arrays are
+  // bounded; only the per-string slice is load-bearing here.
+  if (extracted.guidelines?.length) draft.guidelines = extracted.guidelines.map(s => s.slice(0, 200));
+  if (extracted.avoid?.length) draft.avoid = extracted.avoid.map(s => s.slice(0, 200));
+  if (extracted.notes?.length) draft.notes = extracted.notes.map(s => s.slice(0, 200));
 
   if (injectedFields.length > 0) {
     const warning = `bootstrap dropped fields outside whitelist: ${injectedFields.join(', ')}`;
@@ -507,7 +525,10 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return `Error: docs fetch failed for ${docsUrl} — ${msg}`;
+    // Strip query + fragment so a docs_url with a credential pasted as ?api_key=…
+    // doesn't leak into the agent transcript / stderr via the error path.
+    const safeUrl = safeUrlForLogging(docsUrl);
+    return `Error: docs fetch failed for ${safeUrl} — ${msg}`;
   }
 
   let extracted: DocsExtracted;
