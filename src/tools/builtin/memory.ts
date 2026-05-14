@@ -130,6 +130,7 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
 };
 
 export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
+  destructive: { mode: 'data' },
   definition: {
     name: 'memory_delete',
     description: 'Remove outdated information from your knowledge base.',

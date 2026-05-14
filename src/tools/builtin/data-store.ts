@@ -341,6 +341,7 @@ interface DeleteInput {
 }
 
 export const dataStoreDeleteTool: ToolEntry<DeleteInput> = {
+  destructive: { mode: 'data' },
   definition: {
     name: 'data_store_delete',
     description: 'Remove records from a data table that match a filter. Cannot delete all records without a filter — use this for cleanup of specific entries.',
@@ -391,6 +392,7 @@ interface DropInput {
 }
 
 export const dataStoreDropTool: ToolEntry<DropInput> = {
+  destructive: { mode: 'data' },
   definition: {
     name: 'data_store_drop',
     description: 'Permanently remove an entire data table including all records and its schema. Use with caution — this cannot be undone.',

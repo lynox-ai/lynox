@@ -738,7 +738,7 @@ export class Agent implements IAgent {
     const selfConfirming = tool?.requiresConfirmation === true;
     const danger = (tc.name === 'write_file' && this.changesetManager?.active)
       ? null
-      : isDangerous(tc.name, tc.input, this.autonomy, this.preApproval, this.audit);
+      : isDangerous(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveDanger = (selfConfirming && danger && !danger.includes('[BLOCKED')) ? null : danger;
     if (effectiveDanger) {

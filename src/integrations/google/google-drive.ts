@@ -81,8 +81,17 @@ function formatFileSize(bytes: string | undefined): string {
 
 // === Tool Creation ===
 
+const DRIVE_WRITE_ACTIONS = new Set<DriveInput['action']>(['upload', 'create_doc', 'move', 'share']);
+
 export function createDriveTool(auth: GoogleAuth): ToolEntry<DriveInput> {
   return {
+    destructive: {
+      mode: 'external',
+      check: (input) => {
+        const action = (input as { action?: unknown } | null)?.action;
+        return typeof action === 'string' && (DRIVE_WRITE_ACTIONS as Set<string>).has(action) ? action : null;
+      },
+    },
     definition: {
       name: 'google_drive',
       description: 'Interact with Google Drive: search files, read/download content, upload files, create Google Docs, list folder contents, move files, share files. Use action "search" with a query, "read" with file_id to get content (auto-exports Google Docs as text), "upload" with content and file_name, "create_doc" to create a Google Doc from text, "list" with folder_id, "move" with file_id and target_folder_id, "share" with file_id, email, and role.',
