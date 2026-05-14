@@ -320,7 +320,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          resp = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal });
+          resp = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, agent.toolContext);
         } finally {
           clearTimeout(timer);
         }
