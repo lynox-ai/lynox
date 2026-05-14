@@ -21,8 +21,11 @@ import nodemailer from 'nodemailer';
 
 const ENGINE = process.env['ENGINE_URL'] ?? 'https://engine.lynox.cloud';
 const GREENMAIL_HOST = process.env['GREENMAIL_HOST'] ?? 'control-staging.lynox.cloud';
-const SMTP_PORT = 3025;
-const ADMIN_PORT = 8080;
+// Default to Greenmail's standard ports; overridable so an SSH tunnel can
+// forward localhost:1xxxx → control-staging:xxxx (the dev machine is
+// firewalled off the public Greenmail ports by design).
+const SMTP_PORT = parseInt(process.env['GREENMAIL_SMTP_PORT'] ?? '3025', 10);
+const ADMIN_PORT = parseInt(process.env['GREENMAIL_ADMIN_PORT'] ?? '8080', 10);
 // How long to wait for the inbox classifier to pick up a freshly delivered
 // mail. Generous because the staging engine polls IMAP on a cadence + the
 // classifier LLM call adds latency.
@@ -51,9 +54,9 @@ async function fetchJson(url: string, init: RequestInit = {}): Promise<unknown> 
 }
 
 async function purgeGreenmail(): Promise<void> {
-  // Greenmail admin REST returns 204 No Content on success. We tolerate
-  // any 2xx — the schema differs across Greenmail versions.
-  const res = await fetch(`http://${GREENMAIL_HOST}:${ADMIN_PORT}/api/user/purge`, { method: 'POST' });
+  // Greenmail 2.x admin REST: POST /api/mail/purge (was /api/user/purge in
+  // older versions). Returns 200 on success.
+  const res = await fetch(`http://${GREENMAIL_HOST}:${ADMIN_PORT}/api/mail/purge`, { method: 'POST' });
   if (!res.ok) throw new Error(`Greenmail purge failed: HTTP ${res.status}`);
 }
 
@@ -67,6 +70,21 @@ async function sendMail(from: string, to: string, subject: string, body: string)
     auth: { user: 'staging', pass: 'staging' },
   });
   await transporter.sendMail({ from, to, subject, text: body });
+}
+
+/**
+ * Trigger an engine cold-start backfill for a specific account. Greenmail's
+ * IMAP IDLE support is partial, so the engine sometimes doesn't notice new
+ * mail within a poll cycle. Force-running cold-start makes the engine
+ * fetch + classify immediately so the smoke poll completes in seconds
+ * instead of timing out.
+ */
+async function triggerColdStart(accountId: string): Promise<void> {
+  await fetchJson(`${ENGINE}/api/inbox/cold-start/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId, force: true }),
+  });
 }
 
 async function waitForClassified(prevCount: number, bucket: keyof InboxCounts['counts']): Promise<InboxCounts> {
@@ -100,6 +118,7 @@ async function scenarioCounter(): Promise<void> {
     'Smoke counter test — please reply',
     'Hi, this is the staging smoke counter test.',
   );
+  await triggerColdStart('staging-business');
 
   log('  waiting for classify…');
   const afterSend = await waitForClassified(before.counts.requires_user, 'requires_user');
@@ -135,6 +154,7 @@ async function scenarioLongSubject(): Promise<void> {
     subject,
     'Body irrelevant — testing subject pass-through.',
   );
+  await triggerColdStart('staging-business');
 
   await waitForClassified(before.counts.requires_user, 'requires_user');
   const item = await getMostRecentItem('requires_user');
@@ -157,6 +177,7 @@ async function scenarioUnsnoozeOnReply(): Promise<void> {
     subject,
     'Initial message.',
   );
+  await triggerColdStart('staging-business');
   await waitForClassified(before.counts.requires_user, 'requires_user');
   const item = await getMostRecentItem('requires_user');
 
@@ -177,6 +198,7 @@ async function scenarioUnsnoozeOnReply(): Promise<void> {
     `Re: ${subject}`,
     'Reply that should auto-unsnooze.',
   );
+  await triggerColdStart('staging-business');
 
   // 4. Poll the item — snooze_until should clear.
   const deadline = Date.now() + CLASSIFY_TIMEOUT_MS;
@@ -206,6 +228,7 @@ async function scenarioBulkPrefilter(): Promise<void> {
     'Your Stripe invoice for May is ready',
     'Invoice body — testing that mail.stripe.com is NOT noise-prefiltered.',
   );
+  await triggerColdStart('staging-stripe');
 
   log('  waiting for any bucket to tick…');
   const deadline = Date.now() + CLASSIFY_TIMEOUT_MS;
