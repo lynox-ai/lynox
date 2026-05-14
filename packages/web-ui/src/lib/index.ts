@@ -30,6 +30,7 @@ export { default as ToastContainer } from './components/ToastContainer.svelte';
 export { default as MobileAccess } from './components/MobileAccess.svelte';
 export { default as MigrationWizard } from './components/MigrationWizard.svelte';
 export { default as PromptAnchor } from './components/PromptAnchor.svelte';
+export { default as StreamingActivityBar } from './components/StreamingActivityBar.svelte';
 export { default as InboxView } from './components/InboxView.svelte';
 export { default as ColdStartBanner } from './components/ColdStartBanner.svelte';
 export { default as KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp.svelte';

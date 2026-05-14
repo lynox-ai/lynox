@@ -314,6 +314,16 @@ let sessionId = $state<string | null>(persisted.sessionId);
 let isStreaming = $state(false);
 let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
 let streamingToolName = $state<string | null>(null);
+// Wall-clock when the currently-running tool call began. Set on each
+// tool_call event, cleared when the activity returns to writing/thinking/idle.
+// Drives the elapsed-time display in the streaming indicator and sticky
+// activity bar so the user can see "Crawlt Webseite... · 42s" instead of
+// a static label that gives no signal during long-running tools.
+let currentToolStartedAt = $state<number | null>(null);
+// Wall-clock when the last SSE event (any kind) was received from the
+// server during an active run. Drives the "Verbindung scheint langsam"
+// hint when the gap grows beyond the server heartbeat interval.
+let lastEventAt = $state<number | null>(null);
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let pendingTabsPrompt = $state<TabsPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
@@ -565,6 +575,10 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	messages.push({ role: 'assistant', content: '', toolCalls: [] });
 
 	isStreaming = true;
+	// Seed liveness markers so a stale value from the previous run can't
+	// flash "Verbindung scheint langsam" for the first ~20s of this run.
+	lastEventAt = Date.now();
+	currentToolStartedAt = null;
 
 	const payload: Record<string, unknown> = { task, protocol: 2 };
 	if (files && files.length > 0) {
@@ -858,6 +872,10 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 }
 
 function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number, userIdx: number): void {
+	// Any event arriving counts as proof the connection is alive. Drives the
+	// "Verbindung scheint langsam" hint in StreamingActivityBar when the gap
+	// grows beyond the server heartbeat interval (~10s).
+	lastEventAt = Date.now();
 	const msg = messages[idx];
 	if (!msg) return;
 
@@ -883,6 +901,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg._toolSinceText = false;
 			streamingActivity = 'writing';
 			streamingToolName = null;
+			currentToolStartedAt = null;
 			// Interleaved blocks: append to current text block or start new one
 			msg.blocks = msg.blocks ?? [];
 			const lastBlock = msg.blocks[msg.blocks.length - 1];
@@ -897,6 +916,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg.thinking = (msg.thinking ?? '') + String(data['thinking'] ?? '');
 			streamingActivity = 'thinking';
 			streamingToolName = null;
+			currentToolStartedAt = null;
+			break;
+		case 'heartbeat':
+			// Server keepalive carrying a real event so the SSE comment-line
+			// keepalives don't have to suffice. lastEventAt was already bumped
+			// at the top of handleSSEEvent — nothing else to do.
 			break;
 		case 'tool_call': {
 			const toolName = String(data['name'] ?? '');
@@ -921,6 +946,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg._toolSinceText = true;
 			streamingActivity = 'tool';
 			streamingToolName = toolName;
+			currentToolStartedAt = Date.now();
 			// Skip sidebar update for tools whose dedicated stream event carries
 			// richer live state. spawn_agent emits a separate 'spawn' event a
 			// few ticks later with running/done counts; letting the tool_call
@@ -964,6 +990,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			};
 			streamingActivity = 'tool';
 			streamingToolName = 'spawn_agent';
+			currentToolStartedAt = Date.now();
 			// Surface delegation in the Context panel so the sidebar shows
 			// live sub-agent state alongside the inline ChatView block.
 			setContext({
@@ -1493,6 +1520,16 @@ export function getStreamingActivity() {
 }
 export function getStreamingToolName() {
 	return streamingToolName;
+}
+/** Wall-clock when the currently running tool call began. Null between
+ *  tool calls (text/thinking). Consumers should also gate on isStreaming. */
+export function getCurrentToolStartedAt(): number | null {
+	return currentToolStartedAt;
+}
+/** Wall-clock of the last SSE event (any kind, incl. server heartbeat).
+ *  Used to detect "connection seems slow" without a hard disconnect. */
+export function getLastEventAt(): number | null {
+	return lastEventAt;
 }
 export function getQueueLength() {
 	return messageQueue.length;

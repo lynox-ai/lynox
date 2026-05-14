@@ -1341,10 +1341,20 @@ export class LynoxHTTPApi {
         return row?.answer_saved === 1;
       };
 
-      // SSE keepalive — prevents proxies/browsers from dropping idle connections
+      // Heartbeat — every 10s emit a real SSE event (not a comment line) so
+      // the client can update its "last alive" timestamp and surface a soft
+      // "Verbindung scheint langsam" hint when the gap grows. 10s sits well
+      // under the typical 30s Traefik/Go default idle timeout and gives iPad
+      // Safari background-throttling headroom before the proxy closes us.
+      // The event payload is intentionally tiny — clients only use it to bump
+      // a wall-clock; the server doesn't track per-tool state here.
+      const heartbeatStart = Date.now();
       const keepaliveTimer = setInterval(() => {
-        if (!aborted && !res.writableEnded) res.write(': keepalive\n\n');
-      }, 15_000);
+        if (!aborted && !res.writableEnded) {
+          const elapsedS = Math.floor((Date.now() - heartbeatStart) / 1000);
+          res.write(`event: heartbeat\ndata: ${JSON.stringify({ sentAt: Date.now(), elapsedS })}\n\n`);
+        }
+      }, 10_000);
 
       // Abort on client disconnect or timeout (30 min max)
       const streamTimeout = setTimeout(() => {
