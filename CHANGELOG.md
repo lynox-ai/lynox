@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.1 — 2026-05-14
+
+Patch — version-sync only. v1.4.0 `release-cut` bumped `core/package.json` and `pro/packages/managed/package.json` to 1.4.0 but missed `core/packages/web-ui/package.json`. StatusBar's stale-bundle check fires when the bundle's build-time `BUILT_VERSION` (baked from web-ui/package.json) does not match the engine's runtime `/api/health.version` (= core/package.json), so users on v1.4.0 saw a permanent "Neue lynox-Version verfügbar" toast that did not clear on reload (rebuilt bundle still had BUILT_VERSION=1.3.12 baked in). v1.4.1 aligns the three packages and patches the `/release-cut` skill so future releases bump all three together.
+
+### Fixed
+
+- **Web UI permanent stale-bundle toast on v1.4.0** — see above. (#331)
+
 ## 1.4.0 — 2026-05-14
 
 Major feature release: Unified Inbox (Phase 1–4) ships as the new default mail surface, plus the Wave 1 security audit fixes.
