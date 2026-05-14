@@ -1,4 +1,5 @@
-import type { ToolEntry } from '../../types/index.js';
+import type { IAgent, ToolEntry } from '../../types/index.js';
+import type { ToolContext } from '../../core/tool-context.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
 import { extractContent } from './content-extractor.js';
 import { getErrorMessage } from '../../core/utils.js';
@@ -20,14 +21,14 @@ const ENRICH_MAX_CHARS = 4000;
  * Enrich search results that lack full content (e.g. SearXNG snippets)
  * by fetching the top N pages via content extractor.
  */
-async function enrichResults(results: SearchResult[]): Promise<SearchResult[]> {
+async function enrichResults(results: SearchResult[], ctx?: ToolContext | undefined): Promise<SearchResult[]> {
   const toEnrich = results.slice(0, ENRICH_TOP_N).filter(r => !r.content);
   if (toEnrich.length === 0) return results;
 
   // Race enrichment against a 10s timeout to keep search responsive
   const enrichmentPromise = Promise.allSettled(
     toEnrich.map(async (r) => {
-      const extracted = await extractContent(r.url, ENRICH_MAX_CHARS);
+      const extracted = await extractContent(r.url, ENRICH_MAX_CHARS, ctx);
       return { url: r.url, content: extracted.content };
     }),
   );
@@ -117,7 +118,8 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
         required: ['action'],
       },
     },
-    handler: async (input: WebSearchInput): Promise<string> => {
+    handler: async (input: WebSearchInput, agent: IAgent): Promise<string> => {
+      const ctx = agent.toolContext;
       if (input.action === 'search') {
         if (!input.query) return 'Error: "query" is required for action "search".';
         try {
@@ -132,7 +134,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // any failure so original results remain accessible.
           const reranked = await rerankSearchResults(input.query, results);
           results = reranked.results;
-          results = await enrichResults(results);
+          results = await enrichResults(results, ctx);
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
@@ -145,7 +147,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
       if (input.action === 'read') {
         if (!input.url) return 'Error: "url" is required for action "read".';
         try {
-          const result = await extractContent(input.url);
+          const result = await extractContent(input.url, undefined, ctx);
           const parts = [`# ${result.title}`, `Source: ${result.url}`, `Words: ${result.wordCount}`];
           if (result.truncated) parts.push('(Content truncated)');
           parts.push('', result.content);
