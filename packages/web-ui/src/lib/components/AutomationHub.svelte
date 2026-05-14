@@ -21,6 +21,18 @@
 		return 'workflows';
 	})());
 
+	// Rewrite legacy `?section=reminders` to `?section=tasks` on first load
+	// so the URL bar matches the rendered tab. Without this the user is
+	// looking at Tasks but the URL says reminders — sharing/copying it
+	// would land the recipient on the same redirect dance.
+	$effect(() => {
+		if ($page.url.searchParams.get('section') === 'reminders') {
+			const url = new URL($page.url);
+			url.searchParams.set('section', 'tasks');
+			void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
+		}
+	});
+
 	function setTab(next: Tab): void {
 		const url = new URL($page.url);
 		if (next === 'workflows') url.searchParams.delete('section');

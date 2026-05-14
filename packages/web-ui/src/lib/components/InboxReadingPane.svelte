@@ -122,7 +122,7 @@
 				{#if showBack}
 					<button
 						type="button"
-						class="shrink-0 flex items-center gap-1 text-text-subtle hover:text-text text-[12px] min-h-[36px] -ml-1 px-2"
+						class="shrink-0 flex items-center gap-1 text-text-subtle hover:text-text text-[12px] min-h-[44px] sm:min-h-[36px] -ml-1 px-2"
 						onclick={() => closeItem()}
 						aria-label={t('inbox.reading_back')}
 					>
@@ -137,11 +137,11 @@
 							<div class="h-4 w-1/2 animate-pulse rounded bg-bg-subtle"></div>
 						</div>
 					{:else if full}
-						<h2 class="text-base sm:text-lg font-semibold text-text break-words" title={full.item.subject || full.item.snippet || full.item.reasonDe}>
+						<h2 class="text-base sm:text-lg font-semibold text-text break-words [overflow-wrap:anywhere]" title={full.item.subject || full.item.snippet || full.item.reasonDe}>
 							{inboxHeadline(full.item)}
 						</h2>
 						<div class="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] text-text-subtle">
-							<span class="text-text-muted break-words min-w-0">
+							<span class="text-text-muted break-words [overflow-wrap:anywhere] min-w-0">
 								{full.item.fromName || full.item.fromAddress}
 								{#if full.item.fromName}
 									<span class="text-text-subtle">&lt;{full.item.fromAddress}&gt;</span>
@@ -153,7 +153,7 @@
 				</div>
 				<button
 					type="button"
-					class="shrink-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[36px]"
+					class="shrink-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] sm:min-h-[36px] sm:min-w-0 min-w-[44px]"
 					onclick={() => closeItem()}
 					aria-label={t('inbox.reading_close')}
 				>×</button>

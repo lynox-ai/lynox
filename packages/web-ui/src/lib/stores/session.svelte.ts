@@ -13,16 +13,24 @@
 // CTA. Single source of truth so two views racing at the same 401
 // don't show two banners.
 
+const DISMISS_COOLDOWN_MS = 30_000;
+
 let _sessionExpired = $state(false);
+// Soft-dismiss timestamp. When the user clicks "Später" the banner
+// hides for 30s. Without this an in-flight 401 from a parallel poller
+// would re-flip the flag instantly and the user feels gaslit.
+let _dismissedUntil = 0;
 
 export function isSessionExpired(): boolean {
 	return _sessionExpired;
 }
 
 export function markSessionExpired(): void {
+	if (Date.now() < _dismissedUntil) return;
 	_sessionExpired = true;
 }
 
 export function clearSessionExpired(): void {
 	_sessionExpired = false;
+	_dismissedUntil = Date.now() + DISMISS_COOLDOWN_MS;
 }
