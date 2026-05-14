@@ -462,6 +462,7 @@ function handleSessionExpired(assistantIdx?: number, userMsgIdx?: number): void 
 	isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+	streamingToolPhase = null;
 	chatError = t('chat.error_session_expired');
 	if (assistantIdx !== undefined && messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 	if (userMsgIdx !== undefined && messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
@@ -680,6 +681,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			isStreaming = false;
 			streamingActivity = 'idle';
 			streamingToolName = null;
+			streamingToolPhase = null;
 			return;
 		}
 		if (messages[userMsgIdx]) {
@@ -738,6 +740,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			isStreaming = false;
 			streamingActivity = 'idle';
 			streamingToolName = null;
+			streamingToolPhase = null;
 			return;
 		}
 
@@ -748,6 +751,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+	streamingToolPhase = null;
 		// HTTP 401 on /run means the lynox_session cookie is invalid or expired —
 		// not the LLM API key. Show the honest copy and bounce to /login so the
 		// user can re-authenticate instead of digging in Settings for a key that
@@ -843,6 +847,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+	streamingToolPhase = null;
 	pendingPermission = null;
 	pendingTabsPrompt = null;
 	retryStatus = null;
@@ -908,6 +913,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg._toolSinceText = false;
 			streamingActivity = 'writing';
 			streamingToolName = null;
+			streamingToolPhase = null;
 			currentToolStartedAt = null;
 			// Interleaved blocks: append to current text block or start new one
 			msg.blocks = msg.blocks ?? [];
@@ -923,6 +929,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			msg.thinking = (msg.thinking ?? '') + String(data['thinking'] ?? '');
 			streamingActivity = 'thinking';
 			streamingToolName = null;
+			streamingToolPhase = null;
 			currentToolStartedAt = null;
 			break;
 		case 'heartbeat':
@@ -1405,6 +1412,7 @@ export async function abortRun(): Promise<void> {
 	isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+	streamingToolPhase = null;
 }
 
 let isCompacting = $state(false);
@@ -1698,6 +1706,7 @@ export function newChat() {
 	isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+	streamingToolPhase = null;
 	pendingPermission = null;
 	pendingTabsPrompt = null;
 	pendingSecretPrompt = null;
@@ -1739,6 +1748,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
+	streamingToolPhase = null;
 	pendingPermission = null;
 	pendingTabsPrompt = null;
 	// Without this reset, a secret prompt persisted from thread A would

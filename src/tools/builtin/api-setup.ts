@@ -504,16 +504,28 @@ function buildNlSummary(draft: ApiProfile, docsUrl: string): string {
 
 /** Surface a sub-phase update on the streamHandler so the activity bar can
  *  swap its generic "api_setup" label for "Reading API docs..." etc. No-op
- *  when no handler is attached (CLI / headless runs). */
+ *  when no handler is attached (CLI / headless runs).
+ *
+ *  Defensive try/catch + caught Promise.rejection: a misbehaving stream
+ *  handler must never turn a successful bootstrap into an error string nor
+ *  produce an unhandledRejection. The progress event is fire-and-forget
+ *  UX polish — its failure path should be silent. */
 function emitBootstrapProgress(agent: IAgent, phase: 'fetching_docs' | 'extracting' | 'finalizing'): void {
   const handler = agent.toolContext.streamHandler;
   if (!handler) return;
-  void handler({
-    type: 'tool_progress',
-    tool: 'api_setup',
-    phase,
-    agent: agent.name,
-  });
+  try {
+    const result = handler({
+      type: 'tool_progress',
+      tool: 'api_setup',
+      phase,
+      agent: agent.name,
+    });
+    if (result instanceof Promise) {
+      result.catch(() => { /* swallow — progress emission is best-effort */ });
+    }
+  } catch {
+    /* swallow synchronous throws too */
+  }
 }
 
 async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string> {
