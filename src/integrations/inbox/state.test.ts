@@ -145,6 +145,83 @@ describe('InboxStateDb — items', () => {
     expect(inbox.countItemsByBucket().requires_user).toBe(2);
   });
 
+  // Audit S-AT-02: getItem and the mutation surface (updateUserAction,
+  // setSnooze, attachDraft, deleteRule, markReminderNotified, getDraftById,
+  // listAuditForItem) must scope to tenant. Without this, a Phase-5
+  // multi-tenant deployment could mutate other tenants' items by id alone.
+  describe('tenant isolation (audit S-AT-02)', () => {
+    it('getItem returns null when the tenant does not match', () => {
+      const id = insertSampleItem();
+      expect(inbox.getItem(id, DEFAULT_TENANT_ID)).not.toBeNull();
+      expect(inbox.getItem(id, 'other-tenant')).toBeNull();
+    });
+
+    it('updateUserAction is a no-op for the wrong tenant', () => {
+      const id = insertSampleItem();
+      expect(inbox.updateUserAction(id, 'archived', new Date(), 'other-tenant')).toBe(false);
+      expect(inbox.getItem(id)?.userAction).toBeUndefined();
+      // Default tenant still works
+      expect(inbox.updateUserAction(id, 'archived')).toBe(true);
+      expect(inbox.getItem(id)?.userAction).toBe('archived');
+    });
+
+    it('setSnooze is a no-op for the wrong tenant', () => {
+      const id = insertSampleItem();
+      const until = new Date('2026-05-15T10:00:00Z');
+      expect(inbox.setSnooze(id, until, null, true, false, 'other-tenant')).toBe(false);
+      expect(inbox.getItem(id)?.snoozeUntil).toBeUndefined();
+    });
+
+    it('attachDraft is a no-op for the wrong tenant', () => {
+      const id = insertSampleItem();
+      expect(inbox.attachDraft(id, 'drf_x', 'other-tenant')).toBe(false);
+      expect(inbox.getItem(id)?.draftId).toBeUndefined();
+    });
+
+    it('deleteRule is a no-op for the wrong tenant', () => {
+      const ruleId = inbox.insertRule({
+        accountId: TEST_ACCOUNT.id,
+        matcherKind: 'from',
+        matcherValue: 'noreply@example.com',
+        bucket: 'auto_handled',
+        action: 'archive',
+        source: 'manual',
+      });
+      expect(inbox.deleteRule(ruleId, 'other-tenant')).toBe(false);
+      expect(inbox.deleteRule(ruleId)).toBe(true);
+    });
+
+    it('getDraftById returns null for the wrong tenant', () => {
+      const itemId = insertSampleItem();
+      const draftId = inbox.insertDraft({
+        itemId,
+        bodyMd: 'Hi there',
+        generatedAt: new Date(),
+        generatorVersion: 'haiku-2026-05',
+      });
+      expect(inbox.getDraftById(draftId, DEFAULT_TENANT_ID)).not.toBeNull();
+      expect(inbox.getDraftById(draftId, 'other-tenant')).toBeNull();
+    });
+
+    it('listAuditForItem returns empty for the wrong tenant', () => {
+      const itemId = insertSampleItem();
+      inbox.appendAudit({
+        itemId,
+        action: 'archived',
+        actor: 'user',
+        payloadJson: '{}',
+      });
+      expect(inbox.listAuditForItem(itemId).length).toBe(1);
+      expect(inbox.listAuditForItem(itemId, 'other-tenant').length).toBe(0);
+    });
+
+    it('markReminderNotified is a no-op for the wrong tenant', () => {
+      const itemId = insertSampleItem();
+      expect(inbox.markReminderNotified(itemId, new Date(), 'other-tenant')).toBe(false);
+      expect(inbox.markReminderNotified(itemId)).toBe(true);
+    });
+  });
+
   it('hasAnyItemForAccount returns false for an empty account and true after one insert', () => {
     expect(inbox.hasAnyItemForAccount(TEST_ACCOUNT.id)).toBe(false);
     insertSampleItem();
