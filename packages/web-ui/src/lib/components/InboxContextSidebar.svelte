@@ -88,7 +88,7 @@
 			<p class="text-[11px] text-text-subtle">{t('inbox.context_unavailable')}</p>
 		{:else if context}
 			{#if context.sender.address}
-				<div class="text-[11px] text-text-muted break-words" title={context.sender.address}>
+				<div class="text-[11px] text-text-muted break-words [overflow-wrap:anywhere]" title={context.sender.address}>
 					{#if context.sender.name}
 						<span class="text-text">{context.sender.name}</span>
 						<span class="text-text-subtle">&lt;{context.sender.address}&gt;</span>
@@ -108,7 +108,7 @@
 					<ul class="space-y-1">
 						{#each context.recentThreads as item (item.id)}
 							<li class="flex items-baseline justify-between gap-2 text-[11px] min-w-0">
-								<span class="text-text break-words min-w-0" title={item.subject}>{item.subject}</span>
+								<span class="text-text break-words [overflow-wrap:anywhere] min-w-0" title={item.subject}>{item.subject}</span>
 								<span class="shrink-0 text-text-subtle">{dateOnly(item.mailDate ?? item.classifiedAt)}</span>
 							</li>
 						{/each}
@@ -124,7 +124,7 @@
 					<ul class="space-y-1">
 						{#each context.openFollowups as fu (fu.id)}
 							<li class="flex items-baseline justify-between gap-2 text-[11px] min-w-0">
-								<span class="text-text break-words min-w-0" title={fu.reason}>{fu.reason}</span>
+								<span class="text-text break-words [overflow-wrap:anywhere] min-w-0" title={fu.reason}>{fu.reason}</span>
 								<span class="shrink-0 text-text-subtle">{dateOnly(fu.reminderAt)}</span>
 							</li>
 						{/each}
@@ -142,7 +142,7 @@
 					<ul class="space-y-1">
 						{#each context.outboundHistory as out (out.id)}
 							<li class="flex items-baseline justify-between gap-2 text-[11px] min-w-0">
-								<span class="text-text break-words min-w-0" title={out.subject}>{out.subject}</span>
+								<span class="text-text break-words [overflow-wrap:anywhere] min-w-0" title={out.subject}>{out.subject}</span>
 								<span class="shrink-0 text-text-subtle">{dateTime(out.sentAt)}</span>
 							</li>
 						{/each}
@@ -158,7 +158,7 @@
 					<ul class="space-y-1">
 						{#each context.reminders as r (r.id)}
 							<li class="flex items-baseline justify-between gap-2 text-[11px] min-w-0">
-								<span class="text-text break-words min-w-0" title={r.subject}>{r.subject}</span>
+								<span class="text-text break-words [overflow-wrap:anywhere] min-w-0" title={r.subject}>{r.subject}</span>
 								<span class="shrink-0 text-text-subtle">{dateTime(r.snoozeUntil)}</span>
 							</li>
 						{/each}
