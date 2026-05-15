@@ -12,6 +12,29 @@
 import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
+// ── Errors ──
+
+/**
+ * Thrown by `ApiStore.unregister` when the in-memory delete succeeded but
+ * the on-disk file delete failed for a non-ENOENT reason. Callers (HTTP
+ * handler, agent tool) should map this to a 500-class outcome — the
+ * "deleted" profile would otherwise resurrect on the next engine restart.
+ */
+export class ApiProfileUnlinkError extends Error {
+  constructor(public readonly filePath: string, public override readonly cause: unknown) {
+    super(`Failed to unlink ${filePath}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'ApiProfileUnlinkError';
+  }
+}
+
+// ── Constants ──
+
+// Mirrors the `ID_PATTERN` used in `tools/builtin/api-setup.ts`. Kept here
+// so the store can enforce it on every entry path (`register` /
+// `loadFromDirectory`) — that's what makes the `unregister` path safe to
+// hand the id into `join(apisDir, …)`.
+const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
 // ── Types ──
 
 export interface ApiEndpoint {
@@ -271,8 +294,15 @@ export class ApiStore {
     return loaded;
   }
 
-  /** Register a single profile. */
+  /** Register a single profile. Skips silently if the id is malformed. */
   register(profile: ApiProfile): void {
+    if (!PROFILE_ID_PATTERN.test(profile.id)) {
+      // Refuse the id at the gate so the in-memory Map's invariant holds
+      // — every key is a safe filename component. `unregister` can then
+      // hand the id directly to `join(apisDir, …)` without a second check.
+      process.stderr.write(`[lynox:api-store] Skipping profile with invalid id "${profile.id}" (must match ${PROFILE_ID_PATTERN.source})\n`);
+      return;
+    }
     this.profiles.set(profile.id, profile);
 
     // Map hostname for rate limit lookups
@@ -292,7 +322,11 @@ export class ApiStore {
    *
    * Returns `false` if no profile with that id was registered, so callers
    * can fall through to a disk-only delete for orphans dropped into
-   * `apisDir` after engine boot.
+   * `apisDir` after engine boot. Throws `ApiProfileUnlinkError` if the
+   * in-memory delete succeeded but the on-disk unlink failed for any
+   * reason other than ENOENT — the HTTP handler maps that to a 500 so
+   * the user doesn't see "Profile not found" while the file survives
+   * and would resurrect on the next engine restart.
    *
    * Two invariants worth flagging because they're not obvious from the
    * call site:
@@ -303,11 +337,11 @@ export class ApiStore {
    *   *no* `rate_limit` doesn't inherit stale throttling from this profile.
    */
   unregister(id: string, apisDir?: string): boolean {
-    // Defence-in-depth: `loadFromDirectory` reads `id` from JSON content,
-    // not from the filename. A hand-edited profile whose internal id is
-    // `../../foo` would otherwise traverse on the `join(apisDir, …)`
-    // below. Keep this filter aligned with the api_setup ID_PATTERN.
-    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) return false;
+    // Belt-and-suspenders — `register` already refuses bad ids, but this
+    // is the line that hands `id` to `join(apisDir, …)`. Keeping the
+    // local check means a future regression in `register` can't open a
+    // path-traversal here.
+    if (!PROFILE_ID_PATTERN.test(id)) return false;
 
     const profile = this.profiles.get(id);
     if (!profile) return false;
@@ -331,12 +365,7 @@ export class ApiStore {
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code !== 'ENOENT') {
-          // The in-memory side already happened; the on-disk side failed.
-          // Surface to the caller so the HTTP handler can return 500 — a
-          // silent success would let `loadFromDirectory` resurrect the
-          // "deleted" profile on the next restart.
-          process.stderr.write(`[lynox:api-store] Failed to unlink ${filePath}: ${err instanceof Error ? err.message : String(err)}\n`);
-          return false;
+          throw new ApiProfileUnlinkError(filePath, err);
         }
       }
     }

@@ -1025,8 +1025,15 @@ Next steps before calling create:
       // immediately. Fall through to disk-only when the in-memory store
       // has no record — that covers profiles dropped into apisDir after
       // engine boot, plus the standalone-CLI paths where no store is bound.
-      if (apiStore?.unregister(id, apisDir)) {
-        return `Deleted API profile "${id}".`;
+      try {
+        if (apiStore?.unregister(id, apisDir)) {
+          return `Deleted API profile "${id}".`;
+        }
+      } catch (err) {
+        // unregister() throws ApiProfileUnlinkError on non-ENOENT unlink
+        // failure. Surface as a tool error so the agent doesn't retry
+        // blindly — the profile is already gone from memory.
+        return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
       }
       const filePath = join(apisDir, `${id}.json`);
       if (!existsSync(filePath)) {

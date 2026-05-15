@@ -119,12 +119,34 @@ describe('ApiStore', () => {
       expect(store.checkRateLimit('api.test.com')).toBeNull();
     });
 
-    it('refuses an id with a path-traversal shape', () => {
-      // Even if a malformed profile somehow landed in the in-memory map
-      // (e.g. via hand-edited JSON loaded by loadFromDirectory), unregister
-      // must not pass the id straight into `join(apisDir, …)`.
-      store.register({ ...SAMPLE_PROFILE, id: '../../escape' });
+    it('returns false for a path-traversal-shaped id', () => {
+      // `register` already rejects this id (verified separately), so the
+      // unregister call sees an empty Map and returns false naturally.
+      // Belt-and-suspenders: the regex guard inside unregister also blocks
+      // the id from reaching `join(apisDir, …)` if a future regression in
+      // register lets a bad id leak in.
       expect(store.unregister('../../escape', tmpDir)).toBe(false);
+    });
+
+    it('throws on real (non-ENOENT) unlink failure', async () => {
+      const { ApiProfileUnlinkError } = await import('./api-store.js');
+      writeFileSync(join(tmpDir, 'test-api.json'), JSON.stringify(SAMPLE_PROFILE));
+      store.loadFromDirectory(tmpDir);
+      // Point apisDir at a regular file so unlink(filePath) hits EISDIR/ENOTDIR-class errors.
+      const notADir = join(tmpDir, 'not-a-dir');
+      writeFileSync(notADir, 'plain file');
+      expect(() => store.unregister('test-api', notADir)).toThrow(ApiProfileUnlinkError);
+      // In-memory side still happened — that's the partial state the throw signals.
+      expect(store.size).toBe(0);
+    });
+  });
+
+  describe('register validation', () => {
+    it('skips a profile with a malformed id', () => {
+      const bad: ApiProfile = { ...SAMPLE_PROFILE, id: '../../escape' };
+      store.register(bad);
+      expect(store.size).toBe(0);
+      expect(store.get('../../escape')).toBeUndefined();
     });
   });
 
