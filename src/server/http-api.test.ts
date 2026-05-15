@@ -967,13 +967,14 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('llm catalog', () => {
-    it('GET /api/llm/catalog returns the static catalog with four providers', async () => {
+    it('GET /api/llm/catalog returns the full LLM_CATALOG payload and a cacheable header', async () => {
+      const { LLM_CATALOG } = await import('../core/llm/catalog.js');
       const res = await jsonFetch('/api/llm/catalog');
       expect(res.status).toBe(200);
-      const body = await res.json() as { providers: Array<{ provider: string; models: unknown[] }> };
-      expect(body.providers.map((p) => p.provider).sort()).toEqual(['anthropic', 'custom', 'openai', 'vertex']);
-      const anthropic = body.providers.find((p) => p.provider === 'anthropic');
-      expect(anthropic?.models).toHaveLength(3);
+      expect(res.headers.get('cache-control')).toBe('public, max-age=3600, must-revalidate');
+      const body = await res.json() as { providers: unknown[] };
+      // Serialization drift guard: the wire shape must round-trip the SSoT exactly.
+      expect(body.providers).toEqual(JSON.parse(JSON.stringify(LLM_CATALOG)));
     });
   });
 

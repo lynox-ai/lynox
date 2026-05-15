@@ -2398,11 +2398,10 @@ export class LynoxHTTPApi {
     });
 
     // ── LLM model catalog ──
-    // Static catalog driving the Settings → LLM page model dropdown
-    // (PRD-SETTINGS-REFACTOR Phase 0c). Pure read, no per-request state —
-    // safe to cache aggressively on the client.
+    // Static + version-pinned — safe to cache aggressively on the client.
     this.addStatic('user', 'GET /api/llm/catalog', async (_req, res) => {
       const { LLM_CATALOG } = await import('../core/llm/catalog.js');
+      res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate');
       jsonResponse(res, 200, { providers: LLM_CATALOG });
     });
 

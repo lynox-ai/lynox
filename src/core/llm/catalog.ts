@@ -1,49 +1,33 @@
 /**
- * Static LLM model catalog — drives the Settings → LLM page model dropdown
- * (PRD-SETTINGS-REFACTOR Phase 0c). Exposed via `GET /api/llm/catalog`.
- *
- * Pricing values are approximate "headline" numbers in USD per 1M tokens;
- * real cost accounting goes through `core/pricing.ts` which has the
- * authoritative per-model breakdown including cache discounts.
- *
- * To add a model: append a `CatalogModel` to the right provider entry. To
- * add a provider: add a top-level key + entry. No schema migration needed —
- * Web UI reads whatever this module returns at request time.
+ * Static LLM model catalog. Pricing here is approximate "headline" USD
+ * per 1M tokens — real cost accounting goes through `core/pricing.ts`
+ * (cache discounts etc.). Catalog is frozen so consumers can pass it
+ * by reference without risk of cross-request mutation.
  */
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
 
 export interface CatalogModel {
-  /** Model ID as sent to the provider API (e.g. `claude-sonnet-4-6`). */
   id: string;
-  /** Tier alias for Claude family models (drives `default_tier` config + spawn role mapping). */
+  /** Tier alias for the Claude family (also drives `default_tier` config + spawn role mapping). */
   tier?: ModelTier;
-  /** Human display label for the dropdown (e.g. `Sonnet 4.6`). */
   label: string;
-  /** Context window in tokens. */
   context_window: number;
-  /** Headline pricing per 1M tokens (USD). Cache discounts not modelled. */
+  /** Headline pricing per 1M tokens. Cache discounts NOT modelled — see `core/pricing.ts`. */
   pricing?: { input: number; output: number };
-  /** Capability tags surfaced as inline badges in the UI. */
   capabilities?: ReadonlyArray<'vision' | 'tool_use' | 'extended_thinking'>;
-  /** Residency / region hint for the inline residency note. */
   residency: string;
-  /** Optional editorial note ("Recommended default", "Fastest", etc.). */
   notes?: string;
 }
 
 export interface CatalogProviderEntry {
   provider: LLMProvider;
-  /** Display name for the provider card. */
   display_name: string;
-  /** Models the user can pick. Empty array = free-text fallback. */
+  /** Empty array signals free-text fallback — user types model ID themselves. */
   models: ReadonlyArray<CatalogModel>;
-  /** UI gating hints for the per-provider config form. */
   requires_base_url: boolean;
   requires_region: boolean;
-  /** Default residency line shown inline when no model is selected. */
   default_residency: string;
-  /** Editorial note for the provider card. */
   notes?: string;
 }
 
@@ -183,3 +167,17 @@ export const LLM_CATALOG: LLMCatalog = [
 export function getCatalogForProvider(provider: LLMProvider): CatalogProviderEntry | undefined {
   return LLM_CATALOG.find((entry) => entry.provider === provider);
 }
+
+// Deep-freeze at module load: protects the singleton against accidental
+// mutation when consumers hand `LLM_CATALOG` straight to `jsonResponse`
+// (the response body shares the reference until serialization).
+for (const entry of LLM_CATALOG) {
+  Object.freeze(entry.models);
+  for (const m of entry.models) {
+    Object.freeze(m);
+    if (m.capabilities) Object.freeze(m.capabilities);
+    if (m.pricing) Object.freeze(m.pricing);
+  }
+  Object.freeze(entry);
+}
+Object.freeze(LLM_CATALOG);
