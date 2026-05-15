@@ -82,6 +82,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.automation.workflows': { de: 'Workflows', en: 'Workflows' },
 	'hub.automation.tasks': { de: 'Aufgaben', en: 'Tasks' },
 	'hub.automation.reminders': { de: 'Erinnerungen', en: 'Reminders' },
+	'hub.automation.apis': { de: 'APIs', en: 'APIs' },
 	'hub.automation.activity': { de: 'Aktivität', en: 'Activity' },
 	'hub.artifacts.gallery': { de: 'Galerie', en: 'Gallery' },
 	'hub.artifacts.files': { de: 'Dateien', en: 'Files' },

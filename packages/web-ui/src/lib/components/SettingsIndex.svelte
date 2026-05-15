@@ -79,7 +79,6 @@
 		{
 			labelKey: 'settings.section_data',
 			items: [
-				{ href: '/app/settings/apis', titleKey: 'apis.title', descKey: 'apis.no_profiles' },
 				{ href: '/app/settings/backups', titleKey: 'backups.title', descKey: 'backups.desc' },
 			],
 		},
