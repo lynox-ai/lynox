@@ -236,6 +236,7 @@ vi.mock('./artifact-store.js', () => ({
 }));
 
 vi.mock('./data-store.js', () => ({
+  CRM_OVERLAP_NAMES: new Set(['contacts', 'companies', 'people', 'deals', 'interactions']),
   DataStore: vi.fn().mockImplementation(function () {
     // @ts-expect-error mock constructor
     this.listCollections = vi.fn().mockReturnValue([
@@ -249,6 +250,8 @@ vi.mock('./data-store.js', () => ({
     this.query = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.deleteCollection = vi.fn();
+    // @ts-expect-error mock constructor
+    this.dropEmptyCrmOverlaps = vi.fn().mockReturnValue([]);
   }),
 }));
 

@@ -704,6 +704,33 @@ describe('DataStore', () => {
     });
   });
 
+  describe('dropEmptyCrmOverlaps', () => {
+    it('drops empty CRM-shaped collections and reports their names', () => {
+      ds.createCollection({ name: 'contacts', scope, columns: [{ name: 'email', type: 'string' }] });
+      ds.createCollection({ name: 'deals', scope, columns: [{ name: 'amount', type: 'number' }] });
+      ds.createCollection({ name: 'sales_data', scope, columns: [{ name: 'q', type: 'string' }] });
+
+      const dropped = ds.dropEmptyCrmOverlaps();
+      expect(dropped.sort()).toEqual(['contacts', 'deals']);
+      expect(ds.getCollectionInfo('contacts')).toBeNull();
+      expect(ds.getCollectionInfo('deals')).toBeNull();
+      // Non-CRM-shaped name must survive even when empty.
+      expect(ds.getCollectionInfo('sales_data')).not.toBeNull();
+    });
+
+    it('preserves a CRM-shaped collection with data — the user may rely on it', () => {
+      ds.createCollection({ name: 'contacts', scope, columns: [{ name: 'email', type: 'string' }] });
+      ds.insertRecords({ collection: 'contacts', records: [{ email: 'alice@example.com' }] });
+      ds.dropEmptyCrmOverlaps();
+      expect(ds.getCollectionInfo('contacts')).not.toBeNull();
+    });
+
+    it('returns empty array when nothing matches', () => {
+      ds.createCollection({ name: 'monthly_kpis', scope, columns: [{ name: 'revenue', type: 'number' }] });
+      expect(ds.dropEmptyCrmOverlaps()).toEqual([]);
+    });
+  });
+
   // === JSON columns ===
 
   describe('json columns', () => {
