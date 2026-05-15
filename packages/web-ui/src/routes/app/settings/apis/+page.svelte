@@ -1,5 +1,12 @@
 <script lang="ts">
-	import ApiStoreView from '$lib/components/ApiStoreView.svelte';
-</script>
+	import { goto } from '$app/navigation';
+	import { onMount } from 'svelte';
 
-<ApiStoreView />
+	// API Profiles moved from Settings → Automation (its conceptual home —
+	// the building blocks of how the agent talks to external services,
+	// alongside Workflows + Tasks). Client-side redirect so existing
+	// bookmarks and stale in-app links don't 404.
+	onMount(() => {
+		void goto('/app/automation?section=apis', { replaceState: true });
+	});
+</script>

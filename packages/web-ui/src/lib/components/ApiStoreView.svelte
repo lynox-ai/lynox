@@ -47,8 +47,7 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
-	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
-	<h1 class="text-xl font-light tracking-tight mb-4 mt-2">{t('apis.title')}</h1>
+	<h1 class="text-xl font-light tracking-tight mb-4">{t('apis.title')}</h1>
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
