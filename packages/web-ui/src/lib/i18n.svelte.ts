@@ -77,6 +77,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.intelligence.wissen': { de: 'Wissen', en: 'Knowledge' },
 	'hub.intelligence.graph': { de: 'Graph (Beta)', en: 'Graph (beta)' },
 	'hub.intelligence.contacts': { de: 'Kontakte', en: 'Contacts' },
+	'hub.intelligence.data': { de: 'Daten', en: 'Data' },
 	'hub.intelligence.insights': { de: 'Insights (Beta)', en: 'Insights (beta)' },
 	'hub.automation.workflows': { de: 'Workflows', en: 'Workflows' },
 	'hub.automation.tasks': { de: 'Aufgaben', en: 'Tasks' },
