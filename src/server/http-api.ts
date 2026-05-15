@@ -584,6 +584,155 @@ export class LynoxHTTPApi {
     return `${LynoxHTTPApi.OAUTH_STATE_COOKIE}=; Path=/api/google/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
   }
 
+  /**
+   * Backs `/api/usage/current` (canonical) and `/api/usage/summary` (alias).
+   * Aggregates RunHistory over the requested period and decorates with
+   * tier-aware budget, projection (linear extrapolation from the last 7
+   * days of `daily` data), and hard_limits (full numeric on self-host/BYOK,
+   * opaque on managed).
+   */
+  private async _serveUsageCurrent(
+    req: IncomingMessage,
+    res: ServerResponse,
+    engine: Engine,
+  ): Promise<void> {
+    const history = engine.getRunHistory();
+    if (!requireService(res, history, 'History')) return;
+    const { readUserConfig } = await import('../core/config.js');
+    const { getHardLimits } = await import('../core/limits.js');
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    const rawPeriod = url.searchParams.get('period') ?? 'current';
+    const period = rawPeriod === 'prev' || rawPeriod === '7d' || rawPeriod === '30d' ? rawPeriod : 'current';
+
+    const now = new Date();
+    let startIso: string;
+    let endIso: string;
+    let source: 'calendar-month' | 'rolling' | 'stripe-billing';
+    let label: string;
+    const monthFmt = (d: Date) => d.toLocaleString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+    if (period === 'current') {
+      const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      startIso = start.toISOString();
+      endIso = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+      source = 'calendar-month';
+      label = `${monthFmt(start)} – ${monthFmt(now)}`;
+    } else if (period === 'prev') {
+      const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+      const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      startIso = start.toISOString();
+      endIso = end.toISOString();
+      source = 'calendar-month';
+      const lastDay = new Date(end.getTime() - 86_400_000);
+      label = `${monthFmt(start)} – ${monthFmt(lastDay)}`;
+    } else {
+      const days = period === '7d' ? 7 : 30;
+      const start = new Date(now.getTime() - days * 86_400_000);
+      startIso = start.toISOString();
+      endIso = now.toISOString();
+      source = 'rolling';
+      label = `${monthFmt(start)} – ${monthFmt(now)}`;
+    }
+
+    const config = readUserConfig();
+    const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
+    const isManagedTier = tier === 'managed' || tier === 'managed_pro' || tier === 'eu';
+
+    interface CpSummary {
+      managed: boolean;
+      tier?: string;
+      budget_cents?: number;
+      used_cents?: number;
+      balance_cents?: number;
+      period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;
+    }
+    let cpSummary: CpSummary | null = null;
+    if (isManagedTier && period === 'current') {
+      const { fetchControlPlaneUsageSummary } = await import('../core/managed-usage-summary.js');
+      cpSummary = await fetchControlPlaneUsageSummary();
+      if (cpSummary?.managed && cpSummary.period) {
+        startIso = cpSummary.period.start_iso;
+        endIso = cpSummary.period.end_iso;
+        source = 'stripe-billing';
+        const periodStart = new Date(startIso);
+        const periodEnd = new Date(endIso);
+        const lastDay = new Date(periodEnd.getTime() - 86_400_000);
+        label = `${monthFmt(periodStart)} – ${monthFmt(lastDay)}`;
+      }
+    }
+
+    const cacheKey = `${period}:${startIso}`;
+    const cached = this._usageSummaryCache.get(cacheKey);
+    const nowMs = Date.now();
+    let summary;
+    if (cached && cached.expiresAt > nowMs) {
+      summary = cached.summary;
+    } else {
+      summary = history.getUsageSummary({ startIso, endIso, source, label });
+      this._usageSummaryCache.set(cacheKey, { summary, expiresAt: nowMs + USAGE_SUMMARY_TTL_MS });
+    }
+
+    let budgetCents: number;
+    let overriddenUsedCents: number | undefined;
+    if (cpSummary?.managed) {
+      budgetCents = cpSummary.budget_cents ?? 0;
+      overriddenUsedCents = cpSummary.used_cents;
+    } else if (isManagedTier) {
+      budgetCents = 0;
+    } else {
+      budgetCents = typeof config.max_monthly_cost_usd === 'number'
+        ? Math.round(config.max_monthly_cost_usd * 100)
+        : 0;
+    }
+
+    const usedCents = overriddenUsedCents ?? summary.used_cents;
+    const projection = this._projectExhaust(summary.daily, usedCents, budgetCents, endIso);
+    const hardLimits = isManagedTier
+      ? { tier: 'managed', contact_for_quotas: true }
+      : getHardLimits();
+
+    jsonResponse(res, 200, {
+      tier,
+      ...summary,
+      used_cents: usedCents,
+      budget_cents: budgetCents,
+      limit_cents: budgetCents > 0 ? budgetCents : null,
+      projection,
+      hard_limits: hardLimits,
+    });
+  }
+
+  /**
+   * Linear projection from the last 7 days of `daily` data — when (if ever)
+   * the budget gets exhausted at the current pace. Returns null when there
+   * is no limit set, no spend yet, or fewer than 2 days of data.
+   */
+  private _projectExhaust(
+    daily: ReadonlyArray<{ date: string; cost_cents: number }>,
+    usedCents: number,
+    limitCents: number,
+    periodEndIso: string,
+  ): { exhaust_eta_iso: string | null; projection_basis_days: number } | null {
+    if (limitCents <= 0 || usedCents <= 0 || daily.length < 2) return null;
+    const window = daily.slice(-7).filter((d) => d.cost_cents > 0);
+    if (window.length < 2) return null;
+    const totalRecent = window.reduce((sum, d) => sum + d.cost_cents, 0);
+    const dailyAvg = totalRecent / window.length;
+    if (dailyAvg <= 0) return null;
+    const remainingCents = limitCents - usedCents;
+    if (remainingCents <= 0) {
+      // Already exhausted.
+      return { exhaust_eta_iso: new Date().toISOString(), projection_basis_days: window.length };
+    }
+    const daysRemaining = remainingCents / dailyAvg;
+    const etaMs = Date.now() + daysRemaining * 86_400_000;
+    const periodEndMs = new Date(periodEndIso).getTime();
+    // Only return ETA if it falls before the period ends (otherwise the
+    // user is on pace to finish under-budget — no projection needed).
+    if (etaMs >= periodEndMs) return null;
+    return { exhaust_eta_iso: new Date(etaMs).toISOString(), projection_basis_days: window.length };
+  }
+
   private async _tryStartTelegram(config: ReturnType<typeof loadConfig>): Promise<void> {
     const store = this.engine?.getSecretStore();
     const token = store?.resolve('TELEGRAM_BOT_TOKEN')
@@ -2154,121 +2303,17 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, data);
     });
 
-    // ── Usage Summary (Usage Dashboard Phase 1) ──
-    // Aggregates the local RunHistory into the shape the Web UI's
-    // Usage Dashboard renders. Managed tiers currently get the same
-    // local-only view; the control-plane included-credit integration
-    // is Phase 3. 30-second instance-scoped TTL cache so repeated tab
-    // opens don't re-hammer SQLite for the same window.
+    // ── Usage SSoT ──
+    // PRD-SETTINGS-REFACTOR Phase 0e: `/api/usage/current` is the canonical
+    // cost + usage SSoT. `/api/usage/summary` stays as an alias for older
+    // consumers (Web UI Usage Dashboard) — both endpoints serve the same
+    // payload built by `_buildUsageCurrent`. 30s in-memory TTL cache keyed
+    // by (period, startIso) so repeated tab opens don't re-hammer SQLite.
+    this.addStatic('user', 'GET /api/usage/current', async (req, res) => {
+      await this._serveUsageCurrent(req, res, engine);
+    });
     this.addStatic('user', 'GET /api/usage/summary', async (req, res) => {
-      const history = engine.getRunHistory();
-      if (!requireService(res, history, 'History')) return;
-      const { readUserConfig } = await import('../core/config.js');
-      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      const rawPeriod = url.searchParams.get('period') ?? 'current';
-      const period = rawPeriod === 'prev' || rawPeriod === '7d' || rawPeriod === '30d' ? rawPeriod : 'current';
-
-      const now = new Date();
-      let startIso: string;
-      let endIso: string;
-      let source: 'calendar-month' | 'rolling';
-      let label: string;
-      const monthFmt = (d: Date) => d.toLocaleString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-
-      if (period === 'current') {
-        const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-        startIso = start.toISOString();
-        endIso = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
-        source = 'calendar-month';
-        label = `${monthFmt(start)} – ${monthFmt(now)}`;
-      } else if (period === 'prev') {
-        const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-        const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-        startIso = start.toISOString();
-        endIso = end.toISOString();
-        source = 'calendar-month';
-        const lastDay = new Date(end.getTime() - 86_400_000);
-        label = `${monthFmt(start)} – ${monthFmt(lastDay)}`;
-      } else {
-        const days = period === '7d' ? 7 : 30;
-        const start = new Date(now.getTime() - days * 86_400_000);
-        startIso = start.toISOString();
-        endIso = now.toISOString();
-        source = 'rolling';
-        label = `${monthFmt(start)} – ${monthFmt(now)}`;
-      }
-
-      // Phase 3: for managed tiers, re-fetch the control-plane view FIRST so
-      // we can align the local aggregation window to the Stripe billing
-      // period (otherwise `used_cents` from the control plane and the sum of
-      // `daily` from the local DB report different windows and the numbers
-      // don't reconcile in the UI). On non-managed or when the CP is
-      // unreachable we fall through with the calendar-month / rolling window
-      // computed above.
-      const config = readUserConfig();
-      const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
-      const isManagedTier = tier === 'managed' || tier === 'managed_pro' || tier === 'eu';
-
-      interface CpSummary {
-        managed: boolean;
-        tier?: string;
-        budget_cents?: number;
-        used_cents?: number;
-        balance_cents?: number;
-        period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;
-      }
-      let cpSummary: CpSummary | null = null;
-      if (isManagedTier && period === 'current') {
-        const { fetchControlPlaneUsageSummary } = await import('../core/managed-usage-summary.js');
-        cpSummary = await fetchControlPlaneUsageSummary();
-        if (cpSummary?.managed && cpSummary.period) {
-          // Use the Stripe period for the local aggregation so daily + by_model
-          // cover the same window the control plane is reporting against.
-          startIso = cpSummary.period.start_iso;
-          endIso = cpSummary.period.end_iso;
-          source = 'calendar-month'; // 'stripe-billing' isn't a summary.source; we reuse calendar-month semantics
-          const periodStart = new Date(startIso);
-          const periodEnd = new Date(endIso);
-          const lastDay = new Date(periodEnd.getTime() - 86_400_000);
-          label = `${monthFmt(periodStart)} – ${monthFmt(lastDay)}`;
-        }
-      }
-
-      const cacheKey = `${period}:${startIso}`;
-      const cached = this._usageSummaryCache.get(cacheKey);
-      const nowMs = Date.now();
-      let summary;
-      if (cached && cached.expiresAt > nowMs) {
-        summary = cached.summary;
-      } else {
-        summary = history.getUsageSummary({ startIso, endIso, source, label });
-        this._usageSummaryCache.set(cacheKey, { summary, expiresAt: nowMs + USAGE_SUMMARY_TTL_MS });
-      }
-
-      // Tier-appropriate budget + used resolution:
-      //   - Managed w/ CP reachable → use CP's budget + used (authoritative)
-      //   - Managed w/o CP          → fall through to 0 (UI renders "included
-      //                                credit view coming in a later release")
-      //   - Self-Host / Hosted      → config.max_monthly_cost_usd
-      let budgetCents: number;
-      let overriddenUsedCents: number | undefined;
-      if (cpSummary?.managed) {
-        budgetCents = cpSummary.budget_cents ?? 0;
-        overriddenUsedCents = cpSummary.used_cents;
-      } else if (isManagedTier) {
-        budgetCents = 0;
-      } else {
-        budgetCents = typeof config.max_monthly_cost_usd === 'number'
-          ? Math.round(config.max_monthly_cost_usd * 100)
-          : 0;
-      }
-
-      jsonResponse(res, 200, {
-        tier,
-        ...summary,
-        used_cents: overriddenUsedCents ?? summary.used_cents,
-        budget_cents: budgetCents,
-      });
+      await this._serveUsageCurrent(req, res, engine);
     });
 
     // ── Pipelines ──

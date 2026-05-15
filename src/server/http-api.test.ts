@@ -21,6 +21,13 @@ const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'tes
 const mockHistoryGetRunToolCalls = vi.fn().mockReturnValue([]);
 const mockHistoryGetStats = vi.fn().mockReturnValue({ total_runs: 5 });
 const mockHistoryGetCostByDay = vi.fn().mockReturnValue([]);
+const mockHistoryGetUsageSummary = vi.fn().mockReturnValue({
+  period: { label: 'Test', start_iso: '2026-05-01T00:00:00Z', end_iso: '2026-06-01T00:00:00Z', source: 'calendar-month' as const },
+  used_cents: 1842,
+  by_model: [],
+  by_kind: [],
+  daily: [],
+});
 const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
@@ -80,6 +87,7 @@ vi.mock('../core/engine.js', () => ({
       getRunToolCalls: mockHistoryGetRunToolCalls,
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,
+      getUsageSummary: mockHistoryGetUsageSummary,
     });
     this.getTaskManager = vi.fn().mockReturnValue({
       list: mockTaskList,
@@ -1071,6 +1079,60 @@ describe('LynoxHTTPApi', () => {
         vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
         vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
       }
+    });
+  });
+
+  describe('usage SSoT', () => {
+    it('GET /api/usage/current returns the SSoT payload with projection + hard_limits (self-host)', async () => {
+      const res = await jsonFetch('/api/usage/current');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      // Backwards-compat fields
+      expect(body['used_cents']).toBe(1842);
+      expect(body['period']).toBeDefined();
+      expect(body['by_model']).toEqual([]);
+      // NEW fields
+      expect(body).toHaveProperty('projection');
+      expect(body['limit_cents']).toBeDefined();
+      // Self-host: hard_limits is the full numeric payload from getHardLimits()
+      const hl = body['hard_limits'] as Record<string, unknown>;
+      expect(hl['per_spawn_cents']).toBe(500);
+      expect(hl['tool_http_per_day']).toBe(2000);
+    });
+
+    it('GET /api/usage/summary returns the identical payload (alias semantic)', async () => {
+      const [current, summary] = await Promise.all([
+        jsonFetch('/api/usage/current'),
+        jsonFetch('/api/usage/summary'),
+      ]);
+      expect(current.status).toBe(200);
+      expect(summary.status).toBe(200);
+      const [a, b] = await Promise.all([current.json(), summary.json()]);
+      expect(a).toEqual(b);
+    });
+
+    it('managed tier returns opaque hard_limits blob (not raw numbers)', async () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/usage/current');
+        const body = await res.json() as Record<string, unknown>;
+        const hl = body['hard_limits'] as Record<string, unknown>;
+        expect(hl['tier']).toBe('managed');
+        expect(hl['contact_for_quotas']).toBe(true);
+        expect(hl['per_spawn_cents']).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
+    it('projection returns null when no spend or no limit', async () => {
+      const res = await jsonFetch('/api/usage/current');
+      const body = await res.json() as Record<string, unknown>;
+      // Mock daily=[] -> projection cannot extrapolate -> null
+      expect(body['projection']).toBeNull();
     });
   });
 

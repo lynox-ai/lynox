@@ -91,7 +91,7 @@ export interface UsageSummary {
     label: string;          // e.g. "Apr 1 – Apr 21"
     start_iso: string;
     end_iso: string;
-    source: 'calendar-month' | 'rolling';
+    source: 'calendar-month' | 'rolling' | 'stripe-billing';
   };
   used_cents: number;
   by_model: Array<{
@@ -1052,7 +1052,7 @@ export class RunHistory {
   getUsageSummary(opts: {
     startIso: string;
     endIso: string;
-    source: 'calendar-month' | 'rolling';
+    source: 'calendar-month' | 'rolling' | 'stripe-billing';
     label: string;
   }): UsageSummary {
     const { startIso, endIso } = opts;
