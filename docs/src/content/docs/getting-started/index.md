@@ -8,9 +8,9 @@ sidebar:
 ## Prerequisites
 
 - **An LLM credential** for one of three providers:
-  - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended primary, direct API
-  - [Mistral](https://console.mistral.ai/api-keys/) — France/EU, OpenAI-compatible adapter, ~6× cheaper than Claude on cache-friendly workloads
-  - **Custom (OpenAI-compatible)** — Ollama, LM Studio, OpenAI, Groq, vLLM, LiteLLM, or any other OpenAI-compatible endpoint. Pick this for fully local inference.
+  - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended primary, direct API. Prompt caching makes cache-heavy workflows the cheapest option per token of real work.
+  - [Mistral](https://console.mistral.ai/api-keys/) — France/EU, OpenAI-compatible adapter. Lower list prices than Claude; pick it for sovereignty or for uncached workloads where the lower per-token rate dominates.
+  - **Custom (OpenAI-compatible)** — Ollama, LM Studio, OpenAI, Groq, vLLM, or any other OpenAI-compatible endpoint. Pick this for fully local inference. (LiteLLM as an Anthropic-compatible proxy is also supported via the separate `custom` provider — see [LLM Providers](/setup/llm-providers/).)
 
 The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Provider**. A typical business day on Claude costs **$1–5**; local-only setups cost nothing per call. See [LLM Providers](/setup/llm-providers/) for the per-provider matrix.
 

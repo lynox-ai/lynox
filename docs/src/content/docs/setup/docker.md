@@ -45,7 +45,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 
 ## Environment Variables
 
-`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For Mistral or a Custom OpenAI-compatible endpoint (Ollama, LM Studio, OpenAI, Groq, vLLM, …), see [LLM Providers](/setup/llm-providers/). Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
+`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For Mistral or a **Custom (OpenAI-compatible)** endpoint (Ollama, LM Studio, OpenAI, Groq, vLLM, …), see [LLM Providers](/setup/llm-providers/). Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
