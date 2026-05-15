@@ -257,7 +257,7 @@
 						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 							<div class="flex items-center justify-between mb-3">
 								<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('hub.activity.open_tasks')}</p>
-								<a href="/app/automation?section=tasks" class="text-[10px] text-accent-text hover:opacity-80">{t('hub.activity.view_all')}</a>
+								<a href="/app/hub?section=tasks" class="text-[10px] text-accent-text hover:opacity-80">{t('hub.activity.view_all')}</a>
 							</div>
 							<div class="space-y-2">
 								{#each openTasks.slice(0, 5) as task}
