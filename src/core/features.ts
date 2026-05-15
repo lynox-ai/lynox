@@ -35,9 +35,10 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // /app/inbox UI ships in Phase 1b and the classifier has been piloted.
   'unified-inbox': false,
   // PRD-UNIFIED-API-PROFILE-V2 Phase B. Gates `api_setup bootstrap docs_url=…`
-  // (Haiku-extracted v2 profile draft). Off by default — staging burn-in first,
-  // then rafael canary, then cat/war after 48h soak.
-  'api-setup-v2': false,
+  // (Haiku-extracted v2 profile draft). Default-on as of the HN-launch — Smart
+  // Bootstrap is the headline differentiator and self-hosters need it
+  // out-of-the-box. Set LYNOX_FEATURE_API_SETUP_V2=0 to disable.
+  'api-setup-v2': true,
   // PRD-UNIFIED-API-PROFILE-V2 Phase E. Surfaces per-call cost in the tool_result
   // block + a thread-footer API rollup when an ApiProfile carries a `cost` field
   // (per_call only — per_token / per_unit are deferred). Off by default; users
