@@ -2053,22 +2053,39 @@ export class LynoxHTTPApi {
       });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('admin', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
+    // BYOK-provider secrets that a managed-tier user can self-serve via the
+    // SetupBanner UI. In managed mode, cookie auth grants `user` scope (see
+    // line ~1049 — `adminSecret ? 'user' : 'admin'`), so a strict admin gate
+    // would lock managed-BYOK customers out of their own API-key wizard. The
+    // whitelist is narrow on purpose — every other secret (SMTP password,
+    // webhook tokens, etc.) stays admin-only.
+    const BYOK_USER_WRITABLE_SECRETS = new Set(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
+      const name = params['name']!;
+      // Managed-mode: only the BYOK provider keys can be set by a non-admin.
+      // Self-host has no `LYNOX_HTTP_ADMIN_SECRET`, so cookie users are
+      // already promoted to admin scope by the auth layer and this check
+      // never applies to them.
+      if (process.env['LYNOX_MANAGED_MODE'] && !BYOK_USER_WRITABLE_SECRETS.has(name)) {
+        errorResponse(res, 403, `Managed mode: secret "${name}" is not user-writable`);
+        return;
+      }
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const b = body as Record<string, unknown> | null;
       const value = b && typeof b['value'] === 'string' ? b['value'] : '';
       if (!value) { errorResponse(res, 400, 'Missing value'); return; }
       try {
-        store.set(params['name']!, value);
-        store.recordConsent(params['name']!);
+        store.set(name, value);
+        store.recordConsent(name);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to store secret';
         errorResponse(res, 503, msg);
         return;
       }
       // Hot-reload API key so new sessions use it immediately
-      if (params['name'] === 'ANTHROPIC_API_KEY') {
+      if (name === 'ANTHROPIC_API_KEY') {
         engine.setApiKey(value);
       }
       jsonResponse(res, 200, { ok: true });
@@ -2178,7 +2195,12 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, redacted);
     });
 
-    this.addStatic('admin', 'PUT /api/config', async (_req, res, _params, body) => {
+    // Scope = 'user' so managed-mode cookie users (always user-scope per the
+    // `adminSecret ? 'user' : 'admin'` logic) can reach the field-locking
+    // logic below. The LOCKED_FIELDS gate keeps managed users from changing
+    // provider/api_key/etc — same security as before, just enforced inside
+    // the handler instead of at the auth layer.
+    this.addStatic('user', 'PUT /api/config', async (_req, res, _params, body) => {
       const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       const parsed = LynoxUserConfigSchema.safeParse(body);

@@ -102,6 +102,7 @@ vi.mock('../core/engine.js', () => ({
     this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = vi.fn().mockResolvedValue(undefined);
     this.getUserConfig = vi.fn().mockReturnValue({});
+    this.setApiKey = vi.fn();
     return this;
   }),
 }));
@@ -1263,22 +1264,19 @@ describe('LynoxHTTPApi', () => {
 
   describe('admin scope', () => {
     it('single-token mode grants admin by default', async () => {
-      // LYNOX_HTTP_ADMIN_SECRET is not set — LYNOX_HTTP_SECRET is admin
-      const res = await jsonFetch('/api/config', {
-        method: 'PUT',
-        body: JSON.stringify({ default_tier: 'sonnet' }),
-      });
-      expect(res.status).toBe(200);
+      // LYNOX_HTTP_ADMIN_SECRET is not set — LYNOX_HTTP_SECRET is admin.
+      // POST /api/vault/rotate is admin-only, so reaching 200 here proves
+      // single-token mode promoted the request to admin scope.
+      const res = await jsonFetch('/api/vault/rotate', { method: 'POST', body: '{}' });
+      expect(res.status).not.toBe(403);
     });
 
-    it('rejects destructive endpoint with user token when admin secret is set', async () => {
+    it('rejects destructive admin-only endpoint with user token when admin secret is set', async () => {
       vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
       try {
-        // Use the regular LYNOX_HTTP_SECRET (user scope)
-        const res = await jsonFetch('/api/config', {
-          method: 'PUT',
-          body: JSON.stringify({ default_tier: 'sonnet' }),
-        });
+        // LYNOX_HTTP_SECRET → user scope. POST /api/vault/rotate stays
+        // admin-only post-PR-#???, so the 403 here proves the split.
+        const res = await jsonFetch('/api/vault/rotate', { method: 'POST', body: '{}' });
         expect(res.status).toBe(403);
       } finally {
         vi.unstubAllEnvs();
@@ -1286,23 +1284,118 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('allows destructive endpoint with admin token', async () => {
+    it('allows destructive admin-only endpoint with admin token', async () => {
       const adminToken = 'admin-secret-token-99999';
       vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', adminToken);
       try {
-        const res = await fetch(`${baseUrl}/api/config`, {
-          method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${adminToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ default_tier: 'sonnet' }),
+        const res = await fetch(`${baseUrl}/api/vault/rotate`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: '{}',
         });
-        expect(res.status).toBe(200);
+        expect(res.status).not.toBe(403);
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
       }
+    });
+
+    // Managed-BYOK fix (HN-launch blocker): cookie users on a managed-tier
+    // instance can save their own provider key via SetupBanner. The auth
+    // layer pins them to user-scope (LYNOX_HTTP_ADMIN_SECRET is present in
+    // managed deployments), so PUT /api/secrets/:name + PUT /api/config had
+    // to drop from admin to user with internal whitelists / field-locks
+    // preserving the managed-mode lock.
+    describe('managed-BYOK user-scope writes', () => {
+      it('PUT /api/secrets/ANTHROPIC_API_KEY accepts user-scope in managed mode', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/secrets/ANTHROPIC_API_KEY', {
+            method: 'PUT',
+            body: JSON.stringify({ value: 'sk-ant-test' }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/secrets/OPENAI_API_KEY accepts user-scope in managed mode', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/secrets/OPENAI_API_KEY', {
+            method: 'PUT',
+            body: JSON.stringify({ value: 'sk-test' }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/secrets/SMTP_PASSWORD rejects user-scope in managed mode (not on BYOK whitelist)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/secrets/SMTP_PASSWORD', {
+            method: 'PUT',
+            body: JSON.stringify({ value: 'p4ssw0rd' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('not user-writable');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/secrets/SMTP_PASSWORD accepts user-scope in self-host (no managed gate)', async () => {
+        // No LYNOX_MANAGED_MODE → whitelist gate doesn't apply. Single-token
+        // mode + cookie self-host promotes user-scope to admin anyway, but
+        // testing under user-scope bearer covers the explicit path.
+        const res = await jsonFetch('/api/secrets/SMTP_PASSWORD', {
+          method: 'PUT',
+          body: JSON.stringify({ value: 'p4ssw0rd' }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      it('PUT /api/config accepts user-scope in managed mode for non-locked fields', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          // `experience` is not in LOCKED_FIELDS — user must be able to
+          // change it from the Web UI even on managed.
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ experience: 'developer' }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config still blocks locked-field changes under user-scope in managed mode', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ default_tier: 'haiku' }), // mock effective is 'opus'
+          });
+          expect(res.status).toBe(403);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
     });
 
     // Audit S1: backup restore calls process.exit() — must be admin-gated
@@ -1407,8 +1500,13 @@ describe('LynoxHTTPApi', () => {
     // mirrors the old `requiresAdmin` enumeration verbatim so a code-search
     // for `requiresAdmin` lands on this guard.
     describe('admin-scope coverage (T3 regression backstop)', () => {
+      // PUT /api/config and PUT /api/secrets/:name (BYOK whitelist) were
+      // intentionally downgraded to `user` scope so managed-tier cookie users
+      // (which the auth layer pins to user-scope when LYNOX_HTTP_ADMIN_SECRET
+      // is present) can save their own provider API key via SetupBanner.
+      // Field-level + name-whitelist gates inside the handlers preserve the
+      // managed-mode lock — see the "managed-mode BYOK" tests below.
       const ADMIN_ROUTES: Array<[method: string, path: string]> = [
-        ['PUT',    '/api/config'],
         ['GET',    '/api/vault/key'],
         ['POST',   '/api/vault/rotate'],
         ['GET',    '/api/files'],
@@ -1416,7 +1514,6 @@ describe('LynoxHTTPApi', () => {
         ['GET',    '/api/files/read'],
         ['DELETE', '/api/files'],
         ['GET',    '/api/secrets'],
-        ['PUT',    '/api/secrets/foo'],
         ['DELETE', '/api/secrets/foo'],
         ['GET',    '/api/auth/token'],
         ['GET',    '/api/export'],
