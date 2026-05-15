@@ -219,6 +219,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.load_failed':        { de: 'LLM-Daten konnten nicht geladen werden.',                                   en: 'Could not load LLM data.' },
 	'llm.locked_notice':      { de: 'Anbieter und Modell werden vom Managed-Hosting-Plan vorgegeben.',           en: 'Provider and model are managed by your hosting plan.' },
 	'llm.locked_provider':    { de: 'Anbieter ist auf diesem Plan nicht änderbar.',                              en: 'Provider is locked on this plan.' },
+	'llm.confirm_title':      { de: 'Eigene Endpoint-URL bestätigen',                                            en: 'Confirm custom endpoint URL' },
+	'llm.confirm_body_1':     { de: 'Beim Testen wird dein API-Schlüssel an folgende URL gesendet:',             en: 'Testing will send your API key to this URL:' },
+	'llm.confirm_body_2':     { de: 'Nur fortfahren, wenn du dieser Domain vollständig vertraust. SSRF-Schutz blockiert interne Adressen, aber ein bösartiger öffentlicher Endpoint könnte deinen Key abgreifen.', en: 'Only proceed if you fully trust this domain. SSRF guard blocks internal addresses, but a malicious public endpoint could still capture your key.' },
+	'llm.confirm_cancel':     { de: 'Abbrechen',                                                                 en: 'Cancel' },
+	'llm.confirm_proceed':    { de: 'Verstanden, fortfahren',                                                    en: 'Understood, proceed' },
 
 	// Workflows
 	'workflow.title': { de: 'Workflows', en: 'Workflows' },

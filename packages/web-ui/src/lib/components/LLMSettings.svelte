@@ -102,7 +102,36 @@
 		testResult = null;
 	}
 
+	// Custom-Endpoint Confirm-Banner (PRD Security Model): the SSRF guard
+	// blocks private-IP exfiltration, but a public attacker-controlled URL
+	// would still receive the user's API key. Gate the first probe per
+	// distinct base_url behind an explicit user confirm. sessionStorage so
+	// power-users don't re-confirm the same URL on every test in a session.
+	let pendingTestUrl = $state<string | null>(null);
+
+	function shouldConfirmCustomUrl(provider: LLMProvider, url: string | undefined): boolean {
+		if (provider !== 'custom' && provider !== 'openai') return false;
+		if (!url || url.trim().length === 0) return false;
+		if (typeof sessionStorage === 'undefined') return false;
+		const key = `llm_custom_confirmed:${url}`;
+		return !sessionStorage.getItem(key);
+	}
+
+	function markCustomUrlConfirmed(url: string): void {
+		if (typeof sessionStorage === 'undefined') return;
+		sessionStorage.setItem(`llm_custom_confirmed:${url}`, '1');
+	}
+
 	async function testConnection(): Promise<void> {
+		if (!activeProvider) return;
+		if (shouldConfirmCustomUrl(activeProvider, config.api_base_url)) {
+			pendingTestUrl = config.api_base_url ?? '';
+			return; // wait for modal-confirm
+		}
+		await runProbe();
+	}
+
+	async function runProbe(): Promise<void> {
 		if (!activeProvider) return;
 		testing = true;
 		testResult = null;
@@ -303,3 +332,31 @@
 		</div>
 	{/if}
 </div>
+
+<!-- Custom-endpoint key-exfil confirm modal — fires per distinct URL,
+     once per browser session. SSRF-guard handles private-IP exfil; this
+     handles public attacker-URL exfil where the SSRF-guard wouldn't trigger. -->
+{#if pendingTestUrl !== null}
+	<div role="dialog" aria-modal="true" aria-labelledby="confirm-title"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-bg-overlay/60 p-4">
+		<div class="bg-bg border border-border rounded-lg shadow-xl max-w-md w-full p-6 space-y-4">
+			<h3 id="confirm-title" class="text-lg font-medium flex items-center gap-2">
+				⚠ {t('llm.confirm_title')}
+			</h3>
+			<p class="text-sm">{t('llm.confirm_body_1')}</p>
+			<pre class="font-mono text-xs px-2 py-1 bg-bg-muted rounded break-all whitespace-pre-wrap">{pendingTestUrl}</pre>
+			<p class="text-sm text-warning">{t('llm.confirm_body_2')}</p>
+			<div class="flex justify-end gap-2 pt-2">
+				<button type="button" onclick={() => { pendingTestUrl = null; }}
+					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5">
+					{t('llm.confirm_cancel')}
+				</button>
+				<button type="button"
+					onclick={() => { const url = pendingTestUrl!; pendingTestUrl = null; markCustomUrlConfirmed(url); void runProbe(); }}
+					class="px-3 py-1.5 text-sm bg-warning text-warning-fg rounded hover:opacity-90">
+					{t('llm.confirm_proceed')}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
