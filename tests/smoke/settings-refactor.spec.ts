@@ -4,9 +4,17 @@
  * not just route presence — per project standard
  * `feedback_thorough_smoke_test`.
  *
+ * **Staging-only** — needs a real session cookie + the deployed
+ * Settings-Refactor routes (cost-limits, /api/llm/test, etc.). Run via:
+ *
  *   STAGING_URL=https://engine.lynox.cloud \
  *   STAGING_COOKIE='lynox_session=...' \
- *   npx playwright test /tmp/lynox-settings-smoke.spec.ts --reporter=list
+ *   npx playwright test tests/smoke/settings-refactor.spec.ts --reporter=list
+ *
+ * In CI (smoke-local.sh against a fresh docker-compose stack) neither env
+ * var is set, so every test would 401 against the staging engine. The
+ * beforeEach below skips the whole spec when `STAGING_COOKIE` is absent
+ * — operator-driven staging smoke still runs, CI stays green.
  */
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 
@@ -34,7 +42,10 @@ async function setCookie(page: Page): Promise<void> {
   }]);
 }
 
-test.beforeEach(async ({ page }) => { await setCookie(page); });
+test.beforeEach(async ({ page }) => {
+  test.skip(!COOKIE, 'STAGING_COOKIE required — staging-only smoke spec');
+  await setCookie(page);
+});
 
 // ─────────────────────────────────────────────────────────────────────
 // Phase 0 — Foundation endpoints
