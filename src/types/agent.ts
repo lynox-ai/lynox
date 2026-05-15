@@ -77,6 +77,10 @@ export interface IAgent {
   readonly model:  string;
   readonly memory: IMemory | null;
   readonly tools:  ToolEntry[];
+  /** Filtered tool list honouring excludeTools — propagate this to sub-agents. */
+  getAvailableTools(): ToolEntry[];
+  /** Snapshot of the agent's excludeTools — propagate to sub-agents for defense-in-depth. */
+  getExcludedToolNames(): readonly string[];
   onStream:        StreamHandler | null;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;

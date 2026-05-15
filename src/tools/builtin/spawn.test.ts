@@ -50,21 +50,24 @@ function makeTool(name: string): ToolEntry {
 let testCounters: import('../../types/index.js').SessionCounters;
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
+  const tools = overrides.tools ?? [
+    makeTool('bash'),
+    makeTool('read_file'),
+    makeTool('write_file'),
+    makeTool('spawn_agent'),
+  ];
   return {
     name: 'parent',
     model: 'claude-sonnet-4-6',
     memory: null,
-    tools: [
-      makeTool('bash'),
-      makeTool('read_file'),
-      makeTool('write_file'),
-      makeTool('spawn_agent'),
-    ],
+    tools,
     onStream: null,
     currentRunId: undefined,
     spawnDepth: 0,
     toolContext: { sessionCounters: testCounters } as unknown as import('../../core/tool-context.js').ToolContext,
     sessionCounters: testCounters,
+    getAvailableTools: () => tools,
+    getExcludedToolNames: () => [],
     ...overrides,
   };
 }

@@ -161,7 +161,11 @@ async function executeThinker(
   const roleProfile = resolved
     ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
     : null;
-  const tools = resolveTools(spec.tools, roleProfile, parentAgent.tools, SPAWN_EXCLUDED);
+  // Use the parent's FILTERED tool list (honours user-disabled tools from
+  // Settings → Tool Toggles). Without this, a spawn from a prompt-injected
+  // parent could re-introduce tools the user explicitly disabled — the
+  // exact surface the Tool-Toggle PR was meant to close.
+  const tools = resolveTools(spec.tools, roleProfile, parentAgent.getAvailableTools(), SPAWN_EXCLUDED);
 
   // Context injection (XML-escaped to prevent tag injection)
   const task = spec.context
@@ -218,6 +222,10 @@ async function executeThinker(
     isolation: childIsolation,
     autonomy: parentAgent.autonomy,
     costGuard,
+    // Propagate parent's excludeTools so child's defense-in-depth check
+    // refuses tool_use blocks naming disabled tools (in addition to the
+    // tool list itself already being filtered above).
+    excludeTools: [...parentAgent.getExcludedToolNames()],
     // Profile overrides provider credentials
     apiKey: profile?.api_key ?? userConfig.api_key,
     apiBaseURL: profile?.api_base_url ?? userConfig.api_base_url,

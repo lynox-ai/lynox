@@ -77,6 +77,20 @@ export class Agent implements IAgent {
   private readonly maxIterations: number;
   private continuationPrompt: string | undefined;
   private readonly excludeTools: string[] | undefined;
+  /**
+   * Filtered view of `tools` honouring `excludeTools`. Use this for any
+   * propagation to sub-agents (spawn_agent) or pipeline child-agents so
+   * disabled tools cannot be re-introduced by descending the agent tree.
+   */
+  getAvailableTools(): ToolEntry[] {
+    if (!this.excludeTools || this.excludeTools.length === 0) return this.tools;
+    const exclude = new Set(this.excludeTools);
+    return this.tools.filter(t => !exclude.has(t.definition.name));
+  }
+  /** Snapshot of the parent's excludeTools — propagated to spawned children. */
+  getExcludedToolNames(): readonly string[] {
+    return this.excludeTools ?? [];
+  }
   private briefing: string | undefined;
   readonly autonomy: AutonomyLevel | undefined;
   private readonly preApproval: PreApprovalSet | undefined;
@@ -701,6 +715,19 @@ export class Agent implements IAgent {
   }
 
   private async _executeOne(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
+    // Defense-in-depth: even if a prompt-injected tool_use block names an
+    // excluded tool, refuse here. The LLM-facing tool list already strips
+    // these (see _buildToolsDef), but rehydrated streams or injected
+    // tool_use content could still synthesize a call by name.
+    if (this.excludeTools?.includes(tc.name)) {
+      return {
+        type: 'tool_result',
+        tool_use_id: tc.id,
+        content: annotateNonRetryable(`Tool disabled by user: ${tc.name}`),
+        is_error: true,
+      };
+    }
+
     const tool = this.tools.find(t => t.definition.name === tc.name);
 
     if (!tool) {
