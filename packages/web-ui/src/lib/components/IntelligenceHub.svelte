@@ -27,7 +27,7 @@
 		{ id: 'wissen', labelKey: 'hub.intelligence.wissen' },
 		{ id: 'graph', labelKey: 'hub.intelligence.graph' },
 		{ id: 'contacts', labelKey: 'hub.intelligence.contacts' },
-		{ id: 'data', labelKey: 'hub.intelligence.tables' },
+		{ id: 'data', labelKey: 'hub.intelligence.data' },
 		{ id: 'insights', labelKey: 'hub.intelligence.insights' },
 	];
 </script>
