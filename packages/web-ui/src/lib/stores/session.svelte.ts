@@ -20,6 +20,14 @@ let _sessionExpired = $state(false);
 // hides for 30s. Without this an in-flight 401 from a parallel poller
 // would re-flip the flag instantly and the user feels gaslit.
 let _dismissedUntil = 0;
+// Set by handleSessionExpired (chat.svelte.ts) when it's already taking
+// over the auth-failure UX (red chatError + auto-redirect to /login).
+// A boolean — not a wall-clock window — because iOS Safari throttles
+// setTimeout in backgrounded tabs, so a 5s "suppress for N seconds"
+// could expire before the redirect actually fires and the orange banner
+// would re-appear. The flag is implicitly cleared by the navigation
+// itself (module re-evaluates on /login load).
+let _redirectPending = false;
 
 export function isSessionExpired(): boolean {
 	return _sessionExpired;
@@ -27,10 +35,22 @@ export function isSessionExpired(): boolean {
 
 export function markSessionExpired(): void {
 	if (Date.now() < _dismissedUntil) return;
+	if (_redirectPending) return;
 	_sessionExpired = true;
 }
 
 export function clearSessionExpired(): void {
 	_sessionExpired = false;
 	_dismissedUntil = Date.now() + DISMISS_COOLDOWN_MS;
+}
+
+/**
+ * Called by callers (currently chat.svelte.ts:handleSessionExpired) that
+ * are already taking over the auth-failure UX — showing their own
+ * dedicated message + auto-redirecting to /login. Suppresses the orange
+ * banner so the user sees one notice for the same 401, not two.
+ */
+export function suppressSessionExpiredBanner(): void {
+	_redirectPending = true;
+	_sessionExpired = false;
 }
