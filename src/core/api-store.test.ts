@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, readFileSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, mkdtempSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -52,6 +52,55 @@ describe('ApiStore', () => {
 
     it('returns undefined for unknown hostname', () => {
       expect(store.getByHostname('unknown.com')).toBeUndefined();
+    });
+  });
+
+  describe('unregister', () => {
+    let tmpDir: string;
+
+    beforeEach(() => { tmpDir = createTmpDir(); });
+    afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+    it('removes from in-memory store and unlinks file', () => {
+      writeFileSync(join(tmpDir, 'test-api.json'), JSON.stringify(SAMPLE_PROFILE));
+      store.loadFromDirectory(tmpDir);
+      expect(store.size).toBe(1);
+
+      const removed = store.unregister('test-api', tmpDir);
+      expect(removed).toBe(true);
+      expect(store.size).toBe(0);
+      expect(store.get('test-api')).toBeUndefined();
+      expect(store.getByHostname('api.test.com')).toBeUndefined();
+      expect(existsSync(join(tmpDir, 'test-api.json'))).toBe(false);
+    });
+
+    it('returns false for unknown id without touching disk', () => {
+      writeFileSync(join(tmpDir, 'test-api.json'), JSON.stringify(SAMPLE_PROFILE));
+      store.loadFromDirectory(tmpDir);
+
+      const removed = store.unregister('does-not-exist', tmpDir);
+      expect(removed).toBe(false);
+      expect(store.size).toBe(1);
+      expect(existsSync(join(tmpDir, 'test-api.json'))).toBe(true);
+    });
+
+    it('handles in-memory-only profiles without an apisDir', () => {
+      store.register(SAMPLE_PROFILE);
+      expect(store.unregister('test-api')).toBe(true);
+      expect(store.size).toBe(0);
+    });
+
+    it('preserves a hostname mapping that was re-claimed by a newer profile', () => {
+      const oldP = { ...SAMPLE_PROFILE, id: 'old' };
+      const newP = { ...SAMPLE_PROFILE, id: 'new' };
+      store.register(oldP);
+      store.register(newP); // hostname now maps to 'new'
+
+      const removed = store.unregister('old');
+      expect(removed).toBe(true);
+      // The newer profile's hostname mapping must survive — the older
+      // profile we just removed never owned it after re-registration.
+      expect(store.getByHostname('api.test.com')?.id).toBe('new');
     });
   });
 

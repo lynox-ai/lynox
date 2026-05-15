@@ -9,7 +9,7 @@
  * Also provides per-API rate limiting via hostname matching.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 // ── Types ──
@@ -281,6 +281,43 @@ export class ApiStore {
     } catch {
       // Invalid URL — skip hostname mapping
     }
+  }
+
+  /**
+   * Unregister a profile and remove its on-disk JSON.
+   *
+   * Returns `true` if the profile existed and was removed (in-memory map
+   * + hostname index + rate-limit bucket + `~/.lynox/apis/<id>.json` on
+   * disk when `apisDir` is provided). Returns `false` if no profile with
+   * that id was registered. The on-disk delete is best-effort — a missing
+   * file is not treated as a failure (it can already be absent if the
+   * profile was registered programmatically without persistence).
+   */
+  unregister(id: string, apisDir?: string): boolean {
+    const profile = this.profiles.get(id);
+    if (!profile) return false;
+
+    this.profiles.delete(id);
+
+    try {
+      const hostname = new URL(profile.base_url).hostname;
+      // Only drop the hostname mapping if it still points at this id —
+      // re-registration under the same hostname must not be clobbered.
+      if (this.hostToProfile.get(hostname) === id) {
+        this.hostToProfile.delete(hostname);
+      }
+    } catch {
+      // Invalid URL — no hostname mapping to clean.
+    }
+
+    if (apisDir) {
+      const filePath = join(apisDir, `${id}.json`);
+      if (existsSync(filePath)) {
+        try { unlinkSync(filePath); } catch { /* best-effort */ }
+      }
+    }
+
+    return true;
   }
 
   /** Get all registered profiles. */

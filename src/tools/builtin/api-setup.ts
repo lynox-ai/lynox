@@ -1020,6 +1020,17 @@ Next steps before calling create:
       if (!id) {
         return 'Error: "id" is required for delete action.';
       }
+      const apiStore = agent.toolContext?.apiStore;
+      // Prefer the in-memory + on-disk path so the agent sees the deletion
+      // immediately. Falls back to disk-only when no store is bound (the
+      // tool is also reachable via standalone CLI in some test paths).
+      if (apiStore) {
+        const removed = apiStore.unregister(id, apisDir);
+        if (!removed) {
+          return `API profile "${id}" not found.`;
+        }
+        return `Deleted API profile "${id}".`;
+      }
       const filePath = join(apisDir, `${id}.json`);
       if (!existsSync(filePath)) {
         return `API profile "${id}" not found.`;

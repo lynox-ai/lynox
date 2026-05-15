@@ -4053,6 +4053,16 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { profile });
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/api-profiles/:id', async (_req, res, params) => {
+      const store = engine.getApiStore();
+      if (!requireService(res, store, 'API store')) return;
+      const { getLynoxDir } = await import('../core/config.js');
+      const apisDir = join(getLynoxDir(), 'apis');
+      const removed = store.unregister(params['id']!, apisDir);
+      if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
     // ── DataStore ────────────────────────────────────────────────
 
     this.addStatic('user', 'GET /api/datastore/collections', async (_req, res) => {
