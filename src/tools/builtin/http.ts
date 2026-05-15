@@ -241,8 +241,7 @@ export const MAX_REQUESTS_PER_SESSION = 100;
  * fields are unset, so changing these only affects new orchestrator
  * instances that opt in via applyHttpRateLimits.
  */
-export const DEFAULT_HOURLY_LIMIT = 200;
-export const DEFAULT_DAILY_LIMIT = 2000;
+export { HTTP_TOOL_HOURLY_LIMIT as DEFAULT_HOURLY_LIMIT, HTTP_TOOL_DAILY_LIMIT as DEFAULT_DAILY_LIMIT } from '../../core/limits.js';
 
 // === Egress control: detect data exfiltration attempts ===
 
