@@ -194,6 +194,15 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.activity.no_patterns': { de: 'Noch keine Muster erkannt.', en: 'No patterns detected yet.' },
 	'hub.activity.confidence': { de: 'Konfidenz', en: 'Confidence' },
 	'hub.activity.evidence': { de: 'Belege', en: 'Evidence' },
+	// Tool Toggles (T5 of deferred-batch)
+	'tools.heading':       { de: 'Tool-Berechtigungen',                                                          en: 'Tool permissions' },
+	'tools.subtitle':      { de: 'Bestimmt, welche Tools dem Agenten zur Verfügung stehen. Deaktivierte Tools werden serverseitig aus der Registry ausgeblendet — ein prompt-injizierter Aufruf erreicht sie nicht.', en: 'Controls which tools the agent has access to. Disabled tools are hidden from the registry server-side — a prompt-injected call cannot reach them.' },
+	'tools.loading':       { de: 'Lädt …',                                                                       en: 'Loading …' },
+	'tools.empty':         { de: 'Keine Tools registriert.',                                                     en: 'No tools registered.' },
+	'tools.note':          { de: 'Änderungen wirken auf alle Folge-Sessions. Laufende Sessions behalten ihre Tool-Liste bis zum nächsten Start.', en: 'Changes apply to new sessions. Running sessions keep their current tool list until next start.' },
+	'tools.saved':         { de: 'Gespeichert.',                                                                 en: 'Saved.' },
+	'tools.save_failed':   { de: 'Speichern fehlgeschlagen.',                                                    en: 'Save failed.' },
+	'tools.load_failed':   { de: 'Tool-Liste konnte nicht geladen werden.',                                      en: 'Could not load tool list.' },
 	'hub.workflow.list': { de: 'Workflows', en: 'Workflows' },
 	'hub.workflow.analytics': { de: 'Analyse (Beta)', en: 'Analytics (beta)' },
 	// LLM settings page (PRD-SETTINGS-REFACTOR Phase 2)

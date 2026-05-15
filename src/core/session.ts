@@ -949,7 +949,14 @@ export class Session {
         : undefined,
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,
-      excludeTools: this.agentOverrides.excludeTools,
+      // Merge user-disabled tools (Settings → Integrations → Tool Toggles)
+      // with any session-specific excludes. Server-side enforcement: the
+      // Agent never sees disabled tools so a prompt-injected agent cannot
+      // call them — stronger than a runtime "tool disabled" error.
+      excludeTools: [
+        ...(userConfig.disabled_tools ?? []),
+        ...(this.agentOverrides.excludeTools ?? []),
+      ],
       apiKey: this._profileOverride?.api_key ?? userConfig.api_key,
       apiBaseURL: this._profileOverride?.api_base_url ?? userConfig.api_base_url,
       provider: this._profileOverride?.provider ?? userConfig.provider,

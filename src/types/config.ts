@@ -248,6 +248,8 @@ export interface LynoxUserConfig {
   bugsink_dsn?: string | undefined;
   /** Toggle for the error-reporting pipe. Default true when DSN is set. */
   bugsink_enabled?: boolean | undefined;
+  /** Tool names disabled by the user in Settings. Hidden from the agent at session start (server-side enforcement). */
+  disabled_tools?: string[] | undefined;
   /** Directory for backup storage. Default: ~/.lynox/backups */
   backup_dir?: string | undefined;
   /** Cron schedule for automatic backups. Default: '0 3 * * *' (daily 3 AM). */

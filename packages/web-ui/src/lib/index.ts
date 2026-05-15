@@ -24,6 +24,7 @@ export { default as ArtifactsHub } from './components/ArtifactsHub.svelte';
 export { default as ActivityHub } from './components/ActivityHub.svelte';
 export { default as WorkflowsView } from './components/WorkflowsView.svelte';
 export { default as AutomationHub } from './components/AutomationHub.svelte';
+export { default as ToolToggles } from './components/ToolToggles.svelte';
 export { default as VoiceSettings } from './components/VoiceSettings.svelte';
 export { default as PrivacyDataSettings } from './components/PrivacyDataSettings.svelte';
 export { default as SystemSettings } from './components/SystemSettings.svelte';
