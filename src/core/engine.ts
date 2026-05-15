@@ -281,6 +281,16 @@ export class Engine {
     const apiKey = process.env['ANTHROPIC_API_KEY']
       ?? this.secretStore?.resolve('ANTHROPIC_API_KEY')
       ?? this.userConfig.api_key;
+    // Mirror the resolved Anthropic key into process.env so secondary SDK
+    // instances (llm-helper's `callForStructuredJson` for the api_setup
+    // docs_url bootstrap, etc.) pick it up. Without this the engine's
+    // primary client works (it gets the resolved key directly) but every
+    // `new Anthropic()` elsewhere falls back to env-only resolution and
+    // throws "Could not resolve authentication method" — see the
+    // managed-BYOK Smart Bootstrap regression smoked 2026-05-15.
+    if (apiKey && this.userConfig.provider !== 'vertex' && this.userConfig.provider !== 'openai') {
+      process.env['ANTHROPIC_API_KEY'] = apiKey;
+    }
     // Vertex AI: resolve GCP credentials from env > vault > config
     const gcpProjectId = process.env['GCP_PROJECT_ID']
       ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']
