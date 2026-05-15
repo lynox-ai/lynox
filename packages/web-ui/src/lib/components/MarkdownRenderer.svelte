@@ -2,6 +2,7 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 	import { codeToHtml } from 'shiki';
+	import { goto } from '$app/navigation';
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
@@ -122,6 +123,7 @@
 			<div class="artifact-toolbar">
 				<span class="artifact-label">Markdown</span>
 				<span class="artifact-md-title">${safeTitle}</span>
+				<button class="artifact-btn" data-action="open-gallery" title="Open in Artifacts">${ICON_OPEN_GALLERY}</button>
 				<button class="artifact-btn" data-action="download-md" title="Download as .md">${ICON_DOWNLOAD}</button>
 				<button class="artifact-btn" data-action="print-pdf" title="Print / Save as PDF">${ICON_PRINT}</button>
 			</div>
@@ -170,6 +172,8 @@
 	const ICON_CLIPBOARD = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 3A1.5 1.5 0 017 1.5h2A1.5 1.5 0 0110.5 3M5.5 3H4a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1V4a1 1 0 00-1-1h-1.5M5.5 3h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_CLOSE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
 	const ICON_PRINT = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 2.5h7v3.5M4.5 11.5H3A1.5 1.5 0 011.5 10V7A1.5 1.5 0 013 5.5h10A1.5 1.5 0 0114.5 7v3a1.5 1.5 0 01-1.5 1.5h-1.5M4.5 9.5h7V14h-7V9.5z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+	// External-link / "open in another view" icon — arrow exiting a frame.
+	const ICON_OPEN_GALLERY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9 2h5v5M14 2L8 8M11 9v4a1 1 0 01-1 1H3a1 1 0 01-1-1V6a1 1 0 011-1h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 	/** Injected into artifact iframes — posts height via postMessage for cross-origin resize */
 	const RESIZE_SCRIPT = '<script>(function(){function s(){parent.postMessage({type:"lynox-resize",h:document.documentElement.scrollHeight},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
@@ -232,6 +236,7 @@
 			else if (action === 'export') handleArtifactExport(container);
 			else if (action === 'download-md') handleMarkdownDownload(container);
 			else if (action === 'print-pdf') handleMarkdownPrint(container);
+			else if (action === 'open-gallery') void handleMarkdownOpenGallery(container);
 		}
 	}
 
@@ -485,6 +490,25 @@ window.addEventListener('afterprint', function () { window.close(); });
 		saveArtifact({ title, content: html, type: 'html' }).then(result => {
 			if (result) addToast(t('artifacts.saved'), 'success');
 		});
+	}
+
+	/**
+	 * Open the markdown artifact in the dedicated /app/artifacts gallery
+	 * view. Saves a snapshot to the ArtifactStore first (no prompt — the
+	 * agent's title is used as-is to keep the click fast), then navigates.
+	 * If the user already triggered this on the same artifact, they'll get
+	 * a duplicate row in the gallery — acceptable cost; dedup-by-content
+	 * is a future improvement.
+	 */
+	async function handleMarkdownOpenGallery(container: HTMLElement) {
+		const md = decodeDataMd(container);
+		if (!md) { addToast('Open failed', 'error'); return; }
+		const title = container.dataset['title'] ?? 'Artifact';
+		const result = await saveArtifact({ title, content: md, type: 'markdown' });
+		if (!result) { addToast('Open failed', 'error'); return; }
+		// Client-side nav so the chat scroll position, streaming SSE,
+		// and the wider app shell don't blow away on a full reload.
+		await goto(`/app/artifacts?id=${encodeURIComponent(result.id)}`);
 	}
 
 	// ── Escape key for fullscreen artifacts ──────────────────

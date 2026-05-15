@@ -1467,15 +1467,9 @@
 		}
 	}
 
-	let toolCallsExpanded = $state(false);
-
-	function toggleAllToolCalls() {
-		toolCallsExpanded = !toolCallsExpanded;
-		const details = document.querySelectorAll('.tool-call-details');
-		details.forEach((d) => { (d as HTMLDetailsElement).open = toolCallsExpanded; });
-	}
-
-	const hasToolCalls = $derived(messages.some((m) => m.toolCalls && m.toolCalls.length > 0));
+	// EXPAND ALL was removed: the button targeted elements with class
+	// `tool-call-details`, but the new interleaved-block rendering doesn't
+	// emit that class anywhere — the toggle never had anything to expand.
 
 	function formatUsage(u: UsageInfo): string {
 		const totalIn = u.tokensIn;
@@ -1884,11 +1878,19 @@
 									</div>
 								{/if}
 							{:else if gBlock.type === 'text' && gBlock.text}
-								{@const hasArtifact = gBlock.text.includes('```html') && (gBlock.text.includes('<!DOCTYPE') || gBlock.text.includes('<html'))}
 								<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
-								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
 						{/if}
 						{/each}
+						<!-- One footer per logical reply, not per text-block. A single
+						     agent turn may interleave 3-4 text segments around tool
+						     calls; rendering the usage row + speak + copy after every
+						     segment makes the same numbers repeat and clutters the
+						     thumb zone. Aggregate hasArtifact across the whole
+						     message content. -->
+						{#if msg.blocks?.length && msg.content}
+							{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
+							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
+						{/if}
 						<!-- Fallback for legacy messages without blocks -->
 						{#if !msg.blocks?.length}
 							{@const legacyGroups = groupedToolCalls((msg.toolCalls ?? []).map((_, i) => ({ type: 'tool_call' as const, index: i })), msg.toolCalls ?? [])}
@@ -1915,11 +1917,6 @@
 
 			{#if messages.length > 0}
 				<div class="flex items-center gap-3 flex-wrap">
-					{#if hasToolCalls}
-						<button onclick={toggleAllToolCalls} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">
-							{toolCallsExpanded ? t('chat.collapse_all') : t('chat.expand_all')}
-						</button>
-					{/if}
 					<button onclick={() => downloadExport('md')} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">↓ Export</button>
 					<button onclick={async () => { const { exportAsJSON } = await import('../stores/chat.svelte.js'); await navigator.clipboard.writeText(exportAsJSON()); addToast(t('common.copied'), 'success', 1500); }} class="hidden md:inline text-xs text-text-subtle hover:text-text transition-colors font-mono uppercase tracking-widest">⎘ JSON</button>
 				</div>

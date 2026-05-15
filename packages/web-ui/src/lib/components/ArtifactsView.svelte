@@ -9,6 +9,8 @@
 		type ArtifactMeta,
 	} from '../stores/artifacts.svelte.js';
 	import { tick } from 'svelte';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { t } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
@@ -16,12 +18,34 @@
 	let confirmDelete = $state<string | null>(null);
 	let deleteDialogRef = $state<HTMLDivElement | null>(null);
 	let deleteDialogTrigger: HTMLElement | null = null;
+	let deepLinkConsumed = false;
 
 	const artifacts = $derived(getArtifacts());
 	const isLoading = $derived(getIsLoadingArtifacts());
 
 	$effect(() => {
 		loadArtifacts();
+	});
+
+	// Deep-link: `/app/artifacts?id=…` (set by MarkdownRenderer's
+	// "open-gallery" button on inline markdown artifacts) auto-opens that
+	// artifact's preview once the list has loaded. One-shot — re-running
+	// loadArtifacts shouldn't keep re-opening the same artifact, and a
+	// hard reload (or back-nav after deleting the artifact) shouldn't
+	// resurrect the open dialog.
+	$effect(() => {
+		if (deepLinkConsumed || isLoading || artifacts.length === 0) return;
+		const id = $page.url.searchParams.get('id');
+		if (!id) return;
+		const match = artifacts.find(a => a.id === id);
+		if (match) {
+			deepLinkConsumed = true;
+			// Strip the `?id=` from the URL so reload / back-nav doesn't
+			// re-open the same artifact. keepFocus avoids stealing focus from
+			// the about-to-mount preview dialog.
+			void goto('/app/artifacts', { replaceState: true, keepFocus: true, noScroll: true });
+			void openArtifact(match);
+		}
 	});
 
 	// Focus dialog when it opens
