@@ -1512,4 +1512,109 @@ describe('Agent', () => {
       expect(budgetEvents.length).toBe(0);
     });
   });
+
+  describe('Tool-Toggles enforcement (defense-in-depth)', () => {
+    // The LLM-facing tool list already strips excluded names (see
+    // `_buildToolsDef` → `_excludeSet`). The defense-in-depth check in
+    // `_executeOne` covers a different threat: a prompt-injected tool_use
+    // block that synthesizes a call by name, or a rehydrated history that
+    // carries a now-disabled tool_use. Without this layer a single
+    // injected `<tool_use name="exec_shell">` would land at the registry.
+    it('refuses tool_use blocks naming excluded tools, even when the tool is in the registry', async () => {
+      const forbidden = makeTool('forbidden_tool');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_evil', name: 'forbidden_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [forbidden],
+        excludeTools: ['forbidden_tool'],
+      });
+
+      const result = await agent.send('please use forbidden_tool');
+      expect(result).toBe('Done');
+      // Handler must NOT have run — defense-in-depth refused before dispatch.
+      expect(forbidden.handler).not.toHaveBeenCalled();
+
+      // The synthesized tool_result must surface as an error so the LLM can
+      // recover instead of silently dropping the call.
+      const messages = agent.getMessages();
+      const lastUserMsg = messages.at(-2);
+      expect(lastUserMsg).toBeDefined();
+      const content = (lastUserMsg as { content: Array<{ type: string; is_error?: boolean; content?: unknown }> }).content;
+      const toolResult = content.find(b => b.type === 'tool_result');
+      expect(toolResult).toBeDefined();
+      expect(toolResult?.is_error).toBe(true);
+    });
+
+    it('runs the tool when not on the excludeTools list', async () => {
+      // Inverse of the test above — verifies the check is name-keyed, not a
+      // blanket "always-refuse" gate.
+      const allowed = makeTool('allowed_tool');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ok', name: 'allowed_tool', input: { x: 1 } }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [allowed],
+        excludeTools: ['some_other_tool'],
+      });
+
+      const result = await agent.send('use the tool');
+      expect(result).toBe('Done');
+      expect(allowed.handler).toHaveBeenCalledWith({ x: 1 }, agent);
+    });
+
+    it('strips excluded tools from the LLM-facing tool list (Set hoist, O(1) per iteration)', () => {
+      const a = makeTool('alpha');
+      const b = makeTool('bravo');
+      const c = makeTool('charlie');
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [a, b, c],
+        excludeTools: ['bravo'],
+      });
+
+      // `getAvailableTools()` is the canonical surface spawn / runtime-adapter
+      // propagate to children — strip leaks here would re-introduce disabled
+      // tools in the agent tree.
+      const available = agent.getAvailableTools();
+      const names = available.map(t => t.definition.name);
+      expect(names).toEqual(['alpha', 'charlie']);
+      expect(agent.getExcludedToolNames()).toEqual(['bravo']);
+    });
+
+    it('getAvailableTools is a no-op when excludeTools is empty', () => {
+      // Hoisted-Set fast path — the constructor stores `new Set([])` and the
+      // getter short-circuits to the original `tools` array reference.
+      const a = makeTool('alpha');
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [a] });
+      expect(agent.getAvailableTools()).toBe(agent.tools);
+    });
+  });
+
+  describe('max_context_window_tokens propagation', () => {
+    // The clamp itself (`Math.min(native, cap)`) lives in private
+    // `_effectiveContextWindow` — we verify the propagation surface
+    // (`getMaxContextWindowTokens`) that spawn_agent + runtime-adapter
+    // depend on for tree-wide cap inheritance.
+    it('exposes the user-cap to sub-agent propagation', () => {
+      const agent = new Agent({
+        name: 'parent',
+        model: 'claude-sonnet-4-6',
+        maxContextWindowTokens: 200_000,
+      });
+      expect(agent.getMaxContextWindowTokens()).toBe(200_000);
+    });
+
+    it('returns undefined when no cap was supplied (= use the model native window)', () => {
+      const agent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6' });
+      expect(agent.getMaxContextWindowTokens()).toBeUndefined();
+    });
+  });
 });
