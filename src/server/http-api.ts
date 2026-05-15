@@ -4053,6 +4053,28 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { profile });
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/api-profiles/:id', async (_req, res, params) => {
+      const store = engine.getApiStore();
+      if (!requireService(res, store, 'API store')) return;
+      const { getLynoxDir } = await import('../core/config.js');
+      const { ApiProfileUnlinkError } = await import('../core/api-store.js');
+      const apisDir = join(getLynoxDir(), 'apis');
+      try {
+        const removed = store.unregister(params['id']!, apisDir);
+        if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
+      } catch (err) {
+        if (err instanceof ApiProfileUnlinkError) {
+          // The in-memory side already happened; report the partial state
+          // so the operator sees a 500 instead of a misleading 404 + a
+          // silent file that would resurrect on next restart.
+          errorResponse(res, 500, 'Profile removed from memory but on-disk delete failed; restart will resurrect it');
+          return;
+        }
+        throw err;
+      }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
     // ── DataStore ────────────────────────────────────────────────
 
     this.addStatic('user', 'GET /api/datastore/collections', async (_req, res) => {

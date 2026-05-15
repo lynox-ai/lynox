@@ -9,8 +9,31 @@
  * Also provides per-API rate limiting via hostname matching.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+
+// ── Errors ──
+
+/**
+ * Thrown by `ApiStore.unregister` when the in-memory delete succeeded but
+ * the on-disk file delete failed for a non-ENOENT reason. Callers (HTTP
+ * handler, agent tool) should map this to a 500-class outcome — the
+ * "deleted" profile would otherwise resurrect on the next engine restart.
+ */
+export class ApiProfileUnlinkError extends Error {
+  constructor(public readonly filePath: string, public override readonly cause: unknown) {
+    super(`Failed to unlink ${filePath}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'ApiProfileUnlinkError';
+  }
+}
+
+// ── Constants ──
+
+// Mirrors the `ID_PATTERN` used in `tools/builtin/api-setup.ts`. Kept here
+// so the store can enforce it on every entry path (`register` /
+// `loadFromDirectory`) — that's what makes the `unregister` path safe to
+// hand the id into `join(apisDir, …)`.
+const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 // ── Types ──
 
@@ -201,6 +224,10 @@ class PerApiRateLimiter {
     }
   }
 
+  unregister(hostname: string): void {
+    this.buckets.delete(hostname);
+  }
+
   /**
    * Check if a request to this hostname is allowed.
    * Returns null if allowed, or a reason string if blocked.
@@ -267,8 +294,15 @@ export class ApiStore {
     return loaded;
   }
 
-  /** Register a single profile. */
+  /** Register a single profile. Skips silently if the id is malformed. */
   register(profile: ApiProfile): void {
+    if (!PROFILE_ID_PATTERN.test(profile.id)) {
+      // Refuse the id at the gate so the in-memory Map's invariant holds
+      // — every key is a safe filename component. `unregister` can then
+      // hand the id directly to `join(apisDir, …)` without a second check.
+      process.stderr.write(`[lynox:api-store] Skipping profile with invalid id "${profile.id}" (must match ${PROFILE_ID_PATTERN.source})\n`);
+      return;
+    }
     this.profiles.set(profile.id, profile);
 
     // Map hostname for rate limit lookups
@@ -281,6 +315,62 @@ export class ApiStore {
     } catch {
       // Invalid URL — skip hostname mapping
     }
+  }
+
+  /**
+   * Unregister a profile and remove its on-disk JSON.
+   *
+   * Returns `false` if no profile with that id was registered, so callers
+   * can fall through to a disk-only delete for orphans dropped into
+   * `apisDir` after engine boot. Throws `ApiProfileUnlinkError` if the
+   * in-memory delete succeeded but the on-disk unlink failed for any
+   * reason other than ENOENT — the HTTP handler maps that to a 500 so
+   * the user doesn't see "Profile not found" while the file survives
+   * and would resurrect on the next engine restart.
+   *
+   * Two invariants worth flagging because they're not obvious from the
+   * call site:
+   * - The hostname → id index is dropped only when it still points at
+   *   the id being removed. A profile that re-claimed the hostname mid-
+   *   session must keep its mapping.
+   * - The rate-limit bucket is cleared so a future re-registration with
+   *   *no* `rate_limit` doesn't inherit stale throttling from this profile.
+   */
+  unregister(id: string, apisDir?: string): boolean {
+    // Belt-and-suspenders — `register` already refuses bad ids, but this
+    // is the line that hands `id` to `join(apisDir, …)`. Keeping the
+    // local check means a future regression in `register` can't open a
+    // path-traversal here.
+    if (!PROFILE_ID_PATTERN.test(id)) return false;
+
+    const profile = this.profiles.get(id);
+    if (!profile) return false;
+
+    this.profiles.delete(id);
+
+    try {
+      const hostname = new URL(profile.base_url).hostname;
+      if (this.hostToProfile.get(hostname) === id) {
+        this.hostToProfile.delete(hostname);
+        this.rateLimiter.unregister(hostname);
+      }
+    } catch {
+      // Invalid base_url — no hostname mapping or bucket to clean.
+    }
+
+    if (apisDir) {
+      const filePath = join(apisDir, `${id}.json`);
+      try {
+        unlinkSync(filePath);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') {
+          throw new ApiProfileUnlinkError(filePath, err);
+        }
+      }
+    }
+
+    return true;
   }
 
   /** Get all registered profiles. */

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, readFileSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, mkdtempSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -52,6 +52,101 @@ describe('ApiStore', () => {
 
     it('returns undefined for unknown hostname', () => {
       expect(store.getByHostname('unknown.com')).toBeUndefined();
+    });
+  });
+
+  describe('unregister', () => {
+    let tmpDir: string;
+
+    beforeEach(() => { tmpDir = createTmpDir(); });
+    afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+    it('removes from in-memory store and unlinks file', () => {
+      writeFileSync(join(tmpDir, 'test-api.json'), JSON.stringify(SAMPLE_PROFILE));
+      store.loadFromDirectory(tmpDir);
+      expect(store.size).toBe(1);
+
+      const removed = store.unregister('test-api', tmpDir);
+      expect(removed).toBe(true);
+      expect(store.size).toBe(0);
+      expect(store.get('test-api')).toBeUndefined();
+      expect(store.getByHostname('api.test.com')).toBeUndefined();
+      expect(existsSync(join(tmpDir, 'test-api.json'))).toBe(false);
+    });
+
+    it('returns false for unknown id without touching disk', () => {
+      writeFileSync(join(tmpDir, 'test-api.json'), JSON.stringify(SAMPLE_PROFILE));
+      store.loadFromDirectory(tmpDir);
+
+      const removed = store.unregister('does-not-exist', tmpDir);
+      expect(removed).toBe(false);
+      expect(store.size).toBe(1);
+      expect(existsSync(join(tmpDir, 'test-api.json'))).toBe(true);
+    });
+
+    it('handles in-memory-only profiles without an apisDir', () => {
+      store.register(SAMPLE_PROFILE);
+      expect(store.unregister('test-api')).toBe(true);
+      expect(store.size).toBe(0);
+    });
+
+    it('preserves a hostname mapping that was re-claimed by a newer profile', () => {
+      const oldP = { ...SAMPLE_PROFILE, id: 'old' };
+      const newP = { ...SAMPLE_PROFILE, id: 'new' };
+      store.register(oldP);
+      store.register(newP); // hostname now maps to 'new'
+
+      const removed = store.unregister('old');
+      expect(removed).toBe(true);
+      // The newer profile's hostname mapping must survive — the older
+      // profile we just removed never owned it after re-registration.
+      expect(store.getByHostname('api.test.com')?.id).toBe('new');
+    });
+
+    it('clears the rate-limit bucket so a re-registration without limits is unthrottled', () => {
+      const throttled: ApiProfile = { ...SAMPLE_PROFILE, rate_limit: { requests_per_second: 1 } };
+      store.register(throttled);
+      // Burn the only token so the next call would be blocked if the bucket survives.
+      expect(store.checkRateLimit('api.test.com')).toBeNull();
+      expect(store.checkRateLimit('api.test.com')).not.toBeNull();
+
+      store.unregister('test-api');
+
+      // Re-register without rate_limit; the throttled bucket must be gone.
+      const unlimited: ApiProfile = { ...SAMPLE_PROFILE };
+      store.register(unlimited);
+      expect(store.checkRateLimit('api.test.com')).toBeNull();
+      expect(store.checkRateLimit('api.test.com')).toBeNull();
+    });
+
+    it('returns false for a path-traversal-shaped id', () => {
+      // `register` already rejects this id (verified separately), so the
+      // unregister call sees an empty Map and returns false naturally.
+      // Belt-and-suspenders: the regex guard inside unregister also blocks
+      // the id from reaching `join(apisDir, …)` if a future regression in
+      // register lets a bad id leak in.
+      expect(store.unregister('../../escape', tmpDir)).toBe(false);
+    });
+
+    it('throws on real (non-ENOENT) unlink failure', async () => {
+      const { ApiProfileUnlinkError } = await import('./api-store.js');
+      writeFileSync(join(tmpDir, 'test-api.json'), JSON.stringify(SAMPLE_PROFILE));
+      store.loadFromDirectory(tmpDir);
+      // Point apisDir at a regular file so unlink(filePath) hits EISDIR/ENOTDIR-class errors.
+      const notADir = join(tmpDir, 'not-a-dir');
+      writeFileSync(notADir, 'plain file');
+      expect(() => store.unregister('test-api', notADir)).toThrow(ApiProfileUnlinkError);
+      // In-memory side still happened — that's the partial state the throw signals.
+      expect(store.size).toBe(0);
+    });
+  });
+
+  describe('register validation', () => {
+    it('skips a profile with a malformed id', () => {
+      const bad: ApiProfile = { ...SAMPLE_PROFILE, id: '../../escape' };
+      store.register(bad);
+      expect(store.size).toBe(0);
+      expect(store.get('../../escape')).toBeUndefined();
     });
   });
 

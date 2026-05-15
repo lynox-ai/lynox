@@ -209,6 +209,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'apis.title': { de: 'API Profiles', en: 'API Profiles' },
 	'apis.no_profiles': { de: 'Keine API-Profile registriert.', en: 'No API profiles registered.' },
 	'apis.endpoints': { de: 'Endpoints', en: 'Endpoints' },
+	'apis.delete': { de: 'Löschen', en: 'Delete' },
+	'apis.delete_confirm': { de: 'API-Profil "{name}" wirklich löschen?', en: 'Really delete API profile "{name}"?' },
+	'apis.delete_failed': { de: 'Löschen fehlgeschlagen.', en: 'Delete failed.' },
 
 	// DataStore
 	'data.title': { de: 'Daten', en: 'Data' },

@@ -8,6 +8,7 @@
 	let profiles = $state<ApiProfile[]>([]);
 	let loading = $state(true);
 	let expanded = $state<string | null>(null);
+	let deleting = $state<string | null>(null);
 	let error = $state('');
 
 	async function loadProfiles() {
@@ -22,6 +23,24 @@
 			error = t('common.load_failed');
 		}
 		loading = false;
+	}
+
+	async function deleteProfile(profile: ApiProfile) {
+		// Native confirm keeps the surface small; matches the rest of the
+		// destructive-action UX in this app (HistoryView, ArtifactsView).
+		const msg = t('apis.delete_confirm').replace('{name}', profile.name);
+		if (!confirm(msg)) return;
+		deleting = profile.id;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/api-profiles/${encodeURIComponent(profile.id)}`, { method: 'DELETE' });
+			if (!res.ok) throw new Error();
+			profiles = profiles.filter(p => p.id !== profile.id);
+			if (expanded === profile.id) expanded = null;
+		} catch {
+			error = t('apis.delete_failed');
+		}
+		deleting = null;
 	}
 
 	$effect(() => { loadProfiles(); });
@@ -43,15 +62,23 @@
 		<div class="space-y-2">
 			{#each profiles as profile}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
-					<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
-						class="w-full px-4 py-3 text-left hover:bg-bg-muted transition-colors">
-						<div class="flex items-center justify-between">
-							<span class="text-sm font-medium">{profile.name}</span>
-							{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
-						</div>
-						<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
-						{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
-					</button>
+					<div class="flex items-stretch">
+						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
+							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
+							<div class="flex items-center gap-2">
+								<span class="text-sm font-medium">{profile.name}</span>
+								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
+							</div>
+							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
+							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
+						</button>
+						<button onclick={() => deleteProfile(profile)}
+							disabled={deleting === profile.id}
+							aria-label={t('apis.delete')}
+							class="px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
+							{t('apis.delete')}
+						</button>
+					</div>
 					{#if expanded === profile.id && profile.endpoints && profile.endpoints.length > 0}
 						<div class="border-t border-border px-4 py-3 space-y-1">
 							<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-2">{t('apis.endpoints')} ({profile.endpoints.length})</p>
