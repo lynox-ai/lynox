@@ -80,10 +80,22 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3.5);
 }
 
-/** Estimate USD cost assuming output ≈ 0.25 × input (extraction is typically
- *  much shorter than the source). Used only for the pre-flight gate. */
-function estimateCostUsd(inputTokens: number): number {
-  const estimatedOutput = Math.ceil(inputTokens * 0.25);
+/**
+ * Estimate USD cost for the pre-flight gate.
+ *
+ * Output is hard-capped at `maxOutputTokens` by the actual API call, so the
+ * estimate clamps the output projection to that ceiling. Without the clamp,
+ * a 250 KB / 71 K-token input would project a 17.8 K-token output (25%) and
+ * blow past a $0.05 budget at Haiku output prices — even though the actual
+ * call would emit at most 4 K tokens (~$0.016). That false-positive cost
+ * dominates the docs-bootstrap path for any real-world API landing page.
+ *
+ * Exported so the cost-clamp regression test can assert the math directly
+ * (a behavioural-only test would still pass if the clamp were silently
+ * widened, e.g. doubled to 8 K).
+ */
+export function estimateCostUsd(inputTokens: number, maxOutputTokens: number = DEFAULT_MAX_OUTPUT_TOKENS): number {
+  const estimatedOutput = Math.min(Math.ceil(inputTokens * 0.25), maxOutputTokens);
   return (inputTokens * HAIKU_INPUT_USD_PER_MTOK + estimatedOutput * HAIKU_OUTPUT_USD_PER_MTOK) / 1_000_000;
 }
 
@@ -198,10 +210,10 @@ export async function callForStructuredJson<T = unknown>(
   if (inputEstimate > maxInputTokens) {
     throw new BudgetError(
       `Input estimate ${String(inputEstimate)} tokens exceeds maxInputTokens=${String(maxInputTokens)}`,
-      { estimatedInputTokens: inputEstimate, estimatedCostUsd: estimateCostUsd(inputEstimate) },
+      { estimatedInputTokens: inputEstimate, estimatedCostUsd: estimateCostUsd(inputEstimate, maxOutputTokens) },
     );
   }
-  const costEstimate = estimateCostUsd(inputEstimate);
+  const costEstimate = estimateCostUsd(inputEstimate, maxOutputTokens);
   if (costEstimate > budgetUsd) {
     throw new BudgetError(
       `Estimated cost $${costEstimate.toFixed(4)} exceeds budgetUsd=$${budgetUsd.toFixed(4)}`,

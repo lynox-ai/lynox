@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   callForStructuredJson,
+  estimateCostUsd,
   estimateTokens,
   validateAgainstSchema,
   BudgetError,
@@ -214,6 +215,34 @@ describe('callForStructuredJson', () => {
       expect(be.estimatedInputTokens).toBeGreaterThan(1000);
       expect(be.estimatedCostUsd).toBeGreaterThan(0);
     }
+  });
+
+  it('estimateCostUsd clamps the output projection to maxOutputTokens', () => {
+    // Pricing reference (Haiku 4.5 list, 2026-05): input $0.80/M, output $4.00/M.
+    // 70_000 input tokens → $0.056 input cost.
+    // Naive 25%-of-input projection = 17_500 output tokens × $4/M = $0.070.
+    // Real API call caps output at maxOutputTokens (4_000) = $0.016.
+    // Therefore the clamped estimate must be ~$0.072, not ~$0.126.
+    const clamped = estimateCostUsd(70_000, 4_000);
+    const unclamped = estimateCostUsd(70_000, 1_000_000); // cap well above 25% projection
+    expect(clamped).toBeCloseTo(0.072, 3);
+    expect(unclamped).toBeCloseTo(0.126, 3);
+    // The clamp is the difference: $0.054 lower per call at this input size.
+    expect(unclamped - clamped).toBeGreaterThan(0.05);
+  });
+
+  it('clamped estimate keeps a real 250 KB docs bootstrap inside the bumped $0.10 budget', async () => {
+    const client = mockClient({ toolInput: { name: 'a', count: 1, level: 'low' } });
+    // 245 K chars / 3.5 ≈ 70 K tokens — same scale as a real Stripe-style
+    // docs landing page after the 250 KB body cap. Asserts the integration
+    // path (not just the math) survives the bumped DOCS_EXTRACT_BUDGET_USD.
+    await expect(callForStructuredJson({
+      ...BASE_OPTS,
+      user: 'x'.repeat(245_000),
+      budgetUsd: 0.10,
+      maxOutputTokens: 4_000,
+      client,
+    })).resolves.toBeDefined();
   });
 
   it('throws when the model emits no tool_use block', async () => {
