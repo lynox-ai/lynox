@@ -545,19 +545,30 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // show "$0.0006" alongside the tool_result. per_token / per_unit are
       // deferred — we have no reliable token counter for arbitrary HTTP bodies.
       try {
-        const profile = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname);
+        // Use the response's final URL (after redirects) for attribution so a
+        // redirect chain that lands on a different host is profiled against
+        // its actual endpoint, not the original request URL.
+        const finalUrl = response.url || input.url;
+        const parsedFinal = new URL(finalUrl);
+        const profile = toolContext?.apiStore?.getByHostname(parsedFinal.hostname);
         if (profile?.cost?.model === 'per_call' && isFeatureEnabled('api-cost-display')) {
           const streamHandler = toolContext?.streamHandler;
           if (streamHandler) {
-            void streamHandler({
+            // Mirror emitBootstrapProgress: catch sync throws via the outer
+            // try/catch, and chain .catch on the Promise so an async rejection
+            // from the handler cannot escape as an unhandledRejection.
+            const emitResult = streamHandler({
               type: 'api_cost',
               tool: 'http_request',
               profileId: profile.id,
               profileName: profile.name,
-              endpoint: new URL(input.url).pathname,
+              endpoint: parsedFinal.pathname,
               costUsd: profile.cost.rate_usd,
               agent: agent.name,
             });
+            if (emitResult instanceof Promise) {
+              emitResult.catch(() => { /* best-effort */ });
+            }
           }
         }
       } catch { /* cost emission is best-effort */ }
