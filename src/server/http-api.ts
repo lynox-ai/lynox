@@ -225,6 +225,8 @@ export class LynoxHTTPApi {
   // keeps repeated SQLite scans off the hot path without stale-data risk, since
   // the period window itself rolls forward and evicts old entries.
   private readonly _usageSummaryCache = new Map<string, { summary: import('../core/run-history.js').UsageSummary; expiresAt: number }>();
+  /** Test-only: drop cached usage summaries between tests so 30s TTL doesn't bleed mocks across cases. */
+  public _clearUsageCache(): void { this._usageSummaryCache.clear(); }
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
   // OAuth state previously lived as `_googleOAuthState` + `_googleRedirectUri`
   // instance fields, which:

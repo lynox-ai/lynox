@@ -21,13 +21,14 @@ const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'tes
 const mockHistoryGetRunToolCalls = vi.fn().mockReturnValue([]);
 const mockHistoryGetStats = vi.fn().mockReturnValue({ total_runs: 5 });
 const mockHistoryGetCostByDay = vi.fn().mockReturnValue([]);
-const mockHistoryGetUsageSummary = vi.fn().mockReturnValue({
-  period: { label: 'Test', start_iso: '2026-05-01T00:00:00Z', end_iso: '2026-06-01T00:00:00Z', source: 'calendar-month' as const },
+const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: 'calendar-month' | 'rolling' | 'stripe-billing'; label: string; startIso: string; endIso: string }) => ({
+  // Pass through the handler-computed period so per-period tests see the right source/label/window.
+  period: { label: opts.label, start_iso: opts.startIso, end_iso: opts.endIso, source: opts.source },
   used_cents: 1842,
   by_model: [],
   by_kind: [],
   daily: [],
-});
+}));
 const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
@@ -1083,6 +1084,12 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('usage SSoT', () => {
+    beforeEach(() => {
+      // Cache lives on the long-lived `api` instance (beforeAll). 30s TTL bleeds
+      // mocks across cases unless we drop it between tests.
+      api._clearUsageCache();
+    });
+
     it('GET /api/usage/current returns the SSoT payload with projection + hard_limits (self-host)', async () => {
       const res = await jsonFetch('/api/usage/current');
       expect(res.status).toBe(200);
@@ -1128,11 +1135,21 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('projection returns null when no spend or no limit', async () => {
+    it('projection returns null when daily history is empty (insufficient data)', async () => {
       const res = await jsonFetch('/api/usage/current');
       const body = await res.json() as Record<string, unknown>;
       // Mock daily=[] -> projection cannot extrapolate -> null
       expect(body['projection']).toBeNull();
+    });
+
+    it.each(['prev', '7d', '30d'])('GET /api/usage/current with period=%s returns valid payload', async (period) => {
+      const res = await jsonFetch(`/api/usage/current?period=${period}`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const p = body['period'] as Record<string, unknown>;
+      // 7d/30d use rolling window, prev uses calendar-month
+      if (period === 'prev') expect(p['source']).toBe('calendar-month');
+      else expect(p['source']).toBe('rolling');
     });
   });
 
