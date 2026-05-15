@@ -250,6 +250,8 @@ export interface LynoxUserConfig {
   enforce_https?: boolean | undefined;
   /** Bugsink DSN for opt-in error reporting. No data sent unless configured. */
   bugsink_dsn?: string | undefined;
+  /** Toggle for the error-reporting pipe. Default true when DSN is set. */
+  bugsink_enabled?: boolean | undefined;
   /** Directory for backup storage. Default: ~/.lynox/backups */
   backup_dir?: string | undefined;
   /** Cron schedule for automatic backups. Default: '0 3 * * *' (daily 3 AM). */

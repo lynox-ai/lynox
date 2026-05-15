@@ -2197,6 +2197,9 @@ export class LynoxHTTPApi {
         locks.custom_endpoints = { reason: 'managed-tier' };
       }
       redacted['locks'] = locks;
+      // Bugsink-toggle UX requires the page to know whether a DSN is
+      // configured (env or vault) without leaking the DSN itself.
+      redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);
       jsonResponse(res, 200, redacted);
     });
 
