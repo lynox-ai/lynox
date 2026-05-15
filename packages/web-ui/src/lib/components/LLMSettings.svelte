@@ -168,14 +168,17 @@
 		if (!activeProvider || !loaded) return;
 		saving = true;
 		try {
-			// 1. Save keys to vault first (only if non-empty — empty means keep existing)
+			// 1. Save keys to vault first (only if non-empty — empty means keep existing).
+			// Throw on 4xx/5xx so a silently-rejected vault write doesn't toast "saved"
+			// after the config PUT — user thought their key landed but the vault refused it.
 			for (const [slot, value] of Object.entries(keys)) {
 				if (value.length > 0) {
-					await fetch(`${getApiBase()}/secrets/${slot}`, {
+					const secretRes = await fetch(`${getApiBase()}/secrets/${slot}`, {
 						method: 'PUT',
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify({ value }),
 					});
+					if (!secretRes.ok) throw new Error(`Vault rejected ${slot}: HTTP ${secretRes.status}`);
 				}
 			}
 			// 2. Save provider + tier + base_url to config

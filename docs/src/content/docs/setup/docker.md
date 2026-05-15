@@ -60,8 +60,6 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `LYNOX_HTTP_PORT` | No | Engine HTTP API port (default: 3000 in Docker, 3100 locally) |
 | `LYNOX_WORKSPACE` | No | Workspace root (default: /workspace) |
 | `LYNOX_EMBEDDING_PROVIDER` | No | `onnx` (default) |
-| `TELEGRAM_BOT_TOKEN` | No | Enable Telegram bot |
-| `TELEGRAM_ALLOWED_CHAT_IDS` | Recommended | Restrict bot access to specific chats |
 | `GOOGLE_CLIENT_ID` | No | Google Workspace OAuth |
 | `GOOGLE_CLIENT_SECRET` | No | Google Workspace OAuth |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | No | Google service account (headless) |
@@ -159,18 +157,14 @@ Both `/health` and `/api/health` work — `/health` is a thin alias for proxies 
 
 ## Engine-Only Mode
 
-For headless setups (Telegram bot, MCP server, or API-only):
+For headless setups (MCP server, or API-only):
 
 ```bash
 docker run -d --name lynox \
   -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e TELEGRAM_BOT_TOKEN=123:ABC... \
-  -e TELEGRAM_ALLOWED_CHAT_IDS=12345678 \
   -v ~/.lynox:/home/lynox/.lynox \
   ghcr.io/lynox-ai/lynox:latest
 ```
-
-No port mapping needed — Telegram connects outbound.
 
 ## MCP Server Mode
 

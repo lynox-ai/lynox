@@ -247,13 +247,6 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | Path to Google service account JSON key file (headless/Docker) |
 
-### Telegram
-
-| Variable | Purpose |
-|----------|---------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| `TELEGRAM_ALLOWED_CHAT_IDS` | Comma-separated allowed Telegram chat IDs |
-
 ## Editing Config
 
 You can edit config in three ways:

@@ -81,6 +81,8 @@ export interface IAgent {
   getAvailableTools(): ToolEntry[];
   /** Snapshot of the agent's excludeTools — propagate to sub-agents for defense-in-depth. */
   getExcludedToolNames(): readonly string[];
+  /** User-preferred max context window — propagate to sub-agents so the cap applies tree-wide. */
+  getMaxContextWindowTokens(): number | undefined;
   onStream:        StreamHandler | null;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;

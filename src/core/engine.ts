@@ -211,6 +211,10 @@ export class Engine {
     const oldKey = this.userConfig.api_key;
     const oldBase = this.userConfig.api_base_url;
     const oldProvider = this.userConfig.provider;
+    // Snapshot Bugsink active-state under the OLD config before swapping —
+    // see `_reconcileBugsink` for why both sides matter.
+    const oldDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
+    const oldBugsinkActive = !!oldDsn && this.userConfig.bugsink_enabled !== false;
     this.userConfig = loadConfig();
     const newProvider = this.userConfig.provider;
     // Recreate API client if credentials or provider changed
@@ -220,6 +224,49 @@ export class Engine {
         await initLLMProvider(newProvider);
       }
       this._recreateClient();
+    }
+    // Tear down / bring up Bugsink on toggle transition. Without this, the
+    // GDPR opt-out the Settings → Privacy toggle promises wouldn't hold —
+    // Sentry would keep flushing breadcrumbs + the uncaughtException handler
+    // would survive until process restart.
+    await this._reconcileBugsink(oldBugsinkActive);
+  }
+
+  /** Toggle Bugsink based on the new config — extracted so `_initBootstrap` and `reloadUserConfig` share the bring-up path. */
+  private async _initBugsink(): Promise<void> {
+    const errorDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
+    const bugsinkEnabled = this.userConfig.bugsink_enabled !== false;
+    if (!errorDsn || !bugsinkEnabled) return;
+    try {
+      const { initErrorReporting, installGlobalHandlers } = await import('./error-reporting.js');
+      const errorReportingActive = await initErrorReporting(errorDsn);
+      if (errorReportingActive) {
+        installGlobalHandlers();
+        // Subscribe to tool:end channel for automatic breadcrumbs
+        const { channels: obsChannels } = await import('./observability.js');
+        const { addToolBreadcrumb } = await import('./error-reporting.js');
+        obsChannels.toolEnd.subscribe((msg: unknown) => {
+          const data = msg as { name?: string; success?: boolean; duration?: number } | undefined;
+          if (data?.name) {
+            addToolBreadcrumb(String(data.name), Boolean(data.success), typeof data.duration === 'number' ? data.duration : 0);
+          }
+        });
+      }
+    } catch {
+      // Bugsink init failed — non-critical, continue without it
+    }
+  }
+
+  /** Compare desired Bugsink state against the prior active state and reconcile. */
+  private async _reconcileBugsink(oldActive: boolean): Promise<void> {
+    const newDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
+    const newActive = !!newDsn && this.userConfig.bugsink_enabled !== false;
+    if (oldActive === newActive) return;
+    if (newActive) {
+      await this._initBugsink();
+    } else {
+      const { shutdownErrorReporting } = await import('./error-reporting.js');
+      await shutdownErrorReporting();
     }
   }
 
@@ -281,30 +328,9 @@ export class Engine {
     //   - bugsink_enabled config flag (UI toggle; default unset = legacy
     //     DSN-only behaviour, opt-in on self-host)
     //   - LYNOX_BUGSINK_DSN env var OR config.bugsink_dsn (sink endpoint)
-    // Managed deployments set bugsink_enabled=true via .env so the DPIA-
-    // mandated always-on telemetry path holds.
-    const errorDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
-    const bugsinkEnabled = this.userConfig.bugsink_enabled !== false;  // default true when DSN exists
-    if (errorDsn && bugsinkEnabled) {
-      try {
-        const { initErrorReporting, installGlobalHandlers } = await import('./error-reporting.js');
-        const errorReportingActive = await initErrorReporting(errorDsn);
-        if (errorReportingActive) {
-          installGlobalHandlers();
-          // Subscribe to tool:end channel for automatic breadcrumbs
-          const { channels: obsChannels } = await import('./observability.js');
-          const { addToolBreadcrumb } = await import('./error-reporting.js');
-          obsChannels.toolEnd.subscribe((msg: unknown) => {
-            const data = msg as { name?: string; success?: boolean; duration?: number } | undefined;
-            if (data?.name) {
-              addToolBreadcrumb(String(data.name), Boolean(data.success), typeof data.duration === 'number' ? data.duration : 0);
-            }
-          });
-        }
-      } catch {
-        // Bugsink init failed — non-critical, continue without it
-      }
-    }
+    // Managed deployments pre-configure the DSN; the toggle still honours
+    // GDPR Art. 21 opt-out for managed users.
+    await this._initBugsink();
   }
 
   /** RunHistory, ThreadStore, PromptStore, SecurityAudit, persistent budget + HTTP rate limits. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */

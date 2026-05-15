@@ -226,6 +226,9 @@ async function executeThinker(
     // refuses tool_use blocks naming disabled tools (in addition to the
     // tool list itself already being filtered above).
     excludeTools: [...parentAgent.getExcludedToolNames()],
+    // Inherit the user's context-window cap so a spawned researcher running
+    // on a 1M-native model still respects the user's 200k preference.
+    maxContextWindowTokens: parentAgent.getMaxContextWindowTokens(),
     // Profile overrides provider credentials
     apiKey: profile?.api_key ?? userConfig.api_key,
     apiBaseURL: profile?.api_base_url ?? userConfig.api_base_url,

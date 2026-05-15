@@ -83,13 +83,15 @@
 	</section>
 
 	<!-- Bugsink toggle — properly wired in T4 of the deferred-batch.
-	     Managed always-on per DPIA; self-host opt-in (requires DSN). -->
+	     On managed the CP pre-configures the DSN; on self-host the user supplies
+	     LYNOX_BUGSINK_DSN. Either way the on/off toggle is user-controlled —
+	     GDPR Art. 21 right to object overrides the DPIA's "always-on" framing,
+	     and the server-side allowlist (`MANAGED_USER_WRITABLE_CONFIG` includes
+	     `bugsink_enabled`) accepts the opt-out from managed users too. -->
 	<section class="border-t border-border pt-6 space-y-3">
 		<h2 class="text-lg font-medium">{t('privacy.bugsink_heading')}</h2>
 		<p class="text-xs text-text-muted">{t('privacy.bugsink_subtitle')}</p>
-		{#if managed}
-			<p class="text-sm italic text-text-muted">{t('privacy.bugsink_managed_fixed')}</p>
-		{:else if !bugsinkDsnConfigured}
+		{#if !bugsinkDsnConfigured && !managed}
 			<p class="text-sm italic text-text-muted">{t('privacy.bugsink_self_host_env')}</p>
 		{:else}
 			<label class="flex items-center gap-2 cursor-pointer">

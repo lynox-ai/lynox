@@ -14,10 +14,24 @@ const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
 
 const LLMProviderSchema = z.enum(['anthropic', 'vertex', 'custom', 'openai']);
 
+/**
+ * Reject non-http(s) URLs (javascript:, file:, ftp:, data:) — these can be
+ * persisted via PUT /api/config and then flow into the LLM client / probe
+ * paths, where a non-http scheme would either crash or in the worst case
+ * exfiltrate API keys / open SSRF vectors that the network guard does not
+ * cover. Same pattern as the `searxng_url` guard below.
+ */
+const HttpUrlSchema = z.string().url().refine(
+  url => url.startsWith('http://') || url.startsWith('https://'),
+  { message: 'URL must use http:// or https:// scheme' },
+);
+
 export const LynoxUserConfigSchema = z.object({
   api_key:              z.string().optional(),
-  api_base_url:         z.string().optional(),
+  // Empty string permitted (UI "clear" gesture) — collapses to undefined at consume time.
+  api_base_url:         z.union([HttpUrlSchema.max(2048), z.literal('')]).optional(),
   provider:             LLMProviderSchema.optional(),
+  bugsink_enabled:      z.boolean().optional(),
   // User-disabled tools (Settings → Integrations → Tool Toggles).
   // Bounded array of bounded strings so malformed manual edits cannot
   // crash the session.ts `excludeTools` spread (non-array → not iterable).
@@ -30,7 +44,7 @@ export const LynoxUserConfigSchema = z.object({
   custom_endpoints:     z.array(z.object({
     id:       z.string().min(1).max(128),
     name:     z.string().min(1).max(64),
-    base_url: z.string().url().max(2048),
+    base_url: HttpUrlSchema.max(2048),
   })).catch([]).optional(),
   gcp_project_id:       z.string().optional(),
   gcp_region:           z.string().optional(),

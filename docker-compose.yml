@@ -37,12 +37,6 @@ services:
       # - LYNOX_HTTP_SECRET         # Access token for Web UI login
       # - LYNOX_VAULT_KEY           # Encrypt data at rest (generate: openssl rand -base64 48)
 
-      # ── Telegram (optional) ──────────────────────────
-      # Mobile access via Telegram bot.
-      # Create a bot: t.me/BotFather → /newbot → copy token
-      - TELEGRAM_BOT_TOKEN
-      - TELEGRAM_ALLOWED_CHAT_IDS
-
       # ── Web Search ────────────────────────────────────
       - SEARXNG_URL=http://searxng:8080  # Free, unlimited via SearXNG below
       # - TAVILY_API_KEY                 # Alternative: tavily.com (1K free/month, set search_provider: 'tavily')

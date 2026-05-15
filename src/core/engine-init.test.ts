@@ -102,7 +102,7 @@ describe('generateInitBriefing', () => {
 
   it('returns undefined for non-cli context', async () => {
     const result = await generateInitBriefing(
-      { ...cliContext, source: 'telegram' },
+      { ...cliContext, source: 'slack' },
       null,
       [],
     );

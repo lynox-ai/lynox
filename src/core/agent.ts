@@ -77,19 +77,38 @@ export class Agent implements IAgent {
   private readonly maxIterations: number;
   private continuationPrompt: string | undefined;
   private readonly excludeTools: string[] | undefined;
+  /** Optional user-preferred max context window — clamps the trim budget below the model's native window. */
+  private readonly maxContextWindowTokens: number | undefined;
+  /**
+   * Set-based lookup hoisted out of the per-iteration `_callAPI` filter and the
+   * per-tool-call `_executeOne` check. Without this, both paths re-allocated
+   * `excludeTools.includes(name)` lookups every LLM iteration / tool call —
+   * O(n*m) per agent run with the Tool-Toggles UI making "many disabled"
+   * common.
+   */
+  private readonly _excludeSet: ReadonlySet<string>;
   /**
    * Filtered view of `tools` honouring `excludeTools`. Use this for any
    * propagation to sub-agents (spawn_agent) or pipeline child-agents so
    * disabled tools cannot be re-introduced by descending the agent tree.
    */
   getAvailableTools(): ToolEntry[] {
-    if (!this.excludeTools || this.excludeTools.length === 0) return this.tools;
-    const exclude = new Set(this.excludeTools);
-    return this.tools.filter(t => !exclude.has(t.definition.name));
+    if (this._excludeSet.size === 0) return this.tools;
+    return this.tools.filter(t => !this._excludeSet.has(t.definition.name));
   }
   /** Snapshot of the parent's excludeTools — propagated to spawned children. */
   getExcludedToolNames(): readonly string[] {
     return this.excludeTools ?? [];
+  }
+  /** User-preferred max context window — propagated to spawned children + pipeline child agents. */
+  getMaxContextWindowTokens(): number | undefined {
+    return this.maxContextWindowTokens;
+  }
+  /** Effective context window after applying the user's optional cap — never returns more than the model's native window. */
+  private _effectiveContextWindow(): number {
+    const native = getContextWindow(this.model);
+    const cap = this.maxContextWindowTokens;
+    return cap !== undefined && cap > 0 ? Math.min(native, cap) : native;
   }
   private briefing: string | undefined;
   readonly autonomy: AutonomyLevel | undefined;
@@ -172,6 +191,8 @@ export class Agent implements IAgent {
     this.maxIterations = rawMax;
     this.continuationPrompt = config.continuationPrompt;
     this.excludeTools = config.excludeTools;
+    this._excludeSet = new Set(config.excludeTools ?? []);
+    this.maxContextWindowTokens = config.maxContextWindowTokens;
     this.currentRunId = config.currentRunId;
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
@@ -428,7 +449,7 @@ export class Agent implements IAgent {
 
     const msgTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
     const totalTokens = msgTokens + overheadTokens;
-    const maxCtx = getContextWindow(this.model);
+    const maxCtx = this._effectiveContextWindow();
     // Budget for messages = total context minus overhead, with 15% safety margin
     if (totalTokens < maxCtx * 0.85) return;
 
@@ -503,7 +524,7 @@ export class Agent implements IAgent {
       : [];
     const rawTools = [
       ...this.tools
-        .filter(t => !this.excludeTools?.includes(t.definition.name))
+        .filter(t => !this._excludeSet.has(t.definition.name))
         .map(t => t.definition),
       ...builtinTools,
     ];
@@ -531,7 +552,7 @@ export class Agent implements IAgent {
     if (this.onStream) {
       const messageTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
       const totalTokens = messageTokens + overheadTokens;
-      const maxCtx = getContextWindow(this.model);
+      const maxCtx = this._effectiveContextWindow();
       const usagePercent = Math.round(totalTokens / maxCtx * 100);
       if (usagePercent > 70) {
         void this.onStream({
@@ -719,7 +740,7 @@ export class Agent implements IAgent {
     // excluded tool, refuse here. The LLM-facing tool list already strips
     // these (see _buildToolsDef), but rehydrated streams or injected
     // tool_use content could still synthesize a call by name.
-    if (this.excludeTools?.includes(tc.name)) {
+    if (this._excludeSet.has(tc.name)) {
       return {
         type: 'tool_result',
         tool_use_id: tc.id,
