@@ -60,12 +60,19 @@
 	let testResult = $state<{ ok: boolean; latency_ms?: number; message?: string } | null>(null);
 
 	// Vault slot per provider — keeps existing keys when user switches.
-	const VAULT_SLOTS: Record<LLMProvider, string> = {
+	// Each provider has a DISTINCT slot so flipping anthropic → custom → anthropic
+	// doesn't clobber the original Anthropic key. Vertex has no slot (auth is
+	// GCP-OAuth via env / service-account) — we render the GCP fields instead.
+	const VAULT_SLOTS: Record<LLMProvider, string | null> = {
 		anthropic: 'ANTHROPIC_API_KEY',
-		vertex: 'ANTHROPIC_API_KEY', // Vertex auth is GCP-OAuth via env, no key field
-		openai: 'MISTRAL_API_KEY',
-		custom: 'ANTHROPIC_API_KEY',
+		vertex: null,
+		openai: 'MISTRAL_API_KEY',  // catalog label is "Mistral (OpenAI-compat)" — slot matches that semantic
+		custom: 'CUSTOM_API_KEY',
 	};
+	function slotFor(p: LLMProvider | null): string {
+		if (!p) return '';
+		return VAULT_SLOTS[p] ?? '';
+	}
 
 	async function load(): Promise<void> {
 		try {
@@ -100,8 +107,8 @@
 		testing = true;
 		testResult = null;
 		try {
-			const slot = VAULT_SLOTS[activeProvider];
-			const apiKey = keys[slot] ?? '';
+			const slot = slotFor(activeProvider);
+			const apiKey = slot ? (keys[slot] ?? '') : '';
 			const res = await fetch(`${getApiBase()}/llm/test`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -209,14 +216,16 @@
 				<p class="text-xs text-text-muted">{activeProviderEntry.notes}</p>
 			{/if}
 
-			<label class="block">
-				<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
-				<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
-					placeholder={t('llm.api_key_placeholder')}
-					bind:value={keys[VAULT_SLOTS[activeProviderEntry.provider]]}
-					class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
-				<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
-			</label>
+			{#if slotFor(activeProviderEntry.provider)}
+				<label class="block">
+					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
+					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
+						placeholder={t('llm.api_key_placeholder')}
+						bind:value={keys[slotFor(activeProviderEntry.provider)]}
+						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
+					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
+				</label>
+			{/if}
 
 			{#if activeProviderEntry.requires_base_url}
 				<label class="block">

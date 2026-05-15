@@ -2505,7 +2505,25 @@ export class LynoxHTTPApi {
     // the user submits a real query. Custom/OpenAI-compatible endpoints route
     // through `fetchWithPublicRedirects` to block SSRF + cloud-metadata
     // exfiltration of the API key (PRD Security Model).
-    this.addStatic('user', 'POST /api/llm/test', async (_req, res, _params, body) => {
+    //
+    // Rate-limited: closes the credential-probe oracle (attacker can't brute
+    // -force stolen keys here) AND the cost-amplification vector (each probe
+    // costs ~$0.0001 on Anthropic). 6 probes per 60s rolling window per IP
+    // — matches PRD spec.
+    const llmTestRateLimit = new Map<string, number[]>();
+    const LLM_TEST_WINDOW_MS = 60_000;
+    const LLM_TEST_MAX_PROBES = 6;
+    this.addStatic('user', 'POST /api/llm/test', async (req, res, _params, body) => {
+      const ip = req.socket.remoteAddress ?? 'unknown';
+      const nowTs = Date.now();
+      const history = llmTestRateLimit.get(ip) ?? [];
+      const recent = history.filter((t) => nowTs - t < LLM_TEST_WINDOW_MS);
+      if (recent.length >= LLM_TEST_MAX_PROBES) {
+        errorResponse(res, 429, `Rate limit exceeded: max ${String(LLM_TEST_MAX_PROBES)} probes per minute`);
+        return;
+      }
+      recent.push(nowTs);
+      llmTestRateLimit.set(ip, recent);
       const b = body as { provider?: string; api_key?: string; base_url?: string; model?: string } | null;
       if (!b || typeof b['provider'] !== 'string') {
         errorResponse(res, 400, 'Missing provider');
@@ -2557,7 +2575,7 @@ export class LynoxHTTPApi {
               ? { 'Authorization': `Bearer ${apiKey}` }
               : { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
             ...(provider === 'custom' && {
-              body: JSON.stringify({ model: model || 'claude-haiku', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+              body: JSON.stringify({ model: model || 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
             }),
             signal: AbortSignal.timeout(10_000),
           });
