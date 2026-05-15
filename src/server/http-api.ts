@@ -110,12 +110,48 @@ const TZ_PATTERN = /^[A-Za-z0-9_+\-/]+$/;
 const TZ_MAX_LENGTH = 64;
 
 /**
- * Managed-mode tier values that gate downgraded routes (PUT /api/secrets,
- * PUT /api/config) behind allowlists / field-locks. Truthy `LYNOX_MANAGED_MODE`
- * isn't precise enough — a future tier string would silently fail-open. Both
- * route handlers call `isManagedTier()` so the gate semantics stay aligned.
+ * Three deployment modes the engine has to keep distinct:
+ *
+ *  1. **Self-host** — no `LYNOX_HTTP_ADMIN_SECRET`, no `LYNOX_MANAGED_MODE`.
+ *     Cookie auth is promoted to admin scope at L~1049, so all gates below
+ *     are no-ops for cookie users. The user *is* the admin.
+ *
+ *  2. **Managed BYOK / starter** — `LYNOX_HTTP_ADMIN_SECRET` IS set,
+ *     `LYNOX_MANAGED_MODE=starter`. Customer brings their own key via the
+ *     SetupBanner. Provider + api_base_url + cost-caps stay configurable
+ *     (it's their key, their bill). Only the secret-store write needs the
+ *     BYOK whitelist (otherwise a managed cookie user — who has user scope —
+ *     can't save their key).
+ *
+ *  3. **Managed pool** — `LYNOX_MANAGED_MODE=managed|managed_pro|eu`.
+ *     CP delivers the LLM. Provider, cost caps, MCP servers, OAuth ids,
+ *     search/backup config, etc. are all CP-managed. Only UI preferences
+ *     are user-writable.
+ *
+ * Two predicates so a single tier never accidentally pulls in the wrong gate:
+ *   - `requiresAdminSplitGate()` → true for both BYOK and pool (admin secret
+ *     is present, cookie users get user scope, secret writes need whitelist).
+ *   - `requiresConfigLockGate()` → true ONLY for pool (BYOK keeps full config
+ *     control because the customer pays for and operates their own LLM).
  */
-const MANAGED_TIER_VALUES = new Set(['managed', 'managed_pro', 'eu', 'starter']);
+const ADMIN_SPLIT_TIERS = new Set(['managed', 'managed_pro', 'eu', 'starter']);
+const CONFIG_LOCKED_TIERS = new Set(['managed', 'managed_pro', 'eu']);
+
+/**
+ * Managed-pool effective defaults for fields that are NOT in the user-config
+ * file but ARE locked by the engine. The Web UI reads provider via
+ * `/api/secrets/status` (which defaults `provider: 'anthropic'` when absent
+ * from the config file) and re-sends it on every save, so a strict diff
+ * against `loadConfig()` would 403 every save. Treat these resends as no-ops
+ * by overlaying the managed defaults before the comparison.
+ *
+ * `eu` tier hides the SetupBanner outright (UI ~L55-59) so the only practical
+ * caller of this code path is the `managed`/`managed_pro` SetupBanner, where
+ * provider is always 'anthropic'.
+ */
+const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
+  provider: 'anthropic',
+};
 
 /**
  * BYOK-provider secrets a managed-tier user can self-serve via the SetupBanner
@@ -173,9 +209,14 @@ function requireService<T>(res: ServerResponse, service: T | null | undefined, n
   return service !== null && service !== undefined;
 }
 
-/** True when the process is running under a managed-tier deployment. */
-function isManagedTier(value: string | undefined): boolean {
-  return value !== undefined && MANAGED_TIER_VALUES.has(value);
+/** Cookie auth is user-scope → secret writes need the BYOK whitelist. Covers BYOK starter + managed pool. */
+function requiresAdminSplitGate(value: string | undefined): boolean {
+  return value !== undefined && ADMIN_SPLIT_TIERS.has(value);
+}
+
+/** Provider / cost-caps / integrations are CP-managed → PUT /api/config needs the field allowlist. Pool tiers only. */
+function requiresConfigLockGate(value: string | undefined): boolean {
+  return value !== undefined && CONFIG_LOCKED_TIERS.has(value);
 }
 
 async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
@@ -2106,7 +2147,7 @@ export class LynoxHTTPApi {
       // Managed-tier user (cookie auth → user scope per L~1049): only the BYOK
       // provider keys are writable. Self-host has no admin secret, so cookie
       // users are already promoted to admin and this gate never applies.
-      if (isManagedTier(process.env['LYNOX_MANAGED_MODE']) && !BYOK_USER_WRITABLE_SECRETS.has(name)) {
+      if (requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && !BYOK_USER_WRITABLE_SECRETS.has(name)) {
         errorResponse(res, 403, `Managed mode: secret "${name}" is not user-writable`);
         return;
       }
@@ -2255,22 +2296,28 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
-      // Managed-tier: the Web UI is allowed to re-send every field on every
-      // save (PRD-SETTINGS-REFACTOR Principle 6: get returns shape, put
-      // accepts shape), so we can't just reject non-allowlist fields outright.
-      // Instead: compare each non-allowlist field to its *effective* env-merged
-      // value — a no-op re-send is allowed, an attempted CHANGE returns 403.
-      // The allowlist + no-op gate is fail-closed for unknown / future config
-      // fields (schema is `.passthrough()` for forward compat, but a hostile
-      // user passing a never-seen-before key will trip the diff check because
-      // `effective[unknownKey]` is `undefined`).
-      if (isManagedTier(process.env['LYNOX_MANAGED_MODE'])) {
-        const effective = loadConfig() as Record<string, unknown>;
+      // Managed-pool tiers (managed / managed_pro / eu): CP locks provider +
+      // cost-caps + integrations. Starter BYOK is NOT gated here — customer
+      // owns their LLM, owns their config. The Web UI re-sends every field on
+      // every save (PRD-SETTINGS-REFACTOR Principle 6), so we can't reject
+      // non-allowlist fields outright — compare each against the *effective*
+      // value (config file + managed defaults) and only block real changes.
+      // Schema is `.passthrough()` for forward compat, so an unknown field
+      // diffs against `undefined` and 403s — fail-closed for future fields.
+      if (requiresConfigLockGate(process.env['LYNOX_MANAGED_MODE'])) {
+        const fileConfig = loadConfig() as Record<string, unknown>;
         const update = parsed.data as Record<string, unknown>;
         const attempted: string[] = [];
         for (const [field, value] of Object.entries(update)) {
           if (MANAGED_USER_WRITABLE_CONFIG.has(field)) continue;
-          if (JSON.stringify(value) !== JSON.stringify(effective[field])) {
+          // Managed pool: provider is forced to 'anthropic' (CP key); the UI
+          // resends it on every save (read from /api/secrets/status, which
+          // defaults the field). A strict diff against loadConfig() would
+          // 403 because the field isn't physically in the config file —
+          // overlay the managed default before comparing so the no-op
+          // resend passes.
+          const effective = fileConfig[field] ?? MANAGED_EFFECTIVE_DEFAULTS[field];
+          if (JSON.stringify(value) !== JSON.stringify(effective)) {
             attempted.push(field);
           }
         }

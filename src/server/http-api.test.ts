@@ -1521,6 +1521,54 @@ describe('LynoxHTTPApi', () => {
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
         }
       });
+
+      // The actual SetupBanner-save regression: the UI re-sends
+      // `{provider: 'anthropic'}` (read from /api/secrets/status, which
+      // defaults the value when no explicit provider is in the config file).
+      // A strict diff against loadConfig() 403'd this every save. The fix
+      // overlays a managed default for `provider` before comparing — so the
+      // no-op resend passes while an attempted *change* to a different
+      // provider still 403s.
+      it('PUT /api/config accepts {provider:"anthropic"} re-send in managed-pool mode (SetupBanner no-op)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ provider: 'anthropic' }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      // Starter (BYOK) — provider/api_base_url/cost-caps are NOT locked.
+      // Customer owns their LLM, owns the config. Config-lock gate must
+      // skip them entirely.
+      it.each([
+        ['provider', 'openai'],
+        ['default_tier', 'haiku'],
+        ['max_session_cost_usd', 250],
+        ['mcp_servers', [{ name: 'my-tool', url: 'https://mcp.my-company' }]],
+      ])(
+        'PUT /api/config allows %s change in starter (BYOK) mode',
+        async (field, value) => {
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+          try {
+            const res = await jsonFetch('/api/config', {
+              method: 'PUT',
+              body: JSON.stringify({ [field]: value }),
+            });
+            expect(res.status).toBe(200);
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        },
+      );
     });
 
     // Audit S1: backup restore calls process.exit() — must be admin-gated
