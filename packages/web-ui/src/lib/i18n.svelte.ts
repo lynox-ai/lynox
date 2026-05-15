@@ -84,6 +84,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.automation.reminders': { de: 'Erinnerungen', en: 'Reminders' },
 	'hub.automation.apis': { de: 'APIs', en: 'APIs' },
 	'hub.automation.activity': { de: 'Aktivität', en: 'Activity' },
+	'hub.migration_toast': { de: 'Aktivität liegt jetzt unter /app/hub — Lesezeichen aktualisieren.', en: 'Activity moved to /app/hub — please update your bookmark.' },
 	'hub.artifacts.gallery': { de: 'Galerie', en: 'Gallery' },
 	'hub.artifacts.files': { de: 'Dateien', en: 'Files' },
 	'hub.activity.dashboard': { de: 'Dashboard', en: 'Dashboard' },

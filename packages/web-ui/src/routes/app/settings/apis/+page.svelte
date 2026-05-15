@@ -7,6 +7,6 @@
 	// alongside Workflows + Tasks). Client-side redirect so existing
 	// bookmarks and stale in-app links don't 404.
 	onMount(() => {
-		void goto('/app/automation?section=apis', { replaceState: true });
+		void goto('/app/hub?section=apis', { replaceState: true });
 	});
 </script>

@@ -226,7 +226,7 @@
 			items.push({ href: '/app/inbox', labelKey: 'nav.inbox', exact: false, icon: 'inbox' });
 		}
 		items.push(
-			{ href: '/app/automation', labelKey: 'nav.automation', exact: false, icon: 'workflow' },
+			{ href: '/app/hub', labelKey: 'nav.automation', exact: false, icon: 'workflow' },
 			{ href: '/app/intelligence', labelKey: 'nav.intelligence', exact: false, icon: 'brain' },
 			{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts' },
 		);
