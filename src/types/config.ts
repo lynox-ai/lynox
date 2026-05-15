@@ -206,6 +206,14 @@ export interface LynoxUserConfig {
   max_daily_cost_usd?: number | undefined;
   /** Maximum monthly spending cap (USD). Enforced across sessions via run history. */
   max_monthly_cost_usd?: number | undefined;
+  /**
+   * Preferred maximum context-window size in tokens. UI options: 200_000
+   * (Standard), 500_000 (Extended), 1_000_000 (Maximum). The agent clamps
+   * its message-history trim window to this hint when the underlying model
+   * supports a larger native window than the user wants to pay for. Default:
+   * provider/model's native context window (see types/models.ts).
+   */
+  max_context_window_tokens?: number | undefined;
   /** Max HTTP requests per hour (across sessions). */
   max_http_requests_per_hour?: number | undefined;
   /** Max HTTP requests per day (across sessions). */
