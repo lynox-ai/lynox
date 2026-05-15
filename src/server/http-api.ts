@@ -2470,6 +2470,22 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true, channel: 'mailto', recipient: 'privacy@lynox.ai' });
     });
 
+    // ── Available tools (T5 — Tool Toggles UI) ──
+    // Drives the Integrations → Tool Toggles checkboxes. Returns name +
+    // description for every tool registered at startup. Disabled tools
+    // are merged into `excludeTools` in session.ts so the agent never
+    // sees them (server-side enforcement, not UI-only hide).
+    this.addStatic('user', 'GET /api/tools/available', async (_req, res) => {
+      const entries = engine.registry.getEntries();
+      const tools = entries.map((e) => ({
+        name: e.definition.name,
+        description: typeof e.definition.description === 'string'
+          ? e.definition.description.split('\n')[0]?.slice(0, 200) ?? ''
+          : '',
+      }));
+      jsonResponse(res, 200, { tools });
+    });
+
     // ── LLM model catalog ──
     // Static + version-pinned — safe to cache aggressively on the client.
     this.addStatic('user', 'GET /api/llm/catalog', async (_req, res) => {
