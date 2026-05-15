@@ -2397,9 +2397,18 @@ export class LynoxHTTPApi {
       });
     });
 
+    // ── LLM model catalog ──
+    // Static catalog driving the Settings → LLM page model dropdown
+    // (PRD-SETTINGS-REFACTOR Phase 0c). Pure read, no per-request state —
+    // safe to cache aggressively on the client.
+    this.addStatic('user', 'GET /api/llm/catalog', async (_req, res) => {
+      const { LLM_CATALOG } = await import('../core/llm/catalog.js');
+      jsonResponse(res, 200, { providers: LLM_CATALOG });
+    });
+
     // ── Voice info (combined STT + TTS capabilities for the Web UI) ──
     // Drives the privacy hint + auto-speak toggle visibility + the
-    // Settings → Compliance voice pickers. Prefer this over the legacy
+    // Settings → Voice provider pickers. Prefer this over the legacy
     // /api/transcribe/info for new callers — the old path stays for
     // back-compat with existing clients.
     this.addStatic('user', 'GET /api/voice/info', async (_req, res) => {

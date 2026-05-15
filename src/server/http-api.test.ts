@@ -966,6 +966,17 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  describe('llm catalog', () => {
+    it('GET /api/llm/catalog returns the static catalog with four providers', async () => {
+      const res = await jsonFetch('/api/llm/catalog');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { providers: Array<{ provider: string; models: unknown[] }> };
+      expect(body.providers.map((p) => p.provider).sort()).toEqual(['anthropic', 'custom', 'openai', 'vertex']);
+      const anthropic = body.providers.find((p) => p.provider === 'anthropic');
+      expect(anthropic?.models).toHaveLength(3);
+    });
+  });
+
   describe('history', () => {
     it('GET /api/history/runs returns recent runs', async () => {
       const res = await jsonFetch('/api/history/runs');
