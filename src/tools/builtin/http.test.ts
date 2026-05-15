@@ -772,4 +772,146 @@ describe('httpRequestTool', () => {
       expect(promptUser).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('Phase E: api_cost emission', () => {
+    const ORIGINAL_FLAG = process.env.LYNOX_FEATURE_API_COST_DISPLAY;
+
+    afterEach(() => {
+      if (ORIGINAL_FLAG === undefined) delete process.env.LYNOX_FEATURE_API_COST_DISPLAY;
+      else process.env.LYNOX_FEATURE_API_COST_DISPLAY = ORIGINAL_FLAG;
+    });
+
+    it('emits api_cost when hostname has a profiled per_call cost and the flag is on', async () => {
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '1';
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'dataforseo',
+        name: 'DataForSEO',
+        base_url: 'https://api.dataforseo.com',
+        description: 'SEO API',
+        cost: { model: 'per_call', rate_usd: 0.0006 },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: { ok: true },
+      })));
+
+      const events: Array<Record<string, unknown>> = [];
+      const agent = {
+        name: 'main',
+        toolContext: {
+          apiStore: store,
+          streamHandler: (e: Record<string, unknown>) => { events.push(e); },
+        },
+        sessionCounters: testCounters,
+      } as never;
+
+      await handler({ url: 'https://api.dataforseo.com/v3/serp/google' }, agent);
+      const cost = events.find(e => e['type'] === 'api_cost');
+      expect(cost).toBeDefined();
+      expect(cost?.['profileId']).toBe('dataforseo');
+      expect(cost?.['profileName']).toBe('DataForSEO');
+      expect(cost?.['costUsd']).toBe(0.0006);
+      expect(cost?.['endpoint']).toBe('/v3/serp/google');
+      expect(cost?.['tool']).toBe('http_request');
+    });
+
+    it('does not emit api_cost when the api-cost-display flag is off', async () => {
+      delete process.env.LYNOX_FEATURE_API_COST_DISPLAY;
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'dataforseo',
+        name: 'DataForSEO',
+        base_url: 'https://api.dataforseo.com',
+        description: 'SEO API',
+        cost: { model: 'per_call', rate_usd: 0.0006 },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: { ok: true },
+      })));
+
+      const events: Array<Record<string, unknown>> = [];
+      const agent = {
+        name: 'main',
+        toolContext: {
+          apiStore: store,
+          streamHandler: (e: Record<string, unknown>) => { events.push(e); },
+        },
+        sessionCounters: testCounters,
+      } as never;
+
+      await handler({ url: 'https://api.dataforseo.com/v3/serp/google' }, agent);
+      expect(events.some(e => e['type'] === 'api_cost')).toBe(false);
+    });
+
+    it('does not emit api_cost for a profile without a cost field even with flag on', async () => {
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '1';
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'free-api',
+        name: 'Free API',
+        base_url: 'https://api.free.example.com',
+        description: 'No cost set',
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: { ok: true },
+      })));
+
+      const events: Array<Record<string, unknown>> = [];
+      const agent = {
+        name: 'main',
+        toolContext: {
+          apiStore: store,
+          streamHandler: (e: Record<string, unknown>) => { events.push(e); },
+        },
+        sessionCounters: testCounters,
+      } as never;
+
+      await handler({ url: 'https://api.free.example.com/v1/x' }, agent);
+      expect(events.some(e => e['type'] === 'api_cost')).toBe(false);
+    });
+
+    it('does not emit api_cost for a per_token cost model (deferred)', async () => {
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '1';
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'tokenized',
+        name: 'Tokenized',
+        base_url: 'https://api.tokenized.example.com',
+        description: 'Per-token API',
+        cost: { model: 'per_token', rate_usd: 0.000001 },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: { ok: true },
+      })));
+
+      const events: Array<Record<string, unknown>> = [];
+      const agent = {
+        name: 'main',
+        toolContext: {
+          apiStore: store,
+          streamHandler: (e: Record<string, unknown>) => { events.push(e); },
+        },
+        sessionCounters: testCounters,
+      } as never;
+
+      await handler({ url: 'https://api.tokenized.example.com/v1/x' }, agent);
+      expect(events.some(e => e['type'] === 'api_cost')).toBe(false);
+    });
+  });
 });

@@ -13,7 +13,8 @@ export type FeatureFlag =
   | 'flat-file-memory'
   | 'whatsapp-inbox'
   | 'unified-inbox'
-  | 'api-setup-v2';
+  | 'api-setup-v2'
+  | 'api-cost-display';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -22,6 +23,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'whatsapp-inbox': 'LYNOX_FEATURE_WHATSAPP_INBOX',
   'unified-inbox': 'LYNOX_FEATURE_UNIFIED_INBOX',
   'api-setup-v2': 'LYNOX_FEATURE_API_SETUP_V2',
+  'api-cost-display': 'LYNOX_FEATURE_API_COST_DISPLAY',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -36,6 +38,14 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // (Haiku-extracted v2 profile draft). Off by default — staging burn-in first,
   // then rafael canary, then cat/war after 48h soak.
   'api-setup-v2': false,
+  // PRD-UNIFIED-API-PROFILE-V2 Phase E. Surfaces per-call cost in the tool_result
+  // block + a thread-footer API rollup when an ApiProfile carries a `cost` field
+  // (per_call only — per_token / per_unit are deferred). Off by default; users
+  // opt in once their own keys are configured. The public demo MUST NOT route
+  // through paid APIs (DataForSEO etc.) — that would charge the lynox.ai bill
+  // for anonymous traffic; demo instances use only the Meridian seed data plus
+  // bundled web_search.
+  'api-cost-display': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

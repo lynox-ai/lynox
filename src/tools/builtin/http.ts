@@ -3,6 +3,7 @@ import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
+import { isFeatureEnabled } from '../../core/features.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -538,6 +539,29 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Wrap response in data boundary markers (prompt injection defense)
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       const wrapped = wrapUntrustedData(rawResult, 'http_response');
+
+      // Phase E (api-cost-display): if this hit a profiled API with a per_call
+      // cost model, surface the cost on the streamHandler so the web-ui can
+      // show "$0.0006" alongside the tool_result. per_token / per_unit are
+      // deferred — we have no reliable token counter for arbitrary HTTP bodies.
+      try {
+        const profile = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname);
+        if (profile?.cost?.model === 'per_call' && isFeatureEnabled('api-cost-display')) {
+          const streamHandler = toolContext?.streamHandler;
+          if (streamHandler) {
+            void streamHandler({
+              type: 'api_cost',
+              tool: 'http_request',
+              profileId: profile.id,
+              profileName: profile.name,
+              endpoint: new URL(input.url).pathname,
+              costUsd: profile.cost.rate_usd,
+              agent: agent.name,
+            });
+          }
+        }
+      } catch { /* cost emission is best-effort */ }
+
       // Append profile warning if this was an unregistered API
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
       return profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;

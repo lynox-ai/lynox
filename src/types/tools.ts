@@ -62,6 +62,8 @@ export type StreamEvent =
   | { type: 'thinking_done';                                       agent: string; subAgent?: string | undefined }
   | { type: 'tool_call';   name: string; input: unknown;           agent: string; subAgent?: string | undefined }
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
+  | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
+      endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
   | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean; subAgent?: string | undefined }
   | { type: 'spawn';       agents: string[]; estimatedCostUSD?: number | undefined; agent: string }
   | { type: 'spawn_progress'; elapsedS: number; running: string[];

@@ -1485,6 +1485,12 @@
 			fmtCost(u.costUsd),
 		];
 		if (cachePct > 0) parts.push(`${cachePct}% cache`);
+		// Phase E: surface third-party API cost (DataForSEO etc.) next to the LLM
+		// cost when the message hit any profiled API. Threshold of >$0.001 keeps
+		// the row clean when nothing meaningful happened.
+		if (u.apiCostUsd !== undefined && u.apiCostUsd > 0.001) {
+			parts.push(`API: ${fmtCost(u.apiCostUsd)}`);
+		}
 		return parts.join(' · ');
 	}
 
