@@ -1,0 +1,69 @@
+name: Staging — Playwright Smoke
+
+# Runs the Settings-refactor smoke against the staging engine after every
+# redeploy. Catches regressions on routes + SSoT endpoints + connection-test
+# SSRF/rate-limit gates.
+#
+# Triggers:
+#   - workflow_dispatch (manual)
+#   - repository_dispatch event_type=staging-engine-redeployed (fired by
+#     lynox-ai/lynox-pro's staging-engine-redeploy.yml after redeploy)
+#
+# All workflow inputs are admin-controlled (workflow_dispatch defaults +
+# repository_dispatch from trusted sibling repo) — no user-supplied
+# strings reach `run:` blocks. STAGING_CP_SSH_PRIVATE_KEY secret never
+# leaves the runner (key file is rm'd before the smoke step).
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_url:
+        description: 'Staging engine URL'
+        required: false
+        default: 'https://engine.lynox.cloud'
+  repository_dispatch:
+    types: [staging-engine-redeployed]
+
+concurrency:
+  group: staging-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+
+      - name: Mint staging session cookie
+        id: cookie
+        env:
+          SSH_KEY: ${{ secrets.STAGING_CP_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cookie=$(bash scripts/mint-staging-cookie.sh)
+          echo "::add-mask::$cookie"
+          echo "STAGING_COOKIE=lynox_session=$cookie" >> "$GITHUB_OUTPUT"
+          rm -f ~/.ssh/id_ed25519
+
+      - name: Run Playwright smoke
+        env:
+          STAGING_URL: ${{ inputs.staging_url || 'https://engine.lynox.cloud' }}
+          STAGING_COOKIE: ${{ steps.cookie.outputs.STAGING_COOKIE }}
+        run: npx playwright test tests/smoke/ --reporter=list --workers=1
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
