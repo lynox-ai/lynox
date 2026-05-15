@@ -23,7 +23,7 @@ import { getActiveProvider } from '../core/llm-client.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
-import type { StreamEvent, PromptMeta } from '../types/index.js';
+import type { StreamEvent, PromptMeta, CapabilityLocks } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 
@@ -2013,7 +2013,6 @@ export class LynoxHTTPApi {
         import('../core/limits.js'),
       ]);
       redacted['capabilities'] = {
-        // Resource availability
         mistral_available: mistralAvailable,
         voice_stt_available: transcribeMod.hasTranscribeProvider(),
         voice_tts_available: speakMod.hasSpeakProvider(),
@@ -2037,14 +2036,14 @@ export class LynoxHTTPApi {
       };
       // Lock metadata for every `can_set_X = false` decision. UI renders a
       // human-readable reason instead of an unexplained disabled input.
-      const locks: Record<string, { reason: string; upgrade_cta?: { href: string; label: string }; contact_cta?: { href: string; label: string } }> = {};
+      const locks: CapabilityLocks = {};
       if (isManagedTier) {
-        locks['provider'] = { reason: 'managed-tier' };
-        locks['limits'] = {
+        locks.provider = { reason: 'managed-tier' };
+        locks.limits = {
           reason: 'managed-tier',
           contact_cta: { href: 'mailto:support@lynox.ai?subject=Quota%20adjustment', label: 'Contact support' },
         };
-        locks['custom_endpoints'] = { reason: 'managed-tier' };
+        locks.custom_endpoints = { reason: 'managed-tier' };
       }
       redacted['locks'] = locks;
       jsonResponse(res, 200, redacted);

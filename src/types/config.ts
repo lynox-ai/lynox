@@ -349,3 +349,18 @@ export interface PluginHooks {
 }
 
 export type PluginExport = (ctx: PluginContext) => { tools?: ToolEntry[] | undefined; hooks?: PluginHooks | undefined };
+
+// ── Capability-gating types (PRD-SETTINGS-REFACTOR Principle 6) ──
+
+/** Lock entry for a setting that is read-only on the current tier.
+ *  `upgrade_cta` points to a tier-upgrade path (rare — usually only
+ *  shown for self-host → managed migration). `contact_cta` points to
+ *  a quota-change channel (typical for managed → support@). */
+export interface CapabilityLock {
+  reason: 'managed-tier' | 'env-override' | 'capability-missing';
+  upgrade_cta?: { href: string; label: string } | undefined;
+  contact_cta?: { href: string; label: string } | undefined;
+}
+
+/** Map of locked setting → lock metadata. Empty on self-host / BYOK. */
+export type CapabilityLocks = Partial<Record<'provider' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort', CapabilityLock>>;
