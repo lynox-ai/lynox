@@ -1894,4 +1894,117 @@ describe('LynoxHTTPApi', () => {
       expect(statuses.every(s => s === 200)).toBe(true);
     });
   });
+
+  // ── /api/llm/test connection probe — PRD-SETTINGS-REFACTOR Phase 2.
+  // The smoke spec covers happy-path end-to-end via STAGING_COOKIE; these
+  // tests lock down the synchronous validation + SSRF guard so a regression
+  // doesn't have to wait for a staging deploy to surface.
+  //
+  // Each test in this block uses a distinct fake X-Forwarded-For value so
+  // the 6/min IP-keyed rate-limit bucket can't bleed across cases.
+  // LYNOX_TRUST_PROXY=true is set in beforeAll so the test-derived IP wins
+  // over the loopback socket address.
+  describe('POST /api/llm/test', () => {
+    let _ipCounter = 100;
+    function llmTestFetch(body: unknown): Promise<Response> {
+      const ip = `198.51.100.${++_ipCounter}`;  // TEST-NET-2, never globally routed
+      return jsonFetch('/api/llm/test', {
+        method: 'POST',
+        headers: { 'X-Forwarded-For': ip },
+        body: JSON.stringify(body),
+      });
+    }
+
+    it('400 when provider field is missing', async () => {
+      const res = await llmTestFetch({ api_key: 'sk-test' });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 when api_key is missing for anthropic', async () => {
+      const res = await llmTestFetch({ provider: 'anthropic' });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 when base_url is missing for custom provider', async () => {
+      const res = await llmTestFetch({ provider: 'custom', api_key: 'sk-test' });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 when api_key is missing for openai provider', async () => {
+      const res = await llmTestFetch({ provider: 'openai', base_url: 'https://api.example.com/v1' });
+      expect(res.status).toBe(400);
+    });
+
+    it('vertex returns 200 with skipped=true (auth too heavy for sync probe)', async () => {
+      const res = await llmTestFetch({ provider: 'vertex' });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ok: boolean; skipped?: boolean };
+      expect(body.ok).toBe(true);
+      expect(body.skipped).toBe(true);
+    });
+
+    it('SSRF guard: refuses a private-IP base_url (custom provider)', async () => {
+      // The probe path uses fetchWithPublicRedirects which calls
+      // assertPublicUrl synchronously — never reaches an outbound fetch.
+      // Engine surfaces the rejection as a 200 with `ok: false` so the UI
+      // can render the error inline (matches the 401/403 auth-fail shape).
+      const res = await llmTestFetch({
+        provider: 'custom',
+        api_key: 'sk-test',
+        base_url: 'http://127.0.0.1:1234/v1',
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ok?: boolean; error?: string };
+      expect(body.ok).toBeFalsy();
+      expect(typeof body.error).toBe('string');
+    });
+
+    it('SSRF guard: refuses a link-local base_url (EC2 IMDS exfil pattern)', async () => {
+      const res = await llmTestFetch({
+        provider: 'custom',
+        api_key: 'sk-test',
+        base_url: 'http://169.254.169.254/latest/meta-data/',
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ok?: boolean };
+      expect(body.ok).toBeFalsy();
+    });
+
+    it('rate-limit: 7th probe within window returns 429 (PRD: 6/min/IP)', async () => {
+      // Burst from a single IP — F7 fixed the keying to honour
+      // X-Forwarded-For under LYNOX_TRUST_PROXY=true, so all 7 here land in
+      // the same bucket.
+      const burstIp = '198.51.100.250';
+      const statuses: number[] = [];
+      for (let i = 0; i < 7; i++) {
+        const res = await jsonFetch('/api/llm/test', {
+          method: 'POST',
+          headers: { 'X-Forwarded-For': burstIp },
+          body: JSON.stringify({ provider: 'vertex' }),
+        });
+        statuses.push(res.status);
+      }
+      expect(statuses.filter((s) => s === 429).length).toBeGreaterThanOrEqual(1);
+      expect(statuses.slice(0, 6)).toEqual([200, 200, 200, 200, 200, 200]);
+    });
+  });
+
+  // ── /api/privacy/delete-request — GDPR Art. 17 stop-gap mailto endpoint.
+  // PRD-SETTINGS-REFACTOR Phase 3 ships a UI-side mailto + server audit; Phase 6
+  // will replace it with a synchronous DELETE /api/privacy/account.
+  describe('POST /api/privacy/delete-request', () => {
+    it('accepts the request and returns the mailto recipient', async () => {
+      const res = await jsonFetch('/api/privacy/delete-request', { method: 'POST' });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ok: boolean; channel: string; recipient: string };
+      expect(body.ok).toBe(true);
+      expect(body.channel).toBe('mailto');
+      expect(body.recipient).toMatch(/privacy@/);
+    });
+
+    it('rejects unauthenticated requests', async () => {
+      const res = await fetch(`${baseUrl}/api/privacy/delete-request`, { method: 'POST' });
+      expect(res.status).toBe(401);
+    });
+  });
 });

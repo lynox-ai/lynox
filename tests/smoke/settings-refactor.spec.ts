@@ -117,7 +117,7 @@ test('0e — /api/usage/summary is an alias of /api/usage/current (same payload)
 
 test('1 — /app/hub/cost-limits renders limits form, context-window radios, hard-limits panel', async ({ page }) => {
   const { errors } = consoleErrorCollector(page);
-  await page.goto(`${BASE}/app/hub/cost-limits`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app/hub/cost-limits`, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('h1')).toContainText(/Cost.*Limits|Kosten.*Limits/i);
   // Context-window radio group should expose all 4 options
   const radios = page.locator('input[name="context-window"]');
@@ -139,11 +139,20 @@ test('1 — PUT /api/config round-trips max_context_window_tokens', async ({ req
     const after = await (await request.get(`${BASE}/api/config`, { headers: cookieHeader })).json() as { max_context_window_tokens?: number };
     expect(after.max_context_window_tokens).toBe(500_000);
   } finally {
-    // Restore (null/undefined → omitted; otherwise restore original)
-    await request.put(`${BASE}/api/config`, {
-      headers: { ...cookieHeader, 'Content-Type': 'application/json' },
-      data: { max_context_window_tokens: orig.max_context_window_tokens ?? null },
-    });
+    // Restore: send the original value if it was defined, otherwise omit the
+    // key entirely. JSON `null` would 400 against `z.number().int().positive()`
+    // (the schema doesn't accept null) and leave staging persisted at 500k
+    // across runs — restore must be schema-valid.
+    const restoreBody: Record<string, number> = {};
+    if (typeof orig.max_context_window_tokens === 'number') {
+      restoreBody['max_context_window_tokens'] = orig.max_context_window_tokens;
+    }
+    if (Object.keys(restoreBody).length > 0) {
+      await request.put(`${BASE}/api/config`, {
+        headers: { ...cookieHeader, 'Content-Type': 'application/json' },
+        data: restoreBody,
+      });
+    }
   }
 });
 
@@ -153,11 +162,15 @@ test('1 — PUT /api/config round-trips max_context_window_tokens', async ({ req
 
 test('2 — /app/settings/llm renders 4 provider cards + Test button', async ({ page }) => {
   const { errors } = consoleErrorCollector(page);
-  await page.goto(`${BASE}/app/settings/llm`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app/settings/llm`, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('h1')).toContainText(/LLM/i);
-  // 4 provider cards
-  const cards = page.locator('button:has-text("Anthropic"), button:has-text("Vertex"), button:has-text("Mistral"), button:has-text("Custom")');
-  await expect(cards).toHaveCount(4);
+  // 4 provider cards under the provider-picker grid. The grid is the only
+  // div with `grid sm:grid-cols-2` containing buttons inside the
+  // `[aria-labelledby="llm-provider-heading"]` section, so the selector
+  // anchors on that section instead of `has-text` substrings (which double-
+  // counted any model-label button that contained "Mistral").
+  const providerCards = page.locator('section[aria-labelledby="llm-provider-heading"] button');
+  await expect(providerCards).toHaveCount(4);
   // Connection-test button visible
   await expect(page.getByRole('button', { name: /Test connection|Verbindung testen/i })).toBeVisible();
   expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
@@ -222,7 +235,7 @@ test('2 — POST /api/llm/test rate-limits at 6/min (7th call returns 429)', asy
 
 test('3 — /app/settings/voice renders STT + TTS provider dropdowns', async ({ page }) => {
   const { errors } = consoleErrorCollector(page);
-  await page.goto(`${BASE}/app/settings/voice`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app/settings/voice`, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('h1')).toContainText(/Voice|Sprache/i);
   // STT + TTS section headings
   await expect(page.getByText(/Speech-to-Text|Eingabe/i).first()).toBeVisible();
@@ -232,7 +245,7 @@ test('3 — /app/settings/voice renders STT + TTS provider dropdowns', async ({ 
 
 test('3 — /app/settings/privacy renders 4 sections + Delete-request button', async ({ page }) => {
   const { errors } = consoleErrorCollector(page);
-  await page.goto(`${BASE}/app/settings/privacy`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app/settings/privacy`, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('h1')).toContainText(/Privacy.*Data|Privatsphäre.*Daten/i);
   // Sections: Export / Audit / Bugsink / Delete
   await expect(page.getByText(/Export.*data|Daten exportieren/i).first()).toBeVisible();
@@ -257,7 +270,7 @@ test('3 — POST /api/privacy/delete-request returns mailto channel', async ({ r
 
 test('4 — /app/settings/integrations/api-store renders without 404', async ({ page }) => {
   const { errors } = consoleErrorCollector(page);
-  const response = await page.goto(`${BASE}/app/settings/integrations/api-store`, { waitUntil: 'networkidle' });
+  const response = await page.goto(`${BASE}/app/settings/integrations/api-store`, { waitUntil: 'domcontentloaded' });
   expect(response?.status()).toBeLessThan(400);
   expect(page.url()).toContain('api-store');
   expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
@@ -269,7 +282,7 @@ test('4 — /app/settings/integrations/api-store renders without 404', async ({ 
 
 test('5 — /app/settings/system renders Vault + Token + Update-check sections', async ({ page }) => {
   const { errors } = consoleErrorCollector(page);
-  await page.goto(`${BASE}/app/settings/system`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app/settings/system`, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('h1')).toContainText(/System/i);
   // For self-host the three sections render; for managed only the minimal notice.
   // Either path is acceptable — assert at least one of the sections OR the managed notice.
@@ -284,21 +297,21 @@ test('5 — /app/settings/system renders Vault + Token + Update-check sections',
 // ─────────────────────────────────────────────────────────────────────
 
 test('X — StatusBar cost-pill links to /app/hub/cost-limits (canonical SSoT)', async ({ page }) => {
-  await page.goto(`${BASE}/app`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app`, { waitUntil: 'domcontentloaded' });
   const pill = page.locator('a[href="/app/hub/cost-limits"]');
   await expect(pill.first()).toHaveAttribute('href', '/app/hub/cost-limits');
 });
 
 test('X — Mobile 390px: LLM page renders without horizontal scroll', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`${BASE}/app/settings/llm`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app/settings/llm`, { waitUntil: 'domcontentloaded' });
   const scrollX = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(scrollX, 'horizontal scroll on mobile').toBeLessThanOrEqual(2);
 });
 
 test('X — Mobile 390px: Cost & Limits renders without horizontal scroll', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`${BASE}/app/hub/cost-limits`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app/hub/cost-limits`, { waitUntil: 'domcontentloaded' });
   const scrollX = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(scrollX, 'horizontal scroll on mobile').toBeLessThanOrEqual(2);
 });
