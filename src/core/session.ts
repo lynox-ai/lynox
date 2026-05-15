@@ -957,6 +957,9 @@ export class Session {
         ...(userConfig.disabled_tools ?? []),
         ...(this.agentOverrides.excludeTools ?? []),
       ],
+      // User-preferred max context window — clamps the agent's trim budget
+      // below the model's native window (CostLimits UI offers 200k/500k/1M).
+      maxContextWindowTokens: userConfig.max_context_window_tokens,
       apiKey: this._profileOverride?.api_key ?? userConfig.api_key,
       apiBaseURL: this._profileOverride?.api_base_url ?? userConfig.api_base_url,
       provider: this._profileOverride?.provider ?? userConfig.provider,

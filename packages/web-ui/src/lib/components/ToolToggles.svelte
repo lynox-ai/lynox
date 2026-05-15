@@ -18,6 +18,11 @@
 	let disabled = $state<Set<string>>(new Set());
 	let loaded = $state(false);
 	let saving = $state(false);
+	// Serialize PUTs so rapid toggles don't race: each click chains onto the
+	// previous request's tail. Without this, an in-flight failure's revert can
+	// stomp a successful later toggle's optimistic state, leaving UI and
+	// server out of sync.
+	let saveQueue: Promise<void> = Promise.resolve();
 
 	async function load(): Promise<void> {
 		try {
@@ -36,26 +41,32 @@
 		}
 	}
 
-	async function toggle(name: string): Promise<void> {
+	function toggle(name: string): void {
 		const next = new Set(disabled);
 		if (next.has(name)) next.delete(name); else next.add(name);
 		disabled = next;
 		saving = true;
-		try {
-			const res = await fetch(`${getApiBase()}/config`, {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ disabled_tools: Array.from(disabled) }),
+		// Capture the post-toggle snapshot — race-free because Svelte $state
+		// reads are synchronous and `disabled` was just assigned above.
+		const snapshot = Array.from(disabled);
+		saveQueue = saveQueue
+			.then(async () => {
+				const res = await fetch(`${getApiBase()}/config`, {
+					method: 'PUT',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ disabled_tools: snapshot }),
+				});
+				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+				addToast(t('tools.saved'), 'success', 2000);
+			})
+			.catch((e: unknown) => {
+				// Revert optimistic state on failure
+				disabled = new Set(disabled.has(name) ? [...disabled].filter((d) => d !== name) : [...disabled, name]);
+				addToast(e instanceof Error ? e.message : t('tools.save_failed'), 'error', 5000);
+			})
+			.finally(() => {
+				saving = false;
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			addToast(t('tools.saved'), 'success', 2000);
-		} catch (e) {
-			// Revert optimistic state on failure
-			disabled = new Set(disabled.has(name) ? [...disabled].filter((d) => d !== name) : [...disabled, name]);
-			addToast(e instanceof Error ? e.message : t('tools.save_failed'), 'error', 5000);
-		} finally {
-			saving = false;
-		}
 	}
 
 	$effect(() => { void load(); });

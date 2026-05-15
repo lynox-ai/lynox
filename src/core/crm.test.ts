@@ -59,8 +59,8 @@ describe('CRM', () => {
     });
 
     it('finds contact by channel_id', () => {
-      crm.upsertContact({ name: 'Bob', channel_id: 'telegram:123', source: 'telegram' });
-      const found = crm.findContact({ channel_id: 'telegram:123' });
+      crm.upsertContact({ name: 'Bob', channel_id: 'mail:bob@example.com', source: 'mail' });
+      const found = crm.findContact({ channel_id: 'mail:bob@example.com' });
       expect(found).not.toBeNull();
       expect(found!.name).toBe('Bob');
     });

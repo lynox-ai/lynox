@@ -157,33 +157,64 @@ export async function captureUserFeedback(opts: {
 }
 
 // ── Global handlers ──
+//
+// Tracked as named refs so a runtime opt-out (Settings → Privacy → Bugsink)
+// can fully detach Sentry from the process. Without the refs, the uncaught
+// exception handler would survive teardown and still call `process.exit(1)`
+// after Sentry was closed — turning a recoverable opt-out into a crash.
+
+let _uncaughtHandler: ((error: Error) => void) | null = null;
+let _rejectionHandler: ((reason: unknown) => void) | null = null;
 
 export function installGlobalHandlers(): void {
   if (!_enabled || !_sentry) return;
+  if (_uncaughtHandler !== null) return;  // idempotent — re-init in same process keeps single handler
   const Sentry = _sentry;
 
-  process.on('uncaughtException', (error) => {
+  _uncaughtHandler = (error) => {
     Sentry.captureException(error);
     void Sentry.flush(2000).finally(() => {
       process.exit(1);
     });
-  });
-
-  process.on('unhandledRejection', (reason) => {
+  };
+  _rejectionHandler = (reason) => {
     Sentry.captureException(reason);
-  });
+  };
+
+  process.on('uncaughtException', _uncaughtHandler);
+  process.on('unhandledRejection', _rejectionHandler);
+}
+
+export function uninstallGlobalHandlers(): void {
+  if (_uncaughtHandler !== null) {
+    process.off('uncaughtException', _uncaughtHandler);
+    _uncaughtHandler = null;
+  }
+  if (_rejectionHandler !== null) {
+    process.off('unhandledRejection', _rejectionHandler);
+    _rejectionHandler = null;
+  }
 }
 
 // ── Shutdown ──
 
 export async function shutdownErrorReporting(): Promise<void> {
-  if (!_enabled || !_sentry) return;
-  try {
-    await _sentry.flush(5000);
-    await _sentry.close();
-  } catch {
-    // best-effort
+  // Detach process listeners FIRST so a flush-time exception can't re-enter
+  // the now-closing Sentry instance.
+  uninstallGlobalHandlers();
+  if (_sentry) {
+    try {
+      await _sentry.flush(5000);
+      await _sentry.close();
+    } catch {
+      // best-effort
+    }
   }
+  // Reset state so a subsequent toggle false→true can re-initialise — without
+  // this, `_initialized` would gate `initErrorReporting()` and silently no-op.
+  _initialized = false;
+  _enabled = false;
+  _sentry = null;
 }
 
 /** Whether Bugsink error reporting is currently active. */

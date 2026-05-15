@@ -68,6 +68,7 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     sessionCounters: testCounters,
     getAvailableTools: () => tools,
     getExcludedToolNames: () => [],
+    getMaxContextWindowTokens: () => undefined,
     ...overrides,
   };
 }

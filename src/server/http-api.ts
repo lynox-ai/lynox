@@ -2623,11 +2623,35 @@ export class LynoxHTTPApi {
     // -force stolen keys here) AND the cost-amplification vector (each probe
     // costs ~$0.0001 on Anthropic). 6 probes per 60s rolling window per IP
     // — matches PRD spec.
+    // Periodic sweep of empty rate-limit buckets — without it the Map grows
+    // unbounded over the engine's lifetime (one entry per IP that ever hit
+    // /api/llm/test, never reclaimed once their `recent` array emptied).
     const llmTestRateLimit = new Map<string, number[]>();
     const LLM_TEST_WINDOW_MS = 60_000;
     const LLM_TEST_MAX_PROBES = 6;
+    setInterval(() => {
+      const nowTs = Date.now();
+      for (const [key, recent] of llmTestRateLimit) {
+        const fresh = recent.filter((t) => nowTs - t < LLM_TEST_WINDOW_MS);
+        if (fresh.length === 0) llmTestRateLimit.delete(key);
+        else if (fresh.length !== recent.length) llmTestRateLimit.set(key, fresh);
+      }
+    }, LLM_TEST_WINDOW_MS).unref();
     this.addStatic('user', 'POST /api/llm/test', async (req, res, _params, body) => {
-      const ip = req.socket.remoteAddress ?? 'unknown';
+      // Key on the proxy-aware client IP (matches LYNOX_TRUST_PROXY logic at
+      // the request entry point), not the raw socket — behind Traefik / a
+      // managed CP every user shares one socket-IP and one user would starve
+      // the 6/min window for all peers; conversely an attacker behind many
+      // forwarded IPs would bypass the limit entirely. Re-derive locally
+      // instead of plumbing clientIp through addStatic (touch surface = 1).
+      let ip = req.socket.remoteAddress ?? 'unknown';
+      if (process.env['LYNOX_TRUST_PROXY'] === 'true') {
+        const forwarded = req.headers['x-forwarded-for'];
+        if (typeof forwarded === 'string' && forwarded.length > 0) {
+          ip = forwarded.split(',')[0]?.trim() ?? ip;
+        }
+      }
+      ip = ip.replace(/^::ffff:/, '');
       const nowTs = Date.now();
       const history = llmTestRateLimit.get(ip) ?? [];
       const recent = history.filter((t) => nowTs - t < LLM_TEST_WINDOW_MS);
