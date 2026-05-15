@@ -3,15 +3,16 @@
 	import { page } from '$app/stores';
 	import { t } from '../i18n.svelte.js';
 	import ContactsView from './ContactsView.svelte';
+	import DataStoreView from './DataStoreView.svelte';
 	import KnowledgeGraphView from './KnowledgeGraphView.svelte';
 	import MemoryInsightsView from './MemoryInsightsView.svelte';
 	import MemoryView from './MemoryView.svelte';
 
-	type Tab = 'wissen' | 'graph' | 'contacts' | 'insights';
+	type Tab = 'wissen' | 'graph' | 'contacts' | 'data' | 'insights';
 
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('tab');
-		if (p === 'graph' || p === 'contacts' || p === 'insights') return p;
+		if (p === 'graph' || p === 'contacts' || p === 'data' || p === 'insights') return p;
 		return 'wissen';
 	})());
 
@@ -26,6 +27,7 @@
 		{ id: 'wissen', labelKey: 'hub.intelligence.wissen' },
 		{ id: 'graph', labelKey: 'hub.intelligence.graph' },
 		{ id: 'contacts', labelKey: 'hub.intelligence.contacts' },
+		{ id: 'data', labelKey: 'hub.intelligence.tables' },
 		{ id: 'insights', labelKey: 'hub.intelligence.insights' },
 	];
 </script>
@@ -47,6 +49,8 @@
 			<KnowledgeGraphView />
 		{:else if tab === 'contacts'}
 			<ContactsView />
+		{:else if tab === 'data'}
+			<DataStoreView />
 		{:else}
 			<MemoryInsightsView />
 		{/if}
