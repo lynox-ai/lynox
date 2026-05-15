@@ -238,6 +238,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.endpoints_use':           { de: 'Verwenden',                                                             en: 'Use' },
 	'llm.endpoints_save_current':  { de: '+ Aktuellen Endpoint speichern',                                        en: '+ Save current endpoint' },
 	'llm.endpoints_save_prompt':   { de: 'Name für diesen Endpoint (z.B. "Production LiteLLM"):',                en: 'Name for this endpoint (e.g. "Production LiteLLM"):' },
+	'llm.endpoints_active':        { de: 'aktiv',                                                                en: 'active' },
 
 	// Workflows
 	'workflow.title': { de: 'Workflows', en: 'Workflows' },

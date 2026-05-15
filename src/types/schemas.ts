@@ -19,11 +19,15 @@ export const LynoxUserConfigSchema = z.object({
   api_base_url:         z.string().optional(),
   provider:             LLMProviderSchema.optional(),
   // Saved Custom-provider endpoints (LiteLLM-friendly UI bookmarks).
+  // `base_url` is capped at 2KB to prevent runaway URLs from inflating the
+  // config payload. Array fails gracefully via `.catch([])`: a single
+  // malformed bookmark from manual config-file editing won't brick the
+  // whole config-load path (would otherwise lock the user out of Settings).
   custom_endpoints:     z.array(z.object({
-    id:       z.string().min(1),
+    id:       z.string().min(1).max(128),
     name:     z.string().min(1).max(64),
-    base_url: z.string().url(),
-  })).optional(),
+    base_url: z.string().url().max(2048),
+  })).catch([]).optional(),
   gcp_project_id:       z.string().optional(),
   gcp_region:           z.string().optional(),
   openai_model_id:      z.string().optional(),
