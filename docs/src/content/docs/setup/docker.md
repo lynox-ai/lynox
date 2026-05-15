@@ -45,17 +45,14 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 
 ## Environment Variables
 
-`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For alternative providers (Google Vertex AI, OpenAI-compatible, Custom), see [LLM Providers](/setup/llm-providers/). Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
+`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For Mistral or a Custom OpenAI-compatible endpoint (Ollama, LM Studio, OpenAI, Groq, vLLM, …), see [LLM Providers](/setup/llm-providers/). Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `ANTHROPIC_API_KEY` | Recommended | Anthropic API key (browse mode without it) |
-| `ANTHROPIC_BASE_URL` | No | Custom API endpoint (for LiteLLM/proxies) |
-| `LYNOX_LLM_PROVIDER` | No | `anthropic` (default), `vertex`, `custom`, `openai` |
-| `GCP_PROJECT_ID` | Vertex only | GCP project ID |
-| `CLOUD_ML_REGION` | Vertex only | Vertex region, e.g. `europe-west4`, `us-east5` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Vertex only | Path to GCP service-account JSON |
-| `OPENAI_MODEL_ID` | OpenAI only | Model ID (e.g. `mistral-large-latest`) |
+| `ANTHROPIC_API_KEY` | Recommended | Anthropic API key. Also reused as the generic bearer for `provider: openai` (Mistral / custom endpoint) — name kept generic. |
+| `ANTHROPIC_BASE_URL` | No | Endpoint for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
+| `LYNOX_LLM_PROVIDER` | No | `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy), `vertex` (legacy, see below) |
+| `OPENAI_MODEL_ID` | OpenAI only | Model ID (e.g. `mistral-large-latest`, `llama3.2`, `gpt-4o`) |
 | `LYNOX_VAULT_KEY` | Recommended | Encryption key for secrets at rest |
 | `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
 | `LYNOX_MCP_SECRET` | Production | MCP HTTP bearer token |
@@ -76,6 +73,16 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `LYNOX_ALLOWED_IPS` | No | Restrict access to specific IPs (comma-separated) |
 | `LYNOX_TLS_CERT` | No | Path to TLS certificate (enables HTTPS) |
 | `LYNOX_TLS_KEY` | No | Path to TLS private key |
+
+### Legacy: Vertex AI
+
+`provider: vertex` is no longer offered by the installer or in-product wizard but stays wired in the engine for existing self-hosters whose `config.json` still points at Vertex. New installs should use Anthropic direct or `provider: openai` instead.
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `GCP_PROJECT_ID` | Vertex only | GCP project ID |
+| `CLOUD_ML_REGION` | Vertex only | Vertex region, e.g. `europe-west4`, `us-east5` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Vertex only | Path to GCP service-account JSON |
 
 ## Persistent Data
 

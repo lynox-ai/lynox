@@ -7,14 +7,12 @@ sidebar:
 
 ## Prerequisites
 
-- **An LLM API key** for at least one of:
+- **An LLM credential** for one of three providers:
   - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended primary, direct API
-  - [Claude (Google Vertex AI)](https://console.cloud.google.com/vertex-ai) — BYOK for customers already on GCP
-  - [Mistral AI](https://console.mistral.ai/) — EU-based alternative / background tasks
-  - OpenAI-compatible (Gemini, local models) — for specialized tasks
-  - Custom Proxy (LiteLLM, OpenRouter) — experimental
+  - [Mistral](https://console.mistral.ai/api-keys/) — France/EU, OpenAI-compatible adapter, ~6× cheaper than Claude on cache-friendly workloads
+  - **Custom (OpenAI-compatible)** — Ollama, LM Studio, OpenAI, Groq, vLLM, LiteLLM, or any other OpenAI-compatible endpoint. Pick this for fully local inference.
 
-The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in Settings. A typical business day costs **$1–5**.
+The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Provider**. A typical business day on Claude costs **$1–5**; local-only setups cost nothing per call. See [LLM Providers](/setup/llm-providers/) for the per-provider matrix.
 
 ## Install
 
