@@ -33,9 +33,22 @@
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (res.ok) {
-				const data = (await res.json()) as { provider: string; managed?: string | null; configured: Record<string, boolean> };
-				currentProvider = (data.provider ?? 'anthropic') as Provider;
-				selectedProvider = currentProvider;
+				const data = (await res.json()) as { provider: string; api_base_url?: string; managed?: string | null; configured: Record<string, boolean> };
+				// Narrow against the current Provider union explicitly. Legacy configs
+				// can still carry `provider: 'vertex'` or `'custom'` (Anthropic-compat
+				// proxy); both are valid engine paths but no longer offered by the
+				// wizard, so we fall back to the anthropic credential form rather
+				// than smuggle an out-of-union string into `selectedProvider`.
+				const raw = data.provider ?? 'anthropic';
+				const narrowed: Provider = raw === 'mistral' || raw === 'openai' ? raw : 'anthropic';
+				// Mistral + Custom both persist as `provider: 'openai'`. Sniff the
+				// Mistral base URL so re-opening the wizard restores the Mistral
+				// credential form instead of showing the generic Custom URL field.
+				const restored: Provider = narrowed === 'openai' && data.api_base_url === 'https://api.mistral.ai/v1'
+					? 'mistral'
+					: narrowed;
+				currentProvider = restored;
+				selectedProvider = restored;
 				managedMode = data.managed ?? null;
 
 				// EU instances have pre-configured keys — never show wizard

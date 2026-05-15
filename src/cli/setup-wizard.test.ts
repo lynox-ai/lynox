@@ -186,4 +186,40 @@ describe('setup-wizard', () => {
     expect(config!.openai_model_id).toBe('llama3.2');
     expect(config!.api_key).toBeUndefined();
   });
+
+  it('custom branch retries on a malformed URL then accepts a valid one', async () => {
+    const rl = mockReadline([
+      '3',                              // select Custom OpenAI-compatible
+      'not-a-url',                      // rejected: parse failure
+      'http://127.0.0.1:1234/v1',       // accepted (LM Studio default)
+      'qwen2.5',                        // Model
+      '',                               // No key — loopback
+    ]);
+
+    const { runSetupWizard } = await import('./setup-wizard.js');
+    const config = await runSetupWizard(rl);
+
+    expect(config).not.toBeNull();
+    expect(config!.api_base_url).toBe('http://127.0.0.1:1234/v1');
+    expect(config!.openai_model_id).toBe('qwen2.5');
+  });
+
+  it('custom branch accepts a public host even with empty key (warns but persists)', async () => {
+    // For public hosts the wizard warns that the engine will fail to start
+    // until a key is configured, but it still persists the partial config so
+    // the user can fix it via Settings → Keys without re-running the wizard.
+    const rl = mockReadline([
+      '3',                              // select Custom OpenAI-compatible
+      'https://api.groq.com/openai/v1', // public host
+      'llama-3.3-70b-versatile',        // Model
+      '',                               // No key (warning path)
+    ]);
+
+    const { runSetupWizard } = await import('./setup-wizard.js');
+    const config = await runSetupWizard(rl);
+
+    expect(config).not.toBeNull();
+    expect(config!.api_base_url).toBe('https://api.groq.com/openai/v1');
+    expect(config!.api_key).toBeUndefined();
+  });
 });

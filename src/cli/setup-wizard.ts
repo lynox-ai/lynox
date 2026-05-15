@@ -267,12 +267,41 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
       stdout.write(`\n  ${BOLD}Custom (OpenAI-compatible)${RESET}\n`);
       stdout.write(`${DIM}  Point at any OpenAI-compatible endpoint — local model server${RESET}\n`);
       stdout.write(`${DIM}  (Ollama: http://localhost:11434/v1, LM Studio: http://localhost:1234/v1, …)${RESET}\n`);
-      const urlInput = await rl.question(`  ${BOLD}Base URL:${RESET} `);
-      apiBaseUrl = urlInput.trim() || 'http://localhost:11434/v1';
+
+      let parsedBaseUrl: URL | null = null;
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const urlInput = await rl.question(`  ${BOLD}Base URL:${RESET} `);
+        const candidate = urlInput.trim() || 'http://localhost:11434/v1';
+        try {
+          parsedBaseUrl = new URL(candidate);
+          apiBaseUrl = candidate;
+          break;
+        } catch {
+          stdout.write(`  ${YELLOW}⚠${RESET} "${candidate}" is not a valid URL — include the scheme (http:// or https://).\n`);
+          if (attempt >= 5) {
+            stdout.write(`  ${RED}✗${RESET} Could not parse the base URL after 5 attempts.\n`);
+            return null;
+          }
+        }
+      }
+      if (!parsedBaseUrl) return null;
+
       const modelInput = await rl.question(`  ${BOLD}Model ID:${RESET} ${DIM}(e.g. llama3.2, gpt-4o-mini)${RESET} `);
       openaiModelId = modelInput.trim() || 'llama3.2';
-      const keyInput = await readSecret(`  ${BOLD}API Key:${RESET} ${DIM}(blank for local endpoints without auth)${RESET}`, stdin.isTTY ? undefined : rl);
+      // Loopback hosts (Ollama, LM Studio, vLLM) usually run without auth.
+      // Public hosts (paid OpenAI, Groq, hosted LiteLLM) require a key — empty
+      // key + public URL produces a startup throw in createLLMClient. Detect
+      // the public case and require a key.
+      const isLoopback = ['localhost', '127.0.0.1', '0.0.0.0', '::1', 'host.docker.internal']
+        .includes(parsedBaseUrl.hostname);
+      const keyPromptSuffix = isLoopback
+        ? ` ${DIM}(blank for local endpoints without auth)${RESET}`
+        : ` ${DIM}(required for public hosts)${RESET}`;
+      const keyInput = await readSecret(`  ${BOLD}API Key:${RESET}${keyPromptSuffix}`, stdin.isTTY ? undefined : rl);
       apiKey = keyInput.trim();
+      if (!apiKey && !isLoopback) {
+        stdout.write(`  ${YELLOW}⚠${RESET} Public host ${parsedBaseUrl.hostname} usually requires an API key. Set it now or via Settings → Keys later (engine will fail to start until one is configured).\n`);
+      }
       stdout.write(`  ${GREEN}✓${RESET} ${apiBaseUrl} (${openaiModelId})\n`);
     }
 
