@@ -1022,13 +1022,10 @@ Next steps before calling create:
       }
       const apiStore = agent.toolContext?.apiStore;
       // Prefer the in-memory + on-disk path so the agent sees the deletion
-      // immediately. Falls back to disk-only when no store is bound (the
-      // tool is also reachable via standalone CLI in some test paths).
-      if (apiStore) {
-        const removed = apiStore.unregister(id, apisDir);
-        if (!removed) {
-          return `API profile "${id}" not found.`;
-        }
+      // immediately. Fall through to disk-only when the in-memory store
+      // has no record — that covers profiles dropped into apisDir after
+      // engine boot, plus the standalone-CLI paths where no store is bound.
+      if (apiStore?.unregister(id, apisDir)) {
         return `Deleted API profile "${id}".`;
       }
       const filePath = join(apisDir, `${id}.json`);

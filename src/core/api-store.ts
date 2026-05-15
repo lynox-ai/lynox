@@ -201,6 +201,10 @@ class PerApiRateLimiter {
     }
   }
 
+  unregister(hostname: string): void {
+    this.buckets.delete(hostname);
+  }
+
   /**
    * Check if a request to this hostname is allowed.
    * Returns null if allowed, or a reason string if blocked.
@@ -286,14 +290,25 @@ export class ApiStore {
   /**
    * Unregister a profile and remove its on-disk JSON.
    *
-   * Returns `true` if the profile existed and was removed (in-memory map
-   * + hostname index + rate-limit bucket + `~/.lynox/apis/<id>.json` on
-   * disk when `apisDir` is provided). Returns `false` if no profile with
-   * that id was registered. The on-disk delete is best-effort — a missing
-   * file is not treated as a failure (it can already be absent if the
-   * profile was registered programmatically without persistence).
+   * Returns `false` if no profile with that id was registered, so callers
+   * can fall through to a disk-only delete for orphans dropped into
+   * `apisDir` after engine boot.
+   *
+   * Two invariants worth flagging because they're not obvious from the
+   * call site:
+   * - The hostname → id index is dropped only when it still points at
+   *   the id being removed. A profile that re-claimed the hostname mid-
+   *   session must keep its mapping.
+   * - The rate-limit bucket is cleared so a future re-registration with
+   *   *no* `rate_limit` doesn't inherit stale throttling from this profile.
    */
   unregister(id: string, apisDir?: string): boolean {
+    // Defence-in-depth: `loadFromDirectory` reads `id` from JSON content,
+    // not from the filename. A hand-edited profile whose internal id is
+    // `../../foo` would otherwise traverse on the `join(apisDir, …)`
+    // below. Keep this filter aligned with the api_setup ID_PATTERN.
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) return false;
+
     const profile = this.profiles.get(id);
     if (!profile) return false;
 
@@ -301,19 +316,28 @@ export class ApiStore {
 
     try {
       const hostname = new URL(profile.base_url).hostname;
-      // Only drop the hostname mapping if it still points at this id —
-      // re-registration under the same hostname must not be clobbered.
       if (this.hostToProfile.get(hostname) === id) {
         this.hostToProfile.delete(hostname);
+        this.rateLimiter.unregister(hostname);
       }
     } catch {
-      // Invalid URL — no hostname mapping to clean.
+      // Invalid base_url — no hostname mapping or bucket to clean.
     }
 
     if (apisDir) {
       const filePath = join(apisDir, `${id}.json`);
-      if (existsSync(filePath)) {
-        try { unlinkSync(filePath); } catch { /* best-effort */ }
+      try {
+        unlinkSync(filePath);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') {
+          // The in-memory side already happened; the on-disk side failed.
+          // Surface to the caller so the HTTP handler can return 500 — a
+          // silent success would let `loadFromDirectory` resurrect the
+          // "deleted" profile on the next restart.
+          process.stderr.write(`[lynox:api-store] Failed to unlink ${filePath}: ${err instanceof Error ? err.message : String(err)}\n`);
+          return false;
+        }
       }
     }
 

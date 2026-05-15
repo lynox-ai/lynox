@@ -102,6 +102,30 @@ describe('ApiStore', () => {
       // profile we just removed never owned it after re-registration.
       expect(store.getByHostname('api.test.com')?.id).toBe('new');
     });
+
+    it('clears the rate-limit bucket so a re-registration without limits is unthrottled', () => {
+      const throttled: ApiProfile = { ...SAMPLE_PROFILE, rate_limit: { requests_per_second: 1 } };
+      store.register(throttled);
+      // Burn the only token so the next call would be blocked if the bucket survives.
+      expect(store.checkRateLimit('api.test.com')).toBeNull();
+      expect(store.checkRateLimit('api.test.com')).not.toBeNull();
+
+      store.unregister('test-api');
+
+      // Re-register without rate_limit; the throttled bucket must be gone.
+      const unlimited: ApiProfile = { ...SAMPLE_PROFILE };
+      store.register(unlimited);
+      expect(store.checkRateLimit('api.test.com')).toBeNull();
+      expect(store.checkRateLimit('api.test.com')).toBeNull();
+    });
+
+    it('refuses an id with a path-traversal shape', () => {
+      // Even if a malformed profile somehow landed in the in-memory map
+      // (e.g. via hand-edited JSON loaded by loadFromDirectory), unregister
+      // must not pass the id straight into `join(apisDir, …)`.
+      store.register({ ...SAMPLE_PROFILE, id: '../../escape' });
+      expect(store.unregister('../../escape', tmpDir)).toBe(false);
+    });
   });
 
   describe('loadFromDirectory', () => {
