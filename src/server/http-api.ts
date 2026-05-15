@@ -14,7 +14,7 @@ import { statfs } from 'node:fs/promises';
 import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
+import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
@@ -405,17 +405,41 @@ export class LynoxHTTPApi {
   }
 
   // ── Session cookie verification (shared auth with Web UI) ─────────────
+  //
+  // The Web UI mints the cookie via packages/web-ui/src/lib/server/auth.ts
+  // (`createSessionToken`). Both sides MUST use the same TTL or the cookie
+  // dies silently from the user's perspective: SvelteKit's `load`
+  // validates the cookie as fresh (loads /app), but every `/api/*` call
+  // 401s and the user sees the session-expired banner with the engine
+  // showing as healthy. Keep `SESSION_MAX_AGE_S` aligned with
+  // `packages/web-ui/src/lib/server/auth.ts`.
+  //
+  // Rolling refresh: once the cookie's timestamp is older than
+  // SESSION_REFRESH_AFTER_S we mint a fresh one on the next successful
+  // verify and emit it via Set-Cookie. Keeps active users immune to Safari
+  // ITP eviction (the cookie's stored age stays low enough not to be a
+  // pruning candidate).
 
-  private _verifySessionCookie(req: IncomingMessage, secret: string): boolean {
+  private static readonly SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
+  private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
+  private static readonly SESSION_COOKIE_NAME = 'lynox_session';
+
+  /**
+   * Validate the `lynox_session` cookie.
+   * Returns `null` on any failure (missing, malformed, expired, bad HMAC).
+   * On success returns the cookie's unix-second timestamp so the caller
+   * can decide whether to roll a fresh one via _maybeRefreshSessionCookie.
+   */
+  private _verifySessionCookie(req: IncomingMessage, secret: string): number | null {
     const cookieHeader = req.headers['cookie'];
-    if (!cookieHeader) return false;
+    if (!cookieHeader) return null;
 
-    const match = /(?:^|;\s*)lynox_session=([^;]+)/.exec(cookieHeader);
-    if (!match?.[1]) return false;
+    const match = cookieHeader.match(/(?:^|;\s*)lynox_session=([^;]+)/);
+    if (!match?.[1]) return null;
 
     const token = decodeURIComponent(match[1]);
     const parts = token.split('.');
-    if (parts.length < 2 || parts.length > 3) return false;
+    if (parts.length < 2 || parts.length > 3) return null;
 
     const sig = parts[parts.length - 1]!;
     const payload = parts.slice(0, -1).join('.');
@@ -423,18 +447,69 @@ export class LynoxHTTPApi {
     const tsStr = parts.length === 3 ? parts[1]! : parts[0]!;
 
     const timestamp = parseInt(tsStr, 10);
-    if (Number.isNaN(timestamp)) return false;
-    if (Math.floor(Date.now() / 1000) - timestamp > 7 * 24 * 60 * 60) return false;
+    if (Number.isNaN(timestamp)) return null;
+    if (Math.floor(Date.now() / 1000) - timestamp > LynoxHTTPApi.SESSION_MAX_AGE_S) return null;
 
     try {
       const key = createHmac('sha256', 'lynox-session').update(secret).digest();
       const expected = createHmac('sha256', key).update(payload).digest('hex');
       const sigBuf = Buffer.from(sig, 'hex');
       const expBuf = Buffer.from(expected, 'hex');
-      if (sigBuf.length !== expBuf.length) return false;
-      return timingSafeEqual(sigBuf, expBuf);
+      if (sigBuf.length !== expBuf.length) return null;
+      return timingSafeEqual(sigBuf, expBuf) ? timestamp : null;
     } catch {
-      return false;
+      return null;
+    }
+  }
+
+  /**
+   * If the just-verified cookie is older than SESSION_REFRESH_AFTER_S, mint
+   * a fresh one and queue it as Set-Cookie. Cookie format matches the
+   * Web UI's `createSessionToken`: `<nonce>.<ts>.<hmac>`.
+   *
+   * Secure flag mirrors how the Web UI infers HTTPS (login/+page.server.ts
+   * uses `url.protocol === 'https:'`). Behind a TLS-terminating proxy the
+   * socket is plain TCP, so we trust `x-forwarded-proto` from the proxy
+   * AND check `socket.encrypted` for direct TLS termination.
+   */
+  private _maybeRefreshSessionCookie(
+    req: IncomingMessage,
+    res: ServerResponse,
+    secret: string,
+    cookieIssuedAt: number,
+  ): void {
+    const ageSec = Math.floor(Date.now() / 1000) - cookieIssuedAt;
+    if (ageSec < LynoxHTTPApi.SESSION_REFRESH_AFTER_S) return;
+
+    const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+    const nonce = randomBytes(8).toString('hex');
+    const ts = Math.floor(Date.now() / 1000).toString();
+    const payload = `${nonce}.${ts}`;
+    const hmac = createHmac('sha256', key).update(payload).digest('hex');
+    const token = `${payload}.${hmac}`;
+
+    const forwardedProto = req.headers['x-forwarded-proto'];
+    const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+    const isTls = proto === 'https' || ('encrypted' in req.socket && req.socket.encrypted === true);
+
+    const attrs = [
+      `${LynoxHTTPApi.SESSION_COOKIE_NAME}=${token}`,
+      'Path=/',
+      'HttpOnly',
+      'SameSite=Strict',
+      `Max-Age=${LynoxHTTPApi.SESSION_MAX_AGE_S}`,
+    ];
+    if (isTls) attrs.push('Secure');
+
+    // Coalesce with any pre-existing Set-Cookie (e.g. OAuth state) the
+    // handler may have queued earlier in the request.
+    const existing = res.getHeader('Set-Cookie');
+    if (Array.isArray(existing)) {
+      res.setHeader('Set-Cookie', [...existing, attrs.join('; ')]);
+    } else if (typeof existing === 'string') {
+      res.setHeader('Set-Cookie', [existing, attrs.join('; ')]);
+    } else {
+      res.setHeader('Set-Cookie', attrs.join('; '));
     }
   }
 
@@ -804,12 +879,16 @@ export class LynoxHTTPApi {
           }
           authScope = 'admin';
         }
-      } else if (this._verifySessionCookie(req, secret)) {
-        // Session cookie auth (same-origin Web UI requests)
-        authScope = adminSecret ? 'user' : 'admin';
       } else {
-        errorResponse(res, 401, 'Unauthorized');
-        return;
+        const cookieIssuedAt = this._verifySessionCookie(req, secret);
+        if (cookieIssuedAt !== null) {
+          // Session cookie auth (same-origin Web UI requests)
+          authScope = adminSecret ? 'user' : 'admin';
+          this._maybeRefreshSessionCookie(req, res, secret, cookieIssuedAt);
+        } else {
+          errorResponse(res, 401, 'Unauthorized');
+          return;
+        }
       }
       } // end migration-token else
     }

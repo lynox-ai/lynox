@@ -14,12 +14,19 @@
 // don't show two banners.
 
 const DISMISS_COOLDOWN_MS = 30_000;
+// While chat.svelte.ts's handleSessionExpired() is auto-redirecting to
+// /login, suppressing the orange banner for a few seconds keeps the user
+// from seeing two stacked auth notices for the same 401 (red chatError +
+// orange banner). The redirect happens at 1.8s so 5s covers the gap with
+// margin for slow devices.
+const SUPPRESS_WINDOW_MS = 5_000;
 
 let _sessionExpired = $state(false);
 // Soft-dismiss timestamp. When the user clicks "Später" the banner
 // hides for 30s. Without this an in-flight 401 from a parallel poller
 // would re-flip the flag instantly and the user feels gaslit.
 let _dismissedUntil = 0;
+let _suppressUntil = 0;
 
 export function isSessionExpired(): boolean {
 	return _sessionExpired;
@@ -27,10 +34,22 @@ export function isSessionExpired(): boolean {
 
 export function markSessionExpired(): void {
 	if (Date.now() < _dismissedUntil) return;
+	if (Date.now() < _suppressUntil) return;
 	_sessionExpired = true;
 }
 
 export function clearSessionExpired(): void {
 	_sessionExpired = false;
 	_dismissedUntil = Date.now() + DISMISS_COOLDOWN_MS;
+}
+
+/**
+ * Called by callers (currently chat.svelte.ts:handleSessionExpired) that
+ * are already taking over the auth-failure UX — showing their own
+ * dedicated message + auto-redirecting to /login. We suppress the orange
+ * banner during their window so the user sees one notice, not two.
+ */
+export function suppressSessionExpiredBanner(): void {
+	_suppressUntil = Date.now() + SUPPRESS_WINDOW_MS;
+	_sessionExpired = false;
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import type { Server } from 'node:http';
+import { createHmac, randomBytes } from 'node:crypto';
 
 // === Mock dependencies ===
 
@@ -153,6 +154,19 @@ function extractFirstCookiePair(res: Response, name: string): string | null {
   if (!raw) return null;
   const match = raw.match(new RegExp(`(${name}=[^;]+)`));
   return match?.[1] ?? null;
+}
+
+/**
+ * Mint a session token signed by `secret`, stamped at `issuedAtSec`.
+ * Mirrors packages/web-ui/src/lib/server/auth.ts:createSessionToken — must
+ * stay in sync so this test exercises the verifier the way the Web UI does.
+ */
+function mintSessionToken(secret: string, issuedAtSec: number): string {
+  const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+  const nonce = randomBytes(8).toString('hex');
+  const payload = `${nonce}.${issuedAtSec}`;
+  const hmac = createHmac('sha256', key).update(payload).digest('hex');
+  return `${payload}.${hmac}`;
 }
 
 // === Setup/Teardown ===
@@ -311,6 +325,82 @@ describe('LynoxHTTPApi', () => {
         body: '{}',
       });
       expect(webhookPost.status).not.toBe(401);
+    });
+  });
+
+  // ── Session-cookie auth (shared with Web UI) ──────────────────────────
+  //
+  // Regression backstop for the silent 7d/30d mismatch that produced cat's
+  // "Sitzung abgelaufen" loop in May 2026: the Web UI minted 30-day cookies
+  // (`SESSION_MAX_AGE_S` in packages/web-ui/src/lib/server/auth.ts) but the
+  // engine rejected anything older than 7 days, so users between day 7 and
+  // day 30 saw a healthy engine + 401 on every /api/* call.
+  describe('session-cookie auth (Web UI shared)', () => {
+    const SECOND = 1;
+    const DAY = 24 * 60 * 60;
+
+    it('accepts a freshly-minted lynox_session cookie', async () => {
+      const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${cookie}` },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('accepts a cookie minted 29 days ago (under the 30-day cap)', async () => {
+      const issuedAt = Math.floor(Date.now() / 1000) - (29 * DAY);
+      const cookie = mintSessionToken(TEST_SECRET, issuedAt);
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${cookie}` },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('rejects a cookie older than 30 days', async () => {
+      // Boundary lock: change SESSION_MAX_AGE_S in http-api.ts → this fails.
+      // Keep the value aligned with packages/web-ui/src/lib/server/auth.ts.
+      const issuedAt = Math.floor(Date.now() / 1000) - (30 * DAY) - SECOND;
+      const cookie = mintSessionToken(TEST_SECRET, issuedAt);
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${cookie}` },
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it('rejects a tampered cookie (wrong HMAC)', async () => {
+      const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
+      // Flip the last char of the HMAC.
+      const tampered = cookie.slice(0, -1) + (cookie.endsWith('a') ? 'b' : 'a');
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${tampered}` },
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it('emits a Set-Cookie refresh when the cookie is older than 1 day', async () => {
+      const issuedAt = Math.floor(Date.now() / 1000) - (2 * DAY);
+      const cookie = mintSessionToken(TEST_SECRET, issuedAt);
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${cookie}` },
+      });
+      expect(res.status).toBe(200);
+      const refresh = extractFirstCookiePair(res, 'lynox_session');
+      expect(refresh, 'engine must roll the cookie when it is > 1 day old').toBeTruthy();
+      // The refreshed token must validate (we feed it back as a fresh request).
+      const echo = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: refresh! },
+      });
+      expect(echo.status).toBe(200);
+    });
+
+    it('does NOT emit a Set-Cookie refresh for a fresh cookie', async () => {
+      const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${cookie}` },
+      });
+      expect(res.status).toBe(200);
+      const refresh = extractFirstCookiePair(res, 'lynox_session');
+      expect(refresh).toBeNull();
     });
   });
 

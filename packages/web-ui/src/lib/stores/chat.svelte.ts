@@ -4,6 +4,7 @@ import { t } from '../i18n.svelte.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
+import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 
 // ---------------------------------------------------------------------------
@@ -482,6 +483,10 @@ function handleSessionExpired(assistantIdx?: number, userMsgIdx?: number): void 
 	streamingToolName = null;
 	streamingToolPhase = null;
 	chatError = t('chat.error_session_expired');
+	// We own the auth-failure UX here (dedicated message + auto-redirect) —
+	// suppress the AppShell's orange banner so the user doesn't see two
+	// stacked notices for the same 401.
+	suppressSessionExpiredBanner();
 	if (assistantIdx !== undefined && messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 	if (userMsgIdx !== undefined && messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
 	if (typeof window !== 'undefined') {
@@ -1834,13 +1839,14 @@ export async function resumeThread(threadId: string): Promise<void> {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
-		// Server says "thread doesn't exist" — authoritative empty. Drop
-		// the local snapshot so a later resume can't false-resurrect it
-		// (happens when a thread was deleted elsewhere or on another device).
+		// A 404 used to nuke the local snapshot on the theory that "thread
+		// doesn't exist on the server" is authoritative. That deletes the
+		// user's history on any transient backend hiccup (tenant-scope
+		// race, mid-deploy 404 before routes register, etc.). Keep the
+		// local copy and surface a clear error instead — a stale snapshot
+		// is fully recoverable, a destroyed snapshot is not. Explicit
+		// archive / delete actions still call dropPersistedThread().
 		if (msgRes.status === 404) {
-			messages = [];
-			dropPersistedThread(threadId);
-			sessionId = null;
 			chatError = t('chat.error_connection');
 			return;
 		}
