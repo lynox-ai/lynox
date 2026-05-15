@@ -1161,6 +1161,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// UI-side ghost — leaving it spinning forever after the answer is
 			// already on screen is the bug rafael reported on 2026-05-15
 			// (api_setup ✓ visible but inner http_request still spinning).
+			//
+			// Index-drift invariant: `msg` was resolved at the top of
+			// handleSSEEvent for THIS event's run; the backend serialises
+			// turn_end strictly after every tool_result for the same run and
+			// never interleaves a later run's events into this stream, so
+			// `msg` is always the right turn's message here. If the SSE
+			// stream's ordering ever weakens, flip the iteration to a
+			// run-id / message-id lookup.
 			if (msg.toolCalls) {
 				for (const tc of msg.toolCalls) {
 					if (tc.status === 'running') tc.status = 'done';

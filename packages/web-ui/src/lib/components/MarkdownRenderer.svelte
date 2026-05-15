@@ -2,6 +2,7 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 	import { codeToHtml } from 'shiki';
+	import { goto } from '$app/navigation';
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
@@ -235,7 +236,7 @@
 			else if (action === 'export') handleArtifactExport(container);
 			else if (action === 'download-md') handleMarkdownDownload(container);
 			else if (action === 'print-pdf') handleMarkdownPrint(container);
-			else if (action === 'open-gallery') handleMarkdownOpenGallery(container);
+			else if (action === 'open-gallery') void handleMarkdownOpenGallery(container);
 		}
 	}
 
@@ -499,19 +500,15 @@ window.addEventListener('afterprint', function () { window.close(); });
 	 * a duplicate row in the gallery — acceptable cost; dedup-by-content
 	 * is a future improvement.
 	 */
-	function handleMarkdownOpenGallery(container: HTMLElement) {
+	async function handleMarkdownOpenGallery(container: HTMLElement) {
 		const md = decodeDataMd(container);
 		if (!md) { addToast('Open failed', 'error'); return; }
 		const title = container.dataset['title'] ?? 'Artifact';
-		saveArtifact({ title, content: md, type: 'markdown' }).then(result => {
-			if (result) {
-				// Land on the gallery with this artifact pre-selected so the
-				// click feels like "open this thing", not "save + then go find it".
-				window.location.assign(`/app/artifacts?id=${encodeURIComponent(result.id)}`);
-			} else {
-				addToast('Open failed', 'error');
-			}
-		});
+		const result = await saveArtifact({ title, content: md, type: 'markdown' });
+		if (!result) { addToast('Open failed', 'error'); return; }
+		// Client-side nav so the chat scroll position, streaming SSE,
+		// and the wider app shell don't blow away on a full reload.
+		await goto(`/app/artifacts?id=${encodeURIComponent(result.id)}`);
 	}
 
 	// ── Escape key for fullscreen artifacts ──────────────────
