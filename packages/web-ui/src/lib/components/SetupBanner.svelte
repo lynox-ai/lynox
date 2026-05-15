@@ -4,7 +4,7 @@
 	import { clearError } from '../stores/chat.svelte.js';
 	import { onMount } from 'svelte';
 
-	type Provider = 'anthropic' | 'vertex' | 'custom' | 'openai';
+	type Provider = 'anthropic' | 'mistral' | 'openai';
 
 	let apiKeyMissing = $state(false);
 	let dismissed = $state(false);
@@ -19,12 +19,11 @@
 
 	// Credential fields
 	let anthropicKey = $state('');
-	let vertexProjectId = $state('');
-	let vertexRegion = $state('europe-west4');
-	let customUrl = $state('');
-	let customKey = $state('');
+	let mistralKey = $state('');
+	let mistralModel = $state('mistral-large-latest');
 	let openaiUrl = $state('');
 	let openaiKey = $state('');
+	let openaiModel = $state('llama3.2');
 
 	let saving = $state(false);
 	let saveError = $state('');
@@ -34,9 +33,22 @@
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (res.ok) {
-				const data = (await res.json()) as { provider: string; managed?: string | null; configured: Record<string, boolean> };
-				currentProvider = (data.provider ?? 'anthropic') as Provider;
-				selectedProvider = currentProvider;
+				const data = (await res.json()) as { provider: string; api_base_url?: string; managed?: string | null; configured: Record<string, boolean> };
+				// Narrow against the current Provider union explicitly. Legacy configs
+				// can still carry `provider: 'vertex'` or `'custom'` (Anthropic-compat
+				// proxy); both are valid engine paths but no longer offered by the
+				// wizard, so we fall back to the anthropic credential form rather
+				// than smuggle an out-of-union string into `selectedProvider`.
+				const raw = data.provider ?? 'anthropic';
+				const narrowed: Provider = raw === 'mistral' || raw === 'openai' ? raw : 'anthropic';
+				// Mistral + Custom both persist as `provider: 'openai'`. Sniff the
+				// Mistral base URL so re-opening the wizard restores the Mistral
+				// credential form instead of showing the generic Custom URL field.
+				const restored: Provider = narrowed === 'openai' && data.api_base_url === 'https://api.mistral.ai/v1'
+					? 'mistral'
+					: narrowed;
+				currentProvider = restored;
+				selectedProvider = restored;
 				managedMode = data.managed ?? null;
 
 				// EU instances have pre-configured keys — never show wizard
@@ -88,9 +100,8 @@
 
 	const canSave = $derived(
 		selectedProvider === 'anthropic' ? !!anthropicKey.trim() :
-		selectedProvider === 'vertex' ? (!!vertexProjectId.trim() && !!vertexRegion.trim()) :
-		selectedProvider === 'custom' ? !!customUrl.trim() :
-		selectedProvider === 'openai' ? (!!openaiUrl.trim() && !!openaiKey.trim()) :
+		selectedProvider === 'mistral' ? !!mistralKey.trim() :
+		selectedProvider === 'openai' ? !!openaiUrl.trim() :
 		false
 	);
 
@@ -101,17 +112,18 @@
 		try {
 			const base = getApiBase();
 
-			// 1. Save provider config
-			const providerConfig: Record<string, unknown> = { provider: selectedProvider };
-			if (selectedProvider === 'vertex') {
-				providerConfig['gcp_project_id'] = vertexProjectId.trim();
-				providerConfig['gcp_region'] = vertexRegion.trim();
-			}
-			if (selectedProvider === 'custom') {
-				providerConfig['api_base_url'] = customUrl.trim();
+			// Mistral + Custom OpenAI-compatible both flow through the same `openai`
+			// adapter under the hood; the user-facing labels stay distinct so a new
+			// user picking "Mistral" doesn't have to know the routing detail.
+			const persistedProvider = selectedProvider === 'anthropic' ? 'anthropic' : 'openai';
+			const providerConfig: Record<string, unknown> = { provider: persistedProvider };
+			if (selectedProvider === 'mistral') {
+				providerConfig['api_base_url'] = 'https://api.mistral.ai/v1';
+				providerConfig['openai_model_id'] = mistralModel.trim() || 'mistral-large-latest';
 			}
 			if (selectedProvider === 'openai') {
 				providerConfig['api_base_url'] = openaiUrl.trim();
+				providerConfig['openai_model_id'] = openaiModel.trim() || 'llama3.2';
 			}
 
 			const configRes = await fetch(`${base}/config`, {
@@ -124,12 +136,11 @@
 			// 2. Save credentials to vault
 			if (selectedProvider === 'anthropic') {
 				await saveSecret('ANTHROPIC_API_KEY', anthropicKey.trim());
-			} else if (selectedProvider === 'custom' && customKey.trim()) {
-				await saveSecret('ANTHROPIC_API_KEY', customKey.trim());
-			} else if (selectedProvider === 'openai') {
+			} else if (selectedProvider === 'mistral') {
+				await saveSecret('OPENAI_API_KEY', mistralKey.trim());
+			} else if (selectedProvider === 'openai' && openaiKey.trim()) {
 				await saveSecret('OPENAI_API_KEY', openaiKey.trim());
 			}
-			// vertex: credentials come from GOOGLE_APPLICATION_CREDENTIALS env var — no secret to save
 
 			saveSuccess = true;
 			apiKeyMissing = false;
@@ -159,14 +170,12 @@
 
 	const providers: { id: Provider; label: string; desc: string }[] = [
 		{ id: 'anthropic', label: 'Claude (Anthropic)', desc: 'setup.provider_anthropic_desc' },
-		{ id: 'vertex', label: 'Claude (Vertex AI)', desc: 'setup.provider_vertex_desc' },
-		{ id: 'custom', label: 'Custom Proxy', desc: 'setup.provider_custom_desc' },
-		{ id: 'openai', label: 'OpenAI-compatible', desc: 'setup.provider_openai_desc' },
+		{ id: 'mistral', label: 'Mistral', desc: 'setup.provider_mistral_desc' },
+		{ id: 'openai', label: 'Custom (OpenAI-compatible)', desc: 'setup.provider_openai_desc' },
 	];
 
 	const subtitleKey = $derived(
-		selectedProvider === 'vertex' ? 'setup.subtitle_vertex' :
-		selectedProvider === 'custom' ? 'setup.subtitle_custom' :
+		selectedProvider === 'mistral' ? 'setup.subtitle_mistral' :
 		selectedProvider === 'openai' ? 'setup.subtitle_openai' :
 		'setup.subtitle'
 	);
@@ -256,57 +265,34 @@
 								</p>
 							</div>
 
-						{:else if selectedProvider === 'vertex'}
+						{:else if selectedProvider === 'mistral'}
 							<div class="space-y-2">
-								<label for="setup-vertex-project" class="text-sm font-medium text-text">{t('setup.label_vertex_project')}</label>
-								<input
-									id="setup-vertex-project"
-									type="text"
-									bind:value={vertexProjectId}
-									placeholder="lynox-prod"
-									autocomplete="off"
-									class={inputClass}
-								/>
-							</div>
-							<div class="space-y-2">
-								<label for="setup-vertex-region" class="text-sm font-medium text-text">{t('setup.label_vertex_region')}</label>
+								<label for="setup-mistral-model" class="text-sm font-medium text-text">{t('setup.label_mistral_model')}</label>
 								<select
-									id="setup-vertex-region"
-									bind:value={vertexRegion}
+									id="setup-mistral-model"
+									bind:value={mistralModel}
 									class={inputClass}
 								>
-									<option value="europe-west4">europe-west4 (Netherlands — EU residency)</option>
-									<option value="europe-west1">europe-west1 (Belgium)</option>
-									<option value="us-east5">us-east5 (Columbus)</option>
-									<option value="us-central1">us-central1 (Iowa)</option>
+									<option value="mistral-large-latest">mistral-large-latest (recommended)</option>
+									<option value="mistral-medium-latest">mistral-medium-latest</option>
+									<option value="codestral-latest">codestral-latest (code-focused)</option>
 								</select>
 							</div>
-							<p class="text-xs text-text-subtle">{t('setup.hint_vertex')}</p>
-
-						{:else if selectedProvider === 'custom'}
 							<div class="space-y-2">
-								<label for="setup-custom-url" class="text-sm font-medium text-text">{t('setup.label_custom_url')}</label>
+								<label for="setup-mistral-key" class="text-sm font-medium text-text">{t('setup.label_mistral_key')}</label>
 								<input
-									id="setup-custom-url"
-									type="url"
-									bind:value={customUrl}
-									placeholder="http://localhost:4000"
-									autocomplete="off"
-									class={inputClass}
-								/>
-							</div>
-							<div class="space-y-2">
-								<label for="setup-custom-key" class="text-sm font-medium text-text">{t('setup.label_custom_key')}</label>
-								<input
-									id="setup-custom-key"
+									id="setup-mistral-key"
 									type="password"
-									bind:value={customKey}
-									placeholder="sk-..."
+									bind:value={mistralKey}
+									placeholder="..."
 									autocomplete="off"
 									class={inputClass}
 								/>
+								<p class="text-xs text-text-subtle">
+									{t('setup.hint_mistral')}
+									<a href="https://console.mistral.ai/api-keys/" target="_blank" rel="noopener" class="text-accent-text hover:underline">console.mistral.ai</a>
+								</p>
 							</div>
-							<p class="text-xs text-text-subtle">{t('setup.hint_custom')}</p>
 
 						{:else if selectedProvider === 'openai'}
 							<div class="space-y-2">
@@ -315,18 +301,29 @@
 									id="setup-openai-url"
 									type="url"
 									bind:value={openaiUrl}
-									placeholder="https://api.mistral.ai/v1"
+									placeholder="http://localhost:11434/v1"
 									autocomplete="off"
 									class={inputClass}
 								/>
 							</div>
 							<div class="space-y-2">
-								<label for="setup-openai-key" class="text-sm font-medium text-text">{t('setup.label_openai_key')}</label>
+								<label for="setup-openai-model" class="text-sm font-medium text-text">{t('setup.label_openai_model')}</label>
+								<input
+									id="setup-openai-model"
+									type="text"
+									bind:value={openaiModel}
+									placeholder="llama3.2"
+									autocomplete="off"
+									class={inputClass}
+								/>
+							</div>
+							<div class="space-y-2">
+								<label for="setup-openai-key" class="text-sm font-medium text-text">{t('setup.label_openai_key')} <span class="text-text-subtle font-normal">({t('setup.optional')})</span></label>
 								<input
 									id="setup-openai-key"
 									type="password"
 									bind:value={openaiKey}
-									placeholder="sk-..."
+									placeholder=""
 									autocomplete="off"
 									class={inputClass}
 								/>

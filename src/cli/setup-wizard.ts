@@ -195,18 +195,17 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     // ── LLM Provider ─────────────────────────────────────────────
     stdout.write(`\n  ${BOLD}LLM Provider${RESET}\n`);
     stdout.write(`${DIM}  Where should AI requests be sent?${RESET}\n\n`);
-    type ProviderChoice = 'anthropic' | 'vertex' | 'custom';
+    type ProviderChoice = 'anthropic' | 'mistral' | 'custom';
     const providerChoice = await select<ProviderChoice>([
       { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended' },
-      { label: 'Claude (Google Vertex AI)', value: 'vertex', hint: 'EU data residency' },
-      { label: 'Custom Proxy', value: 'custom', hint: 'experimental' },
+      { label: 'Mistral', value: 'mistral', hint: 'Paris, EU' },
+      { label: 'Custom (OpenAI-compatible)', value: 'custom', hint: 'Ollama, LM Studio, Groq, LiteLLM, vLLM' },
     ], { default: 0, rl: stdin.isTTY ? undefined : rl });
     const provider: ProviderChoice = providerChoice ?? 'anthropic';
 
     let apiKey = '';
-    let gcpProjectId: string | undefined;
-    let gcpRegion: string | undefined;
     let apiBaseUrl: string | undefined;
+    let openaiModelId: string | undefined;
 
     if (provider === 'anthropic') {
       // ── Anthropic API Key ──
@@ -245,29 +244,65 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
         apiKey = input.trim();
         break;
       }
-    } else if (provider === 'vertex') {
-      // ── Google Vertex AI ──
-      stdout.write(`\n  ${BOLD}Claude (Google Vertex AI)${RESET}\n`);
-      stdout.write(`${DIM}  Requires: GCP project with Vertex AI enabled + service account${RESET}\n`);
-      stdout.write(`${DIM}  Install SDK: pnpm add @anthropic-ai/vertex-sdk${RESET}\n\n`);
-      const projectInput = await rl.question(`  ${BOLD}GCP Project ID:${RESET} `);
-      gcpProjectId = projectInput.trim();
-      const regionChoice = await select([
-        { label: 'europe-west4 (Netherlands)', value: 'europe-west4', hint: 'EU residency' },
-        { label: 'europe-west1 (Belgium)', value: 'europe-west1' },
-        { label: 'us-east5 (Columbus)', value: 'us-east5' },
-        { label: 'us-central1 (Iowa)', value: 'us-central1' },
+    } else if (provider === 'mistral') {
+      // ── Mistral via OpenAI-compatible API ──
+      stdout.write(`\n  ${BOLD}Mistral${RESET}\n`);
+      stdout.write(`${DIM}  console.mistral.ai → API Keys → Create${RESET}\n`);
+      apiBaseUrl = 'https://api.mistral.ai/v1';
+      const modelChoice = await select([
+        { label: 'mistral-large-latest', value: 'mistral-large-latest', hint: 'recommended' },
+        { label: 'mistral-medium-latest', value: 'mistral-medium-latest' },
+        { label: 'codestral-latest', value: 'codestral-latest', hint: 'code-focused' },
       ], { default: 0, rl: stdin.isTTY ? undefined : rl });
-      gcpRegion = regionChoice ?? 'europe-west4';
-      stdout.write(`  ${GREEN}✓${RESET} Region: ${gcpRegion}\n`);
-      stdout.write(`  ${DIM}Credentials: set GOOGLE_APPLICATION_CREDENTIALS env var to service account JSON path${RESET}\n`);
+      openaiModelId = modelChoice ?? 'mistral-large-latest';
+      const input = await readSecret(`  ${BOLD}Mistral API Key:${RESET}`, stdin.isTTY ? undefined : rl);
+      if (!input.trim()) {
+        stdout.write(`  ${DIM}Cancelled.${RESET}\n`);
+        return null;
+      }
+      apiKey = input.trim();
+      stdout.write(`  ${GREEN}✓${RESET} Model: ${openaiModelId}\n`);
     } else {
-      // ── Custom / LiteLLM ──
-      stdout.write(`\n  ${BOLD}Custom Proxy${RESET} ${DIM}(experimental)${RESET}\n`);
-      stdout.write(`${DIM}  Point to any Anthropic-compatible proxy (LiteLLM, OpenRouter, etc.)${RESET}\n`);
-      const input = await rl.question(`  ${BOLD}Proxy URL:${RESET} `);
-      apiBaseUrl = input.trim() || 'http://localhost:4000';
-      stdout.write(`  ${GREEN}✓${RESET} URL: ${apiBaseUrl}\n`);
+      // ── Custom OpenAI-compatible (Ollama, LM Studio, LiteLLM, Groq, vLLM, …) ──
+      stdout.write(`\n  ${BOLD}Custom (OpenAI-compatible)${RESET}\n`);
+      stdout.write(`${DIM}  Point at any OpenAI-compatible endpoint — local model server${RESET}\n`);
+      stdout.write(`${DIM}  (Ollama: http://localhost:11434/v1, LM Studio: http://localhost:1234/v1, …)${RESET}\n`);
+
+      let parsedBaseUrl: URL | null = null;
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const urlInput = await rl.question(`  ${BOLD}Base URL:${RESET} `);
+        const candidate = urlInput.trim() || 'http://localhost:11434/v1';
+        try {
+          parsedBaseUrl = new URL(candidate);
+          apiBaseUrl = candidate;
+          break;
+        } catch {
+          stdout.write(`  ${YELLOW}⚠${RESET} "${candidate}" is not a valid URL — include the scheme (http:// or https://).\n`);
+          if (attempt >= 5) {
+            stdout.write(`  ${RED}✗${RESET} Could not parse the base URL after 5 attempts.\n`);
+            return null;
+          }
+        }
+      }
+      if (!parsedBaseUrl) return null;
+
+      const modelInput = await rl.question(`  ${BOLD}Model ID:${RESET} ${DIM}(e.g. llama3.2, gpt-4o-mini)${RESET} `);
+      openaiModelId = modelInput.trim() || 'llama3.2';
+      // Loopback hosts (Ollama, LM Studio, vLLM) usually run without auth.
+      // Public hosts (paid OpenAI, Groq, hosted LiteLLM) require a key — empty
+      // key + public URL produces a startup throw in createLLMClient. Detect
+      // the public case and require a key.
+      const isLoopback = ['localhost', '127.0.0.1', '0.0.0.0', '::1', 'host.docker.internal']
+        .includes(parsedBaseUrl.hostname);
+      const keyPromptSuffix = isLoopback
+        ? ` ${DIM}(blank for local endpoints without auth)${RESET}`
+        : ` ${DIM}(required for public hosts)${RESET}`;
+      const keyInput = await readSecret(`  ${BOLD}API Key:${RESET}${keyPromptSuffix}`, stdin.isTTY ? undefined : rl);
+      apiKey = keyInput.trim();
+      if (!apiKey && !isLoopback) {
+        stdout.write(`  ${YELLOW}⚠${RESET} Public host ${parsedBaseUrl.hostname} usually requires an API key. Set it now or via Settings → Keys later (engine will fail to start until one is configured).\n`);
+      }
+      stdout.write(`  ${GREEN}✓${RESET} ${apiBaseUrl} (${openaiModelId})\n`);
     }
 
     // ── Encryption (always on, no prompt) ────────────────────────
@@ -295,21 +330,25 @@ export async function runSetupWizard(rl?: ReadlineInterface): Promise<LynoxUserC
     const tier: ModelTier = 'sonnet';
 
     // ── Save ────────────────────────────────────────────────────
+    // Mistral + Custom both flow through the OpenAI-compatible adapter under
+    // the hood (`provider: 'openai'`). The user-facing labels stay distinct so
+    // a new user picking "Mistral" gets the Mistral-specific endpoint + model
+    // defaults without having to know the routing detail.
+    const persistedProvider = provider === 'anthropic' ? 'anthropic' : 'openai';
     const config: LynoxUserConfig = {
       default_tier: tier,
-      ...(provider !== 'anthropic' ? { provider } : {}),
+      ...(persistedProvider !== 'anthropic' ? { provider: persistedProvider } : {}),
       ...(apiKey ? { api_key: apiKey } : {}),
-      ...(gcpProjectId ? { gcp_project_id: gcpProjectId } : {}),
-      ...(gcpRegion ? { gcp_region: gcpRegion } : {}),
       ...(apiBaseUrl ? { api_base_url: apiBaseUrl } : {}),
+      ...(openaiModelId ? { openai_model_id: openaiModelId } : {}),
     };
     saveUserConfig(config);
     reloadConfig();
 
     // ── Summary ─────────────────────────────────────────────────
     const providerLabel = provider === 'anthropic' ? 'Claude (Anthropic)'
-      : provider === 'vertex' ? `Claude (Vertex AI, ${gcpRegion})`
-      : `Custom Proxy (${apiBaseUrl})`;
+      : provider === 'mistral' ? `Mistral (${openaiModelId ?? 'mistral-large-latest'})`
+      : `Custom OpenAI-compatible (${apiBaseUrl})`;
     stdout.write(`\n  ${GREEN}${BOLD}✓ Setup complete${RESET}\n\n`);
     stdout.write(`  Provider       ${GREEN}✓${RESET} ${providerLabel}\n`);
     stdout.write(`  Encryption     ${GREEN}✓${RESET}\n`);

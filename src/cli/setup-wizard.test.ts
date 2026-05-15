@@ -43,8 +43,8 @@ function mockReadline(answers: string[]): ReturnType<typeof createInterface> {
 }
 
 // New answer sequence (provider + credentials wizard):
-// 1. Provider selection (1=Anthropic, 2=Vertex, 3=Custom)
-// 2. API key (for Anthropic) or region/URL (for others)
+// 1. Provider selection (1=Anthropic, 2=Mistral, 3=Custom OpenAI-compatible)
+// 2. API key (for Anthropic) or model + URL + key (for the OpenAI-compatible paths)
 // (Encryption = always on, Accuracy = always sonnet — no prompts)
 
 function basicAnswers(apiKey: string): string[] {
@@ -152,35 +152,74 @@ describe('setup-wizard', () => {
     expect(config!.api_key).toBe('sk-ant-net-error-key-12345');
   });
 
-  it('saves vertex config with project and region', async () => {
+  it('saves mistral config with model + api_base_url + api_key', async () => {
     const rl = mockReadline([
-      '2',                   // select Vertex AI
-      'my-gcp-project',      // GCP Project ID
-      '1',                   // select europe-west4
+      '2',                            // select Mistral
+      '1',                            // select mistral-large-latest
+      'mst-secret-key-12345678',      // Mistral API key
     ]);
 
     const { runSetupWizard } = await import('./setup-wizard.js');
     const config = await runSetupWizard(rl);
 
     expect(config).not.toBeNull();
-    expect(config!.provider).toBe('vertex');
-    expect(config!.gcp_project_id).toBe('my-gcp-project');
-    expect(config!.gcp_region).toBe('europe-west4');
+    expect(config!.provider).toBe('openai');
+    expect(config!.api_base_url).toBe('https://api.mistral.ai/v1');
+    expect(config!.openai_model_id).toBe('mistral-large-latest');
+    expect(config!.api_key).toBe('mst-secret-key-12345678');
+  });
+
+  it('saves custom OpenAI-compatible config with user-supplied URL + model + key', async () => {
+    const rl = mockReadline([
+      '3',                              // select Custom OpenAI-compatible
+      'http://localhost:11434/v1',      // Base URL (Ollama default)
+      'llama3.2',                       // Model
+      '',                               // No API key (local endpoint)
+    ]);
+
+    const { runSetupWizard } = await import('./setup-wizard.js');
+    const config = await runSetupWizard(rl);
+
+    expect(config).not.toBeNull();
+    expect(config!.provider).toBe('openai');
+    expect(config!.api_base_url).toBe('http://localhost:11434/v1');
+    expect(config!.openai_model_id).toBe('llama3.2');
     expect(config!.api_key).toBeUndefined();
   });
 
-  it('saves custom provider config with URL', async () => {
+  it('custom branch retries on a malformed URL then accepts a valid one', async () => {
     const rl = mockReadline([
-      '3',                        // select Custom
-      'http://localhost:4000',    // proxy URL
+      '3',                              // select Custom OpenAI-compatible
+      'not-a-url',                      // rejected: parse failure
+      'http://127.0.0.1:1234/v1',       // accepted (LM Studio default)
+      'qwen2.5',                        // Model
+      '',                               // No key — loopback
     ]);
 
     const { runSetupWizard } = await import('./setup-wizard.js');
     const config = await runSetupWizard(rl);
 
     expect(config).not.toBeNull();
-    expect(config!.provider).toBe('custom');
-    expect(config!.api_base_url).toBe('http://localhost:4000');
+    expect(config!.api_base_url).toBe('http://127.0.0.1:1234/v1');
+    expect(config!.openai_model_id).toBe('qwen2.5');
+  });
+
+  it('custom branch accepts a public host even with empty key (warns but persists)', async () => {
+    // For public hosts the wizard warns that the engine will fail to start
+    // until a key is configured, but it still persists the partial config so
+    // the user can fix it via Settings → Keys without re-running the wizard.
+    const rl = mockReadline([
+      '3',                              // select Custom OpenAI-compatible
+      'https://api.groq.com/openai/v1', // public host
+      'llama-3.3-70b-versatile',        // Model
+      '',                               // No key (warning path)
+    ]);
+
+    const { runSetupWizard } = await import('./setup-wizard.js');
+    const config = await runSetupWizard(rl);
+
+    expect(config).not.toBeNull();
+    expect(config!.api_base_url).toBe('https://api.groq.com/openai/v1');
     expect(config!.api_key).toBeUndefined();
   });
 });
