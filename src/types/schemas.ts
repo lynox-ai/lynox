@@ -49,6 +49,9 @@ export const LynoxUserConfigSchema = z.object({
   google_client_secret: z.string().optional(),
   max_daily_cost_usd:   z.number().optional(),
   max_monthly_cost_usd: z.number().optional(),
+  // Preferred max context-window in tokens — UI offers 200k / 500k / 1M.
+  // Backend clamps the trim window to this when set; default = model native.
+  max_context_window_tokens: z.number().int().positive().optional(),
   max_http_requests_per_hour: z.number().optional(),
   max_http_requests_per_day:  z.number().optional(),
   max_mail_sends_per_hour:    z.number().optional(),
