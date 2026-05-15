@@ -2482,6 +2482,16 @@ export class LynoxHTTPApi {
       });
     });
 
+    // ── Privacy & Data — stop-gap delete-request ──
+    // PRD-SETTINGS-REFACTOR Phase 3 mailto stop-gap. Phase 6 replaces with
+    // synchronous DELETE /api/privacy/account. For now we acknowledge — the
+    // Web UI opens a mailto to privacy@lynox.ai and a human handles within
+    // GDPR Art. 17's 30-day window.
+    this.addStatic('user', 'POST /api/privacy/delete-request', async (_req, res) => {
+      process.stderr.write('[privacy] account deletion requested via UI stop-gap mailto\n');
+      jsonResponse(res, 200, { ok: true, channel: 'mailto', recipient: 'privacy@lynox.ai' });
+    });
+
     // ── LLM model catalog ──
     // Static + version-pinned — safe to cache aggressively on the client.
     this.addStatic('user', 'GET /api/llm/catalog', async (_req, res) => {
