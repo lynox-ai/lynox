@@ -27,6 +27,7 @@ export { default as AutomationHub } from './components/AutomationHub.svelte';
 export { default as VoiceSettings } from './components/VoiceSettings.svelte';
 export { default as PrivacyDataSettings } from './components/PrivacyDataSettings.svelte';
 export { default as SystemSettings } from './components/SystemSettings.svelte';
+export { default as LLMSettings } from './components/LLMSettings.svelte';
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
 export { default as ChangesetReview } from './components/ChangesetReview.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';
