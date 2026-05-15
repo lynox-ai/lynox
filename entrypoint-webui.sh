@@ -99,6 +99,36 @@ for dir in "$HOME/.lynox" "$HOME/.cache/huggingface"; do
   fi
 done
 
+# Detect ownership drift inside ~/.lynox/. The base image's default user used
+# to be `node` (uid 1000) before we switched to `lynox` (uid 1001). Volumes
+# persisted across that switch keep their old ownership, which makes file-
+# write tools (api_setup refine, artifact save, …) fail silently — the
+# directory is writable so the dir-check above passes, but individual file
+# rewrites inside it return EACCES. Surface the diagnosis so the operator
+# knows the one-liner fix instead of debugging "refine doesn't work".
+CURRENT_UID=$(id -u)
+CURRENT_USER=$(id -un)
+if [ -d "$HOME/.lynox" ]; then
+  # Limit to the first few mismatched paths so the log stays readable; the
+  # operator only needs to know *that* there are wrong-owned files, not the
+  # full list. Errors from `find` (e.g. unreadable subdirs) are silenced.
+  WRONG_OWNED=$(find "$HOME/.lynox" -mindepth 1 -not -uid "$CURRENT_UID" 2>/dev/null | head -3)
+  if [ -n "$WRONG_OWNED" ]; then
+    echo "" >&2
+    echo "  WARNING: files in $HOME/.lynox are owned by another user." >&2
+    echo "  The container runs as '$CURRENT_USER' (uid $CURRENT_UID), but some files were created" >&2
+    echo "  by an older image version under a different uid. Examples:" >&2
+    echo "$WRONG_OWNED" | sed 's/^/    /' >&2
+    echo "" >&2
+    echo "  Symptom: api_setup refine, artifact save, and other in-place rewrites fail with EACCES." >&2
+    echo "  Fix from the host (one-time):" >&2
+    echo "    docker compose stop lynox" >&2
+    echo "    chown -R \$(docker exec lynox id -u):\$(docker exec lynox id -g) <host-volume-path>" >&2
+    echo "    docker compose start lynox" >&2
+    echo "" >&2
+  fi
+fi
+
 # SvelteKit CSRF: ORIGIN must match the browser's Origin header on form POSTs.
 # Behind a reverse proxy / tunnel, the browser sends the public URL as Origin,
 # but the server sees localhost — causing a CSRF mismatch (403).
