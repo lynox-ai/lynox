@@ -690,7 +690,8 @@ describe('api_setup tool', () => {
     });
 
     it('returns a feature-flag error when api-setup-v2 is off (and emits no progress events)', async () => {
-      delete process.env.LYNOX_FEATURE_API_SETUP_V2;
+      // Default flipped to `true` for HN-launch — explicitly disable to exercise the gate.
+      process.env.LYNOX_FEATURE_API_SETUP_V2 = '0';
       const events: Array<{ type: string }> = [];
       const agent = createMockAgent(new ApiStore()) as unknown as {
         toolContext: { streamHandler: (e: Record<string, unknown>) => void };
