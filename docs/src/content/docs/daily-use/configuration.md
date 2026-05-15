@@ -23,20 +23,18 @@ Project configs cannot override security-sensitive fields like API keys or vault
 ```json
 {
   "provider": "anthropic",
-  "gcp_project_id": "my-project",
-  "gcp_region": "europe-west4",
-  "api_base_url": "http://localhost:4000"
+  "api_base_url": "https://api.mistral.ai/v1",
+  "openai_model_id": "mistral-large-latest"
 }
 ```
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `provider` | `anthropic`, `vertex`, `custom`, `openai` | `anthropic` |
-| `gcp_project_id` | GCP project ID (provider: `vertex`) | — |
-| `gcp_region` | Vertex region, e.g. `europe-west4` (provider: `vertex`) | — |
-| `api_base_url` | Custom proxy URL (provider: `custom` / `openai`) | — |
+| `provider` | `anthropic`, `openai` (Mistral / Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini long-context), `custom` (Anthropic-compat proxy via LiteLLM), `vertex` (legacy) | `anthropic` |
+| `api_base_url` | Endpoint for `provider: openai` or `custom` | — |
+| `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-large-latest`, `llama3.2`) | — |
 
-Only configure the fields relevant to your provider. See [LLM Providers](/setup/llm-providers/) for full setup guides.
+Only configure the fields relevant to your provider. See [LLM Providers](/setup/llm-providers/) for full setup guides per provider, including a "Legacy: Vertex AI" footnote for existing `provider: vertex` users.
 
 ### Model & Intelligence
 
@@ -193,25 +191,27 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 
 | Variable | Purpose |
 |----------|---------|
-| `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider) |
-| `ANTHROPIC_BASE_URL` | Custom API base URL (for LiteLLM/proxy) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic`, `vertex`, `custom`, `openai` |
+| `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider) — also reused as the generic key for `provider: openai` |
+| `ANTHROPIC_BASE_URL` | Endpoint for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy), `vertex` (legacy) |
 
-### Google Vertex AI (BYOK)
+### OpenAI-Compatible
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-large-latest`, `llama3.2`, `gpt-4o`, `llama-3.3-70b-versatile` |
+| `ANTHROPIC_API_KEY` | API key for the provider (reused env var; leave blank for local Ollama / LM Studio without auth) |
+| `ANTHROPIC_BASE_URL` | Provider base URL — see [LLM Providers](/setup/llm-providers/) for the value per backend |
+
+### Legacy: Google Vertex AI
+
+`provider: vertex` is no longer offered by the installer; the env vars below remain wired for existing `config.json` setups that still point at Vertex. New installs should use Anthropic direct or the OpenAI-compatible path above.
 
 | Variable | Purpose |
 |----------|---------|
 | `GCP_PROJECT_ID` | GCP project ID |
 | `CLOUD_ML_REGION` | Vertex region, e.g. `europe-west4`, `us-east5` |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCP service-account JSON |
-
-### OpenAI-Compatible
-
-| Variable | Purpose |
-|----------|---------|
-| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-large-latest`, `gemini-2.5-flash` |
-| `ANTHROPIC_API_KEY` | API key for the provider (reused env var) |
-| `ANTHROPIC_BASE_URL` | Provider base URL, e.g. `https://api.mistral.ai/v1` |
 
 ### Web Search
 

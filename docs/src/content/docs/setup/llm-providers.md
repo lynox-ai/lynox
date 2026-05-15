@@ -13,34 +13,28 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 
 ## At a Glance
 
-| | **Claude (Anthropic)** | **Claude (Google Vertex)** | **OpenAI-Compatible** | **Custom Proxy** |
-|---|---|---|---|---|
-| **Status** | Stable | Stable | Stable | Experimental |
-| **Setup** | API key | GCP project + service account | API key + base URL | Proxy URL |
-| **AI quality** | Claude | Claude (same models) | Model-dependent | Model-dependent |
-| | | | | |
-| **Features** | | | | |
-| Chat + Streaming | ✅ | ✅ | ✅ | ✅ |
-| Tool Calling | ✅ | ✅ | ✅ Native | ✅ via LiteLLM |
-| Extended Thinking | ✅ | ✅ | ❌ Auto-disabled | ❌ Auto-disabled |
-| Prompt Caching | ✅ 1h TTL | ✅ 5min TTL | ❌ | ❌ |
-| Web Search (built-in) | ✅ | ❌ | ❌ | ❌ |
-| Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ | ✅ |
-| MCP Server-Side | ✅ | ❌ | ❌ | ❌ |
-| | | | | |
-| **Privacy** | | | | |
-| Data residency | US | Your GCP region (EU available) | Provider-dependent | 🏠 Your server |
-| DPA available | ✅ Auto | ✅ GCP | Provider-dependent | N/A |
-| Training on data | ❌ Never | ❌ Never | Provider-dependent | ❌ Never |
-| | | | | |
-| **Cost** | | | | |
-| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | Similar to Anthropic (region surcharge may apply) | From $0.50/$1.50 (Mistral) | Free (your hardware) |
-| Infrastructure | — | — | — | GPU server ~€150/mo |
-| Typical monthly | $30–150 | $30–150 | $10–50 | $150 fixed |
-
-:::note[BYOK only]
-Google Vertex AI is a **Bring-Your-Own-Key** option for GCP-native organizations. lynox's own managed plans handle provider selection automatically — contact us at [hello@lynox.ai](mailto:hello@lynox.ai) for details.
-:::
+| | **Claude (Anthropic)** | **OpenAI-Compatible Direct** | **Custom Proxy via LiteLLM** |
+|---|---|---|---|
+| **Setup** | API key | API key + base URL | Proxy URL |
+| **AI quality** | Claude | Model-dependent | Model-dependent |
+| **Recommended for** | Default choice | Mistral / Ollama / LM Studio / OpenAI / Groq / vLLM | Multi-provider routing |
+| | | | |
+| **Features** | | | |
+| Chat + Streaming | ✅ | ✅ | ✅ |
+| Tool Calling | ✅ | ✅ Native | ✅ via LiteLLM |
+| Extended Thinking | ✅ | ❌ Auto-disabled | ❌ Auto-disabled |
+| Prompt Caching | ✅ 1h TTL | ❌ | ❌ |
+| Web Search (built-in) | ✅ | ❌ | ❌ |
+| Web Search (SearXNG / Tavily) | ✅ | ✅ | ✅ |
+| MCP Server-Side | ✅ | ❌ | ❌ |
+| | | | |
+| **Privacy** | | | |
+| Data residency | US | Provider-dependent (Mistral = EU) | 🏠 Your server |
+| Training on data | ❌ Never | Provider-dependent | ❌ Never |
+| | | | |
+| **Cost** | | | |
+| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | From $0.50/$1.50 (Mistral); free (local Ollama / LM Studio / vLLM) | Free (your hardware) |
+| Typical monthly | $30–150 | $0–50 (Mistral) or $0 (local) | $150 fixed (GPU) |
 
 ## Claude (Anthropic) — Default
 
@@ -63,40 +57,25 @@ Direct connection to the Anthropic API. Simplest setup, recommended for most use
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-## Claude (Google Vertex AI) — BYOK
+## OpenAI-Compatible Direct — Recommended for Non-Claude
 
-Same Claude models, hosted in your own GCP project. Useful if you already have a GCP footprint, need to keep LLM billing inside GCP, or have a regional residency requirement that a Vertex EU region (e.g. `europe-west4`) covers.
+`provider: 'openai'` is the path for everything that speaks the OpenAI Chat Completions API. No proxy needed — lynox translates natively. This covers hosted clouds (Mistral, OpenAI, Groq, Gemini) AND local model servers (Ollama, LM Studio, vLLM) under the same code path. Pick the snippet that matches your endpoint.
+
+The config shape is always the same:
 
 ```json
 {
-  "provider": "vertex",
-  "gcp_project_id": "your-gcp-project",
-  "gcp_region": "europe-west4"
+  "provider": "openai",
+  "api_base_url": "<endpoint-url>",
+  "openai_model_id": "<model-id>"
 }
 ```
 
-**Setup:**
-1. Enable the **Vertex AI API** in your GCP project
-2. Enable Claude models in **Vertex AI → Model Garden → Anthropic** (request access if first time)
-3. Create a service account with `roles/aiplatform.user`, generate a JSON key
-4. Install the Vertex SDK peer-dep:
-   ```bash
-   pnpm add @anthropic-ai/vertex-sdk
-   ```
+The wizard (npx installer or in-product **Settings → Provider**) prefills the right values when you pick Mistral or Custom; the manual snippets below are for `~/.lynox/config.json` editors or environment-driven deploys.
 
-**Environment:**
-```bash
-LYNOX_LLM_PROVIDER=vertex
-GCP_PROJECT_ID=your-gcp-project
-CLOUD_ML_REGION=europe-west4
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
-```
+### Mistral (France, EU)
 
-**Trade-offs vs. Anthropic Direct:** Prompt cache TTL is 5 minutes on Vertex vs. 1 hour on Anthropic, which materially affects costs on cache-heavy workflows. A region surcharge may apply depending on your GCP region. Web Search (built-in) and MCP server-side are not available through the Vertex path.
-
-## OpenAI-Compatible Providers — Mistral & Gemini
-
-Connect directly to any OpenAI-compatible LLM API. No proxy needed — lynox translates natively.
+lynox's official Claude fallback. ~6× cheaper than Claude on cached workloads; near-Claude tool-calling quality; French company (no US CLOUD Act exposure).
 
 ```json
 {
@@ -106,30 +85,111 @@ Connect directly to any OpenAI-compatible LLM API. No proxy needed — lynox tra
 }
 ```
 
-**Environment:**
 ```bash
 LYNOX_LLM_PROVIDER=openai
 ANTHROPIC_BASE_URL=https://api.mistral.ai/v1
-ANTHROPIC_API_KEY=your-mistral-key
+ANTHROPIC_API_KEY=<your-mistral-key>          # var name is intentionally generic
 OPENAI_MODEL_ID=mistral-large-latest
 ```
 
-### Supported Providers
+- **Key**: console.mistral.ai → API Keys
+- **Models**: `mistral-large-latest` (flagship), `mistral-medium-latest`, `codestral-latest` (code-focused)
+- **Pricing**: $0.50 / $1.50 per MTok input/output (Large)
+- **Tool calling**: tested near-Claude quality on the lynox agent-loop bench (internal); the most polished non-Claude option today
 
-| Provider | Base URL | Model ID | Role | Pricing |
-|----------|----------|----------|------|---------|
-| **Mistral Large** (France) | `https://api.mistral.ai/v1` | `mistral-large-latest` | Fallback + background + bulk | $0.50/$1.50 per MTok |
-| **Gemini 2.5 Flash** (Google) | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` | Long-context tasks, agentic workflows | ~$0.30/$2.50 per MTok |
+### Ollama (local, no auth)
 
-Tool calling quality validated against lynox's agent loop: Mistral 97%, Gemini 80% (fails on complex aggregations).
+The default local-model server. lynox's installer presets Ollama as the **Custom** option, so a fresh laptop with Ollama already running gets a working setup in two `<enter>` presses.
 
-:::tip[Mistral — Main Fallback]
-Mistral Large is lynox's official Claude fallback. It scored 97% on tool calling tests — near Claude quality at ~6x lower cost. No CLOUD Act exposure (French company).
-:::
+```json
+{
+  "provider": "openai",
+  "api_base_url": "http://localhost:11434/v1",
+  "openai_model_id": "llama3.2"
+}
+```
 
-:::caution[Gemini — Long-Context Only]
-Use Gemini only for tasks that need its 1M context window (deep research, large document processing, inbox triage). Gemini failed on structured aggregation queries in testing — use Mistral for anything else. Google AI Studio endpoint has no regional data residency guarantee — for strict EU sovereignty, use Mistral only.
-:::
+```bash
+# 1. Install Ollama (https://ollama.com) and pull a tool-calling model
+ollama pull llama3.2          # 3B — minimum, decent
+ollama pull qwen2.5:14b       # 14B — good balance for 12GB+ VRAM
+ollama pull qwen2.5:72b       # 72B — best local quality, needs 48GB VRAM
+
+# 2. Configure lynox (api_key blank — Ollama doesn't auth by default)
+LYNOX_LLM_PROVIDER=openai
+ANTHROPIC_BASE_URL=http://localhost:11434/v1
+OPENAI_MODEL_ID=llama3.2
+```
+
+Tested with Ollama 0.4+; tool-calling quality varies sharply by model size — Qwen 2.5 14B is the practical minimum for the lynox agent loop.
+
+### LM Studio (local, no auth)
+
+Same shape as Ollama; LM Studio's local server speaks the OpenAI API. Useful if you prefer LM Studio's GUI for model management.
+
+```json
+{
+  "provider": "openai",
+  "api_base_url": "http://localhost:1234/v1",
+  "openai_model_id": "<id-shown-in-lm-studio>"
+}
+```
+
+The model ID is whatever's loaded in the LM Studio Server tab (e.g. `qwen2.5-7b-instruct`). Start the LM Studio server before pointing lynox at it.
+
+### OpenAI (api.openai.com)
+
+```json
+{
+  "provider": "openai",
+  "api_base_url": "https://api.openai.com/v1",
+  "openai_model_id": "gpt-4o"
+}
+```
+
+- **Key**: platform.openai.com → API keys
+- **Models tested**: `gpt-4o`, `gpt-4o-mini`. Current reasoning models (`o1`, `o3`) support function calling but add latency — `gpt-4o` is the simpler default for tool-using agents.
+
+### Groq (hosted, fast inference)
+
+Hosts open-source models with very low latency (LPU-backed).
+
+```json
+{
+  "provider": "openai",
+  "api_base_url": "https://api.groq.com/openai/v1",
+  "openai_model_id": "llama-3.3-70b-versatile"
+}
+```
+
+- **Key**: console.groq.com → API Keys
+- **Models tested**: `llama-3.3-70b-versatile` (best tool-calling on Groq), `qwen-2.5-72b`. Function calling has been GA on Groq for the Llama 3.3 and Qwen families since late 2024; per-model support is listed in Groq's API docs.
+
+### Gemini 2.5 Flash — Long-Context Only
+
+```json
+{
+  "provider": "openai",
+  "api_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+  "openai_model_id": "gemini-2.5-flash"
+}
+```
+
+Use Gemini only for tasks that need its 1M-token context (deep research, large document processing, inbox triage). Gemini failed on structured-aggregation queries in our agent-loop tests — use Mistral for anything else. Google AI Studio endpoint has no regional data-residency guarantee; for strict EU sovereignty, use Mistral only.
+
+### vLLM (self-hosted GPU)
+
+Production-grade open-source inference server for your own GPU box. Default port is 8000.
+
+```json
+{
+  "provider": "openai",
+  "api_base_url": "http://your-gpu-host:8000/v1",
+  "openai_model_id": "<the-model-vllm-is-serving>"
+}
+```
+
+Run vLLM with `--served-model-name <id>` so the model ID matches your config. Tool calling requires a vLLM build that ships function-calling (0.6+; current releases are 0.10+, all of which support it) plus a model trained for tool use (Qwen 2.5, Llama 3.1+ Instruct, etc.).
 
 ### Model Profiles (Multi-Provider)
 
@@ -161,9 +221,9 @@ Use named profiles to run different models for different tasks. Claude handles y
 - **Background tasks** (`worker_profile`): Mistral or other — runs cron jobs, watch tasks, scheduled reports
 - **Spawn agents** (`profile` in spawn spec): Sub-agents can use any profile for delegated tasks
 
-## Custom Proxy — Experimental
+## Custom Proxy via LiteLLM — Optional Routing Layer
 
-Route requests through your own Anthropic-compatible proxy (e.g. LiteLLM).
+If you already run [LiteLLM](https://github.com/BerriAI/litellm) for cost tracking / fallback chains / per-team quotas, point lynox at its proxy port. Direct OpenAI-compatible (section above) is the recommended path for new installs — LiteLLM only earns its keep when you need its policy / multi-provider routing features.
 
 ```json
 {
@@ -172,40 +232,36 @@ Route requests through your own Anthropic-compatible proxy (e.g. LiteLLM).
 }
 ```
 
-**Environment:**
 ```bash
 LYNOX_LLM_PROVIDER=custom
 ANTHROPIC_BASE_URL=http://localhost:4000
 ```
 
-### LiteLLM + Ollama (Local Qwen)
+The `custom` provider expects an **Anthropic-compatible** proxy (LiteLLM exposes one). The proxy translates between Anthropic Messages API and whatever upstream you point it at.
 
-Run a fully local LLM — no data leaves your machine at all.
+### Example: LiteLLM in front of Ollama (Qwen 2.5 14B)
 
-**1. Install:**
 ```bash
-pip install litellm[proxy]
+pip install 'litellm[proxy]'
 ollama pull qwen2.5:14b
-```
-
-**2. Start LiteLLM proxy:**
-```bash
 litellm --model ollama/qwen2.5:14b --port 4000
 ```
 
-**3. Configure lynox:**
-```json
-{
-  "provider": "custom",
-  "api_base_url": "http://localhost:4000"
-}
+### Example: LiteLLM in front of an EU cloud (Scaleway / Nebius / Mistral)
+
+LiteLLM is useful when you want a single endpoint for several EU providers + automatic failover. Otherwise, a direct `provider: 'openai'` config (above) is simpler.
+
+```bash
+# Scaleway (Paris) — 18+ open-source models
+OPENAI_API_KEY=your-scw-key litellm --model openai/llama-3.3-70b-versatile \
+  --api_base https://api.scaleway.ai/v1 --port 4000
+
+# Nebius (Finland / Netherlands) — 60+ open-source models
+OPENAI_API_KEY=your-nebius-key litellm --model openai/Qwen3-235B-A22B-Instruct-2507 \
+  --api_base https://api.studio.nebius.com/v1 --port 4000
 ```
 
-LiteLLM translates between Anthropic API format and OpenAI-compatible format, so lynox works without code changes.
-
-lynox detects the provider and gracefully disables unsupported features — no errors, no configuration needed. See the comparison table above for details.
-
-### Recommended Local Models
+### Recommended local models for self-hosted GPU
 
 | Model | VRAM | Tool Calling | Quality |
 |-------|------|-------------|---------|
@@ -214,46 +270,8 @@ lynox detects the provider and gracefully disables unsupported features — no e
 | **Llama 3.3 70B** | 48 GB | Good | Strong reasoning |
 | **Qwen 2.5 14B** | 12 GB | Decent | Minimum for tool calling |
 
-### EU Cloud Providers via LiteLLM
-
-Use LiteLLM to route requests to EU-hosted LLM providers. Your data stays in Europe — no CLOUD Act exposure, no transatlantic transfers.
-
-**1. Start LiteLLM with your EU provider:**
-
-**Mistral (France)** — French company, own models, native tool calling. No US parent company.
-```bash
-MISTRAL_API_KEY=your-key litellm --model mistral/mistral-large-latest --port 4000
-```
-Models: `mistral-large-latest` (flagship), `mistral-medium-latest`, `mistral-small-latest` (budget).
-
-**Scaleway (France)** — 18+ open-source models hosted in Paris. Very affordable.
-```bash
-OPENAI_API_KEY=your-scw-key litellm --model openai/llama-3.3-70b-versatile \
-  --api_base https://api.scaleway.ai/v1 --port 4000
-```
-Models: Llama 3.3 70B, Qwen 3, DeepSeek R1, Mistral variants.
-
-**Nebius (Finland)** — 60+ models, Finland/Netherlands infrastructure, 99.9% SLA.
-```bash
-OPENAI_API_KEY=your-nebius-key litellm --model openai/Qwen3-235B-A22B-Instruct-2507 \
-  --api_base https://api.studio.nebius.com/v1 --port 4000
-```
-Models: Qwen 3, DeepSeek V3/R1, Llama 3.3, GLM-4.5.
-
-**2. Configure lynox:**
-```json
-{
-  "provider": "custom",
-  "api_base_url": "http://localhost:4000"
-}
-```
-
-:::tip[EU Data Sovereignty]
-Mistral, Scaleway, and Nebius are EU-based companies (or EU-hosted infrastructure) and are not subject to the US CLOUD Act. For regulated industries (healthcare, legal, finance), this can be a decisive compliance advantage over US-headquartered model providers.
-:::
-
-:::caution
-EU cloud providers host open-source models (Mistral, Llama, Qwen, DeepSeek). These are capable but not on the same level as Claude for complex reasoning and tool calling. Test with your specific use case before committing.
+:::caution[EU clouds host open-source models]
+Mistral, Scaleway, and Nebius host open-source models (Llama, Qwen, DeepSeek). These are capable but not on the same level as Claude for complex reasoning and tool calling. Test with your specific use case before committing.
 :::
 
 ## Hosting lynox + LLM Together
@@ -262,10 +280,26 @@ For maximum data control, run lynox on a server close to your LLM provider — a
 
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
-| **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no CLOUD Act |
+| **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no US CLOUD Act exposure |
 | **Fully local** | Ollama on your server | Docker on your server | Nothing leaves your network |
 
 lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/setup/docker/) for container configuration.
+
+## Legacy: Vertex AI
+
+`provider: 'vertex'` is no longer offered by the installer or the in-product wizard but is still wired in the engine for existing self-hosters with `~/.lynox/config.json` already pointing at Vertex. Anthropic's direct API + the `provider: 'openai'` paths above cover the same ground with cleaner setup; new installs should not pick Vertex.
+
+If you still need it, the config shape is:
+
+```json
+{
+  "provider": "vertex",
+  "gcp_project_id": "your-gcp-project",
+  "gcp_region": "europe-west4"
+}
+```
+
+Requires `pnpm add @anthropic-ai/vertex-sdk` as an additional peer dependency, plus `GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account JSON with `roles/aiplatform.user`. Prompt-cache TTL is 5 minutes on Vertex versus 1 hour on Anthropic direct, which makes a measurable cost difference on cache-heavy workflows.
 
 ## Changing Providers
 
