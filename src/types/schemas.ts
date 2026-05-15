@@ -18,6 +18,10 @@ export const LynoxUserConfigSchema = z.object({
   api_key:              z.string().optional(),
   api_base_url:         z.string().optional(),
   provider:             LLMProviderSchema.optional(),
+  // User-disabled tools (Settings → Integrations → Tool Toggles).
+  // Bounded array of bounded strings so malformed manual edits cannot
+  // crash the session.ts `excludeTools` spread (non-array → not iterable).
+  disabled_tools:       z.array(z.string().min(1).max(128)).max(200).optional(),
   // Saved Custom-provider endpoints (LiteLLM-friendly UI bookmarks).
   // `base_url` is capped at 2KB to prevent runaway URLs from inflating the
   // config payload. Array fails gracefully via `.catch([])`: a single

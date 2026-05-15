@@ -214,6 +214,14 @@ export async function spawnViaAgent(
     tools = stripHumanInTheLoopTools(tools);
   }
 
+  // Honour user-disabled tools (Settings → Integrations → Tool Toggles).
+  // Pipeline steps were previously bypassing this gate — see #401 follow-up.
+  const disabledTools = config.disabled_tools ?? [];
+  if (disabledTools.length > 0) {
+    const disabled = new Set(disabledTools);
+    tools = tools.filter(t => !disabled.has(t.definition.name));
+  }
+
   // Resolve thinking from step hint, fallback to adaptive
   const thinking: ThinkingMode = step.thinking === 'enabled'
     ? { type: 'enabled', budget_tokens: 10_000 }
@@ -231,6 +239,7 @@ export async function spawnViaAgent(
     thinking,
     effort: step.effort ?? config.effort_level ?? 'medium',
     maxIterations: 10,
+    excludeTools: disabledTools,
     costGuard: { maxBudgetUSD: model.includes('opus') ? 10 : 2, maxIterations: 10 },
     apiKey: config.api_key,
     apiBaseURL: config.api_base_url,
@@ -316,6 +325,12 @@ export async function spawnInline(
   if (!parentPrompt?.parentPromptUser) {
     tools = stripHumanInTheLoopTools(tools);
   }
+  // Honour user-disabled tools (Settings → Integrations → Tool Toggles).
+  const disabledToolsInline = config.disabled_tools ?? [];
+  if (disabledToolsInline.length > 0) {
+    const disabledSet = new Set(disabledToolsInline);
+    tools = tools.filter(t => !disabledSet.has(t.definition.name));
+  }
   // Resolve thinking: step hint > adaptive default. Haiku 4.5 has no
   // extended-thinking support — force disabled regardless of step hint to
   // avoid Anthropic 400 "model does not support" errors.
@@ -342,6 +357,7 @@ export async function spawnInline(
     tools,
     thinking,
     effort,
+    excludeTools: disabledToolsInline,
     apiKey: config.api_key,
     apiBaseURL: config.api_base_url,
     provider: config.provider,
