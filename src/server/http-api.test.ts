@@ -336,8 +336,25 @@ describe('LynoxHTTPApi', () => {
   // engine rejected anything older than 7 days, so users between day 7 and
   // day 30 saw a healthy engine + 401 on every /api/* call.
   describe('session-cookie auth (Web UI shared)', () => {
-    const SECOND = 1;
     const DAY = 24 * 60 * 60;
+    // Boundary margins use a few seconds of slack so a second-boundary
+    // tick between mint and verify cannot flip 30-day-cap assertions.
+    const SLACK_S = 5;
+
+    /** Mint a legacy 2-part token `<ts>.<hmac>` (pre-nonce format). */
+    function mintLegacySessionToken(secret: string, issuedAtSec: number): string {
+      const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+      const payload = `${issuedAtSec}`;
+      const hmac = createHmac('sha256', key).update(payload).digest('hex');
+      return `${payload}.${hmac}`;
+    }
+
+    /** Extract the timestamp embedded in a fresh token (newest format). */
+    function tsFromToken(token: string): number {
+      const parts = token.split('.');
+      // 3-part `<nonce>.<ts>.<hmac>`, ts is the middle element.
+      return parseInt(parts[parts.length - 2] ?? '0', 10);
+    }
 
     it('accepts a freshly-minted lynox_session cookie', async () => {
       const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
@@ -347,8 +364,17 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    it('accepts the legacy 2-part `<ts>.<hmac>` cookie format', async () => {
+      // Back-compat for users whose cookie predates the nonce-bearing format.
+      const cookie = mintLegacySessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${cookie}` },
+      });
+      expect(res.status).toBe(200);
+    });
+
     it('accepts a cookie minted 29 days ago (under the 30-day cap)', async () => {
-      const issuedAt = Math.floor(Date.now() / 1000) - (29 * DAY);
+      const issuedAt = Math.floor(Date.now() / 1000) - (29 * DAY) + SLACK_S;
       const cookie = mintSessionToken(TEST_SECRET, issuedAt);
       const res = await fetch(`${baseUrl}/api/secrets`, {
         headers: { cookie: `lynox_session=${cookie}` },
@@ -359,7 +385,7 @@ describe('LynoxHTTPApi', () => {
     it('rejects a cookie older than 30 days', async () => {
       // Boundary lock: change SESSION_MAX_AGE_S in http-api.ts → this fails.
       // Keep the value aligned with packages/web-ui/src/lib/server/auth.ts.
-      const issuedAt = Math.floor(Date.now() / 1000) - (30 * DAY) - SECOND;
+      const issuedAt = Math.floor(Date.now() / 1000) - (30 * DAY) - SLACK_S;
       const cookie = mintSessionToken(TEST_SECRET, issuedAt);
       const res = await fetch(`${baseUrl}/api/secrets`, {
         headers: { cookie: `lynox_session=${cookie}` },
@@ -377,6 +403,21 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(401);
     });
 
+    it('rejects malformed cookie shapes', async () => {
+      // Each shape exercises a distinct branch in _verifySessionCookie's
+      // structural checks (parts-length, NaN ts, empty value).
+      const cases = [
+        'lynox_session=',                        // empty value
+        'lynox_session=nodelimiter',             // length === 1
+        'lynox_session=a.b.c.d',                 // length > 3
+        'lynox_session=not_a_number.deadbeef',   // NaN timestamp
+      ];
+      for (const cookie of cases) {
+        const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie } });
+        expect(res.status, `expected 401 for cookie=${JSON.stringify(cookie)}`).toBe(401);
+      }
+    });
+
     it('emits a Set-Cookie refresh when the cookie is older than 1 day', async () => {
       const issuedAt = Math.floor(Date.now() / 1000) - (2 * DAY);
       const cookie = mintSessionToken(TEST_SECRET, issuedAt);
@@ -386,7 +427,11 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const refresh = extractFirstCookiePair(res, 'lynox_session');
       expect(refresh, 'engine must roll the cookie when it is > 1 day old').toBeTruthy();
-      // The refreshed token must validate (we feed it back as a fresh request).
+
+      // The refreshed token must (a) embed a fresh, more recent timestamp
+      // and (b) verify on a follow-up request.
+      const refreshedToken = refresh!.slice('lynox_session='.length);
+      expect(tsFromToken(refreshedToken)).toBeGreaterThan(issuedAt);
       const echo = await fetch(`${baseUrl}/api/secrets`, {
         headers: { cookie: refresh! },
       });
@@ -401,6 +446,76 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const refresh = extractFirstCookiePair(res, 'lynox_session');
       expect(refresh).toBeNull();
+    });
+
+    it('omits Secure on the rolling refresh over plain HTTP', async () => {
+      // Test server binds plain HTTP, so socket.encrypted is false. Even
+      // though LYNOX_TRUST_PROXY=true is set in beforeAll, we send no
+      // x-forwarded-proto, so the Secure attribute must not be emitted —
+      // a browser would otherwise drop the cookie and our refresh would
+      // silently null-op.
+      const issuedAt = Math.floor(Date.now() / 1000) - (2 * DAY);
+      const cookie = mintSessionToken(TEST_SECRET, issuedAt);
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${cookie}` },
+      });
+      const raw = res.headers.get('set-cookie');
+      expect(raw).toBeTruthy();
+      expect(raw!.toLowerCase()).not.toContain('secure');
+    });
+
+    it('adds Secure when behind a trusted proxy with x-forwarded-proto=https', async () => {
+      const issuedAt = Math.floor(Date.now() / 1000) - (2 * DAY);
+      const cookie = mintSessionToken(TEST_SECRET, issuedAt);
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: {
+          cookie: `lynox_session=${cookie}`,
+          'x-forwarded-proto': 'https',
+        },
+      });
+      const raw = res.headers.get('set-cookie');
+      expect(raw).toBeTruthy();
+      expect(raw!.toLowerCase()).toContain('secure');
+    });
+
+    it('ignores x-forwarded-proto when LYNOX_TRUST_PROXY is disabled', async () => {
+      // Lock the security fix: an untrusted-proxy deployment must NOT
+      // honor a client-supplied X-Forwarded-Proto, or attackers could
+      // strip the Secure attribute by sending `http` and steal cookies
+      // over a downgraded MITM channel.
+      vi.stubEnv('LYNOX_TRUST_PROXY', 'false');
+      try {
+        // Spin up a sibling instance with the untrusted-proxy posture so
+        // we don't disturb the suite-shared `api`/`baseUrl`.
+        const altApi = new LynoxHTTPApi();
+        await altApi.init();
+        const altPort = TEST_PORT + 1;
+        await altApi.start(altPort);
+        try {
+          const altBase = `http://127.0.0.1:${altPort}`;
+          // Wait for the alt server to be ready.
+          for (let i = 0; i < 20; i++) {
+            try { const r = await fetch(`${altBase}/health`); if (r.ok) break; } catch { /* not ready */ }
+            await new Promise(r => setTimeout(r, 50));
+          }
+
+          const issuedAt = Math.floor(Date.now() / 1000) - (2 * DAY);
+          const cookie = mintSessionToken(TEST_SECRET, issuedAt);
+          const res = await fetch(`${altBase}/api/secrets`, {
+            headers: {
+              cookie: `lynox_session=${cookie}`,
+              'x-forwarded-proto': 'https',
+            },
+          });
+          const raw = res.headers.get('set-cookie');
+          expect(raw).toBeTruthy();
+          expect(raw!.toLowerCase()).not.toContain('secure');
+        } finally {
+          await altApi.shutdown();
+        }
+      } finally {
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+      }
     });
   });
 

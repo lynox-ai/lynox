@@ -14,19 +14,20 @@
 // don't show two banners.
 
 const DISMISS_COOLDOWN_MS = 30_000;
-// While chat.svelte.ts's handleSessionExpired() is auto-redirecting to
-// /login, suppressing the orange banner for a few seconds keeps the user
-// from seeing two stacked auth notices for the same 401 (red chatError +
-// orange banner). The redirect happens at 1.8s so 5s covers the gap with
-// margin for slow devices.
-const SUPPRESS_WINDOW_MS = 5_000;
 
 let _sessionExpired = $state(false);
 // Soft-dismiss timestamp. When the user clicks "Später" the banner
 // hides for 30s. Without this an in-flight 401 from a parallel poller
 // would re-flip the flag instantly and the user feels gaslit.
 let _dismissedUntil = 0;
-let _suppressUntil = 0;
+// Set by handleSessionExpired (chat.svelte.ts) when it's already taking
+// over the auth-failure UX (red chatError + auto-redirect to /login).
+// A boolean — not a wall-clock window — because iOS Safari throttles
+// setTimeout in backgrounded tabs, so a 5s "suppress for N seconds"
+// could expire before the redirect actually fires and the orange banner
+// would re-appear. The flag is implicitly cleared by the navigation
+// itself (module re-evaluates on /login load).
+let _redirectPending = false;
 
 export function isSessionExpired(): boolean {
 	return _sessionExpired;
@@ -34,7 +35,7 @@ export function isSessionExpired(): boolean {
 
 export function markSessionExpired(): void {
 	if (Date.now() < _dismissedUntil) return;
-	if (Date.now() < _suppressUntil) return;
+	if (_redirectPending) return;
 	_sessionExpired = true;
 }
 
@@ -46,10 +47,10 @@ export function clearSessionExpired(): void {
 /**
  * Called by callers (currently chat.svelte.ts:handleSessionExpired) that
  * are already taking over the auth-failure UX — showing their own
- * dedicated message + auto-redirecting to /login. We suppress the orange
- * banner during their window so the user sees one notice, not two.
+ * dedicated message + auto-redirecting to /login. Suppresses the orange
+ * banner so the user sees one notice for the same 401, not two.
  */
 export function suppressSessionExpiredBanner(): void {
-	_suppressUntil = Date.now() + SUPPRESS_WINDOW_MS;
+	_redirectPending = true;
 	_sessionExpired = false;
 }

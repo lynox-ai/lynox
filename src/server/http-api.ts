@@ -424,12 +424,8 @@ export class LynoxHTTPApi {
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
 
-  /**
-   * Validate the `lynox_session` cookie.
-   * Returns `null` on any failure (missing, malformed, expired, bad HMAC).
-   * On success returns the cookie's unix-second timestamp so the caller
-   * can decide whether to roll a fresh one via _maybeRefreshSessionCookie.
-   */
+  /** Returns the cookie's issued-at unix-sec on success, null on any failure.
+   *  Caller uses the timestamp to decide whether to roll a fresh cookie. */
   private _verifySessionCookie(req: IncomingMessage, secret: string): number | null {
     const cookieHeader = req.headers['cookie'];
     if (!cookieHeader) return null;
@@ -463,20 +459,39 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * If the just-verified cookie is older than SESSION_REFRESH_AFTER_S, mint
-   * a fresh one and queue it as Set-Cookie. Cookie format matches the
-   * Web UI's `createSessionToken`: `<nonce>.<ts>.<hmac>`.
+   * Append a Set-Cookie value, preserving any cookies already queued on
+   * this response. Direct `res.setHeader('Set-Cookie', x)` would clobber
+   * an earlier rolling-refresh or OAuth cookie minted in the same request.
+   */
+  private static _appendSetCookie(res: ServerResponse, value: string): void {
+    const existing = res.getHeader('Set-Cookie');
+    if (Array.isArray(existing)) {
+      res.setHeader('Set-Cookie', [...existing, value]);
+    } else if (typeof existing === 'string') {
+      res.setHeader('Set-Cookie', [existing, value]);
+    } else {
+      res.setHeader('Set-Cookie', value);
+    }
+  }
+
+  /**
+   * Mint a fresh `lynox_session` cookie if the just-verified one has
+   * crossed SESSION_REFRESH_AFTER_S. Format matches the Web UI's
+   * `createSessionToken`: `<nonce>.<ts>.<hmac>`.
    *
-   * Secure flag mirrors how the Web UI infers HTTPS (login/+page.server.ts
-   * uses `url.protocol === 'https:'`). Behind a TLS-terminating proxy the
-   * socket is plain TCP, so we trust `x-forwarded-proto` from the proxy
-   * AND check `socket.encrypted` for direct TLS termination.
+   * `trustProxy` mirrors the gate used for `x-forwarded-for` (managed
+   * deployments behind Traefik) — without it, an unprotected self-hosted
+   * instance could be tricked by a client-supplied `X-Forwarded-Proto:
+   * http` header to drop the `Secure` attribute, enabling MITM cookie
+   * theft. When the proxy isn't trusted we still detect TLS via
+   * `socket.encrypted` for direct-termination deployments.
    */
   private _maybeRefreshSessionCookie(
     req: IncomingMessage,
     res: ServerResponse,
     secret: string,
     cookieIssuedAt: number,
+    trustProxy: boolean,
   ): void {
     const ageSec = Math.floor(Date.now() / 1000) - cookieIssuedAt;
     if (ageSec < LynoxHTTPApi.SESSION_REFRESH_AFTER_S) return;
@@ -488,9 +503,14 @@ export class LynoxHTTPApi {
     const hmac = createHmac('sha256', key).update(payload).digest('hex');
     const token = `${payload}.${hmac}`;
 
-    const forwardedProto = req.headers['x-forwarded-proto'];
-    const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
-    const isTls = proto === 'https' || ('encrypted' in req.socket && req.socket.encrypted === true);
+    let isTls = false;
+    if (req.socket && 'encrypted' in req.socket && req.socket.encrypted === true) {
+      isTls = true;
+    } else if (trustProxy) {
+      const forwardedProto = req.headers['x-forwarded-proto'];
+      const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+      if (proto === 'https') isTls = true;
+    }
 
     const attrs = [
       `${LynoxHTTPApi.SESSION_COOKIE_NAME}=${token}`,
@@ -501,16 +521,7 @@ export class LynoxHTTPApi {
     ];
     if (isTls) attrs.push('Secure');
 
-    // Coalesce with any pre-existing Set-Cookie (e.g. OAuth state) the
-    // handler may have queued earlier in the request.
-    const existing = res.getHeader('Set-Cookie');
-    if (Array.isArray(existing)) {
-      res.setHeader('Set-Cookie', [...existing, attrs.join('; ')]);
-    } else if (typeof existing === 'string') {
-      res.setHeader('Set-Cookie', [existing, attrs.join('; ')]);
-    } else {
-      res.setHeader('Set-Cookie', attrs.join('; '));
-    }
+    LynoxHTTPApi._appendSetCookie(res, attrs.join('; '));
   }
 
   // ── Google OAuth state cookie (CSRF guard for /api/google/callback) ───
@@ -644,7 +655,7 @@ export class LynoxHTTPApi {
       }
 
       try {
-        await this._handleRequest(req, res, secret, clientIp);
+        await this._handleRequest(req, res, secret, clientIp, trustProxy);
       } catch (err: unknown) {
         if (!res.headersSent) {
           errorResponse(res, 500, 'Internal server error');
@@ -743,6 +754,7 @@ export class LynoxHTTPApi {
     res: ServerResponse,
     secret: string | undefined,
     clientIp: string = 'unknown',
+    trustProxy: boolean = false,
   ): Promise<void> {
     const method = req.method ?? 'GET';
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -884,7 +896,7 @@ export class LynoxHTTPApi {
         if (cookieIssuedAt !== null) {
           // Session cookie auth (same-origin Web UI requests)
           authScope = adminSecret ? 'user' : 'admin';
-          this._maybeRefreshSessionCookie(req, res, secret, cookieIssuedAt);
+          this._maybeRefreshSessionCookie(req, res, secret, cookieIssuedAt, trustProxy);
         } else {
           errorResponse(res, 401, 'Unauthorized');
           return;
@@ -3124,7 +3136,7 @@ export class LynoxHTTPApi {
             errorResponse(res, 500, 'LYNOX_HTTP_SECRET must be set for redirect-mode OAuth');
             return;
           }
-          res.setHeader('Set-Cookie', this._buildOAuthStateSetCookie(state, httpSecret));
+          LynoxHTTPApi._appendSetCookie(res, this._buildOAuthStateSetCookie(state, httpSecret));
           jsonResponse(res, 200, { authUrl });
           return;
         } catch (err: unknown) {
@@ -3204,7 +3216,7 @@ export class LynoxHTTPApi {
         const origin = process.env['ORIGIN'] ?? '';
         const redirectUri = `${origin}/api/google/callback`;
         await google.exchangeRedirectCode(code, redirectUri);
-        res.setHeader('Set-Cookie', this._clearOAuthStateCookie());
+        LynoxHTTPApi._appendSetCookie(res, this._clearOAuthStateCookie());
         sendSuccessRedirect();
       } catch (err: unknown) {
         const msg = (err instanceof Error ? err.message : String(err))
