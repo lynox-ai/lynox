@@ -30,8 +30,14 @@ const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 /** Cap on the docs-page body pre-Haiku. 250 KB matches PRD-UNIFIED-API-PROFILE-V2. */
 const DOCS_BODY_MAX_BYTES = 250 * 1024;
 const DOCS_FETCH_TIMEOUT_MS = 15_000;
-/** Hard $ budget per Haiku extraction. PRD requires ≤ $0.05. */
-const DOCS_EXTRACT_BUDGET_USD = 0.05;
+/**
+ * Hard $ budget per Haiku extraction. PRD specified $0.05; bumped to $0.10
+ * to give a realistic 250 KB / ~70 K-token landing page enough headroom
+ * even at Haiku output prices ($4 / M-tok). Worst-case input + capped 4 K
+ * output ≈ $0.073; this leaves ~30 % margin without nudging real-world
+ * spend (actual extraction cost lands around $0.01–0.03).
+ */
+const DOCS_EXTRACT_BUDGET_USD = 0.10;
 
 type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine';
 

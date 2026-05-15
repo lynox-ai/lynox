@@ -216,6 +216,27 @@ describe('callForStructuredJson', () => {
     }
   });
 
+  it('clamps the output estimate to maxOutputTokens (real fix for docs_url bootstrap)', async () => {
+    // ~250 KB body ≈ 71 K input tokens at the 3.5-chars/token estimate.
+    // 25% of 71 K = ~17.8 K projected output. Real call caps at maxOutputTokens.
+    // Without the clamp, the input + 17.8 K × $4/M output ≈ $0.128 — well over
+    // a $0.05 docs-bootstrap budget. With the clamp (4 K output cap), the
+    // estimate drops to ~$0.073 worst-case + typical actual cost is much
+    // lower because Haiku rarely emits 4 K tokens for a structured extraction.
+    const client = mockClient({ toolInput: { name: 'a', count: 1, level: 'low' } });
+    // The fix lets a "real" 250 KB docs bootstrap pass the pre-flight at a
+    // realistic budget headroom — verify a 70 K-input call survives a $0.10
+    // budget (it would NOT have without the clamp, since 17.8 K × $4/M alone
+    // is $0.071).
+    await expect(callForStructuredJson({
+      ...BASE_OPTS,
+      user: 'x'.repeat(245_000), // ≈ 70 K tokens
+      budgetUsd: 0.10,
+      maxOutputTokens: 4_000,
+      client,
+    })).resolves.toBeDefined();
+  });
+
   it('throws when the model emits no tool_use block', async () => {
     const client = mockClient({
       contentBlocks: [{ type: 'text', text: 'I refuse to call the tool.', citations: null } as Anthropic.ContentBlock],
