@@ -277,9 +277,15 @@ export class Engine {
       }
     }
 
-    // Initialize Bugsink error reporting (opt-in — requires DSN env var or config field)
+    // Initialize Bugsink error reporting. Gated by:
+    //   - bugsink_enabled config flag (UI toggle; default unset = legacy
+    //     DSN-only behaviour, opt-in on self-host)
+    //   - LYNOX_BUGSINK_DSN env var OR config.bugsink_dsn (sink endpoint)
+    // Managed deployments set bugsink_enabled=true via .env so the DPIA-
+    // mandated always-on telemetry path holds.
     const errorDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
-    if (errorDsn) {
+    const bugsinkEnabled = this.userConfig.bugsink_enabled !== false;  // default true when DSN exists
+    if (errorDsn && bugsinkEnabled) {
       try {
         const { initErrorReporting, installGlobalHandlers } = await import('./error-reporting.js');
         const errorReportingActive = await initErrorReporting(errorDsn);
