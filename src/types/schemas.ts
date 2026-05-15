@@ -18,6 +18,12 @@ export const LynoxUserConfigSchema = z.object({
   api_key:              z.string().optional(),
   api_base_url:         z.string().optional(),
   provider:             LLMProviderSchema.optional(),
+  // Saved Custom-provider endpoints (LiteLLM-friendly UI bookmarks).
+  custom_endpoints:     z.array(z.object({
+    id:       z.string().min(1),
+    name:     z.string().min(1).max(64),
+    base_url: z.string().url(),
+  })).optional(),
   gcp_project_id:       z.string().optional(),
   gcp_region:           z.string().optional(),
   openai_model_id:      z.string().optional(),

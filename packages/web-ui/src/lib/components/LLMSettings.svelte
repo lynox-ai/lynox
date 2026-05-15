@@ -35,6 +35,8 @@
 		notes?: string;
 	}
 
+	interface CustomEndpoint { id: string; name: string; base_url: string }
+
 	interface UserConfig {
 		provider?: LLMProvider;
 		api_base_url?: string;
@@ -42,6 +44,7 @@
 		gcp_region?: string;
 		default_tier?: string;
 		openai_model_id?: string;
+		custom_endpoints?: CustomEndpoint[];
 	}
 
 	interface Locks {
@@ -188,6 +191,9 @@
 			if (activeProvider === 'openai' && config.openai_model_id) {
 				update.openai_model_id = config.openai_model_id;
 			}
+			if (activeProvider === 'custom') {
+				update.custom_endpoints = config.custom_endpoints ?? [];
+			}
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
@@ -264,6 +270,39 @@
 						bind:value={config.api_base_url}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 				</label>
+
+				{#if activeProvider === 'custom'}
+					<!-- Saved custom endpoints (LiteLLM-friendly bookmarks).
+					     Pure UI sugar — engine still reads api_base_url. -->
+					<div class="space-y-2 pl-3 border-l-2 border-border">
+						<p class="text-xs font-medium text-text-muted">{t('llm.endpoints_heading')}</p>
+						{#if (config.custom_endpoints ?? []).length === 0}
+							<p class="text-xs italic text-text-muted">{t('llm.endpoints_empty')}</p>
+						{:else}
+							<ul class="space-y-1">
+								{#each config.custom_endpoints ?? [] as ep (ep.id)}
+									<li class="flex items-center gap-2 text-xs">
+										<span class="font-mono">{ep.name}</span>
+										<span class="font-mono text-text-muted truncate flex-1">{ep.base_url}</span>
+										<button type="button" class="text-accent-text underline" disabled={!loaded || providerLocked}
+											onclick={() => { config.api_base_url = ep.base_url; }}>{t('llm.endpoints_use')}</button>
+										<button type="button" class="text-danger underline" disabled={!loaded || providerLocked}
+											onclick={() => { config.custom_endpoints = (config.custom_endpoints ?? []).filter((e) => e.id !== ep.id); }}>✕</button>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+						<button type="button" class="text-xs text-accent-text underline" disabled={!loaded || providerLocked || !config.api_base_url}
+							onclick={() => {
+								const url = config.api_base_url ?? '';
+								if (!url) return;
+								const name = (typeof prompt === 'function' ? prompt(t('llm.endpoints_save_prompt'), '') : null) ?? '';
+								if (!name.trim()) return;
+								const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto) ? crypto.randomUUID() : `ep-${Date.now()}`;
+								config.custom_endpoints = [...(config.custom_endpoints ?? []), { id, name: name.trim(), base_url: url }];
+							}}>{t('llm.endpoints_save_current')}</button>
+					</div>
+				{/if}
 			{/if}
 
 			{#if activeProviderEntry.requires_region}

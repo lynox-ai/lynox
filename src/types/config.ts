@@ -152,6 +152,12 @@ export interface LynoxUserConfig {
   api_base_url?: string | undefined;
   /** LLM provider: 'anthropic' (default), 'vertex' (GCP), 'custom' (proxy), or 'openai' (Mistral/Gemini). */
   provider?: LLMProvider | undefined;
+  /**
+   * Saved Custom-provider endpoints (LiteLLM-friendly). Each entry is a
+   * bookmark — clicking "Use" in the UI swaps `api_base_url` to its url.
+   * Pure UI state; the engine still reads `api_base_url` as before.
+   */
+  custom_endpoints?: ReadonlyArray<{ id: string; name: string; base_url: string }> | undefined;
   /** GCP project ID for Vertex AI provider. */
   gcp_project_id?: string | undefined;
   /** GCP region for Vertex AI (e.g. 'europe-west4', 'us-east5'). */

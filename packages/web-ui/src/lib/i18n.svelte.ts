@@ -233,6 +233,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.confirm_body_2':     { de: 'Nur fortfahren, wenn du dieser Domain vollständig vertraust. SSRF-Schutz blockiert interne Adressen, aber ein bösartiger öffentlicher Endpoint könnte deinen Key abgreifen.', en: 'Only proceed if you fully trust this domain. SSRF guard blocks internal addresses, but a malicious public endpoint could still capture your key.' },
 	'llm.confirm_cancel':     { de: 'Abbrechen',                                                                 en: 'Cancel' },
 	'llm.confirm_proceed':    { de: 'Verstanden, fortfahren',                                                    en: 'Understood, proceed' },
+	'llm.endpoints_heading':       { de: 'Gespeicherte Endpoints',                                                en: 'Saved endpoints' },
+	'llm.endpoints_empty':         { de: 'Keine gespeicherten Endpoints. Speichere den aktuellen, um schnell zwischen LiteLLM-Setups zu wechseln.', en: 'No saved endpoints. Save the current one to switch quickly between LiteLLM setups.' },
+	'llm.endpoints_use':           { de: 'Verwenden',                                                             en: 'Use' },
+	'llm.endpoints_save_current':  { de: '+ Aktuellen Endpoint speichern',                                        en: '+ Save current endpoint' },
+	'llm.endpoints_save_prompt':   { de: 'Name für diesen Endpoint (z.B. "Production LiteLLM"):',                en: 'Name for this endpoint (e.g. "Production LiteLLM"):' },
 
 	// Workflows
 	'workflow.title': { de: 'Workflows', en: 'Workflows' },
