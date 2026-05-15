@@ -281,10 +281,13 @@
 						{:else}
 							<ul class="space-y-1">
 								{#each config.custom_endpoints ?? [] as ep (ep.id)}
-									<li class="flex items-center gap-2 text-xs">
+									{@const isActive = ep.base_url === config.api_base_url}
+									<li class="flex items-center gap-2 text-xs px-1 py-0.5 rounded {isActive ? 'bg-accent/10' : ''}">
 										<span class="font-mono">{ep.name}</span>
+										{#if isActive}<span class="text-[10px] uppercase tracking-wider text-accent-text">{t('llm.endpoints_active')}</span>{/if}
 										<span class="font-mono text-text-muted truncate flex-1">{ep.base_url}</span>
-										<button type="button" class="text-accent-text underline" disabled={!loaded || providerLocked}
+										<button type="button" class="text-accent-text underline disabled:opacity-50 disabled:no-underline"
+											disabled={!loaded || providerLocked || isActive}
 											onclick={() => { config.api_base_url = ep.base_url; }}>{t('llm.endpoints_use')}</button>
 										<button type="button" class="text-danger underline" disabled={!loaded || providerLocked}
 											onclick={() => { config.custom_endpoints = (config.custom_endpoints ?? []).filter((e) => e.id !== ep.id); }}>✕</button>
@@ -298,7 +301,7 @@
 								if (!url) return;
 								const name = (typeof prompt === 'function' ? prompt(t('llm.endpoints_save_prompt'), '') : null) ?? '';
 								if (!name.trim()) return;
-								const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto) ? crypto.randomUUID() : `ep-${Date.now()}`;
+								const id = crypto.randomUUID();
 								config.custom_endpoints = [...(config.custom_endpoints ?? []), { id, name: name.trim(), base_url: url }];
 							}}>{t('llm.endpoints_save_current')}</button>
 					</div>
