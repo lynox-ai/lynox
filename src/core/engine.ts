@@ -518,6 +518,13 @@ export class Engine {
     try {
       this._dataStore = new DataStore();
       this._toolContext.dataStore = this._dataStore;
+      // Drop empty CRM-shaped collections (`contacts` / `deals` / `interactions`
+      // …) that older agent sessions left behind. They duplicate the dedicated
+      // CRM tab in the UI and confuse users. Non-empty ones are preserved.
+      const droppedOverlaps = this._dataStore.dropEmptyCrmOverlaps();
+      if (droppedOverlaps.length > 0) {
+        process.stderr.write(`[lynox] DataStore: dropped ${String(droppedOverlaps.length)} empty CRM-overlap collection(s): ${droppedOverlaps.join(', ')}\n`);
+      }
       const collections = this._dataStore.listCollections();
       if (collections.length > 0) {
         this.registerDataStoreTools();

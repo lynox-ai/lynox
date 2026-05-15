@@ -17,6 +17,20 @@ import type {
 
 const COLLECTION_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
 const RESERVED_NAMES = new Set(['meta', 'collections', 'schema_version', 'sqlite_master']);
+
+/**
+ * Collection names that conceptually overlap with the dedicated CRM subsystem
+ * (people/companies/deals/interactions live in `crm.ts` with a typed schema).
+ * The agent has historically created empty DataStore collections under these
+ * names — they then show up in the UI alongside the real CRM tab and confuse
+ * the user. Empty collections matching this set are dropped on engine startup
+ * (see `dropEmptyCrmOverlaps`), and the web UI filters out any that survive a
+ * mid-session re-creation (belt-and-suspenders). Non-empty collections are
+ * preserved — a power user may have a legitimate "contacts" table.
+ */
+export const CRM_OVERLAP_NAMES: ReadonlySet<string> = new Set([
+  'contacts', 'companies', 'people', 'deals', 'interactions',
+]);
 const MAX_COLLECTIONS = 100;
 const MAX_COLUMNS = 50;
 const MAX_RECORDS = 100_000;
@@ -512,6 +526,23 @@ export class DataStore {
 
     transaction();
     return true;
+  }
+
+  /**
+   * One-shot at engine startup: drop empty CRM-shaped collections (see
+   * `CRM_OVERLAP_NAMES`) that the agent left behind in older sessions.
+   * Returns the dropped names so callers can log. Non-empty collections are
+   * preserved — they may hold legitimate user data.
+   */
+  dropEmptyCrmOverlaps(): string[] {
+    const dropped: string[] = [];
+    const rows = this.db.prepare('SELECT name, record_count FROM ds_collections').all() as Array<{ name: string; record_count: number }>;
+    for (const r of rows) {
+      if (CRM_OVERLAP_NAMES.has(r.name) && r.record_count === 0) {
+        if (this.dropCollection(r.name)) dropped.push(r.name);
+      }
+    }
+    return dropped;
   }
 
   close(): void {

@@ -4080,7 +4080,12 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'GET /api/datastore/collections', async (_req, res) => {
       const ds = engine.getDataStore();
       if (!ds) { jsonResponse(res, 200, { collections: [] }); return; }
-      const collections = ds.listCollections();
+      const { CRM_OVERLAP_NAMES } = await import('../core/data-store.js');
+      // Belt-and-suspenders: the engine drops empty CRM-overlap collections
+      // at startup, but if the agent re-creates one mid-session it must not
+      // resurface in the UI alongside the dedicated Contacts tab. Hide only
+      // when empty — a non-empty user-owned table is legitimate.
+      const collections = ds.listCollections().filter(c => !(CRM_OVERLAP_NAMES.has(c.name) && c.recordCount === 0));
       jsonResponse(res, 200, { collections });
     });
 
