@@ -106,7 +106,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'cost_limits.context.extended':      { de: 'Erweitert — 500k Tokens',                                                         en: 'Extended — 500k tokens' },
 	'cost_limits.context.extended_hint': { de: 'Mehr Historie pro Antwort. ~2.5× teurer.',                                        en: 'More history per response. ~2.5× cost.' },
 	'cost_limits.context.maximum':       { de: 'Maximum — 1M Tokens',                                                             en: 'Maximum — 1M tokens' },
-	'cost_limits.context.maximum_hint':  { de: 'Volle Modell-Kapazität. ~5× teurer, +30 % Latenz. Nur für sehr lange Threads.',   en: 'Full model capacity. ~5× cost, +30% latency. Only for very long threads.' }, /* rebase-marker */
+	'cost_limits.context.maximum_hint':  { de: 'Volle Modell-Kapazität. ~5× teurer, +30 % Latenz. Nur für sehr lange Threads.',   en: 'Full model capacity. ~5× cost, +30% latency. Only for very long threads.' },
 	// Voice settings page (PRD-SETTINGS-REFACTOR Phase 3)
 	'voice.title':         { de: 'Sprache',                                                          en: 'Voice' },
 	'voice.subtitle':      { de: 'Spracheingabe (STT) und -ausgabe (TTS) konfigurieren.',            en: 'Configure speech input (STT) and output (TTS).' },
