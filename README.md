@@ -2,12 +2,13 @@
 
 [![npm version](https://img.shields.io/npm/v/@lynox-ai/core)](https://www.npmjs.com/package/@lynox-ai/core)
 [![CI](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml/badge.svg)](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-4600%2B-brightgreen)](#testing-and-security)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
 **Run your business. Not your tools.**
 
-One system that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Source-available (ELv2), self-hosted, no vendor lock-in.
+One open-source agent that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Bring your own LLM (Anthropic, Mistral, or any OpenAI-compatible endpoint — Ollama, LM Studio, LiteLLM, Groq). Source-available (ELv2), self-hosted, no vendor lock-in.
 
 > [!IMPORTANT]
 > **lynox is a CLI, not a library.** Run `npx @lynox-ai/core`, not `npm install @lynox-ai/core`. The npm page sidebar suggests `npm i` by default, but that only installs lynox as a dependency without running anything.
@@ -26,7 +27,7 @@ One system that learns your business — handles CRM, workflows, research, and m
 npx @lynox-ai/core
 ```
 
-You need Node.js 22+, Docker, and an [Anthropic API key](https://console.anthropic.com/) (or Vertex AI / a custom proxy). The interactive installer asks for the key, generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000).
+You need Node.js 22+, Docker, and an LLM credential. The interactive installer walks you through provider choice (**Anthropic**, **Mistral**, or **Custom** — any OpenAI-compatible endpoint, including Ollama / LM Studio / LiteLLM / Groq / vLLM), generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000).
 
 Prefer to edit `.env` yourself before the first run? Jump to [manual Docker](#docker) below.
 
@@ -39,30 +40,32 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 ```
 ┌──────────────────────────────────────┐
 │              You                     │
-│  Web UI · Telegram · CLI · MCP      │
+│  Web UI · Telegram · CLI · MCP       │
 └──────────────┬───────────────────────┘
                │
 ┌──────────────▼───────────────────────┐
 │            lynox                     │
-│                                      │
-│  Understands your business context   │
-│  Remembers what it learned           │
-│  Works autonomously in background    │
-└──────────────┬───────────────────────┘
-               │
-┌──────────────▼───────────────────────┐
-│          Your Data                   │
-│   Gmail · Sheets · Drive · Calendar  │
-│   Files · APIs · Databases           │
-└──────────────────────────────────────┘
+│  Knowledge Graph · Workflow Capture  │
+│  Entity Resolution · Background      │
+│  Worker · Activity Visibility        │
+└──────┬───────────────────────┬───────┘
+       │                       │
+┌──────▼─────────┐  ┌──────────▼────────┐
+│   Your LLM     │  │     Your Data     │
+│  Anthropic ·   │  │ Gmail · Sheets ·  │
+│  Mistral ·     │  │ Drive · Calendar  │
+│  Custom (any   │  │ Files · APIs ·    │
+│  OpenAI API)   │  │ Databases         │
+└────────────────┘  └───────────────────┘
 ```
 
-**BYOK** — You provide your Anthropic API key. lynox calls the API directly. No proxy, no middleman, no data collection.
+**BYOK** — You provide your LLM credential (Anthropic / Mistral / OpenAI-compatible). When self-hosted, lynox calls the API directly: no proxy, no middleman, no data collection. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
 
 ## Key capabilities
 
 - **Knowledge Graph** — Learns entities, relationships, and contradictions across your business. 100 languages, fully local.
 - **Web UI** — Primary interface. Chat, knowledge browser, run history, settings, integrations. Installable as PWA. QR code login for instant phone access.
+- **Activity Bar** — Every tool call streams live with its current sub-phase (e.g. "Reading API docs..." → "Extracting auth..."). No mysterious 30-second waits.
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
 - **Telegram Bot** — Mobile notifications and quick tasks. Voice, photos, files, follow-up suggestions.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
@@ -70,6 +73,15 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 - **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it.
 - **4 Specialized Roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets.
 - **Security** — AES-256 encrypted vault, permission guard, input/output scanning, SSRF protection.
+
+## What lynox is NOT good at yet
+
+Honest about today's gaps, so you can decide if it's the right fit:
+
+- **Voice in / out is functional, not polished.** Whisper STT + browser TTS work, but iOS Safari has Web Audio quirks (use Chrome on iOS for now). Hands-free workflows still need keyboard fallback.
+- **Native calendar integration is on the roadmap.** CalDAV reads + ICS imports are spec'd (Phase 0 spike done) but not yet shipped; until then, calendar tasks flow through Google Workspace OAuth.
+- **No multi-user / team accounts.** lynox is single-user today. One vault, one workflow library, one knowledge graph per instance. Multi-tenant teams happen on the Managed tier; self-hosted is solo.
+- **The LLM is not deterministic.** Like every agent built on Claude / Mistral, output quality varies run-to-run. lynox mitigates with the knowledge graph + workflow templates, but if you need 100%-reproducible automation, a script beats lynox.
 
 ## Install
 
@@ -116,10 +128,17 @@ This starts an in-process engine, runs the task, and exits.
 
 Create a bot via [@BotFather](https://t.me/BotFather), add the token in Web UI → Settings → Integrations.
 
+## Testing and security
 
-## Documentation
+- 4600+ tests across the engine, tools, and orchestrator. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
+- Layered defenses: input-guard, output-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — private-IP block at DNS-resolve time (pre-fetch), URL-validated on each redirect hop.
+- Responsible disclosure → [`SECURITY.md`](SECURITY.md).
 
-Architecture, tools, integrations, security, and deployment details are in [`docs/`](docs/).
+## Who builds this
+
+Built solo by Rafael Burlet in Zürich. lynox runs in production for three SMBs (one is mine). The project sustains through the [Managed hosting tier](https://lynox.ai/managed) for users who'd rather not run their own Docker host — self-hosted is and stays free.
+
+If something breaks, an [issue](https://github.com/lynox-ai/lynox/issues) lands on my desk directly; I usually reply within a few working days.
 
 ## Community
 
@@ -139,16 +158,11 @@ This software is provided **"as is"**, without warranty of any kind. By using ly
 
 ## License
 
-[Elastic License 2.0](LICENSE) (ELv2) — free to use, modify, and self-host.
+**Free for any use including production and customer-facing**, except offering lynox itself as a competing hosted service. Source is open and forkable under the [Elastic License 2.0](LICENSE) — the same license as Elasticsearch and Kibana.
 
-**What you can do:**
-- Read, modify, and redistribute the source code
-- Self-host lynox for your business, your clients, or your team
-- Build commercial products and services on top of lynox
+**What you can do:** read, modify, and redistribute the source · self-host for your business, your clients, or your team · build commercial products and services on top of lynox.
 
-**The one restriction:** You may not offer lynox as a hosted service to third parties.
-
-This protects the project's sustainability while keeping the code fully open. The same approach is used by Elasticsearch and CockroachDB. Questions? [Open an issue](https://github.com/lynox-ai/lynox/issues).
+**The one restriction:** you may not resell lynox as a managed hosting service to third parties (the Managed tier exists to fund the project; if you want to host it for someone else, [talk to me](https://github.com/lynox-ai/lynox/issues)).
 
 ---
 
