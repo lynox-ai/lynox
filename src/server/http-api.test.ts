@@ -946,6 +946,114 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('GET returns capability + locks shape on self-host (PRD-SETTINGS-REFACTOR Principle 6)', async () => {
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const caps = body['capabilities'] as Record<string, unknown>;
+      // Resource probes
+      expect(typeof caps['mistral_available']).toBe('boolean');
+      expect(typeof caps['voice_stt_available']).toBe('boolean');
+      expect(typeof caps['voice_tts_available']).toBe('boolean');
+      expect(typeof caps['whisper_local_available']).toBe('boolean');
+      // Self-host: all can_set_* true, hard_limits is full numeric shape
+      expect(caps['can_set_provider']).toBe(true);
+      expect(caps['can_set_limits']).toBe(true);
+      expect(caps['can_set_context_window']).toBe(true);
+      expect(caps['can_set_thinking_effort']).toBe(true);
+      expect(caps['can_set_custom_endpoints']).toBe(true);
+      expect(caps['can_export_data']).toBe(true);
+      expect(caps['can_delete_account']).toBe(true);
+      // Dark gates: false until PRD-MCP / PRD-CAL backends land
+      expect(caps['has_mcp_support']).toBe(false);
+      expect(caps['has_calendar']).toBe(false);
+      // Self-host hard_limits = full payload from getHardLimits(); assert all 8 keys
+      const hl = caps['hard_limits'] as Record<string, unknown>;
+      expect(Object.keys(hl).sort()).toEqual([
+        'default_context_window_tokens',
+        'max_per_spawn_cents',
+        'per_spawn_cents',
+        'spawn_max_agents_per_call',
+        'spawn_max_depth',
+        'spawn_max_turns',
+        'tool_http_per_day',
+        'tool_http_per_hour',
+      ]);
+      expect(hl['per_spawn_cents']).toBe(500);
+      expect(hl['max_per_spawn_cents']).toBe(5000);
+      expect(hl['spawn_max_turns']).toBe(50);
+      expect(hl['spawn_max_agents_per_call']).toBe(10);
+      expect(hl['spawn_max_depth']).toBe(5);
+      expect(hl['tool_http_per_hour']).toBe(200);
+      expect(hl['tool_http_per_day']).toBe(2000);
+      expect(hl['default_context_window_tokens']).toBe(200_000);
+      // Self-host: locks is empty
+      expect(body['locks']).toEqual({});
+    });
+
+    it('GET treats LYNOX_MANAGED_MODE=starter (BYOK) as non-managed for capability gating', async () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        // managed tier surfaced for UI tier-awareness, but BYOK gets full editability
+        expect(body['managed']).toBe('starter');
+        const caps = body['capabilities'] as Record<string, unknown>;
+        expect(caps['can_set_provider']).toBe(true);
+        expect(caps['can_set_limits']).toBe(true);
+        expect(caps['can_set_custom_endpoints']).toBe(true);
+        // Hard limits exposed as numbers (BYOK owner has full transparency)
+        const hl = caps['hard_limits'] as Record<string, unknown>;
+        expect(hl['per_spawn_cents']).toBe(500);
+        expect(hl['tier']).toBeUndefined();
+        // No locks
+        expect(body['locks']).toEqual({});
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
+    it.each(['managed', 'managed_pro', 'eu'])(
+      'GET on managed tier %s abstracts hard_limits and populates locks',
+      async (mode) => {
+        vi.stubEnv('LYNOX_MANAGED_MODE', mode);
+        try {
+          const res = await jsonFetch('/api/config');
+          expect(res.status).toBe(200);
+          const body = await res.json() as Record<string, unknown>;
+          const caps = body['capabilities'] as Record<string, unknown>;
+          // can_set_* gates flip false for managed-restricted fields
+          expect(caps['can_set_provider']).toBe(false);
+          expect(caps['can_set_limits']).toBe(false);
+          expect(caps['can_set_custom_endpoints']).toBe(false);
+          // But context-window and thinking-effort stay editable everywhere
+          expect(caps['can_set_context_window']).toBe(true);
+          expect(caps['can_set_thinking_effort']).toBe(true);
+          // hard_limits returns opaque tier-tag, never raw numbers
+          const hl = caps['hard_limits'] as Record<string, unknown>;
+          expect(hl['tier']).toBe('managed');
+          expect(hl['contact_for_quotas']).toBe(true);
+          expect(hl['per_spawn_cents']).toBeUndefined();
+          expect(hl['tool_http_per_hour']).toBeUndefined();
+          // locks populated with reason + contact CTA on limits
+          const locks = body['locks'] as Record<string, Record<string, unknown>>;
+          expect(locks['provider']?.['reason']).toBe('managed-tier');
+          expect(locks['limits']?.['reason']).toBe('managed-tier');
+          expect((locks['limits']?.['contact_cta'] as Record<string, unknown>)?.['href']).toContain('mailto:support@lynox.ai');
+          expect(locks['custom_endpoints']?.['reason']).toBe('managed-tier');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+          vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+        }
+      },
+    );
+
     it('PUT in managed mode allows no-op locked-field re-send (regression v1.3.5)', async () => {
       // Web UI re-sends every field on every save. A no-op write of `default_tier`
       // (same value as effective config) must NOT block unrelated updates like

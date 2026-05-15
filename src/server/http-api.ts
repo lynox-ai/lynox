@@ -23,7 +23,7 @@ import { getActiveProvider } from '../core/llm-client.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
-import type { StreamEvent, PromptMeta } from '../types/index.js';
+import type { StreamEvent, PromptMeta, CapabilityLocks } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 
@@ -1996,18 +1996,56 @@ export class LynoxHTTPApi {
         }
       }
       // Expose managed tier so the Web UI can adapt its settings UI ('starter' = BYOK, 'eu' = Managed Mistral EU)
-      if (process.env['LYNOX_MANAGED_MODE']) {
-        redacted['managed'] = process.env['LYNOX_MANAGED_MODE'];
+      const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
+      const isManagedTier = tier === 'managed' || tier === 'managed_pro' || tier === 'eu';
+      if (tier) {
+        redacted['managed'] = tier;
       }
       // Capability probe: what this instance *can* do, independent of tier.
       // Drives capability-based gating in the Web UI so working features stop
-      // being hidden by tier checks (see prd/settings-compliance-overhaul.md).
+      // being hidden by tier checks (see PRD-SETTINGS-REFACTOR Principle 6).
       const secretStore = engine.getSecretStore();
       const secretNames = secretStore ? new Set(secretStore.listNames()) : new Set<string>();
       const mistralAvailable = secretNames.has('MISTRAL_API_KEY') || !!process.env['MISTRAL_API_KEY'];
+      const [transcribeMod, speakMod, limitsMod] = await Promise.all([
+        import('../core/transcribe.js'),
+        import('../core/speak.js'),
+        import('../core/limits.js'),
+      ]);
       redacted['capabilities'] = {
         mistral_available: mistralAvailable,
+        voice_stt_available: transcribeMod.hasTranscribeProvider(),
+        voice_tts_available: speakMod.hasSpeakProvider(),
+        whisper_local_available: transcribeMod.whisperCppProvider.isAvailable,
+        // Capability gates — drive UI visibility instead of tier checks
+        can_set_provider: !isManagedTier,
+        can_set_limits: !isManagedTier,
+        can_set_context_window: true,
+        can_set_thinking_effort: true,
+        can_set_custom_endpoints: !isManagedTier,
+        can_export_data: true,
+        can_delete_account: true,
+        // Dark gates — flip to true when PRD-MCP / PRD-CAL backends land
+        has_mcp_support: false,
+        has_calendar: false,
+        // Hard-limits exposure: full numbers for self-host/BYOK,
+        // opaque tier-tag for managed (prevents DoS-knob disclosure).
+        hard_limits: isManagedTier
+          ? { tier: 'managed', contact_for_quotas: true }
+          : limitsMod.getHardLimits(),
       };
+      // Lock metadata for every `can_set_X = false` decision. UI renders a
+      // human-readable reason instead of an unexplained disabled input.
+      const locks: CapabilityLocks = {};
+      if (isManagedTier) {
+        locks.provider = { reason: 'managed-tier' };
+        locks.limits = {
+          reason: 'managed-tier',
+          contact_cta: { href: 'mailto:support@lynox.ai?subject=Quota%20adjustment', label: 'Contact support' },
+        };
+        locks.custom_endpoints = { reason: 'managed-tier' };
+      }
+      redacted['locks'] = locks;
       jsonResponse(res, 200, redacted);
     });
 
