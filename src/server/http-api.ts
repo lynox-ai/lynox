@@ -186,6 +186,15 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // telemetry even when the CP supplies the Bugsink DSN. `bugsink_dsn` itself
   // stays locked (CP-managed endpoint), only the on/off toggle is user.
   'bugsink_enabled',
+  // Sprint Settings-Refactor user-preference surfaces — none of these are
+  // billing- or security-tier fields, so locking them out on managed left
+  // the corresponding UI controls (CostLimits radios, LiteLLM bookmarks,
+  // Tool-Toggles checkboxes) silently 403-ing on managed tenants while
+  // appearing interactive. Each field can only reduce surface or shape the
+  // user's own session — never widen blast radius.
+  'max_context_window_tokens',  // CostLimits radios (200k / 500k / 1M) — caps the agent trim budget, no cost / capability impact on CP.
+  'custom_endpoints',           // LLM-settings bookmarks — UI sugar over api_base_url, engine still consumes api_base_url.
+  'disabled_tools',             // Tool-Toggles — strictly narrows excludeTools, never widens.
 ]);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
