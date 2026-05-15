@@ -1074,6 +1074,18 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  describe('llm catalog', () => {
+    it('GET /api/llm/catalog returns the full LLM_CATALOG payload and a cacheable header', async () => {
+      const { LLM_CATALOG } = await import('../core/llm/catalog.js');
+      const res = await jsonFetch('/api/llm/catalog');
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('public, max-age=3600, must-revalidate');
+      const body = await res.json() as { providers: unknown[] };
+      // Serialization drift guard: the wire shape must round-trip the SSoT exactly.
+      expect(body.providers).toEqual(JSON.parse(JSON.stringify(LLM_CATALOG)));
+    });
+  });
+
   describe('history', () => {
     it('GET /api/history/runs returns recent runs', async () => {
       const res = await jsonFetch('/api/history/runs');
