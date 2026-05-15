@@ -21,6 +21,14 @@ const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'tes
 const mockHistoryGetRunToolCalls = vi.fn().mockReturnValue([]);
 const mockHistoryGetStats = vi.fn().mockReturnValue({ total_runs: 5 });
 const mockHistoryGetCostByDay = vi.fn().mockReturnValue([]);
+const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: 'calendar-month' | 'rolling' | 'stripe-billing'; label: string; startIso: string; endIso: string }) => ({
+  // Pass through the handler-computed period so per-period tests see the right source/label/window.
+  period: { label: opts.label, start_iso: opts.startIso, end_iso: opts.endIso, source: opts.source },
+  used_cents: 1842,
+  by_model: [],
+  by_kind: [],
+  daily: [],
+}));
 const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
@@ -80,6 +88,7 @@ vi.mock('../core/engine.js', () => ({
       getRunToolCalls: mockHistoryGetRunToolCalls,
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,
+      getUsageSummary: mockHistoryGetUsageSummary,
     });
     this.getTaskManager = vi.fn().mockReturnValue({
       list: mockTaskList,
@@ -1071,6 +1080,76 @@ describe('LynoxHTTPApi', () => {
         vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
         vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
       }
+    });
+  });
+
+  describe('usage SSoT', () => {
+    beforeEach(() => {
+      // Cache lives on the long-lived `api` instance (beforeAll). 30s TTL bleeds
+      // mocks across cases unless we drop it between tests.
+      api._clearUsageCache();
+    });
+
+    it('GET /api/usage/current returns the SSoT payload with projection + hard_limits (self-host)', async () => {
+      const res = await jsonFetch('/api/usage/current');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      // Backwards-compat fields
+      expect(body['used_cents']).toBe(1842);
+      expect(body['period']).toBeDefined();
+      expect(body['by_model']).toEqual([]);
+      // NEW fields
+      expect(body).toHaveProperty('projection');
+      expect(body['limit_cents']).toBeDefined();
+      // Self-host: hard_limits is the full numeric payload from getHardLimits()
+      const hl = body['hard_limits'] as Record<string, unknown>;
+      expect(hl['per_spawn_cents']).toBe(500);
+      expect(hl['tool_http_per_day']).toBe(2000);
+    });
+
+    it('GET /api/usage/summary returns the identical payload (alias semantic)', async () => {
+      const [current, summary] = await Promise.all([
+        jsonFetch('/api/usage/current'),
+        jsonFetch('/api/usage/summary'),
+      ]);
+      expect(current.status).toBe(200);
+      expect(summary.status).toBe(200);
+      const [a, b] = await Promise.all([current.json(), summary.json()]);
+      expect(a).toEqual(b);
+    });
+
+    it('managed tier returns opaque hard_limits blob (not raw numbers)', async () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/usage/current');
+        const body = await res.json() as Record<string, unknown>;
+        const hl = body['hard_limits'] as Record<string, unknown>;
+        expect(hl['tier']).toBe('managed');
+        expect(hl['contact_for_quotas']).toBe(true);
+        expect(hl['per_spawn_cents']).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
+    it('projection returns null when daily history is empty (insufficient data)', async () => {
+      const res = await jsonFetch('/api/usage/current');
+      const body = await res.json() as Record<string, unknown>;
+      // Mock daily=[] -> projection cannot extrapolate -> null
+      expect(body['projection']).toBeNull();
+    });
+
+    it.each(['prev', '7d', '30d'])('GET /api/usage/current with period=%s returns valid payload', async (period) => {
+      const res = await jsonFetch(`/api/usage/current?period=${period}`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const p = body['period'] as Record<string, unknown>;
+      // 7d/30d use rolling window, prev uses calendar-month
+      if (period === 'prev') expect(p['source']).toBe('calendar-month');
+      else expect(p['source']).toBe('rolling');
     });
   });
 
