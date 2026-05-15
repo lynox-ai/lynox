@@ -137,6 +137,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'privacy.bugsink_subtitle':     { de: 'Anonyme Stack-Traces an unseren Bugsink in Frankfurt (DE) senden, damit wir Bugs schneller finden.', en: 'Send anonymous stack traces to our Bugsink in Frankfurt (DE) so we can find bugs faster.' },
 	'privacy.bugsink_label':        { de: 'Fehler-Reporting aktivieren',                                                         en: 'Enable error reporting' },
 	'privacy.bugsink_managed_fixed':{ de: 'Auf Managed-Plänen immer aktiv (per DPIA, Hetzner Frankfurt).',                       en: 'Always on for managed plans (per DPIA, Hetzner Frankfurt).' },
+	'privacy.bugsink_self_host_env':{ de: 'Selbst-Hosting: Aktivieren durch Setzen der Env-Variable LYNOX_BUGSINK_DSN. UI-Toggle folgt.', en: 'Self-host: enable by setting env LYNOX_BUGSINK_DSN. UI toggle in a follow-up release.' },
 	'privacy.delete_heading':       { de: 'Konto löschen',                                                                       en: 'Delete account' },
 	'privacy.delete_subtitle':      { de: 'Schickt eine E-Mail an unser Privacy-Team. Bearbeitung innerhalb 30 Tagen (GDPR Art. 17).', en: 'Opens an email to our privacy team. Processed within 30 days (GDPR Art. 17).' },
 	'privacy.delete_button':        { de: 'Löschung anfordern',                                                                  en: 'Request deletion' },

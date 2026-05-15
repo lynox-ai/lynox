@@ -8,43 +8,16 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 
-	interface Config {
-		bugsink_enabled?: boolean;
-		managed?: string;
-	}
-
-	let config = $state<Config>({});
-	let saving = $state(false);
-	let loaded = $state(false);
 	let managed = $state(false);
 
 	async function load(): Promise<void> {
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			const body = (await res.json()) as Config;
-			config = { bugsink_enabled: body.bugsink_enabled };
+			const body = (await res.json()) as { managed?: string };
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
-			loaded = true;
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('privacy.load_failed'), 'error', 5000);
-		}
-	}
-
-	async function saveBugsink(): Promise<void> {
-		saving = true;
-		try {
-			const res = await fetch(`${getApiBase()}/config`, {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ bugsink_enabled: config.bugsink_enabled }),
-			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			addToast(t('privacy.saved'), 'success', 3000);
-		} catch (e) {
-			addToast(e instanceof Error ? e.message : t('privacy.save_failed'), 'error', 5000);
-		} finally {
-			saving = false;
 		}
 	}
 
@@ -85,18 +58,15 @@
 		<p class="text-xs text-text-muted italic">{t('privacy.audit_soon')}</p>
 	</section>
 
-	<!-- Bugsink toggle (moved from old Compliance tab) -->
+	<!-- Bugsink — info-only in Phase 3. Phase 5 wires the schema field
+	     `bugsink_enabled` and the runtime BugsinkClient toggle properly. -->
 	<section class="border-t border-border pt-6 space-y-3">
 		<h2 class="text-lg font-medium">{t('privacy.bugsink_heading')}</h2>
 		<p class="text-xs text-text-muted">{t('privacy.bugsink_subtitle')}</p>
 		{#if managed}
 			<p class="text-sm italic text-text-muted">{t('privacy.bugsink_managed_fixed')}</p>
 		{:else}
-			<label class="flex items-center gap-2 cursor-pointer">
-				<input type="checkbox" disabled={!loaded || saving} bind:checked={config.bugsink_enabled}
-					onchange={saveBugsink} class="w-4 h-4" />
-				<span class="text-sm">{t('privacy.bugsink_label')}</span>
-			</label>
+			<p class="text-sm italic text-text-muted">{t('privacy.bugsink_self_host_env')}</p>
 		{/if}
 	</section>
 
