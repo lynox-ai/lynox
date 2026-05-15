@@ -1452,6 +1452,21 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('PUT /api/config accepts bugsink_enabled toggle in managed mode (GDPR opt-out)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ bugsink_enabled: false }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       it.each([
         ['default_tier', 'haiku'],
         ['max_session_cost_usd', 1_000_000],

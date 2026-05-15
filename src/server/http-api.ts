@@ -146,6 +146,10 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'memory_extraction',
   'knowledge_graph_enabled',
   'tts_voice',
+  // GDPR compliance: a managed customer must be able to opt out of error
+  // telemetry even when the CP supplies the Bugsink DSN. `bugsink_dsn` itself
+  // stays locked (CP-managed endpoint), only the on/off toggle is user.
+  'bugsink_enabled',
 ]);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
