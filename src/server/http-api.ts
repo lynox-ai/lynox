@@ -109,6 +109,49 @@ const TLS_KEY = process.env['LYNOX_TLS_KEY'] ?? '';
 const TZ_PATTERN = /^[A-Za-z0-9_+\-/]+$/;
 const TZ_MAX_LENGTH = 64;
 
+/**
+ * Managed-mode tier values that gate downgraded routes (PUT /api/secrets,
+ * PUT /api/config) behind allowlists / field-locks. Truthy `LYNOX_MANAGED_MODE`
+ * isn't precise enough — a future tier string would silently fail-open. Both
+ * route handlers call `isManagedTier()` so the gate semantics stay aligned.
+ */
+const MANAGED_TIER_VALUES = new Set(['managed', 'managed_pro', 'eu', 'starter']);
+
+/**
+ * BYOK-provider secrets a managed-tier user can self-serve via the SetupBanner
+ * UI. Auth layer pins managed cookie users to `user` scope (see ~L1049 —
+ * `adminSecret ? 'user' : 'admin'`), so a strict admin gate would lock managed
+ * customers out of their own API-key wizard. The whitelist is narrow on
+ * purpose — every other secret (SMTP password, webhook tokens, …) stays
+ * admin-only. Self-host has no admin secret, so cookie users are promoted to
+ * admin scope at the auth layer and this gate never applies to them.
+ */
+const BYOK_USER_WRITABLE_SECRETS = new Set(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+
+/**
+ * Config fields a managed-tier user can change via PUT /api/config. Everything
+ * else (cost caps, MCP servers, OAuth client ids, search/embedding/backup
+ * config, etc.) is CP-managed — letting a customer flip those would allow
+ * billing-drain, persistent backdoors via mcp_servers, search/OAuth hijacking,
+ * and so on. Allowlist (not blocklist) so future config fields fail closed.
+ */
+const MANAGED_USER_WRITABLE_CONFIG = new Set([
+  'display_name',
+  'experience',
+  'thinking_mode',
+  'effort_level',
+  'changeset_review',
+  'memory_auto_scope',
+  'greeting',
+  'memory_extraction',
+  'knowledge_graph_enabled',
+  'tts_voice',
+  // GDPR compliance: a managed customer must be able to opt out of error
+  // telemetry even when the CP supplies the Bugsink DSN. `bugsink_dsn` itself
+  // stays locked (CP-managed endpoint), only the on/off toggle is user.
+  'bugsink_enabled',
+]);
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
@@ -128,6 +171,11 @@ function errorResponse(res: ServerResponse, status: number, message: string): vo
 function requireService<T>(res: ServerResponse, service: T | null | undefined, name: string): service is NonNullable<T> {
   if (service === null || service === undefined) errorResponse(res, 503, `${name} not available`);
   return service !== null && service !== undefined;
+}
+
+/** True when the process is running under a managed-tier deployment. */
+function isManagedTier(value: string | undefined): boolean {
+  return value !== undefined && MANAGED_TIER_VALUES.has(value);
 }
 
 async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
@@ -2053,25 +2101,42 @@ export class LynoxHTTPApi {
       });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('admin', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
+      const name = params['name']!;
+      // Managed-tier user (cookie auth → user scope per L~1049): only the BYOK
+      // provider keys are writable. Self-host has no admin secret, so cookie
+      // users are already promoted to admin and this gate never applies.
+      if (isManagedTier(process.env['LYNOX_MANAGED_MODE']) && !BYOK_USER_WRITABLE_SECRETS.has(name)) {
+        errorResponse(res, 403, `Managed mode: secret "${name}" is not user-writable`);
+        return;
+      }
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const b = body as Record<string, unknown> | null;
       const value = b && typeof b['value'] === 'string' ? b['value'] : '';
       if (!value) { errorResponse(res, 400, 'Missing value'); return; }
       try {
-        store.set(params['name']!, value);
-        store.recordConsent(params['name']!);
+        store.set(name, value);
+        store.recordConsent(name);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to store secret';
         errorResponse(res, 503, msg);
         return;
       }
-      // Hot-reload API key so new sessions use it immediately
-      if (params['name'] === 'ANTHROPIC_API_KEY') {
-        engine.setApiKey(value);
+      // Hot-reload the LLM client so subsequent sessions pick up the new key
+      // without a process restart. Wrap defensively — the secret is already
+      // persisted; a failed re-init shouldn't make the caller think the write
+      // didn't land. Surface the partial success with `hot_reload: false` so
+      // the UI can choose to nudge the user to refresh.
+      let hotReload = true;
+      if (name === 'ANTHROPIC_API_KEY') {
+        try {
+          engine.setApiKey(value);
+        } catch {
+          hotReload = false;
+        }
       }
-      jsonResponse(res, 200, { ok: true });
+      jsonResponse(res, 200, { ok: true, hot_reload: hotReload });
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('admin', 'DELETE', '/api/secrets/:name', async (_req, res, params) => {
@@ -2178,7 +2243,11 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, redacted);
     });
 
-    this.addStatic('admin', 'PUT /api/config', async (_req, res, _params, body) => {
+    // Scope = 'user' so managed-mode cookie users (always user-scope per the
+    // `adminSecret ? 'user' : 'admin'` logic) can reach the allowlist below.
+    // Self-host: no admin secret → cookie users auto-promoted to admin scope
+    // at the auth layer, so the allowlist branch is a no-op for them.
+    this.addStatic('user', 'PUT /api/config', async (_req, res, _params, body) => {
       const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       const parsed = LynoxUserConfigSchema.safeParse(body);
@@ -2186,24 +2255,27 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
-      // Managed mode: block provider/credential changes (lynox provides the LLM).
-      // Starter (BYOK) mode: provider changes are allowed (customer brings own key).
-      // Compare incoming values against the *effective* env-merged config — the
-      // Web UI re-sends every field on every save (including locked ones it
-      // received from GET), so a no-op write of `provider` or `default_tier`
-      // would otherwise look like an attempted change and block unrelated
-      // updates (e.g. flipping experience level).
-      if (process.env['LYNOX_MANAGED_MODE'] === 'managed' || process.env['LYNOX_MANAGED_MODE'] === 'managed_pro' || process.env['LYNOX_MANAGED_MODE'] === 'eu') {
-        const LOCKED_FIELDS = ['provider', 'api_key', 'api_base_url', 'gcp_project_id', 'gcp_region', 'openai_model_id', 'default_tier'];
+      // Managed-tier: the Web UI is allowed to re-send every field on every
+      // save (PRD-SETTINGS-REFACTOR Principle 6: get returns shape, put
+      // accepts shape), so we can't just reject non-allowlist fields outright.
+      // Instead: compare each non-allowlist field to its *effective* env-merged
+      // value — a no-op re-send is allowed, an attempted CHANGE returns 403.
+      // The allowlist + no-op gate is fail-closed for unknown / future config
+      // fields (schema is `.passthrough()` for forward compat, but a hostile
+      // user passing a never-seen-before key will trip the diff check because
+      // `effective[unknownKey]` is `undefined`).
+      if (isManagedTier(process.env['LYNOX_MANAGED_MODE'])) {
         const effective = loadConfig() as Record<string, unknown>;
         const update = parsed.data as Record<string, unknown>;
-        const attempted = LOCKED_FIELDS.filter((f) => {
-          if (!(f in update)) return false;
-          // No-op write (same value as effective config) → allow.
-          return JSON.stringify(update[f]) !== JSON.stringify(effective[f]);
-        });
+        const attempted: string[] = [];
+        for (const [field, value] of Object.entries(update)) {
+          if (MANAGED_USER_WRITABLE_CONFIG.has(field)) continue;
+          if (JSON.stringify(value) !== JSON.stringify(effective[field])) {
+            attempted.push(field);
+          }
+        }
         if (attempted.length > 0) {
-          errorResponse(res, 403, `Managed EU instance: cannot change ${attempted.join(', ')}`);
+          errorResponse(res, 403, `Managed instance: cannot change ${attempted.join(', ')}`);
           return;
         }
       }
