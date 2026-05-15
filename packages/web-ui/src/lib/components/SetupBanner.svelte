@@ -63,8 +63,13 @@
 					const wasDismissed = localStorage.getItem('lynox-setup-dismissed');
 					showWizard = !wasDismissed;
 					dismissed = !!wasDismissed;
-					// Managed BYOK: skip provider selection, go straight to Anthropic key
-					if (managedMode) {
+					// Managed-pool tiers (`managed`, `managed_pro`): the CP provides
+					// the LLM endpoint + key, customer just enters their Anthropic key
+					// → skip the picker, jump straight to credentials. `eu` is
+					// already handled above (banner not shown at all). Starter (BYOK)
+					// and self-host both show the picker so the customer can pick
+					// Anthropic / Mistral / Custom freely.
+					if (managedMode === 'managed' || managedMode === 'managed_pro') {
 						selectedProvider = 'anthropic';
 						step = 'credentials';
 					}
