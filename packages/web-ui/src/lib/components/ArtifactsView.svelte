@@ -9,6 +9,7 @@
 		type ArtifactMeta,
 	} from '../stores/artifacts.svelte.js';
 	import { tick } from 'svelte';
+	import { page } from '$app/stores';
 	import { t } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
@@ -16,12 +17,28 @@
 	let confirmDelete = $state<string | null>(null);
 	let deleteDialogRef = $state<HTMLDivElement | null>(null);
 	let deleteDialogTrigger: HTMLElement | null = null;
+	let deepLinkConsumed = false;
 
 	const artifacts = $derived(getArtifacts());
 	const isLoading = $derived(getIsLoadingArtifacts());
 
 	$effect(() => {
 		loadArtifacts();
+	});
+
+	// Deep-link: `/app/artifacts?id=…` (set by MarkdownRenderer's
+	// "open-gallery" button on inline markdown artifacts) auto-opens that
+	// artifact's preview once the list has loaded. One-shot — re-running
+	// loadArtifacts shouldn't keep re-opening the same artifact.
+	$effect(() => {
+		if (deepLinkConsumed || isLoading || artifacts.length === 0) return;
+		const id = $page.url.searchParams.get('id');
+		if (!id) return;
+		const match = artifacts.find(a => a.id === id);
+		if (match) {
+			deepLinkConsumed = true;
+			void openArtifact(match);
+		}
 	});
 
 	// Focus dialog when it opens

@@ -1154,6 +1154,18 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		case 'turn_end': {
 			retryStatus = null;
+			// Recovery for a dropped/late `tool_result` event: if the agent has
+			// finished its turn the engine MUST have received every tool's
+			// result server-side (otherwise the model couldn't have produced
+			// its final reply). Anything still flagged `running` here is a
+			// UI-side ghost — leaving it spinning forever after the answer is
+			// already on screen is the bug rafael reported on 2026-05-15
+			// (api_setup ✓ visible but inner http_request still spinning).
+			if (msg.toolCalls) {
+				for (const tc of msg.toolCalls) {
+					if (tc.status === 'running') tc.status = 'done';
+				}
+			}
 			// Use actual model from this turn (may differ from session default due to Haiku downgrade)
 			const turnModel = typeof data['model'] === 'string' ? data['model'] : sessionModel;
 			if (turnModel && turnModel !== sessionModel) sessionModel = turnModel;
