@@ -6,7 +6,7 @@ export const ALL_NAMESPACES: readonly MemoryNamespace[] = ['knowledge', 'methods
 
 // === Context ===
 
-export type ContextSource = 'cli' | 'telegram' | 'slack' | 'mcp' | 'pwa';
+export type ContextSource = 'cli' | 'slack' | 'mcp' | 'pwa';
 
 export interface LynoxContext {
   id: string;              // unique identifier (hash or explicit)

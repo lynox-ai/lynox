@@ -26,7 +26,7 @@ function defaultDbPath(): string {
  * (channel detection in `inbox/watcher-hook.ts`), so a mail account with
  * a reserved prefix would silently misclassify its items.
  */
-const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = ['whatsapp:', 'telegram:'];
+const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = ['whatsapp:'];
 
 const MIGRATIONS: string[] = [
   // v1: Initial schema — Message-ID dedup table

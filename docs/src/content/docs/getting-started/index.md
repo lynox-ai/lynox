@@ -88,4 +88,3 @@ Without `-v ~/.lynox:/home/lynox/.lynox`, your vault key and all data are lost o
 - [LLM Providers](/setup/llm-providers/) — Anthropic, Mistral, OpenAI-compatible, or local models
 - [Email (IMAP/SMTP)](/integrations/mail/) — Connect any email account for triage, search, and sending
 - [Google Workspace](/integrations/google-workspace/) — Connect Gmail, Calendar, Drive
-- [Telegram](/integrations/telegram/) — Mobile access via Telegram bot

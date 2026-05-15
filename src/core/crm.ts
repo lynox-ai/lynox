@@ -21,9 +21,9 @@ export interface ContactData {
   company?: string | undefined;
   /** lead, customer, partner, prospect, other */
   type?: string | undefined;
-  /** telegram, email, web, manual */
+  /** email, web, manual */
   source?: string | undefined;
-  /** External ID: Telegram chat ID, email address, etc. */
+  /** External ID: email address, mail account, etc. */
   channel_id?: string | undefined;
   language?: string | undefined;
   notes?: string | undefined;
@@ -46,7 +46,7 @@ export interface InteractionData {
   contact_name: string;
   /** message, email, call, meeting, note */
   type: string;
-  /** telegram, email, web, manual */
+  /** email, web, manual */
   channel: string;
   summary: string;
   date?: string | undefined;

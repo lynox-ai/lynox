@@ -122,7 +122,7 @@ vi.mock('../core/config.js', () => ({
   loadConfig: vi.fn().mockReturnValue({ default_tier: 'opus' }),
   readUserConfig: vi.fn().mockReturnValue({
     default_tier: 'opus', thinking_mode: 'adaptive',
-    api_key: 'sk-ant-secret-key', telegram_bot_token: '12345:ABC',
+    api_key: 'sk-ant-secret-key',
   }),
   saveUserConfig: vi.fn(),
   reloadConfig: vi.fn(),
@@ -924,9 +924,7 @@ describe('LynoxHTTPApi', () => {
       expect(body['default_tier']).toBe('opus');
       // Secrets must be stripped, replaced with _configured flags
       expect(body['api_key']).toBeUndefined();
-      expect(body['telegram_bot_token']).toBeUndefined();
       expect(body['api_key_configured']).toBe(true);
-      expect(body['telegram_bot_token_configured']).toBe(true);
     });
 
     it('PUT saves user config', async () => {
@@ -1253,14 +1251,13 @@ describe('LynoxHTTPApi', () => {
 
   describe('secrets/status', () => {
     it('GET /api/secrets/status returns category booleans', async () => {
-      mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY', 'TELEGRAM_BOT_TOKEN']);
+      mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY']);
       const res = await jsonFetch('/api/secrets/status');
       expect(res.status).toBe(200);
       const body = await res.json() as { configured: Record<string, boolean>; count: number };
       expect(body.configured.api_key).toBe(true);
-      expect(body.configured.telegram).toBe(true);
       expect(body.configured.search).toBe(false);
-      expect(body.count).toBe(2);
+      expect(body.count).toBe(1);
     });
   });
 

@@ -120,7 +120,7 @@ ${safe}
 }
 
 /**
- * Wrap a channel message (mail/whatsapp/telegram/google) as a single
+ * Wrap a channel message (mail/whatsapp/google) as a single
  * `<untrusted_data>` block. Use this when there are multiple
  * attacker-controllable fields (subject, sender, body, caption, title) —
  * passing them individually keeps every channel from re-implementing the
