@@ -2500,6 +2500,109 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { providers: LLM_CATALOG });
     });
 
+    // ── LLM connection probe (PRD-SETTINGS-REFACTOR Phase 2) ──
+    // 1-token health probe so the Settings → LLM page can show green/red BEFORE
+    // the user submits a real query. Custom/OpenAI-compatible endpoints route
+    // through `fetchWithPublicRedirects` to block SSRF + cloud-metadata
+    // exfiltration of the API key (PRD Security Model).
+    //
+    // Rate-limited: closes the credential-probe oracle (attacker can't brute
+    // -force stolen keys here) AND the cost-amplification vector (each probe
+    // costs ~$0.0001 on Anthropic). 6 probes per 60s rolling window per IP
+    // — matches PRD spec.
+    const llmTestRateLimit = new Map<string, number[]>();
+    const LLM_TEST_WINDOW_MS = 60_000;
+    const LLM_TEST_MAX_PROBES = 6;
+    this.addStatic('user', 'POST /api/llm/test', async (req, res, _params, body) => {
+      const ip = req.socket.remoteAddress ?? 'unknown';
+      const nowTs = Date.now();
+      const history = llmTestRateLimit.get(ip) ?? [];
+      const recent = history.filter((t) => nowTs - t < LLM_TEST_WINDOW_MS);
+      if (recent.length >= LLM_TEST_MAX_PROBES) {
+        errorResponse(res, 429, `Rate limit exceeded: max ${String(LLM_TEST_MAX_PROBES)} probes per minute`);
+        return;
+      }
+      recent.push(nowTs);
+      llmTestRateLimit.set(ip, recent);
+      const b = body as { provider?: string; api_key?: string; base_url?: string; model?: string } | null;
+      if (!b || typeof b['provider'] !== 'string') {
+        errorResponse(res, 400, 'Missing provider');
+        return;
+      }
+      const provider = b['provider'];
+      const apiKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
+      const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
+      const model = typeof b['model'] === 'string' ? b['model'] : '';
+      const started = Date.now();
+      try {
+        if (provider === 'anthropic') {
+          if (!apiKey) { errorResponse(res, 400, 'API key required'); return; }
+          const probeRes = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify({
+              model: model || 'claude-haiku-4-5-20251001',
+              max_tokens: 1,
+              messages: [{ role: 'user', content: 'hi' }],
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!probeRes.ok) {
+            const status = probeRes.status;
+            errorResponse(res, 200, status === 401 || status === 403 ? 'Authentication failed' : `Provider returned ${status}`);
+            return;
+          }
+          jsonResponse(res, 200, { ok: true, latency_ms: Date.now() - started, provider_model: model || 'claude-haiku-4-5-20251001' });
+          return;
+        }
+        if (provider === 'openai' || provider === 'custom') {
+          if (!baseUrl) { errorResponse(res, 400, 'Base URL required'); return; }
+          if (!apiKey) { errorResponse(res, 400, 'API key required'); return; }
+          const { fetchWithPublicRedirects } = await import('../core/network-guard.js');
+          // OpenAI-compatible /v1/models is the canonical health endpoint.
+          // Custom (Anthropic-compatible) proxies don't have a stable health
+          // path, so we use /v1/messages too — both shape variants are accepted.
+          const probeUrl = provider === 'openai'
+            ? `${baseUrl.replace(/\/+$/, '')}/models`
+            : `${baseUrl.replace(/\/+$/, '')}/messages`;
+          const probeRes = await fetchWithPublicRedirects(probeUrl, {
+            method: provider === 'openai' ? 'GET' : 'POST',
+            headers: provider === 'openai'
+              ? { 'Authorization': `Bearer ${apiKey}` }
+              : { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+            ...(provider === 'custom' && {
+              body: JSON.stringify({ model: model || 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!probeRes.ok) {
+            const status = probeRes.status;
+            errorResponse(res, 200, status === 401 || status === 403 ? 'Authentication failed' : `Provider returned ${status}`);
+            return;
+          }
+          jsonResponse(res, 200, { ok: true, latency_ms: Date.now() - started, provider_model: model || null });
+          return;
+        }
+        if (provider === 'vertex') {
+          // Vertex AI requires OAuth-token generation from a service-account key —
+          // too heavy for a synchronous probe endpoint. We accept the config and
+          // surface failures at first real inference instead.
+          jsonResponse(res, 200, { ok: true, latency_ms: 0, skipped: true, reason: 'Vertex test deferred to first inference' });
+          return;
+        }
+        errorResponse(res, 400, `Unknown provider "${provider}"`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Probe failed';
+        // Surface SSRF-guard blocks and timeouts cleanly without leaking
+        // server-side context.
+        errorResponse(res, 200, msg.startsWith('Blocked:') ? msg : 'Probe failed: timeout or network error');
+      }
+    });
+
     // ── Voice info (combined STT + TTS capabilities for the Web UI) ──
     // Drives the privacy hint + auto-speak toggle visibility + the
     // Settings → Voice provider pickers. Prefer this over the legacy
