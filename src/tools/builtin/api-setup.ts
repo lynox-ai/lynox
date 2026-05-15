@@ -31,13 +31,17 @@ const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 const DOCS_BODY_MAX_BYTES = 250 * 1024;
 const DOCS_FETCH_TIMEOUT_MS = 15_000;
 /**
- * Hard $ budget per Haiku extraction. PRD specified $0.05; bumped to $0.10
- * to give a realistic 250 KB / ~70 K-token landing page enough headroom
- * even at Haiku output prices ($4 / M-tok). Worst-case input + capped 4 K
- * output ≈ $0.073; this leaves ~30 % margin without nudging real-world
- * spend (actual extraction cost lands around $0.01–0.03).
+ * Hard $ budget per extraction call. The helper's default model is now
+ * Sonnet 4.6 (matches the engine-wide LLM default) — Haiku was the legacy
+ * choice and is retained as the public-demo override via
+ * `LYNOX_LLM_HELPER_MODEL`. Sonnet pricing ($3 / M-tok input, $15 / M-tok
+ * output) on a worst-case 70 K-token landing page + 4 K capped output
+ * lands at ~$0.27; this budget leaves headroom for the linked-section
+ * fan-out (A1-ext2) and avoids false-positive 403s on real-world docs
+ * pages. Actual single-page extractions still land in the $0.05–$0.15
+ * range with Sonnet, $0.01–$0.03 with the Haiku override.
  */
-const DOCS_EXTRACT_BUDGET_USD = 0.10;
+const DOCS_EXTRACT_BUDGET_USD = 0.50;
 
 type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine';
 

@@ -174,8 +174,9 @@ describe('callForStructuredJson', () => {
     expect(result.data.count).toBe(7);
     expect(result.inputTokens).toBe(200);
     expect(result.outputTokens).toBe(80);
-    // Cost = (200 * 0.8 + 80 * 4) / 1e6 = (160 + 320) / 1e6 = 0.00048
-    expect(result.costUsd).toBeCloseTo(0.00048, 7);
+    // Engine-wide default is Sonnet 4.6 (input $3/M, output $15/M).
+    // Cost = (200 * 3 + 80 * 15) / 1e6 = (600 + 1200) / 1e6 = 0.0018
+    expect(result.costUsd).toBeCloseTo(0.0018, 7);
   });
 
   it('rejects pre-flight when input estimate exceeds maxInputTokens', async () => {
@@ -217,29 +218,47 @@ describe('callForStructuredJson', () => {
     }
   });
 
-  it('estimateCostUsd clamps the output projection to maxOutputTokens', () => {
+  it('estimateCostUsd clamps the output projection to maxOutputTokens (Haiku pricing)', () => {
     // Pricing reference (Haiku 4.5 list, 2026-05): input $0.80/M, output $4.00/M.
     // 70_000 input tokens → $0.056 input cost.
     // Naive 25%-of-input projection = 17_500 output tokens × $4/M = $0.070.
     // Real API call caps output at maxOutputTokens (4_000) = $0.016.
     // Therefore the clamped estimate must be ~$0.072, not ~$0.126.
-    const clamped = estimateCostUsd(70_000, 4_000);
-    const unclamped = estimateCostUsd(70_000, 1_000_000); // cap well above 25% projection
+    const haiku = 'claude-haiku-4-5-20251001';
+    const clamped = estimateCostUsd(70_000, 4_000, haiku);
+    const unclamped = estimateCostUsd(70_000, 1_000_000, haiku); // cap well above 25% projection
     expect(clamped).toBeCloseTo(0.072, 3);
     expect(unclamped).toBeCloseTo(0.126, 3);
     // The clamp is the difference: $0.054 lower per call at this input size.
     expect(unclamped - clamped).toBeGreaterThan(0.05);
   });
 
-  it('clamped estimate keeps a real 250 KB docs bootstrap inside the bumped $0.10 budget', async () => {
+  it('estimateCostUsd uses Sonnet pricing for the engine-wide default', () => {
+    // Pricing reference (Sonnet 4.6, 2026-05): input $3/M, output $15/M.
+    // 70 K input × $3/M = $0.21; clamped 4 K output × $15/M = $0.06 → total ~$0.27.
+    const clamped = estimateCostUsd(70_000, 4_000, 'claude-sonnet-4-6');
+    expect(clamped).toBeCloseTo(0.27, 2);
+  });
+
+  it('estimateCostUsd falls back to Sonnet pricing for an unknown model id (fail-closed budget gate)', () => {
+    // Defends against drift: an unrecognised model id silently routed through
+    // the helper must NOT trip a lower-budget gate that surprises the caller.
+    // Sonnet (highest of the three known tiers) is the conservative fallback.
+    const fallback = estimateCostUsd(70_000, 4_000, 'claude-future-model-not-yet-released');
+    const sonnet = estimateCostUsd(70_000, 4_000, 'claude-sonnet-4-6');
+    expect(fallback).toBeCloseTo(sonnet, 4);
+  });
+
+  it('clamped estimate keeps a real 250 KB docs bootstrap inside the bumped $0.50 budget (Sonnet default)', async () => {
     const client = mockClient({ toolInput: { name: 'a', count: 1, level: 'low' } });
     // 245 K chars / 3.5 ≈ 70 K tokens — same scale as a real Stripe-style
     // docs landing page after the 250 KB body cap. Asserts the integration
-    // path (not just the math) survives the bumped DOCS_EXTRACT_BUDGET_USD.
+    // path (not just the math) survives the bumped DOCS_EXTRACT_BUDGET_USD
+    // at Sonnet pricing (~$0.27 worst-case under the 4 K output cap).
     await expect(callForStructuredJson({
       ...BASE_OPTS,
       user: 'x'.repeat(245_000),
-      budgetUsd: 0.10,
+      budgetUsd: 0.50,
       maxOutputTokens: 4_000,
       client,
     })).resolves.toBeDefined();

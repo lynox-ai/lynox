@@ -41,9 +41,11 @@ export interface CallForStructuredJsonOptions {
   schema: ExtractSchema;
   /** Hard cap on input tokens (pre-flight estimate, char-based). Default 100_000. */
   maxInputTokens?: number;
-  /** Hard cap on total USD per call (pre-flight estimate). Default 0.05. */
+  /** Hard cap on total USD per call (pre-flight estimate). Default 0.50. */
   budgetUsd?: number;
-  /** Model id. Default 'claude-haiku-4-5-20251001'. */
+  /** Model id. Default `claude-sonnet-4-6` (engine-wide default); overridable
+   *  via `LYNOX_LLM_HELPER_MODEL` env var (the public-demo container sets
+   *  this to a Haiku id to keep the daily cost-cap healthy). */
   model?: string;
   /**
    * Anthropic client. If omitted, a fresh client is constructed via the active
@@ -61,18 +63,44 @@ export interface StructuredJsonResult<T> {
   inputTokens: number;
   /** Tokens charged by Anthropic for output (from response.usage). */
   outputTokens: number;
-  /** Computed USD cost using Haiku 4.5 list pricing. */
+  /** Computed USD cost from the model-appropriate list pricing. */
   costUsd: number;
 }
 
-/** Pricing per 1M tokens for the default Haiku 4.5 model. List price 2026-05. */
-const HAIKU_INPUT_USD_PER_MTOK = 0.80;
-const HAIKU_OUTPUT_USD_PER_MTOK = 4.00;
+/**
+ * List prices per 1M tokens for the models this helper can invoke. Used by
+ * both the pre-flight budget estimate and the post-call exact-cost calc, so
+ * an unknown model would silently mis-budget. Falls back to the Sonnet rate
+ * (highest of the three) — fail-closed for the budget gate.
+ */
+interface ModelPricing { input: number; output: number; }
+const MODEL_PRICING: Record<string, ModelPricing> = {
+  // Anthropic list prices, 2026-05.
+  'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00 },
+  'claude-sonnet-4-6':         { input: 3.00, output: 15.00 },
+  'claude-opus-4-7':           { input: 15.00, output: 75.00 },
+};
+const FALLBACK_PRICING: ModelPricing = MODEL_PRICING['claude-sonnet-4-6']!;
+
+function pricingFor(model: string): ModelPricing {
+  return MODEL_PRICING[model] ?? FALLBACK_PRICING;
+}
 
 const DEFAULT_MAX_INPUT_TOKENS = 100_000;
-const DEFAULT_BUDGET_USD = 0.05;
+/**
+ * Default per-call budget cap. Sized for a Sonnet call on a ~70 K-token docs
+ * page with the 4 K output cap: ~$0.27 actual, ~$0.40 worst-case. Set to
+ * $0.50 so the gate doesn't false-positive on real-world API landing pages.
+ */
+const DEFAULT_BUDGET_USD = 0.50;
 const DEFAULT_MAX_OUTPUT_TOKENS = 4_000;
-const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
+/**
+ * Default model. Sonnet matches the engine-wide primary client (per the
+ * bench-verdict baseline). Public-demo containers override this to Haiku
+ * via `LYNOX_LLM_HELPER_MODEL` to fit the daily cost-cap of the anonymous
+ * sandbox — see `pro/packages/deploy/demo/docker-compose.yml`.
+ */
+const DEFAULT_MODEL = process.env['LYNOX_LLM_HELPER_MODEL'] ?? 'claude-sonnet-4-6';
 
 /** Rough char→token estimate. English ~3.5 chars/token; over-estimates for
  *  non-Latin scripts (safer for budget gates). */
@@ -94,14 +122,20 @@ export function estimateTokens(text: string): number {
  * (a behavioural-only test would still pass if the clamp were silently
  * widened, e.g. doubled to 8 K).
  */
-export function estimateCostUsd(inputTokens: number, maxOutputTokens: number = DEFAULT_MAX_OUTPUT_TOKENS): number {
+export function estimateCostUsd(
+  inputTokens: number,
+  maxOutputTokens: number = DEFAULT_MAX_OUTPUT_TOKENS,
+  model: string = DEFAULT_MODEL,
+): number {
   const estimatedOutput = Math.min(Math.ceil(inputTokens * 0.25), maxOutputTokens);
-  return (inputTokens * HAIKU_INPUT_USD_PER_MTOK + estimatedOutput * HAIKU_OUTPUT_USD_PER_MTOK) / 1_000_000;
+  const p = pricingFor(model);
+  return (inputTokens * p.input + estimatedOutput * p.output) / 1_000_000;
 }
 
 /** Compute exact USD cost from Anthropic-reported usage. */
-function computeCostUsd(inputTokens: number, outputTokens: number): number {
-  return (inputTokens * HAIKU_INPUT_USD_PER_MTOK + outputTokens * HAIKU_OUTPUT_USD_PER_MTOK) / 1_000_000;
+function computeCostUsd(inputTokens: number, outputTokens: number, model: string): number {
+  const p = pricingFor(model);
+  return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
 }
 
 /** Defensive cap on schema-recursion depth so a malformed schema with circular
@@ -210,10 +244,10 @@ export async function callForStructuredJson<T = unknown>(
   if (inputEstimate > maxInputTokens) {
     throw new BudgetError(
       `Input estimate ${String(inputEstimate)} tokens exceeds maxInputTokens=${String(maxInputTokens)}`,
-      { estimatedInputTokens: inputEstimate, estimatedCostUsd: estimateCostUsd(inputEstimate, maxOutputTokens) },
+      { estimatedInputTokens: inputEstimate, estimatedCostUsd: estimateCostUsd(inputEstimate, maxOutputTokens, model) },
     );
   }
-  const costEstimate = estimateCostUsd(inputEstimate, maxOutputTokens);
+  const costEstimate = estimateCostUsd(inputEstimate, maxOutputTokens, model);
   if (costEstimate > budgetUsd) {
     throw new BudgetError(
       `Estimated cost $${costEstimate.toFixed(4)} exceeds budgetUsd=$${budgetUsd.toFixed(4)}`,
@@ -252,7 +286,7 @@ export async function callForStructuredJson<T = unknown>(
     data: toolUseBlock.input as T,
     inputTokens,
     outputTokens,
-    costUsd: computeCostUsd(inputTokens, outputTokens),
+    costUsd: computeCostUsd(inputTokens, outputTokens, model),
   };
 }
 
