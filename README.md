@@ -59,12 +59,13 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 └────────────────┘  └───────────────────┘
 ```
 
-**BYOK** — You provide your LLM credential (Anthropic / Mistral / OpenAI-compatible). lynox calls the API directly. No proxy, no middleman, no data collection. Your data stays on the host you control.
+**BYOK** — You provide your LLM credential (Anthropic / Mistral / OpenAI-compatible). When self-hosted, lynox calls the API directly: no proxy, no middleman, no data collection. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
 
 ## Key capabilities
 
 - **Knowledge Graph** — Learns entities, relationships, and contradictions across your business. 100 languages, fully local.
 - **Web UI** — Primary interface. Chat, knowledge browser, run history, settings, integrations. Installable as PWA. QR code login for instant phone access.
+- **Activity Bar** — Every tool call streams live with its current sub-phase (e.g. "Reading API docs..." → "Extracting auth..."). No mysterious 30-second waits.
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
 - **Telegram Bot** — Mobile notifications and quick tasks. Voice, photos, files, follow-up suggestions.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
@@ -77,10 +78,10 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 
 Honest about today's gaps, so you can decide if it's the right fit:
 
-- **Voice in / out is functional, not polished.** Whisper + GPT-style TTS work, but iOS Safari has Web Audio quirks (use Chrome on iOS for now). Hands-free workflows still need keyboard fallback.
-- **Native calendar integration is read-only.** CalDAV reads + ICS imports work; creating events from chat lands later. Until then, calendar tasks flow through Google Workspace OAuth.
+- **Voice in / out is functional, not polished.** Whisper STT + browser TTS work, but iOS Safari has Web Audio quirks (use Chrome on iOS for now). Hands-free workflows still need keyboard fallback.
+- **Native calendar integration is on the roadmap.** CalDAV reads + ICS imports are spec'd (Phase 0 spike done) but not yet shipped; until then, calendar tasks flow through Google Workspace OAuth.
 - **No multi-user / team accounts.** lynox is single-user today. One vault, one workflow library, one knowledge graph per instance. Multi-tenant teams happen on the Managed tier; self-hosted is solo.
-- **The LLM is not deterministic.** Like every agent built on Claude / Mistral, output quality varies run-to-run. We mitigate with the knowledge graph + workflow templates, but if you need 100%-reproducible automation, a script beats lynox.
+- **The LLM is not deterministic.** Like every agent built on Claude / Mistral, output quality varies run-to-run. lynox mitigates with the knowledge graph + workflow templates, but if you need 100%-reproducible automation, a script beats lynox.
 
 ## Install
 
@@ -130,14 +131,14 @@ Create a bot via [@BotFather](https://t.me/BotFather), add the token in Web UI �
 ## Testing and security
 
 - 4600+ tests across the engine, tools, and orchestrator. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
-- Layered defenses: input-guard, output-guard, permission-guard, data-boundary, AES-256 vault, security-audit. SSRF protection on every outbound URL; private-IP + DNS-rebinding heuristics in `fetchWithValidatedRedirects`.
+- Layered defenses: input-guard, output-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — private-IP block at DNS-resolve time (pre-fetch), URL-validated on each redirect hop.
 - Responsible disclosure → [`SECURITY.md`](SECURITY.md).
 
 ## Who builds this
 
-Built solo by Rafael Burlet in Zürich. lynox runs in production for three SMBs (one is mine). There's no fundraise — the project sustains through the [Managed hosting tier](https://lynox.ai/managed) for users who'd rather not run their own Docker host. Self-hosted is and stays free.
+Built solo by Rafael Burlet in Zürich. lynox runs in production for three SMBs (one is mine). The project sustains through the [Managed hosting tier](https://lynox.ai/managed) for users who'd rather not run their own Docker host — self-hosted is and stays free.
 
-If something breaks, an [issue](https://github.com/lynox-ai/lynox/issues) lands on my desk directly; I tend to respond within a working day.
+If something breaks, an [issue](https://github.com/lynox-ai/lynox/issues) lands on my desk directly; I usually reply within a few working days.
 
 ## Community
 
@@ -157,7 +158,7 @@ This software is provided **"as is"**, without warranty of any kind. By using ly
 
 ## License
 
-[Elastic License 2.0](LICENSE) — source-available, **free for any use including production and customer-facing**, except offering lynox itself as a competing hosted service. Same model as Elasticsearch, CockroachDB, MongoDB Atlas.
+**Free for any use including production and customer-facing**, except offering lynox itself as a competing hosted service. Source is open and forkable under the [Elastic License 2.0](LICENSE) — the same license as Elasticsearch and Kibana.
 
 **What you can do:** read, modify, and redistribute the source · self-host for your business, your clients, or your team · build commercial products and services on top of lynox.
 
