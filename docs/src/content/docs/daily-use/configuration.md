@@ -30,7 +30,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `provider` | `anthropic`, `openai` (Mistral / Ollama / LM Studio / OpenAI / Groq / vLLM), `custom` (Anthropic-compat proxy via LiteLLM), `vertex` (legacy) | `anthropic` |
+| `provider` | `anthropic`, `openai` (Mistral / Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini long-context), `custom` (Anthropic-compat proxy via LiteLLM), `vertex` (legacy) | `anthropic` |
 | `api_base_url` | Endpoint for `provider: openai` or `custom` | — |
 | `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-large-latest`, `llama3.2`) | — |
 

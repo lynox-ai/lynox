@@ -95,7 +95,7 @@ OPENAI_MODEL_ID=mistral-large-latest
 - **Key**: console.mistral.ai → API Keys
 - **Models**: `mistral-large-latest` (flagship), `mistral-medium-latest`, `codestral-latest` (code-focused)
 - **Pricing**: $0.50 / $1.50 per MTok input/output (Large)
-- **Tool calling**: validated at 97% on the lynox agent loop
+- **Tool calling**: tested near-Claude quality on the lynox agent-loop bench (internal); the most polished non-Claude option today
 
 ### Ollama (local, no auth)
 
@@ -121,7 +121,7 @@ ANTHROPIC_BASE_URL=http://localhost:11434/v1
 OPENAI_MODEL_ID=llama3.2
 ```
 
-Verified working with Ollama 0.4+; tool-calling quality varies sharply by model size — Qwen 2.5 14B is the practical minimum for the lynox agent loop.
+Tested with Ollama 0.4+; tool-calling quality varies sharply by model size — Qwen 2.5 14B is the practical minimum for the lynox agent loop.
 
 ### LM Studio (local, no auth)
 
@@ -148,7 +148,7 @@ The model ID is whatever's loaded in the LM Studio Server tab (e.g. `qwen2.5-7b-
 ```
 
 - **Key**: platform.openai.com → API keys
-- **Models tested with lynox**: `gpt-4o`, `gpt-4o-mini`. The `o1` reasoning models work for chat but don't support function calling well — pick a `gpt-4*` for tool-using agents.
+- **Models tested**: `gpt-4o`, `gpt-4o-mini`. Current reasoning models (`o1`, `o3`) support function calling but add latency — `gpt-4o` is the simpler default for tool-using agents.
 
 ### Groq (hosted, fast inference)
 
@@ -163,7 +163,7 @@ Hosts open-source models with very low latency (LPU-backed).
 ```
 
 - **Key**: console.groq.com → API Keys
-- **Models tested**: `llama-3.3-70b-versatile` (best tool-calling on Groq), `qwen-2.5-72b`. Function calling support is recent — confirm with their docs before relying on it for complex agent loops.
+- **Models tested**: `llama-3.3-70b-versatile` (best tool-calling on Groq), `qwen-2.5-72b`. Function calling has been GA on Groq for the Llama 3.3 and Qwen families since late 2024; per-model support is listed in Groq's API docs.
 
 ### Gemini 2.5 Flash — Long-Context Only
 
@@ -189,7 +189,7 @@ Production-grade open-source inference server for your own GPU box. Default port
 }
 ```
 
-Run vLLM with `--served-model-name <id>` so the model ID matches your config. Tool calling requires vLLM 0.6+ and a model that supports it (Qwen 2.5, Llama 3.1+ Instruct, etc.).
+Run vLLM with `--served-model-name <id>` so the model ID matches your config. Tool calling requires a vLLM build that ships function-calling (0.6+; current releases are 0.10+, all of which support it) plus a model trained for tool use (Qwen 2.5, Llama 3.1+ Instruct, etc.).
 
 ### Model Profiles (Multi-Provider)
 
@@ -280,7 +280,7 @@ For maximum data control, run lynox on a server close to your LLM provider — a
 
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
-| **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no CLOUD Act |
+| **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no US CLOUD Act exposure |
 | **Fully local** | Ollama on your server | Docker on your server | Nothing leaves your network |
 
 lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/setup/docker/) for container configuration.
