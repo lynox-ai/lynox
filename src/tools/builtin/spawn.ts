@@ -11,24 +11,19 @@ import { resolveTools } from '../resolve-tools.js';
 import { checkSessionBudget } from '../../core/session-budget.js';
 import { escapeXml } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix } from '../../core/prompts.js';
+import {
+  DEFAULT_SPAWN_BUDGET_USD,
+  DEFAULT_SPAWN_MAX_TURNS,
+  MAX_SPAWN_AGENTS,
+  MAX_SPAWN_BUDGET_USD,
+  MAX_SPAWN_DEPTH,
+  MAX_SPAWN_NAME_LENGTH,
+  MAX_SPAWN_TASK_LENGTH,
+  MAX_SPAWN_TURNS,
+} from '../../core/limits.js';
 
 const SPAWN_TIMEOUT = 10 * 60 * 1000;
-const MAX_SPAWN_DEPTH = 5;
 const SPAWN_EXCLUDED = new Set(['spawn_agent']);
-const DEFAULT_SPAWN_BUDGET_USD = 5;
-
-// Hard caps on caller-supplied values. Tool-input schemas aren't enforced
-// at runtime, so the handler re-validates — without these caps a negative
-// `max_turns` would flip the estimate negative and credit the session-budget
-// counter via `checkSessionBudget`.
-const MAX_SPAWN_AGENTS = 10;
-const MAX_SPAWN_TURNS = 50;
-const MAX_SPAWN_BUDGET_USD = 50;
-const MAX_SPAWN_NAME_LENGTH = 64;
-const MAX_SPAWN_TASK_LENGTH = 16_384;
-
-/** Used as both estimator multiplier and runtime cap so the two can't drift. */
-const DEFAULT_SPAWN_MAX_TURNS = 10;
 
 /** Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the per-spawn cost guard. */
 const SPAWN_OUTPUT_FILL_RATIO = 0.3;
