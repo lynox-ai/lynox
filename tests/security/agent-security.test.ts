@@ -72,13 +72,8 @@ describe('Agent Security Audit', () => {
       expect(mcpContent).toContain('wrapUntrustedData');
     });
 
-    it('Telegram voice transcription is wrapped as untrusted data', () => {
-      const tgContent = readFileSync(join(SRC, 'integrations/telegram/telegram-bot.ts'), 'utf-8');
-      // wrapChannelMessage produces the same untrusted_data boundary
-      // and is now used so the caption + transcript wrap together.
-      const wraps = tgContent.includes('wrapUntrustedData') || tgContent.includes('wrapChannelMessage');
-      expect(wraps, 'telegram-bot.ts must wrap voice transcription').toBe(true);
-    });
+    // Telegram voice transcription test removed 2026-05-15 with the
+    // Telegram integration kill — see feedback_telegram_not_gated memory.
 
     it('HTTP redirect SSRF protection on watch fetch', () => {
       const workerContent = readFileSync(join(SRC, 'core/worker-loop.ts'), 'utf-8');

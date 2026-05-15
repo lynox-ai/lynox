@@ -491,7 +491,7 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
     expect(ruleCount.c).toBe(0);
   });
 
-  it('rejects upsertAccount with a reserved channel prefix (whatsapp: / telegram:)', () => {
+  it('rejects upsertAccount with a reserved channel prefix (whatsapp:)', () => {
     const base = {
       displayName: 'Bad',
       address: 'me@example.com',
@@ -503,7 +503,6 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
       isDefault: false,
     };
     expect(() => db.upsertAccount({ id: 'whatsapp:foo', ...base })).toThrow(/reserved channel prefix/);
-    expect(() => db.upsertAccount({ id: 'telegram:foo', ...base })).toThrow(/reserved channel prefix/);
     // Normal ids still pass.
     expect(() => db.upsertAccount({ id: 'acct-normal', ...base })).not.toThrow();
   });

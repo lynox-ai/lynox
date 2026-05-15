@@ -50,10 +50,10 @@ check_output "CLI has 16-char hash ID" "true" \
     console.log(c.id.length === 16 && /^[a-f0-9]+$/.test(c.id));
   "
 
-check_output "Telegram uses explicit context" "telegram" \
+check_output "CLI uses explicit context" "telegram" \
   node --import tsx -e "
     import { resolveContext } from './src/core/context.js';
-    console.log(resolveContext({ context: { id: 'c1', source: 'telegram', workspaceDir: '/tmp/x' } }).source);
+    console.log(resolveContext({ context: { id: 'c1', source: 'cli', workspaceDir: '/tmp/x' } }).source);
   "
 
 check_output "Empty workspaceDir auto-generates path" "true" \

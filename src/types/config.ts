@@ -188,10 +188,6 @@ export interface LynoxUserConfig {
   memory_auto_scope?: boolean | undefined;
   /** Show auto-greeting on interactive REPL start. Default: true */
   greeting?: boolean | undefined;
-  /** Telegram bot token from @BotFather */
-  telegram_bot_token?: string | undefined;
-  /** Restrict Telegram bot to specific chat IDs */
-  telegram_allowed_chat_ids?: number[] | undefined;
   /** API key for Tavily web search provider */
   search_api_key?: string | undefined;
   /** Web search provider: 'tavily' or 'searxng' */

@@ -204,7 +204,7 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
         // Targeted send so a silent web-push failure (zero subscriptions,
         // expired key, all endpoints 410) returns false and we don't
         // burn the throttle budget on a delivery that never happened.
-        // Other channels (telegram, etc.) are addressed via their own
+        // Other channels are addressed via their own
         // notifier path — inbox push is web-push specifically.
         const ok = await opts.router.sendTo('web-push', msg);
         if (ok) history.push(now());

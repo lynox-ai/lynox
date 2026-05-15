@@ -216,9 +216,6 @@ GET /api/crm/stats                # CRM statistics
 ### Integrations
 
 ```
-POST   /api/telegram/setup        # Start Telegram setup
-GET    /api/telegram/setup        # Poll setup status
-DELETE /api/telegram/setup        # Cancel setup
 
 GET    /api/google/status         # Google auth status
 POST   /api/google/auth           # Start device flow

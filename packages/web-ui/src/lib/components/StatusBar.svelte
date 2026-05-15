@@ -400,7 +400,6 @@
 					<div class="grid grid-cols-2 gap-1.5">
 						{#each [
 							['api_key', isManaged ? t('status.api_key_managed') : t('status.api_key')],
-							['telegram', t('status.telegram')],
 							['search', t('status.search')],
 							['google', t('status.google')],
 							...(!isManaged ? [['bugsink', t('status.bugsink')]] : []),

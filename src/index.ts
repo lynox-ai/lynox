@@ -65,8 +65,8 @@ export type { ProjectInfo } from './core/project.js';
 export { resolveContext } from './core/context.js';
 export type { LynoxContext, ContextSource } from './types/index.js';
 export { runSetupWizard } from './cli/setup-wizard.js';
-export { startTelegramBot, stopTelegramBot, getTelegramBot } from './integrations/telegram/telegram-bot.js';
-export { TelegramNotificationChannel } from './integrations/telegram/telegram-notification.js';
+// Telegram integration removed 2026-05-15 (data sovereignty + attack-surface reduction;
+// PWA + Mail/Voice cover every Telegram use case).
 export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES, createGoogleTools } from './integrations/google/index.js';
 export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult } from './integrations/google/index.js';
 export { getRole, getRoleNames, BUILTIN_ROLES } from './core/roles.js';
@@ -240,7 +240,6 @@ Usage:
   lynox --http-api              Start Engine HTTP API server (headless)
   lynox --mcp-server            Start as MCP server (stdio)
   lynox --mcp-server --transport sse   Start as MCP server (HTTP/SSE)
-  lynox --telegram              Start Telegram bot mode
   lynox --watch <glob> --on-change "<task>"   Watch files and run task on change
 
 Options:
@@ -264,7 +263,6 @@ Environment:
   LYNOX_WEBUI_URL               Web UI URL to open (default: http://localhost:5173)
   GCP_PROJECT_ID                Google Cloud project (for provider: vertex)
   CLOUD_ML_REGION               Vertex AI region (e.g. europe-west4, us-east5)
-  TELEGRAM_BOT_TOKEN            Auto-start Telegram bot mode
   SEARXNG_URL                   SearXNG instance for web search (Docker: http://searxng:8080)
   TAVILY_API_KEY                Enable Tavily web search (fallback when no SearXNG)
 
@@ -343,49 +341,6 @@ Docs: https://docs.lynox.ai
     return;
   }
 
-  // === Telegram bot mode ===
-  if (args.includes('--telegram') || process.env['TELEGRAM_BOT_TOKEN']) {
-    const { loadConfig: loadCfg } = await import('./core/config.js');
-    const cfg = loadCfg();
-    const token = process.env['TELEGRAM_BOT_TOKEN'] ?? cfg.telegram_bot_token;
-    if (!token) {
-      stderr.write('TELEGRAM_BOT_TOKEN required (env var or config)\n');
-      process.exit(1);
-    }
-    const tgEngine = new Engine({});
-    await tgEngine.init();
-
-    const allowedRaw = process.env['TELEGRAM_ALLOWED_CHAT_IDS'];
-    const allowedChatIds = allowedRaw
-      ? allowedRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
-      : cfg.telegram_allowed_chat_ids;
-
-    const { startTelegramBot: startTgBot, stopTelegramBot: stopTgBot } = await import('./integrations/telegram/telegram-bot.js');
-
-    const shutdown = async () => {
-      await stopTgBot();
-      await tgEngine.shutdown();
-      process.exit(0);
-    };
-    process.on('SIGINT', () => void shutdown());
-    process.on('SIGTERM', () => void shutdown());
-
-    await startTgBot({ token, allowedChatIds, engine: tgEngine });
-
-    // Register Telegram notification channel for background task results
-    const { getTelegramBot } = await import('./integrations/telegram/telegram-bot.js');
-    const { TelegramNotificationChannel } = await import('./integrations/telegram/telegram-notification.js');
-    const notifyChatId = allowedChatIds?.[0];
-    const tgBot = getTelegramBot();
-    if (notifyChatId && tgBot) {
-      tgEngine.getNotificationRouter().register(new TelegramNotificationChannel(tgBot, notifyChatId));
-    }
-
-    // Start background worker loop for scheduled task execution
-    tgEngine.startWorkerLoop();
-
-    return;
-  }
 
   const engine = new Engine({});
   state.currentModelId = getModelId(engine.config.model ?? 'sonnet', getActiveProvider());

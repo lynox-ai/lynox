@@ -37,8 +37,6 @@ export const LynoxUserConfigSchema = z.object({
   changeset_review:     z.boolean().optional(),
   memory_auto_scope:    z.boolean().optional(),
   greeting:             z.boolean().optional(),
-  telegram_bot_token:       z.string().optional(),
-  telegram_allowed_chat_ids: z.array(z.number()).optional(),
   search_api_key:       z.string().optional(),
   search_provider:      z.enum(['tavily', 'searxng']).optional(),
   searxng_url:          z.string().url().refine(
