@@ -65,6 +65,21 @@ export interface UsageInfo {
 	cacheRead: number;
 	cacheWrite: number;
 	costUsd: number;
+	/** Cumulative third-party API cost (DataForSEO etc.) charged this message,
+	 *  populated by the api_cost stream event. Distinct from `costUsd` which is
+	 *  LLM-only. Surfaces in the thread footer rollup. */
+	apiCostUsd?: number;
+}
+
+/** Single profiled-API call attributed to a chat message. Populated by the
+ *  api_cost stream event so the UI can render "$0.0006 (DataForSEO) — /v3/serp/…"
+ *  alongside the corresponding tool_result block. */
+export interface ApiCallCost {
+	tool: string;
+	profileId: string;
+	profileName: string;
+	endpoint: string;
+	costUsd: number;
 }
 
 export type ContentBlock =
@@ -87,6 +102,9 @@ export interface ChatMessage {
 	spawn?: SpawnProgress;
 	thinking?: string;
 	usage?: UsageInfo;
+	/** Profiled-API calls fired by this message's tool invocations. Each entry
+	 *  pairs with the matching tool_call block in `blocks`/`toolCalls`. */
+	apiCalls?: ApiCallCost[];
 	queued?: boolean;
 	/** Stable id correlating this bubble with its `messageQueue` entry. Set
 	 *  while queued, kept after un-queue (cheap) so removeQueuedMessage can
@@ -983,6 +1001,23 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (tool && phase) {
 				streamingToolPhase = { tool, phase };
 			}
+			break;
+		}
+		case 'api_cost': {
+			// Phase E: http_request emits one of these for every call against a
+			// profiled API with a per_call cost. Stored per-message so we can
+			// render the cost next to its tool_call block + roll up into the
+			// thread footer's usage row.
+			const profileId = String(data['profileId'] ?? '');
+			const profileName = String(data['profileName'] ?? '');
+			const endpoint = String(data['endpoint'] ?? '');
+			const tool = String(data['tool'] ?? 'http_request');
+			const costUsd = Number(data['costUsd'] ?? 0);
+			if (!profileId || !Number.isFinite(costUsd) || costUsd < 0) break;
+			const entry: ApiCallCost = { tool, profileId, profileName, endpoint, costUsd };
+			msg.apiCalls = [...(msg.apiCalls ?? []), entry];
+			const existing = msg.usage ?? { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+			msg.usage = { ...existing, apiCostUsd: (existing.apiCostUsd ?? 0) + costUsd };
 			break;
 		}
 		case 'tool_result': {
