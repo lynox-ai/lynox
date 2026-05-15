@@ -44,22 +44,40 @@
 	let usage = $state<UsageCurrent | null>(null);
 	let config = $state<UserConfig>({});
 	let saving = $state(false);
+	let loaded = $state(false);
 	let managed = $state<boolean | null>(null);
 
+	// Plain type-guard (not $derived — no reactive deps; calling overhead-free).
+	function isNumericHardLimits(h: HardLimits | undefined): h is HardLimitsNumeric {
+		return !!h && 'per_spawn_cents' in h;
+	}
+
 	async function load(): Promise<void> {
-		const [usageRes, configRes] = await Promise.all([
-			fetch(`${getApiBase()}/usage/current`),
-			fetch(`${getApiBase()}/config`),
-		]);
-		if (usageRes.ok) usage = (await usageRes.json()) as UsageCurrent;
-		if (configRes.ok) {
+		try {
+			const [usageRes, configRes] = await Promise.all([
+				fetch(`${getApiBase()}/usage/current`),
+				fetch(`${getApiBase()}/config`),
+			]);
+			if (!usageRes.ok || !configRes.ok) throw new Error(`HTTP ${usageRes.status} / ${configRes.status}`);
+			usage = (await usageRes.json()) as UsageCurrent;
 			const body = (await configRes.json()) as UserConfig & { managed?: string };
-			config = { ...body };
+			// Narrow to the 4 fields this surface owns — preserves type safety
+			// across spread + avoids stomping unrelated config on save.
+			config = {
+				max_monthly_cost_usd: body.max_monthly_cost_usd,
+				max_daily_cost_usd: body.max_daily_cost_usd,
+				max_session_cost_usd: body.max_session_cost_usd,
+				max_context_window_tokens: body.max_context_window_tokens,
+			};
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
+			loaded = true;
+		} catch (e) {
+			addToast(e instanceof Error ? e.message : t('cost_limits.load_failed'), 'error', 5000);
 		}
 	}
 
 	async function saveConfig(): Promise<void> {
+		if (!loaded) return;
 		saving = true;
 		try {
 			const res = await fetch(`${getApiBase()}/config`, {
@@ -83,19 +101,21 @@
 
 	$effect(() => { void load(); });
 
-	const isNumericHardLimits = $derived((h: HardLimits | undefined): h is HardLimitsNumeric => !!h && 'per_spawn_cents' in h);
 	const projectionLabel = $derived.by(() => {
 		if (!usage?.projection?.exhaust_eta_iso) return '';
 		const eta = new Date(usage.projection.exhaust_eta_iso);
-		const days = Math.max(0, Math.round((eta.getTime() - Date.now()) / 86_400_000));
+		// Math.ceil so a sub-day ETA never shows "exhausts in 0 days" — the
+		// projection itself is a warning, not a calendar-precise prediction.
+		const days = Math.max(1, Math.ceil((eta.getTime() - Date.now()) / 86_400_000));
 		return t('cost_limits.projection').replace('{days}', days.toString());
 	});
 
-	// Context window: 200k / 500k / 1M choices with relative-cost framing.
-	const CONTEXT_OPTIONS = [
-		{ value: 200_000, label: t('cost_limits.context.standard'), hint: t('cost_limits.context.standard_hint') },
-		{ value: 500_000, label: t('cost_limits.context.extended'), hint: t('cost_limits.context.extended_hint') },
-		{ value: 1_000_000, label: t('cost_limits.context.maximum'), hint: t('cost_limits.context.maximum_hint') },
+	// Context window: undefined = model default; 200k / 500k / 1M = explicit caps.
+	const CONTEXT_OPTIONS: ReadonlyArray<{ value: number | undefined; label: string; hint: string }> = [
+		{ value: undefined,  label: t('cost_limits.context.default'),  hint: t('cost_limits.context.default_hint') },
+		{ value: 200_000,    label: t('cost_limits.context.standard'), hint: t('cost_limits.context.standard_hint') },
+		{ value: 500_000,    label: t('cost_limits.context.extended'), hint: t('cost_limits.context.extended_hint') },
+		{ value: 1_000_000,  label: t('cost_limits.context.maximum'),  hint: t('cost_limits.context.maximum_hint') },
 	];
 </script>
 
@@ -104,7 +124,7 @@
 		<h1 class="text-2xl font-semibold mb-1">{t('cost_limits.title')}</h1>
 		<p class="text-sm text-text-muted">{t('cost_limits.subtitle')}</p>
 		{#if projectionLabel}
-			<p class="text-xs text-amber-600 mt-2" role="status" aria-live="polite">{projectionLabel}</p>
+			<p class="text-xs text-warning mt-2" role="status" aria-live="polite">⚠ {projectionLabel}</p>
 		{/if}
 	</header>
 
@@ -121,17 +141,17 @@
 			<div class="grid gap-4 sm:grid-cols-3">
 				<label class="block">
 					<span class="block text-sm mb-1">{t('config.monthly_limit')}</span>
-					<input type="number" step="1" min="0" placeholder="—" class="w-full font-mono px-2 py-1 border border-border rounded bg-bg"
+					<input type="number" step="1" min="0" placeholder="—" disabled={!loaded} class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50"
 						bind:value={config.max_monthly_cost_usd} />
 				</label>
 				<label class="block">
 					<span class="block text-sm mb-1">{t('config.daily_limit')}</span>
-					<input type="number" step="0.5" min="0" placeholder="—" class="w-full font-mono px-2 py-1 border border-border rounded bg-bg"
+					<input type="number" step="0.5" min="0" placeholder="—" disabled={!loaded} class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50"
 						bind:value={config.max_daily_cost_usd} />
 				</label>
 				<label class="block">
 					<span class="block text-sm mb-1">{t('config.session_limit')}</span>
-					<input type="number" step="0.5" min="0" placeholder="5.00" class="w-full font-mono px-2 py-1 border border-border rounded bg-bg"
+					<input type="number" step="0.5" min="0" placeholder="5.00" disabled={!loaded} class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50"
 						bind:value={config.max_session_cost_usd} />
 				</label>
 			</div>
@@ -143,10 +163,10 @@
 		<h2 id="cl-context-heading" class="text-lg font-medium mb-1">{t('cost_limits.context.heading')}</h2>
 		<p class="text-xs text-text-muted mb-3">{t('cost_limits.context.subtitle')}</p>
 		<div class="space-y-2">
-			{#each CONTEXT_OPTIONS as opt (opt.value)}
+			{#each CONTEXT_OPTIONS as opt (opt.value ?? 'default')}
 				<label class="flex items-start gap-3 cursor-pointer">
 					<input type="radio" name="context-window" value={opt.value} bind:group={config.max_context_window_tokens}
-						class="mt-1" />
+						disabled={!loaded} class="mt-1 disabled:opacity-50" />
 					<div class="flex-1">
 						<div class="text-sm font-medium">{opt.label}</div>
 						<div class="text-xs text-text-muted">{opt.hint}</div>
@@ -158,7 +178,7 @@
 
 	<!-- Save row -->
 	<div class="flex justify-end">
-		<button type="button" onclick={saveConfig} disabled={saving}
+		<button type="button" onclick={saveConfig} disabled={saving || !loaded}
 			class="px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50">
 			{saving ? t('cost_limits.saving') : t('cost_limits.save')}
 		</button>
