@@ -95,6 +95,7 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
+const ORPHAN_PROMPT_WATCHDOG_MS = 10 * 60_000; // 10 min — orphaned-stream + pending-prompt slot free guard
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
 /** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
@@ -216,6 +217,22 @@ function errorResponse(res: ServerResponse, status: number, message: string): vo
 function requireService<T>(res: ServerResponse, service: T | null | undefined, name: string): service is NonNullable<T> {
   if (service === null || service === undefined) errorResponse(res, 503, `${name} not available`);
   return service !== null && service !== undefined;
+}
+
+/**
+ * Constant-time secret comparison that does NOT leak length via early return.
+ * Use this in auth paths instead of `a.length === b.length && timingSafeEqual(a, b)`
+ * — the latter short-circuits on length mismatch in a way that an attacker can
+ * measure to learn the server-side secret length.
+ *
+ * Strategy: zero-pad the input to the expected length, run timingSafeEqual on
+ * equal-width buffers, then AND in the length-equality check. The total work
+ * is the same regardless of input length.
+ */
+function constantTimeEqual(candidate: Buffer, expected: Buffer): boolean {
+  const fixed = Buffer.alloc(expected.length);
+  candidate.copy(fixed); // truncates if longer, zero-pads if shorter
+  return timingSafeEqual(fixed, expected) && candidate.length === expected.length;
 }
 
 /** Cookie auth is user-scope → secret writes need the BYOK whitelist. Covers BYOK starter + managed pool. */
@@ -550,8 +567,13 @@ export class LynoxHTTPApi {
       const expected = createHmac('sha256', key).update(payload).digest('hex');
       const sigBuf = Buffer.from(sig, 'hex');
       const expBuf = Buffer.from(expected, 'hex');
-      if (sigBuf.length !== expBuf.length) return null;
-      return timingSafeEqual(sigBuf, expBuf) ? timestamp : null;
+      // Always run timingSafeEqual against equal-length buffers — the length
+      // mismatch early-return previously short-circuited the comparison in
+      // a way that leaked sig length to an attacker measuring response time.
+      const fixed = Buffer.alloc(expBuf.length);
+      sigBuf.copy(fixed); // truncates or zero-pads to expBuf.length
+      const matched = timingSafeEqual(fixed, expBuf);
+      return matched && sigBuf.length === expBuf.length ? timestamp : null;
     } catch {
       return null;
     }
@@ -1091,14 +1113,18 @@ export class LynoxHTTPApi {
       const adminSecret = process.env['LYNOX_HTTP_ADMIN_SECRET'];
 
       if (bearerToken) {
-        // Bearer token auth (external clients, MCP, Telegram)
+        // Bearer token auth (external clients, MCP).
+        // Avoid `len(a) !== len(b) && timingSafeEqual(a, b)` — the early-return
+        // shape leaks server-secret length via response-time. Compare in
+        // fixed-width buffers and fold the length-equality check into the
+        // final boolean only after timingSafeEqual has run.
         const tokenBuf = Buffer.from(bearerToken);
         const secretBuf = Buffer.from(secret);
 
         if (adminSecret) {
           const adminBuf = Buffer.from(adminSecret);
-          const isAdmin = adminBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, adminBuf);
-          const isUser = secretBuf.length === tokenBuf.length && timingSafeEqual(tokenBuf, secretBuf);
+          const isAdmin = constantTimeEqual(tokenBuf, adminBuf);
+          const isUser = constantTimeEqual(tokenBuf, secretBuf);
           if (isAdmin) {
             authScope = 'admin';
           } else if (isUser) {
@@ -1109,8 +1135,7 @@ export class LynoxHTTPApi {
           }
         } else {
           // Single-token mode — LYNOX_HTTP_SECRET grants admin
-          const secretBufCmp = Buffer.from(secret);
-          if (tokenBuf.length !== secretBufCmp.length || !timingSafeEqual(tokenBuf, secretBufCmp)) {
+          if (!constantTimeEqual(tokenBuf, secretBuf)) {
             errorResponse(res, 401, 'Unauthorized');
             return;
           }
@@ -1692,6 +1717,18 @@ export class LynoxHTTPApi {
         if (!hasActivePendingPrompt) {
           sessionAbortController.abort();
           session.abort();
+        } else {
+          // Orphan watchdog: bound how long a closed-stream slot can hold
+          // the running-session entry while waiting on a pending prompt.
+          // Pre-1.5.0 the slot could sit `streamAlive=false` up to PROMPT_TTL
+          // (24h), pinning a runningSessions entry + open SQLite handles
+          // until the prompt expired. Now: 10 min after stream close, if
+          // nobody reconnected (streamAlive still false), trigger the
+          // takeover so the prompt expires and the slot frees.
+          setTimeout(() => {
+            const liveSlot = this.runningSessions.get(sessionId);
+            if (liveSlot && !liveSlot.streamAlive) liveSlot.takeover();
+          }, ORPHAN_PROMPT_WATCHDOG_MS);
         }
       });
 

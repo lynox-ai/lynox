@@ -510,6 +510,10 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
       const resp = await fetchWithValidatedRedirects(url, { signal: ac.signal }, agent.toolContext);
+      // Bootstrap fetches go around the http_request tool, so the session
+      // limit didn't see them pre-1.5.0. Charge each successful fetch so a
+      // pathological docs_url can't laundromat its way past the budget.
+      agent.sessionCounters.httpRequests++;
       if (!resp.ok) return '';
       const { text } = await readBodyLimited(resp, remainingBudget);
       return text;
@@ -662,6 +666,9 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
       const resp = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, agent.toolContext);
+      // Charge the primary docs fetch against the session HTTP budget so
+      // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
+      agent.sessionCounters.httpRequests++;
       if (!resp.ok) {
         return `Error: failed to fetch docs page (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL and try again.`;
       }
@@ -880,6 +887,8 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         let resp: Response;
         try {
           resp = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, agent.toolContext);
+          // Charge OpenAPI bootstrap fetches against the session budget too.
+          agent.sessionCounters.httpRequests++;
         } finally {
           clearTimeout(timer);
         }

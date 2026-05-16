@@ -29,7 +29,7 @@ The role determines which model is used, what tools are available, and how auton
 
 ![Workflows — pipeline runs with steps, costs, and duration](../../../assets/screenshots/workflows.jpg)
 
-lynox can run tasks in the background — scheduled or triggered. Results are delivered via your notification channel (Web UI, Telegram, or both).
+lynox can run tasks in the background — scheduled or triggered. Results are delivered via your notification channel (Web UI Activity Hub, mail, or push).
 
 ### Creating tasks
 
@@ -88,8 +88,9 @@ When you work through a task interactively, lynox can capture the workflow as a 
 
 Background task results are delivered through your configured channels:
 
-- **Web UI** — Results appear in the Activity view
-- **Telegram** — Sent as a message with follow-up buttons
+- **Web UI** — Results appear in the [Activity Hub](/features/web-ui/) (`/app/hub`)
+- **Mail** — Sent to your connected mailbox with a reply-to-act follow-up
+- **Push** — Web push notification if enabled in your browser
 
 If a background task needs your input (e.g., a clarification question), you receive an inline prompt you can answer directly.
 

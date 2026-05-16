@@ -32,3 +32,5 @@ playwright-report/
 test-results/
 .wrangler/
 .claude/settings.local.json
+.audits/
+audits/

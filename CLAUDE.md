@@ -15,7 +15,7 @@ pnpm run lint        # eslint src/
 pnpm run build       # tsc → dist/
 pnpm run dev         # watch mode with tsx
 pnpm run security    # security scan + vitest security tests
-npx vitest run       # 115 test files
+npx vitest run       # ~200 test files (src + tests/)
 npx vitest run tests/online/  # 22 real API tests
 
 # Web UI (@lynox-ai/web-ui)
@@ -33,11 +33,11 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — 78 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
+- `src/core/` — ~95 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, Docker installer, setup wizard, watchdog)
 - `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
-- `src/integrations/` — Telegram, Google Workspace, Web Search (SearXNG default, Tavily fallback)
+- `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, WhatsApp, Web Search (SearXNG default, Tavily fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/integrations/remote-access.md`.)
 - `src/server/` — MCP server (stdio + HTTP SSE), Engine HTTP API (REST + SSE for PWA)
 - `src/types/` — 12 domain type files, barrel re-export via index.ts
 
@@ -61,8 +61,7 @@ SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component l
 
 Pro/pwa imports `@lynox-ai/web-ui` and wraps View components with Lucia auth + onboarding.
 
-**Interface priority:** Web UI (primary) → Telegram (secondary, mobile) → CLI (headless/automation).
-Telegram is pure task execution — setup/admin redirects to Web UI.
+**Interface priority:** Web UI (primary) → PWA + mail/voice (mobile) → CLI (headless/automation).
 No interactive REPL — CLI is for single-task, watch, manifest, and server modes only.
 
 Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by category:
@@ -97,9 +96,8 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Testing
 
-108 offline test files (105 in src/, 3 in tests/integration/). Co-located *.test.ts.
-2 security test files in tests/security/.
-5 online test files (real Haiku API) in tests/online/.
+~180 co-located *.test.ts in src/, ~20 in tests/ (integration + security + smoke).
+Online tests in tests/online/ (real Haiku API).
 Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/integrations/ (lines >=65%, functions >=60%, branches >=50%, statements >=65%).
 
 ## Git
@@ -113,7 +111,7 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/int
 **Single image** (`Dockerfile`): Combined Engine + Web UI for all deployments.
 Single process: Engine HTTP API auto-loads SvelteKit handler as fallback for non-API routes.
 Entrypoint: entrypoint-webui.sh (env setup, then `exec node dist/index.js --http-api`).
-LLM credentials are optional at startup — without them, engine starts in browse mode and SetupBanner shows a provider-aware wizard (Anthropic / Vertex / Custom / OpenAI) to enter credentials via the UI (stored in vault). Never set placeholder env vars as env vars override vault.
+LLM credentials are optional at startup — without them, engine starts in browse mode and SetupBanner shows a provider-aware wizard (Anthropic / Mistral / Custom — OpenAI-compat proxy) to enter credentials via the UI (stored in vault). Vertex is no longer offered by the installer or in-product wizard but stays wired for existing `provider: 'vertex'` config.json setups. Never set placeholder env vars as env vars override vault.
 Web UI handler resolved from `/app/web-ui/handler.js` (adapter-node export).
 `docker run -p 3000:3000 -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/lynox-ai/lynox:latest`
 

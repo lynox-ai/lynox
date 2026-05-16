@@ -45,6 +45,14 @@ const SAMPLE_PROFILE: ApiProfile = {
 
 function createMockAgent(apiStore?: ApiStore | null) {
   return {
+    // Bootstrap fetches now charge against sessionCounters.httpRequests
+    // (matches http.ts). The stub just provides a writable counter; tests
+    // that care about exact request budgets can assert on it.
+    sessionCounters: {
+      httpRequests: 0,
+      approvedOutboundDomains: new Set<string>(),
+      pendingOutboundPrompts: new Map<string, unknown>(),
+    },
     toolContext: {
       apiStore: apiStore ?? null,
       dataStore: null,

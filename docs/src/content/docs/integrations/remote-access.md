@@ -93,7 +93,7 @@ lynox used to ship a Telegram bot as the mobile-access companion. We removed it 
 - **Attack surface** — a Telegram bot token is a public webhook endpoint with stable URL; mistakes there can't be quickly contained.
 - **Feature parity** — the PWA covers everything the bot did (chat, voice, mail, push notifications), better.
 
-If you specifically need a *messenger-style* interface to lynox, see the [WhatsApp Inbox](/integrations/whatsapp/) integration which keeps mail-shaped conversation flows native to your business.
+If you specifically need a *messenger-style* interface to lynox, see the [Unified Inbox](/features/unified-inbox/) which routes WhatsApp Business messages alongside mail in the same triage UI.
 
 ## Troubleshooting
 

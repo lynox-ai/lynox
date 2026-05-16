@@ -8,7 +8,7 @@ sidebar:
 lynox accepts voice input on two surfaces:
 
 - **Web UI (primary)** — record in the browser, transcript is sent back for review or submitted directly as a message.
-- **Telegram bot (secondary)** — forward a voice message to the bot and it transcribes before running the task.
+- **Mail / Inbox** — forward a voice attachment (m4a / mp3 / ogg) to your connected mailbox and lynox transcribes it before running the task.
 
 Transcription happens server-side. Two providers are supported; you can choose which one runs.
 

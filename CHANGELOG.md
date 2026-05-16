@@ -1,5 +1,101 @@
 # Changelog
 
+## 1.5.0 — 2026-05-16
+
+Minor — **HN-launch readiness release**. Settings & Usage IA Refactor (23 PRs landed 2026-05-15) consolidates the post-onboarding surface around six top-level tabs. **Telegram integration removed** as a customer-facing feature (data sovereignty + attack-surface reduction; companion still available in self-hosted core). API Setup v2 graduates with Smart Bootstrap from `docs_url`. LLM Settings page + model catalog endpoint replace the BYOK-by-env-only flow. Tool-Toggles + server-side enforcement land as a first-class security primitive. README + first-run + provider matrix polished for HN.
+
+### Added — Settings & Usage IA Refactor (Phases 0-5 + T1-T7)
+
+- **Six top-level tabs** with route migrations: Chat / Hub / Intelligence / Automation / Voice / System. Replaces the legacy `/app/settings/*` grab-bag. (#387, #389, #391, #393)
+- **Activity Hub elevated to `/app/hub`** (route migration with redirects). Cost & Limits surface at `/app/hub/cost-limits`. (#387, #389)
+- **System settings top-level page** consolidates security, residency, sessions, build version. (#393)
+- **Voice + Privacy & Data top-level settings pages** — split out of the legacy compound surface. (#391)
+- **LLM Settings page** with `/api/llm/test` connection probe + per-provider key entry; replaces the env-only BYOK flow. (#390)
+- **Custom-Endpoint Confirm-Banner** on LLMSettings reduces foot-shotgun risk when wiring LiteLLM bookmarks. (#399)
+- **Multi-Custom-Endpoint Registry** (LiteLLM-style bookmarks) — users save multiple OpenAI-compatible endpoints with per-bookmark display name + key. (#402)
+- **Tool-Toggles + server-side enforcement** — per-tool enable/disable that the engine respects on dispatch, not just the UI. Security gaps from /pr-review closed in #405. (#401, #405)
+- **Bugsink toggle** in web-ui (schema + engine wiring + UI) — self-hosted users can flip error reporting from settings instead of env. (#400)
+- **API profile delete** UX (#375). API Profiles moved to Automation tab (#382). DataStore moved to Intelligence tab (#376).
+- **Reserve `/app/settings/integrations/api-store/` sub-route** for the upcoming managed API-Profile store. (#392)
+
+### Added — API Setup v2 + Smart Bootstrap
+
+- **API Setup v2 default-on** — agent-driven setup graduates from feature-flag to default. (#395)
+- **Smart Bootstrap from `docs_url`** (Phase B) — agents bootstrap a profile by reading the API's docs page directly when no OpenAPI spec exists. (#367)
+- **Linked-section fan-out** in `docs_url` bootstrap — 1-2 follow-up reads when the landing page references nested endpoints. (#369)
+- **`tool_progress` events during `docs_url` bootstrap** — the StreamingActivityBar surfaces what the bootstrap is currently reading. (#368)
+- **API Profile v2 schema + loader migration** — new shape: `auth_scheme`, `limits`, `parallel_ok`, `output_volume`, `dos`, `donts`, `sub_agent_strategy`. (#365)
+- **Per-call cost emission + render** from profiled APIs (Phase E). (#373)
+- **`/api/llm/catalog` endpoint** — canonical LLM model catalog (replaces hard-coded UI lists). (#386)
+- **`/api/usage/current` SSoT endpoint** — single source of truth for current usage; powers Cost & Limits and Status surfaces. (#388)
+- **`/api/config` shape extended** with `capability` + `locks` — UI can render lock-icons for managed-policy-pinned settings. (#385)
+
+### Added — HN-launch surface
+
+- **README polish for HN** — multi-provider matrix, ELv2 framing, "NOT good at" honest-limits table, founder section. (#370)
+- **First-run provider choices** aligned with HN-launch positioning (Anthropic + Mistral + Custom). (#371)
+- **Provider matrix restructured** (Vertex dropped; Anthropic / Mistral / Custom-OpenAI-compatible primary). (#372)
+- **AppShell sidebar redesign + Migration Wizard docs page**. (#362)
+- **Walkthrough docs aligned** with the current provider set. (#374)
+- **Chat rendering polish** — 4 findings bundled (#383).
+
+### Added — Tests & CI
+
+- **Staging-Smoke Playwright workflow + spec in `tests/smoke/`** — runs against `engine.lynox.cloud` after every release. (#398, #403)
+- **F14 — vitest coverage for the Settings-Refactor sprint surface** (+41 new tests). (#408)
+
+### Removed (breaking — customer-facing Telegram)
+
+- **End-user Telegram integration killed** — `src/integrations/telegram/` channel-side surface removed (8 integration files + 553-line `telegram-bot.ts` deleted). `telegram_bot_token` + `telegram_allowed_chat_ids` removed from config schema + types. Managed plane stops provisioning bot tokens. Driven by: data-sovereignty posture for HN-launch, attack-surface reduction (Wave-4 callout), and the unified-inbox repositioning. **Migration:** existing managed customers with active Telegram are auto-migrated to email-only inbox; bot tokens revoked. **Rollback note:** v1.4.2 still references the removed config fields — downgrade after env-var removal will require operator to restore tokens manually. (#397)
+- **`MANAGED_TELEGRAM_BOT_TOKEN` for ops alerting (Alerter/Gatus) is unaffected** — it lives in `pro/packages/managed` and is separate from the customer-facing channel. Ops alerts continue to flow through Telegram.
+
+### Fixed
+
+- **`api-setup`: steer agents to `docs_url` when OpenAPI spec is too large** — closes the bootstrap-budget false-positive that surfaced as HN-launch blocker. (#415, #379)
+- **`api-setup`: support `auth.type="none"`** for public APIs (open-data + free LLM endpoints). (#414)
+- **`api-setup`: wire ApiStore into ToolContext on fresh installs** (closes the "profile saved but never visible" path). (#413)
+- **SetupBanner: show provider picker on BYOK starter**, not just self-host. (#412)
+- **`llm-helper`: default to Sonnet engine-wide**, Haiku as override (was inverted). (#411)
+- **Engine: mirror resolved Anthropic key into `process.env`** so downstream libraries that read from env see the key vault resolved. (#410)
+- **`http-api`: allow managed users to set their own preference fields** (was 403 on managed-pool BYOK). (#409, #406, #396)
+- **Security: close 3 Tool-Toggle enforcement gaps** surfaced by `/pr-review` on #401. (#405)
+- **Auth: align engine session-cookie TTL with web-ui + roll on use** — closes the 7d/30d drift that caused random "Verbindung verloren" toasts on iOS Safari PWA. (#381)
+- **Apply Sprint-Review follow-ups** (5 blockers + 9 nits in one bundle). (#407)
+- **Entrypoint: warn when `~/.lynox/` has files owned by a different uid** — catches the docker-compose user-id mismatch upfront. (#380)
+- **Hide CRM-overlap DataStore collections + drop stale empties at startup**. (#378)
+- **Fix stale `labelKey` in Intelligence Data tab**. (#377)
+
+### Refactored
+
+- **Apply 4 nits from `/pr-review` on #402** (Multi-Custom-Endpoint Registry polish). (#404)
+- **Consolidate hard-limit constants into `core/limits.ts`** — single source of truth for all $/req/day caps. (#384)
+
+### Pro / Managed Hosting
+
+- **Customer-facing Telegram killed** in managed plane — mirror of core #397. Existing customers auto-migrated. (pro #142)
+- **`api_setup` helper pinned to Haiku** in public-demo container — bounds cost of demo bootstrap runs. (pro #143)
+- **Tier-1 public-demo scaffold** — landing page + sandbox compose + safety ADR for `demo.lynox.cloud`. (pro #135)
+- **CF Worker daily-cost kill-switch** for demo (cap #5 — auto-stop demo when daily cost exceeds threshold). (pro #136)
+- **`/trust` landing page** for HN-launch posture (data-residency, ELv2, no-train commitments). (pro #134)
+- **`/compare/vs-saas-stack`: honest-limits table** (where SaaS stacks are still better). (pro #139)
+- **Pricing page BYOK list aligned** with launch lineup. (pro #138)
+- **HN launch post drafts** — three angle variants. (pro #137)
+- **`bootstrap migration-tracking` on first deploy** — fixes the bootstrap-path bug that broke v1.4.2 release-CP. (pro #131)
+- **`devalue` + `postcss` bumped** — clears HIGH CVE audit findings. (pro #133)
+
+### Docs & Internal
+
+- **PRD: Settings & Usage IA Refactor (HN-launch)** — drove the 23 PRs. (pro #141)
+- **B3 architecture blog: "Anatomy of a lynox agent run"** (EN draft). (pro #140)
+- **PRD: ad-hoc sub-agent teams for business-case fan-out**. (pro #132)
+- **Docs: Unified Inbox page**; archive WhatsApp Inbox doc. (#361)
+- **Docs drift fix**: Bedrock → Vertex provider, version + cost-limit drift across getting-started. (#360)
+- **Docs boundary**: relocate tier-routing strategy from public docs to internal PRDs; generalize WA-beta references. (#359)
+
+### Dependencies
+
+- **`svelte` 5.55.7 + `@sveltejs/kit` 2.60.1** (devalue 5.8.1). (#366)
+
 ## 1.4.2 — 2026-05-14
 
 Patch — UI clarity for long-running agent turns + the root-cause fix for the "Verbindung zum Server verloren" toast that surfaced on cat.lynox.cloud + Wave 3/4 security and refactor convergence.

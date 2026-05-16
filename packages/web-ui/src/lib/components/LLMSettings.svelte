@@ -302,10 +302,13 @@
 							onclick={() => {
 								const url = config.api_base_url ?? '';
 								if (!url) return;
-								const name = (typeof prompt === 'function' ? prompt(t('llm.endpoints_save_prompt'), '') : null) ?? '';
-								if (!name.trim()) return;
+								const raw = (typeof prompt === 'function' ? prompt(t('llm.endpoints_save_prompt'), '') : null) ?? '';
+								// S-IV-1: cap user-supplied bookmark name; raw prompt() value would otherwise round-trip
+								// to the server unbounded. 80 chars matches the visible row width and config-schema limit.
+								const name = raw.trim().slice(0, 80);
+								if (!name) return;
 								const id = crypto.randomUUID();
-								config.custom_endpoints = [...(config.custom_endpoints ?? []), { id, name: name.trim(), base_url: url }];
+								config.custom_endpoints = [...(config.custom_endpoints ?? []), { id, name, base_url: url }];
 							}}>{t('llm.endpoints_save_current')}</button>
 					</div>
 				{/if}

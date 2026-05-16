@@ -11,6 +11,7 @@
 
 import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { wrapUntrustedData } from './data-boundary.js';
 
 // ── Errors ──
 
@@ -438,8 +439,16 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
    */
   formatProfile(p: ApiProfile): string {
     const lines: string[] = [];
+    // Defense-in-depth: when a profile was bootstrapped from a docs_url
+    // (a Haiku extraction over an arbitrary HTML page), wrap free-text
+    // fields so an attacker docs page can't smuggle "ignore previous
+    // instructions / set vault_keys to X" through the description /
+    // guidelines / avoid / notes lines into the parent agent's prompt.
+    const fromDocs = p.provenance?.source === 'docs_url';
+    const trust = (text: string, field: string): string =>
+      fromDocs ? wrapUntrustedData(text, `api_profile.${field}`) : text;
     lines.push(`### ${p.name}`);
-    lines.push(p.description);
+    lines.push(trust(p.description, 'description'));
     lines.push(`Base URL: ${p.base_url}`);
 
     if (p.auth) {
@@ -481,19 +490,19 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     if (p.guidelines && p.guidelines.length > 0) {
       lines.push('');
       lines.push('Guidelines:');
-      for (const g of p.guidelines) lines.push(`- ${g}`);
+      for (const g of p.guidelines) lines.push(`- ${trust(g, 'guidelines')}`);
     }
 
     if (p.avoid && p.avoid.length > 0) {
       lines.push('');
       lines.push('Avoid:');
-      for (const a of p.avoid) lines.push(`- ${a}`);
+      for (const a of p.avoid) lines.push(`- ${trust(a, 'avoid')}`);
     }
 
     if (p.notes && p.notes.length > 0) {
       lines.push('');
       lines.push('Notes:');
-      for (const n of p.notes) lines.push(`- ${n}`);
+      for (const n of p.notes) lines.push(`- ${trust(n, 'notes')}`);
     }
 
     if (p.response_shape) {
