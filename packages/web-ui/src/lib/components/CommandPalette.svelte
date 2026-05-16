@@ -27,7 +27,10 @@
 		{ id: 'nav-settings', label: t('nav.settings'), group: t('cmd.nav'), action: () => goto('/app/settings'), keywords: 'settings einstellungen config' },
 		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/keys'), keywords: 'keys api schluessel' },
 		{ id: 'nav-integrations', label: t('settings.integrations'), group: t('cmd.nav'), action: () => goto('/app/settings/integrations'), keywords: 'integrations google tavily mail email imap smtp' },
-		{ id: 'nav-config', label: t('settings.config'), group: t('cmd.nav'), action: () => goto('/app/settings/config'), keywords: 'config model effort thinking budget backup' },
+		// PRD-IA-V2 P1-PR-A2 — /app/settings/config was deleted; target the
+		// LLM-page (Provider + Model + Advanced + Memory). Phase-3 splits this
+		// further into /llm/advanced, /llm/memory, /workspace/limits, etc.
+		{ id: 'nav-config', label: t('settings.config'), group: t('cmd.nav'), action: () => goto('/app/settings/llm'), keywords: 'config model effort thinking budget backup provider llm' },
 	];
 
 	const filtered = $derived(

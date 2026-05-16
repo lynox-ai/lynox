@@ -2348,8 +2348,8 @@ export class LynoxHTTPApi {
       // every save (PRD-SETTINGS-REFACTOR Principle 6), so we can't reject
       // non-allowlist fields outright — compare each against the *effective*
       // value (config file + managed defaults) and only block real changes.
-      // Schema is `.passthrough()` for forward compat, so an unknown field
-      // diffs against `undefined` and 403s — fail-closed for future fields.
+      // Schema is `.strict()` (PRD-IA-V2 P1-PR-A2) — unknown fields already
+      // 400 before we get here, so this loop only sees real schema fields.
       if (requiresConfigLockGate(process.env['LYNOX_MANAGED_MODE'])) {
         const fileConfig = loadConfig() as Record<string, unknown>;
         const update = parsed.data as Record<string, unknown>;

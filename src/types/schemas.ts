@@ -110,4 +110,9 @@ export const LynoxUserConfigSchema = z.object({
   // the catalog can grow without a schema bump. Validation against the live
   // voices list happens at request time inside the TTS provider.
   tts_voice:               z.string().min(1).max(64).optional(),
-}).passthrough(); // allow unknown keys for forward compat
+  // Auto-update notification toggle (SystemSettings → Updates).
+  update_check:            z.boolean().optional(),
+}).strict(); // reject unknown keys — prevents stale-tab ghost-writes from
+              // landing GET-response-only fields (capabilities, locks,
+              // managed, bugsink_dsn_configured) in ~/.lynox/config.json.
+              // PRD-IA-V2 P1-PR-A2 — ConfigView delete + schema tightening.

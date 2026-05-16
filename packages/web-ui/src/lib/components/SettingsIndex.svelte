@@ -72,7 +72,9 @@
 		{
 			labelKey: 'settings.section_main',
 			items: [
-				{ href: '/app/settings/config', titleKey: 'settings.config', descKey: 'settings.config_desc' },
+				// PRD-IA-V2 P1-PR-A2 — /settings/config deleted; LLMSettings is the new
+				// canonical entry-point for Provider + Model + Advanced + Memory.
+				{ href: '/app/settings/llm', titleKey: 'settings.config', descKey: 'settings.config_desc' },
 				{ href: '/app/settings/integrations', titleKey: 'settings.integrations', descKey: 'settings.integrations_desc' },
 			],
 		},
