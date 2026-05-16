@@ -21,13 +21,31 @@ export interface CatalogModel {
 }
 
 export interface CatalogProviderEntry {
+  /**
+   * Wire-level provider — what the engine sends to `createLLMClient`. Multiple
+   * UI entries can share a `provider` (e.g. both 'Mistral (EU-Paris)' and
+   * generic 'OpenAI-compatible endpoint' serialise to provider='openai'); the
+   * UI keys buttons off `preset_id ?? provider` to disambiguate them.
+   */
   provider: LLMProvider;
+  /**
+   * Optional UI-only identifier for catalog entries that share a `provider`.
+   * Stable across rebuilds — used as a localStorage key and the UI button
+   * identity. Omit when the provider field is itself unique.
+   */
+  preset_id?: string;
   display_name: string;
   /** Empty array signals free-text fallback — user types model ID themselves. */
   models: ReadonlyArray<CatalogModel>;
   requires_base_url: boolean;
   requires_region: boolean;
   default_residency: string;
+  /**
+   * Pre-filled api_base_url for this preset. Used when `requires_base_url` is
+   * false but the entry still needs a non-default URL (e.g. Mistral preset
+   * implies api.mistral.ai without making the user type it).
+   */
+  base_url_default?: string;
   notes?: string;
 }
 
@@ -96,32 +114,45 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
   },
 ];
 
+/**
+ * Mistral models pinned to dated snapshots — mirrors MISTRAL_MODEL_MAP in
+ * types/models.ts so the EU-sovereign tier router and the user-facing
+ * catalog stay aligned. `*-latest` aliases auto-roll silently → bad for
+ * cost predictability + behaviour-drift in managed-EU tenants.
+ *
+ * Tier mapping: small ↔ haiku, large ↔ sonnet, magistral-medium ↔ opus
+ * (see types/models.ts for the cost/quality rationale).
+ */
 const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   {
-    id: 'mistral-large-latest',
+    id: 'mistral-large-2512',
+    tier: 'sonnet',
     label: 'Mistral Large',
-    context_window: 128_000,
+    context_window: 131_072,
     pricing: { input: 2, output: 6 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Highest quality EU-sovereign option.',
+    notes: 'Recommended default — tool-calling workhorse on EU-sovereign mode.',
   },
   {
-    id: 'mistral-medium-latest',
-    label: 'Mistral Medium',
-    context_window: 128_000,
-    pricing: { input: 0.40, output: 2 },
+    id: 'magistral-medium-2509',
+    tier: 'opus',
+    label: 'Magistral Medium',
+    context_window: 131_072,
+    pricing: { input: 2, output: 5 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
+    notes: 'Reasoning-heavy variant — slower, better at multi-step planning.',
   },
   {
-    id: 'mistral-small-latest',
+    id: 'mistral-small-2603',
+    tier: 'haiku',
     label: 'Mistral Small',
-    context_window: 128_000,
+    context_window: 32_000,
     pricing: { input: 0.20, output: 0.60 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Fast + cheap; suitable for routing and quick replies.',
+    notes: 'Fast + cheap; suitable for routing, classification, and quick replies.',
   },
 ];
 
@@ -134,6 +165,33 @@ export const LLM_CATALOG: LLMCatalog = [
     requires_region: false,
     default_residency: 'US (Anthropic; DPA + GDPR)',
   },
+  // Mistral is rendered as a first-class native option (its own button above
+  // the generic OpenAI-compatible entry) so EU-sovereign customers don't
+  // have to know they're going through the OpenAI wire format. Same
+  // `provider: 'openai'` under the hood — disambiguated in the UI via
+  // `preset_id`. The hostname-match in `getOpenAIModelMap` activates the
+  // tier router regardless of which preset the user picked.
+  {
+    provider: 'openai',
+    preset_id: 'mistral',
+    display_name: 'Mistral',
+    models: MISTRAL_MODELS,
+    requires_base_url: false,
+    requires_region: false,
+    base_url_default: 'https://api.mistral.ai/v1',
+    default_residency: 'EU-Paris (Mistral SAS; DPA + GDPR)',
+    notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: small / large / magistral picked from the model dropdown.',
+  },
+  {
+    provider: 'openai',
+    preset_id: 'openai-compat',
+    display_name: 'OpenAI-compatible endpoint',
+    models: [],
+    requires_base_url: true,
+    requires_region: false,
+    default_residency: 'depends on the operator-configured endpoint',
+    notes: 'Generic OpenAI wire (POST /chat/completions). Use for Groq, OpenRouter, LMStudio, LiteLLM in OpenAI mode, or any custom OpenAI-API-compatible server.',
+  },
   {
     provider: 'vertex',
     display_name: 'Google Vertex AI (Claude)',
@@ -142,15 +200,6 @@ export const LLM_CATALOG: LLMCatalog = [
     requires_region: true,
     default_residency: 'GCP region (configurable)',
     notes: 'Same Claude family routed through Vertex. Requires GCP project + region.',
-  },
-  {
-    provider: 'openai',
-    display_name: 'OpenAI-compatible endpoint',
-    models: MISTRAL_MODELS,
-    requires_base_url: true,
-    requires_region: false,
-    default_residency: 'e.g. Mistral (EU-Paris) or LiteLLM in OpenAI mode',
-    notes: 'OpenAI wire (POST /chat/completions). Base URL defaults to https://api.mistral.ai/v1 for Mistral; works with any OpenAI-API-compatible endpoint.',
   },
   {
     provider: 'custom',
@@ -163,9 +212,79 @@ export const LLM_CATALOG: LLMCatalog = [
   },
 ];
 
+/**
+ * Stable UI key per catalog entry. Multiple entries can share a `provider`
+ * (Mistral + generic OpenAI-compatible both serialise to `'openai'`), so
+ * `preset_id` is the disambiguator. Falls back to `provider` when omitted.
+ */
+export function catalogEntryKey(entry: CatalogProviderEntry): string {
+  return entry.preset_id ?? entry.provider;
+}
+
 /** Look up a single provider entry. Returns undefined when the provider isn't catalogued. */
 export function getCatalogForProvider(provider: LLMProvider): CatalogProviderEntry | undefined {
   return LLM_CATALOG.find((entry) => entry.provider === provider);
+}
+
+/** Look up a catalog entry by its UI key (preset_id or provider). */
+export function getCatalogEntryByKey(key: string): CatalogProviderEntry | undefined {
+  return LLM_CATALOG.find((entry) => catalogEntryKey(entry) === key);
+}
+
+/**
+ * Disambiguate which catalog preset matches a persisted (provider,
+ * api_base_url) pair. UI uses this on load so a returning user lands on
+ * the same picker tile they previously saved.
+ *
+ * Matching is hostname-based (URL parser, NOT substring), mirroring
+ * `getOpenAIModelMap` in `types/models.ts`. A hostile/misconfigured
+ * api_base_url like `https://attacker.example.com/?proxy=mistral.ai`
+ * therefore CANNOT accidentally activate the Mistral preset.
+ *
+ * Fallback order when no preset matches:
+ *   1. Single-entry provider → that entry
+ *   2. Multi-preset provider, no baseUrl supplied → the preset that
+ *      `requires_base_url=true` (generic/free-text), so the user sees
+ *      the input they need to fill in
+ *   3. Otherwise → the first candidate (defensive — shouldn't happen
+ *      in a well-formed catalog)
+ *
+ * `catalog` defaults to the live `LLM_CATALOG` but accepts an override
+ * for unit testing. Pure function.
+ */
+export function resolveCatalogKey(
+  provider: LLMProvider,
+  baseUrl: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): string {
+  const candidates = catalog.filter((p) => p.provider === provider);
+  if (candidates.length === 0) return provider;
+  if (candidates.length === 1) return catalogEntryKey(candidates[0]!);
+
+  if (baseUrl) {
+    let host: string;
+    try { host = new URL(baseUrl).hostname.toLowerCase(); }
+    catch { host = ''; }
+    if (host) {
+      const matched = candidates.find((c) => {
+        if (!c.base_url_default) return false;
+        let defHost: string;
+        try { defHost = new URL(c.base_url_default).hostname.toLowerCase(); }
+        catch { return false; }
+        // Apex + `api.*` + subdomain variants all match the preset:
+        //   defHost='api.mistral.ai' matches 'api.mistral.ai',
+        //   'mistral.ai' (apex), 'eu.mistral.ai' (subdomain).
+        // Crucially does NOT match 'api.mistral.ai.attacker.com'
+        // because the suffix check requires a leading `.`.
+        if (host === defHost) return true;
+        const apex = defHost.replace(/^api\./, '');
+        return host === apex || host.endsWith(`.${apex}`);
+      });
+      if (matched) return catalogEntryKey(matched);
+    }
+  }
+  const generic = candidates.find((c) => c.requires_base_url);
+  return catalogEntryKey(generic ?? candidates[0]!);
 }
 
 // Deep-freeze at module load: protects the singleton against accidental

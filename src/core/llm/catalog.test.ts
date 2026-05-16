@@ -1,23 +1,30 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
 
 describe('LLM_CATALOG', () => {
-  it('exposes all four providers (anthropic, vertex, openai, custom)', () => {
-    const providers = LLM_CATALOG.map((e) => e.provider).sort();
-    expect(providers).toEqual(['anthropic', 'custom', 'openai', 'vertex']);
+  it('exposes the five UI entries (anthropic, mistral, openai-compat, vertex, custom)', () => {
+    // Mistral is split out from the generic OpenAI-compatible entry so the
+    // EU-sovereign option is a first-class button in the provider picker
+    // rather than hidden behind "OpenAI-compatible endpoint". Both UI
+    // entries serialise to `provider: 'openai'` at the wire — disambiguated
+    // by `preset_id` for the UI.
+    const keys = LLM_CATALOG.map(catalogEntryKey).sort();
+    expect(keys).toEqual(['anthropic', 'custom', 'mistral', 'openai-compat', 'vertex']);
   });
 
-  // Per-provider requires_base_url + requires_region matrix. UI uses these
+  // Per-entry requires_base_url + requires_region matrix. UI uses these
   // to render conditional form fields, so a regression here would break the
-  // LLM page (e.g. showing a base-URL input for Anthropic).
+  // LLM page (e.g. showing a base-URL input for Anthropic, or hiding it
+  // for the generic OpenAI-compatible preset).
   it.each([
-    ['anthropic', { requires_base_url: false, requires_region: false }],
-    ['vertex',    { requires_base_url: false, requires_region: true  }],
-    ['openai',    { requires_base_url: true,  requires_region: false }],
-    ['custom',    { requires_base_url: true,  requires_region: false }],
-  ] as const)('%s has expected requires_base_url/requires_region flags', (provider, expected) => {
-    const entry = getCatalogForProvider(provider as LLMProvider)!;
+    ['anthropic',     { requires_base_url: false, requires_region: false }],
+    ['vertex',        { requires_base_url: false, requires_region: true  }],
+    ['mistral',       { requires_base_url: false, requires_region: false }],
+    ['openai-compat', { requires_base_url: true,  requires_region: false }],
+    ['custom',        { requires_base_url: true,  requires_region: false }],
+  ] as const)('%s has expected requires_base_url/requires_region flags', (key, expected) => {
+    const entry = getCatalogEntryByKey(key)!;
     expect(entry.requires_base_url).toBe(expected.requires_base_url);
     expect(entry.requires_region).toBe(expected.requires_region);
   });
@@ -47,22 +54,59 @@ describe('LLM_CATALOG', () => {
     expect(byTier['haiku']?.id).toBe('claude-haiku-4-5');
   });
 
-  it('openai (Mistral) has three Mistral models, EU-Paris residency, mistral-large pricing pinned', () => {
-    const entry = getCatalogForProvider('openai')!;
+  it('mistral preset pins dated snapshots and EU-Paris residency', () => {
+    const entry = getCatalogEntryByKey('mistral')!;
+    // Pinned to dated snapshots — mirrors MISTRAL_MODEL_MAP. The previous
+    // catalog shipped `*-latest` aliases which auto-roll at Mistral's
+    // discretion, silently shifting cost + behaviour mid-billing-period.
     expect(entry.models.map((m) => m.id)).toEqual([
-      'mistral-large-latest',
-      'mistral-medium-latest',
-      'mistral-small-latest',
+      'mistral-large-2512',
+      'magistral-medium-2509',
+      'mistral-small-2603',
     ]);
     expect(entry.default_residency).toContain('EU-Paris');
-    const large = entry.models.find((m) => m.id === 'mistral-large-latest')!;
-    expect(large.pricing).toEqual({ input: 2, output: 6 });
+    expect(entry.base_url_default).toBe('https://api.mistral.ai/v1');
+    expect(entry.preset_id).toBe('mistral');
+    expect(entry.provider).toBe('openai');
+    // Tier mapping (small ↔ haiku, large ↔ sonnet, magistral ↔ opus) — kept
+    // in sync with MISTRAL_MODEL_MAP so the engine's tier router and the UI
+    // model dropdown stay coherent.
+    const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));
+    expect(byTier['haiku']?.id).toBe('mistral-small-2603');
+    expect(byTier['sonnet']?.id).toBe('mistral-large-2512');
+    expect(byTier['opus']?.id).toBe('magistral-medium-2509');
+    expect(byTier['sonnet']?.pricing).toEqual({ input: 2, output: 6 });
+  });
+
+  it('generic OpenAI-compatible preset accepts free-text model + base URL', () => {
+    const entry = getCatalogEntryByKey('openai-compat')!;
+    expect(entry.models).toHaveLength(0);
+    expect(entry.requires_base_url).toBe(true);
+    expect(entry.preset_id).toBe('openai-compat');
+    expect(entry.provider).toBe('openai');
+    expect(entry.base_url_default).toBeUndefined();
+  });
+
+  it('mistral preset is ordered before the generic openai-compat preset', () => {
+    // Visual priority guarantee for the EU-sovereign button — surfaced
+    // above the catch-all OpenAI-compatible option in the picker.
+    const order = LLM_CATALOG.map(catalogEntryKey);
+    expect(order.indexOf('mistral')).toBeLessThan(order.indexOf('openai-compat'));
+    expect(order.indexOf('anthropic')).toBeLessThan(order.indexOf('mistral'));
   });
 
   it('custom provider has zero preset models (user supplies free-text model ID)', () => {
     const entry = getCatalogForProvider('custom')!;
     expect(entry.models).toHaveLength(0);
     expect(entry.requires_base_url).toBe(true);
+  });
+
+  it('getCatalogForProvider returns the first openai entry (mistral) — preset disambig is UI-side', () => {
+    // Backward-compat: callers reading by `provider` get the first match.
+    // The UI uses `getCatalogEntryByKey` with the preset_id when it needs
+    // to distinguish mistral vs openai-compat.
+    const entry = getCatalogForProvider('openai' as LLMProvider)!;
+    expect(entry.preset_id).toBe('mistral');
   });
 
   it('returns undefined for an unknown provider', () => {
@@ -76,5 +120,71 @@ describe('LLM_CATALOG', () => {
     expect(Object.isFrozen(anthropic)).toBe(true);
     expect(Object.isFrozen(anthropic.models)).toBe(true);
     expect(Object.isFrozen(anthropic.models[0])).toBe(true);
+  });
+
+  it('getCatalogEntryByKey returns undefined for unknown keys', () => {
+    expect(getCatalogEntryByKey('does-not-exist')).toBeUndefined();
+    expect(getCatalogEntryByKey('')).toBeUndefined();
+  });
+
+  it('catalogEntryKey falls back to provider when preset_id is absent', () => {
+    const anthropic = getCatalogForProvider('anthropic')!;
+    expect(anthropic.preset_id).toBeUndefined();
+    expect(catalogEntryKey(anthropic)).toBe('anthropic');
+    const mistral = getCatalogEntryByKey('mistral')!;
+    expect(mistral.preset_id).toBe('mistral');
+    expect(catalogEntryKey(mistral)).toBe('mistral');
+  });
+});
+
+describe('resolveCatalogKey', () => {
+  // Single-entry providers — base URL is irrelevant; preset is forced.
+  it.each([
+    ['anthropic', undefined,                       'anthropic'],
+    ['anthropic', 'https://api.anthropic.com',     'anthropic'],
+    ['vertex',    undefined,                       'vertex'],
+    ['custom',    'https://litellm.local',         'custom'],
+  ] as const)('single-entry provider %s + url=%s → %s', (provider, url, expected) => {
+    expect(resolveCatalogKey(provider as LLMProvider, url)).toBe(expected);
+  });
+
+  // Multi-preset provider (openai) — disambiguation by hostname.
+  it('mistral host (api.mistral.ai) activates the mistral preset', () => {
+    expect(resolveCatalogKey('openai', 'https://api.mistral.ai/v1')).toBe('mistral');
+  });
+  it('mistral subdomain (eu.mistral.ai) activates the mistral preset', () => {
+    expect(resolveCatalogKey('openai', 'https://eu.mistral.ai/v1')).toBe('mistral');
+  });
+  it('mistral apex (mistral.ai) activates the mistral preset', () => {
+    // Defensive: a user typing `https://mistral.ai/v1` should land on the
+    // Mistral preset, not silently fall through to the generic openai
+    // entry. Mirrors the apex-match clause in `resolveCatalogKey`.
+    expect(resolveCatalogKey('openai', 'https://mistral.ai/v1')).toBe('mistral');
+  });
+  it('hostname normalises case', () => {
+    expect(resolveCatalogKey('openai', 'https://API.MISTRAL.AI/v1')).toBe('mistral');
+  });
+  it('non-mistral openai host falls through to openai-compat', () => {
+    expect(resolveCatalogKey('openai', 'https://api.groq.com/openai/v1')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'https://openrouter.ai/api/v1')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'http://localhost:11434/v1')).toBe('openai-compat');
+  });
+  it('hostile URL smuggling mistral.ai in path/query does not activate mistral', () => {
+    // Substring-match used to leak: `'https://attacker.example.com/?proxy=mistral.ai'`
+    // would have picked the Mistral preset. Hostname-match prevents that.
+    expect(resolveCatalogKey('openai', 'https://attacker.example.com/?proxy=mistral.ai')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'https://api.mistral.ai.attacker.com/v1')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'https://example.com/mistral.ai/v1')).toBe('openai-compat');
+  });
+  it('malformed URL falls through to the generic openai-compat preset', () => {
+    expect(resolveCatalogKey('openai', 'not-a-url')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'mistral.ai')).toBe('openai-compat'); // missing scheme
+  });
+  it('no baseUrl supplied falls through to the requires_base_url preset', () => {
+    // Empty/undefined api_base_url on a multi-preset provider — the user
+    // hasn't picked, so render the input that asks them to. Generic
+    // openai-compat is the only preset with requires_base_url=true.
+    expect(resolveCatalogKey('openai', undefined)).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', '')).toBe('openai-compat');
   });
 });
