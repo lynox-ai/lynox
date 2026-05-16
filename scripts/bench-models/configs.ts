@@ -80,11 +80,22 @@ export const HN_BENCH_CONFIGS: readonly BenchConfig[] = [
   { label: 'claude-opus-47',    tier: 'anthropic-native', provider: 'anthropic', modelId: OPUS_47, apiKeyEnv: 'ANTHROPIC_API_KEY', effort: 'xhigh',  thinking: 'adaptive' },
 
   // ── Mistral native ──
+  // Pinned to `mistral-large-2512` (2025-12 release) instead of the generic
+  // `mistral-large-latest` alias because Mistral applies per-model rate
+  // limits and the `latest` alias inherits the lowest-tier limit (15 RPM).
+  // The dated 2512 build has 6 RPS = 360 RPM on this workspace.
+  //
+  // `providerExtras.parallel_tool_calls: false` is the critical knob —
+  // Mistral defaults to parallel tool execution which emits 3+ tool_uses
+  // per turn. With parallel off, Mistral converges in ~6 turns (one tool
+  // per turn) instead of looping past `maxIterations`. Verified via direct
+  // API probe 2026-05-16.
   {
     label: 'mistral-large',  tier: 'mistral-native', provider: 'openai',
-    modelId: 'mistral-large-latest', apiBaseURL: MISTRAL_BASE, openaiModelId: 'mistral-large-latest',
+    modelId: 'mistral-large-2512', apiBaseURL: MISTRAL_BASE, openaiModelId: 'mistral-large-2512',
     apiKeyEnv: 'MISTRAL_API_KEY', effort: 'none', thinking: 'disabled',
     pricing: { inputPerMillion: 2, outputPerMillion: 6 },
+    providerExtras: { parallel_tool_calls: false },
   },
 
   // ── OpenRouter (open-weights + frontier-non-Anthropic) ──

@@ -206,6 +206,14 @@ async function* translateStream(
   const toolBlockMap = new Map<number, number>();
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  // True once we've emitted the close-out (content_block_stop +
+  // message_delta + message_stop). Some providers (OpenRouter→DeepInfra
+  // for DeepSeek V3) end the stream without ever sending a chunk with a
+  // non-null `finish_reason` — the in-loop close branch never fires and
+  // the consumer (Agent) sees an open tool_use block with no terminator,
+  // hence 0 visible iterations / 0 tools / empty output. The fallback
+  // close-out below runs once the stream ends if the in-loop one didn't.
+  let finishEmitted = false;
 
   try {
     while (true) {
@@ -217,6 +225,7 @@ async function* translateStream(
       buffer = lines.pop() ?? '';
 
       for (const line of lines) {
+        if (process.env['LYNOX_ADAPTER_DEBUG']) process.stderr.write(`[adapter raw] ${line}\n`);
         if (!line.startsWith('data: ')) continue;
         const data = line.slice(6).trim();
         if (data === '[DONE]') continue;
@@ -314,8 +323,39 @@ async function* translateStream(
           } as unknown as BetaRawMessageDeltaEvent as BetaRawMessageStreamEvent;
 
           yield { type: 'message_stop' } as BetaRawMessageStreamEvent;
+          finishEmitted = true;
         }
       }
+    }
+
+    // Fallback close-out — fires when the upstream ended the stream
+    // (via `[DONE]` or socket close) without ever sending a chunk that
+    // carried a non-null `finish_reason`. Provider seen in the wild:
+    // OpenRouter→DeepInfra for DeepSeek V3 emits all chunks with
+    // `finish_reason: null` and terminates with `[DONE]`. Infer the
+    // stop_reason from state: an open tool_use block means the model
+    // wants tool execution; otherwise treat it as a normal stop.
+    if (!finishEmitted) {
+      if (activeTextBlock) {
+        yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+        blockIndex++;
+        activeTextBlock = false;
+      }
+      for (const [, bi] of toolBlockMap) {
+        yield { type: 'content_block_stop', index: bi } as BetaRawMessageStreamEvent;
+      }
+      const inferredStopReason = toolBlockMap.size > 0 ? 'tool_use' : 'end_turn';
+      yield {
+        type: 'message_delta',
+        delta: { stop_reason: inferredStopReason, stop_sequence: null },
+        usage: {
+          input_tokens: totalInputTokens,
+          output_tokens: totalOutputTokens,
+          cache_creation_input_tokens: null,
+          cache_read_input_tokens: null,
+        },
+      } as unknown as BetaRawMessageDeltaEvent as BetaRawMessageStreamEvent;
+      yield { type: 'message_stop' } as BetaRawMessageStreamEvent;
     }
   } finally {
     reader.releaseLock();
@@ -474,6 +514,33 @@ export class OpenAIAdapter {
     if (openaiTools?.length) {
       body.tools = openaiTools;
       body.tool_choice = 'auto';
+    }
+
+    // Forward provider-extras the caller passed via `params`. Allowlist
+    // (not pass-through) so Anthropic-only fields like `thinking` can never
+    // accidentally hit an OpenAI-compat endpoint. The five fields below
+    // come from the OpenAI Chat Completions spec + the documented Mistral
+    // extensions (Mistral docs 2026-05-16):
+    //   - parallel_tool_calls (Mistral default true; setting false stops
+    //     the verbose-tool-loop pattern that hangs lynox agents on
+    //     Mistral-large)
+    //   - reasoning_effort   (Mistral "high"|"none" on adjustable-reasoning
+    //     models; OpenAI o1-style on others)
+    //   - tool_choice         (overrides the default "auto" when caller
+    //     wants "any" / "required" / "none")
+    //   - response_format     (JSON schema mode)
+    //   - prompt_cache_key    (Mistral's cache control)
+    //   - safe_prompt         (Mistral safety injection)
+    const EXTRAS = [
+      'parallel_tool_calls',
+      'reasoning_effort',
+      'tool_choice',
+      'response_format',
+      'prompt_cache_key',
+      'safe_prompt',
+    ] as const;
+    for (const key of EXTRAS) {
+      if (params[key] !== undefined) body[key] = params[key];
     }
 
     const apiKey = await this.resolveApiKey();

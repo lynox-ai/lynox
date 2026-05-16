@@ -72,6 +72,7 @@ export async function runOne({ scenario, config, iteration, apiKeys }: RunOneOpt
     apiKey,
     ...(config.apiBaseURL ? { apiBaseURL: config.apiBaseURL } : {}),
     ...(config.openaiModelId ? { openaiModelId: config.openaiModelId } : {}),
+    ...(config.providerExtras ? { providerExtras: { ...config.providerExtras } } : {}),
     ...(tools.length > 0 ? { tools } : {}),
     onStream,
     maxIterations: scenario.maxIterations ?? 3,

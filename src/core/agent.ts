@@ -68,6 +68,8 @@ export class Agent implements IAgent {
   /** True only for custom (non-Claude) — additionally strips betas, block-level cache_control, thinking, effort */
   private readonly isCustomProxy: boolean;
   private readonly provider: LLMProvider;
+  /** Provider-extras passed through to the OpenAI-compat stream call (Mistral's parallel_tool_calls, reasoning_effort, etc). Ignored on Anthropic-direct paths. */
+  private readonly providerExtras: Record<string, unknown> | undefined;
   private readonly systemPrompt: string | undefined;
   private readonly mcpServers: MCPServer[] | undefined;
   private thinking: ThinkingMode;
@@ -174,6 +176,7 @@ export class Agent implements IAgent {
     this.isNonDirectAnthropic = activeProvider !== 'anthropic';
     this.isCustomProxy = activeProvider === 'custom' || activeProvider === 'openai';
     this.mcpServers = activeProvider === 'anthropic' ? config.mcpServers : undefined;
+    this.providerExtras = config.providerExtras;
     const isHaiku = this.model.includes('haiku');
     const requestedThinking = config.thinking ?? { type: 'adaptive' };
     // Haiku 4.5 has no extended-thinking support (manual or adaptive) — sending
@@ -586,6 +589,10 @@ export class Agent implements IAgent {
           ...( this.isCustomProxy ? {} : { betas: getBetasForProvider(this.provider) }),
           tools: toolsDef,
           ...(this.mcpServers ? { mcp_servers: this.mcpServers } : {}),
+          // Provider-extras (e.g. Mistral's `parallel_tool_calls: false`,
+          // `reasoning_effort: 'high'`). Only forwarded on openai-compat
+          // paths — anthropic-direct rejects unknown fields.
+          ...(this.isCustomProxy && this.providerExtras ? this.providerExtras : {}),
         }, { signal });
 
         const handler = this.onStream ?? (() => {});

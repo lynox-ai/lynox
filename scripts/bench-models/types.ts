@@ -57,6 +57,14 @@ export interface BenchConfig {
     readonly inputPerMillion: number;
     readonly outputPerMillion: number;
   };
+  /**
+   * Provider-specific request-body extras. Forwarded as-is by the
+   * OpenAIAdapter, ignored on Anthropic-native paths. Common entries:
+   *   - `parallel_tool_calls: false` (Mistral — stops the verbose loop)
+   *   - `reasoning_effort: 'high'` (Mistral adjustable-reasoning models)
+   *   - `tool_choice: 'any'` (force the agent to pick a tool)
+   */
+  readonly providerExtras?: Readonly<Record<string, unknown>>;
 }
 
 export interface BenchUsage {

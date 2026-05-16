@@ -63,6 +63,24 @@ export interface AgentConfig {
   openaiModelId?:      string | undefined;
   /** Auth mode for OpenAI provider. 'google-vertex' uses GOOGLE_APPLICATION_CREDENTIALS to generate OAuth tokens. */
   openaiAuth?:         'static' | 'google-vertex' | undefined;
+  /**
+   * Provider-specific request-body extras forwarded through to the
+   * OpenAI-compat endpoint as-is. Whitelisted by the adapter — anything not
+   * recognized is dropped, so passing e.g. `thinking` here cannot leak into
+   * a request meant for Mistral.
+   *
+   * Currently honored:
+   *   - `parallel_tool_calls` (Mistral default `true`; setting `false`
+   *     forces sequential tool execution — required to stop Mistral's
+   *     verbose-tool-loop that exhausts iterations without synthesizing)
+   *   - `reasoning_effort` (`"high" | "none"` for Mistral; `"low" | "medium" | "high"`
+   *     for OpenAI o1 — caller must use the right value per provider)
+   *   - `tool_choice` (`"auto" | "any" | "required" | "none"`)
+   *   - `response_format`, `prompt_cache_key`, `safe_prompt`
+   *
+   * Anthropic-native paths ignore this field.
+   */
+  providerExtras?:     Record<string, unknown> | undefined;
   /** IANA timezone (e.g. 'Europe/Zurich') for the human user. Threaded through the per-turn `[Now: …]` marker so the model presents scheduled times in the user's wallclock, not UTC. */
   userTimezone?:       string | undefined;
   /**
