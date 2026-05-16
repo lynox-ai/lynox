@@ -16,6 +16,7 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { formatCostCents } from '../format.js';
 	import { t } from '../i18n.svelte.js';
 
 	type Period = 'current' | 'prev' | '7d' | '30d';
@@ -100,17 +101,6 @@
 		);
 		if (!voiceKind) return `${row.run_count} ${t('usage.runs')}`;
 		return `${formatInt(voiceKind.unit_count)} ${t(`usage.unit_${voiceKind.unit_label}`)}`;
-	}
-
-	function formatCents(c: number): string {
-		// Sub-cent costs round to 0 on the API side (integer cents over the
-		// wire). For small values we show "< $0.01" instead of "$0.00" so
-		// voice rows don't look like they cost nothing.
-		if (c === 0) return '$0.00';
-		if (c < 1) return '< $0.01';
-		const d = Math.floor(c / 100);
-		const r = (c % 100).toString().padStart(2, '0');
-		return `$${d}.${r}`;
 	}
 
 	function formatInt(n: number): string {
@@ -206,9 +196,9 @@
 			</div>
 
 			<p class="text-2xl font-light tracking-tight mt-1">
-				{formatCents(summary.used_cents)}
+				{formatCostCents(summary.used_cents)}
 				{#if summary.budget_cents > 0}
-					<span class="text-sm text-text-muted">/ {formatCents(summary.budget_cents)}</span>
+					<span class="text-sm text-text-muted">/ {formatCostCents(summary.budget_cents)}</span>
 				{/if}
 			</p>
 
@@ -218,7 +208,7 @@
 				</div>
 				<p class="text-xs text-text-muted mt-2">
 					{t('usage.remaining_prefix')}
-					<strong class="text-text">{formatCents(remainingCents)}</strong>
+					<strong class="text-text">{formatCostCents(remainingCents)}</strong>
 					· {pct}{t('usage.percent_used_suffix')}
 				</p>
 			{:else if summary.tier === 'managed' || summary.tier === 'managed_pro' || summary.tier === 'eu'}
@@ -257,7 +247,7 @@
 									{row.run_count} {t('usage.runs')} · {secondary(row)}
 								</p>
 							</div>
-							<p class="tabular-nums shrink-0">{formatCents(row.cost_cents)}</p>
+							<p class="tabular-nums shrink-0">{formatCostCents(row.cost_cents)}</p>
 						</li>
 					{/each}
 				</ul>

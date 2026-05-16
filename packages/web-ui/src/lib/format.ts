@@ -32,16 +32,40 @@ export function estimateCost(
 }
 
 /**
- * Smart cost formatting:
- * - null/0 → '-'
- * - < $0.01 → '$0.003' (3 significant digits)
- * - < $1 → '$0.12' (2 decimal places)
- * - ≥ $1 → '$1.23' (2 decimal places)
+ * Smart cost formatting — canonical SSoT (PRD-IA-V2 P1-PR-B).
+ * Float-USD input. Used everywhere a precise per-run / per-step / per-day cost
+ * is rendered (HistoryView, ActivityHub, WorkflowsView, StatusBar, ColdStartBanner, …).
+ *
+ * - null/0 → '-' (no-data sentinel)
+ * - < $0.01 → '$0.0042' (4 decimals — preserves migration-estimate sub-cent precision)
+ * - ≥ $0.01 → '$0.12' / '$1.23' (2 decimals)
+ *
+ * For integer-cents input (Dashboard / budget contexts where sub-cent precision
+ * is already lost on the wire), see `formatCostCents`.
  */
 export function formatCost(usd: number | null | undefined): string {
 	if (usd == null || usd === 0) return '-';
 	if (usd < 0.01) return `$${usd.toFixed(4)}`;
 	return `$${usd.toFixed(2)}`;
+}
+
+/**
+ * Cost formatting for integer-cents input (Dashboard / budget contexts).
+ * Sub-integer-cent precision is lost on the wire, so we render '< $0.01'
+ * instead of '$0.00' to signal "non-zero but rounded".
+ *
+ * - null/undefined → '-' (no-data)
+ * - 0 → '$0.00' (real zero — explicit, not a sentinel)
+ * - 0 < c < 1 → '< $0.01' (sub-cent rounded value)
+ * - ≥ 1 cent → '$X.YY'
+ */
+export function formatCostCents(cents: number | null | undefined): string {
+	if (cents == null) return '-';
+	if (cents === 0) return '$0.00';
+	if (cents < 1) return '< $0.01';
+	const d = Math.floor(cents / 100);
+	const r = (cents % 100).toString().padStart(2, '0');
+	return `$${d}.${r}`;
 }
 
 /** Duration formatting: ms → human-readable. */
