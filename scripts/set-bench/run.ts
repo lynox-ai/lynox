@@ -1,15 +1,20 @@
 #!/usr/bin/env npx tsx
 /**
- * Set-Bench Phase 2 — top-level driver.
+ * Set-Bench — top-level driver.
  *
  * Reads API keys from ~/.lynox/config.json (chmod 600), iterates every
  * (scenario, cell) pair where the scenario's axis matches the cell's
  * axis, repeats each `runsPerCell` times, and writes both JSON + Markdown
  * report files into `scripts/set-bench/results/`.
  *
+ * Default n=5 (Phase 3): n=3 missed signal once during Phase 2 when
+ * mistral-large-2512 looked broken at n=1 but turned out fine at n=3.
+ * n=5 yields meaningful p50/p95 and dampens single-flake noise; the
+ * extra two cells per cell trade ~$0.001 + 10s wall-clock for stability.
+ *
  * Usage:
- *   npx tsx scripts/set-bench/run.ts                  # full matrix, 3 runs/cell
- *   npx tsx scripts/set-bench/run.ts --cells mistral-large-2512,mistral-large-latest --runs 5
+ *   npx tsx scripts/set-bench/run.ts                  # full matrix, 5 runs/cell
+ *   npx tsx scripts/set-bench/run.ts --cells mistral-large-2512,mistral-large-latest --runs 10
  *   npx tsx scripts/set-bench/run.ts --axis orchestration
  *
  * API keys: reads `anthropic_api_key` + `mistral_api_key` from the same
@@ -35,7 +40,7 @@ interface CliArgs {
 }
 
 function parseArgs(argv: readonly string[]): CliArgs {
-  const out: CliArgs = { runsPerCell: 3 };
+  const out: CliArgs = { runsPerCell: 5 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--axis') {

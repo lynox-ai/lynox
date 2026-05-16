@@ -20,7 +20,8 @@ import { describe, it, expect } from 'vitest';
 import { TOOL_CHAIN_ZURICH_X2, ORCHESTRATION_EMAIL_TRIAGE, ZURICH_POPULATION_PINNED } from '../scripts/set-bench/scenarios.js';
 import { dispatchMockTool } from '../scripts/set-bench/mock-tools.js';
 import { isRateLimitError } from '../scripts/set-bench/run-cell.js';
-import type { ToolCallTrace } from '../scripts/set-bench/types.js';
+import { percentile, computeParetoFrontier, buildReport, formatReportMarkdown } from '../scripts/set-bench/report.js';
+import type { CellRun, SetBenchCell, ToolCallTrace } from '../scripts/set-bench/types.js';
 
 const ZX2 = ZURICH_POPULATION_PINNED * 2;
 
@@ -194,6 +195,147 @@ describe('mock-tools dispatcher', () => {
 
   it('compute rejects divide-by-zero rather than emitting Infinity', () => {
     expect(dispatchMockTool('compute', { expression: '5 / 0' })).toBe('ERROR: divide by zero');
+  });
+});
+
+describe('percentile (R-7 linear interpolation)', () => {
+  // Pins the bench-grade statistic. Matches numpy.percentile / pandas default
+  // semantics so we can cross-check against external tooling if needed.
+  it('returns 0 on empty input', () => {
+    expect(percentile([], 50)).toBe(0);
+    expect(percentile([], 95)).toBe(0);
+  });
+
+  it('returns the single value on n=1 (any percentile)', () => {
+    expect(percentile([42], 50)).toBe(42);
+    expect(percentile([42], 95)).toBe(42);
+  });
+
+  it('interpolates linearly between bracketing samples', () => {
+    // n=2: rank = p/100 * (n-1) = 0.5 * 1 = 0.5 → midpoint of [10, 20].
+    expect(percentile([10, 20], 50)).toBe(15);
+    // n=5: rank for p50 = 0.5 * 4 = 2 → sortedAsc[2] exactly.
+    expect(percentile([1, 2, 3, 4, 5], 50)).toBe(3);
+    // n=5: rank for p95 = 0.95 * 4 = 3.8 → 0.2 * 4 + 0.8 * 5 = 4.8.
+    expect(percentile([1, 2, 3, 4, 5], 95)).toBeCloseTo(4.8, 5);
+  });
+
+  it('preserves p50 < p95 ordering on monotonic input', () => {
+    const xs = [100, 200, 300, 400, 9000];
+    expect(percentile(xs, 50)).toBeLessThan(percentile(xs, 95));
+    // Tail-sensitive: p95 catches the 9000 outlier.
+    expect(percentile(xs, 95)).toBeGreaterThan(1000);
+  });
+});
+
+describe('computeParetoFrontier', () => {
+  // Pareto frontier: a is dominated by b iff b is no worse on both axes
+  // AND strictly better on at least one. The frontier drops dominated
+  // cells. Subtle semantics worth pinning explicitly — strict-vs-non-
+  // strict gets quietly flipped in refactors.
+  type Row = ReturnType<typeof buildReport>['summary'][number];
+  const row = (label: string, cost: number, passRate: number): Row => ({
+    axis: 'tool-chain' as const,
+    cellLabel: label,
+    passRate,
+    avgCostUsd: cost,
+    avgDurationMs: 1000,
+    p50DurationMs: 1000,
+    p95DurationMs: 1000,
+    pinned: true,
+  });
+
+  it('keeps the cheap-pass-100 cell and drops dominated ones', () => {
+    const cheap100 = row('cheap-100', 0.001, 1);
+    const expensive100 = row('expensive-100', 0.010, 1);
+    const flaky = row('flaky', 0.005, 0.5);
+    const frontier = computeParetoFrontier([cheap100, expensive100, flaky]);
+    // cheap-100 dominates both: expensive-100 (same passRate, higher cost)
+    // and flaky (higher cost AND lower passRate).
+    expect(frontier).toEqual([cheap100]);
+  });
+
+  it('keeps both ends of a genuine quality-cost tradeoff', () => {
+    const cheap80 = row('cheap-80', 0.001, 0.8);
+    const expensive100 = row('expensive-100', 0.010, 1);
+    const frontier = computeParetoFrontier([cheap80, expensive100]);
+    // Neither dominates: cheap-80 wins on cost, expensive-100 wins on passRate.
+    expect(frontier.map((r) => r.cellLabel)).toEqual(['cheap-80', 'expensive-100']);
+  });
+
+  it('sorts frontier cheapest → most expensive', () => {
+    const a = row('mid-90', 0.005, 0.9);
+    const b = row('cheap-70', 0.001, 0.7);
+    const c = row('expensive-100', 0.010, 1);
+    const frontier = computeParetoFrontier([a, b, c]);
+    expect(frontier.map((r) => r.cellLabel)).toEqual(['cheap-70', 'mid-90', 'expensive-100']);
+  });
+
+  it('dedupes exact (cost, passRate) ties', () => {
+    // Two cells with identical stats — keep only one row in the frontier
+    // so the rendered markdown doesn't duplicate-list them.
+    const twin1 = row('twin-1', 0.002, 0.9);
+    const twin2 = row('twin-2', 0.002, 0.9);
+    const frontier = computeParetoFrontier([twin1, twin2]);
+    expect(frontier).toHaveLength(1);
+  });
+
+  it('returns empty when input is empty', () => {
+    expect(computeParetoFrontier([])).toEqual([]);
+  });
+});
+
+describe('buildReport + formatReportMarkdown', () => {
+  // Round-trip a tiny synthetic dataset through buildReport → markdown to
+  // pin the section ordering AND the p50/p95 column rendering.
+  const cell = (label: string, axis: 'tool-chain' | 'orchestration', pinned: boolean): SetBenchCell => ({
+    label,
+    axis,
+    provider: 'anthropic' as const,
+    modelId: label,
+    apiKeyEnv: 'ANTHROPIC_API_KEY',
+    pricing: { inputPerMillion: 1, outputPerMillion: 1 },
+    pinned,
+  });
+  const run = (cellLabel: string, pass: boolean, durationMs: number, costUsd: number): CellRun => ({
+    cellLabel,
+    scenarioId: 'fake',
+    pass,
+    tokensIn: 100,
+    tokensOut: 50,
+    costUsd,
+    durationMs,
+    iterations: 1,
+    finalText: '',
+    toolCalls: [],
+  });
+
+  it('exposes p50/p95 columns in the per-axis table', () => {
+    const cells = [cell('alpha', 'tool-chain', true)];
+    // n=5 durations: p50=300, p95=480 (rank 3.8 → 0.2*400 + 0.8*500).
+    const runs = [
+      run('alpha', true, 100, 0.001),
+      run('alpha', true, 200, 0.001),
+      run('alpha', true, 300, 0.001),
+      run('alpha', true, 400, 0.001),
+      run('alpha', true, 500, 0.001),
+    ];
+    const report = buildReport(runs, cells);
+    expect(report.summary[0]!.p50DurationMs).toBe(300);
+    expect(report.summary[0]!.p95DurationMs).toBeCloseTo(480, 5);
+    const md = formatReportMarkdown(report);
+    expect(md).toContain('p50');
+    expect(md).toContain('p95');
+    expect(md).toContain('Pareto frontier');
+    // Pin rendered values, not just column-header presence — catches
+    // a regression where columns swap or the toFixed formatting changes.
+    expect(md).toContain('0.3s'); // p50DurationMs=300ms → "0.3s"
+    expect(md).toContain('0.5s'); // p95DurationMs=480ms → "0.5s" (toFixed(1) rounds 0.48 → 0.5)
+  });
+
+  it('omits Pareto section when no cells exist for the axis', () => {
+    const md = formatReportMarkdown(buildReport([], []));
+    expect(md).not.toContain('Pareto frontier');
   });
 });
 
