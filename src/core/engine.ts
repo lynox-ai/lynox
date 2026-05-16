@@ -1103,6 +1103,7 @@ export class Engine {
   getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }
   getCRM(): import('./crm.js').CRM | null { return this._crm; }
   getPromptStore(): import('./prompt-store.js').PromptStore | null { return this._promptStore; }
+  getSecurityAudit(): import('./security-audit.js').SecurityAudit | null { return this.securityAudit; }
 
   /** Returns true if CRM tables (contacts/deals) contain actual records. */
   hasCrmData(): boolean {

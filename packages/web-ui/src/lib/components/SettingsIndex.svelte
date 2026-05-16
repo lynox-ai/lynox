@@ -79,9 +79,15 @@
 			],
 		},
 		{
-			labelKey: 'settings.section_data',
+			// PRD-IA-V2 P3-PR-B: Workspace & System is Self-Host only — ToolToggles
+			// moves under Privacy on Managed in P3-PR-E.
+			labelKey: 'settings.section_workspace',
 			items: [
-				{ href: '/app/settings/backups', titleKey: 'backups.title', descKey: 'backups.desc' },
+				{ href: '/app/settings/workspace/backups', titleKey: 'settings.workspace.backups', descKey: 'settings.workspace.backups_desc', selfHostOnly: true },
+				{ href: '/app/settings/workspace/security', titleKey: 'settings.workspace.security', descKey: 'settings.workspace.security_desc', selfHostOnly: true },
+				{ href: '/app/settings/workspace/limits', titleKey: 'settings.workspace.limits', descKey: 'settings.workspace.limits_desc', selfHostOnly: true },
+				{ href: '/app/settings/workspace/updates', titleKey: 'settings.workspace.updates', descKey: 'settings.workspace.updates_desc', selfHostOnly: true },
+				{ href: '/app/settings/workspace/tools', titleKey: 'tools.heading', descKey: 'tools.subtitle', selfHostOnly: true },
 			],
 		},
 		{
