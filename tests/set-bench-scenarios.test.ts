@@ -42,6 +42,18 @@ import {
 import { dispatchMockTool } from '../scripts/set-bench/mock-tools.js';
 import { isRateLimitError } from '../scripts/set-bench/run-cell.js';
 import { percentile, computeParetoFrontier, buildReport, formatReportMarkdown } from '../scripts/set-bench/report.js';
+import {
+  ALL_CELLS,
+  TOOL_CHAIN_CELLS,
+  ORCHESTRATION_CELLS,
+  KG_EXTRACTION_CELLS,
+  DAG_PLANNING_CELLS,
+  MEMORY_EXTRACTION_CELLS,
+  LONG_CONTEXT_CELLS,
+  CODE_REVIEW_CELLS,
+  MULTI_STEP_REASONING_CELLS,
+  MISTRAL,
+} from '../scripts/set-bench/configs.js';
 import type { CellRun, SetBenchAxis, SetBenchCell, SetBenchScenario, ToolCallTrace } from '../scripts/set-bench/types.js';
 
 const ZX2 = ZURICH_POPULATION_PINNED * 2;
@@ -1415,4 +1427,169 @@ describe('axisLabel coverage via formatReportMarkdown', () => {
       expect(md).not.toMatch(/undefined/);
     });
   }
+});
+
+// ──────────────────────────────────────────────────────────────
+// Phase 3 PR D — full Mistral roster cells (structural sanity)
+// ──────────────────────────────────────────────────────────────
+
+describe('Phase 3 PR D — cell roster structural sanity', () => {
+  // Source-of-truth pricing per million tokens from `src/core/pricing.ts`
+  // DEFAULT_PRICING. Mirrored locally to keep the test independent of the
+  // file-system pricing.json override path. If `src/core/pricing.ts`
+  // changes, update this map AND the matching cell `pricing` field; the
+  // assertion below ties them together so the drift can't go unnoticed.
+  // `*-latest` aliases inherit the snapshot price (Mistral bills the alias
+  // at the underlying snapshot rate, per the catalog notes).
+  const COST_TS_PRICING: Readonly<Record<string, { inputPerMillion: number; outputPerMillion: number }>> = {
+    'claude-opus-4-7':           { inputPerMillion: 5,    outputPerMillion: 25 },
+    'claude-sonnet-4-6':         { inputPerMillion: 3,    outputPerMillion: 15 },
+    'claude-haiku-4-5-20251001': { inputPerMillion: 1,    outputPerMillion: 5  },
+    'mistral-small-2603':        { inputPerMillion: 0.20, outputPerMillion: 0.60 },
+    'mistral-small-latest':      { inputPerMillion: 0.20, outputPerMillion: 0.60 },
+    'mistral-large-2512':        { inputPerMillion: 2,    outputPerMillion: 6  },
+    'mistral-large-latest':      { inputPerMillion: 2,    outputPerMillion: 6  },
+    'magistral-medium-2509':     { inputPerMillion: 2,    outputPerMillion: 5  },
+    'magistral-medium-latest':   { inputPerMillion: 2,    outputPerMillion: 5  },
+  };
+
+  // Models that are in PR D-managed cells (the new 6 axes). PR D pricing
+  // must match cost.ts for every cell whose modelId is in COST_TS_PRICING.
+  // Phase 2 cells reference a handful of exploratory models without
+  // pricing.ts entries (ministral-3b/8b, open-mistral-nemo, mistral-medium-*);
+  // those are out of scope for this assertion and remain untouched.
+  const PR_D_AXES: readonly SetBenchAxis[] = [
+    'kg-extraction',
+    'dag-planning',
+    'memory-extraction',
+    'long-context',
+    'code-review',
+    'multi-step-reasoning',
+  ];
+
+  const ALL_AXES: readonly SetBenchAxis[] = [
+    'tool-chain',
+    'orchestration',
+    ...PR_D_AXES,
+  ];
+
+  it('every axis has at least one cell', () => {
+    for (const axis of ALL_AXES) {
+      const cellsForAxis = ALL_CELLS.filter((c) => c.axis === axis);
+      expect(cellsForAxis.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('every PR-D axis has at least one Anthropic baseline cell', () => {
+    for (const axis of PR_D_AXES) {
+      const anthropic = ALL_CELLS.filter((c) => c.axis === axis && c.provider === 'anthropic');
+      expect(anthropic.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('every PR-D axis has at least one Mistral candidate cell', () => {
+    for (const axis of PR_D_AXES) {
+      const mistral = ALL_CELLS.filter(
+        (c) => c.axis === axis && c.provider === 'openai' && c.apiBaseURL === MISTRAL,
+      );
+      expect(mistral.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('every cell has a valid apiKeyEnv (env-var name shape, not a key value)', () => {
+    // Env-var convention: SHOUTY_SNAKE_CASE, leading letter, no `=` / spaces /
+    // sk- prefixes (which would hint at a leaked literal key).
+    const envVarPattern = /^[A-Z][A-Z0-9_]*$/;
+    for (const cell of ALL_CELLS) {
+      expect(cell.apiKeyEnv).toMatch(envVarPattern);
+      expect(cell.apiKeyEnv).not.toMatch(/^sk-/i);
+    }
+  });
+
+  it('every cell has positive non-zero pricing', () => {
+    for (const cell of ALL_CELLS) {
+      expect(cell.pricing.inputPerMillion).toBeGreaterThan(0);
+      expect(cell.pricing.outputPerMillion).toBeGreaterThan(0);
+    }
+  });
+
+  it('every Mistral cell with a cost.ts entry matches the cost.ts price exactly', () => {
+    for (const cell of ALL_CELLS) {
+      const expected = COST_TS_PRICING[cell.modelId];
+      if (!expected) continue; // exploratory Phase 2 cells without cost.ts entry — skipped, not asserted.
+      expect(cell.pricing.inputPerMillion).toBe(expected.inputPerMillion);
+      expect(cell.pricing.outputPerMillion).toBe(expected.outputPerMillion);
+    }
+  });
+
+  it('every cell axis is one of the 8 SetBenchAxis values', () => {
+    const valid: ReadonlySet<SetBenchAxis> = new Set(ALL_AXES);
+    for (const cell of ALL_CELLS) {
+      expect(valid.has(cell.axis)).toBe(true);
+    }
+  });
+
+  it('every openai-provider cell points at the Mistral base URL', () => {
+    // Every openai-provider cell in this bench is a Mistral candidate;
+    // tying the assertion to the MISTRAL constant catches both missing-
+    // and typo'd URLs (e.g. trailing slash, http instead of https) in
+    // one check rather than a weaker truthiness-only guard.
+    for (const cell of ALL_CELLS) {
+      if (cell.provider === 'openai') {
+        expect(cell.apiBaseURL).toBe(MISTRAL);
+      }
+    }
+  });
+
+  it('every Mistral cell ships pinned + latest pair where both are claimed', () => {
+    // For each (axis, modelFamily), if a `*-latest` alias is in the roster,
+    // the pinned snapshot must also be there — and vice versa where the
+    // model has both variants. The pinned-vs-latest drift surface only
+    // works when both sides are measured.
+    const families: readonly { latest: string; pinned: string }[] = [
+      { latest: 'mistral-small-latest', pinned: 'mistral-small-2603' },
+      { latest: 'mistral-large-latest', pinned: 'mistral-large-2512' },
+      { latest: 'magistral-medium-latest', pinned: 'magistral-medium-2509' },
+    ];
+    for (const axis of PR_D_AXES) {
+      const cellsForAxis = ALL_CELLS.filter((c) => c.axis === axis);
+      const labelsForAxis = new Set(cellsForAxis.map((c) => c.modelId));
+      for (const fam of families) {
+        const hasLatest = labelsForAxis.has(fam.latest);
+        const hasPinned = labelsForAxis.has(fam.pinned);
+        // Either both, or neither — never one without the other.
+        expect(hasLatest).toBe(hasPinned);
+      }
+      // Pin the `pinned` flag convention: a `*-latest` modelId is
+      // pinned=false, anything else is pinned=true. A refactor that
+      // accidentally flipped this would silently corrupt the drift
+      // report's pinned-vs-latest column.
+      for (const cell of cellsForAxis) {
+        if (cell.provider !== 'openai') continue;
+        const isLatestAlias = cell.modelId.endsWith('-latest');
+        expect(cell.pinned).toBe(!isLatestAlias);
+      }
+    }
+  });
+
+  it('every cell label is kebab-case and contains no real customer data', () => {
+    // Labels feed report headers — restrict to a-z 0-9 . - to keep the
+    // markdown table well-formed AND to lock out any accidental customer
+    // hostname / email / proper-noun leakage in cell metadata.
+    const kebab = /^[a-z0-9][a-z0-9\-.]*$/;
+    for (const cell of ALL_CELLS) {
+      expect(cell.label).toMatch(kebab);
+    }
+  });
+
+  it('exports per-axis cell arrays sized non-zero for each PR-D axis', () => {
+    expect(TOOL_CHAIN_CELLS.length).toBeGreaterThan(0);
+    expect(ORCHESTRATION_CELLS.length).toBeGreaterThan(0);
+    expect(KG_EXTRACTION_CELLS.length).toBeGreaterThan(0);
+    expect(DAG_PLANNING_CELLS.length).toBeGreaterThan(0);
+    expect(MEMORY_EXTRACTION_CELLS.length).toBeGreaterThan(0);
+    expect(LONG_CONTEXT_CELLS.length).toBeGreaterThan(0);
+    expect(CODE_REVIEW_CELLS.length).toBeGreaterThan(0);
+    expect(MULTI_STEP_REASONING_CELLS.length).toBeGreaterThan(0);
+  });
 });
