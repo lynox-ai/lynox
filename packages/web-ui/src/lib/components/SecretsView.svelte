@@ -26,6 +26,21 @@
 		'CUSTOM_API_KEY',
 	]);
 
+	// Channel-managed secrets — owned by their own Settings sub-page (Mail
+	// accounts under Integrations → Mail, WhatsApp under .../whatsapp, etc.).
+	// Showing them in the generic-keys list confuses operators because the
+	// "Ändern" button here writes to a different code path than the channel's
+	// edit form, races silently, and the names (e.g. MAIL_ACCOUNT_STAGING_RULE)
+	// don't read as "API keys" the way TAVILY_API_KEY does. Filter by prefix.
+	const CHANNEL_MANAGED_PREFIXES: ReadonlyArray<string> = [
+		'MAIL_ACCOUNT_',
+		'WHATSAPP_',
+		'GOOGLE_OAUTH_',
+	];
+	function isChannelManaged(name: string): boolean {
+		return CHANNEL_MANAGED_PREFIXES.some((prefix) => name.startsWith(prefix));
+	}
+
 	// Suggested names — drives the "Add new key" dropdown. Free-text still works
 	// for anything custom (zapier, replicate, etc.).
 	const SUGGESTED_NAMES = [
@@ -79,8 +94,9 @@
 		loading = false;
 	}
 
-	// Generic-keys list = everything that's not a per-provider LLM slot.
-	const genericNames = $derived(allNames.filter(n => !PROVIDER_SLOTS.has(n)));
+	// Generic-keys list = everything that's not a per-provider LLM slot
+	// AND not a channel-managed prefix (mail accounts, WhatsApp BYOK, Google OAuth).
+	const genericNames = $derived(allNames.filter(n => !PROVIDER_SLOTS.has(n) && !isChannelManaged(n)));
 
 	async function saveSecret() {
 		const trimmed = newName.trim();
