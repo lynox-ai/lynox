@@ -9,7 +9,6 @@
 		backup_schedule?: string | undefined;
 		backup_encrypt?: boolean;
 		backup_retention_days?: number | undefined;
-		[key: string]: unknown;
 	}
 
 	let backups = $state<Backup[]>([]);
@@ -41,7 +40,17 @@
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error();
-			config = (await res.json()) as Config;
+			// GET /api/config returns the user config plus response-only fields
+			// (managed, capabilities, locks, bugsink_dsn_configured, *_configured).
+			// We only need the three backup fields — projecting here keeps a future
+			// `JSON.stringify(config)` save from re-sending those response-only keys
+			// (the schema is `.strict()` since PRD-IA-V2 P1-PR-A2, would 400).
+			const body = (await res.json()) as Config;
+			config = {
+				backup_schedule: body.backup_schedule,
+				backup_encrypt: body.backup_encrypt,
+				backup_retention_days: body.backup_retention_days,
+			};
 		} catch { /* ignore — settings just won't be editable */ }
 		configLoading = false;
 	}
@@ -49,10 +58,17 @@
 	async function saveConfig() {
 		saving = true;
 		try {
+			// Send ONLY the three backup fields — schema is `.strict()`, so any
+			// stray response-only field from GET would 400 the whole save.
+			const payload: Config = {
+				backup_schedule: config.backup_schedule,
+				backup_encrypt: config.backup_encrypt,
+				backup_retention_days: config.backup_retention_days,
+			};
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(config)
+				body: JSON.stringify(payload)
 			});
 			if (!res.ok) throw new Error();
 			saved = true;

@@ -161,6 +161,71 @@ describe('LynoxUserConfigSchema — bugsink_enabled', () => {
   });
 });
 
+describe('LynoxUserConfigSchema — update_check', () => {
+  it('accepts true (SystemSettings update toggle)', () => {
+    const result = LynoxUserConfigSchema.safeParse({ update_check: true });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts false', () => {
+    const result = LynoxUserConfigSchema.safeParse({ update_check: false });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects non-boolean', () => {
+    const result = LynoxUserConfigSchema.safeParse({ update_check: 'true' as unknown as boolean });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('LynoxUserConfigSchema — strict mode (PRD-IA-V2 P1-PR-A2)', () => {
+  it('rejects GET-response-only field `capabilities` — prevents BackupsView-style ghost-writes', () => {
+    const result = LynoxUserConfigSchema.safeParse({ capabilities: { mistral_available: true } });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects GET-response-only field `locks`', () => {
+    const result = LynoxUserConfigSchema.safeParse({ locks: { provider: { reason: 'managed-tier' } } });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects GET-response-only field `managed` (tier indicator)', () => {
+    const result = LynoxUserConfigSchema.safeParse({ managed: 'managed' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects GET-response-only field `bugsink_dsn_configured`', () => {
+    const result = LynoxUserConfigSchema.safeParse({ bugsink_dsn_configured: true });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects `${key}_configured` redaction-mirror fields', () => {
+    expect(LynoxUserConfigSchema.safeParse({ api_key_configured: true }).success).toBe(false);
+    expect(LynoxUserConfigSchema.safeParse({ search_api_key_configured: true }).success).toBe(false);
+    expect(LynoxUserConfigSchema.safeParse({ google_client_id_configured: true }).success).toBe(false);
+  });
+
+  it('rejects arbitrary unknown fields (forward-compat ghost-write surface closed)', () => {
+    const result = LynoxUserConfigSchema.safeParse({ totally_made_up_field: 42 });
+    expect(result.success).toBe(false);
+  });
+
+  it('still accepts a real settings payload (no false-positive on the happy path)', () => {
+    const result = LynoxUserConfigSchema.safeParse({
+      provider: 'anthropic',
+      default_tier: 'sonnet',
+      effort_level: 'high',
+      thinking_mode: 'adaptive',
+      experience: 'business',
+      memory_extraction: true,
+      update_check: true,
+      max_session_cost_usd: 50,
+      bugsink_enabled: false,
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
 describe('LynoxUserConfigSchema — max_context_window_tokens', () => {
   it('accepts the three UI radio values (200k / 500k / 1M)', () => {
     for (const v of [200_000, 500_000, 1_000_000]) {

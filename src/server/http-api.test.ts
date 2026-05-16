@@ -1505,7 +1505,6 @@ describe('LynoxHTTPApi', () => {
         ['searxng_url', 'https://attacker.example'],
         ['google_client_id', 'attacker-oauth-client'],
         ['google_client_secret', 'attacker-oauth-secret'],
-        ['telegram_bot_token', '00000:attacker-token'],
         ['bugsink_dsn', 'https://attacker.example/dsn'],
         ['enforce_https', false],
         ['backup_dir', '/tmp/exfil'],
@@ -1531,11 +1530,11 @@ describe('LynoxHTTPApi', () => {
         },
       );
 
-      it('PUT /api/config rejects unknown fields under user-scope in managed mode (passthrough fail-closed)', async () => {
-        // Schema is `.passthrough()` for forward compat, so a hostile or
-        // typo'd unknown field reaches the allowlist check. `effective[key]`
-        // is `undefined`, so the diff against the submitted value fails and
-        // we return 403 — fail-closed for future fields.
+      it('PUT /api/config rejects unknown fields under user-scope in managed mode (schema-strict fail-closed)', async () => {
+        // PRD-IA-V2 P1-PR-A2: schema is `.strict()`, so a hostile or typo'd
+        // unknown field is rejected by Zod *before* the managed allowlist
+        // check — returns 400 instead of 403, but the security property
+        // (unknown fields cannot land in ~/.lynox/config.json) is preserved.
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
         try {
@@ -1543,10 +1542,27 @@ describe('LynoxHTTPApi', () => {
             method: 'PUT',
             body: JSON.stringify({ a_future_field_we_havent_invented_yet: 'evil' }),
           });
-          expect(res.status).toBe(403);
+          expect(res.status).toBe(400);
         } finally {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config rejects GET-response-only fields (capabilities, locks, managed) in self-host mode too', async () => {
+        // PRD-IA-V2 P1-PR-A2: a stale ConfigView tab would JSON.stringify the
+        // entire `/api/config` GET response back to the PUT endpoint, which
+        // includes `capabilities`, `locks`, `managed`, `bugsink_dsn_configured`,
+        // and `*_configured` redaction mirrors. Schema-strict rejects each.
+        for (const ghostField of [
+          'capabilities', 'locks', 'managed', 'bugsink_dsn_configured',
+          'api_key_configured', 'search_api_key_configured',
+        ]) {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ [ghostField]: 'anything' }),
+          });
+          expect(res.status, `${ghostField} should 400`).toBe(400);
         }
       });
 

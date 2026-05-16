@@ -7,7 +7,9 @@ export { default as CommandPalette } from './components/CommandPalette.svelte';
 export { default as MemoryView } from './components/MemoryView.svelte';
 export { default as HistoryView } from './components/HistoryView.svelte';
 export { default as SettingsIndex } from './components/SettingsIndex.svelte';
-export { default as ConfigView } from './components/ConfigView.svelte';
+// ConfigView deleted PRD-IA-V2 P1-PR-A2 — settings live in LLMSettings /
+// VoiceSettings / PrivacyDataSettings / SystemSettings (extracted in V1).
+// `/settings/config` now 301-redirects to the appropriate extracted page.
 export { default as KeysView } from './components/KeysView.svelte';
 export { default as SecretsView } from './components/SecretsView.svelte';
 export { default as IntegrationsView } from './components/IntegrationsView.svelte';
