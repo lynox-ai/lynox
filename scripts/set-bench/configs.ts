@@ -31,7 +31,11 @@
 
 import type { SetBenchCell } from './types.js';
 
-const MISTRAL = 'https://api.mistral.ai/v1';
+// Exported so the structural-sanity tests can reference the same constant
+// the cells use — otherwise a typo or trailing-slash drift in `MISTRAL`
+// would silently turn the "every PR-D axis has ≥1 Mistral candidate"
+// assertion into a no-op.
+export const MISTRAL = 'https://api.mistral.ai/v1';
 
 const ANTHROPIC_KEY = 'ANTHROPIC_API_KEY';
 const MISTRAL_KEY = 'MISTRAL_API_KEY';

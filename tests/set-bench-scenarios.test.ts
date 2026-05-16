@@ -52,6 +52,7 @@ import {
   LONG_CONTEXT_CELLS,
   CODE_REVIEW_CELLS,
   MULTI_STEP_REASONING_CELLS,
+  MISTRAL,
 } from '../scripts/set-bench/configs.js';
 import type { CellRun, SetBenchAxis, SetBenchCell, SetBenchScenario, ToolCallTrace } from '../scripts/set-bench/types.js';
 
@@ -1489,7 +1490,7 @@ describe('Phase 3 PR D — cell roster structural sanity', () => {
   it('every PR-D axis has at least one Mistral candidate cell', () => {
     for (const axis of PR_D_AXES) {
       const mistral = ALL_CELLS.filter(
-        (c) => c.axis === axis && c.provider === 'openai' && c.apiBaseURL === 'https://api.mistral.ai/v1',
+        (c) => c.axis === axis && c.provider === 'openai' && c.apiBaseURL === MISTRAL,
       );
       expect(mistral.length).toBeGreaterThanOrEqual(1);
     }
@@ -1528,10 +1529,14 @@ describe('Phase 3 PR D — cell roster structural sanity', () => {
     }
   });
 
-  it('every openai-provider cell has an apiBaseURL set', () => {
+  it('every openai-provider cell points at the Mistral base URL', () => {
+    // Every openai-provider cell in this bench is a Mistral candidate;
+    // tying the assertion to the MISTRAL constant catches both missing-
+    // and typo'd URLs (e.g. trailing slash, http instead of https) in
+    // one check rather than a weaker truthiness-only guard.
     for (const cell of ALL_CELLS) {
       if (cell.provider === 'openai') {
-        expect(cell.apiBaseURL).toBeTruthy();
+        expect(cell.apiBaseURL).toBe(MISTRAL);
       }
     }
   });
@@ -1547,12 +1552,22 @@ describe('Phase 3 PR D — cell roster structural sanity', () => {
       { latest: 'magistral-medium-latest', pinned: 'magistral-medium-2509' },
     ];
     for (const axis of PR_D_AXES) {
-      const labelsForAxis = new Set(ALL_CELLS.filter((c) => c.axis === axis).map((c) => c.modelId));
+      const cellsForAxis = ALL_CELLS.filter((c) => c.axis === axis);
+      const labelsForAxis = new Set(cellsForAxis.map((c) => c.modelId));
       for (const fam of families) {
         const hasLatest = labelsForAxis.has(fam.latest);
         const hasPinned = labelsForAxis.has(fam.pinned);
         // Either both, or neither — never one without the other.
         expect(hasLatest).toBe(hasPinned);
+      }
+      // Pin the `pinned` flag convention: a `*-latest` modelId is
+      // pinned=false, anything else is pinned=true. A refactor that
+      // accidentally flipped this would silently corrupt the drift
+      // report's pinned-vs-latest column.
+      for (const cell of cellsForAxis) {
+        if (cell.provider !== 'openai') continue;
+        const isLatestAlias = cell.modelId.endsWith('-latest');
+        expect(cell.pinned).toBe(!isLatestAlias);
       }
     }
   });
