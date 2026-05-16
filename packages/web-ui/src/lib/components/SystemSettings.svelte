@@ -11,12 +11,17 @@
 	interface Config {
 		update_check?: boolean;
 		managed?: string;
+		// PRD-IA-V2 P1-PR-A1 — backfill the legacy ConfigView HTTP-rate-cap
+		// here as a temporary home; final SSoT lands on `/workspace/limits`
+		// in P3-PR-B. Self-host only — managed tier hides the input below.
+		max_http_requests_per_hour?: number;
 	}
 
 	let config = $state<Config>({});
 	let managed = $state(false);
 	let loaded = $state(false);
 	let saving = $state(false);
+	let httpRateSaving = $state(false);
 
 	let vaultConfigured = $state(false);
 	let vaultRevealed = $state(false);
@@ -33,7 +38,10 @@
 			]);
 			if (!configRes.ok) throw new Error(`HTTP ${configRes.status}`);
 			const body = (await configRes.json()) as Config;
-			config = { update_check: body.update_check };
+			config = {
+				update_check: body.update_check,
+				max_http_requests_per_hour: body.max_http_requests_per_hour,
+			};
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
 			if (vaultRes.ok) {
 				const vaultBody = (await vaultRes.json()) as { configured: boolean };
@@ -83,6 +91,31 @@
 			addToast(e instanceof Error ? e.message : t('system.save_failed'), 'error', 5000);
 		} finally {
 			saving = false;
+		}
+	}
+
+	async function saveHttpRateLimit(): Promise<void> {
+		// Drop the field entirely when blank/zero so the engine falls back to
+		// its built-in default (200/hr) rather than persisting a 0-cap that
+		// would brick all HTTP-tool calls.
+		const raw = config.max_http_requests_per_hour;
+		const payload: { max_http_requests_per_hour?: number } = {};
+		if (typeof raw === 'number' && raw > 0 && Number.isFinite(raw)) {
+			payload.max_http_requests_per_hour = Math.floor(raw);
+		}
+		httpRateSaving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/config`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload),
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			addToast(t('system.saved'), 'success', 3000);
+		} catch (e) {
+			addToast(e instanceof Error ? e.message : t('system.save_failed'), 'error', 5000);
+		} finally {
+			httpRateSaving = false;
 		}
 	}
 
@@ -143,6 +176,32 @@
 					onchange={saveUpdateCheck} class="w-4 h-4" />
 				<span class="text-sm">{t('system.update_label')}</span>
 			</label>
+		</section>
+
+		<!--
+			HTTP rate cap — temporary home per PRD-IA-V2 P1-PR-A1 (final SSoT:
+			`/settings/workspace/limits` in P3-PR-B). Surfaced here only on
+			self-host because (a) the input is non-monetary and (b) the legacy
+			ConfigView gated it on `!managed`.
+		-->
+		<section class="border-t border-border pt-6 space-y-2">
+			<h2 class="text-lg font-medium">{t('system.http_rate_heading')}</h2>
+			<p class="text-xs text-text-muted">{t('config.http_rate_limit_desc')}</p>
+			<div class="flex items-end gap-2">
+				<label class="flex-1">
+					<span class="block text-sm font-medium mb-1">{t('config.http_rate_limit')}</span>
+					<input type="number" min="1" max="100000" step="1" placeholder="200"
+						bind:value={config.max_http_requests_per_hour}
+						disabled={httpRateSaving}
+						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
+				</label>
+				<button type="button" onclick={saveHttpRateLimit}
+					disabled={httpRateSaving}
+					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5 disabled:opacity-50">
+					{httpRateSaving ? t('system.saving') : t('system.save_button')}
+				</button>
+			</div>
+			<p class="text-xs text-text-muted italic">{t('system.http_rate_temp_home')}</p>
 		</section>
 	{/if}
 </div>

@@ -45,6 +45,17 @@
 		default_tier?: string;
 		openai_model_id?: string;
 		custom_endpoints?: CustomEndpoint[];
+		// Advanced / Memory backfill (PRD-IA-V2 P1-PR-A1) — moved out of legacy
+		// ConfigView. Schema source-of-truth: core/src/types/schemas.ts.
+		experience?: 'business' | 'developer';
+		effort_level?: 'low' | 'medium' | 'high' | 'max';
+		thinking_mode?: 'adaptive' | 'disabled';
+		embedding_provider?: 'onnx' | 'local';
+		llm_mode?: 'standard' | 'eu-sovereign';
+		memory_extraction?: boolean;
+		memory_half_life_days?: number;
+		managed?: string;
+		capabilities?: { mistral_available?: boolean };
 	}
 
 	interface Locks {
@@ -55,12 +66,19 @@
 	let config = $state<UserConfig>({});
 	let locks = $state<Locks>({});
 	let activeProvider = $state<LLMProvider | null>(null);
+	// Tracks whether `provider` was explicitly set in ~/.lynox/config.json
+	// (vs. defaulted to 'anthropic' in `load()`). PRD-IA-V2 P1-PR-A1 empty-state
+	// CTA must fire on first-paint of a fresh config, before the user picks.
+	let providerExplicit = $state(false);
 	// Per-provider key cache (UI-only — kept in vault, sent on save).
 	let keys = $state<Record<string, string>>({});
 	let loaded = $state(false);
 	let testing = $state(false);
 	let saving = $state(false);
 	let testResult = $state<{ ok: boolean; latency_ms?: number; message?: string } | null>(null);
+	// Live `/api/secrets/status` snapshot — drives the empty-state predicate
+	// alongside the explicit-provider flag. Both must be false to show the CTA.
+	let apiKeyConfigured = $state<boolean | null>(null);
 
 	// Vault slot per provider — keeps existing keys when user switches.
 	// Each provider has a DISTINCT slot so flipping anthropic → custom → anthropic
@@ -79,9 +97,10 @@
 
 	async function load(): Promise<void> {
 		try {
-			const [catRes, configRes] = await Promise.all([
+			const [catRes, configRes, statusRes] = await Promise.all([
 				fetch(`${getApiBase()}/llm/catalog`),
 				fetch(`${getApiBase()}/config`),
+				fetch(`${getApiBase()}/secrets/status`),
 			]);
 			if (!catRes.ok || !configRes.ok) throw new Error(`HTTP ${catRes.status} / ${configRes.status}`);
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
@@ -89,7 +108,14 @@
 			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks };
 			config = configBody;
 			locks = configBody.locks ?? {};
+			providerExplicit = typeof configBody.provider === 'string' && configBody.provider.length > 0;
 			activeProvider = configBody.provider ?? 'anthropic';
+			if (statusRes.ok) {
+				const status = (await statusRes.json()) as { configured?: { api_key?: boolean } };
+				apiKeyConfigured = status.configured?.api_key === true;
+			} else {
+				apiKeyConfigured = null;
+			}
 			loaded = true;
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('llm.load_failed'), 'error', 5000);
@@ -191,11 +217,26 @@
 				update.gcp_region = config.gcp_region;
 			}
 			if (config.default_tier) update.default_tier = config.default_tier;
-			if (activeProvider === 'openai' && config.openai_model_id) {
+			// `openai_model_id` covers BOTH 'openai' (Mistral / generic OpenAI-compat)
+			// AND 'custom' (Anthropic-compat proxies via LiteLLM etc.) — engine reads
+			// the same field for both (engine.ts:307, session.ts:968). The legacy
+			// ConfigView didn't expose it for 'custom', leaving custom users stuck
+			// with whatever the wizard set; we now honour both providers.
+			if ((activeProvider === 'openai' || activeProvider === 'custom') && config.openai_model_id) {
 				update.openai_model_id = config.openai_model_id;
 			}
 			if (activeProvider === 'custom') {
 				update.custom_endpoints = config.custom_endpoints ?? [];
+			}
+			// Advanced + Memory backfill — same PUT, no separate endpoint.
+			if (config.experience) update.experience = config.experience;
+			if (config.effort_level) update.effort_level = config.effort_level;
+			if (config.thinking_mode) update.thinking_mode = config.thinking_mode;
+			if (config.embedding_provider) update.embedding_provider = config.embedding_provider;
+			if (config.llm_mode) update.llm_mode = config.llm_mode;
+			if (typeof config.memory_extraction === 'boolean') update.memory_extraction = config.memory_extraction;
+			if (typeof config.memory_half_life_days === 'number' && config.memory_half_life_days > 0) {
+				update.memory_half_life_days = config.memory_half_life_days;
 			}
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
@@ -215,6 +256,26 @@
 
 	const activeProviderEntry = $derived(providers.find((p) => p.provider === activeProvider));
 	const providerLocked = $derived(!!locks.provider);
+
+	// Capability gate for the llm_mode toggle — mirrors ConfigView's same-name
+	// derived. Hidden until the engine reports a working Mistral path, so the
+	// radio doesn't tease BYOK self-hosters who don't have Mistral wired.
+	const mistralAvailable = $derived(config.capabilities?.mistral_available === true);
+	// Managed tiers can't write embedding_provider + max_http_requests_per_hour
+	// (allowlist gate in http-api.ts MANAGED_USER_WRITABLE_CONFIG); hide those
+	// inputs on managed to avoid the silent-403 trap.
+	const isManaged = $derived(config.managed === 'managed' || config.managed === 'managed_pro' || config.managed === 'eu');
+	// Empty-state CTA (PRD acceptance: fresh ~/.lynox/config.json → SetupBanner
+	// → click → lands on /settings/llm empty-state). Triggers when neither a
+	// provider was persisted to config.json nor an LLM key exists in the vault.
+	// Conservative: hide the CTA when /secrets/status is unreachable (apiKeyConfigured===null).
+	const showEmptyState = $derived(
+		loaded && !providerLocked && !providerExplicit && apiKeyConfigured === false,
+	);
+
+	// Memory-section toggle (collapsible — final `/llm/memory` route lands in P3-PR-C).
+	let memoryOpen = $state(false);
+	let advancedOpen = $state(false);
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">
@@ -231,6 +292,26 @@
 			{/if}
 		</div>
 	{/if}
+
+	{#if showEmptyState}
+		<!--
+			Empty-state CTA — PRD-IA-V2 P1-PR-A1 acceptance: SetupBanner cold-start
+			path lands on /settings/llm and shows a primary "Provider wählen + Key
+			eintragen" CTA. Provider picker below is always present once activeProvider
+			is set; this banner just nudges first-paint users into the picker.
+		-->
+		<div role="status" class="border border-accent/40 bg-accent/5 rounded p-4 text-sm space-y-2">
+			<p class="font-medium">{t('llm.empty_state_title')}</p>
+			<p class="text-text-muted">{t('llm.empty_state_body')}</p>
+			<p class="text-xs text-text-muted">{t('llm.empty_state_hint')}</p>
+		</div>
+	{/if}
+
+	<!-- Generic API-Keys (Tavily / Brevo / custom) live on their own sub-page. -->
+	<div class="text-xs text-text-muted">
+		<a href="/app/settings/llm/keys" class="text-accent-text underline hover:opacity-90">{t('secrets.link_to_keys')}</a>
+		— {t('secrets.link_to_keys_hint')}
+	</div>
 
 	<!-- Provider picker — 4 cards. Active one expands inline. -->
 	<section aria-labelledby="llm-provider-heading">
@@ -350,6 +431,22 @@
 						</select>
 					{/if}
 				</label>
+			{:else if activeProvider === 'custom'}
+				<!--
+					Custom (Anthropic-compatible) endpoints have no enumerated model
+					catalog (see core/src/core/llm/catalog.ts:158) — model id is
+					free-text routed by the proxy. The legacy ConfigView lost this
+					field entirely, leaving custom users stuck with whatever the
+					wizard set. P1-PR-A1 surfaces it explicitly.
+				-->
+				<label class="block">
+					<span class="block text-sm font-medium mb-1">{t('llm.custom_model_id')}</span>
+					<input type="text" disabled={!loaded || providerLocked}
+						placeholder="claude-3-5-sonnet-20241022"
+						bind:value={config.openai_model_id}
+						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
+					<span class="text-xs text-text-muted">{t('llm.custom_model_id_hint')}</span>
+				</label>
 			{/if}
 
 			<!-- Inline residency note -->
@@ -369,6 +466,137 @@
 					<span class="text-sm text-danger">✗ {testResult.message}</span>
 				{/if}
 			</div>
+		</section>
+
+		<!--
+			Advanced section — backfilled from legacy ConfigView (PRD-IA-V2 P1-PR-A1).
+			Collapsible to keep the picker-flow visually clean; final dedicated
+			sub-route `/settings/llm/advanced` lands in P3-PR-C.
+		-->
+		<section aria-labelledby="llm-advanced-heading" class="border-t border-border pt-4 space-y-4">
+			<button type="button" onclick={() => { advancedOpen = !advancedOpen; }}
+				class="flex items-center gap-2 text-left w-full"
+				aria-expanded={advancedOpen} aria-controls="llm-advanced-body">
+				<span class="text-sm font-medium">{t('llm.advanced_heading')}</span>
+				<span class="text-xs text-text-muted">{advancedOpen ? '▾' : '▸'}</span>
+			</button>
+			{#if advancedOpen}
+				<div id="llm-advanced-body" class="space-y-4">
+					<!-- LLM mode (capability-gated) -->
+					{#if mistralAvailable}
+						<fieldset class="space-y-2 border border-border rounded p-3">
+							<legend class="px-1 text-xs font-medium uppercase tracking-wider text-text-muted">{t('config.llm_mode')}</legend>
+							<p class="text-xs text-text-muted">{t('config.llm_mode_desc')}</p>
+							<label class="flex items-start gap-3 p-2 rounded border border-border bg-bg cursor-pointer">
+								<input type="radio" name="llm-mode" value="standard"
+									checked={(config.llm_mode ?? 'standard') === 'standard'}
+									onchange={() => { config.llm_mode = 'standard'; }}
+									class="mt-1 accent-accent shrink-0" />
+								<span class="text-sm">
+									<span class="font-medium block">{t('config.llm_mode_standard')}</span>
+									<span class="text-xs text-text-muted">{t('config.llm_mode_standard_desc')}</span>
+								</span>
+							</label>
+							<label class="flex items-start gap-3 p-2 rounded border border-border bg-bg cursor-pointer">
+								<input type="radio" name="llm-mode" value="eu-sovereign"
+									checked={config.llm_mode === 'eu-sovereign'}
+									onchange={() => { config.llm_mode = 'eu-sovereign'; }}
+									class="mt-1 accent-accent shrink-0" />
+								<span class="text-sm">
+									<span class="font-medium block">{t('config.llm_mode_eu_sovereign')}</span>
+									<span class="text-xs text-text-muted">{t('config.llm_mode_eu_sovereign_desc')}</span>
+								</span>
+							</label>
+							<p class="text-xs text-text-muted italic">{t('config.llm_mode_restart_required')}</p>
+						</fieldset>
+					{/if}
+
+					<label class="block">
+						<span class="block text-sm font-medium mb-1">{t('config.effort')}</span>
+						<span class="block text-xs text-text-muted mb-1">{t('config.effort_desc')}</span>
+						<select bind:value={config.effort_level} disabled={!loaded}
+							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+							<option value="low">{t('config.effort_low')}</option>
+							<option value="medium">{t('config.effort_medium')}</option>
+							<option value="high">{t('config.effort_high')}</option>
+							<option value="max">{t('config.effort_max')}</option>
+						</select>
+					</label>
+
+					<label class="block">
+						<span class="block text-sm font-medium mb-1">{t('config.thinking')}</span>
+						<span class="block text-xs text-text-muted mb-1">{t('config.thinking_desc')}</span>
+						<select bind:value={config.thinking_mode} disabled={!loaded}
+							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+							<option value="disabled">{t('config.thinking_disabled')}</option>
+							<option value="adaptive">{t('config.thinking_adaptive')}</option>
+						</select>
+					</label>
+
+					<label class="block">
+						<span class="block text-sm font-medium mb-1">{t('config.experience')}</span>
+						<span class="block text-xs text-text-muted mb-1">{t('config.experience_desc')}</span>
+						<select bind:value={config.experience} disabled={!loaded}
+							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+							<option value="business">{t('config.experience_business')}</option>
+							<option value="developer">{t('config.experience_developer')}</option>
+						</select>
+					</label>
+
+					{#if !isManaged}
+						<!-- embedding_provider is not in MANAGED_USER_WRITABLE_CONFIG (http-api.ts:175).
+						     Hiding on managed avoids the silent-403 UX trap. -->
+						<label class="block">
+							<span class="block text-sm font-medium mb-1">{t('config.embedding_provider')}</span>
+							<select bind:value={config.embedding_provider} disabled={!loaded}
+								class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+								<option value="onnx">{t('config.embedding_onnx')}</option>
+							</select>
+						</label>
+					{/if}
+				</div>
+			{/if}
+		</section>
+
+		<!--
+			Memory section — backfilled from legacy ConfigView (PRD-IA-V2 P1-PR-A1).
+			Final dedicated sub-route `/settings/llm/memory` lands in P3-PR-C; for
+			now this lives as a collapsible panel on the LLM page so the settings
+			don't go missing between ConfigView delete (P1-PR-A2) and Phase 3.
+		-->
+		<section aria-labelledby="llm-memory-heading" class="border-t border-border pt-4 space-y-4">
+			<button type="button" onclick={() => { memoryOpen = !memoryOpen; }}
+				class="flex items-center gap-2 text-left w-full"
+				aria-expanded={memoryOpen} aria-controls="llm-memory-body">
+				<span class="text-sm font-medium">{t('llm.memory_heading')}</span>
+				<span class="text-xs text-text-muted">{memoryOpen ? '▾' : '▸'}</span>
+			</button>
+			{#if memoryOpen}
+				<div id="llm-memory-body" class="space-y-4">
+					<div class="flex items-center justify-between gap-3">
+						<div>
+							<p class="text-sm font-medium">{t('config.memory_extraction')}</p>
+							<p class="text-xs text-text-muted mt-0.5">{t('config.memory_extraction_desc')}</p>
+						</div>
+						<button type="button"
+							onclick={() => { config.memory_extraction = !config.memory_extraction; }}
+							disabled={!loaded}
+							aria-pressed={config.memory_extraction === true}
+							aria-label={t('config.memory_extraction')}
+							class="relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 {config.memory_extraction ? 'bg-accent' : 'bg-border'}">
+							<span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.memory_extraction ? 'translate-x-4' : ''}"></span>
+						</button>
+					</div>
+
+					<label class="block">
+						<span class="block text-sm font-medium mb-1">{t('config.memory_half_life')}</span>
+						<span class="block text-xs text-text-muted mb-1">{t('config.memory_half_life_desc')}</span>
+						<input type="number" min="1" max="3650" placeholder="90"
+							bind:value={config.memory_half_life_days} disabled={!loaded}
+							class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
+					</label>
+				</div>
+			{/if}
 		</section>
 
 		<!-- Save row -->

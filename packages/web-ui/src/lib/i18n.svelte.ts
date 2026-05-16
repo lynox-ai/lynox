@@ -166,6 +166,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'system.update_label':          { de: 'Update-Check aktivieren',                                                      en: 'Enable update check' },
 	'system.saved':                 { de: 'Gespeichert.',                                                                 en: 'Saved.' },
 	'system.save_failed':           { de: 'Speichern fehlgeschlagen.',                                                    en: 'Save failed.' },
+	'system.saving':                { de: 'Speichere …',                                                                  en: 'Saving …' },
+	'system.save_button':           { de: 'Speichern',                                                                    en: 'Save' },
+	// PRD-IA-V2 P1-PR-A1 — temporary home for HTTP rate-cap until P3-PR-B moves it to /workspace/limits.
+	'system.http_rate_heading':     { de: 'HTTP-Limit',                                                                    en: 'HTTP rate limit' },
+	'system.http_rate_temp_home':   { de: 'Hinweis: dieser Schalter zieht später nach Einstellungen → Workspace → Limits.', en: 'Note: this control moves to Settings → Workspace → Limits in a later release.' },
 	'cost_limits.hard_heading':           { de: 'System-Schutzlimits',                                                            en: 'System hard limits' },
 	'cost_limits.hard_subtitle':          { de: 'Schützt vor Runaway-Loops und unbeschränkten Kosten. Nicht änderbar.',           en: 'Protects against runaway loops and unbounded cost. Not user-editable.' },
 	'cost_limits.hard.per_spawn':         { de: 'Pro Sub-Agent (Default)',                                                        en: 'Per sub-agent (default)' },
@@ -239,6 +244,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.endpoints_save_current':  { de: '+ Aktuellen Endpoint speichern',                                        en: '+ Save current endpoint' },
 	'llm.endpoints_save_prompt':   { de: 'Name für diesen Endpoint (z.B. "Production LiteLLM"):',                en: 'Name for this endpoint (e.g. "Production LiteLLM"):' },
 	'llm.endpoints_active':        { de: 'aktiv',                                                                en: 'active' },
+	// PRD-IA-V2 P1-PR-A1 — backfill labels for Advanced + Memory + custom-model + empty-state.
+	'llm.empty_state_title':       { de: 'Provider und API-Schlüssel fehlen.',                                  en: 'Provider and API key not yet set.' },
+	'llm.empty_state_body':        { de: 'Wähle unten einen Anbieter und trage deinen Schlüssel ein, um lynox zu starten.', en: 'Pick a provider below and paste your key to get lynox running.' },
+	'llm.empty_state_hint':        { de: 'Generic API-Keys (Tavily, Brevo, andere) leben unter „API-Keys".',     en: 'Generic API keys (Tavily, Brevo, others) live under "API keys".' },
+	'llm.advanced_heading':        { de: 'Erweitert',                                                             en: 'Advanced' },
+	'llm.memory_heading':          { de: 'Erinnerung',                                                            en: 'Memory' },
+	'llm.custom_model_id':         { de: 'Modell-ID',                                                             en: 'Model ID' },
+	'llm.custom_model_id_hint':    { de: 'Frei wählbar (LiteLLM, Ollama, eigene Proxies). Beispiel: claude-3-5-sonnet-20241022 oder llama3.2.', en: 'Free-form (LiteLLM, Ollama, custom proxies). Example: claude-3-5-sonnet-20241022 or llama3.2.' },
 
 	// Workflows
 	'workflow.title': { de: 'Workflows', en: 'Workflows' },
@@ -876,6 +889,25 @@ const translations: Record<string, Record<Locale, string>> = {
 	'keys.value_label': { de: 'Wert', en: 'Value' },
 	'keys.edit': { de: 'Ändern', en: 'Edit' },
 	'keys.new_value': { de: 'Neuer Wert...', en: 'New value...' },
+
+	// Secrets (PRD-IA-V2 P1-PR-A1) — generic API-Keys sub-page under /settings/llm/keys.
+	// Separate namespace from `keys.*` to keep the legacy KeysView translations intact
+	// during the transition (KeysView still mounts on /settings/keys until P1-PR-A2 deletes
+	// the route).
+	'secrets.title':                { de: 'API-Keys',                                                              en: 'API keys' },
+	'secrets.subtitle':             { de: 'Drittanbieter-Schlüssel (Tavily, Brevo, Custom). LLM-Provider-Keys liegen unter LLM-Provider.', en: 'Third-party keys (Tavily, Brevo, custom). LLM provider keys live under LLM Provider.' },
+	'secrets.back_to_llm':          { de: 'Zurück zu LLM-Provider',                                                en: 'Back to LLM provider' },
+	'secrets.list_heading':         { de: 'Gespeicherte Keys',                                                     en: 'Stored keys' },
+	'secrets.empty':                { de: 'Keine API-Keys gespeichert.',                                           en: 'No API keys stored.' },
+	'secrets.add_title':            { de: 'Neuen Key hinzufügen',                                                  en: 'Add new key' },
+	'secrets.name_hint':            { de: 'Vorschläge: TAVILY_API_KEY, BREVO_API_KEY, SEARCH_API_KEY, GOOGLE_CLIENT_ID. Eigene Namen sind erlaubt.', en: 'Suggestions: TAVILY_API_KEY, BREVO_API_KEY, SEARCH_API_KEY, GOOGLE_CLIENT_ID. Custom names allowed.' },
+	'secrets.use_llm_page':         { de: 'Dieser Key gehört in die LLM-Provider-Seite, nicht hierher.',           en: 'This key belongs on the LLM provider page, not here.' },
+	'secrets.managed_blocked':      { de: 'Auf Managed-Hosting nicht beschreibbar — schreib uns für custom Integrationen.', en: 'Not writable on managed hosting — contact us for custom integrations.' },
+	'secrets.managed_notice_title': { de: 'Managed-Hosting',                                                       en: 'Managed hosting' },
+	'secrets.managed_notice_body':  { de: 'Generische API-Keys (Tavily, Brevo, Custom) werden auf managed Hosting zentral verwaltet. Nur Anthropic- und OpenAI-kompatible Schlüssel sind hier schreibbar.', en: 'Generic API keys (Tavily, Brevo, custom) are centrally managed on managed hosting. Only Anthropic- and OpenAI-compatible keys are writable here.' },
+	'secrets.no_admin':             { de: 'Keine Admin-Berechtigung — Key-Liste nicht verfügbar.',                 en: 'No admin permission — key list unavailable.' },
+	'secrets.link_to_keys':         { de: 'API-Keys verwalten →',                                                  en: 'Manage API keys →' },
+	'secrets.link_to_keys_hint':    { de: 'Drittanbieter-Keys (Tavily, Brevo, eigene Namen).',                     en: 'Third-party keys (Tavily, Brevo, custom names).' },
 
 	// Tasks
 	'tasks.title': { de: 'Aufgaben', en: 'Tasks' },
