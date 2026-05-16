@@ -27,12 +27,24 @@
 	}
 	interface CatalogProvider {
 		provider: LLMProvider;
+		/**
+		 * UI-only disambiguator when multiple entries share `provider` (e.g.
+		 * Mistral + generic OpenAI-compatible both serialise to `'openai'`).
+		 * When omitted, the entry's `provider` is its UI identity.
+		 */
+		preset_id?: string;
 		display_name: string;
 		models: CatalogModel[];
 		requires_base_url: boolean;
 		requires_region: boolean;
 		default_residency: string;
+		/** Pre-filled api_base_url for presets that pin a fixed endpoint. */
+		base_url_default?: string;
 		notes?: string;
+	}
+
+	function catalogKey(entry: CatalogProvider): string {
+		return entry.preset_id ?? entry.provider;
 	}
 
 	interface CustomEndpoint { id: string; name: string; base_url: string }
@@ -70,6 +82,11 @@
 	let config = $state<UserConfig>({});
 	let locks = $state<Locks>({});
 	let activeProvider = $state<LLMProvider | null>(null);
+	// UI key of the active catalog entry — disambiguates entries that share
+	// `provider` (e.g. mistral vs. generic openai-compat). Stays in sync with
+	// `activeProvider` on selection; on load, derived from config (Mistral
+	// host → 'mistral'; otherwise the provider id).
+	let activeCatalogKey = $state<string | null>(null);
 	// Tracks whether `provider` was explicitly set in ~/.lynox/config.json
 	// (vs. defaulted to 'anthropic' in `load()`). PRD-IA-V2 P1-PR-A1 empty-state
 	// CTA must fire on first-paint of a fresh config, before the user picks.
@@ -99,6 +116,39 @@
 		return VAULT_SLOTS[p] ?? '';
 	}
 
+	/**
+	 * Disambiguate which preset matches a persisted (provider, api_base_url)
+	 * pair. Falls back to the first catalog entry for that provider when no
+	 * preset matches — keeps single-entry providers (anthropic, vertex,
+	 * custom) working without preset_id.
+	 */
+	function resolveCatalogKey(provider: LLMProvider, baseUrl?: string): string {
+		const candidates = providers.filter((p) => p.provider === provider);
+		if (candidates.length === 0) return provider;
+		if (candidates.length === 1) return catalogKey(candidates[0]!);
+		// Multi-preset provider — pick the preset whose `base_url_default`
+		// the saved api_base_url points at (hostname match, not substring;
+		// mirrors getOpenAIModelMap in core/src/types/models.ts).
+		if (baseUrl) {
+			try {
+				const host = new URL(baseUrl).hostname.toLowerCase();
+				const matched = candidates.find((c) => {
+					if (!c.base_url_default) return false;
+					try {
+						const defHost = new URL(c.base_url_default).hostname.toLowerCase();
+						return host === defHost || host.endsWith(`.${defHost.replace(/^api\./, '')}`);
+					} catch { return false; }
+				});
+				if (matched) return catalogKey(matched);
+			} catch { /* invalid URL — fall through to fallback */ }
+		}
+		// No baseUrl OR no preset matched → fall back to the catalog entry
+		// that REQUIRES a base URL (the generic-fallback preset), so the
+		// user sees the input they need to fill in.
+		const generic = candidates.find((c) => c.requires_base_url);
+		return catalogKey(generic ?? candidates[0]!);
+	}
+
 	async function load(): Promise<void> {
 		try {
 			const [catRes, configRes, statusRes] = await Promise.all([
@@ -114,6 +164,13 @@
 			locks = configBody.locks ?? {};
 			providerExplicit = typeof configBody.provider === 'string' && configBody.provider.length > 0;
 			activeProvider = configBody.provider ?? 'anthropic';
+			// Pick the matching catalog entry. For providers with multiple
+			// presets (openai → mistral + openai-compat) we disambiguate from
+			// the saved api_base_url: a Mistral host activates the Mistral
+			// preset, anything else falls through to the generic OpenAI-compat
+			// entry. Keeps round-trip consistent so a returning user lands on
+			// the same button they last picked.
+			activeCatalogKey = resolveCatalogKey(activeProvider, configBody.api_base_url);
 			if (statusRes.ok) {
 				const status = (await statusRes.json()) as { configured?: { api_key?: boolean } };
 				apiKeyConfigured = status.configured?.api_key === true;
@@ -124,6 +181,28 @@
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('llm.load_failed'), 'error', 5000);
 		}
+	}
+
+	function selectCatalogEntry(entry: CatalogProvider): void {
+		if (locks.provider) {
+			addToast(t('llm.locked_provider'), 'info', 3000);
+			return;
+		}
+		activeProvider = entry.provider;
+		activeCatalogKey = catalogKey(entry);
+		// Pre-fill api_base_url for presets that pin a fixed endpoint
+		// (e.g. Mistral → api.mistral.ai). Keeps the user from having to
+		// type it AND ensures save→reload round-trips back to this preset.
+		if (entry.base_url_default && !entry.requires_base_url) {
+			config = { ...config, api_base_url: entry.base_url_default };
+		} else if (entry.requires_base_url && config.api_base_url === entry.base_url_default) {
+			// Switching from a pinned preset (Mistral) to a free-text one
+			// (openai-compat) — clear the pre-filled URL so the input
+			// renders blank instead of inheriting the previous preset's
+			// host.
+			config = { ...config, api_base_url: '' };
+		}
+		testResult = null;
 	}
 
 	function selectProvider(p: LLMProvider): void {
@@ -219,8 +298,15 @@
 			const update: UserConfig = {};
 			if (!providerLocked && activeProvider) {
 				update.provider = activeProvider;
+				// Send api_base_url for both free-text presets (requires_base_url)
+				// AND pinned presets (base_url_default — e.g. Mistral). Without
+				// the second case a user picking "Mistral" would save without
+				// the api.mistral.ai host, and the engine would default to
+				// Anthropic Direct.
 				if (activeProviderEntry?.requires_base_url && config.api_base_url) {
 					update.api_base_url = config.api_base_url;
+				} else if (activeProviderEntry?.base_url_default) {
+					update.api_base_url = activeProviderEntry.base_url_default;
 				}
 				if (activeProviderEntry?.requires_region) {
 					update.gcp_project_id = config.gcp_project_id;
@@ -273,7 +359,10 @@
 
 	$effect(() => { void load(); });
 
-	const activeProviderEntry = $derived(providers.find((p) => p.provider === activeProvider));
+	const activeProviderEntry = $derived(
+		providers.find((p) => catalogKey(p) === activeCatalogKey)
+		?? providers.find((p) => p.provider === activeProvider),
+	);
 	const providerLocked = $derived(!!locks.provider);
 
 	// Capability gate for the llm_mode toggle — mirrors ConfigView's same-name
@@ -351,9 +440,9 @@
 	<section aria-labelledby="llm-provider-heading">
 		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
 		<div class="grid gap-2 sm:grid-cols-2">
-			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (p.provider)}
-				<button type="button" onclick={() => selectProvider(p.provider)} disabled={providerLocked && p.provider !== activeProvider}
-					class="text-left p-3 rounded border-2 transition-colors {activeProvider === p.provider ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
+			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogKey(p))}
+				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={providerLocked && catalogKey(p) !== activeCatalogKey}
+					class="text-left p-3 rounded border-2 transition-colors {catalogKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
 					<div class="font-medium text-sm">{p.display_name}</div>
 					<div class="text-xs text-text-muted mt-0.5">{p.default_residency}</div>
 				</button>
