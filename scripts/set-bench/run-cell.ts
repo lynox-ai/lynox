@@ -115,15 +115,40 @@ export async function runCell(
         };
       }
 
-      const stream = client.beta.messages.stream({
-        model: cell.modelId,
-        max_tokens: 2048,
-        system: SYSTEM,
-        messages,
-        tools: SET_BENCH_TOOLS as BetaTool[],
-        ...(cell.providerExtras ?? {}),
-      });
-      const msg = await stream.finalMessage();
+      // Mistral free + Tier-1 paid tiers cap RPM aggressively. The bench
+      // would otherwise emit a noisy 0% for cells that work fine when given
+      // more breathing room. Retry with exponential backoff on 429 only —
+      // any other error still surfaces (kept inside the catch below so the
+      // run's failure reason stays informative).
+      let msg: Awaited<ReturnType<typeof stream.finalMessage>> | undefined;
+      let attempt = 0;
+      const MAX_ATTEMPTS = 4;
+      let stream!: ReturnType<typeof client.beta.messages.stream>;
+      while (attempt < MAX_ATTEMPTS) {
+        try {
+          stream = client.beta.messages.stream({
+            model: cell.modelId,
+            max_tokens: 2048,
+            system: SYSTEM,
+            messages,
+            tools: SET_BENCH_TOOLS as BetaTool[],
+            ...(cell.providerExtras ?? {}),
+          });
+          msg = await stream.finalMessage();
+          break;
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          if (!/\b429\b|rate.?limit/i.test(m) || attempt === MAX_ATTEMPTS - 1) {
+            throw err;
+          }
+          attempt++;
+          // 1.5s → 4s → 10s — keeps the bench tractable while letting the
+          // 1m RPM window roll over.
+          const delay = [1500, 4000, 10000][attempt - 1] ?? 10000;
+          await new Promise((res) => setTimeout(res, delay));
+        }
+      }
+      if (!msg) throw new Error('unreachable: no final message');
       tokensIn += msg.usage.input_tokens;
       tokensOut += msg.usage.output_tokens;
 
