@@ -135,6 +135,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Deprecation banner (PRD-IA-V2 P2-PR-C) — page is being moved in v1.7.
 	'cost_limits.deprecated.heading':    { de: 'Diese Seite zieht in v1.7 um',                                                    en: 'This page is being moved' },
 	'cost_limits.deprecated.body':       { de: 'Kosten-Limits werden in Einstellungen → Workspace → Limits zugänglich sein, das Kontextfenster in Einstellungen → LLM → Erweitert. Du kannst sie ab v1.6 schon dort einstellen.', en: 'Cost limits will move to Settings → Workspace → Limits in v1.7, and the context window to Settings → LLM → Advanced. Both are also available from there starting v1.6.' },
+	// One-time transition toast (PRD-IA-V2 P2-PR-F) — shown on the first visit
+	// to /app/hub/cost-limits after the P2 deploy. localStorage flag keeps it
+	// from re-firing. CTA links to /app/settings/llm where the context-window
+	// radio already lives in v1.6 (final spend-limits home lands v1.7 via P3-PR-B).
+	'cost_limits.toast.message': { de: 'Cost-Limits sind in v1.7 unter Einstellungen verfügbar. Lesezeichen aktualisieren.', en: 'Cost limits are moving to Settings in v1.7. Please update your bookmark.' },
+	'cost_limits.toast.cta':     { de: 'Einstellungen öffnen', en: 'Open Settings' },
 	// Voice settings page (PRD-SETTINGS-REFACTOR Phase 3)
 	'voice.title':         { de: 'Sprache',                                                          en: 'Voice' },
 	'voice.subtitle':      { de: 'Spracheingabe (STT) und -ausgabe (TTS) konfigurieren.',            en: 'Configure speech input (STT) and output (TTS).' },
