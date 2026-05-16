@@ -547,15 +547,18 @@ export class OpenAIAdapter {
     }
 
     const apiKey = await this.resolveApiKey();
-    const response = await fetch(`${this.baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
+    const response = await this._fetchWithRetry(
+      `${this.baseURL}/chat/completions`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: options?.signal ?? null,
       },
-      body: JSON.stringify(body),
-      signal: options?.signal ?? null,
-    });
+    );
 
     if (!response.ok) {
       const errText = await response.text();
@@ -563,5 +566,55 @@ export class OpenAIAdapter {
     }
 
     yield* translateStream(response);
+  }
+
+  /**
+   * Exponential-backoff retry around fetch() for transient failures.
+   *
+   * Triggers on HTTP 429 (rate-limited) and HTTP 5xx. Reads the
+   * `Retry-After` response header — Mistral, OpenAI, and OpenRouter all
+   * set it on 429s, often with explicit second values. Falls back to
+   * 1s/2s/4s exponential delays if the header is missing or unparseable.
+   *
+   * Why this matters production-side: Mistral defaults new paid accounts
+   * to Tier-1 (15 req/min for chat-completions) for the first ~14 days
+   * of usage history. Without retry, a managed-EU agent burst (one
+   * workflow with three sub-agents) hits the wall and silently fails.
+   * With retry, the agent stalls for a few seconds and continues.
+   *
+   * Caps at 3 retries to avoid pathological waits when the upstream is
+   * genuinely down. Respects the AbortSignal — a cancelled stream
+   * doesn't keep retrying in the background.
+   */
+  private async _fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    maxRetries = 3,
+  ): Promise<Response> {
+    let lastResponse: Response | undefined;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (init.signal?.aborted) throw new Error('Request aborted');
+      lastResponse = await fetch(url, init);
+      if (lastResponse.ok || (lastResponse.status !== 429 && lastResponse.status < 500)) {
+        return lastResponse;
+      }
+      if (attempt === maxRetries) return lastResponse;
+      // Read the body so the connection can be reused
+      await lastResponse.text().catch(() => '');
+      const retryAfter = lastResponse.headers.get('retry-after');
+      const headerSeconds = retryAfter !== null ? Number.parseInt(retryAfter, 10) : NaN;
+      const delayMs = Number.isFinite(headerSeconds) && headerSeconds > 0
+        ? Math.min(headerSeconds, 30) * 1000
+        : 1000 * Math.pow(2, attempt); // 1s, 2s, 4s
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, delayMs);
+        init.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('Request aborted during retry backoff'));
+        }, { once: true });
+      });
+    }
+    // Unreachable, but keeps TS happy
+    return lastResponse!;
   }
 }

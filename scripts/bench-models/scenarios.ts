@@ -556,7 +556,11 @@ Do NOT guess. Use the tools.`,
     'Korrekte Identifikation der Top-3 Städte (Zürich, Geneva, Basel)',
   ],
   referenceAnswer: `Top-3 Cities: Zürich (421,900), Geneva (203,800), Basel (173,800). Combined total: ${String(SWISS_TOP3_POPULATION_TOTAL)}.`,
-  maxIterations: 8,
+  // Cap=20 (was 8) because tool-calling styles differ wildly across providers:
+  // Sonnet converges in 3 iter (2 parallel tools per turn); Mistral with
+  // parallel_tool_calls=false needs 7 iter (one tool per turn); Llama can
+  // exceed both. Cap=8 unfairly penalized verbose-but-correct tool-callers.
+  maxIterations: 20,
   timeoutMs: 90_000,
   passCheck: (run) => {
     // Three checks, all must pass:

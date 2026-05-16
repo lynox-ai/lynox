@@ -34,6 +34,7 @@ import { scanToolResult } from './output-guard.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
+import { coerceToolInput } from './tool-input-coercer.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -849,6 +850,15 @@ export class Agent implements IAgent {
         processedInput = this.secretStore!.resolveSecretRefs(tc.input);
       }
     }
+
+    // Type coercion BEFORE validation. Some openai-compat providers
+    // (Llama 3.3 70B via OpenRouter/Inceptron confirmed) emit typed args
+    // as strings — `{"rank": "1"}` instead of `{"rank": 1}` — which the
+    // strict validator below would reject. Coercion converts the obvious
+    // string→primitive cases per the schema; on any ambiguity the value
+    // is left intact and the validator's error fires as before so the
+    // agent self-corrects on the next turn.
+    processedInput = coerceToolInput(tool.definition.input_schema, processedInput);
 
     // Schema-level input validation. Catches unknown keys, missing required
     // fields, type mismatches, and enum violations before the handler runs.
