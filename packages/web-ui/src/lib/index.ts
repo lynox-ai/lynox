@@ -32,6 +32,10 @@ export { default as ToolToggles } from './components/ToolToggles.svelte';
 export { default as VoiceSettings } from './components/VoiceSettings.svelte';
 export { default as PrivacyDataSettings } from './components/PrivacyDataSettings.svelte';
 export { default as SystemSettings } from './components/SystemSettings.svelte';
+// PRD-IA-V2 P3-PR-B — Workspace & System section components (Self-Host only).
+export { default as WorkspaceSecurityView } from './components/WorkspaceSecurityView.svelte';
+export { default as WorkspaceUpdatesView } from './components/WorkspaceUpdatesView.svelte';
+export { default as WorkspaceLimitsView } from './components/WorkspaceLimitsView.svelte';
 export { default as LLMSettings } from './components/LLMSettings.svelte';
 export { default as CostLimits } from './components/CostLimits.svelte';
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';

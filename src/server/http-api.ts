@@ -2386,6 +2386,30 @@ export class LynoxHTTPApi {
       saveUserConfig(merged);
       reloadConfig();
       await engine.reloadUserConfig();
+
+      // PRD-IA-V2 P3-PR-B (Security S4) — structured audit-log per
+      // saveUserConfig write. Keys-only (no values) → safe for self-host
+      // history.db + managed CP without leaking secrets/limit-values into
+      // the audit trail. SecurityAudit auto-masks any accidental secret
+      // strings via maskSecrets(), but we only emit field-names here.
+      try {
+        const audit = engine.getSecurityAudit();
+        if (audit) {
+          const fields = Object.keys(parsed.data);
+          audit.record({
+            event_type: 'config_update',
+            decision: 'applied',
+            source: 'http_api',
+            detail: JSON.stringify({
+              tier: process.env['LYNOX_MANAGED_MODE'] ?? 'self-host',
+              fields_changed: fields,
+            }),
+          });
+        }
+      } catch {
+        // Never let audit-emit failures break the config write.
+      }
+
       jsonResponse(res, 200, { ok: true });
     });
 
