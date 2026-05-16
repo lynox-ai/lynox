@@ -85,12 +85,8 @@
 			],
 		},
 		{
-			// PRD-IA-V2 P3-PR-F — "Account & Access" section: 2 sub-page tiles.
-			// Mobile points at the new account-namespaced route (old
-			// `/settings/mobile` is now a 301). Migration tile is a Settings-side
-			// stub that forwards to `/app/migration` (wizard route unchanged) and
-			// stays self-host-only via `keepItem(tier === 'self-host')`.
-			labelKey: 'settings.section.account',
+			// PRD-IA-V2 P3-PR-F: Migration tile is self-host-only (Managed users skip the wizard).
+			labelKey: 'settings.section_account',
 			items: [
 				{ href: '/app/settings/account/mobile', titleKey: 'settings.account.mobile', descKey: 'mobile.settings_desc', hideOnMobile: true },
 				{ href: '/app/settings/account/migration', titleKey: 'settings.account.migration', descKey: 'migration.subtitle', selfHostOnly: true },

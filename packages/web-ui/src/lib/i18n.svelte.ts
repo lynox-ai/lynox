@@ -751,14 +751,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.section_main': { de: 'Haupteinstellungen', en: 'Main Settings' },
 	'settings.section_data': { de: 'Daten & Sicherung', en: 'Data & Backup' },
 	'settings.section_access': { de: 'Zugang', en: 'Access' },
-	// PRD-IA-V2 P3-PR-F — "Account & Access" section keys. `section.account`
-	// (dotted) is the new section label that replaces the old `section_access`
-	// (underscore) in SettingsIndex; we keep the legacy key around in case any
-	// downstream consumer (pro/pwa wrappers) still references it. Tile labels
-	// `settings.account.mobile` / `.migration` are dedicated copy for the
-	// Account section — title is shorter than the page-level `mobile.title`
-	// / `migration.title` so the index reads as a noun list, not a sentence.
-	'settings.section.account': { de: 'Konto & Zugang', en: 'Account & Access' },
+	// PRD-IA-V2 P3-PR-F — Account & Access section keys (underscore naming
+	// matches the existing section_main / section_data / section_access pattern).
+	'settings.section_account': { de: 'Konto & Zugang', en: 'Account & Access' },
 	'settings.account.mobile': { de: 'Mobiler Zugang', en: 'Mobile Access' },
 	'settings.account.migration': { de: 'Migration zu Managed', en: 'Migration to Managed' },
 	'settings.keys': { de: 'API Keys', en: 'API Keys' },
