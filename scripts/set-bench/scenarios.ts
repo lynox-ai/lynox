@@ -900,9 +900,11 @@ const MEMORY_CHAT_DE = [
 
 const MEMORY_EXPECTED_DE: readonly MemoryFact[] = [
   { anchor: 'Name ist Jordan', mustContain: ['jordan'] },
-  // Mustermatch acceptiert "Bäckerei"/"baeckerei" durch lowercased substring.
-  { anchor: 'betreibt eine Bäckerei in Wien', mustContain: ['wien'] },
-  { anchor: 'bevorzugt E-Mail statt Telefon', mustContain: ['mail'] },
+  // Mirror EN's conjunctive bar: both location AND business-class required.
+  // Lowercased substring match handles "Bäckerei"/"baeckerei" naturally.
+  { anchor: 'betreibt eine Bäckerei in Wien', mustContain: ['wien', 'bäckerei'] },
+  // "e-mail" not bare "mail" — "mail" would also match "Voicemail" / "Mailbox".
+  { anchor: 'bevorzugt E-Mail statt Telefon', mustContain: ['e-mail'] },
   { anchor: 'Partnerin Sam macht Großhandel', mustContain: ['sam'] },
 ];
 
@@ -972,8 +974,7 @@ const LONG_DOC_DE = [
  * matching inside generic prose like "alarm" or "aesthetic".
  */
 const LONG_DOC_DE_ANCHOR_PATTERNS: readonly RegExp[] = [
-  /\barm-?soc\b/i,
-  /\barm\b/i,                       // standalone "ARM" reference, not "Alarm"
+  /\barm\b/i,                       // standalone "ARM" reference, not "Alarm"; also covers "ARM-SoC" via word boundary
   /\bethernet\b/i,
   /\bsfp\+/i,
   /\bmodbus\b/i,

@@ -1272,6 +1272,23 @@ describe('MULTI_STEP_REASONING_DE passCheck', () => {
     expect(r.pass).toBe(false);
     expect(r.reason).toMatch(/missing ANSWER/);
   });
+
+  it('fails when a DE-locale-formatted number leaks into ANSWER= (regex truncates to leading int)', () => {
+    // Documented limitation pinned as a test: small DE models occasionally
+    // emit `ANSWER=9.662,96` (German thousands-dot / decimal-comma) or
+    // `ANSWER=966.296` (thousands-dot). The /ANSWER\s*=\s*(\d+)/i regex
+    // captures only the leading digit run before the first non-digit,
+    // yielding a wildly wrong number that the tolerance bar rejects.
+    // The bench correctly reports this as a fail — the prompt asks for
+    // an integer in cents, so DE-locale formatting IS the capability gap.
+    // Without this test the regex could silently drift to accept comma-
+    // tolerant parsing and quietly inflate Mistral-DE scoring.
+    const r = MULTI_STEP_REASONING_COMPOUND_INTEREST_DE.passCheck('Endbetrag: ANSWER=9.662,96', []);
+    expect(r.pass).toBe(false);
+    // Either "wrong answer" (regex captured '9') or "missing" — both indicate
+    // the bench correctly refused the DE-locale-formatted leak.
+    expect(r.reason).toMatch(/wrong answer|missing ANSWER/);
+  });
 });
 
 describe('SET_BENCH_SCENARIOS registry', () => {
@@ -1292,9 +1309,15 @@ describe('SET_BENCH_SCENARIOS registry', () => {
     ]);
   });
 
-  it('appends 6 DE twins after the EN scenarios (5 haiku/sonnet + 1 reasoning, same axis order)', () => {
+  it('appends one DE twin per Phase-3 EN scenario (1:1 pair count, exhaustive)', () => {
+    // Pair count locks the bench shape: EN-only scenarios (TOOL_CHAIN +
+    // ORCHESTRATION from Phase 2) stay unpaired, every Phase-3 EN scenario
+    // gets exactly one DE twin. A future orphan DE scenario (or missing
+    // pair) fails here loudly rather than silently widening the matrix.
     const deScenarios = SET_BENCH_SCENARIOS.filter((s) => s.id.endsWith('-de'));
+    const enWithDeTwin = SET_BENCH_SCENARIOS.filter((s) => !s.id.endsWith('-de') && SET_BENCH_SCENARIOS.some((other) => other.id === `${s.id}-de`));
     expect(deScenarios.length).toBe(6);
+    expect(enWithDeTwin.length).toBe(6);
     // DE twins reuse the EN axes — axis is a routing concept, not a
     // language concept. Order mirrors PR B's 6 new use-cases.
     expect(deScenarios.map((s) => s.axis)).toEqual([
@@ -1336,6 +1359,10 @@ describe('SET_BENCH_SCENARIOS registry', () => {
       expect(de.axis).toBe(en.axis);
       expect(de.maxIterations).toBe(en.maxIterations);
       expect(de.timeoutMs).toBe(en.timeoutMs);
+      // Lock the id-suffix convention in the same iteration that pins
+      // the rest of the twin contract — a future PR adding a 7th DE
+      // scenario with a freelance id ("kg-extraction-german") fails here.
+      expect(de.id).toBe(`${en.id}-de`);
     }
   });
 });
