@@ -273,6 +273,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// LLM settings page (PRD-SETTINGS-REFACTOR Phase 2)
 	'llm.title':              { de: 'LLM-Provider',                                                              en: 'LLM Provider' },
 	'llm.subtitle':           { de: 'Anbieter, Schlüssel und Modell auswählen.',                                 en: 'Pick provider, key, and model.' },
+	'llm.back_to_settings':   { de: 'Zurück zu Einstellungen',                                                   en: 'Back to Settings' },
 	'llm.provider_heading':   { de: 'Anbieter',                                                                  en: 'Provider' },
 	'llm.api_key':            { de: 'API-Schlüssel',                                                             en: 'API key' },
 	'llm.api_key_placeholder':{ de: 'Leer lassen, um den gespeicherten Schlüssel zu behalten.',                  en: 'Leave blank to keep the stored key.' },
@@ -883,7 +884,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.backup_weekly': { de: 'Wöchentlich (Montag 03:00)', en: 'Weekly (Monday 3:00 AM)' },
 	'config.backup_monthly': { de: 'Monatlich (1. um 03:00)', en: 'Monthly (1st at 3:00 AM)' },
 	'config.backup_encrypt': { de: 'Backups verschlüsseln', en: 'Encrypt backups' },
-	'config.backup_encrypt_desc': { de: 'AES-256-GCM Verschlüsselung mit Vault Key', en: 'AES-256-GCM encryption with vault key' },
+	'config.backup_encrypt_desc': { de: 'AES-256-GCM mit Vault Key. Gilt nur für neue Backups — bestehende behalten ihren Verschlüsselungs-Status.', en: 'AES-256-GCM with vault key. Applies to new backups only — existing backups keep their encryption state.' },
 	'config.backup_retention': { de: 'Aufbewahrung (Tage)', en: 'Retention (days)' },
 
 	// Knowledge

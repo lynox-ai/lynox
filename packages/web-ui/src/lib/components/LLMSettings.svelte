@@ -211,33 +211,41 @@
 					if (!secretRes.ok) throw new Error(`Vault rejected ${slot}: HTTP ${secretRes.status}`);
 				}
 			}
-			// 2. Save provider + tier + base_url to config
-			const update: UserConfig = { provider: activeProvider };
-			if (activeProviderEntry?.requires_base_url && config.api_base_url) {
-				update.api_base_url = config.api_base_url;
+			// 2. Save config. Provider-bound fields only stage when the user can change
+			// them. On managed-tier the CP locks provider; sending provider-bound
+			// fields runs them through the lock-gate's effective-default diff and
+			// any tiny drift (e.g. llm_mode that has no MANAGED_EFFECTIVE_DEFAULTS
+			// entry) returns 403, silently breaking the entire save.
+			const update: UserConfig = {};
+			if (!providerLocked && activeProvider) {
+				update.provider = activeProvider;
+				if (activeProviderEntry?.requires_base_url && config.api_base_url) {
+					update.api_base_url = config.api_base_url;
+				}
+				if (activeProviderEntry?.requires_region) {
+					update.gcp_project_id = config.gcp_project_id;
+					update.gcp_region = config.gcp_region;
+				}
+				if (config.default_tier) update.default_tier = config.default_tier;
+				// `openai_model_id` covers BOTH 'openai' (Mistral / generic OpenAI-compat)
+				// AND 'custom' (Anthropic-compat proxies via LiteLLM etc.) — engine reads
+				// the same field for both (engine.ts:307, session.ts:968).
+				if ((activeProvider === 'openai' || activeProvider === 'custom') && config.openai_model_id) {
+					update.openai_model_id = config.openai_model_id;
+				}
+				if (activeProvider === 'custom') {
+					update.custom_endpoints = config.custom_endpoints ?? [];
+				}
+				// llm_mode is admin-only on managed (per project_managed_llm_strategy:
+				// "eu-sovereign admin-only"); self-host with Mistral wired = user-pickable.
+				if (config.llm_mode) update.llm_mode = config.llm_mode;
+				// embedding_provider is self-host only (ONNX); managed doesn't expose it.
+				if (config.embedding_provider) update.embedding_provider = config.embedding_provider;
 			}
-			if (activeProviderEntry?.requires_region) {
-				update.gcp_project_id = config.gcp_project_id;
-				update.gcp_region = config.gcp_region;
-			}
-			if (config.default_tier) update.default_tier = config.default_tier;
-			// `openai_model_id` covers BOTH 'openai' (Mistral / generic OpenAI-compat)
-			// AND 'custom' (Anthropic-compat proxies via LiteLLM etc.) — engine reads
-			// the same field for both (engine.ts:307, session.ts:968). The legacy
-			// ConfigView didn't expose it for 'custom', leaving custom users stuck
-			// with whatever the wizard set; we now honour both providers.
-			if ((activeProvider === 'openai' || activeProvider === 'custom') && config.openai_model_id) {
-				update.openai_model_id = config.openai_model_id;
-			}
-			if (activeProvider === 'custom') {
-				update.custom_endpoints = config.custom_endpoints ?? [];
-			}
-			// Advanced + Memory backfill — same PUT, no separate endpoint.
+			// Advanced + Memory — managed-allowlist-writable per MANAGED_USER_WRITABLE_CONFIG.
 			if (config.experience) update.experience = config.experience;
 			if (config.effort_level) update.effort_level = config.effort_level;
 			if (config.thinking_mode) update.thinking_mode = config.thinking_mode;
-			if (config.embedding_provider) update.embedding_provider = config.embedding_provider;
-			if (config.llm_mode) update.llm_mode = config.llm_mode;
 			if (typeof config.memory_extraction === 'boolean') update.memory_extraction = config.memory_extraction;
 			if (typeof config.memory_half_life_days === 'number' && config.memory_half_life_days > 0) {
 				update.memory_half_life_days = config.memory_half_life_days;
@@ -301,6 +309,7 @@
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">
+	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('llm.back_to_settings')}</a>
 	<header>
 		<h1 class="text-2xl font-semibold mb-1">{t('llm.title')}</h1>
 		<p class="text-sm text-text-muted">{t('llm.subtitle')}</p>
@@ -335,11 +344,14 @@
 		— {t('secrets.link_to_keys_hint')}
 	</div>
 
-	<!-- Provider picker — 4 cards. Active one expands inline. -->
+	<!-- Provider picker — Anthropic / Mistral / Custom. Vertex is wired in the
+	     engine for legacy `provider: 'vertex'` config.json setups (see core
+	     CLAUDE.md) but no longer offered in-product per
+	     project_eu_providers_strategy — filter it out of the tile list. -->
 	<section aria-labelledby="llm-provider-heading">
 		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
 		<div class="grid gap-2 sm:grid-cols-2">
-			{#each providers as p (p.provider)}
+			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (p.provider)}
 				<button type="button" onclick={() => selectProvider(p.provider)} disabled={providerLocked && p.provider !== activeProvider}
 					class="text-left p-3 rounded border-2 transition-colors {activeProvider === p.provider ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
 					<div class="font-medium text-sm">{p.display_name}</div>
@@ -504,8 +516,13 @@
 			</button>
 			{#if advancedOpen}
 				<div id="llm-advanced-body" class="space-y-4">
-					<!-- LLM mode (capability-gated) -->
-					{#if mistralAvailable}
+					<!-- LLM mode (capability-gated): only render when Mistral path is
+					     wired AND the user can actually change provider. On managed
+					     tiers the provider is locked and eu-sovereign is admin-only
+					     (per project_managed_llm_strategy), so this radio would be
+					     visually live but silently 403 the save. Hiding it removes
+					     the dual-model-picker confusion. -->
+					{#if mistralAvailable && !providerLocked}
 						<fieldset class="space-y-2 border border-border rounded p-3">
 							<legend class="px-1 text-xs font-medium uppercase tracking-wider text-text-muted">{t('config.llm_mode')}</legend>
 							<p class="text-xs text-text-muted">{t('config.llm_mode_desc')}</p>
