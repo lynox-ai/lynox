@@ -23,8 +23,8 @@ import { fetchWithValidatedRedirects, readBodyLimited } from './http.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { isFeatureEnabled } from '../../core/features.js';
 
-/** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. */
-const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
+/** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
+export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
 const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 
 /** Cap on the docs-page body pre-Haiku. 250 KB matches PRD-UNIFIED-API-PROFILE-V2. */
@@ -888,7 +888,10 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         }
         const { text, truncated } = await readBodyLimited(resp, OPENAPI_SPEC_MAX_BYTES);
         if (truncated) {
-          return `Error: OpenAPI spec body exceeds ${String(OPENAPI_SPEC_MAX_BYTES)} bytes. Point at a smaller spec or split the API into multiple profiles.`;
+          // Common offender: GitHub's full OpenAPI spec (~13 MB) — too large to
+          // parse here, but the human-readable docs path works fine. Steer the
+          // agent to docs_url + manual refinement rather than "split the API".
+          return `Error: OpenAPI spec body exceeds ${String(OPENAPI_SPEC_MAX_BYTES)} bytes. Try one of:\n  1. Re-run \`api_setup\` action="bootstrap" with \`docs_url\` pointing at the human-readable docs landing page — the helper LLM extracts a v2 profile from prose.\n  2. Use \`api_setup\` action="create" with a hand-written profile covering only the endpoints you need.`;
         }
         spec = JSON.parse(text) as OpenApiDoc;
       } catch (err: unknown) {
