@@ -9,6 +9,7 @@ export { default as HistoryView } from './components/HistoryView.svelte';
 export { default as SettingsIndex } from './components/SettingsIndex.svelte';
 export { default as ConfigView } from './components/ConfigView.svelte';
 export { default as KeysView } from './components/KeysView.svelte';
+export { default as SecretsView } from './components/SecretsView.svelte';
 export { default as IntegrationsView } from './components/IntegrationsView.svelte';
 export { default as KnowledgeGraphView } from './components/KnowledgeGraphView.svelte';
 export { default as MemoryInsightsView } from './components/MemoryInsightsView.svelte';
