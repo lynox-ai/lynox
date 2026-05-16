@@ -1,0 +1,126 @@
+{
+  "generatedAt": "2026-05-16T17:47:34.563Z",
+  "cells": [
+    {
+      "cellLabel": "mistral-large-2512",
+      "scenarioId": "tool-chain.zurich-x2",
+      "pass": false,
+      "reason": "called lookup_population 5x (loop)",
+      "tokensIn": 2586,
+      "tokensOut": 165,
+      "costUsd": 0.006162000000000001,
+      "durationMs": 5871,
+      "iterations": 7,
+      "finalText": "ZURICH_X2=873102",
+      "toolCalls": [
+        {
+          "name": "lookup_population",
+          "input": {
+            "expression": "427063 * 2"
+          },
+          "output": "ERROR: city is required"
+        },
+        {
+          "name": "compute",
+          "input": {},
+          "output": "ERROR: expression is required"
+        },
+        {
+          "name": "lookup_population",
+          "input": {
+            "expression": "427063 * 2"
+          },
+          "output": "ERROR: city is required"
+        },
+        {
+          "name": "compute",
+          "input": {},
+          "output": "ERROR: expression is required"
+        },
+        {
+          "name": "lookup_population",
+          "input": {
+            "expression": "427063 * 2"
+          },
+          "output": "ERROR: city is required"
+        },
+        {
+          "name": "compute",
+          "input": {},
+          "output": "ERROR: expression is required"
+        },
+        {
+          "name": "lookup_population",
+          "input": {
+            "expression": "427063 * 2"
+          },
+          "output": "ERROR: city is required"
+        },
+        {
+          "name": "compute",
+          "input": {},
+          "output": "ERROR: expression is required"
+        },
+        {
+          "name": "lookup_population",
+          "input": {
+            "city": "Zurich"
+          },
+          "output": "436551"
+        },
+        {
+          "name": "compute",
+          "input": {
+            "expression": "436551 * 2"
+          },
+          "output": "873102"
+        }
+      ]
+    },
+    {
+      "cellLabel": "mistral-large-latest",
+      "scenarioId": "tool-chain.zurich-x2",
+      "pass": true,
+      "tokensIn": 854,
+      "tokensOut": 45,
+      "costUsd": 0.001978,
+      "durationMs": 1951,
+      "iterations": 3,
+      "finalText": "ZURICH_X2=873102",
+      "toolCalls": [
+        {
+          "name": "lookup_population",
+          "input": {
+            "city": "Zurich"
+          },
+          "output": "436551"
+        },
+        {
+          "name": "compute",
+          "input": {
+            "expression": "436551 * 2"
+          },
+          "output": "873102"
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "axis": "tool-chain",
+      "cellLabel": "mistral-large-2512",
+      "passRate": 0,
+      "avgCostUsd": 0.006162000000000001,
+      "avgDurationMs": 5871,
+      "pinned": true
+    },
+    {
+      "axis": "tool-chain",
+      "cellLabel": "mistral-large-latest",
+      "passRate": 1,
+      "avgCostUsd": 0.001978,
+      "avgDurationMs": 1951,
+      "pinned": false
+    }
+  ]
+}
