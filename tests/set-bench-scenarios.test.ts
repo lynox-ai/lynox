@@ -19,6 +19,7 @@
 import { describe, it, expect } from 'vitest';
 import { TOOL_CHAIN_ZURICH_X2, ORCHESTRATION_EMAIL_TRIAGE, ZURICH_POPULATION_PINNED } from '../scripts/set-bench/scenarios.js';
 import { dispatchMockTool } from '../scripts/set-bench/mock-tools.js';
+import { isRateLimitError } from '../scripts/set-bench/run-cell.js';
 import type { ToolCallTrace } from '../scripts/set-bench/types.js';
 
 const ZX2 = ZURICH_POPULATION_PINNED * 2;
@@ -193,5 +194,34 @@ describe('mock-tools dispatcher', () => {
 
   it('compute rejects divide-by-zero rather than emitting Infinity', () => {
     expect(dispatchMockTool('compute', { expression: '5 / 0' })).toBe('ERROR: divide by zero');
+  });
+});
+
+describe('isRateLimitError', () => {
+  // Pins the retry-classifier policy: only genuine rate-limit signals
+  // trigger the backoff path. A regression here could either silently
+  // mis-classify real failures as retryable (masking provider outages)
+  // or fail to retry on real 429s (poisoning the bench matrix).
+  it('matches the documented rate-limit signal variants', () => {
+    expect(isRateLimitError('OpenAI-compatible API error 429: {"detail":"Rate limit exceeded"}')).toBe(true);
+    expect(isRateLimitError('HTTP 429 Too Many Requests')).toBe(true);
+    expect(isRateLimitError('rate limit exceeded')).toBe(true);
+    expect(isRateLimitError('Rate-Limited')).toBe(true);
+    expect(isRateLimitError('rate_limit hit')).toBe(true);
+  });
+
+  it('rejects unrelated 429-shaped substrings', () => {
+    // \b429\b — must be a standalone token, not part of a larger number.
+    expect(isRateLimitError('count: 4290 tokens consumed')).toBe(false);
+    expect(isRateLimitError('error code 142901')).toBe(false);
+  });
+
+  it('rejects unrelated rate-shaped phrases', () => {
+    // "limited rate of change" should not trigger — the regex looks for
+    // the noun phrase "rate-limit" / "rate limit" specifically.
+    expect(isRateLimitError('limited rate of change')).toBe(false);
+    expect(isRateLimitError('first rate experience')).toBe(false);
+    expect(isRateLimitError('connection reset by peer')).toBe(false);
+    expect(isRateLimitError('Invalid API key')).toBe(false);
   });
 });

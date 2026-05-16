@@ -113,7 +113,5 @@ export const SET_BENCH_SCENARIOS: readonly SetBenchScenario[] = [
   ORCHESTRATION_EMAIL_TRIAGE,
 ];
 
-/** Frozen list of expected labels — exposed for the mocked-tool variant. */
-export const EXPECTED_EMAIL_LABELS = EXPECTED_LABELS;
 /** Frozen Zurich population — exposed for the mocked-tool variant. */
 export const ZURICH_POPULATION_PINNED = ZURICH_POPULATION;

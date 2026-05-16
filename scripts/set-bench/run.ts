@@ -62,12 +62,27 @@ function parseArgs(argv: readonly string[]): CliArgs {
   return out;
 }
 
+/**
+ * Source API keys for the bench. Precedence: shell env wins over the local
+ * config file — so an operator can override per-run via
+ * `MISTRAL_API_KEY=... npx tsx scripts/set-bench/run.ts` without editing
+ * `~/.lynox/config.json`. Missing config file is fine when the shell
+ * already has both keys; only hard-error when nothing satisfies a needed
+ * `apiKeyEnv` (the per-cell check in `run-cell.ts` surfaces that).
+ */
 function loadEnvFromConfig(): void {
+  if (process.env['ANTHROPIC_API_KEY'] && process.env['MISTRAL_API_KEY']) return;
   const path = join(homedir(), '.lynox', 'config.json');
-  const raw = readFileSync(path, 'utf8');
-  const cfg = JSON.parse(raw) as Record<string, unknown>;
-  if (typeof cfg['anthropic_api_key'] === 'string') process.env['ANTHROPIC_API_KEY'] = cfg['anthropic_api_key'];
-  if (typeof cfg['mistral_api_key'] === 'string') process.env['MISTRAL_API_KEY'] = cfg['mistral_api_key'];
+  let raw: string;
+  try { raw = readFileSync(path, 'utf8'); } catch { return; }
+  let cfg: Record<string, unknown>;
+  try { cfg = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
+  if (!process.env['ANTHROPIC_API_KEY'] && typeof cfg['anthropic_api_key'] === 'string') {
+    process.env['ANTHROPIC_API_KEY'] = cfg['anthropic_api_key'];
+  }
+  if (!process.env['MISTRAL_API_KEY'] && typeof cfg['mistral_api_key'] === 'string') {
+    process.env['MISTRAL_API_KEY'] = cfg['mistral_api_key'];
+  }
 }
 
 function pickCells(args: CliArgs): readonly SetBenchCell[] {

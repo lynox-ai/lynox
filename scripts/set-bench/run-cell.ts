@@ -65,6 +65,19 @@ function buildClient(cell: SetBenchCell, apiKey: string): ClientLike {
   throw new Error(`unsupported provider ${cell.provider} on cell ${cell.label}`);
 }
 
+/**
+ * Classify whether a thrown error message indicates rate-limiting. Matches
+ * "HTTP 429", "rate limit", "rate-limit", "rate_limit" — case-insensitive,
+ * word-boundary anchored on "429" so a numeric body like "{ count: 4290 }"
+ * doesn't trigger.
+ *
+ * Exported so test coverage can pin the match-set without spinning up a
+ * full bench client.
+ */
+export function isRateLimitError(msg: string): boolean {
+  return /\b429\b|rate.?limit/i.test(msg);
+}
+
 function costFromUsage(cell: SetBenchCell, tokensIn: number, tokensOut: number): number {
   return (tokensIn / 1_000_000) * cell.pricing.inputPerMillion
        + (tokensOut / 1_000_000) * cell.pricing.outputPerMillion;
@@ -120,10 +133,10 @@ export async function runCell(
       // more breathing room. Retry with exponential backoff on 429 only —
       // any other error still surfaces (kept inside the catch below so the
       // run's failure reason stays informative).
-      let msg: Awaited<ReturnType<typeof stream.finalMessage>> | undefined;
-      let attempt = 0;
       const MAX_ATTEMPTS = 4;
-      let stream!: ReturnType<typeof client.beta.messages.stream>;
+      let stream: ReturnType<typeof client.beta.messages.stream> | undefined;
+      let msg: Awaited<ReturnType<NonNullable<typeof stream>['finalMessage']>> | undefined;
+      let attempt = 0;
       while (attempt < MAX_ATTEMPTS) {
         try {
           stream = client.beta.messages.stream({
@@ -137,8 +150,15 @@ export async function runCell(
           msg = await stream.finalMessage();
           break;
         } catch (err) {
+          // Discard the failed stream's connection BEFORE backoff so the
+          // SDK's underlying SSE/fetch reader is freed promptly rather
+          // than relying on GC. SDK exposes `controller.abort()` on the
+          // returned stream — best-effort, optional-chained because the
+          // shape differs between Anthropic SDK and the in-tree OpenAI
+          // adapter.
+          (stream as { controller?: { abort?: () => void } } | undefined)?.controller?.abort?.();
           const m = err instanceof Error ? err.message : String(err);
-          if (!/\b429\b|rate.?limit/i.test(m) || attempt === MAX_ATTEMPTS - 1) {
+          if (!isRateLimitError(m) || attempt === MAX_ATTEMPTS - 1) {
             throw err;
           }
           attempt++;
@@ -149,8 +169,11 @@ export async function runCell(
         }
       }
       if (!msg) throw new Error('unreachable: no final message');
-      tokensIn += msg.usage.input_tokens;
-      tokensOut += msg.usage.output_tokens;
+      // Some openai-compat adapters elide `usage` on streamed responses.
+      // Default to 0 so a missing usage doesn't crash the run and mask
+      // a successful tool-chain as `error: …`.
+      tokensIn += msg.usage?.input_tokens ?? 0;
+      tokensOut += msg.usage?.output_tokens ?? 0;
 
       // Extract assistant text + tool_use blocks from the content array.
       const assistantBlocks = msg.content;
