@@ -1451,6 +1451,20 @@ describe('Phase 3 PR D — cell roster structural sanity', () => {
     'mistral-large-latest':      { inputPerMillion: 2,    outputPerMillion: 6  },
     'magistral-medium-2509':     { inputPerMillion: 2,    outputPerMillion: 5  },
     'magistral-medium-latest':   { inputPerMillion: 2,    outputPerMillion: 5  },
+    // Phase 3 PR E — Mistral roster fill. Pricing.ts entries mirrored here
+    // so the price-match assertion can validate the new PR-E cells. The
+    // 3B + nemo entries also validate the pre-existing Phase 2 cells now
+    // that those models have pricing.ts entries (previously skipped by the
+    // price-match assertion because no pricing.ts entry existed).
+    'ministral-8b-2410':         { inputPerMillion: 0.10, outputPerMillion: 0.10 },
+    'ministral-3b-2410':         { inputPerMillion: 0.04, outputPerMillion: 0.04 },
+    'open-mistral-nemo':         { inputPerMillion: 0.15, outputPerMillion: 0.15 },
+    'mistral-medium-2508':       { inputPerMillion: 0.40, outputPerMillion: 2    },
+    'mistral-medium-latest':     { inputPerMillion: 0.40, outputPerMillion: 2    },
+    'codestral-2508':            { inputPerMillion: 0.30, outputPerMillion: 0.90 },
+    'codestral-latest':          { inputPerMillion: 0.30, outputPerMillion: 0.90 },
+    'magistral-small-2509':      { inputPerMillion: 0.50, outputPerMillion: 1.50 },
+    'magistral-small-latest':    { inputPerMillion: 0.50, outputPerMillion: 1.50 },
   };
 
   // Models that are in PR D-managed cells (the new 6 axes). PR D pricing
@@ -1550,6 +1564,10 @@ describe('Phase 3 PR D — cell roster structural sanity', () => {
       { latest: 'mistral-small-latest', pinned: 'mistral-small-2603' },
       { latest: 'mistral-large-latest', pinned: 'mistral-large-2512' },
       { latest: 'magistral-medium-latest', pinned: 'magistral-medium-2509' },
+      // Phase 3 PR E — new pinned + latest families.
+      { latest: 'codestral-latest', pinned: 'codestral-2508' },
+      { latest: 'magistral-small-latest', pinned: 'magistral-small-2509' },
+      { latest: 'mistral-medium-latest', pinned: 'mistral-medium-2508' },
     ];
     for (const axis of PR_D_AXES) {
       const cellsForAxis = ALL_CELLS.filter((c) => c.axis === axis);

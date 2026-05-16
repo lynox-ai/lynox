@@ -22,6 +22,20 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'mistral-small-2603':        { input: 0.20, output: 0.60, cacheWrite: 0.20, cacheRead: 0.20 },
   'mistral-large-2512':        { input: 2,    output: 6,    cacheWrite: 2,    cacheRead: 2    },
   'magistral-medium-2509':     { input: 2,    output: 5,    cacheWrite: 2,    cacheRead: 2    },
+  // Phase 3 PR E — Mistral roster fill. Pricing mirrors Phase 2 set-bench
+  // cells (ministral-*, open-mistral-nemo, mistral-medium-*) and Mistral
+  // published rates as of 2026-05 (codestral, magistral-small,
+  // mistral-medium-2508 = Medium 3.1). cacheWrite/cacheRead = input rate
+  // (Mistral doesn't ship a separate cache tier).
+  'ministral-8b-2410':         { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.10 },
+  'ministral-3b-2410':         { input: 0.04, output: 0.04, cacheWrite: 0.04, cacheRead: 0.04 },
+  'open-mistral-nemo':         { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.15 },
+  'mistral-medium-2508':       { input: 0.40, output: 2,    cacheWrite: 0.40, cacheRead: 0.40 },
+  'mistral-medium-latest':     { input: 0.40, output: 2,    cacheWrite: 0.40, cacheRead: 0.40 },
+  'codestral-2508':            { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
+  'codestral-latest':          { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
+  'magistral-small-2509':      { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
+  'magistral-small-latest':    { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
 };
 
 let overridePricing: Record<string, ModelPricing> | null = null;

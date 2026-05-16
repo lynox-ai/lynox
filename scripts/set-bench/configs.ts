@@ -17,13 +17,14 @@
  *     snapshot (Mistral bills the alias at the underlying snapshot rate).
  *     Drift surface — the pinned-vs-latest pass-rate delta is the report.
  *
- * Models with no pricing entry in `src/core/pricing.ts` (ministral-3b/8b,
- * open-mistral-nemo, mistral-medium-*, codestral, magistral-small) are
- * intentionally NOT added on the new axes — coverage tracks cost.ts, not
- * "every model the provider sells". Add a pricing entry first, then a cell.
- * Phase 2 orchestration + tool-chain cells already shipped a few of these
- * as exploratory candidates and are left untouched to preserve the Phase 2
- * baseline; see the PR-D commit message for the full skip list.
+ * Phase 3 PR E closes the coverage gap PR D left intentionally: pricing.ts
+ * entries are now in place for ministral-8b-2410, mistral-medium-2508 +
+ * -latest, codestral-2508 + -latest, magistral-small-2509 + -latest, so the
+ * structural-sanity test can validate them. Phase 2 orchestration +
+ * tool-chain cells stay untouched (ministral-3b, open-mistral-nemo and the
+ * mistral-medium tool-chain wildcard kept their hardcoded Phase 2 pricing).
+ * The 3B + nemo models are deliberately NOT on the new axes — too small for
+ * reliable KG/DAG; Phase 2 orchestration coverage is enough.
  *
  * Cost is computed from headline pricing per million tokens. Cache discount
  * is NOT modelled — bench runs are single-turn so cache hits would be zero.
@@ -51,6 +52,12 @@ const PRICE_OPUS_4_7   = { inputPerMillion: 5, outputPerMillion: 25 } as const;
 const PRICE_MISTRAL_SMALL_2603     = { inputPerMillion: 0.20, outputPerMillion: 0.60 } as const;
 const PRICE_MISTRAL_LARGE_2512     = { inputPerMillion: 2,    outputPerMillion: 6    } as const;
 const PRICE_MAGISTRAL_MEDIUM_2509  = { inputPerMillion: 2,    outputPerMillion: 5    } as const;
+// Phase 3 PR E — fill constants for previously-skipped Mistral roster.
+// Mirror src/core/pricing.ts; the structural test ties cells to those entries.
+const PRICE_MINISTRAL_8B_2410      = { inputPerMillion: 0.10, outputPerMillion: 0.10 } as const;
+const PRICE_MISTRAL_MEDIUM_2508    = { inputPerMillion: 0.40, outputPerMillion: 2    } as const;
+const PRICE_CODESTRAL_2508         = { inputPerMillion: 0.30, outputPerMillion: 0.90 } as const;
+const PRICE_MAGISTRAL_SMALL_2509   = { inputPerMillion: 0.50, outputPerMillion: 1.50 } as const;
 
 // ── TOOL_CHAIN axis: sonnet-tier work, Anthropic Sonnet 4.6 as bar ─────
 // Phase 2 cells — left intact for the Phase 2 baseline. ministral-*, open-
@@ -229,6 +236,42 @@ export const KG_EXTRACTION_CELLS: readonly SetBenchCell[] = [
     pricing: PRICE_MISTRAL_SMALL_2603,
     pinned: false,
   },
+  // PR E — ministral-8b (cheaper haiku-tier candidate, no -latest alias
+  // documented; Phase 2 also ships pinned-only).
+  {
+    label: 'ministral-8b-2410',
+    axis: 'kg-extraction',
+    provider: 'openai',
+    modelId: 'ministral-8b-2410',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_MINISTRAL_8B_2410,
+    pinned: true,
+    providerExtras: { parallel_tool_calls: false },
+  },
+  // PR E — magistral-small (reasoning-native small model, natural KG fit).
+  {
+    label: 'magistral-small-2509',
+    axis: 'kg-extraction',
+    provider: 'openai',
+    modelId: 'magistral-small-2509',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_MAGISTRAL_SMALL_2509,
+    pinned: true,
+    providerExtras: { parallel_tool_calls: false },
+  },
+  {
+    label: 'magistral-small-latest',
+    axis: 'kg-extraction',
+    provider: 'openai',
+    modelId: 'magistral-small-latest',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_MAGISTRAL_SMALL_2509,
+    pinned: false,
+    providerExtras: { parallel_tool_calls: false },
+  },
 ];
 
 // ── DAG_PLANNING axis: haiku-tier work, Anthropic Haiku 4.5 as bar ─────
@@ -298,6 +341,41 @@ export const MEMORY_EXTRACTION_CELLS: readonly SetBenchCell[] = [
     apiKeyEnv: MISTRAL_KEY,
     pricing: PRICE_MISTRAL_SMALL_2603,
     pinned: false,
+  },
+  // PR E — ministral-8b: same haiku-tier replacement claim as KG extraction.
+  {
+    label: 'ministral-8b-2410',
+    axis: 'memory-extraction',
+    provider: 'openai',
+    modelId: 'ministral-8b-2410',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_MINISTRAL_8B_2410,
+    pinned: true,
+    providerExtras: { parallel_tool_calls: false },
+  },
+  // PR E — magistral-small: reasoning small model on memory triage.
+  {
+    label: 'magistral-small-2509',
+    axis: 'memory-extraction',
+    provider: 'openai',
+    modelId: 'magistral-small-2509',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_MAGISTRAL_SMALL_2509,
+    pinned: true,
+    providerExtras: { parallel_tool_calls: false },
+  },
+  {
+    label: 'magistral-small-latest',
+    axis: 'memory-extraction',
+    provider: 'openai',
+    modelId: 'magistral-small-latest',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_MAGISTRAL_SMALL_2509,
+    pinned: false,
+    providerExtras: { parallel_tool_calls: false },
   },
 ];
 
@@ -398,6 +476,30 @@ export const CODE_REVIEW_CELLS: readonly SetBenchCell[] = [
     pinned: false,
     providerExtras: { parallel_tool_calls: false },
   },
+  // PR E — codestral: THE natural fit for code-review. Mistral's
+  // code-specialised model at sonnet-tier pricing (0.30/0.90).
+  {
+    label: 'codestral-2508',
+    axis: 'code-review',
+    provider: 'openai',
+    modelId: 'codestral-2508',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_CODESTRAL_2508,
+    pinned: true,
+    providerExtras: { parallel_tool_calls: false },
+  },
+  {
+    label: 'codestral-latest',
+    axis: 'code-review',
+    provider: 'openai',
+    modelId: 'codestral-latest',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_CODESTRAL_2508,
+    pinned: false,
+    providerExtras: { parallel_tool_calls: false },
+  },
 ];
 
 // ── MULTI_STEP_REASONING axis: opus-tier work, Anthropic Opus 4.7 as bar
@@ -455,6 +557,31 @@ export const MULTI_STEP_REASONING_CELLS: readonly SetBenchCell[] = [
     apiBaseURL: MISTRAL,
     apiKeyEnv: MISTRAL_KEY,
     pricing: PRICE_MISTRAL_LARGE_2512,
+    pinned: false,
+    providerExtras: { parallel_tool_calls: false },
+  },
+  // PR E — mistral-medium (Medium 3.1, snapshot 2508). Phase 2 surfaced
+  // mistral-medium as a tool-chain cost surprise (~94% cheaper than Sonnet
+  // at 100% pass). Reasoning is where the next data point matters most.
+  {
+    label: 'mistral-medium-2508',
+    axis: 'multi-step-reasoning',
+    provider: 'openai',
+    modelId: 'mistral-medium-2508',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_MISTRAL_MEDIUM_2508,
+    pinned: true,
+    providerExtras: { parallel_tool_calls: false },
+  },
+  {
+    label: 'mistral-medium-latest',
+    axis: 'multi-step-reasoning',
+    provider: 'openai',
+    modelId: 'mistral-medium-latest',
+    apiBaseURL: MISTRAL,
+    apiKeyEnv: MISTRAL_KEY,
+    pricing: PRICE_MISTRAL_MEDIUM_2508,
     pinned: false,
     providerExtras: { parallel_tool_calls: false },
   },
