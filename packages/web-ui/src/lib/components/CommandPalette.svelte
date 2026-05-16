@@ -25,7 +25,10 @@
 		{ id: 'nav-intelligence', label: t('nav.intelligence'), group: t('cmd.nav'), action: () => goto('/app/intelligence'), keywords: 'intelligence dashboards reports knowledge memory wissen graph insights kpi contacts kontakte crm' },
 		{ id: 'nav-artifacts', label: t('nav.artifacts'), group: t('cmd.nav'), action: () => goto('/app/artifacts'), keywords: 'artifacts dashboards diagrams files galerie' },
 		{ id: 'nav-settings', label: t('nav.settings'), group: t('cmd.nav'), action: () => goto('/app/settings'), keywords: 'settings einstellungen config' },
-		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/keys'), keywords: 'keys api schluessel' },
+		// PRD-IA-V2 P1-PR-C — `/app/settings/keys` is now a 301 stub; SecretsView
+		// (generic API-Key CRUD for Tavily/Brevo/custom) lives at `/llm/keys`,
+		// the SSoT per PRD. Palette skips the redirect bounce and lands directly.
+		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/llm/keys'), keywords: 'keys api schluessel' },
 		{ id: 'nav-integrations', label: t('settings.integrations'), group: t('cmd.nav'), action: () => goto('/app/settings/integrations'), keywords: 'integrations google tavily mail email imap smtp' },
 		// PRD-IA-V2 P1-PR-A2 — /app/settings/config was deleted; target the
 		// LLM-page (Provider + Model + Advanced + Memory). Phase-3 splits this

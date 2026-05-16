@@ -891,9 +891,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'keys.new_value': { de: 'Neuer Wert...', en: 'New value...' },
 
 	// Secrets (PRD-IA-V2 P1-PR-A1) — generic API-Keys sub-page under /settings/llm/keys.
-	// Separate namespace from `keys.*` to keep the legacy KeysView translations intact
-	// during the transition (KeysView still mounts on /settings/keys until P1-PR-A2 deletes
-	// the route).
+	// Separate namespace from `keys.*` to keep the legacy KeysView translations intact;
+	// `/settings/keys` itself is now a 301 stub pointing at `/settings/llm/keys` (P1-PR-C).
 	'secrets.title':                { de: 'API-Keys',                                                              en: 'API keys' },
 	'secrets.subtitle':             { de: 'Drittanbieter-Schlüssel (Tavily, Brevo, Custom). LLM-Provider-Keys liegen unter LLM-Provider.', en: 'Third-party keys (Tavily, Brevo, custom). LLM provider keys live under LLM Provider.' },
 	'secrets.back_to_llm':          { de: 'Zurück zu LLM-Provider',                                                en: 'Back to LLM provider' },
