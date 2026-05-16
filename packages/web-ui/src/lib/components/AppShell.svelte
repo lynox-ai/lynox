@@ -226,6 +226,9 @@
 			items.push({ href: '/app/inbox', labelKey: 'nav.inbox', exact: false, icon: 'inbox' });
 		}
 		items.push(
+			// PRD-IA-V2 P2-PR-A: Activity is its own root (daily-frequency surface).
+			// Position 3 per PRD nav table — between Inbox and Hub.
+			{ href: '/app/activity', labelKey: 'nav.activity', exact: false, icon: 'clock' },
 			{ href: '/app/hub', labelKey: 'nav.automation', exact: false, icon: 'workflow' },
 			{ href: '/app/intelligence', labelKey: 'nav.intelligence', exact: false, icon: 'brain' },
 			{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts' },
