@@ -86,7 +86,21 @@ export function formatReportMarkdown(report: BenchReport): string {
   lines.push(`# Set-Bench report — ${report.generatedAt}`);
   lines.push('');
 
-  for (const axis of ['tool-chain', 'orchestration'] as const) {
+  // Ordering: keep tool-chain + orchestration first (carry-over from
+  // Phase 2 so existing report consumers see the familiar header order),
+  // then the six Phase 3 axes in haiku-tier → sonnet-tier → opus-tier
+  // ascending order.
+  const AXES: readonly SetBenchAxis[] = [
+    'tool-chain',
+    'orchestration',
+    'kg-extraction',
+    'dag-planning',
+    'memory-extraction',
+    'long-context',
+    'code-review',
+    'multi-step-reasoning',
+  ];
+  for (const axis of AXES) {
     const axisRows = report.summary.filter((s) => s.axis === axis);
     if (axisRows.length === 0) continue;
     lines.push(`## ${axisLabel(axis)}`);
@@ -142,8 +156,24 @@ export function formatReportMarkdown(report: BenchReport): string {
 }
 
 function axisLabel(axis: SetBenchAxis): string {
-  if (axis === 'tool-chain') return 'TOOL_CHAIN axis (sonnet-tier bar: Anthropic Sonnet 4.6)';
-  return 'ORCHESTRATION axis (haiku-tier bar: Anthropic Haiku 4.5)';
+  switch (axis) {
+    case 'tool-chain':
+      return 'TOOL_CHAIN axis (sonnet-tier bar: Anthropic Sonnet 4.6)';
+    case 'orchestration':
+      return 'ORCHESTRATION axis (haiku-tier bar: Anthropic Haiku 4.5)';
+    case 'kg-extraction':
+      return 'KG_EXTRACTION axis (haiku-tier bar: Anthropic Haiku 4.5)';
+    case 'dag-planning':
+      return 'DAG_PLANNING axis (haiku-tier bar: Anthropic Haiku 4.5)';
+    case 'memory-extraction':
+      return 'MEMORY_EXTRACTION axis (haiku-tier bar: Anthropic Haiku 4.5)';
+    case 'long-context':
+      return 'LONG_CONTEXT axis (sonnet-tier bar: Anthropic Sonnet 4.6)';
+    case 'code-review':
+      return 'CODE_REVIEW axis (sonnet-tier bar: Anthropic Sonnet 4.6)';
+    case 'multi-step-reasoning':
+      return 'MULTI_STEP_REASONING axis (opus-tier bar: Anthropic Opus 4 / Sonnet 4.6 + thinking)';
+  }
 }
 
 interface DriftRow {
