@@ -499,12 +499,15 @@ export class Engine {
       this._apiStore = new ApiStore();
       const apisDir = join(getLynoxDir(), 'apis');
       const loaded = this._apiStore.loadFromDirectory(apisDir);
+      // Wire the in-memory store into tool context unconditionally — otherwise
+      // a fresh install (zero profiles on disk) leaves toolContext.apiStore
+      // undefined, so api_setup `create` writes the new profile to disk but
+      // can't register it in memory, and GET /api/api-profiles keeps returning
+      // [] until the next engine restart loads it via loadFromDirectory.
+      this._toolContext.apiStore = this._apiStore;
       if (loaded > 0) {
-        // Inject API knowledge into briefing
         const apiContext = this._apiStore.formatForSystemPrompt();
         this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;
-        // Wire per-API rate limiter into tool context
-        this._toolContext.apiStore = this._apiStore;
       }
     } catch {
       this._apiStore = null;
