@@ -15,6 +15,13 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'claude-opus-4-6':           { input: 5,    output: 25, cacheWrite: 6.25,  cacheRead: 0.50 },
   'claude-sonnet-4-6':         { input: 3,    output: 15, cacheWrite: 3.75,  cacheRead: 0.30 },
   'claude-haiku-4-5-20251001': { input: 1,    output: 5,  cacheWrite: 1.25,  cacheRead: 0.10 },
+  // Mistral set (eu-sovereign tier-map; see MISTRAL_MODEL_MAP in types/models.ts).
+  // No prompt-cache pricing — Mistral exposes `prompt_cache_key` but bills the
+  // cached prefix at the standard input rate. Mirror cacheRead/cacheWrite =
+  // input rate so opportunistic cache hits don't get charged at zero.
+  'mistral-small-2603':        { input: 0.20, output: 0.60, cacheWrite: 0.20, cacheRead: 0.20 },
+  'mistral-large-2512':        { input: 2,    output: 6,    cacheWrite: 2,    cacheRead: 2    },
+  'magistral-medium-2509':     { input: 2,    output: 5,    cacheWrite: 2,    cacheRead: 2    },
 };
 
 let overridePricing: Record<string, ModelPricing> | null = null;
