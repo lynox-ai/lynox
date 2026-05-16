@@ -43,7 +43,7 @@
 		notes?: string;
 	}
 
-	function catalogKey(entry: CatalogProvider): string {
+	function catalogEntryKey(entry: CatalogProvider): string {
 		return entry.preset_id ?? entry.provider;
 	}
 
@@ -118,35 +118,42 @@
 
 	/**
 	 * Disambiguate which preset matches a persisted (provider, api_base_url)
-	 * pair. Falls back to the first catalog entry for that provider when no
-	 * preset matches — keeps single-entry providers (anthropic, vertex,
-	 * custom) working without preset_id.
+	 * pair. Mirrors `resolveCatalogKey` in core/src/core/llm/catalog.ts —
+	 * web-ui keeps its own copy because the file architecture forbids
+	 * direct core imports (avoids dist/ rebuild churn; see the type-mirror
+	 * comment at the top of this script). The pure-TS twin in catalog.ts
+	 * has the unit test coverage; keep both in lockstep on changes.
+	 *
+	 * Hostname-based match (URL parser, NOT substring) so a misconfigured
+	 * api_base_url like `https://attacker.example.com/?proxy=mistral.ai`
+	 * cannot accidentally activate the Mistral preset. Apex/api/subdomain
+	 * all match the registered preset; foreign-host suffixes do not.
+	 *
+	 * Fallback order: single-entry → that entry; multi-preset without a
+	 * match → the `requires_base_url` preset (so the user sees the input
+	 * they need to fill in); else first candidate.
 	 */
 	function resolveCatalogKey(provider: LLMProvider, baseUrl?: string): string {
 		const candidates = providers.filter((p) => p.provider === provider);
 		if (candidates.length === 0) return provider;
-		if (candidates.length === 1) return catalogKey(candidates[0]!);
-		// Multi-preset provider — pick the preset whose `base_url_default`
-		// the saved api_base_url points at (hostname match, not substring;
-		// mirrors getOpenAIModelMap in core/src/types/models.ts).
+		if (candidates.length === 1) return catalogEntryKey(candidates[0]!);
 		if (baseUrl) {
-			try {
-				const host = new URL(baseUrl).hostname.toLowerCase();
+			let host = '';
+			try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { /* invalid */ }
+			if (host) {
 				const matched = candidates.find((c) => {
 					if (!c.base_url_default) return false;
-					try {
-						const defHost = new URL(c.base_url_default).hostname.toLowerCase();
-						return host === defHost || host.endsWith(`.${defHost.replace(/^api\./, '')}`);
-					} catch { return false; }
+					let defHost = '';
+					try { defHost = new URL(c.base_url_default).hostname.toLowerCase(); } catch { return false; }
+					if (host === defHost) return true;
+					const apex = defHost.replace(/^api\./, '');
+					return host === apex || host.endsWith(`.${apex}`);
 				});
-				if (matched) return catalogKey(matched);
-			} catch { /* invalid URL — fall through to fallback */ }
+				if (matched) return catalogEntryKey(matched);
+			}
 		}
-		// No baseUrl OR no preset matched → fall back to the catalog entry
-		// that REQUIRES a base URL (the generic-fallback preset), so the
-		// user sees the input they need to fill in.
 		const generic = candidates.find((c) => c.requires_base_url);
-		return catalogKey(generic ?? candidates[0]!);
+		return catalogEntryKey(generic ?? candidates[0]!);
 	}
 
 	async function load(): Promise<void> {
@@ -189,28 +196,23 @@
 			return;
 		}
 		activeProvider = entry.provider;
-		activeCatalogKey = catalogKey(entry);
-		// Pre-fill api_base_url for presets that pin a fixed endpoint
-		// (e.g. Mistral → api.mistral.ai). Keeps the user from having to
-		// type it AND ensures save→reload round-trips back to this preset.
+		activeCatalogKey = catalogEntryKey(entry);
 		if (entry.base_url_default && !entry.requires_base_url) {
+			// Pinned preset (e.g. Mistral → api.mistral.ai). Stamp it so
+			// save→reload round-trips back to this preset and the user
+			// doesn't have to type a URL they didn't choose.
 			config = { ...config, api_base_url: entry.base_url_default };
-		} else if (entry.requires_base_url && config.api_base_url === entry.base_url_default) {
-			// Switching from a pinned preset (Mistral) to a free-text one
-			// (openai-compat) — clear the pre-filled URL so the input
-			// renders blank instead of inheriting the previous preset's
-			// host.
+		} else if (entry.requires_base_url
+			&& config.api_base_url
+			&& providers.some((p) => p.base_url_default === config.api_base_url)) {
+			// Switching FROM a pinned preset (Mistral) TO a free-text one
+			// (openai-compat). Detect "the URL we have was stamped by a
+			// pinned preset" via membership in `base_url_default` across
+			// the catalog — the previous-PR version compared to the NEW
+			// entry's base_url_default which is undefined for free-text
+			// presets, so the URL never cleared.
 			config = { ...config, api_base_url: '' };
 		}
-		testResult = null;
-	}
-
-	function selectProvider(p: LLMProvider): void {
-		if (locks.provider) {
-			addToast(t('llm.locked_provider'), 'info', 3000);
-			return;
-		}
-		activeProvider = p;
 		testResult = null;
 	}
 
@@ -360,7 +362,7 @@
 	$effect(() => { void load(); });
 
 	const activeProviderEntry = $derived(
-		providers.find((p) => catalogKey(p) === activeCatalogKey)
+		providers.find((p) => catalogEntryKey(p) === activeCatalogKey)
 		?? providers.find((p) => p.provider === activeProvider),
 	);
 	const providerLocked = $derived(!!locks.provider);
@@ -440,9 +442,9 @@
 	<section aria-labelledby="llm-provider-heading">
 		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
 		<div class="grid gap-2 sm:grid-cols-2">
-			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogKey(p))}
-				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={providerLocked && catalogKey(p) !== activeCatalogKey}
-					class="text-left p-3 rounded border-2 transition-colors {catalogKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
+			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogEntryKey(p))}
+				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={providerLocked && catalogEntryKey(p) !== activeCatalogKey}
+					class="text-left p-3 rounded border-2 transition-colors {catalogEntryKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
 					<div class="font-medium text-sm">{p.display_name}</div>
 					<div class="text-xs text-text-muted mt-0.5">{p.default_residency}</div>
 				</button>

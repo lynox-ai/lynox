@@ -231,6 +231,62 @@ export function getCatalogEntryByKey(key: string): CatalogProviderEntry | undefi
   return LLM_CATALOG.find((entry) => catalogEntryKey(entry) === key);
 }
 
+/**
+ * Disambiguate which catalog preset matches a persisted (provider,
+ * api_base_url) pair. UI uses this on load so a returning user lands on
+ * the same picker tile they previously saved.
+ *
+ * Matching is hostname-based (URL parser, NOT substring), mirroring
+ * `getOpenAIModelMap` in `types/models.ts`. A hostile/misconfigured
+ * api_base_url like `https://attacker.example.com/?proxy=mistral.ai`
+ * therefore CANNOT accidentally activate the Mistral preset.
+ *
+ * Fallback order when no preset matches:
+ *   1. Single-entry provider → that entry
+ *   2. Multi-preset provider, no baseUrl supplied → the preset that
+ *      `requires_base_url=true` (generic/free-text), so the user sees
+ *      the input they need to fill in
+ *   3. Otherwise → the first candidate (defensive — shouldn't happen
+ *      in a well-formed catalog)
+ *
+ * `catalog` defaults to the live `LLM_CATALOG` but accepts an override
+ * for unit testing. Pure function.
+ */
+export function resolveCatalogKey(
+  provider: LLMProvider,
+  baseUrl: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): string {
+  const candidates = catalog.filter((p) => p.provider === provider);
+  if (candidates.length === 0) return provider;
+  if (candidates.length === 1) return catalogEntryKey(candidates[0]!);
+
+  if (baseUrl) {
+    let host: string;
+    try { host = new URL(baseUrl).hostname.toLowerCase(); }
+    catch { host = ''; }
+    if (host) {
+      const matched = candidates.find((c) => {
+        if (!c.base_url_default) return false;
+        let defHost: string;
+        try { defHost = new URL(c.base_url_default).hostname.toLowerCase(); }
+        catch { return false; }
+        // Apex + `api.*` + subdomain variants all match the preset:
+        //   defHost='api.mistral.ai' matches 'api.mistral.ai',
+        //   'mistral.ai' (apex), 'eu.mistral.ai' (subdomain).
+        // Crucially does NOT match 'api.mistral.ai.attacker.com'
+        // because the suffix check requires a leading `.`.
+        if (host === defHost) return true;
+        const apex = defHost.replace(/^api\./, '');
+        return host === apex || host.endsWith(`.${apex}`);
+      });
+      if (matched) return catalogEntryKey(matched);
+    }
+  }
+  const generic = candidates.find((c) => c.requires_base_url);
+  return catalogEntryKey(generic ?? candidates[0]!);
+}
+
 // Deep-freeze at module load: protects the singleton against accidental
 // mutation when consumers hand `LLM_CATALOG` straight to `jsonResponse`
 // (the response body shares the reference until serialization).

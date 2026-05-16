@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
 
 describe('LLM_CATALOG', () => {
   it('exposes the five UI entries (anthropic, mistral, openai-compat, vertex, custom)', () => {
@@ -120,5 +120,71 @@ describe('LLM_CATALOG', () => {
     expect(Object.isFrozen(anthropic)).toBe(true);
     expect(Object.isFrozen(anthropic.models)).toBe(true);
     expect(Object.isFrozen(anthropic.models[0])).toBe(true);
+  });
+
+  it('getCatalogEntryByKey returns undefined for unknown keys', () => {
+    expect(getCatalogEntryByKey('does-not-exist')).toBeUndefined();
+    expect(getCatalogEntryByKey('')).toBeUndefined();
+  });
+
+  it('catalogEntryKey falls back to provider when preset_id is absent', () => {
+    const anthropic = getCatalogForProvider('anthropic')!;
+    expect(anthropic.preset_id).toBeUndefined();
+    expect(catalogEntryKey(anthropic)).toBe('anthropic');
+    const mistral = getCatalogEntryByKey('mistral')!;
+    expect(mistral.preset_id).toBe('mistral');
+    expect(catalogEntryKey(mistral)).toBe('mistral');
+  });
+});
+
+describe('resolveCatalogKey', () => {
+  // Single-entry providers — base URL is irrelevant; preset is forced.
+  it.each([
+    ['anthropic', undefined,                       'anthropic'],
+    ['anthropic', 'https://api.anthropic.com',     'anthropic'],
+    ['vertex',    undefined,                       'vertex'],
+    ['custom',    'https://litellm.local',         'custom'],
+  ] as const)('single-entry provider %s + url=%s → %s', (provider, url, expected) => {
+    expect(resolveCatalogKey(provider as LLMProvider, url)).toBe(expected);
+  });
+
+  // Multi-preset provider (openai) — disambiguation by hostname.
+  it('mistral host (api.mistral.ai) activates the mistral preset', () => {
+    expect(resolveCatalogKey('openai', 'https://api.mistral.ai/v1')).toBe('mistral');
+  });
+  it('mistral subdomain (eu.mistral.ai) activates the mistral preset', () => {
+    expect(resolveCatalogKey('openai', 'https://eu.mistral.ai/v1')).toBe('mistral');
+  });
+  it('mistral apex (mistral.ai) activates the mistral preset', () => {
+    // Defensive: a user typing `https://mistral.ai/v1` should land on the
+    // Mistral preset, not silently fall through to the generic openai
+    // entry. Mirrors the apex-match clause in `resolveCatalogKey`.
+    expect(resolveCatalogKey('openai', 'https://mistral.ai/v1')).toBe('mistral');
+  });
+  it('hostname normalises case', () => {
+    expect(resolveCatalogKey('openai', 'https://API.MISTRAL.AI/v1')).toBe('mistral');
+  });
+  it('non-mistral openai host falls through to openai-compat', () => {
+    expect(resolveCatalogKey('openai', 'https://api.groq.com/openai/v1')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'https://openrouter.ai/api/v1')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'http://localhost:11434/v1')).toBe('openai-compat');
+  });
+  it('hostile URL smuggling mistral.ai in path/query does not activate mistral', () => {
+    // Substring-match used to leak: `'https://attacker.example.com/?proxy=mistral.ai'`
+    // would have picked the Mistral preset. Hostname-match prevents that.
+    expect(resolveCatalogKey('openai', 'https://attacker.example.com/?proxy=mistral.ai')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'https://api.mistral.ai.attacker.com/v1')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'https://example.com/mistral.ai/v1')).toBe('openai-compat');
+  });
+  it('malformed URL falls through to the generic openai-compat preset', () => {
+    expect(resolveCatalogKey('openai', 'not-a-url')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'mistral.ai')).toBe('openai-compat'); // missing scheme
+  });
+  it('no baseUrl supplied falls through to the requires_base_url preset', () => {
+    // Empty/undefined api_base_url on a multi-preset provider — the user
+    // hasn't picked, so render the input that asks them to. Generic
+    // openai-compat is the only preset with requires_base_url=true.
+    expect(resolveCatalogKey('openai', undefined)).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', '')).toBe('openai-compat');
   });
 });
