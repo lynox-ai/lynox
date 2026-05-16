@@ -443,8 +443,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     lines.push(`Base URL: ${p.base_url}`);
 
     if (p.auth) {
-      const authDesc = p.auth.type === 'none'
-          ? 'None (public API — no credentials required)'
+      const authDesc = p.auth.type === 'none' ? 'None (public API — no credentials required)'
         : p.auth.type === 'basic'
           ? p.auth.basic_format === 'pre_encoded_b64'
             ? 'Basic Auth (pre-encoded Base64 secret — send as-is in Authorization header)'

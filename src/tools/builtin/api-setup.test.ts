@@ -154,7 +154,8 @@ describe('api_setup tool', () => {
       };
       const result = await apiSetupTool.handler({ action: 'create', profile: publicProfile }, agent);
       expect(result).toContain('Created API profile');
-      expect(result).not.toContain('No auth method specified');
+      expect(result).not.toContain('Profile is incomplete');
+      expect(result).not.toMatch(/no auth method/i);
       expect(store.get('hn-algolia')?.auth?.type).toBe('none');
     });
 
