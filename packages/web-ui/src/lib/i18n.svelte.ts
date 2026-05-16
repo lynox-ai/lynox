@@ -132,14 +132,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'cost_limits.context.maximum':       { de: 'Maximum — 1M Tokens',                                                             en: 'Maximum — 1M tokens' },
 	'cost_limits.context.maximum_hint':  { de: 'Volle Modell-Kapazität. ~5× teurer, +30 % Latenz. Nur für sehr lange Threads.',   en: 'Full model capacity. ~5× cost, +30% latency. Only for very long threads.' },
 	'cost_limits.context.also_in_llm':   { de: 'Auch verfügbar unter Einstellungen → LLM.',                                       en: 'Also available under Settings → LLM.' },
-	// Deprecation banner (PRD-IA-V2 P2-PR-C) — page is being moved in v1.7.
-	'cost_limits.deprecated.heading':    { de: 'Diese Seite zieht in v1.7 um',                                                    en: 'This page is being moved' },
-	'cost_limits.deprecated.body':       { de: 'Kosten-Limits werden in Einstellungen → Workspace → Limits zugänglich sein, das Kontextfenster in Einstellungen → LLM → Erweitert. Du kannst sie ab v1.6 schon dort einstellen.', en: 'Cost limits will move to Settings → Workspace → Limits in v1.7, and the context window to Settings → LLM → Advanced. Both are also available from there starting v1.6.' },
+	// Deprecation banner (PRD-IA-V2 P2-PR-C) — page is being moved (final delete in Phase 3 / P3-PR-X).
+	'cost_limits.deprecated.heading':    { de: 'Diese Seite zieht um',                                                            en: 'This page is being moved' },
+	'cost_limits.deprecated.body':       { de: 'Kosten-Limits ziehen nach Einstellungen → Workspace → Limits, das Kontextfenster nach Einstellungen → LLM → Erweitert. Du kannst sie schon dort einstellen.', en: 'Cost limits are moving to Settings → Workspace → Limits, and the context window to Settings → LLM → Advanced. Both are already available from there.' },
 	// One-time transition toast (PRD-IA-V2 P2-PR-F) — shown on the first visit
 	// to /app/hub/cost-limits after the P2 deploy. localStorage flag keeps it
 	// from re-firing. CTA links to /app/settings/llm where the context-window
-	// radio already lives in v1.6 (final spend-limits home lands v1.7 via P3-PR-B).
-	'cost_limits.toast.message': { de: 'Cost-Limits sind in v1.7 unter Einstellungen verfügbar. Lesezeichen aktualisieren.', en: 'Cost limits are moving to Settings in v1.7. Please update your bookmark.' },
+	// radio already lives (final spend-limits home lands via Phase 3 / P3-PR-B).
+	'cost_limits.toast.message': { de: 'Cost-Limits sind in den Einstellungen verfügbar. Lesezeichen aktualisieren.', en: 'Cost limits are now available in Settings. Please update your bookmark.' },
 	'cost_limits.toast.cta':     { de: 'Einstellungen öffnen', en: 'Open Settings' },
 	// Voice settings page (PRD-SETTINGS-REFACTOR Phase 3)
 	'voice.title':         { de: 'Sprache',                                                          en: 'Voice' },
