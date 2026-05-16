@@ -54,6 +54,10 @@
 		llm_mode?: 'standard' | 'eu-sovereign';
 		memory_extraction?: boolean;
 		memory_half_life_days?: number;
+		// Context-window (PRD-IA-V2 P2-PR-C interim move from CostLimits). Same field
+		// the backend has always read — both /app/hub/cost-limits and /settings/llm
+		// PUT to /api/config, no schema change. Final route lands in P3-PR-C.
+		max_context_window_tokens?: number;
 		managed?: string;
 		capabilities?: { mistral_available?: boolean };
 	}
@@ -238,6 +242,13 @@
 			if (typeof config.memory_half_life_days === 'number' && config.memory_half_life_days > 0) {
 				update.memory_half_life_days = config.memory_half_life_days;
 			}
+			// Context-window: `undefined` is a meaningful value (= model default), so
+			// we send the field whenever the radio has been touched (i.e. the key is
+			// present on `config`). Backend reads `max_context_window_tokens` from the
+			// same /api/config endpoint as CostLimits.svelte — single SSoT.
+			if ('max_context_window_tokens' in config) {
+				update.max_context_window_tokens = config.max_context_window_tokens;
+			}
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
@@ -276,6 +287,17 @@
 	// Memory-section toggle (collapsible — final `/llm/memory` route lands in P3-PR-C).
 	let memoryOpen = $state(false);
 	let advancedOpen = $state(false);
+
+	// Context-window radio options (PRD-IA-V2 P2-PR-C). Mirrors `CONTEXT_OPTIONS`
+	// in CostLimits.svelte; both surfaces write the same backend field. Kept in
+	// sync here rather than hoisted to a shared util so the lift can be deleted
+	// cleanly when P3-PR-X removes the CostLimits-Page copy.
+	const CONTEXT_OPTIONS: ReadonlyArray<{ value: number | undefined; labelKey: string; hintKey: string }> = [
+		{ value: undefined,  labelKey: 'llm.context_window.option.default', hintKey: 'llm.context_window.option.default_hint' },
+		{ value: 200_000,    labelKey: 'llm.context_window.option.200k',    hintKey: 'llm.context_window.option.200k_hint' },
+		{ value: 500_000,    labelKey: 'llm.context_window.option.500k',    hintKey: 'llm.context_window.option.500k_hint' },
+		{ value: 1_000_000,  labelKey: 'llm.context_window.option.1m',      hintKey: 'llm.context_window.option.1m_hint' },
+	];
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">
@@ -597,6 +619,30 @@
 					</label>
 				</div>
 			{/if}
+		</section>
+
+		<!--
+			Context-window section — interim move from /app/hub/cost-limits
+			(PRD-IA-V2 P2-PR-C). Both surfaces remain functional during the
+			interim; final dedicated sub-route `/settings/llm/advanced` lands
+			in P3-PR-C, after which the radio leaves the CostLimits-Page.
+		-->
+		<section aria-labelledby="llm-context-window-heading" class="border-t border-border pt-6">
+			<h2 id="llm-context-window-heading" class="text-lg font-medium mb-1">{t('llm.context_window.heading')}</h2>
+			<p class="text-xs text-text-muted mb-3">{t('llm.context_window.description')}</p>
+			<div class="space-y-2">
+				{#each CONTEXT_OPTIONS as opt (opt.value ?? 'default')}
+					<label class="flex items-start gap-3 cursor-pointer">
+						<input type="radio" name="llm-context-window" value={opt.value}
+							bind:group={config.max_context_window_tokens}
+							disabled={!loaded} class="mt-1 disabled:opacity-50" />
+						<div class="flex-1">
+							<div class="text-sm font-medium">{t(opt.labelKey)}</div>
+							<div class="text-xs text-text-muted">{t(opt.hintKey)}</div>
+						</div>
+					</label>
+				{/each}
+			</div>
 		</section>
 
 		<!-- Save row -->
