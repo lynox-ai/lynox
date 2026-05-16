@@ -18,8 +18,24 @@
 
 import type { LLMProvider } from '../../src/types/index.js';
 
-/** Which axis of the lynox routing claim this scenario probes. */
-export type SetBenchAxis = 'tool-chain' | 'orchestration';
+/**
+ * Which axis of the lynox routing claim this scenario probes.
+ *
+ * Phase 3 widens the surface beyond tool-chain + orchestration to cover
+ * every tier-driven workflow in lynox: KG extraction (haiku), DAG
+ * planning (haiku), memory extraction (haiku), long-context summary
+ * (sonnet), code review (sonnet), multi-step reasoning (opus / thinking).
+ * Each axis is graded against a known-good Anthropic baseline.
+ */
+export type SetBenchAxis =
+  | 'tool-chain'
+  | 'orchestration'
+  | 'kg-extraction'
+  | 'dag-planning'
+  | 'memory-extraction'
+  | 'long-context'
+  | 'code-review'
+  | 'multi-step-reasoning';
 
 export interface SetBenchScenario {
   readonly id: string;

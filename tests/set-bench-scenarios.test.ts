@@ -17,7 +17,22 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { TOOL_CHAIN_ZURICH_X2, ORCHESTRATION_EMAIL_TRIAGE, ZURICH_POPULATION_PINNED } from '../scripts/set-bench/scenarios.js';
+import {
+  TOOL_CHAIN_ZURICH_X2,
+  ORCHESTRATION_EMAIL_TRIAGE,
+  ZURICH_POPULATION_PINNED,
+  KG_EXTRACTION_ENTITIES,
+  DAG_PLANNING_RELEASE,
+  MEMORY_EXTRACTION_CHAT,
+  LONG_CONTEXT_SPEC_SUMMARY,
+  CODE_REVIEW_PLANTED_BUGS,
+  MULTI_STEP_REASONING_INTEREST,
+  extractJsonArray,
+  isValidDag,
+  extractBullets,
+  extractLineRefs,
+  SET_BENCH_SCENARIOS,
+} from '../scripts/set-bench/scenarios.js';
 import { dispatchMockTool } from '../scripts/set-bench/mock-tools.js';
 import { isRateLimitError } from '../scripts/set-bench/run-cell.js';
 import { percentile, computeParetoFrontier, buildReport, formatReportMarkdown } from '../scripts/set-bench/report.js';
@@ -366,4 +381,578 @@ describe('isRateLimitError', () => {
     expect(isRateLimitError('connection reset by peer')).toBe(false);
     expect(isRateLimitError('Invalid API key')).toBe(false);
   });
+});
+
+// ──────────────────────────────────────────────────────────────
+// Phase 3 PR B — new use-case scenarios
+// ──────────────────────────────────────────────────────────────
+
+describe('extractJsonArray', () => {
+  // Shared helper used by 3 passChecks. Pinning its contract here means
+  // a regression in fence-stripping or string-aware brace walking
+  // surfaces before it silently breaks 3 scenarios at once.
+  it('parses a plain JSON array', () => {
+    expect(extractJsonArray('[1, 2, 3]')).toEqual([1, 2, 3]);
+  });
+
+  it('strips ```json fences', () => {
+    expect(extractJsonArray('```json\n[{"a": 1}]\n```')).toEqual([{ a: 1 }]);
+  });
+
+  it('strips plain ``` fences', () => {
+    expect(extractJsonArray('```\n["x", "y"]\n```')).toEqual(['x', 'y']);
+  });
+
+  it('finds the array even when wrapped in prose', () => {
+    expect(extractJsonArray('Sure, here you go: [1, 2, 3]. Hope that helps!')).toEqual([1, 2, 3]);
+  });
+
+  it('handles arrays containing strings with bracket characters', () => {
+    // The string-aware walker must not match the `]` inside the string.
+    expect(extractJsonArray('[{"text": "an array like [1, 2]"}]')).toEqual([{ text: 'an array like [1, 2]' }]);
+  });
+
+  it('returns null on malformed JSON', () => {
+    expect(extractJsonArray('not json')).toBeNull();
+    expect(extractJsonArray('[1, 2')).toBeNull();
+    // Trailing comma — strict JSON.parse rejects, walker reports null.
+    // Pins behaviour: we do NOT silently coerce JSON5-style trailing commas.
+    expect(extractJsonArray('[1, 2, ]')).toBeNull();
+  });
+
+  it('stops at the first balanced close-bracket (trailing prose ignored)', () => {
+    // Tolerant: a well-formed JSON array followed by trailing text still parses.
+    expect(extractJsonArray('[1, 2] then a footnote')).toEqual([1, 2]);
+  });
+});
+
+describe('KG_EXTRACTION passCheck', () => {
+  const ALL_8 = [
+    { name: 'Maria Sanchez', type: 'person' },
+    { name: 'Liam OConnor', type: 'person' },
+    { name: 'Priya Kapoor', type: 'person' },
+    { name: 'Acme Robotics', type: 'organization' },
+    { name: 'Northwind Logistics', type: 'organization' },
+    { name: 'Helios Ventures', type: 'organization' },
+    { name: 'Berlin', type: 'location' },
+    { name: 'Munich', type: 'location' },
+  ];
+
+  it('passes on a clean 8/8 happy path', () => {
+    const r = KG_EXTRACTION_ENTITIES.passCheck(JSON.stringify(ALL_8), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes at 7/8 (one missing entity within tolerance)', () => {
+    const r = KG_EXTRACTION_ENTITIES.passCheck(JSON.stringify(ALL_8.slice(0, 7)), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails at 6/8 (below 7/8 tolerance bar)', () => {
+    const r = KG_EXTRACTION_ENTITIES.passCheck(JSON.stringify(ALL_8.slice(0, 6)), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/6\/8/);
+  });
+
+  it('tolerates ```json fences + leading prose', () => {
+    const r = KG_EXTRACTION_ENTITIES.passCheck(
+      'Here are the entities:\n```json\n' + JSON.stringify(ALL_8) + '\n```',
+      [],
+    );
+    expect(r.pass).toBe(true);
+  });
+
+  it('tolerates aliases for names (first-name only, alternate apostrophes)', () => {
+    const aliased = [
+      { name: 'Maria', type: 'person' },
+      { name: "Liam O'Connor", type: 'person' },
+      { name: 'Priya', type: 'person' },
+      { name: 'Acme', type: 'organization' },
+      { name: 'Northwind', type: 'organization' },
+      { name: 'Helios', type: 'organization' },
+      { name: 'Berlin', type: 'location' },
+      { name: 'Munich', type: 'location' },
+    ];
+    const r = KG_EXTRACTION_ENTITIES.passCheck(JSON.stringify(aliased), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when the output is not a JSON array at all', () => {
+    const r = KG_EXTRACTION_ENTITIES.passCheck('Maria Sanchez is the CTO...', []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/parseable JSON array/);
+  });
+
+  it('fails when types are wrong (everyone tagged as "thing")', () => {
+    const wrong = ALL_8.map((e) => ({ ...e, type: 'thing' }));
+    const r = KG_EXTRACTION_ENTITIES.passCheck(JSON.stringify(wrong), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/0\/8|1\/8|2\/8|3\/8|4\/8|5\/8|6\/8/);
+  });
+});
+
+describe('isValidDag', () => {
+  it('accepts a linear chain', () => {
+    expect(
+      isValidDag([
+        { id: 'a', depends_on: [] },
+        { id: 'b', depends_on: ['a'] },
+        { id: 'c', depends_on: ['b'] },
+      ]),
+    ).toBe(true);
+  });
+
+  it('rejects a 2-cycle', () => {
+    expect(
+      isValidDag([
+        { id: 'a', depends_on: ['b'] },
+        { id: 'b', depends_on: ['a'] },
+      ]),
+    ).toBe(false);
+  });
+
+  it('rejects a self-loop', () => {
+    expect(isValidDag([{ id: 'a', depends_on: ['a'] }])).toBe(false);
+  });
+
+  it('rejects unresolved dependency references', () => {
+    expect(isValidDag([{ id: 'a', depends_on: ['ghost'] }])).toBe(false);
+  });
+});
+
+describe('DAG_PLANNING passCheck', () => {
+  const VALID_DAG = [
+    { id: 'cut_tag', depends_on: [] },
+    { id: 'run_tests', depends_on: ['cut_tag'] },
+    { id: 'deploy', depends_on: ['run_tests'] },
+  ];
+
+  it('passes on the canonical 3-step DAG', () => {
+    const r = DAG_PLANNING_RELEASE.passCheck(JSON.stringify(VALID_DAG), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes when extra non-required upstreams are added (still acyclic)', () => {
+    // deploy waiting on both cut_tag AND run_tests is still valid; the
+    // required upstream is the transitive parent. Pass-check only
+    // enforces the must-have edges, not the must-not-have.
+    const extra = [
+      { id: 'cut_tag', depends_on: [] },
+      { id: 'run_tests', depends_on: ['cut_tag'] },
+      { id: 'deploy', depends_on: ['run_tests', 'cut_tag'] },
+    ];
+    const r = DAG_PLANNING_RELEASE.passCheck(JSON.stringify(extra), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('tolerates ```json fences', () => {
+    const r = DAG_PLANNING_RELEASE.passCheck('```json\n' + JSON.stringify(VALID_DAG) + '\n```', []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when a required dependency edge is missing', () => {
+    // deploy without run_tests upstream — gating violated.
+    const broken = [
+      { id: 'cut_tag', depends_on: [] },
+      { id: 'run_tests', depends_on: ['cut_tag'] },
+      { id: 'deploy', depends_on: ['cut_tag'] }, // skips run_tests
+    ];
+    const r = DAG_PLANNING_RELEASE.passCheck(JSON.stringify(broken), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/depend on 'run_tests'/);
+  });
+
+  it('fails when a required step is missing', () => {
+    const missingDeploy = [
+      { id: 'cut_tag', depends_on: [] },
+      { id: 'run_tests', depends_on: ['cut_tag'] },
+    ];
+    const r = DAG_PLANNING_RELEASE.passCheck(JSON.stringify(missingDeploy), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/missing required step: deploy/);
+  });
+
+  it('fails when the graph contains a cycle', () => {
+    const cyclic = [
+      { id: 'cut_tag', depends_on: ['deploy'] },
+      { id: 'run_tests', depends_on: ['cut_tag'] },
+      { id: 'deploy', depends_on: ['run_tests'] },
+    ];
+    const r = DAG_PLANNING_RELEASE.passCheck(JSON.stringify(cyclic), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/not a valid DAG/);
+  });
+
+  it('fails when depends_on is missing (shape violation)', () => {
+    const malformed = [{ id: 'cut_tag' }, { id: 'run_tests' }, { id: 'deploy' }];
+    const r = DAG_PLANNING_RELEASE.passCheck(JSON.stringify(malformed), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/shape/);
+  });
+});
+
+describe('MEMORY_EXTRACTION passCheck', () => {
+  const ALL_4 = [
+    'User name is Jordan.',
+    'Jordan runs a bakery in Vienna and bakes sourdough and rye.',
+    'Jordan prefers email over phone for updates.',
+    'Jordan has a partner named Sam who handles wholesale orders.',
+  ];
+
+  it('passes on a clean 4/4 string-array happy path', () => {
+    const r = MEMORY_EXTRACTION_CHAT.passCheck(JSON.stringify(ALL_4), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes at 3/4 (within ambiguity tolerance)', () => {
+    const partial = [ALL_4[0]!, ALL_4[1]!, ALL_4[2]!]; // skip "partner Sam"
+    const r = MEMORY_EXTRACTION_CHAT.passCheck(JSON.stringify(partial), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails at 2/4 (below bar)', () => {
+    const partial = [ALL_4[0]!, ALL_4[2]!]; // only name + email pref
+    const r = MEMORY_EXTRACTION_CHAT.passCheck(JSON.stringify(partial), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/2\/4/);
+  });
+
+  it('tolerates structured object facts ({key, value} shape)', () => {
+    const structured = [
+      { key: 'name', value: 'Jordan' },
+      { key: 'business', value: 'Bakery located in Vienna' },
+      { key: 'communication_preference', value: 'Prefers email channels' },
+      { key: 'relationships', value: 'Partner Sam handles wholesale' },
+    ];
+    const r = MEMORY_EXTRACTION_CHAT.passCheck(JSON.stringify(structured), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('tolerates ```json fences + extra commentary stripped', () => {
+    const r = MEMORY_EXTRACTION_CHAT.passCheck(
+      'Sure thing!\n```json\n' + JSON.stringify(ALL_4) + '\n```\n',
+      [],
+    );
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when the output is not a JSON array', () => {
+    const r = MEMORY_EXTRACTION_CHAT.passCheck('Jordan, Vienna bakery, email pref, Sam.', []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/parseable JSON array/);
+  });
+});
+
+describe('extractBullets', () => {
+  it('extracts dash bullets', () => {
+    expect(extractBullets('- one\n- two\n- three')).toEqual(['one', 'two', 'three']);
+  });
+
+  it('extracts star + plus bullet markers', () => {
+    expect(extractBullets('* alpha\n+ beta')).toEqual(['alpha', 'beta']);
+  });
+
+  it('extracts numbered bullets (both "1." and "1)" forms)', () => {
+    expect(extractBullets('1. first\n2) second')).toEqual(['first', 'second']);
+  });
+
+  it('ignores non-bullet lines', () => {
+    expect(extractBullets('Intro paragraph.\n- bullet\n\nFooter.')).toEqual(['bullet']);
+  });
+});
+
+describe('LONG_CONTEXT passCheck', () => {
+  const ANCHORED_5 = [
+    '- Custom ARM-based SoC with DIN-rail mounting and 65 watts peak draw',
+    '- Four 2.5-gigabit Ethernet ports plus SFP+ cages, with cellular LTE/5G fallback',
+    '- Hardware root of trust, AES encryption at rest, mutual TLS to the management plane',
+    '- Hardened Yocto Linux with Podman runtime and Prometheus metrics endpoint',
+    '- IP54 rated chassis with 350,000 hours mean-time-between-failures rating',
+  ].join('\n');
+
+  it('passes on a clean 5/5 anchored summary', () => {
+    const r = LONG_CONTEXT_SPEC_SUMMARY.passCheck(ANCHORED_5, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes at 4/5 anchors (one generic bullet allowed)', () => {
+    const fourAnchored = [
+      '- A generic introductory bullet without specifics',
+      '- Four 2.5-gigabit Ethernet ports plus SFP+ cages',
+      '- Hardware root of trust and AES encryption',
+      '- Yocto Linux with Podman container runtime',
+      '- IP54 rated chassis for industrial environments',
+    ].join('\n');
+    const r = LONG_CONTEXT_SPEC_SUMMARY.passCheck(fourAnchored, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when there are more than 5 bullets', () => {
+    const six = ANCHORED_5 + '\n- a sixth bullet';
+    const r = LONG_CONTEXT_SPEC_SUMMARY.passCheck(six, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/expected exactly 5 bullets, got 6/);
+  });
+
+  it('fails when there are fewer than 5 bullets', () => {
+    const four = ANCHORED_5.split('\n').slice(0, 4).join('\n');
+    const r = LONG_CONTEXT_SPEC_SUMMARY.passCheck(four, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/expected exactly 5 bullets, got 4/);
+  });
+
+  it('fails on a generic summary with no corpus-specific anchors', () => {
+    // Five well-formed bullets, but each one could apply to any
+    // industrial appliance — no anchor phrases. This is the "model
+    // hallucinated a generic answer without reading the doc" failure
+    // mode that the anchor list exists to catch.
+    const generic = [
+      '- The device is rugged and designed for industrial environments',
+      '- It supports a wide range of network protocols and form factors',
+      '- Security is a top priority with multiple layers of protection',
+      '- The software is reliable and supports remote configuration',
+      '- It is certified for use in multiple regions globally',
+    ].join('\n');
+    const r = LONG_CONTEXT_SPEC_SUMMARY.passCheck(generic, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/anchor phrase/);
+  });
+
+  it('tolerates star + numbered bullet markers as well as dashes', () => {
+    const mixed = [
+      '1. Custom ARM SoC with DIN-rail mounting',
+      '2. Ethernet plus SFP+ cages with LTE/5G fallback',
+      '3. Hardware root of trust and AES encryption',
+      '4. Yocto Linux and Podman runtime',
+      '5. IP54 rated, 350,000 hours mean-time-between-failures',
+    ].join('\n');
+    const r = LONG_CONTEXT_SPEC_SUMMARY.passCheck(mixed, []);
+    expect(r.pass).toBe(true);
+  });
+});
+
+describe('extractLineRefs', () => {
+  it('extracts "line N" form', () => {
+    expect(extractLineRefs('Bug at line 7')).toContain(7);
+  });
+
+  it('extracts "L7" form', () => {
+    expect(extractLineRefs('See L13 for SQL issue')).toContain(13);
+  });
+
+  it('extracts range forms ("lines 5-9")', () => {
+    const out = extractLineRefs('Vulnerability spans lines 5-9');
+    expect(out).toContain(5);
+    expect(out).toContain(9);
+  });
+
+  it('does not extract grading fractions like "5/5"', () => {
+    expect(extractLineRefs('grade: 5/5')).toEqual([]);
+  });
+});
+
+describe('CODE_REVIEW passCheck', () => {
+  const HAPPY = [
+    'BUG: null dereference at line 7 — userId may be null when .trim() is called.',
+    'BUG: SQL injection at line 9 — user-controlled value interpolated into raw SQL via template literal.',
+  ].join('\n');
+
+  it('passes when both bug classes + planted lines are flagged', () => {
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(HAPPY, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes when SQL injection is flagged at the second site (line 15)', () => {
+    const alt = [
+      'BUG: null dereference at line 7 — userId may be null.',
+      'BUG: SQL injection at line 15 — string concatenation in searchUsers.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(alt, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('tolerates the line-class window (±2 lines off the planted site)', () => {
+    // Model says "line 6" — still inside the [5..9] window for the null-deref site.
+    const off = [
+      'BUG: nullish access at line 6 — userId may be null.',
+      'BUG: SQL injection at line 13 — concatenation.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(off, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when only one bug is flagged (null-deref missing)', () => {
+    const onlySqli = 'BUG: SQL injection at line 9 — interpolation.';
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(onlySqli, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/null-deref/);
+  });
+
+  it('fails when only one bug is flagged (SQL injection missing)', () => {
+    const onlyNull = 'BUG: null dereference at line 7 — userId may be null.';
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(onlyNull, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/SQL injection/);
+  });
+
+  it('fails when the bug class is named but the line ref is wrong', () => {
+    const wrongLine = [
+      'BUG: null dereference at line 25 — far from the planted site.',
+      'BUG: SQL injection at line 99 — way out of range.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(wrongLine, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/0\/2|1\/2/);
+  });
+
+  it('tolerates synonym bug-class phrasing (sqli / parameterized-query callout)', () => {
+    const synonyms = [
+      'BUG: nullable input at line 7 — userId may be null when trimmed.',
+      'BUG: SQLi at line 9 — use a prepared statement here.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(synonyms, []);
+    expect(r.pass).toBe(true);
+  });
+});
+
+describe('MULTI_STEP_REASONING passCheck', () => {
+  // Reference: 10000 EUR at 6% annually, withdraw 2000 EUR at start of Y2,
+  // compound 2 more years. End balance = 9662.96 EUR = 966296 cents.
+  const CORRECT = 966_296;
+
+  it('passes on the exact correct answer', () => {
+    const r = MULTI_STEP_REASONING_INTEREST.passCheck(`Working through it... ANSWER=${CORRECT}`, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes within ±100 cents tolerance (rounding tail)', () => {
+    const r = MULTI_STEP_REASONING_INTEREST.passCheck(`ANSWER=${CORRECT + 50}`, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when the answer is more than 100 cents off', () => {
+    const r = MULTI_STEP_REASONING_INTEREST.passCheck(`ANSWER=${CORRECT + 250}`, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/wrong answer/);
+  });
+
+  it('fails when the answer is way off (e.g. forgot the withdrawal)', () => {
+    // 10000 * 1.06^3 * 100 = 1191016 — what the model gets if it never
+    // applies the mid-period withdrawal. Different failure-mode pin.
+    const r = MULTI_STEP_REASONING_INTEREST.passCheck('ANSWER=1191016', []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/1191016/);
+  });
+
+  it('fails when no ANSWER=<n> line is emitted', () => {
+    const r = MULTI_STEP_REASONING_INTEREST.passCheck('The final balance is approximately 9662.96 EUR.', []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/missing ANSWER/);
+  });
+
+  it('picks the LAST ANSWER= line when the model echoes the template first', () => {
+    // The prompt itself includes "write EXACTLY: ANSWER=<value>" and
+    // "would be written ANSWER=500050" — small models sometimes echo
+    // those before emitting their real answer. Pass-check must take the
+    // last hit, not the first.
+    const echoed = [
+      'I will write ANSWER=500050 as the example shows.',
+      'Now solving the actual problem...',
+      `ANSWER=${CORRECT}`,
+    ].join('\n');
+    const r = MULTI_STEP_REASONING_INTEREST.passCheck(echoed, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('tolerates case-insensitive ANSWER prefix + extra whitespace', () => {
+    const r = MULTI_STEP_REASONING_INTEREST.passCheck(`answer = ${CORRECT}`, []);
+    expect(r.pass).toBe(true);
+  });
+});
+
+describe('SET_BENCH_SCENARIOS registry', () => {
+  // Pins the exported array shape so an accidental delete or re-order
+  // in scenarios.ts gets caught before the matrix runner picks up a
+  // half-broken set.
+  it('exports all 8 phase-2+3 scenarios in axis order', () => {
+    const axes = SET_BENCH_SCENARIOS.map((s) => s.axis);
+    expect(axes).toEqual([
+      'tool-chain',
+      'orchestration',
+      'kg-extraction',
+      'dag-planning',
+      'memory-extraction',
+      'long-context',
+      'code-review',
+      'multi-step-reasoning',
+    ]);
+  });
+
+  it('every scenario has a unique id', () => {
+    const ids = SET_BENCH_SCENARIOS.map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('every scenario has a non-zero maxIterations and timeoutMs', () => {
+    for (const s of SET_BENCH_SCENARIOS) {
+      expect(s.maxIterations).toBeGreaterThan(0);
+      expect(s.timeoutMs).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('axisLabel coverage via formatReportMarkdown', () => {
+  // formatReportMarkdown is the only consumer of axisLabel — round-trip
+  // a single-cell BenchReport per new axis to make sure no axis renders
+  // as `undefined` in the headline. Catches the classic "added enum
+  // member, forgot the switch arm" regression.
+  type Axis =
+    | 'tool-chain'
+    | 'orchestration'
+    | 'kg-extraction'
+    | 'dag-planning'
+    | 'memory-extraction'
+    | 'long-context'
+    | 'code-review'
+    | 'multi-step-reasoning';
+  const allAxes: readonly Axis[] = [
+    'tool-chain',
+    'orchestration',
+    'kg-extraction',
+    'dag-planning',
+    'memory-extraction',
+    'long-context',
+    'code-review',
+    'multi-step-reasoning',
+  ];
+
+  for (const axis of allAxes) {
+    it(`renders a non-empty header for axis '${axis}'`, () => {
+      const cell: SetBenchCell = {
+        label: `cell-${axis}`,
+        axis,
+        provider: 'anthropic' as const,
+        modelId: `cell-${axis}`,
+        apiKeyEnv: 'ANTHROPIC_API_KEY',
+        pricing: { inputPerMillion: 1, outputPerMillion: 1 },
+        pinned: true,
+      };
+      const run: CellRun = {
+        cellLabel: cell.label,
+        scenarioId: 'fake',
+        pass: true,
+        tokensIn: 1,
+        tokensOut: 1,
+        costUsd: 0.001,
+        durationMs: 100,
+        iterations: 1,
+        finalText: '',
+        toolCalls: [],
+      };
+      const md = formatReportMarkdown(buildReport([run], [cell]));
+      // Header line for the axis must exist + must not contain `undefined`.
+      expect(md).toMatch(/##\s+[A-Z_]+_?axis|##\s+[A-Z_]+ axis/);
+      expect(md).not.toMatch(/undefined/);
+    });
+  }
 });
