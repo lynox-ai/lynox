@@ -27,6 +27,12 @@ import {
   LONG_CONTEXT_SPEC_SUMMARY,
   CODE_REVIEW_PLANTED_BUGS,
   MULTI_STEP_REASONING_INTEREST,
+  KG_EXTRACTION_ENTITIES_DE,
+  DAG_PLANNING_RELEASE_DE,
+  MEMORY_EXTRACTION_CHAT_DE,
+  LONG_CONTEXT_SPEC_SUMMARY_DE,
+  CODE_REVIEW_PLANTED_BUGS_DE,
+  MULTI_STEP_REASONING_COMPOUND_INTEREST_DE,
   extractJsonArray,
   isValidDag,
   extractBullets,
@@ -36,7 +42,7 @@ import {
 import { dispatchMockTool } from '../scripts/set-bench/mock-tools.js';
 import { isRateLimitError } from '../scripts/set-bench/run-cell.js';
 import { percentile, computeParetoFrontier, buildReport, formatReportMarkdown } from '../scripts/set-bench/report.js';
-import type { CellRun, SetBenchAxis, SetBenchCell, ToolCallTrace } from '../scripts/set-bench/types.js';
+import type { CellRun, SetBenchAxis, SetBenchCell, SetBenchScenario, ToolCallTrace } from '../scripts/set-bench/types.js';
 
 const ZX2 = ZURICH_POPULATION_PINNED * 2;
 
@@ -944,15 +950,377 @@ describe('MULTI_STEP_REASONING passCheck', () => {
   });
 });
 
+// ──────────────────────────────────────────────────────────────
+// Phase 3 PR C — DE twin pass-checks
+//
+// Coverage scope is DELIBERATELY NARROW: each DE block pins what's
+// distinct about the German variant (ß/ä/ö/ü, German bug-class
+// synonyms, DE bullet conventions, DE-anchored corpus tokens). The
+// EN twins' edge-case grid (above) already pins the shared parsing
+// path — re-running every edge case in DE would be churn, not signal.
+// ──────────────────────────────────────────────────────────────
+
+describe('KG_EXTRACTION_DE passCheck', () => {
+  const ALL_8_DE = [
+    { name: 'Maria Schmidt', type: 'person' },
+    { name: 'Stefan Weber', type: 'person' },
+    { name: 'Priya Kapoor', type: 'person' },
+    { name: 'Bayer-Müller Logistik AG', type: 'organization' },
+    { name: 'Holzwerk Stuttgart', type: 'organization' },
+    { name: 'Helios-Kapital', type: 'organization' },
+    { name: 'Berlin', type: 'location' },
+    { name: 'München', type: 'location' },
+  ];
+
+  it('passes on a clean 8/8 DE happy path with ß/ä/ö/ü intact', () => {
+    const r = KG_EXTRACTION_ENTITIES_DE.passCheck(JSON.stringify(ALL_8_DE), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('tolerates ASCII-transliterated München ("Muenchen") via alias', () => {
+    // Smaller models sometimes drop umlauts when re-emitting JSON.
+    // The DE entity list explicitly lists `muenchen` as an alias so the
+    // bench captures capability, not stricter spelling adherence than EN.
+    const transliterated = ALL_8_DE.map((e) => (e.name === 'München' ? { ...e, name: 'Muenchen' } : e));
+    const r = KG_EXTRACTION_ENTITIES_DE.passCheck(JSON.stringify(transliterated), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes at 7/8 (one missing entity within tolerance)', () => {
+    const r = KG_EXTRACTION_ENTITIES_DE.passCheck(JSON.stringify(ALL_8_DE.slice(0, 7)), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails at 6/8 (below tolerance)', () => {
+    const r = KG_EXTRACTION_ENTITIES_DE.passCheck(JSON.stringify(ALL_8_DE.slice(0, 6)), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/6\/8/);
+  });
+
+  it('tolerates first-name + short-form company aliases ("Bayer-Müller" without "Logistik AG")', () => {
+    const aliased = [
+      { name: 'Maria', type: 'person' },
+      { name: 'Stefan', type: 'person' },
+      { name: 'Priya', type: 'person' },
+      { name: 'Bayer-Müller', type: 'organization' },
+      { name: 'Holzwerk', type: 'organization' },
+      { name: 'Helios', type: 'organization' },
+      { name: 'Berlin', type: 'location' },
+      { name: 'München', type: 'location' },
+    ];
+    const r = KG_EXTRACTION_ENTITIES_DE.passCheck(JSON.stringify(aliased), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when the output is not a JSON array', () => {
+    const r = KG_EXTRACTION_ENTITIES_DE.passCheck('Maria Schmidt ist Geschäftsführerin...', []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/parseable JSON array/);
+  });
+});
+
+describe('DAG_PLANNING_DE passCheck', () => {
+  // Step IDs stay English (API shape) — only the prompt is German.
+  const VALID_DAG = [
+    { id: 'cut_tag', depends_on: [] },
+    { id: 'run_tests', depends_on: ['cut_tag'] },
+    { id: 'deploy', depends_on: ['run_tests'] },
+  ];
+
+  it('passes on the canonical 3-step DAG (same shape as EN twin)', () => {
+    const r = DAG_PLANNING_RELEASE_DE.passCheck(JSON.stringify(VALID_DAG), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when a required dependency edge is missing', () => {
+    const broken = [
+      { id: 'cut_tag', depends_on: [] },
+      { id: 'run_tests', depends_on: ['cut_tag'] },
+      { id: 'deploy', depends_on: ['cut_tag'] },
+    ];
+    const r = DAG_PLANNING_RELEASE_DE.passCheck(JSON.stringify(broken), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/depend on 'run_tests'/);
+  });
+
+  it('fails when the graph contains a cycle', () => {
+    const cyclic = [
+      { id: 'cut_tag', depends_on: ['deploy'] },
+      { id: 'run_tests', depends_on: ['cut_tag'] },
+      { id: 'deploy', depends_on: ['run_tests'] },
+    ];
+    const r = DAG_PLANNING_RELEASE_DE.passCheck(JSON.stringify(cyclic), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/not a valid DAG/);
+  });
+
+  it('fails when a required step is missing', () => {
+    const missing = [
+      { id: 'cut_tag', depends_on: [] },
+      { id: 'run_tests', depends_on: ['cut_tag'] },
+    ];
+    const r = DAG_PLANNING_RELEASE_DE.passCheck(JSON.stringify(missing), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/missing required step: deploy/);
+  });
+});
+
+describe('MEMORY_EXTRACTION_DE passCheck', () => {
+  const ALL_4_DE = [
+    'Der Nutzer heißt Jordan.',
+    'Jordan betreibt eine Bäckerei in Wien und bäckt Sauerteig und Roggenbrot.',
+    'Jordan bevorzugt E-Mail statt Telefon für Aktualisierungen.',
+    'Jordan hat eine Partnerin namens Sam, die die Großhandelsbestellungen übernimmt.',
+  ];
+
+  it('passes on a clean 4/4 DE happy path (ß + umlauts preserved)', () => {
+    const r = MEMORY_EXTRACTION_CHAT_DE.passCheck(JSON.stringify(ALL_4_DE), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes at 3/4 (within ambiguity tolerance)', () => {
+    const partial = [ALL_4_DE[0]!, ALL_4_DE[1]!, ALL_4_DE[2]!];
+    const r = MEMORY_EXTRACTION_CHAT_DE.passCheck(JSON.stringify(partial), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails at 2/4 (below bar)', () => {
+    const partial = [ALL_4_DE[0]!, ALL_4_DE[2]!];
+    const r = MEMORY_EXTRACTION_CHAT_DE.passCheck(JSON.stringify(partial), []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/2\/4/);
+  });
+
+  it('tolerates structured object facts with German keys', () => {
+    const structured = [
+      { schluessel: 'name', wert: 'Jordan' },
+      { schluessel: 'beruf', wert: 'Bäckerei in Wien, Sauerteig und Roggen' },
+      { schluessel: 'kommunikation', wert: 'Bevorzugt E-Mail-Kontakt' },
+      { schluessel: 'beziehung', wert: 'Partnerin Sam macht den Großhandel' },
+    ];
+    const r = MEMORY_EXTRACTION_CHAT_DE.passCheck(JSON.stringify(structured), []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when the output is not a JSON array', () => {
+    const r = MEMORY_EXTRACTION_CHAT_DE.passCheck('Jordan, Wien, Bäckerei, Sam.', []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/parseable JSON array/);
+  });
+});
+
+describe('LONG_CONTEXT_DE passCheck', () => {
+  // German technical anchors mirror the EN corpus's anchor set.
+  const ANCHORED_5_DE = [
+    '- Kundenspezifischer ARM-SoC, Hutschienen-Montage, maximal 65 Watt Leistungsaufnahme',
+    '- Vier 2,5-Gigabit-Ethernet-Ports plus SFP+ Käfige, plus Mobilfunk-LTE/5G Fallback',
+    '- Hardware-Vertrauensanker, AES-256-Verschlüsselung im Ruhezustand, Mutual TLS',
+    '- Gehärtetes Yocto-Linux mit Podman-Container-Laufzeit und Prometheus-Metriken',
+    '- IP54-zertifiziertes Gehäuse mit MTBF von 350.000 Stunden für den industriellen Einsatz',
+  ].join('\n');
+
+  it('passes on a clean 5/5 DE-anchored summary', () => {
+    const r = LONG_CONTEXT_SPEC_SUMMARY_DE.passCheck(ANCHORED_5_DE, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes at 4/5 anchors (one generic bullet allowed)', () => {
+    const fourAnchored = [
+      '- Ein generischer einleitender Stichpunkt ohne Spezifika',
+      '- Vier 2,5-Gigabit-Ethernet-Ports plus SFP+ Käfige',
+      '- Hardware-Root-of-Trust und AES-Verschlüsselung',
+      '- Yocto-Linux mit Podman-Container-Laufzeit',
+      '- IP54-zertifiziertes Gehäuse für industrielle Umgebungen',
+    ].join('\n');
+    const r = LONG_CONTEXT_SPEC_SUMMARY_DE.passCheck(fourAnchored, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails on a generic DE summary with no corpus-specific anchors', () => {
+    // Tests the German equivalent of the "model hallucinated a generic
+    // answer" failure mode that exists in the EN twin.
+    const generic = [
+      '- Das Gerät ist robust und für industrielle Umgebungen ausgelegt',
+      '- Es unterstützt zahlreiche Netzwerkprotokolle und Bauformen',
+      '- Sicherheit hat höchste Priorität mit mehreren Schutzschichten',
+      '- Die Software ist zuverlässig und unterstützt Fernwartung',
+      '- Es ist in mehreren Regionen weltweit zertifiziert',
+    ].join('\n');
+    const r = LONG_CONTEXT_SPEC_SUMMARY_DE.passCheck(generic, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/anchor phrase/);
+  });
+
+  it('rejects generic phrasing that only collides with short anchors as substrings (DE)', () => {
+    // German equivalent of the EN word-boundary regression test:
+    // "Alarmsystem" / "Ästhetik" must not match the `arm` / `aes`
+    // anchors as substrings.
+    const generic = [
+      '- Ein Alarmsystem mit Ästhetik und alterierten Voreinstellungen',
+      '- Hochwertige Ästhetik und ein schlanker Alarm-Indikator',
+      '- Alterungsbeständiges Gehäuse mit ästhetischen Akzenten',
+      '- Generische Alarmklingel mit dekorativer Ästhetik',
+      '- 5g Gewichtseinsparung im Gehäusematerial',
+    ].join('\n');
+    const r = LONG_CONTEXT_SPEC_SUMMARY_DE.passCheck(generic, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/anchor phrase/);
+  });
+
+  it('fails when there are more than 5 bullets', () => {
+    const six = ANCHORED_5_DE + '\n- ein sechster Stichpunkt';
+    const r = LONG_CONTEXT_SPEC_SUMMARY_DE.passCheck(six, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/expected exactly 5 bullets, got 6/);
+  });
+});
+
+describe('CODE_REVIEW_DE passCheck', () => {
+  // The diff itself is English (real codebases are English); the model
+  // is asked to RESPOND in German. classMatchers therefore accept both
+  // EN and DE bug-class phrasings.
+  it('passes when bugs are reported with DE bug-class names (Nullzeiger + SQL-Injektion)', () => {
+    const deHappy = [
+      'BUG: Nullzeiger at line 7 — userId kann null sein, wenn .trim() aufgerufen wird.',
+      'BUG: SQL-Injektion at line 9 — Nutzer-kontrollierter Wert wird in rohen SQL interpoliert.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS_DE.passCheck(deHappy, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes when bugs are reported with DE "parametrisierte Abfrage" / "Vorbereitete Anweisung" callouts', () => {
+    const synonyms = [
+      'BUG: Nullreferenz at line 6 — userId kann null sein.',
+      'BUG: SQL-Injektion at line 15 — Hier sollte eine parametrisierte Abfrage / Vorbereitete Anweisung genutzt werden.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS_DE.passCheck(synonyms, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes on mixed EN/DE bug-class phrasing (real-world model output)', () => {
+    // Smaller models often mix English technical terms with German prose
+    // even when asked to respond in German. The bench should not penalise
+    // this — it measures capability, not linguistic purity.
+    const mixed = [
+      'BUG: null dereference at line 7 — userId könnte null sein.',
+      'BUG: SQL-Injektion at line 9 — String-Verkettung mit Nutzereingabe.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS_DE.passCheck(mixed, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when only one bug is flagged in DE (null missing)', () => {
+    const onlySqli = 'BUG: SQL-Injektion at line 9 — Interpolation.';
+    const r = CODE_REVIEW_PLANTED_BUGS_DE.passCheck(onlySqli, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/null-deref/);
+  });
+
+  it('fails when bug class is correct but line ref is out of range', () => {
+    const wrongLine = [
+      'BUG: Nullzeiger at line 25 — weit weg vom echten Bug.',
+      'BUG: SQL-Injektion at line 99 — komplett daneben.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS_DE.passCheck(wrongLine, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/0\/2|1\/2/);
+  });
+});
+
+describe('MULTI_STEP_REASONING_DE passCheck', () => {
+  // Reference is IDENTICAL to the EN twin — 966296 cents. The DE
+  // word problem is cross-checkable against the same canonical value
+  // so per-language drift surfaces immediately as a passCheck delta.
+  const CORRECT = 966_296;
+
+  it('passes on the exact correct answer (same canonical value as EN twin)', () => {
+    const r = MULTI_STEP_REASONING_COMPOUND_INTEREST_DE.passCheck(`Schritt für Schritt... ANSWER=${CORRECT}`, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('passes within ±100 cents tolerance (DE rounding tail identical to EN)', () => {
+    const r = MULTI_STEP_REASONING_COMPOUND_INTEREST_DE.passCheck(`ANSWER=${CORRECT + 50}`, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when the answer ignores the Zwischenentnahme (10000 * 1.06^3)', () => {
+    // 10000 * 1.06^3 * 100 = 1191016 — what the model gets if it forgets
+    // the mid-period withdrawal. Pins the same failure-mode as the EN twin
+    // so cross-language gap analysis attributes failures to capability,
+    // not test setup.
+    const r = MULTI_STEP_REASONING_COMPOUND_INTEREST_DE.passCheck('ANSWER=1191016', []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/1191016/);
+  });
+
+  it('picks the LAST ANSWER= line when the DE prompt template is echoed', () => {
+    // The DE prompt itself includes "ANSWER=500050" as an example.
+    const echoed = [
+      'Ich schreibe ANSWER=500050 wie im Beispiel.',
+      'Jetzt löse ich die eigentliche Aufgabe...',
+      `ANSWER=${CORRECT}`,
+    ].join('\n');
+    const r = MULTI_STEP_REASONING_COMPOUND_INTEREST_DE.passCheck(echoed, []);
+    expect(r.pass).toBe(true);
+  });
+
+  it('fails when no ANSWER=<n> line is emitted (German prose only)', () => {
+    const r = MULTI_STEP_REASONING_COMPOUND_INTEREST_DE.passCheck(
+      'Der Endbetrag liegt bei etwa 9662,96 EUR.',
+      [],
+    );
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/missing ANSWER/);
+  });
+
+  it('fails when a DE-locale-formatted number leaks into ANSWER= (regex truncates to leading int)', () => {
+    // Documented limitation pinned as a test: small DE models occasionally
+    // emit `ANSWER=9.662,96` (German thousands-dot / decimal-comma) or
+    // `ANSWER=966.296` (thousands-dot). The /ANSWER\s*=\s*(\d+)/i regex
+    // captures only the leading digit run before the first non-digit,
+    // yielding a wildly wrong number that the tolerance bar rejects.
+    // The bench correctly reports this as a fail — the prompt asks for
+    // an integer in cents, so DE-locale formatting IS the capability gap.
+    // Without this test the regex could silently drift to accept comma-
+    // tolerant parsing and quietly inflate Mistral-DE scoring.
+    const r = MULTI_STEP_REASONING_COMPOUND_INTEREST_DE.passCheck('Endbetrag: ANSWER=9.662,96', []);
+    expect(r.pass).toBe(false);
+    // Either "wrong answer" (regex captured '9') or "missing" — both indicate
+    // the bench correctly refused the DE-locale-formatted leak.
+    expect(r.reason).toMatch(/wrong answer|missing ANSWER/);
+  });
+});
+
 describe('SET_BENCH_SCENARIOS registry', () => {
   // Pins the exported array shape so an accidental delete or re-order
   // in scenarios.ts gets caught before the matrix runner picks up a
   // half-broken set.
-  it('exports all 8 phase-2+3 scenarios in axis order', () => {
-    const axes = SET_BENCH_SCENARIOS.map((s) => s.axis);
+  it('exports the 8 EN scenarios first, in canonical axis order', () => {
+    const axes = SET_BENCH_SCENARIOS.slice(0, 8).map((s) => s.axis);
     expect(axes).toEqual([
       'tool-chain',
       'orchestration',
+      'kg-extraction',
+      'dag-planning',
+      'memory-extraction',
+      'long-context',
+      'code-review',
+      'multi-step-reasoning',
+    ]);
+  });
+
+  it('appends one DE twin per Phase-3 EN scenario (1:1 pair count, exhaustive)', () => {
+    // Pair count locks the bench shape: EN-only scenarios (TOOL_CHAIN +
+    // ORCHESTRATION from Phase 2) stay unpaired, every Phase-3 EN scenario
+    // gets exactly one DE twin. A future orphan DE scenario (or missing
+    // pair) fails here loudly rather than silently widening the matrix.
+    const deScenarios = SET_BENCH_SCENARIOS.filter((s) => s.id.endsWith('-de'));
+    const enWithDeTwin = SET_BENCH_SCENARIOS.filter((s) => !s.id.endsWith('-de') && SET_BENCH_SCENARIOS.some((other) => other.id === `${s.id}-de`));
+    expect(deScenarios.length).toBe(6);
+    expect(enWithDeTwin.length).toBe(6);
+    // DE twins reuse the EN axes — axis is a routing concept, not a
+    // language concept. Order mirrors PR B's 6 new use-cases.
+    expect(deScenarios.map((s) => s.axis)).toEqual([
       'kg-extraction',
       'dag-planning',
       'memory-extraction',
@@ -971,6 +1339,30 @@ describe('SET_BENCH_SCENARIOS registry', () => {
     for (const s of SET_BENCH_SCENARIOS) {
       expect(s.maxIterations).toBeGreaterThan(0);
       expect(s.timeoutMs).toBeGreaterThan(0);
+    }
+  });
+
+  it('DE twins inherit timing budgets from their EN counterparts (no axis-routing drift)', () => {
+    // Hard contract: axis-driven model selection assumes identical
+    // maxIterations + timeoutMs per axis. Drift would let routers pick
+    // a Mistral cell that passes EN under 60s but times out on DE under
+    // a different budget, masking real capability gaps.
+    const pairs: ReadonlyArray<readonly [SetBenchScenario, SetBenchScenario]> = [
+      [KG_EXTRACTION_ENTITIES, KG_EXTRACTION_ENTITIES_DE],
+      [DAG_PLANNING_RELEASE, DAG_PLANNING_RELEASE_DE],
+      [MEMORY_EXTRACTION_CHAT, MEMORY_EXTRACTION_CHAT_DE],
+      [LONG_CONTEXT_SPEC_SUMMARY, LONG_CONTEXT_SPEC_SUMMARY_DE],
+      [CODE_REVIEW_PLANTED_BUGS, CODE_REVIEW_PLANTED_BUGS_DE],
+      [MULTI_STEP_REASONING_INTEREST, MULTI_STEP_REASONING_COMPOUND_INTEREST_DE],
+    ];
+    for (const [en, de] of pairs) {
+      expect(de.axis).toBe(en.axis);
+      expect(de.maxIterations).toBe(en.maxIterations);
+      expect(de.timeoutMs).toBe(en.timeoutMs);
+      // Lock the id-suffix convention in the same iteration that pins
+      // the rest of the twin contract — a future PR adding a 7th DE
+      // scenario with a freelance id ("kg-extraction-german") fails here.
+      expect(de.id).toBe(`${en.id}-de`);
     }
   });
 });
