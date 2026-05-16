@@ -96,7 +96,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.intelligence.graph': { de: 'Graph (Beta)', en: 'Graph (beta)' },
 	'hub.intelligence.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'hub.intelligence.data': { de: 'Daten', en: 'Data' },
+	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
+	// (powers the sub-tab label). `graph_overview` labels the default graph
+	// view inside the `graph` top-tab.
 	'hub.intelligence.insights': { de: 'Insights (Beta)', en: 'Insights (beta)' },
+	'hub.intelligence.graph_overview': { de: 'Graph', en: 'Graph' },
 	'hub.automation.workflows': { de: 'Workflows', en: 'Workflows' },
 	'hub.automation.tasks': { de: 'Aufgaben', en: 'Tasks' },
 	'hub.automation.reminders': { de: 'Erinnerungen', en: 'Reminders' },

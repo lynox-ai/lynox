@@ -8,18 +8,39 @@
 	import MemoryInsightsView from './MemoryInsightsView.svelte';
 	import MemoryView from './MemoryView.svelte';
 
-	type Tab = 'wissen' | 'graph' | 'contacts' | 'data' | 'insights';
+	// PRD-IA-V2 P3-PR-H: IntelligenceHub shrinks 5 → 4 top-tabs.
+	// `insights` is folded as a sub-tab under `graph` (both Beta, both
+	// AgentMemoryDb-aggregate). Legacy `?tab=insights` is 301-redirected to
+	// `?tab=graph&sub=insights` by the route's `+page.ts` for bookmark survival.
+	type Tab = 'wissen' | 'graph' | 'contacts' | 'data';
+	type GraphSub = 'overview' | 'insights';
 
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('tab');
-		if (p === 'graph' || p === 'contacts' || p === 'data' || p === 'insights') return p;
+		if (p === 'graph' || p === 'contacts' || p === 'data') return p;
 		return 'wissen';
+	})());
+
+	const graphSub = $derived<GraphSub>(((): GraphSub => {
+		if (tab !== 'graph') return 'overview';
+		const s = $page.url.searchParams.get('sub');
+		return s === 'insights' ? 'insights' : 'overview';
 	})());
 
 	function setTab(next: Tab): void {
 		const url = new URL($page.url);
 		if (next === 'wissen') url.searchParams.delete('tab');
 		else url.searchParams.set('tab', next);
+		// Switching top-tab always drops the sub-tab; `sub` is scoped to `graph`.
+		url.searchParams.delete('sub');
+		void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
+	}
+
+	function setGraphSub(next: GraphSub): void {
+		const url = new URL($page.url);
+		url.searchParams.set('tab', 'graph');
+		if (next === 'overview') url.searchParams.delete('sub');
+		else url.searchParams.set('sub', next);
 		void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
 	}
 
@@ -28,6 +49,10 @@
 		{ id: 'graph', labelKey: 'hub.intelligence.graph' },
 		{ id: 'contacts', labelKey: 'hub.intelligence.contacts' },
 		{ id: 'data', labelKey: 'hub.intelligence.data' },
+	];
+
+	const graphSubTabs: ReadonlyArray<{ id: GraphSub; labelKey: string }> = [
+		{ id: 'overview', labelKey: 'hub.intelligence.graph_overview' },
 		{ id: 'insights', labelKey: 'hub.intelligence.insights' },
 	];
 </script>
@@ -42,17 +67,30 @@
 			>{t(t_item.labelKey)}</button>
 		{/each}
 	</div>
+	{#if tab === 'graph'}
+		<div class="flex items-center gap-1 px-4 sm:px-5 py-2 border-b border-border shrink-0 overflow-x-auto scrollbar-none">
+			{#each graphSubTabs as s_item (s_item.id)}
+				<button
+					type="button"
+					class="shrink-0 whitespace-nowrap px-2.5 py-1 rounded-[var(--radius-sm)] text-[11px] font-medium transition-colors {graphSub === s_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+					onclick={() => setGraphSub(s_item.id)}
+				>{t(s_item.labelKey)}</button>
+			{/each}
+		</div>
+	{/if}
 	<div class="flex-1 overflow-y-auto">
 		{#if tab === 'wissen'}
 			<MemoryView />
 		{:else if tab === 'graph'}
-			<KnowledgeGraphView />
+			{#if graphSub === 'insights'}
+				<MemoryInsightsView />
+			{:else}
+				<KnowledgeGraphView />
+			{/if}
 		{:else if tab === 'contacts'}
 			<ContactsView />
-		{:else if tab === 'data'}
-			<DataStoreView />
 		{:else}
-			<MemoryInsightsView />
+			<DataStoreView />
 		{/if}
 	</div>
 </div>
