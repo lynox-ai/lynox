@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getApiBase } from '../config.svelte.js';
+	import { onDestroy } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import MailSettings from './MailSettings.svelte';
@@ -16,442 +16,79 @@
 		isIosWithoutPwa,
 	} from '../stores/notifications.svelte.js';
 	import {
-		getNotificationPrefs,
-		updateNotificationPrefs,
-		type NotificationPrefs,
-		type NotificationPrefsPatch,
-	} from '../api/inbox-notifications.js';
-
-	let prefs = $state<NotificationPrefs | null>(null);
-	async function loadInboxPushPref(): Promise<void> {
-		prefs = await getNotificationPrefs(getApiBase());
-	}
-
-	// Serialise PATCHes so two near-simultaneous toggles don't race —
-	// the second wait-for-first chain ensures we always merge against the
-	// freshest server state, never a stale `prev` snapshot.
-	let inFlight: Promise<void> = Promise.resolve();
-	async function patchPrefs(patch: NotificationPrefsPatch): Promise<void> {
-		const run = async (): Promise<void> => {
-			const prev = prefs;
-			if (prev) {
-				prefs = {
-					...prev,
-					...(patch.inboxPushEnabled !== undefined ? { inboxPushEnabled: patch.inboxPushEnabled } : {}),
-					...(patch.perMinute !== undefined ? { perMinute: patch.perMinute } : {}),
-					...(patch.perHour !== undefined ? { perHour: patch.perHour } : {}),
-					...(patch.quietHours ? { quietHours: { ...prev.quietHours, ...patch.quietHours } } : {}),
-					...(patch.accounts
-						? { accounts: prev.accounts.map((a) => (
-							patch.accounts && a.id in patch.accounts ? { ...a, muted: patch.accounts[a.id]! } : a
-						)) }
-						: {}),
-				};
-			}
-			const result = await updateNotificationPrefs(getApiBase(), patch);
-			if (result) {
-				prefs = result;
-			} else {
-				prefs = prev;
-				addToast(t('integrations.push_inbox_save_failed'), 'error');
-			}
-		};
-		inFlight = inFlight.then(run, run);
-		await inFlight;
-	}
-
-	/** Drop NaN before it taints optimistic state — `parseInt('')` returns NaN. */
-	function patchThrottle(field: 'perMinute' | 'perHour', raw: string): void {
-		const n = parseInt(raw, 10);
-		if (!Number.isFinite(n)) return;
-		void patchPrefs({ [field]: n } as NotificationPrefsPatch);
-	}
-
-	function defaultBrowserTz(): string {
-		try {
-			return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-		} catch {
-			return 'UTC';
-		}
-	}
+		isSecretsLoading,
+		isApiKeyConfigured,
+		isSearchConfigured,
+		isSearxngConfigured,
+		getSearxngConfiguredUrl,
+		getApiKey,
+		setApiKey,
+		isApiKeySaving,
+		loadSecretStatuses,
+		saveAnthropicApiKey,
+	} from '../stores/integrations/secrets.svelte.js';
+	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import {
+		getGoogleStatus,
+		isGoogleLoading,
+		getDeviceFlow,
+		isConnecting,
+		isRevoking,
+		getGoogleClientId,
+		setGoogleClientId,
+		getGoogleClientSecret,
+		setGoogleClientSecret,
+		isGoogleCredSaving,
+		isGoogleCredSaved,
+		getScopeMode,
+		setScopeMode,
+		isManagedGoogleClaiming,
+		isScopeMismatch,
+		loadGoogleStatus,
+		saveGoogleCredentials,
+		startGoogleAuth,
+		revokeGoogle,
+		resetGoogleCredentials,
+		claimManagedGoogleTokens,
+		stopAuthPoll,
+	} from '../stores/integrations/google.svelte.js';
+	import {
+		getPrefs,
+		loadInboxPushPref,
+		patchPrefs,
+		patchThrottle,
+		defaultBrowserTz,
+	} from '../stores/integrations/notifications.svelte.js';
+	import {
+		getSearchKey,
+		setSearchKey,
+		isSearchSaving,
+		isSearchSaved,
+		saveSearch,
+		getSearxngUrl,
+		setSearxngUrl,
+		isSearxngSaving,
+		isSearxngSaved,
+		isSearxngChecking,
+		getSearxngHealthy,
+		checkSearxng,
+		saveSearxng,
+		removeSearxng,
+	} from '../stores/integrations/search.svelte.js';
 
 	async function copyText(text: string) {
 		await navigator.clipboard.writeText(text);
 		addToast(t('common.copied'), 'success', 1500);
 	}
 
-	// --- Google OAuth ---
-	interface GoogleStatus {
-		available: boolean;
-		authenticated?: boolean;
-		scopes?: string[];
-		expiresAt?: string | null;
-		hasRefreshToken?: boolean;
-	}
-	interface DeviceFlow { verificationUrl: string; userCode: string; }
-
-	let googleStatus = $state<GoogleStatus | null>(null);
-	let googleLoading = $state(true);
-	let flow = $state<DeviceFlow | null>(null);
-	let connecting = $state(false);
-	let revoking = $state(false);
-	let googleClientId = $state('');
-	let googleClientSecret = $state('');
-	let googleCredSaving = $state(false);
-	let googleCredSaved = $state(false);
-	let scopeMode = $state<'readonly' | 'full'>('readonly');
-
-	// Detect current scope mode from granted scopes
-	const WRITE_SCOPE_PREFIX = ['.send', '.modify', '/spreadsheets', '/drive', '/calendar.events', '/documents'];
-	function detectScopeMode(scopes: string[]): 'readonly' | 'full' {
-		return scopes.some(s => WRITE_SCOPE_PREFIX.some(w => s.includes(w) && !s.includes('.readonly'))) ? 'full' : 'readonly';
-	}
-	const scopeMismatch = $derived(
-		googleStatus?.authenticated && googleStatus.scopes
-			? detectScopeMode(googleStatus.scopes) !== scopeMode
-			: false,
-	);
-
-	async function loadGoogleStatus() {
-		googleLoading = true;
-		try {
-			const res = await fetch(`${getApiBase()}/google/status`);
-			if (!res.ok) throw new Error();
-			googleStatus = (await res.json()) as GoogleStatus;
-			if (googleStatus?.scopes?.length) {
-				scopeMode = detectScopeMode(googleStatus.scopes);
-			}
-		} catch {
-			googleStatus = null;
-		}
-		googleLoading = false;
-	}
-
-	async function saveGoogleCredentials() {
-		const trimmedId = googleClientId.trim();
-		const trimmedSecret = googleClientSecret.trim();
-		if (!trimmedId || !trimmedSecret) return;
-		googleCredSaving = true;
-		try {
-			const [r1, r2] = await Promise.all([
-				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, {
-					method: 'PUT', headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ value: trimmedId })
-				}),
-				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, {
-					method: 'PUT', headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ value: trimmedSecret })
-				}),
-			]);
-			if (!r1.ok || !r2.ok) throw new Error();
-			googleClientId = '';
-			googleClientSecret = '';
-			googleCredSaved = true;
-			addToast(t('integrations.credentials_saved'), 'success');
-			// Reload Google integration in the running Engine (no restart needed)
-			await fetch(`${getApiBase()}/google/reload`, { method: 'POST' });
-			await new Promise((r) => setTimeout(r, 500));
-			googleCredSaved = false;
-			await loadGoogleStatus();
-			// Auto-start auth flow after credentials are saved
-			if (googleStatus?.available && !googleStatus.authenticated) {
-				await startGoogleAuth();
-			}
-		} catch {
-			addToast(t('common.save_failed'), 'error');
-		}
-		googleCredSaving = false;
-	}
-
-	let authPollInterval: ReturnType<typeof setInterval> | null = null;
-
-	async function startGoogleAuth() {
-		connecting = true;
-		flow = null;
-		try {
-			const res = await fetch(`${getApiBase()}/google/auth`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ scopeMode }),
-			});
-			if (res.ok) {
-				const data = (await res.json()) as { authUrl?: string; verificationUrl?: string; userCode?: string };
-				if (data.authUrl) {
-					// Redirect flow (managed/web-hosted) — redirect to Google consent
-					window.location.href = data.authUrl;
-					return;
-				}
-				flow = data as DeviceFlow;
-				// Device flow — auto-open verification URL and copy code to clipboard
-				if (flow?.verificationUrl) {
-					window.open(flow.verificationUrl, '_blank', 'noopener');
-					navigator.clipboard.writeText(flow.userCode).then(() => {
-						addToast(t('integrations.google_code_copied'), 'success', 4000);
-					}).catch(() => {});
-				}
-			} else {
-				const err = (await res.json()) as { error?: string };
-				const errMsg = err.error ?? '';
-				if (errMsg.includes('unauthorized_client')) {
-					addToast(t('integrations.google_wrong_client_type'), 'error', 12000);
-				} else if (errMsg.includes('invalid_client')) {
-					addToast(t('integrations.google_invalid_credentials'), 'error', 12000);
-				} else {
-					addToast(errMsg || t('common.error'), 'error', 6000);
-				}
-			}
-		} catch {
-			addToast(t('common.error'), 'error');
-		}
-		connecting = false;
-		if (authPollInterval) clearInterval(authPollInterval);
-		authPollInterval = setInterval(async () => {
-			try {
-				const r = await fetch(`${getApiBase()}/google/status`);
-				if (!r.ok) return;
-				const s = (await r.json()) as GoogleStatus;
-				if (s.authenticated) {
-					googleStatus = s;
-					flow = null;
-					if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null; }
-				}
-			} catch { /* ignore */ }
-		}, 3000);
-		setTimeout(() => { if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null; } }, 5 * 60_000);
-	}
-
-	async function revokeGoogle() {
-		revoking = true;
-		try {
-			const res = await fetch(`${getApiBase()}/google/revoke`, { method: 'POST' });
-			if (!res.ok) throw new Error();
-		} catch {
-			addToast(t('common.save_failed'), 'error');
-		}
-		revoking = false;
-		await loadGoogleStatus();
-	}
-
-	async function resetGoogleCredentials() {
-		try {
-			await Promise.all([
-				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, { method: 'DELETE' }),
-				fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, { method: 'DELETE' }),
-			]);
-			await fetch(`${getApiBase()}/google/reload`, { method: 'POST' });
-			flow = null;
-			googleCredSaved = false;
-			await loadGoogleStatus();
-		} catch {
-			addToast(t('common.save_failed'), 'error');
-		}
-	}
-
-	// --- Managed mode detection ---
-	let managedTier = $state<string | undefined>(undefined);
-	const managed = $derived(!!managedTier);
-	let managedGoogleOAuthAvailable = $state(false);
-	let managedGoogleClaiming = $state(false);
-
-	async function loadManagedStatus() {
-		try {
-			const res = await fetch(`${getApiBase()}/config`);
-			if (!res.ok) return;
-			const data = (await res.json()) as Record<string, unknown>;
-			if (typeof data['managed'] === 'string') managedTier = data['managed'];
-
-			// Managed Google OAuth broker disabled — Google requires CASA security audit
-			// ($4-15K+) for third-party apps accessing user data. All deployments
-			// (self-hosted + managed) use per-user Desktop App credentials instead.
-			managedGoogleOAuthAvailable = false;
-		} catch { /* ignore */ }
-	}
-
-	async function startManagedGoogleOAuth() {
-		try {
-			const res = await fetch(`${getApiBase()}/google/oauth-url`);
-			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { url: string };
-			if (data.url) {
-				// Validate the control plane URL is reachable before redirecting
-				try {
-					const check = await fetch(data.url, { method: 'HEAD', mode: 'no-cors' }).catch(() => null);
-					// no-cors HEAD always succeeds — redirect and let the user see the result
-					window.location.href = data.url;
-				} catch {
-					// Control plane unreachable — fall back to self-hosted instructions
-					managedGoogleOAuthAvailable = false;
-					addToast(t('integrations.google_oauth_unavailable'), 'error');
-				}
-			}
-		} catch {
-			// Engine doesn't have control plane config — show self-hosted flow
-			managedGoogleOAuthAvailable = false;
-			addToast(t('integrations.google_oauth_unavailable'), 'error');
-		}
-	}
-
-	async function claimManagedGoogleTokens(claimNonce: string) {
-		managedGoogleClaiming = true;
-		try {
-			const res = await fetch(`${getApiBase()}/google/claim-managed`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ claim_nonce: claimNonce }),
-			});
-			if (res.ok) {
-				addToast(t('integrations.google_connected_managed'), 'success');
-				await loadGoogleStatus();
-			} else {
-				const data = (await res.json().catch(() => ({}))) as { error?: string };
-				addToast(data.error ?? t('common.error'), 'error');
-			}
-		} catch {
-			addToast(t('common.error'), 'error');
-		}
-		managedGoogleClaiming = false;
-	}
-
-	// --- Anthropic API Key ---
-	let apiKey = $state('');
-	let apiKeySaving = $state(false);
-	let apiKeyConfigured = $state(false);
-
-	async function saveApiKey() {
-		if (!apiKey.trim()) return;
-		apiKeySaving = true;
-		try {
-			const res = await fetch(`${getApiBase()}/secrets/ANTHROPIC_API_KEY`, {
-				method: 'PUT', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ value: apiKey.trim() }),
-			});
-			if (!res.ok) throw new Error();
-			apiKey = '';
-			addToast(t('integrations.api_key_saved'), 'success');
-			await loadSecretStatuses();
-		} catch {
-			addToast(t('common.save_failed'), 'error');
-		}
-		apiKeySaving = false;
-	}
-
-	// --- Web Search ---
-	let searchKey = $state('');
-	let searchSaving = $state(false);
-	let searchSaved = $state(false);
-	let searchConfigured = $state(false);
-
-	// --- SearXNG ---
-	let searxngUrl = $state('');
-	let searxngSaving = $state(false);
-	let searxngSaved = $state(false);
-	let searxngConfigured = $state(false);
-	let searxngConfiguredUrl = $state('');
-	let searxngChecking = $state(false);
-	let searxngHealthy = $state<boolean | null>(null);
-
-	let secretsLoading = $state(true);
-
-	async function loadSecretStatuses() {
-		secretsLoading = true;
-		try {
-			const res = await fetch(`${getApiBase()}/secrets/status`);
-			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { configured: { search: boolean; api_key: boolean; searxng: boolean }; searxng_url: string | null };
-			apiKeyConfigured = data.configured.api_key;
-			searchConfigured = data.configured.search;
-			searxngConfigured = data.configured.searxng;
-			searxngConfiguredUrl = data.searxng_url ?? '';
-		} catch { /* ignore */ }
-		secretsLoading = false;
-	}
-
-	async function saveSearch() {
-		if (!searchKey.trim()) return;
-		searchSaving = true;
-		try {
-			const res = await fetch(`${getApiBase()}/secrets/TAVILY_API_KEY`, {
-				method: 'PUT', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ value: searchKey })
-			});
-			if (!res.ok) throw new Error();
-			searchKey = '';
-			searchSaved = true;
-			setTimeout(() => (searchSaved = false), 2000);
-			await loadSecretStatuses();
-		} catch {
-			addToast(t('common.save_failed'), 'error');
-		}
-		searchSaving = false;
-	}
-
-	async function checkSearxng(url: string) {
-		searxngChecking = true;
-		searxngHealthy = null;
-		try {
-			const res = await fetch(`${getApiBase()}/searxng/check`, {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ url })
-			});
-			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { healthy: boolean };
-			searxngHealthy = data.healthy;
-		} catch {
-			searxngHealthy = false;
-		}
-		searxngChecking = false;
-	}
-
-	async function saveSearxng() {
-		const url = searxngUrl.trim().replace(/\/+$/, '');
-		if (!url) return;
-		searxngSaving = true;
-		try {
-			const res = await fetch(`${getApiBase()}/config`, {
-				method: 'PUT', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ searxng_url: url })
-			});
-			if (!res.ok) throw new Error();
-			searxngUrl = '';
-			searxngSaved = true;
-			searxngHealthy = null;
-			setTimeout(() => (searxngSaved = false), 2000);
-			await loadSecretStatuses();
-		} catch {
-			addToast(t('common.save_failed'), 'error');
-		}
-		searxngSaving = false;
-	}
-
-	async function removeSearxng() {
-		searxngSaving = true;
-		try {
-			const res = await fetch(`${getApiBase()}/config`, {
-				method: 'PUT', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ searxng_url: null })
-			});
-			if (!res.ok) throw new Error();
-			searxngConfigured = false;
-			searxngConfiguredUrl = '';
-			searxngHealthy = null;
-			await loadSecretStatuses();
-		} catch {
-			addToast(t('common.save_failed'), 'error');
-		}
-		searxngSaving = false;
-	}
-
-	// Load all statuses on mount
-	import { onDestroy } from 'svelte';
-
 	let oauthClaimHandled = false;
 
 	$effect(() => {
 		initNotifications();
 		void loadInboxPushPref();
-		loadManagedStatus();
-		loadGoogleStatus();
-		loadSecretStatuses();
+		void loadManagedStatus();
+		void loadGoogleStatus();
+		void loadSecretStatuses();
 
 		// Auto-claim Google tokens after OAuth redirect (managed flow)
 		if (!oauthClaimHandled && typeof window !== 'undefined') {
@@ -464,13 +101,13 @@
 				url.searchParams.delete('google_oauth');
 				window.history.replaceState({}, '', url.toString());
 				// Claim tokens using nonce
-				claimManagedGoogleTokens(claimNonce);
+				void claimManagedGoogleTokens(claimNonce);
 			}
 		}
 	});
 
 	onDestroy(() => {
-		if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null; }
+		stopAuthPoll();
 	});
 </script>
 
@@ -479,16 +116,16 @@
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('integrations.title')}</h1>
 
 	<!-- Anthropic API Key (hidden in managed — credentials are system-controlled) -->
-	{#if !managed}
+	{#if !isManaged()}
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 			<div class="flex items-center justify-between mb-4">
 				<div>
 					<h2 class="font-medium">{t('integrations.anthropic')}</h2>
 					<p class="text-xs text-text-muted mt-1">{t('integrations.anthropic_desc')}</p>
 				</div>
-				{#if secretsLoading}
+				{#if isSecretsLoading()}
 					<span class="text-xs text-text-subtle">{t('common.loading')}</span>
-				{:else if apiKeyConfigured}
+				{:else if isApiKeyConfigured()}
 					<span class="text-xs text-success">{t('integrations.api_key_active')}</span>
 				{:else}
 					<span class="text-xs text-text-subtle">{t('integrations.not_configured')}</span>
@@ -496,7 +133,7 @@
 			</div>
 
 			<div class="space-y-3">
-				{#if !apiKeyConfigured}
+				{#if !isApiKeyConfigured()}
 					<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
 						<li>{t('integrations.anthropic_step1')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">console.anthropic.com</a></li>
 						<li>{t('integrations.anthropic_step2')}</li>
@@ -506,18 +143,19 @@
 					<label for="api-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.api_key_label')}</label>
 					<input
 						id="api-key"
-						bind:value={apiKey}
+						value={getApiKey()}
+						oninput={(e) => setApiKey((e.currentTarget as HTMLInputElement).value)}
 						type="password"
 						placeholder="sk-ant-..."
 						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
 					/>
 				</div>
 				<button
-					onclick={saveApiKey}
-					disabled={!apiKey.trim() || apiKeySaving}
+					onclick={saveAnthropicApiKey}
+					disabled={!getApiKey().trim() || isApiKeySaving()}
 					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
 				>
-					{apiKeySaving ? t('settings.saving') : apiKeyConfigured ? t('integrations.api_key_update') : t('settings.save')}
+					{isApiKeySaving() ? t('settings.saving') : isApiKeyConfigured() ? t('integrations.api_key_update') : t('settings.save')}
 				</button>
 			</div>
 		</div>
@@ -536,32 +174,32 @@
 				<h2 class="font-medium">{t('integrations.google_workspace')}</h2>
 				<p class="text-xs text-text-muted mt-1">{t('integrations.google_services')}</p>
 			</div>
-			{#if googleLoading}
+			{#if isGoogleLoading()}
 				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
-			{:else if googleStatus?.authenticated}
+			{:else if getGoogleStatus()?.authenticated}
 				<span class="text-xs text-success">{t('integrations.connected')}</span>
-			{:else if googleStatus?.available}
+			{:else if getGoogleStatus()?.available}
 				<span class="text-xs text-text-subtle">{t('integrations.not_connected')}</span>
 			{:else}
 				<span class="text-xs text-text-subtle">{t('integrations.not_configured')}</span>
 			{/if}
 		</div>
 
-		{#if googleLoading}
+		{#if isGoogleLoading()}
 			<!-- loading -->
-		{:else if managedGoogleClaiming}
+		{:else if isManagedGoogleClaiming()}
 			<div class="flex items-center gap-2 text-sm text-text-muted">
 				<span class="inline-block h-4 w-4 border-2 border-accent border-t-transparent rounded-full animate-spin"></span>
 				{t('integrations.connecting')}
 			</div>
-		{:else if !googleStatus?.available}
+		{:else if !getGoogleStatus()?.available}
 			<!-- Manual credential setup (managed: Web app + redirect URI, self-hosted: Desktop app) -->
 			<div class="space-y-3">
-				{#if googleCredSaved}
+				{#if isGoogleCredSaved()}
 					<p class="text-sm text-success">{t('integrations.credentials_saved')}</p>
 				{:else}
 					<p class="text-xs text-text-muted mb-3">
-						{managed ? t('integrations.google_setup_guide_suffix_managed') : t('integrations.google_setup_guide_suffix')}:
+						{isManaged() ? t('integrations.google_setup_guide_suffix_managed') : t('integrations.google_setup_guide_suffix')}:
 					</p>
 					<a
 						href="https://docs.lynox.ai/integrations/google-workspace/#setup"
@@ -572,7 +210,7 @@
 						{t('integrations.google_setup_guide')}
 						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
 					</a>
-					{#if managed}
+					{#if isManaged()}
 						<div class="mb-3">
 							<p class="text-xs text-text-muted mb-1">{t('integrations.google_redirect_uri_label')}</p>
 							<button onclick={() => copyText(`${window.location.origin}/api/google/callback`)} class="w-full text-left rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs font-mono text-text-muted hover:border-border-hover cursor-pointer" title={t('common.copy')}>
@@ -583,13 +221,15 @@
 					<p class="text-xs text-text-muted mb-2">{t('integrations.google_paste_credentials')}</p>
 					<div class="space-y-2">
 						<input
-							bind:value={googleClientId}
+							value={getGoogleClientId()}
+							oninput={(e) => setGoogleClientId((e.currentTarget as HTMLInputElement).value)}
 							type="password"
 							placeholder="Client ID"
 							class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
 						/>
 						<input
-							bind:value={googleClientSecret}
+							value={getGoogleClientSecret()}
+							oninput={(e) => setGoogleClientSecret((e.currentTarget as HTMLInputElement).value)}
 							type="password"
 							placeholder="Client Secret"
 							class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
@@ -597,14 +237,14 @@
 					</div>
 					<button
 						onclick={saveGoogleCredentials}
-						disabled={!googleClientId.trim() || !googleClientSecret.trim() || googleCredSaving}
+						disabled={!getGoogleClientId().trim() || !getGoogleClientSecret().trim() || isGoogleCredSaving()}
 						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
 					>
-						{googleCredSaving ? t('settings.saving') : t('integrations.save_credentials')}
+						{isGoogleCredSaving() ? t('settings.saving') : t('integrations.save_credentials')}
 					</button>
 				{/if}
 			</div>
-		{:else if googleStatus.authenticated}
+		{:else if getGoogleStatus()?.authenticated}
 			<!-- Connected -->
 			<div class="space-y-3">
 				<!-- Scope mode toggle -->
@@ -612,30 +252,30 @@
 					<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.access_level')}</p>
 					<div class="inline-flex rounded-[var(--radius-md)] border border-border overflow-hidden">
 						<button
-							onclick={() => { scopeMode = 'readonly'; }}
-							class="px-3 py-1.5 text-xs transition-colors {scopeMode === 'readonly' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+							onclick={() => setScopeMode('readonly')}
+							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'readonly' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
 						>{t('integrations.scope_readonly')}</button>
 						<button
-							onclick={() => { scopeMode = 'full'; }}
-							class="px-3 py-1.5 text-xs transition-colors {scopeMode === 'full' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+							onclick={() => setScopeMode('full')}
+							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'full' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
 						>{t('integrations.scope_full')}</button>
 					</div>
-					{#if scopeMode === 'full'}
+					{#if getScopeMode() === 'full'}
 						<p class="text-xs text-text-subtle mt-1">{t('integrations.scope_full_desc')}</p>
 					{/if}
 				</div>
-				{#if scopeMismatch}
+				{#if isScopeMismatch()}
 					<button
 						onclick={startGoogleAuth}
-						disabled={connecting}
+						disabled={isConnecting()}
 						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
 					>
-						{connecting ? t('integrations.connecting') : t('integrations.reconnect_google')}
+						{isConnecting() ? t('integrations.connecting') : t('integrations.reconnect_google')}
 					</button>
 					<p class="text-xs text-warning">{t('integrations.scope_change_hint')}</p>
 				{/if}
-				{#if googleStatus.scopes && googleStatus.scopes.length > 0}
-					{@const scopes = googleStatus.scopes}
+				{#if getGoogleStatus()?.scopes && getGoogleStatus()!.scopes!.length > 0}
+					{@const scopes = getGoogleStatus()!.scopes!}
 					{@const services = [
 						{ name: 'Gmail', read: scopes.some(s => s.includes('gmail.readonly')), write: scopes.some(s => s.includes('gmail.send') || s.includes('gmail.modify')) },
 						{ name: 'Calendar', read: scopes.some(s => s.includes('calendar.readonly')), write: scopes.some(s => s.includes('calendar.events')) },
@@ -653,21 +293,22 @@
 				{/if}
 				<button
 					onclick={revokeGoogle}
-					disabled={revoking}
+					disabled={isRevoking()}
 					class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 disabled:opacity-50"
 				>
-					{revoking ? t('integrations.disconnecting') : t('integrations.disconnect')}
+					{isRevoking() ? t('integrations.disconnecting') : t('integrations.disconnect')}
 				</button>
 			</div>
-		{:else if flow}
+		{:else if getDeviceFlow()}
 			<!-- Device flow active -->
+			{@const flow = getDeviceFlow()!}
 			<div class="space-y-3">
 				<p class="text-sm text-text-muted">{t('integrations.device_flow_hint')}</p>
 				<div class="rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 p-4 text-center space-y-2">
 					<a href={flow.verificationUrl} target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80 text-sm break-all">
 						{flow.verificationUrl}
 					</a>
-					<button onclick={() => copyText(flow?.userCode ?? '')} class="text-2xl font-mono font-bold text-text tracking-widest hover:text-accent-text transition-colors cursor-pointer" title={t('common.copy')}>{flow.userCode}</button>
+					<button onclick={() => copyText(flow.userCode)} class="text-2xl font-mono font-bold text-text tracking-widest hover:text-accent-text transition-colors cursor-pointer" title={t('common.copy')}>{flow.userCode}</button>
 				</div>
 				<p class="text-xs text-text-subtle">{t('integrations.waiting_auth')}</p>
 			</div>
@@ -678,26 +319,26 @@
 					<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.access_level')}</p>
 					<div class="inline-flex rounded-[var(--radius-md)] border border-border overflow-hidden">
 						<button
-							onclick={() => { scopeMode = 'readonly'; }}
-							class="px-3 py-1.5 text-xs transition-colors {scopeMode === 'readonly' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+							onclick={() => setScopeMode('readonly')}
+							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'readonly' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
 						>{t('integrations.scope_readonly')}</button>
 						<button
-							onclick={() => { scopeMode = 'full'; }}
-							class="px-3 py-1.5 text-xs transition-colors {scopeMode === 'full' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+							onclick={() => setScopeMode('full')}
+							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'full' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
 						>{t('integrations.scope_full')}</button>
 					</div>
-					{#if scopeMode === 'full'}
+					{#if getScopeMode() === 'full'}
 						<p class="text-xs text-text-subtle mt-1">{t('integrations.scope_full_desc')}</p>
 					{/if}
 				</div>
 				<button
 					onclick={startGoogleAuth}
-					disabled={connecting}
+					disabled={isConnecting()}
 					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
 				>
-					{connecting ? t('integrations.connecting') : t('integrations.connect_google')}
+					{isConnecting() ? t('integrations.connecting') : t('integrations.connect_google')}
 				</button>
-				<p class="text-xs text-text-subtle">{managed ? t('integrations.redirect_flow_preview') : t('integrations.device_flow_preview')}</p>
+				<p class="text-xs text-text-subtle">{isManaged() ? t('integrations.redirect_flow_preview') : t('integrations.device_flow_preview')}</p>
 				<button
 					onclick={resetGoogleCredentials}
 					class="text-xs text-text-subtle hover:text-text-muted transition-colors"
@@ -755,7 +396,8 @@
 			<!-- Per-category opt-out + Quiet Hours + throttle + per-account
 				mute. All keys live in the same envelope and are PATCHed
 				deltas; backend defaults missing fields. -->
-			{#if prefs}
+			{#if getPrefs()}
+			{@const prefs = getPrefs()!}
 			<div class="mt-4 space-y-3 border-t border-border pt-3">
 				<label class="flex items-start gap-2 cursor-pointer text-sm">
 					<input
@@ -780,7 +422,7 @@
 								enabled: (e.currentTarget as HTMLInputElement).checked,
 								// Backfill the user's TZ on first enable so a server
 								// without LYNOX_TZ doesn't silently mute everything in UTC.
-								...(prefs!.quietHours.tz === 'UTC' ? { tz: defaultBrowserTz() } : {}),
+								...(prefs.quietHours.tz === 'UTC' ? { tz: defaultBrowserTz() } : {}),
 							} })}
 							class="mt-0.5"
 						/>
@@ -879,27 +521,27 @@
 	{/if}
 
 	<!-- Web Search (hidden in managed — SearXNG pre-configured) -->
-	{#if !managed}
+	{#if !isManaged()}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">
 			<div>
 				<h2 class="font-medium">{t('integrations.search')}</h2>
 				<p class="text-xs text-text-muted mt-1">{t('integrations.search_desc')}</p>
 			</div>
-			{#if secretsLoading}
+			{#if isSecretsLoading()}
 				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
-			{:else if searchConfigured}
+			{:else if isSearchConfigured()}
 				<span class="text-xs text-success">{t('integrations.search_configured')}</span>
 			{:else}
 				<span class="text-xs text-text-subtle">{t('integrations.search_not_configured')}</span>
 			{/if}
 		</div>
 
-		{#if searchSaved}
+		{#if isSearchSaved()}
 			<p class="text-sm text-success">{t('integrations.search_saved')}</p>
 		{:else}
 			<div class="space-y-3">
-				{#if !searchConfigured}
+				{#if !isSearchConfigured()}
 					<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
 						<li>{t('integrations.search_step1')} <a href="https://app.tavily.com/sign-in" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">tavily.com</a></li>
 						<li>{t('integrations.search_step2')}</li>
@@ -910,7 +552,8 @@
 					<label for="search-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.tavily_label')}</label>
 					<input
 						id="search-key"
-						bind:value={searchKey}
+						value={getSearchKey()}
+						oninput={(e) => setSearchKey((e.currentTarget as HTMLInputElement).value)}
 						type="password"
 						placeholder="tvly-..."
 						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
@@ -918,10 +561,10 @@
 				</div>
 				<button
 					onclick={saveSearch}
-					disabled={!searchKey.trim() || searchSaving}
+					disabled={!getSearchKey().trim() || isSearchSaving()}
 					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
 				>
-					{searchSaving ? t('settings.saving') : t('settings.save')}
+					{isSearchSaving() ? t('settings.saving') : t('settings.save')}
 				</button>
 			</div>
 		{/if}
@@ -929,46 +572,46 @@
 	{/if}
 
 	<!-- SearXNG (hidden in managed — pre-configured as sidecar) -->
-	{#if !managed}
+	{#if !isManaged()}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">
 			<div>
 				<h2 class="font-medium">{t('integrations.searxng')}</h2>
 				<p class="text-xs text-text-muted mt-1">{t('integrations.searxng_desc')}</p>
 			</div>
-			{#if secretsLoading}
+			{#if isSecretsLoading()}
 				<span class="text-xs text-text-subtle">{t('common.loading')}</span>
-			{:else if searxngConfigured}
+			{:else if isSearxngConfigured()}
 				<span class="text-xs text-success">{t('integrations.searxng_configured')}</span>
 			{:else}
 				<span class="text-xs text-text-subtle">{t('integrations.searxng_not_configured')}</span>
 			{/if}
 		</div>
 
-		{#if searxngSaved}
+		{#if isSearxngSaved()}
 			<p class="text-sm text-success">{t('integrations.searxng_saved')}</p>
-		{:else if searxngConfigured}
+		{:else if isSearxngConfigured()}
 			<div class="space-y-3">
-				<p class="text-xs text-text-muted font-mono">{searxngConfiguredUrl}</p>
+				<p class="text-xs text-text-muted font-mono">{getSearxngConfiguredUrl()}</p>
 				<div class="flex gap-2">
 					<button
-						onclick={() => checkSearxng(searxngConfiguredUrl)}
-						disabled={searxngChecking}
+						onclick={() => checkSearxng(getSearxngConfiguredUrl())}
+						disabled={isSearxngChecking()}
 						class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover disabled:opacity-50"
 					>
-						{searxngChecking ? t('integrations.searxng_checking') : t('integrations.searxng_check')}
+						{isSearxngChecking() ? t('integrations.searxng_checking') : t('integrations.searxng_check')}
 					</button>
 					<button
 						onclick={removeSearxng}
-						disabled={searxngSaving}
+						disabled={isSearxngSaving()}
 						class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-error hover:border-error disabled:opacity-50"
 					>
 						{t('integrations.searxng_remove')}
 					</button>
 				</div>
-				{#if searxngHealthy === true}
+				{#if getSearxngHealthy() === true}
 					<p class="text-xs text-success">{t('integrations.searxng_healthy')}</p>
-				{:else if searxngHealthy === false}
+				{:else if getSearxngHealthy() === false}
 					<p class="text-xs text-error">{t('integrations.searxng_check_failed')}</p>
 				{/if}
 			</div>
@@ -984,31 +627,32 @@
 					<div class="flex gap-2">
 						<input
 							id="searxng-url"
-							bind:value={searxngUrl}
+							value={getSearxngUrl()}
+							oninput={(e) => setSearxngUrl((e.currentTarget as HTMLInputElement).value)}
 							type="url"
 							placeholder="http://localhost:8888"
 							class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
 						/>
 						<button
-							onclick={() => { if (searxngUrl.trim()) checkSearxng(searxngUrl.trim().replace(/\/+$/, '')); }}
-							disabled={!searxngUrl.trim() || searxngChecking}
+							onclick={() => { if (getSearxngUrl().trim()) checkSearxng(getSearxngUrl().trim().replace(/\/+$/, '')); }}
+							disabled={!getSearxngUrl().trim() || isSearxngChecking()}
 							class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover disabled:opacity-50"
 						>
-							{searxngChecking ? t('integrations.searxng_checking') : t('integrations.searxng_check')}
+							{isSearxngChecking() ? t('integrations.searxng_checking') : t('integrations.searxng_check')}
 						</button>
 					</div>
 				</div>
-				{#if searxngHealthy === true}
+				{#if getSearxngHealthy() === true}
 					<p class="text-xs text-success">{t('integrations.searxng_healthy')}</p>
-				{:else if searxngHealthy === false}
+				{:else if getSearxngHealthy() === false}
 					<p class="text-xs text-error">{t('integrations.searxng_check_failed')}</p>
 				{/if}
 				<button
 					onclick={saveSearxng}
-					disabled={!searxngUrl.trim() || searxngSaving}
+					disabled={!getSearxngUrl().trim() || isSearxngSaving()}
 					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
 				>
-					{searxngSaving ? t('settings.saving') : t('settings.save')}
+					{isSearxngSaving() ? t('settings.saving') : t('settings.save')}
 				</button>
 			</div>
 		{/if}
