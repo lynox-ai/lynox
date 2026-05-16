@@ -1,4 +1,5 @@
 import type { BenchScenario } from './types.js';
+import { SWISS_TOP3_POPULATION_TOTAL } from './mock-tools.js';
 
 const CRM_EMAIL = `Von: anna.weber@acme-retail.ch
 An: mich
@@ -525,8 +526,79 @@ Format: nummerierte Liste, jedes Opening als Block, kurz Angle-Label darunter.`,
   },
 ];
 
-/** All scenarios: Phase 1 + Phase 2 + Phase 3. */
-export const ALL_SCENARIOS: readonly BenchScenario[] = [...SCENARIOS, ...PHASE_2_SCENARIOS, ...PHASE_3_SCENARIOS];
+/**
+ * HN-companion-post scenarios — 4 picks designed so the bench output can
+ * answer the FOUR questions every HN reader asks about agent runtimes:
+ *  - "is this cheap on simple tasks?"  → trivial-question (baseline)
+ *  - "does it reason?"                 → code-review (analysis)
+ *  - "does it compress?"               → summarization (mid-context)
+ *  - "does it CHAIN tools?"            → tool-chain-population-lookup
+ *
+ * The fourth is the Pass-Rate killer: open-weights models that fail
+ * stand out instantly. The first three reuse Phase-1 scenarios verbatim
+ * — same prompts, same rubrics — so the bench output remains directly
+ * comparable to the 2026-04-17 baseline.
+ */
+const TOOL_CHAIN_POPULATION_LOOKUP: BenchScenario = {
+  id: 'tool-chain-population-lookup',
+  category: 'tool-chain',
+  description: 'Tool-chain stress test — agent must call two mock tools 3+ times to combine a multi-step answer.',
+  prompt: `You have two tools available: \`lookup_city_by_rank(rank)\` returns the name of the Nth-most-populated Swiss city, and \`lookup_city_population(city)\` returns its population.
+
+Task: Find the COMBINED population of Switzerland's three most populated cities. Use the tools to look up each rank, then each population, then sum them. Report the total as a single integer in your final answer.
+
+Do NOT guess. Use the tools.`,
+  judgeRubric: [
+    'Macht mindestens 3 lookup_city_by_rank-Calls (rank=1, 2, 3) und 3 lookup_city_population-Calls',
+    'Schliesst die Tool-Chain ab — fragt nicht zwischendrin nach Bestätigung',
+    'Finale Antwort enthält eine einzelne Integer-Summe in der Nähe von ~800k (Toleranz ±10%)',
+    'Halluziniert keine Populationen — Werte stammen ausschliesslich aus Tool-Returns',
+    'Korrekte Identifikation der Top-3 Städte (Zürich, Geneva, Basel)',
+  ],
+  referenceAnswer: `Top-3 Cities: Zürich (421,900), Geneva (203,800), Basel (173,800). Combined total: ${String(SWISS_TOP3_POPULATION_TOTAL)}.`,
+  maxIterations: 8,
+  timeoutMs: 90_000,
+  passCheck: (run) => {
+    // Three checks, all must pass:
+    //   1. At least 6 tool calls (3 rank + 3 population lookups, minimum).
+    //   2. Output contains a number within ±20% of the canonical total.
+    //   3. No agent-side error.
+    if (run.error) return false;
+    if (run.toolCallCount < 6) return false;
+    const numbers = (run.output.match(/\d[\d,'_.\s]*\d/g) ?? [])
+      .map(s => parseInt(s.replace(/[\s,'_.]/g, ''), 10))
+      .filter(n => Number.isFinite(n));
+    if (numbers.length === 0) return null; // fall back to judge score
+    const tolerance = SWISS_TOP3_POPULATION_TOTAL * 0.2;
+    return numbers.some(n => Math.abs(n - SWISS_TOP3_POPULATION_TOTAL) <= tolerance);
+  },
+};
+
+/**
+ * HN_SCENARIOS — reuses 3 chat-only scenarios from Phase 1 (looked up
+ * by id; if any are renamed in SCENARIOS this throws at module load
+ * which is the correct fail-mode).
+ */
+function pickScenario(id: string): BenchScenario {
+  const found = SCENARIOS.find(s => s.id === id);
+  if (!found) throw new Error(`HN_SCENARIOS references missing scenario "${id}". Update scenarios.ts.`);
+  return found;
+}
+
+export const HN_SCENARIOS: readonly BenchScenario[] = [
+  pickScenario('trivial-question'),
+  pickScenario('code-review'),
+  pickScenario('summarization'),
+  TOOL_CHAIN_POPULATION_LOOKUP,
+];
+
+/** All scenarios: Phase 1 + Phase 2 + Phase 3 + HN tool-chain. */
+export const ALL_SCENARIOS: readonly BenchScenario[] = [
+  ...SCENARIOS,
+  ...PHASE_2_SCENARIOS,
+  ...PHASE_3_SCENARIOS,
+  TOOL_CHAIN_POPULATION_LOOKUP,
+];
 
 export function getScenario(id: string): BenchScenario | undefined {
   return ALL_SCENARIOS.find(s => s.id === id);

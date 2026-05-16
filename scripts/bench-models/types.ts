@@ -1,6 +1,6 @@
-import type { EffortLevel } from '../../src/types/index.js';
+import type { EffortLevel, LLMProvider } from '../../src/types/index.js';
 
-export type ScenarioCategory = 'baseline' | 'extraction' | 'analysis' | 'reasoning' | 'summarization';
+export type ScenarioCategory = 'baseline' | 'extraction' | 'analysis' | 'reasoning' | 'summarization' | 'tool-chain';
 
 export interface BenchScenario {
   readonly id: string;
@@ -11,14 +11,52 @@ export interface BenchScenario {
   readonly referenceAnswer: string;
   readonly maxIterations?: number;
   readonly timeoutMs?: number;
+  /**
+   * Optional deterministic pass-check, invoked AFTER judging. For tool-chain
+   * scenarios this is where we verify the agent actually called http_request N
+   * times in the right order — a 5/5 judge score on a tool-chain scenario is
+   * meaningless if the agent fabricated the answer instead of fetching it.
+   * Returns null if it can't decide; the run then falls back to judge score >= 3.
+   */
+  readonly passCheck?: (run: import('./types.js').BenchRun) => boolean | null;
 }
+
+/**
+ * Provider tier — drives report grouping, NOT the API path itself. The API
+ * path is chosen by `provider` + `apiBaseURL`. The two are intentionally
+ * decoupled because OpenRouter routes 4 different model families through the
+ * same `openai` provider with the same base URL.
+ */
+export type ProviderTier =
+  | 'anthropic-native'
+  | 'mistral-native'
+  | 'openrouter';
 
 export interface BenchConfig {
   readonly label: string;
-  readonly tier: 'haiku' | 'sonnet' | 'opus';
+  readonly tier: ProviderTier;
+  readonly provider: LLMProvider;
+  /** Model ID for native providers (Anthropic); ignored when `openaiModelId` is set. */
   readonly modelId: string;
+  /** OpenAI-compat base URL — required for `provider='openai'`. */
+  readonly apiBaseURL?: string;
+  /** OpenAI-compat model ID — OpenRouter slug or Mistral `mistral-large-latest`. */
+  readonly openaiModelId?: string;
+  /** Env var holding the auth token for this config. Resolved at run time. */
+  readonly apiKeyEnv: 'ANTHROPIC_API_KEY' | 'MISTRAL_API_KEY' | 'OPENROUTER_API_KEY';
   readonly effort: EffortLevel | 'none';
   readonly thinking: 'adaptive' | 'disabled';
+  /**
+   * Pricing in $/M tokens. Required for non-Anthropic configs because
+   * `core/pricing.ts::getPricing` falls back to opus rates for unknown
+   * model IDs, which would silently inflate non-Anthropic numbers ~5×.
+   * Anthropic-native configs can omit this — the runner reads
+   * `getPricing(modelId)` instead.
+   */
+  readonly pricing?: {
+    readonly inputPerMillion: number;
+    readonly outputPerMillion: number;
+  };
 }
 
 export interface BenchUsage {
@@ -46,6 +84,13 @@ export interface JudgedRun extends BenchRun {
   readonly score: number;
   readonly judgeReasoning: string;
   readonly judgeCostUSD: number;
+  /**
+   * Pass = (no error) AND (no timeout) AND (iterationsUsed <= maxIterations)
+   *        AND (scenario.passCheck?.(run) === true || (passCheck null/absent && score >= 3))
+   * The single HN-relevant column — answers "did this model actually complete
+   * the task" instead of "did this model do well on average".
+   */
+  readonly passed: boolean;
 }
 
 export interface BenchReport {

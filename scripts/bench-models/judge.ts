@@ -32,6 +32,7 @@ export async function judgeRun(
       score: 0,
       judgeReasoning: `Run failed: ${run.error}`,
       judgeCostUSD: 0,
+      passed: false,
     };
   }
 
@@ -55,7 +56,29 @@ export async function judgeRun(
     output_tokens: response.usage.output_tokens,
   });
 
-  return { ...run, score, judgeReasoning: reasoning, judgeCostUSD };
+  return { ...run, score, judgeReasoning: reasoning, judgeCostUSD, passed: computePassed(scenario, run, score) };
+}
+
+/**
+ * Pass-Rate logic — the single HN-relevant column. Order matters:
+ *   1. Run errored / timed out → fail.
+ *   2. Scenario has its own deterministic check → trust it (tool-chain
+ *      scenarios use this to verify the agent actually called the tool
+ *      instead of fabricating an answer the judge can't distinguish).
+ *   3. Fallback: judge score >= 3/5.
+ *
+ * `iterationsUsed > maxIterations` is NOT a failure on its own — the agent
+ * config caps iterations, so hitting the cap means "ran out of budget" not
+ * "broke", and the output may still be acceptable. The judge already
+ * penalizes incomplete answers via the rubric.
+ */
+function computePassed(scenario: BenchScenario, run: BenchRun, score: number): boolean {
+  if (run.error) return false;
+  if (scenario.passCheck) {
+    const verdict = scenario.passCheck(run);
+    if (verdict !== null) return verdict;
+  }
+  return score >= 3;
 }
 
 function buildJudgePrompt(scenario: BenchScenario, run: BenchRun): string {

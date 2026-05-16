@@ -22,15 +22,17 @@ import { homedir } from 'node:os';
 import { runOne } from './bench-models/run-one.js';
 import { judgeRun } from './bench-models/judge.js';
 import { buildMarkdownReport } from './bench-models/report.js';
-import { SCENARIOS, PHASE_2_SCENARIOS, PHASE_3_SCENARIOS, ALL_SCENARIOS, getScenario } from './bench-models/scenarios.js';
-import { PHASE_1_CONFIGS, PHASE_2_CONFIGS, PHASE_3_CONFIGS, SMOKE_CONFIG, getConfig } from './bench-models/configs.js';
+import { SCENARIOS, PHASE_2_SCENARIOS, PHASE_3_SCENARIOS, HN_SCENARIOS, ALL_SCENARIOS, getScenario } from './bench-models/scenarios.js';
+import { PHASE_1_CONFIGS, PHASE_2_CONFIGS, PHASE_3_CONFIGS, HN_BENCH_CONFIGS, SMOKE_CONFIG, getConfig } from './bench-models/configs.js';
 import type { BenchConfig, BenchReport, BenchScenario, JudgedRun } from './bench-models/types.js';
+
+type ApiKeys = Readonly<Record<BenchConfig['apiKeyEnv'], string | undefined>>;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RESULTS_DIR = join(__dirname, 'bench-models', 'results');
 
 interface CliArgs {
-  mode: 'smoke' | 'phase1' | 'phase2' | 'phase3' | 'list' | 'custom';
+  mode: 'smoke' | 'phase1' | 'phase2' | 'phase3' | 'hn' | 'list' | 'custom';
   scenarioId?: string;
   configLabel?: string;
   iterations: number;
@@ -44,6 +46,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     else if (a === '--phase1') args.mode = 'phase1';
     else if (a === '--phase2') args.mode = 'phase2';
     else if (a === '--phase3') args.mode = 'phase3';
+    else if (a === '--hn') args.mode = 'hn';
     else if (a === '--list') args.mode = 'list';
     else if (a === '--scenario') { args.scenarioId = argv[++i]; args.mode = 'custom'; }
     else if (a === '--config') { args.configLabel = argv[++i]; args.mode = 'custom'; }
@@ -59,14 +62,40 @@ function printUsage(): void {
   process.stdout.write(header + '\n');
 }
 
-function getApiKey(): string {
-  if (process.env['ANTHROPIC_API_KEY']) return process.env['ANTHROPIC_API_KEY'];
-  try {
-    const configPath = join(homedir(), '.lynox', 'config.json');
-    const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-    if (typeof config['api_key'] === 'string' && config['api_key'].length > 0) return config['api_key'];
-  } catch { /* not found */ }
-  throw new Error('No API key found. Set ANTHROPIC_API_KEY or configure ~/.lynox/config.json');
+function getApiKeys(configs: readonly BenchConfig[]): ApiKeys {
+  // ANTHROPIC is always required because judge-Haiku runs through it,
+  // regardless of which models the matrix includes.
+  let anthropic = process.env['ANTHROPIC_API_KEY'];
+  if (!anthropic) {
+    try {
+      const configPath = join(homedir(), '.lynox', 'config.json');
+      const cfg = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+      if (typeof cfg['api_key'] === 'string' && cfg['api_key'].length > 0) {
+        anthropic = cfg['api_key'];
+      }
+    } catch { /* not found */ }
+  }
+  if (!anthropic) {
+    throw new Error('No ANTHROPIC_API_KEY found. Required for the judge step. Set the env var or configure ~/.lynox/config.json.');
+  }
+
+  const keys: ApiKeys = {
+    ANTHROPIC_API_KEY: anthropic,
+    MISTRAL_API_KEY: process.env['MISTRAL_API_KEY'],
+    OPENROUTER_API_KEY: process.env['OPENROUTER_API_KEY'],
+  };
+
+  // Fail fast on any config whose env var is unset — better than getting
+  // hundreds of cryptic per-run errors mid-bench.
+  const needed = new Set(configs.map(c => c.apiKeyEnv));
+  const missing = [...needed].filter(env => !keys[env]);
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing API keys for configs in this matrix: ${missing.join(', ')}. ` +
+      `Set them in the env before running.`,
+    );
+  }
+  return keys;
 }
 
 function buildMatrix(args: CliArgs): { scenarios: readonly BenchScenario[]; configs: readonly BenchConfig[]; runs: number } {
@@ -81,6 +110,10 @@ function buildMatrix(args: CliArgs): { scenarios: readonly BenchScenario[]; conf
   }
   if (args.mode === 'phase3') {
     return { scenarios: PHASE_3_SCENARIOS, configs: PHASE_3_CONFIGS, runs: args.iterations };
+  }
+  if (args.mode === 'hn') {
+    // HN-companion-post matrix — 4 scenarios × 8 configs × N runs.
+    return { scenarios: HN_SCENARIOS, configs: HN_BENCH_CONFIGS, runs: args.iterations };
   }
   // custom
   const scenarios = args.scenarioId
@@ -117,11 +150,15 @@ async function main(): Promise<void> {
     for (const c of PHASE_2_CONFIGS) process.stdout.write(`  ${c.label.padEnd(18)} ${c.modelId.padEnd(32)} effort=${c.effort} thinking=${c.thinking}\n`);
     process.stdout.write('\nPhase 3 Configs:\n');
     for (const c of PHASE_3_CONFIGS) process.stdout.write(`  ${c.label.padEnd(18)} ${c.modelId.padEnd(32)} effort=${c.effort} thinking=${c.thinking}\n`);
+    process.stdout.write('\nHN Scenarios:\n');
+    for (const s of HN_SCENARIOS) process.stdout.write(`  ${s.id.padEnd(28)} ${s.category.padEnd(14)} ${s.description}\n`);
+    process.stdout.write('\nHN Configs:\n');
+    for (const c of HN_BENCH_CONFIGS) process.stdout.write(`  ${c.label.padEnd(20)} tier=${c.tier.padEnd(18)} provider=${c.provider} keyEnv=${c.apiKeyEnv}\n`);
     return;
   }
 
-  const apiKey = getApiKey();
   const { scenarios, configs, runs } = buildMatrix(args);
+  const apiKeys = getApiKeys(configs);
   const totalRuns = scenarios.length * configs.length * runs;
 
   process.stdout.write(`Matrix: ${scenarios.length} scenarios × ${configs.length} configs × ${runs} runs = ${totalRuns} total\n\n`);
@@ -137,11 +174,13 @@ async function main(): Promise<void> {
         process.stdout.write(`${prefix} ${scenario.id.padEnd(24)} × ${config.label.padEnd(18)} iter=${iter} ... `);
         const tStart = Date.now();
         try {
-          const run = await runOne({ scenario, config, iteration: iter, apiKey });
-          const judgedRun = await judgeRun(scenario, run, apiKey);
+          const run = await runOne({ scenario, config, iteration: iter, apiKeys });
+          // Judge always uses Anthropic Haiku — apiKeys.ANTHROPIC_API_KEY is
+          // verified non-null by getApiKeys() at startup.
+          const judgedRun = await judgeRun(scenario, run, apiKeys.ANTHROPIC_API_KEY!);
           judged.push(judgedRun);
           const elapsed = Date.now() - tStart;
-          process.stdout.write(`score=${judgedRun.score} cost=$${judgedRun.costUSD.toFixed(4)} lat=${fmtDuration(elapsed)}${run.error ? ' [ERROR]' : ''}\n`);
+          process.stdout.write(`score=${judgedRun.score} pass=${judgedRun.passed ? 'Y' : 'N'} cost=$${judgedRun.costUSD.toFixed(4)} lat=${fmtDuration(elapsed)}${run.error ? ' [ERROR]' : ''}\n`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           process.stdout.write(`CRASH: ${msg}\n`);
@@ -161,7 +200,11 @@ async function main(): Promise<void> {
 
   mkdirSync(RESULTS_DIR, { recursive: true });
   const stamp = report.timestamp.replace(/[:.]/g, '-');
-  const suffix = args.mode === 'phase3' ? '-phase3' : args.mode === 'phase2' ? '-phase2' : args.mode === 'phase1' ? '-phase1' : '';
+  const suffix = args.mode === 'hn' ? '-hn'
+    : args.mode === 'phase3' ? '-phase3'
+    : args.mode === 'phase2' ? '-phase2'
+    : args.mode === 'phase1' ? '-phase1'
+    : '';
   const jsonPath = join(RESULTS_DIR, `${stamp}${suffix}.json`);
   const mdPath = join(RESULTS_DIR, `${stamp}${suffix}.md`);
   writeFileSync(jsonPath, JSON.stringify(report, null, 2));

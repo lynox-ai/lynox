@@ -13,20 +13,24 @@ export function buildMarkdownReport(report: BenchReport): string {
 
   lines.push(`## Per-Config Summary`);
   lines.push(``);
-  lines.push(`| Config | Runs | Avg Score | Avg Cost | Avg Latency | $/score-point |`);
-  lines.push(`|--------|------|-----------|----------|-------------|---------------|`);
+  lines.push(`| Config | Runs | Pass-Rate | Avg Score | Avg Cost | Avg Latency | $/score-point |`);
+  lines.push(`|--------|------|-----------|-----------|----------|-------------|---------------|`);
   const byConfig = groupBy(report.runs, r => r.configLabel);
   const configStats = Object.entries(byConfig).map(([label, runs]) => ({
     label,
     runs: runs.length,
+    passRate: runs.filter(r => r.passed).length / runs.length,
     avgScore: avg(runs.map(r => r.score)),
     avgCost: avg(runs.map(r => r.costUSD)),
     avgLatency: avg(runs.map(r => r.latencyMs)),
   }));
-  configStats.sort((a, b) => b.avgScore / (b.avgCost + 1e-9) - a.avgScore / (a.avgCost + 1e-9));
+  // Sort by pass-rate first (the HN-relevant metric), score-per-dollar as tiebreaker.
+  configStats.sort((a, b) =>
+    b.passRate - a.passRate || (b.avgScore / (b.avgCost + 1e-9)) - (a.avgScore / (a.avgCost + 1e-9)),
+  );
   for (const s of configStats) {
     const costPerPoint = s.avgScore > 0 ? (s.avgCost / s.avgScore).toFixed(5) : '—';
-    lines.push(`| ${s.label} | ${s.runs} | ${s.avgScore.toFixed(2)} | $${s.avgCost.toFixed(4)} | ${(s.avgLatency / 1000).toFixed(1)}s | $${costPerPoint} |`);
+    lines.push(`| ${s.label} | ${s.runs} | ${(s.passRate * 100).toFixed(0)}% | ${s.avgScore.toFixed(2)} | $${s.avgCost.toFixed(4)} | ${(s.avgLatency / 1000).toFixed(1)}s | $${costPerPoint} |`);
   }
   lines.push(``);
 
@@ -36,19 +40,20 @@ export function buildMarkdownReport(report: BenchReport): string {
   for (const [scenarioId, runs] of Object.entries(byScenario)) {
     lines.push(`### ${scenarioId}`);
     lines.push(``);
-    lines.push(`| Config | Score | Cost | Latency | Tools |`);
-    lines.push(`|--------|-------|------|---------|-------|`);
+    lines.push(`| Config | Pass | Score | Cost | Latency | Tools |`);
+    lines.push(`|--------|------|-------|------|---------|-------|`);
     const byCfg = groupBy(runs, r => r.configLabel);
     const rows = Object.entries(byCfg).map(([label, cfgRuns]) => ({
       label,
+      passRate: cfgRuns.filter(r => r.passed).length / cfgRuns.length,
       score: avg(cfgRuns.map(r => r.score)),
       cost: avg(cfgRuns.map(r => r.costUSD)),
       latency: avg(cfgRuns.map(r => r.latencyMs)),
       tools: avg(cfgRuns.map(r => r.toolCallCount)),
     }));
-    rows.sort((a, b) => b.score - a.score || a.cost - b.cost);
+    rows.sort((a, b) => b.passRate - a.passRate || b.score - a.score || a.cost - b.cost);
     for (const r of rows) {
-      lines.push(`| ${r.label} | ${r.score.toFixed(2)} | $${r.cost.toFixed(4)} | ${(r.latency / 1000).toFixed(1)}s | ${r.tools.toFixed(1)} |`);
+      lines.push(`| ${r.label} | ${(r.passRate * 100).toFixed(0)}% | ${r.score.toFixed(2)} | $${r.cost.toFixed(4)} | ${(r.latency / 1000).toFixed(1)}s | ${r.tools.toFixed(1)} |`);
     }
     lines.push(``);
   }
@@ -74,7 +79,7 @@ export function buildMarkdownReport(report: BenchReport): string {
   for (const run of report.runs) {
     lines.push(`### ${run.scenarioId} × ${run.configLabel} (iter ${run.iteration})`);
     lines.push(``);
-    lines.push(`- Score: **${run.score}/5** — ${run.judgeReasoning}`);
+    lines.push(`- Pass: **${run.passed ? 'YES' : 'NO'}** | Score: ${run.score}/5 — ${run.judgeReasoning}`);
     lines.push(`- Cost: $${run.costUSD.toFixed(5)} | Latency: ${(run.latencyMs / 1000).toFixed(2)}s | Tokens: in=${run.usage.inputTokens} out=${run.usage.outputTokens} cacheR=${run.usage.cacheReadTokens}`);
     lines.push(`- Tools: ${run.toolCallCount} | Iterations: ${run.iterationsUsed}`);
     if (run.error) lines.push(`- **Error:** ${run.error}`);

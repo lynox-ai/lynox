@@ -2,6 +2,7 @@ import { Agent } from '../../src/core/agent.js';
 import { calculateCost } from '../../src/core/pricing.js';
 import type { StreamEvent, ThinkingMode } from '../../src/types/index.js';
 import type { BenchConfig, BenchRun, BenchScenario, BenchUsage } from './types.js';
+import { getToolsForScenario } from './mock-tools.js';
 
 const WEB_SEARCH_COST_PER_REQUEST = 0.01; // $10 per 1000 requests
 
@@ -13,10 +14,22 @@ export interface RunOneOptions {
   readonly scenario: BenchScenario;
   readonly config: BenchConfig;
   readonly iteration: number;
-  readonly apiKey: string;
+  /**
+   * Map of env-var-name -> resolved API key. Caller fetches each one once at
+   * startup and passes the whole map; runOne picks the key indicated by
+   * `config.apiKeyEnv`. Letting runOne touch process.env directly per call
+   * would mask "key missing" failures inside the timer racing the agent.
+   */
+  readonly apiKeys: Readonly<Record<BenchConfig['apiKeyEnv'], string | undefined>>;
 }
 
-export async function runOne({ scenario, config, iteration, apiKey }: RunOneOptions): Promise<BenchRun> {
+export async function runOne({ scenario, config, iteration, apiKeys }: RunOneOptions): Promise<BenchRun> {
+  const apiKey = apiKeys[config.apiKeyEnv];
+  if (!apiKey) {
+    throw new Error(
+      `bench/${config.label}: ${config.apiKeyEnv} is required but unset. Configure it in env or ~/.lynox/config.json before running.`,
+    );
+  }
   const usage: { input: number; output: number; cacheW: number; cacheR: number; webSearch: number } = {
     input: 0, output: 0, cacheW: 0, cacheR: 0, webSearch: 0,
   };
@@ -41,10 +54,25 @@ export async function runOne({ scenario, config, iteration, apiKey }: RunOneOpti
     }
   };
 
+  // Provider-specific wiring. For `openai` (Mistral / OpenRouter), we pass
+  // apiBaseURL + openaiModelId; the Agent constructor's `isCustomProxy`
+  // branch forces thinking=disabled + effort=undefined regardless of what's
+  // configured here, so non-Anthropic configs ride on chat-loop only — which
+  // is what we want for the HN comparison.
+  //
+  // Tools are only attached when the scenario declares a tool-chain need
+  // (currently `tool-chain-population-lookup`). Empty list for chat-only
+  // scenarios — attaching tools to chat-only runs would change behavior on
+  // some models even when the tool isn't invoked.
+  const tools = getToolsForScenario(scenario.id);
   const agent = new Agent({
     name: `bench-${config.label}`,
     model: config.modelId,
+    provider: config.provider,
     apiKey,
+    ...(config.apiBaseURL ? { apiBaseURL: config.apiBaseURL } : {}),
+    ...(config.openaiModelId ? { openaiModelId: config.openaiModelId } : {}),
+    ...(tools.length > 0 ? { tools } : {}),
     onStream,
     maxIterations: scenario.maxIterations ?? 3,
     thinking,
@@ -73,12 +101,19 @@ export async function runOne({ scenario, config, iteration, apiKey }: RunOneOpti
     cacheReadTokens:  usage.cacheR,
     webSearchRequests: usage.webSearch,
   };
-  const tokenCost = calculateCost(config.modelId, {
-    input_tokens: finalUsage.inputTokens,
-    output_tokens: finalUsage.outputTokens,
-    cache_creation_input_tokens: finalUsage.cacheWriteTokens,
-    cache_read_input_tokens: finalUsage.cacheReadTokens,
-  });
+  // Non-Anthropic configs MUST supply explicit pricing — otherwise
+  // calculateCost falls back to opus rates for unknown model IDs (see
+  // core/pricing.ts) and inflates the open-weights tier by ~5×. The
+  // BenchConfig schema documents this requirement.
+  const tokenCost = config.pricing
+    ? (finalUsage.inputTokens  / 1_000_000) * config.pricing.inputPerMillion
+    + (finalUsage.outputTokens / 1_000_000) * config.pricing.outputPerMillion
+    : calculateCost(config.modelId, {
+      input_tokens: finalUsage.inputTokens,
+      output_tokens: finalUsage.outputTokens,
+      cache_creation_input_tokens: finalUsage.cacheWriteTokens,
+      cache_read_input_tokens: finalUsage.cacheReadTokens,
+    });
   const costUSD = tokenCost + (finalUsage.webSearchRequests * WEB_SEARCH_COST_PER_REQUEST);
 
   return {
