@@ -51,8 +51,18 @@ export interface ApiRateLimit {
 }
 
 export interface ApiAuth {
-  /** Auth type: basic, bearer, header, query, oauth2 (oauth2 reserved for managed OAuth onboarding). */
-  type: 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
+  /**
+   * Auth type:
+   * - `none`     — explicitly public API (no credential needed). Use this for
+   *                APIs like HN-Algolia or arXiv so the create-action's "no auth"
+   *                heuristic doesn't block the profile.
+   * - `basic`    — username + password.
+   * - `bearer`   — `Authorization: Bearer <token>`.
+   * - `header`   — API key in a custom header (e.g. `X-Api-Key`).
+   * - `query`    — API key in a query parameter.
+   * - `oauth2`   — managed OAuth refresh-token flow.
+   */
+  type: 'none' | 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
   /**
    * For 'basic': how the credential is stored.
    * - 'user_pass_split' — separate username + password fields combined at call time.
@@ -433,7 +443,8 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     lines.push(`Base URL: ${p.base_url}`);
 
     if (p.auth) {
-      const authDesc = p.auth.type === 'basic'
+      const authDesc = p.auth.type === 'none' ? 'None (public API — no credentials required)'
+        : p.auth.type === 'basic'
           ? p.auth.basic_format === 'pre_encoded_b64'
             ? 'Basic Auth (pre-encoded Base64 secret — send as-is in Authorization header)'
             : 'Basic Auth (username:password base64)'

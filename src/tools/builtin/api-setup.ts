@@ -74,7 +74,7 @@ interface ApiSetupInput {
 }
 
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
-const VALID_AUTH_TYPES = new Set(['basic', 'bearer', 'header', 'query', 'oauth2']);
+const VALID_AUTH_TYPES = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
 const VALID_BASIC_FORMATS = new Set(['user_pass_split', 'pre_encoded_b64']);
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const VALID_SHAPE_KINDS = new Set(['reduce', 'passthrough']);
@@ -99,7 +99,7 @@ function validateProfile(profile: ApiProfile): string | null {
   }
   if (profile.auth) {
     if (!VALID_AUTH_TYPES.has(profile.auth.type)) {
-      return `Invalid auth.type "${profile.auth.type}": must be basic, bearer, header, query, or oauth2`;
+      return `Invalid auth.type "${profile.auth.type}": must be none, basic, bearer, header, query, or oauth2`;
     }
     if (profile.auth.basic_format !== undefined && !VALID_BASIC_FORMATS.has(profile.auth.basic_format)) {
       return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;
@@ -300,7 +300,10 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
     auth: {
       type: 'object',
       properties: {
-        type: { type: 'string', enum: ['basic', 'bearer', 'header', 'query', 'oauth2'] as const },
+        // `none` is included so docs_url bootstrap can mark public APIs explicitly
+        // (HN-Algolia, arXiv, etc.) — otherwise the agent has to fake bearer+vault_keys=[]
+        // to dodge the create-action's "no auth specified" warning.
+        type: { type: 'string', enum: ['none', 'basic', 'bearer', 'header', 'query', 'oauth2'] as const },
         basic_format: { type: 'string', enum: ['user_pass_split', 'pre_encoded_b64'] as const },
         header_name: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9-]*$' },
         query_param: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_-]*$' },
@@ -358,7 +361,7 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
 interface DocsExtracted {
   description?: string;
   auth?: {
-    type: 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
+    type: 'none' | 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
     basic_format?: 'user_pass_split' | 'pre_encoded_b64';
     header_name?: string;
     query_param?: string;
@@ -384,6 +387,7 @@ const DOCS_EXTRACT_SYSTEM = `You read API documentation pages and extract a stru
 
 Rules:
 - Only populate fields you can support with explicit evidence from the docs. Leave a field unset rather than guessing.
+- For auth.type: set "none" when the docs explicitly state the API is public / requires no key (HN-Algolia, arXiv, public stats APIs). Use "basic" / "bearer" / "header" / "query" / "oauth2" otherwise.
 - If the docs say "no parallel calls", "one request at a time", "per-token concurrency cap = 1", or similar, set concurrency.parallel_ok=false. Otherwise set parallel_ok=true ONLY if the docs explicitly confirm concurrent calls are supported.
 - When you set parallel_ok=true OR parallel_ok=false, append one notes[] entry quoting the docs sentence that supports the claim (≤200 chars, use straight quotes).
 - For cost: prefer per_call when the docs list a fixed price per request; per_token when pricing is per input/output token; per_unit for other unit-priced models.
@@ -805,7 +809,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         },
         profile: {
           type: 'object',
-          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: basic|bearer|header|query|oauth2, basic_format: user_pass_split|pre_encoded_b64, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
+          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
         },
         id: {
           type: 'string',
@@ -982,7 +986,7 @@ Next steps before calling create:
         warnings.push('No "avoid" rules — add common mistakes to prevent (wrong methods, missing params, rate limit pitfalls).');
       }
       if (!profile.auth) {
-        warnings.push('No auth method specified — most APIs require authentication.');
+        warnings.push('No auth method specified — set `auth.type` to "none" if the API is intentionally public (HN-Algolia, arXiv, public stats APIs), otherwise specify "basic" / "bearer" / "header" / "query" / "oauth2".');
       }
       if (warnings.length > 0) {
         return `Profile is incomplete — research the API docs before creating:\n\n${warnings.map(w => `- ${w}`).join('\n')}\n\nTip: use action="bootstrap" with an OpenAPI URL to auto-derive endpoints + auth.`;

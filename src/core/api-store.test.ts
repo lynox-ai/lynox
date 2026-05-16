@@ -410,5 +410,18 @@ describe('ApiStore', () => {
       expect(out).toContain('OAuth2');
       expect(out).toContain('GOOGLE_REFRESH_TOKEN');
     });
+
+    it('renders auth.type "none" as the explicit public-API label', () => {
+      const p: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'public-render',
+        auth: { type: 'none' },
+      };
+      store.register(p);
+      const out = store.formatProfile(store.get('public-render')!);
+      expect(out).toContain('None (public API');
+      expect(out).not.toContain('vault keys');
+      expect(out).not.toContain('Bearer');
+    });
   });
 });
