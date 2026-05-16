@@ -67,19 +67,31 @@ const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<M
  * configured `api_base_url`. Returns `null` for unknown providers so callers
  * can fall back to the single configured `openai_model_id`.
  *
+ * Matches by URL hostname (not substring) so a misconfigured base URL like
+ * `https://attacker.example.com/?proxy=mistral.ai` doesn't accidentally
+ * activate the Mistral tier-map. Invalid URLs return `null`.
+ *
  * Pure function — no side effects. Engine init wires the result via
  * `setOpenAIModelResolver()`.
  */
 export function getOpenAIModelMap(apiBaseURL: string | undefined): Record<ModelTier, string> | null {
   if (!apiBaseURL) return null;
-  if (apiBaseURL.includes('mistral.ai')) return MISTRAL_MODEL_MAP;
+  let host: string;
+  try {
+    host = new URL(apiBaseURL).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (host === 'api.mistral.ai' || host.endsWith('.mistral.ai')) return MISTRAL_MODEL_MAP;
   return null;
 }
 
-// Process-global tier→model resolver for openai-compat providers.
-// Set once at engine bootstrap by `setOpenAIModelResolver()` based on the
-// active config. Without this, `getModelId(tier, 'openai')` would return
-// Anthropic IDs which downstream Mistral/OpenAI endpoints reject.
+/**
+ * Process-global tier→model resolver for openai-compat providers. Set once
+ * at engine bootstrap by `setOpenAIModelResolver()` based on the active
+ * config. Without this, `getModelId(tier, 'openai')` would return Anthropic
+ * IDs which downstream Mistral/OpenAI endpoints reject.
+ */
 let _openaiModelMap: Record<ModelTier, string> | null = null;
 let _openaiFallbackModelId: string | null = null;
 
@@ -89,8 +101,8 @@ let _openaiFallbackModelId: string | null = null;
  * reset to legacy behaviour (returns Anthropic IDs — fine for tests).
  */
 export function setOpenAIModelResolver(opts: {
-  map?: Record<ModelTier, string> | null;
-  fallbackModelId?: string | null;
+  map?: Record<ModelTier, string> | null | undefined;
+  fallbackModelId?: string | null | undefined;
 }): void {
   if (opts.map !== undefined) _openaiModelMap = opts.map;
   if (opts.fallbackModelId !== undefined) _openaiFallbackModelId = opts.fallbackModelId;

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   clampTier,
   getModelId,
@@ -50,8 +50,13 @@ describe('clampTier', () => {
 });
 
 describe('Mistral tier-set', () => {
+  // `beforeEach` defends against cross-file state leakage (vitest reuses
+  // workers for sibling files — if another file forgets `afterEach`, this
+  // describe would see stale state). Belt-and-braces with the `afterEach`.
+  beforeEach(() => {
+    setOpenAIModelResolver({ map: null, fallbackModelId: null });
+  });
   afterEach(() => {
-    // Reset the process-global resolver so tests don't bleed into each other.
     setOpenAIModelResolver({ map: null, fallbackModelId: null });
   });
 
@@ -76,6 +81,27 @@ describe('Mistral tier-set', () => {
     expect(getOpenAIModelMap('http://localhost:11434/v1')).toBeNull();
   });
 
+  it('getOpenAIModelMap rejects hostile URLs that smuggle `mistral.ai` in the path or query', () => {
+    // A naive `includes('mistral.ai')` would have matched these. URL-parsing
+    // pinned the check to the hostname, so a misconfigured base URL can't
+    // accidentally activate the Mistral tier-map against an attacker host.
+    expect(getOpenAIModelMap('https://attacker.example.com/?proxy=mistral.ai')).toBeNull();
+    expect(getOpenAIModelMap('https://api.mistral.ai.attacker.com/v1')).toBeNull();
+    expect(getOpenAIModelMap('https://example.com/mistral.ai/v1')).toBeNull();
+  });
+
+  it('getOpenAIModelMap normalises hostname case', () => {
+    // Operators sometimes write `https://API.MISTRAL.AI/v1` in env files.
+    // Hostname-case in URLs is case-insensitive per RFC 3986; honour that
+    // so case-typos don't silently disable tier routing.
+    expect(getOpenAIModelMap('https://API.MISTRAL.AI/v1')).toBe(MISTRAL_MODEL_MAP);
+  });
+
+  it('getOpenAIModelMap returns null for malformed URLs', () => {
+    expect(getOpenAIModelMap('not-a-url')).toBeNull();
+    expect(getOpenAIModelMap('mistral.ai')).toBeNull(); // missing scheme
+  });
+
   it('Mistral context-windows + max-tokens + max-continuations registered', () => {
     expect(getContextWindow('mistral-small-2603')).toBe(32_000);
     expect(getContextWindow('mistral-large-2512')).toBe(131_072);
@@ -90,6 +116,9 @@ describe('Mistral tier-set', () => {
 });
 
 describe('getModelId for openai provider', () => {
+  beforeEach(() => {
+    setOpenAIModelResolver({ map: null, fallbackModelId: null });
+  });
   afterEach(() => {
     setOpenAIModelResolver({ map: null, fallbackModelId: null });
   });
