@@ -493,7 +493,6 @@ export class Engine {
   /** API profile loading, builtin tool registration, TaskManager wiring, DataStore + ArtifactStore. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
   private async _initCoreTools(): Promise<void> {
 
-    // Load API profiles (teaches agent how to use external APIs)
     try {
       const { ApiStore } = await import('./api-store.js');
       this._apiStore = new ApiStore();
