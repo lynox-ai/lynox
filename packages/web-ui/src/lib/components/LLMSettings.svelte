@@ -662,9 +662,13 @@
 			</div>
 		</section>
 
-		<!-- Save row -->
+		<!-- Save row — on managed-tier the provider is locked but Advanced /
+		     Memory / Context-Window are user-writable (MANAGED_USER_WRITABLE_CONFIG).
+		     The button used to disable on `providerLocked` and stranded managed
+		     users on the page with no way to persist context-window changes.
+		     Save-handler itself already gates locked fields (see line ~218). -->
 		<div class="flex justify-end">
-			<button type="button" onclick={saveConfig} disabled={saving || providerLocked || !loaded}
+			<button type="button" onclick={saveConfig} disabled={saving || !loaded}
 				class="px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50">
 				{saving ? t('llm.saving') : t('llm.save')}
 			</button>

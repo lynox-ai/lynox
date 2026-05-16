@@ -145,21 +145,21 @@ export const LLM_CATALOG: LLMCatalog = [
   },
   {
     provider: 'openai',
-    display_name: 'Mistral (OpenAI-compatible)',
+    display_name: 'OpenAI-compatible endpoint',
     models: MISTRAL_MODELS,
     requires_base_url: true,
     requires_region: false,
-    default_residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Mistral via OpenAI-compatible endpoint. Base URL defaults to https://api.mistral.ai/v1.',
+    default_residency: 'e.g. Mistral (EU-Paris) or LiteLLM in OpenAI mode',
+    notes: 'OpenAI wire (POST /chat/completions). Base URL defaults to https://api.mistral.ai/v1 for Mistral; works with any OpenAI-API-compatible endpoint.',
   },
   {
     provider: 'custom',
-    display_name: 'Custom (Anthropic-compatible)',
+    display_name: 'Anthropic-compatible endpoint',
     models: [],
     requires_base_url: true,
     requires_region: false,
-    default_residency: 'Depends on endpoint',
-    notes: 'LiteLLM-style proxies. Model ID is free-text; the endpoint is responsible for routing.',
+    default_residency: 'e.g. LiteLLM in Anthropic mode, self-hosted Claude proxy',
+    notes: 'Anthropic wire (POST /v1/messages) against a custom base URL. Model ID is free-text — the endpoint routes.',
   },
 ];
 
