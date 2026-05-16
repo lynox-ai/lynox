@@ -85,10 +85,11 @@
 			],
 		},
 		{
-			labelKey: 'settings.section_access',
+			// PRD-IA-V2 P3-PR-F: Migration tile is self-host-only (Managed users skip the wizard).
+			labelKey: 'settings.section_account',
 			items: [
-				{ href: '/app/settings/mobile', titleKey: 'mobile.title', descKey: 'mobile.settings_desc', hideOnMobile: true },
-				{ href: '/app/migration', titleKey: 'migration.title', descKey: 'migration.subtitle', selfHostOnly: true },
+				{ href: '/app/settings/account/mobile', titleKey: 'settings.account.mobile', descKey: 'mobile.settings_desc', hideOnMobile: true },
+				{ href: '/app/settings/account/migration', titleKey: 'settings.account.migration', descKey: 'migration.subtitle', selfHostOnly: true },
 			],
 		},
 	];

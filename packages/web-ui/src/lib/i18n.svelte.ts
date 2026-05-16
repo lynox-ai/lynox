@@ -751,6 +751,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.section_main': { de: 'Haupteinstellungen', en: 'Main Settings' },
 	'settings.section_data': { de: 'Daten & Sicherung', en: 'Data & Backup' },
 	'settings.section_access': { de: 'Zugang', en: 'Access' },
+	// PRD-IA-V2 P3-PR-F — Account & Access section keys (underscore naming
+	// matches the existing section_main / section_data / section_access pattern).
+	'settings.section_account': { de: 'Konto & Zugang', en: 'Account & Access' },
+	'settings.account.mobile': { de: 'Mobiler Zugang', en: 'Mobile Access' },
+	'settings.account.migration': { de: 'Migration zu Managed', en: 'Migration to Managed' },
 	'settings.keys': { de: 'API Keys', en: 'API Keys' },
 	'settings.integrations': { de: 'Integrationen', en: 'Integrations' },
 	'settings.integrations_desc': { de: 'E-Mail (IMAP/SMTP), Google Workspace, Websuche', en: 'Email (IMAP/SMTP), Google Workspace, Web Search' },
