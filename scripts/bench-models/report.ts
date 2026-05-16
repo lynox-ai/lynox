@@ -13,8 +13,8 @@ export function buildMarkdownReport(report: BenchReport): string {
 
   lines.push(`## Per-Config Summary`);
   lines.push(``);
-  lines.push(`| Config | Runs | Pass-Rate | Avg Score | Avg Cost | Avg Latency | $/score-point |`);
-  lines.push(`|--------|------|-----------|-----------|----------|-------------|---------------|`);
+  lines.push(`| Config | Runs | Pass-Rate | Avg Score | Avg Cost | Avg Latency | Cache-Hit | $/score-point |`);
+  lines.push(`|--------|------|-----------|-----------|----------|-------------|-----------|---------------|`);
   const byConfig = groupBy(report.runs, r => r.configLabel);
   const configStats = Object.entries(byConfig).map(([label, runs]) => ({
     label,
@@ -23,6 +23,13 @@ export function buildMarkdownReport(report: BenchReport): string {
     avgScore: avg(runs.map(r => r.score)),
     avgCost: avg(runs.map(r => r.costUSD)),
     avgLatency: avg(runs.map(r => r.latencyMs)),
+    // Cache-Hit% — only meaningful for Anthropic-native runs (other
+    // providers don't report cache_read tokens in the usage block).
+    // Numerator: cumulative cache_read tokens across all runs.
+    // Denominator: cache_read + fresh-input tokens (the total input the
+    // model "saw"). 0/0 → n/a.
+    cacheReadTotal: sum(runs.map(r => r.usage.cacheReadTokens)),
+    inputPlusCacheTotal: sum(runs.map(r => r.usage.inputTokens + r.usage.cacheReadTokens)),
   }));
   // Sort by pass-rate first (the HN-relevant metric), score-per-dollar as tiebreaker.
   configStats.sort((a, b) =>
@@ -30,7 +37,10 @@ export function buildMarkdownReport(report: BenchReport): string {
   );
   for (const s of configStats) {
     const costPerPoint = s.avgScore > 0 ? (s.avgCost / s.avgScore).toFixed(5) : '—';
-    lines.push(`| ${s.label} | ${s.runs} | ${(s.passRate * 100).toFixed(0)}% | ${s.avgScore.toFixed(2)} | $${s.avgCost.toFixed(4)} | ${(s.avgLatency / 1000).toFixed(1)}s | $${costPerPoint} |`);
+    const cacheHit = s.inputPlusCacheTotal > 0
+      ? `${((s.cacheReadTotal / s.inputPlusCacheTotal) * 100).toFixed(1)}%`
+      : '—';
+    lines.push(`| ${s.label} | ${s.runs} | ${(s.passRate * 100).toFixed(0)}% | ${s.avgScore.toFixed(2)} | $${s.avgCost.toFixed(4)} | ${(s.avgLatency / 1000).toFixed(1)}s | ${cacheHit} | $${costPerPoint} |`);
   }
   lines.push(``);
 
@@ -80,7 +90,9 @@ export function buildMarkdownReport(report: BenchReport): string {
     lines.push(`### ${run.scenarioId} × ${run.configLabel} (iter ${run.iteration})`);
     lines.push(``);
     lines.push(`- Pass: **${run.passed ? 'YES' : 'NO'}** | Score: ${run.score}/5 — ${run.judgeReasoning}`);
-    lines.push(`- Cost: $${run.costUSD.toFixed(5)} | Latency: ${(run.latencyMs / 1000).toFixed(2)}s | Tokens: in=${run.usage.inputTokens} out=${run.usage.outputTokens} cacheR=${run.usage.cacheReadTokens}`);
+    const totalInput = run.usage.inputTokens + run.usage.cacheReadTokens;
+    const cachePct = totalInput > 0 ? `${((run.usage.cacheReadTokens / totalInput) * 100).toFixed(1)}%` : '—';
+    lines.push(`- Cost: $${run.costUSD.toFixed(5)} | Latency: ${(run.latencyMs / 1000).toFixed(2)}s | Tokens: in=${run.usage.inputTokens} out=${run.usage.outputTokens} cacheR=${run.usage.cacheReadTokens} cacheW=${run.usage.cacheWriteTokens} cache-hit=${cachePct}`);
     lines.push(`- Tools: ${run.toolCallCount} | Iterations: ${run.iterationsUsed}`);
     if (run.error) lines.push(`- **Error:** ${run.error}`);
     lines.push(``);
@@ -110,6 +122,10 @@ function groupBy<T>(items: readonly T[], key: (t: T) => string): Record<string, 
 function avg(nums: readonly number[]): number {
   if (nums.length === 0) return 0;
   return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+function sum(nums: readonly number[]): number {
+  return nums.reduce((a, b) => a + b, 0);
 }
 
 interface ConfigStat {

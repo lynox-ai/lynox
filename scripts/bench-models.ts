@@ -15,7 +15,7 @@
  * API key from ANTHROPIC_API_KEY env var or ~/.lynox/config.json.
  * Output: scripts/bench-models/results/<timestamp>.{json,md}
  */
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -62,40 +62,91 @@ function printUsage(): void {
   process.stdout.write(header + '\n');
 }
 
+/**
+ * Resolve all required API keys. Priority order per key:
+ *   1. `process.env[ENV_NAME]`
+ *   2. Matching field in `~/.lynox/config.json`
+ *      - `ANTHROPIC_API_KEY` → reads `anthropic_api_key` (with `api_key`
+ *         as a backward-compat fallback for the legacy single-provider field)
+ *      - `MISTRAL_API_KEY`    → reads `mistral_api_key`
+ *      - `OPENROUTER_API_KEY` → reads `openrouter_api_key`
+ *
+ * Why config.json instead of a separate keys file: one source of truth,
+ * already gitignored by virtue of living outside the repo, already where
+ * the engine reads its own keys. The runner refuses to start if the file
+ * permissions are looser than 0600 — bench keys must not be world-readable.
+ *
+ * ANTHROPIC is always required because the judge step runs Haiku
+ * regardless of which models the matrix includes.
+ */
 function getApiKeys(configs: readonly BenchConfig[]): ApiKeys {
-  // ANTHROPIC is always required because judge-Haiku runs through it,
-  // regardless of which models the matrix includes.
-  let anthropic = process.env['ANTHROPIC_API_KEY'];
+  const cfg = readLynoxConfig();
+
+  const anthropic = process.env['ANTHROPIC_API_KEY']
+    ?? readStr(cfg, 'anthropic_api_key')
+    ?? readStr(cfg, 'api_key');
   if (!anthropic) {
-    try {
-      const configPath = join(homedir(), '.lynox', 'config.json');
-      const cfg = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-      if (typeof cfg['api_key'] === 'string' && cfg['api_key'].length > 0) {
-        anthropic = cfg['api_key'];
-      }
-    } catch { /* not found */ }
-  }
-  if (!anthropic) {
-    throw new Error('No ANTHROPIC_API_KEY found. Required for the judge step. Set the env var or configure ~/.lynox/config.json.');
+    throw new Error(
+      'No Anthropic key found. Required for the judge step. Set ANTHROPIC_API_KEY ' +
+      'in env or add `"anthropic_api_key": "sk-ant-..."` to ~/.lynox/config.json (chmod 600).',
+    );
   }
 
   const keys: ApiKeys = {
     ANTHROPIC_API_KEY: anthropic,
-    MISTRAL_API_KEY: process.env['MISTRAL_API_KEY'],
-    OPENROUTER_API_KEY: process.env['OPENROUTER_API_KEY'],
+    MISTRAL_API_KEY:    process.env['MISTRAL_API_KEY']    ?? readStr(cfg, 'mistral_api_key'),
+    OPENROUTER_API_KEY: process.env['OPENROUTER_API_KEY'] ?? readStr(cfg, 'openrouter_api_key'),
   };
 
-  // Fail fast on any config whose env var is unset — better than getting
-  // hundreds of cryptic per-run errors mid-bench.
+  // Fail fast on any config whose key resolved to undefined. Better than
+  // getting cryptic per-run errors deep in the matrix loop.
   const needed = new Set(configs.map(c => c.apiKeyEnv));
   const missing = [...needed].filter(env => !keys[env]);
   if (missing.length > 0) {
     throw new Error(
-      `Missing API keys for configs in this matrix: ${missing.join(', ')}. ` +
-      `Set them in the env before running.`,
+      `Missing API keys for configs in this matrix: ${missing.join(', ')}.\n` +
+      `Add them to ~/.lynox/config.json (snake_case field names: ` +
+      `anthropic_api_key, mistral_api_key, openrouter_api_key) or export the ` +
+      `equivalent env vars before running.`,
     );
   }
   return keys;
+}
+
+/**
+ * Read ~/.lynox/config.json with a strict permission check — if the file
+ * is world-readable we refuse to load keys from it. Returns an empty
+ * record if the file doesn't exist (env-only operation is still valid).
+ */
+function readLynoxConfig(): Record<string, unknown> {
+  const configPath = join(homedir(), '.lynox', 'config.json');
+  let raw: string;
+  try {
+    const stat = statSync(configPath);
+    // Posix-mode bits: anything beyond owner (0o600) is a leak surface.
+    // 0o077 catches "group" and "other" perms. Skip on Windows (no posix mode).
+    if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+      process.stderr.write(
+        `[bench] WARNING: ~/.lynox/config.json has mode ${(stat.mode & 0o777).toString(8)}; ` +
+        `expected 0600. Refusing to read keys from a world/group-readable file. ` +
+        `Fix: chmod 600 ~/.lynox/config.json\n`,
+      );
+      return {};
+    }
+    raw = readFileSync(configPath, 'utf8');
+  } catch {
+    return {};
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null) return parsed as Record<string, unknown>;
+  } catch { /* corrupt JSON → treat as empty */ }
+  return {};
+}
+
+function readStr(obj: Record<string, unknown>, key: string): string | undefined {
+  const v = obj[key];
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
 
 function buildMatrix(args: CliArgs): { scenarios: readonly BenchScenario[]; configs: readonly BenchConfig[]; runs: number } {
