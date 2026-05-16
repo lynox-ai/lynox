@@ -9,6 +9,7 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { formatCostCents } from '../format.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import UsageDashboard from './UsageDashboard.svelte';
@@ -191,9 +192,9 @@
 		{#if usage?.hard_limits && isNumericHardLimits(usage.hard_limits)}
 			<dl class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
 				<dt class="text-text-muted">{t('cost_limits.hard.per_spawn')}</dt>
-				<dd class="font-mono">${(usage.hard_limits.per_spawn_cents / 100).toFixed(2)}</dd>
+				<dd class="font-mono">{formatCostCents(usage.hard_limits.per_spawn_cents)}</dd>
 				<dt class="text-text-muted">{t('cost_limits.hard.max_per_spawn')}</dt>
-				<dd class="font-mono">${(usage.hard_limits.max_per_spawn_cents / 100).toFixed(2)}</dd>
+				<dd class="font-mono">{formatCostCents(usage.hard_limits.max_per_spawn_cents)}</dd>
 				<dt class="text-text-muted">{t('cost_limits.hard.http_rate')}</dt>
 				<dd class="font-mono">{usage.hard_limits.tool_http_per_hour}/h · {usage.hard_limits.tool_http_per_day}/d</dd>
 				<dt class="text-text-muted">{t('cost_limits.hard.spawn_parallel')}</dt>
