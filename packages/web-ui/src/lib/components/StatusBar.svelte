@@ -291,18 +291,20 @@
 
 	<span class="text-border">|</span>
 
-	<!-- Today's Cost — points to the usage dashboard, not the raw run log. -->
-	<!-- Cost & Limits — the SSoT surface where users see usage AND edit
-	     limits. Per PRD-SETTINGS-REFACTOR Phase 1 the click target is the
-	     canonical /app/hub/cost-limits route, not the embedded Usage tab. -->
-	<a href="/app/hub/cost-limits" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<!-- Today's Cost — points to the canonical Activity Overview.
+	     Per PRD-IA-CONSOLIDATION-V2 Phase 2 P2-PR-B the click target
+	     moves from the legacy hub cost-limits route to /app/activity.
+	     CostLimits page remains the SSoT for edit-limits until P3-PR-B/X. -->
+	<a href="/app/activity" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		{formatCost(todayCost)} {t('status.today')}
 	</a>
 
 	<span class="text-border">|</span>
 
-	<!-- Today's Runs -->
-	<a href="/app/hub?section=activity&tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
+	<!-- Today's Runs — points to Activity History tab.
+	     Per PRD-IA-CONSOLIDATION-V2 P2-PR-B the target moves from the
+	     legacy hub activity-tab query to /app/activity?tab=history. -->
+	<a href="/app/activity?tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		{todayRuns} {t('status.runs')} {t('status.today')}
 	</a>
 
@@ -417,18 +419,28 @@
 				</div>
 			{/if}
 
-			<!-- Usage Today -->
+			<!-- Usage Today — each card links to the canonical Activity surface.
+			     Per PRD-IA-CONSOLIDATION-V2 P2-PR-B the status-panel "Usage Today"
+			     navigates to `/app/activity` (Overview tab). -->
 			<div>
 				<p class="text-xs uppercase tracking-wider text-text-subtle mb-2">{t('status.usage_today')}</p>
 				<div class="grid grid-cols-2 gap-2">
-					<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
+					<a
+						href="/app/activity"
+						onclick={closePanel}
+						class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2 hover:bg-bg hover:text-text transition-colors"
+					>
 						<p class="text-lg font-semibold text-text">{formatCost(todayCost)}</p>
 						<p class="text-xs text-text-subtle">{t('status.cost')}</p>
-					</div>
-					<div class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2">
+					</a>
+					<a
+						href="/app/activity?tab=history"
+						onclick={closePanel}
+						class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2 hover:bg-bg hover:text-text transition-colors"
+					>
 						<p class="text-lg font-semibold text-text">{todayRuns}</p>
 						<p class="text-xs text-text-subtle">{t('status.runs')}</p>
-					</div>
+					</a>
 				</div>
 			</div>
 
