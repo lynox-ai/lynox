@@ -39,10 +39,79 @@ export const VERTEX_MODEL_MAP: Record<ModelTier, string> = {
   'haiku':  'claude-haiku-4-5',
 };
 
+/** Canonical Mistral base URL (used for tier-map detection). */
+export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
+
+/**
+ * Mistral tier-set for openai-provider mode.
+ * Pinned to specific snapshots so behaviour stays reproducible across model
+ * refreshes. `mistral-large-latest` would auto-roll silently — bad for cost
+ * and behaviour-drift in managed-EU tenants.
+ *   haiku  → mistral-small-2603     (cheap, orchestration)
+ *   sonnet → mistral-large-2512     (workhorse, tool-use)
+ *   opus   → magistral-medium-2509  (reasoning-heavy)
+ */
+export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
+  'opus':   'magistral-medium-2509',
+  'sonnet': 'mistral-large-2512',
+  'haiku':  'mistral-small-2603',
+};
+
 const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<ModelTier, string>> = {
   anthropic: MODEL_MAP,
   vertex: VERTEX_MODEL_MAP,
 };
+
+/**
+ * Derive a tier→model map for the openai-compat provider, based on the
+ * configured `api_base_url`. Returns `null` for unknown providers so callers
+ * can fall back to the single configured `openai_model_id`.
+ *
+ * Matches by URL hostname (not substring) so a misconfigured base URL like
+ * `https://attacker.example.com/?proxy=mistral.ai` doesn't accidentally
+ * activate the Mistral tier-map. Invalid URLs return `null`.
+ *
+ * Pure function — no side effects. Engine init wires the result via
+ * `setOpenAIModelResolver()`.
+ */
+export function getOpenAIModelMap(apiBaseURL: string | undefined): Record<ModelTier, string> | null {
+  if (!apiBaseURL) return null;
+  let host: string;
+  try {
+    host = new URL(apiBaseURL).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (host === 'api.mistral.ai' || host.endsWith('.mistral.ai')) return MISTRAL_MODEL_MAP;
+  return null;
+}
+
+/**
+ * Process-global tier→model resolver for openai-compat providers. Set once
+ * at engine bootstrap by `setOpenAIModelResolver()` based on the active
+ * config. Without this, `getModelId(tier, 'openai')` would return Anthropic
+ * IDs which downstream Mistral/OpenAI endpoints reject.
+ */
+let _openaiModelMap: Record<ModelTier, string> | null = null;
+let _openaiFallbackModelId: string | null = null;
+
+/**
+ * Configure the active openai-compat tier→model resolver. Called by engine
+ * bootstrap once `userConfig` is loaded. Pass `null` (or omit fields) to
+ * reset to legacy behaviour (returns Anthropic IDs — fine for tests).
+ */
+export function setOpenAIModelResolver(opts: {
+  map?: Record<ModelTier, string> | null | undefined;
+  fallbackModelId?: string | null | undefined;
+}): void {
+  if (opts.map !== undefined) _openaiModelMap = opts.map;
+  if (opts.fallbackModelId !== undefined) _openaiFallbackModelId = opts.fallbackModelId;
+}
+
+/** Inspect the currently-registered openai tier map (mostly for tests + debug). */
+export function getActiveOpenAIModelMap(): Record<ModelTier, string> | null {
+  return _openaiModelMap;
+}
 
 /**
  * Resolve a tier name to a provider-specific model ID.
@@ -50,8 +119,14 @@ const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<M
 export function getModelId(tier: ModelTier, provider: LLMProvider = 'anthropic'): string {
   // 'custom' provider (LiteLLM etc.) uses standard Anthropic model IDs — proxy maps them
   if (provider === 'custom') return MODEL_MAP[tier];
-  // 'openai' provider uses model ID from profile — tier is ignored (caller sets model directly)
-  if (provider === 'openai') return MODEL_MAP[tier];
+  if (provider === 'openai') {
+    // Prefer the active openai tier→model map (registered by engine bootstrap
+    // for known providers — e.g. MISTRAL_MODEL_MAP for managed-EU). Fall back
+    // to the configured single `openai_model_id` when no map is registered.
+    // Final fallback to Anthropic IDs preserves legacy test behaviour where
+    // the resolver isn't bootstrapped.
+    return _openaiModelMap?.[tier] ?? _openaiFallbackModelId ?? MODEL_MAP[tier];
+  }
   return ALL_MODEL_MAPS[provider][tier];
 }
 
@@ -72,6 +147,10 @@ const _CONTEXT_WINDOW: Record<string, number> = {
   'claude-opus-4-6':         1_000_000,
   'claude-sonnet-4-6':         200_000,
   'claude-haiku-4-5-20251001': 200_000,
+  // Mistral set — large + magistral both 128K, small 32K (per Mistral docs)
+  'mistral-small-2603':         32_000,
+  'mistral-large-2512':        131_072,
+  'magistral-medium-2509':     131_072,
   // Tier-keyed aliases (provider-independent)
   'opus':   1_000_000,
   'sonnet':   200_000,
@@ -82,6 +161,10 @@ const _DEFAULT_MAX_TOKENS: Record<string, number> = {
   'claude-opus-4-6':         32_000,
   'claude-sonnet-4-6':       16_000,
   'claude-haiku-4-5-20251001': 8_192,
+  // Mistral set
+  'mistral-small-2603':       8_192,
+  'mistral-large-2512':      16_000,
+  'magistral-medium-2509':   32_000,
   // Tier-keyed aliases
   'opus':   32_000,
   'sonnet': 16_000,
@@ -92,6 +175,10 @@ const _MAX_CONTINUATIONS: Record<string, number> = {
   'claude-opus-4-6':           20,
   'claude-sonnet-4-6':         10,
   'claude-haiku-4-5-20251001':  5,
+  // Mistral set — mirror tier ordering (small=5 / large=10 / magistral=20)
+  'mistral-small-2603':         5,
+  'mistral-large-2512':        10,
+  'magistral-medium-2509':     20,
   // Tier-keyed aliases
   'opus':   20,
   'sonnet': 10,

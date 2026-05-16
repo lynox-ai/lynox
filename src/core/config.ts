@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig } from '../types/index.js';
+import { MISTRAL_API_BASE } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
@@ -190,8 +191,13 @@ export function loadConfig(): LynoxUserConfig {
   if (merged.llm_mode === 'eu-sovereign' && process.env['MISTRAL_API_KEY']) {
     merged.provider = 'openai';
     merged.api_key = process.env['MISTRAL_API_KEY'];
-    merged.api_base_url = 'https://api.mistral.ai/v1';
-    merged.openai_model_id = 'mistral-large-latest';
+    merged.api_base_url = MISTRAL_API_BASE;
+    // Pin a versioned snapshot rather than the auto-rolling `*-latest` alias
+    // so behaviour stays reproducible across Mistral model refreshes. Tier
+    // routing (haiku/sonnet/opus) is wired separately via MISTRAL_MODEL_MAP
+    // — see Engine._configureOpenAIResolver for the bootstrap path. This
+    // field remains the single-model fallback when no tier is requested.
+    merged.openai_model_id = 'mistral-large-2512';
   }
 
   _cachedConfig = merged;

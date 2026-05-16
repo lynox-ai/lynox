@@ -11,7 +11,7 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP } from '../types/index.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver } from '../types/index.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -223,6 +223,9 @@ export class Engine {
       if (newProvider && newProvider !== oldProvider) {
         await initLLMProvider(newProvider);
       }
+      // Re-bind the openai tier→model resolver to the new config (or clear
+      // it on a switch back to anthropic). Idempotent; safe to call always.
+      this._configureOpenAIResolver();
       this._recreateClient();
     }
     // Tear down / bring up Bugsink on toggle transition. Without this, the
@@ -333,6 +336,10 @@ export class Engine {
         this._recreateClient();
       }
     }
+    // Register the openai tier→model resolver. Without this, code paths that
+    // resolve a `ModelTier` via `getModelId(tier, 'openai')` emit Anthropic
+    // IDs that downstream endpoints (Mistral, OpenAI, …) reject.
+    this._configureOpenAIResolver();
 
     // Initialize Bugsink error reporting. Gated by:
     //   - bugsink_enabled config flag (UI toggle; default unset = legacy
@@ -341,6 +348,22 @@ export class Engine {
     // Managed deployments pre-configure the DSN; the toggle still honours
     // GDPR Art. 21 opt-out for managed users.
     await this._initBugsink();
+  }
+
+  /**
+   * Bring the global openai-compat tier→model resolver in sync with the
+   * active user config. Called from `_initBootstrap` and `reloadUserConfig`
+   * so a UI-toggled provider switch (e.g. standard ↔ eu-sovereign) takes
+   * effect without a process restart.
+   */
+  private _configureOpenAIResolver(): void {
+    const map = this.userConfig.provider === 'openai'
+      ? getOpenAIModelMap(this.userConfig.api_base_url)
+      : null;
+    const fallback = this.userConfig.provider === 'openai'
+      ? this.userConfig.openai_model_id ?? null
+      : null;
+    setOpenAIModelResolver({ map, fallbackModelId: fallback });
   }
 
   /** RunHistory, ThreadStore, PromptStore, SecurityAudit, persistent budget + HTTP rate limits. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
