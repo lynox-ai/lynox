@@ -99,13 +99,20 @@ export interface CellRun {
 export interface BenchReport {
   readonly generatedAt: string;
   readonly cells: readonly CellRun[];
-  /** Per-axis × per-cell pass/cost summary, derived from `cells`. */
+  /**
+   * Per-axis × per-cell summary, derived from `cells`. p50/p95 latency
+   * surfaces tail behaviour that the average hides — e.g. Mistral cells
+   * sometimes burst-throttle the first run and stabilise on retry, which
+   * shows up as a small p50 with a much larger p95.
+   */
   readonly summary: ReadonlyArray<{
     readonly axis: SetBenchAxis;
     readonly cellLabel: string;
     readonly passRate: number;
     readonly avgCostUsd: number;
     readonly avgDurationMs: number;
+    readonly p50DurationMs: number;
+    readonly p95DurationMs: number;
     readonly pinned: boolean;
   }>;
 }
