@@ -295,8 +295,11 @@ async function* translateStream(
           }
         }
 
-        // Finish
-        if (choice.finish_reason) {
+        // Finish — guard against duplicate emission. Some providers
+        // (OpenRouter→Inceptron on Llama 3.3 70B) send two consecutive
+        // chunks with `finish_reason: 'tool_calls'`: one bare, one with
+        // a usage payload. Without the guard we'd emit two close-outs.
+        if (choice.finish_reason && !finishEmitted) {
           // Close any active blocks
           if (activeTextBlock) {
             yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
