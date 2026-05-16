@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.6.0 — 2026-05-16
+
+Minor — **IA Consolidation V2 (Phase 1 + Phase 2)**. Two-phase refactor of the post-onboarding shell. Phase 1 collapses the dual-home `ConfigView` SSoT drift (1100+ LOC deleted, 12 settings now have single canonical pages, schema switches to `.strict()`). Phase 2 moves Activity into its own `/app/activity` root, repoints the footer cost/runs pills, and starts the Cost-Limits page sunset (banner now, final delete in v1.7). Mobile gets a net-new bottom-tab (Chat · Inbox · Activity · Intelligence · More). One canonical `formatCost` replaces three drifted implementations. All legacy URLs 301-redirect — bookmarks survive.
+
+### Changed
+
+- **NEW top-level `/app/activity` route** — canonical home for Cost / Runs / History. Footer cost-pill and runs-pill now land here. Replaces the old `/app/hub?section=activity` sub-tab (auto-redirected for one release). (#422, #424)
+- **`/app/hub` shrinks to 3 tabs** (Workflows / Tasks / APIs) — Activity tab stripped; legacy `?section=activity*` query-strings redirect to `/app/activity?tab=*`. (#425)
+- **Cost & Limits page deprecated** (`/app/hub/cost-limits`). Page still works during the transition with a prominent deprecation banner; cost limits move to Settings → Workspace → Limits in v1.7. The 200k/500k/1M context-window radio is already available now under Settings → LLM. One-time transition toast on first visit. (#423, this PR)
+- **Mobile bottom-tab** — new on smaller viewports: Chat · Inbox · Activity · Intelligence · More-Drawer. `AppShell.svelte` previously only carried the desktop nav-rail. (#426)
+- **CommandPalette** — Activity entry added; `nav.activity` i18n key landed. (#426)
+- **Footer Status-Panel** — pulls from `/usage/summary?period=today` (Voice STT/TTS included) instead of `/history/cost/daily`. One-time "now includes Voice" hint dismissed via localStorage. (#424)
+
+### Fixed
+
+- **`formatCost` collapsed to a single canonical implementation** — three drifted copies (sub-cent rounding, cents-style, locale-aware) reconciled into one helper. (#420)
+- **Stale `update_check` setting** accepted via `passthrough` is now explicit in the config schema. (#421)
+- **`BackupsView` no longer leaks response-only fields** (`capabilities`/`locks`/`managed`) back into `~/.lynox/config.json` on save. (#421)
+
+### Removed
+
+- **`ConfigView.svelte` deleted** (1100+ LOC). 12 dual-homed settings now have a single SSoT in their extracted pages (LLMSettings Advanced/Memory, SecretsView, SystemSettings, CostLimits). (#421)
+- **`/app/settings/{keys,apis,data}` stub routes** — replaced with SSR-301 redirects to canonical homes (`/settings/llm/keys`, Automation → APIs, Intelligence → Data). (#418)
+- **`AutomationHub.svelte` Activity tab** — Activity has its own root now. (#425)
+
+### Security
+
+- **`LynoxUserConfigSchema` switched from `.passthrough()` to `.strict()`** — unknown PUT-fields are now rejected (HTTP 400) instead of silently persisted. Closes the ghost-write vector documented in V2 Round-1 Security review. (#421)
+- **New invariant test:** `disabled_tools` cannot enable a tool that `excludeTools` blocked (regression-pin for V2 Round-1 S7 finding). (#419)
+- **All settings-route 301-redirects use hardcoded path/tab allowlists** — no user-input pathname passthrough (Round-1 S2 mandate). Applies across `/app/settings/*` stubs and the `/app/hub?section=activity*` → `/app/activity` redirect chain. (#418, #425)
+
+### Migration Notes
+
+- `/app/settings/config` → `/app/settings/llm` (+ tab-aware sub-targets, 301)
+- `/app/settings/keys` → `/app/settings/llm/keys` (301)
+- `/app/settings/apis` → `/app/automation?tab=apis` (301)
+- `/app/settings/data` → `/app/intelligence?tab=data` (301)
+- `/app/hub?section=activity*` → `/app/activity?tab=*` (301)
+- `/app/hub/cost-limits` → still live with deprecation banner; final removal in v1.7
+- Footer cost/runs pills now land on `/app/activity` (were `/app/hub?section=activity`)
+- Bookmarks survive — every old route 301-redirects.
+
+### Acknowledged Behaviour Changes
+
+- `ColdStartBanner` migration-estimate now renders in en-US format (`$0.42`) instead of de-CH (`0,42 $`). Consistency win across all cost displays via the unified `formatCost`; matches PRD-IA-V2 Non-Goal "no locale-aware currency rendering".
+- Empty Activity-Overview state shows a zero-state CTA ("Noch keine Runs heute — starte einen Chat") instead of $0.00 placeholders.
+
 ## 1.5.0 — 2026-05-16
 
 Minor — **HN-launch readiness release**. Settings & Usage IA Refactor (23 PRs landed 2026-05-15) consolidates the post-onboarding surface around six top-level tabs. **Telegram integration removed** as a customer-facing feature (data sovereignty + attack-surface reduction; companion still available in self-hosted core). API Setup v2 graduates with Smart Bootstrap from `docs_url`. LLM Settings page + model catalog endpoint replace the BYOK-by-env-only flow. Tool-Toggles + server-side enforcement land as a first-class security primitive. README + first-run + provider matrix polished for HN.
