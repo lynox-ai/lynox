@@ -1354,7 +1354,7 @@
 		'/memory': '/app/intelligence',
 		'/knowledge': '/app/intelligence',
 		'/graph': '/app/intelligence?tab=graph',
-		'/insights': '/app/intelligence?tab=insights',
+		'/insights': '/app/intelligence?tab=graph&sub=insights',
 		'/contacts': '/app/intelligence?tab=contacts',
 		'/history': '/app/activity?tab=history',
 		'/tasks': '/app/hub?section=tasks',
