@@ -81,7 +81,7 @@
 
 		{#if remindersDueToday.length > 0}
 			<a
-				href="/app/hub?section=reminders"
+				href="/app/hub?section=tasks"
 				class="mt-4 block rounded-[var(--radius-sm)] border border-accent/30 bg-accent/5 hover:bg-accent/10 px-3 py-2 transition-colors"
 			>
 				<div class="flex items-baseline justify-between gap-2">
