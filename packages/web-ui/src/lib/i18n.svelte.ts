@@ -107,6 +107,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'cost_limits.context.extended_hint': { de: 'Mehr Historie pro Antwort. ~2.5× teurer.',                                        en: 'More history per response. ~2.5× cost.' },
 	'cost_limits.context.maximum':       { de: 'Maximum — 1M Tokens',                                                             en: 'Maximum — 1M tokens' },
 	'cost_limits.context.maximum_hint':  { de: 'Volle Modell-Kapazität. ~5× teurer, +30 % Latenz. Nur für sehr lange Threads.',   en: 'Full model capacity. ~5× cost, +30% latency. Only for very long threads.' },
+	'cost_limits.context.also_in_llm':   { de: 'Auch verfügbar unter Einstellungen → LLM.',                                       en: 'Also available under Settings → LLM.' },
+	// Deprecation banner (PRD-IA-V2 P2-PR-C) — page is being moved in v1.7.
+	'cost_limits.deprecated.heading':    { de: 'Diese Seite zieht in v1.7 um',                                                    en: 'This page is being moved' },
+	'cost_limits.deprecated.body':       { de: 'Kosten-Limits werden in Einstellungen → Workspace → Limits zugänglich sein, das Kontextfenster in Einstellungen → LLM → Erweitert. Du kannst sie ab v1.6 schon dort einstellen.', en: 'Cost limits will move to Settings → Workspace → Limits in v1.7, and the context window to Settings → LLM → Advanced. Both are also available from there starting v1.6.' },
 	// Voice settings page (PRD-SETTINGS-REFACTOR Phase 3)
 	'voice.title':         { de: 'Sprache',                                                          en: 'Voice' },
 	'voice.subtitle':      { de: 'Spracheingabe (STT) und -ausgabe (TTS) konfigurieren.',            en: 'Configure speech input (STT) and output (TTS).' },
@@ -278,6 +282,18 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.memory_heading':          { de: 'Erinnerung',                                                            en: 'Memory' },
 	'llm.custom_model_id':         { de: 'Modell-ID',                                                             en: 'Model ID' },
 	'llm.custom_model_id_hint':    { de: 'Frei wählbar (LiteLLM, Ollama, eigene Proxies). Beispiel: claude-3-5-sonnet-20241022 oder llama3.2.', en: 'Free-form (LiteLLM, Ollama, custom proxies). Example: claude-3-5-sonnet-20241022 or llama3.2.' },
+	// Context-window section on the LLM page (PRD-IA-V2 P2-PR-C interim move from
+	// /app/hub/cost-limits). Final home `/settings/llm/advanced` lands in P3-PR-C.
+	'llm.context_window.heading':         { de: 'Kontextfenster',                                                                en: 'Context window' },
+	'llm.context_window.description':     { de: 'Wie viele Tokens lynox pro Anfrage in den Kontext lädt. Größer = teurer.',     en: 'How many tokens lynox loads into context per request. Bigger = more expensive.' },
+	'llm.context_window.option.default':       { de: 'Standard (vom Modell vorgegeben)',                                         en: 'Default (model-defined)' },
+	'llm.context_window.option.default_hint':  { de: 'Verwendet die native Kontext-Größe des aktiven Modells. Empfohlen.',       en: 'Uses the active model\'s native context window. Recommended.' },
+	'llm.context_window.option.200k':          { de: 'Standard — 200k Tokens',                                                   en: 'Standard — 200k tokens' },
+	'llm.context_window.option.200k_hint':     { de: 'Default-Kappung. Empfohlen für die meisten Aufgaben.',                     en: 'Default cap. Recommended for most tasks.' },
+	'llm.context_window.option.500k':          { de: 'Erweitert — 500k Tokens',                                                  en: 'Extended — 500k tokens' },
+	'llm.context_window.option.500k_hint':     { de: 'Mehr Historie pro Antwort. ~2.5× teurer.',                                 en: 'More history per response. ~2.5× cost.' },
+	'llm.context_window.option.1m':            { de: 'Maximum — 1M Tokens',                                                      en: 'Maximum — 1M tokens' },
+	'llm.context_window.option.1m_hint':       { de: 'Volle Modell-Kapazität. ~5× teurer, +30 % Latenz. Nur für sehr lange Threads.', en: 'Full model capacity. ~5× cost, +30% latency. Only for very long threads.' },
 
 	// Workflows
 	'workflow.title': { de: 'Workflows', en: 'Workflows' },

@@ -129,6 +129,21 @@
 		{/if}
 	</header>
 
+	<!--
+		Deprecation banner — PRD-IA-V2 P2-PR-C. The page itself remains functional
+		during the interim; cost limits move to /settings/workspace/limits (P3-PR-B)
+		and context-window to /settings/llm/advanced (P3-PR-C) in v1.7. Final delete
+		of this page = P3-PR-X.
+	-->
+	<div role="status" aria-live="polite"
+		class="border-l-4 border-warning bg-warning/10 rounded-r p-4 space-y-1">
+		<p class="font-semibold text-sm flex items-center gap-2">
+			<span aria-hidden="true">⚠</span>
+			{t('cost_limits.deprecated.heading')}
+		</p>
+		<p class="text-sm text-text-muted">{t('cost_limits.deprecated.body')}</p>
+	</div>
+
 	<!-- Usage view (reuses existing dashboard component) -->
 	<section aria-labelledby="cl-usage-heading">
 		<h2 id="cl-usage-heading" class="sr-only">{t('cost_limits.usage_heading')}</h2>
@@ -159,10 +174,13 @@
 		</section>
 	{/if}
 
-	<!-- Context window — editable on every tier per PRD capability.can_set_context_window -->
+	<!-- Context window — editable on every tier per PRD capability.can_set_context_window.
+	     Also editable on /settings/llm via PRD-IA-V2 P2-PR-C interim move; both surfaces
+	     PUT the same `max_context_window_tokens` to /api/config (SSoT in backend). -->
 	<section aria-labelledby="cl-context-heading" class="border-t border-border pt-6">
 		<h2 id="cl-context-heading" class="text-lg font-medium mb-1">{t('cost_limits.context.heading')}</h2>
-		<p class="text-xs text-text-muted mb-3">{t('cost_limits.context.subtitle')}</p>
+		<p class="text-xs text-text-muted mb-1">{t('cost_limits.context.subtitle')}</p>
+		<p class="text-xs text-text-muted mb-3 italic">{t('cost_limits.context.also_in_llm')}</p>
 		<div class="space-y-2">
 			{#each CONTEXT_OPTIONS as opt (opt.value ?? 'default')}
 				<label class="flex items-start gap-3 cursor-pointer">
