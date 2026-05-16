@@ -225,12 +225,20 @@ export const KG_EXTRACTION_ENTITIES: SetBenchScenario = {
   passCheck: (finalText, _toolCalls): PassResult => {
     const arr = extractJsonArray(finalText);
     if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
+    // Track claimed arr indices so a single hallucinated item ("Acme Helios
+    // Robotics") can't satisfy two expected entries (Acme AND Helios).
+    // Each expected entity must bind to a distinct actual item.
+    const claimed = new Set<number>();
     let matched = 0;
     const missing: string[] = [];
     for (const expected of KG_EXPECTED) {
-      const hit = arr.some((item) => typeof item === 'object' && item !== null && kgEntityMatches(item as { name?: unknown; type?: unknown }, expected));
-      if (hit) matched++;
-      else missing.push(expected.name);
+      const idx = arr.findIndex((item, i) => !claimed.has(i) && typeof item === 'object' && item !== null && kgEntityMatches(item as { name?: unknown; type?: unknown }, expected));
+      if (idx >= 0) {
+        claimed.add(idx);
+        matched++;
+      } else {
+        missing.push(expected.name);
+      }
     }
     if (matched < 7) return { pass: false, reason: `only ${matched}/8 entities matched; missing: ${missing.join(', ')}` };
     return { pass: true };
@@ -393,7 +401,14 @@ function flattenFact(item: unknown): string {
   for (const value of Object.values(item as Record<string, unknown>)) {
     if (typeof value === 'string') parts.push(value);
     else if (Array.isArray(value)) {
-      for (const v of value) if (typeof v === 'string') parts.push(v);
+      // Stringify non-string array items (e.g. `mentions: [{name: 'Sam'}]`)
+      // instead of dropping them — models legitimately emit structured
+      // sub-objects and the substring anchor match should still see the
+      // canonical names inside.
+      for (const v of value) {
+        if (typeof v === 'string') parts.push(v);
+        else if (v !== null && v !== undefined) parts.push(JSON.stringify(v));
+      }
     } else if (typeof value === 'object' && value !== null) {
       parts.push(JSON.stringify(value));
     } else if (value !== null && value !== undefined) {
@@ -474,29 +489,34 @@ const LONG_DOC = [
  * of 5 bullets to hit at least one anchor; a fully generic summary
  * ("the device is rugged and secure") fails the bar.
  */
-const LONG_DOC_ANCHORS: readonly string[] = [
-  'arm', // SoC reference
-  'ethernet',
-  'sfp+',
-  'modbus',
-  'cellular',
-  'lte',
-  '5g',
-  'hardware root of trust',
-  'mutual tls',
-  'aes',
-  'podman',
-  'yocto',
-  'prometheus',
-  'syslog',
-  'ip54',
-  'ce mark',
-  'fcc',
-  'rohs',
-  'mean-time-between-failures',
-  '350,000 hours',
-  '65 watts',
-  'din-rail',
+// Anchor list is compiled to word-boundary regexes — substring `.includes`
+// would let short tokens like `arm`, `aes`, `lte`, `5g` falsely satisfy
+// generic filler ("alarm", "aesthetic", "alteration", "no 5g coverage").
+// The bench is testing whether the model picked up *these specific*
+// corpus tokens, not whether English happens to spell them.
+const LONG_DOC_ANCHOR_PATTERNS: readonly RegExp[] = [
+  /\barm\b/i,                       // SoC reference, not "alarm"
+  /\bethernet\b/i,
+  /\bsfp\+/i,
+  /\bmodbus\b/i,
+  /\bcellular\b/i,
+  /\blte\b/i,
+  /\b5g\b/i,
+  /hardware root of trust/i,
+  /mutual tls/i,
+  /\baes\b/i,
+  /\bpodman\b/i,
+  /\byocto\b/i,
+  /\bprometheus\b/i,
+  /\bsyslog\b/i,
+  /\bip54\b/i,
+  /\bce mark\b/i,
+  /\bfcc\b/i,
+  /\brohs\b/i,
+  /mean-time-between-failures/i,
+  /350,000\s*hours/i,
+  /65\s*watts/i,
+  /din-rail/i,
 ];
 
 /**
@@ -537,8 +557,7 @@ export const LONG_CONTEXT_SPEC_SUMMARY: SetBenchScenario = {
     if (bullets.length !== 5) return { pass: false, reason: `expected exactly 5 bullets, got ${bullets.length}` };
     let anchored = 0;
     for (const bullet of bullets) {
-      const lower = bullet.toLowerCase();
-      if (LONG_DOC_ANCHORS.some((anchor) => lower.includes(anchor))) anchored++;
+      if (LONG_DOC_ANCHOR_PATTERNS.some((re) => re.test(bullet))) anchored++;
     }
     if (anchored < 4) {
       return { pass: false, reason: `only ${anchored}/5 bullets contained a corpus-specific anchor phrase` };
@@ -597,22 +616,34 @@ const CODE_REVIEW_BUGS: readonly CodeBugClaim[] = [
   },
   {
     label: 'SQL injection on query / id',
-    classMatchers: ['sql injection', 'sql-injection', 'sqli', 'injection', 'string concatenation', 'template literal', 'parameterized', 'prepared statement'],
-    // Bug 2 (SQL injection) is at lines 9 (template literal in id query)
-    // and 15 (concatenation in searchUsers). The model only needs to
-    // flag one of them in the [8..16] window; the bug class is the same.
-    lineWindow: [8, 9, 10, 11, 12, 13, 14, 15, 16],
+    classMatchers: ['sql injection', 'sql-injection', 'sqli', 'string concatenation', 'template literal', 'parameterized', 'prepared statement'],
+    // Bug 2 (SQL injection) has TWO planted sites: line 9 (template
+    // literal in id query) and line 15 (concatenation in searchUsers).
+    // Each site gets ±2 tolerance; the union excludes line 12, which is
+    // the `// Line 12` structural anchor inside the diff itself — a model
+    // echoing prose like "line 12 looks fine" would otherwise hand us a
+    // free false-positive. Also dropped the lone word "injection" from
+    // classMatchers: "SQL injection" / "sqli" / "sql-injection" already
+    // cover real flags without firing on generic prose.
+    lineWindow: [7, 8, 9, 10, 11, 13, 14, 15, 16, 17],
   },
 ];
 
 /**
  * Scan the model's final text for line refs (line N, L7, :13:, etc) and
  * return them as numbers. Strict-ish — we want to match "line 7" but
- * not the literal "5/5" used for grading.
+ * not the literal "5/5" used for grading. Code-fence content is stripped
+ * first so a model echoing the diff back (which contains `// Line N`
+ * anchors) can't leak structural-anchor numbers into the ref pool.
  */
 export function extractLineRefs(text: string): number[] {
   const out: number[] = [];
-  const lower = text.toLowerCase();
+  // Strip fenced code blocks BEFORE matching so echoed `// Line N`
+  // anchors don't pollute the line-ref set. Real model review prose
+  // lives outside fences; the planted-bug `lineWindow` test is about
+  // what the model *claims*, not what it pasted back.
+  const noCode = text.replace(/```[\s\S]*?```/g, ' ');
+  const lower = noCode.toLowerCase();
   // Pattern 1: "line 7", "lines 7-9", "line: 7"
   for (const m of lower.matchAll(/line[s]?\s*[:\-]?\s*(\d+)(?:\s*[-,]\s*(\d+))?/g)) {
     out.push(parseInt(m[1]!, 10));

@@ -36,7 +36,7 @@ import {
 import { dispatchMockTool } from '../scripts/set-bench/mock-tools.js';
 import { isRateLimitError } from '../scripts/set-bench/run-cell.js';
 import { percentile, computeParetoFrontier, buildReport, formatReportMarkdown } from '../scripts/set-bench/report.js';
-import type { CellRun, SetBenchCell, ToolCallTrace } from '../scripts/set-bench/types.js';
+import type { CellRun, SetBenchAxis, SetBenchCell, ToolCallTrace } from '../scripts/set-bench/types.js';
 
 const ZX2 = ZURICH_POPULATION_PINNED * 2;
 
@@ -489,6 +489,27 @@ describe('KG_EXTRACTION passCheck', () => {
     expect(r.pass).toBe(false);
     expect(r.reason).toMatch(/0\/8|1\/8|2\/8|3\/8|4\/8|5\/8|6\/8/);
   });
+
+  it('does not let a single hallucinated multi-entity item satisfy multiple expected entries', () => {
+    // Regression: previously `arr.some()` allowed one item containing
+    // multiple canonical names ("Acme Robotics Helios Ventures") to
+    // satisfy two expected entries on a single pass. The passCheck now
+    // tracks claimed indices so each expected binds to a distinct item.
+    const hallucinated = [
+      { name: 'Maria Sanchez', type: 'person' },
+      { name: 'Liam OConnor', type: 'person' },
+      { name: 'Priya Kapoor', type: 'person' },
+      // Hallucinated single item that mentions THREE org names — should
+      // bind to only ONE expected org, not all three.
+      { name: 'Acme Robotics / Northwind Logistics / Helios Ventures', type: 'organization' },
+      { name: 'Berlin', type: 'location' },
+      { name: 'Munich', type: 'location' },
+    ];
+    const r = KG_EXTRACTION_ENTITIES.passCheck(JSON.stringify(hallucinated), []);
+    expect(r.pass).toBe(false);
+    // 6 distinct matches (3 people + 1 org + 2 locations), below the 7/8 bar.
+    expect(r.reason).toMatch(/6\/8/);
+  });
 });
 
 describe('isValidDag', () => {
@@ -729,6 +750,23 @@ describe('LONG_CONTEXT passCheck', () => {
     const r = LONG_CONTEXT_SPEC_SUMMARY.passCheck(mixed, []);
     expect(r.pass).toBe(true);
   });
+
+  it('rejects generic phrasing that only collides with short anchors as substrings', () => {
+    // Regression: anchors `arm`, `aes`, `lte`, `5g` previously used
+    // substring `.includes()` matching, so generic bullets containing
+    // "alarm", "aesthetic", "alteration", or "5g coverage in marketing"
+    // would falsely pass. The anchor list is now word-boundary regex.
+    const generic = [
+      '- An alarm system with aesthetic appeal and altered defaults',
+      '- Premium aesthetics and a sleek alarm-style indicator',
+      '- Alteration-resistant casing with aesthetic considerations',
+      '- Generic alarm bell and decorative aesthetic styling',
+      '- 5g of weight reduction in the housing material',
+    ].join('\n');
+    const r = LONG_CONTEXT_SPEC_SUMMARY.passCheck(generic, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/anchor phrase/);
+  });
 });
 
 describe('extractLineRefs', () => {
@@ -803,6 +841,42 @@ describe('CODE_REVIEW passCheck', () => {
     const r = CODE_REVIEW_PLANTED_BUGS.passCheck(wrongLine, []);
     expect(r.pass).toBe(false);
     expect(r.reason).toMatch(/0\/2|1\/2/);
+  });
+
+  it('rejects a SQL-injection flag at line 12 (the structural // Line 12 anchor, not a real bug site)', () => {
+    // Regression: previously the SQL window [8..16] included 12, so a
+    // model claiming "SQL injection at line 12" — which is literally the
+    // `// Line 12` structural anchor in the diff, not a bug site — would
+    // false-pass. The current window excludes 12. To isolate that
+    // exclusion, this test uses line 5 for the null-deref claim (in bug1's
+    // [5..9] window but OUTSIDE bug2's [7..11, 13..17] window) so the
+    // global line-ref pool can't accidentally satisfy bug2 via line 5.
+    const wrongSqliLine = [
+      'BUG: null dereference at line 5 — userId may be null.',
+      'BUG: SQL injection at line 12 — but this line is just a structural anchor.',
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(wrongSqliLine, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/SQL injection/);
+  });
+
+  it('strips fenced code blocks before extracting line refs (model echo guard)', () => {
+    // If a model echoes the entire diff inside ``` fences (common for
+    // smaller models), `// Line 12` would otherwise leak "12" into the
+    // line-ref pool. The fence-stripping in extractLineRefs prevents that
+    // when no real claim references a windowed line.
+    const echoed = [
+      'Here is the diff for reference:',
+      '```',
+      '// Line 12',
+      'export async function searchUsers(query: string) {',
+      '```',
+      'BUG: null dereference at line 7 — userId may be null.',
+      // No SQLi claim — bench should fail because echo didn't smuggle one in.
+    ].join('\n');
+    const r = CODE_REVIEW_PLANTED_BUGS.passCheck(echoed, []);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/SQL injection/);
   });
 
   it('tolerates synonym bug-class phrasing (sqli / parameterized-query callout)', () => {
@@ -906,16 +980,10 @@ describe('axisLabel coverage via formatReportMarkdown', () => {
   // a single-cell BenchReport per new axis to make sure no axis renders
   // as `undefined` in the headline. Catches the classic "added enum
   // member, forgot the switch arm" regression.
-  type Axis =
-    | 'tool-chain'
-    | 'orchestration'
-    | 'kg-extraction'
-    | 'dag-planning'
-    | 'memory-extraction'
-    | 'long-context'
-    | 'code-review'
-    | 'multi-step-reasoning';
-  const allAxes: readonly Axis[] = [
+  // Source the axis list from the exported SetBenchAxis union (one source
+  // of truth) — if the enum is extended again, tsc will error here on a
+  // missing arm rather than silently skipping the new axis from coverage.
+  const allAxes: readonly SetBenchAxis[] = [
     'tool-chain',
     'orchestration',
     'kg-extraction',

@@ -172,7 +172,7 @@ function axisLabel(axis: SetBenchAxis): string {
     case 'code-review':
       return 'CODE_REVIEW axis (sonnet-tier bar: Anthropic Sonnet 4.6)';
     case 'multi-step-reasoning':
-      return 'MULTI_STEP_REASONING axis (opus / sonnet+thinking bar)';
+      return 'MULTI_STEP_REASONING axis (opus-tier bar: Anthropic Opus 4 / Sonnet 4.6 + thinking)';
   }
 }
 
