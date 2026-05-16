@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { apiSetupTool } from './api-setup.js';
+import { apiSetupTool, OPENAPI_SPEC_MAX_BYTES } from './api-setup.js';
 import { ApiStore } from '../../core/api-store.js';
 import type { ApiProfile } from '../../core/api-store.js';
 import * as llmHelper from '../../core/llm-helper.js';
@@ -300,11 +300,15 @@ describe('api_setup tool', () => {
       // ("split the API into multiple profiles") sent it down a manual-create
       // detour. The new message must steer it to docs_url + manual create so
       // the recovery doesn't burn three extra LLM rounds.
+      const overCapBytes = OPENAPI_SPEC_MAX_BYTES + 1024;
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-        new Response('x'.repeat(6 * 1024 * 1024), {
+        new Response('x'.repeat(overCapBytes), {
           status: 200,
           statusText: 'OK',
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+            'content-length': String(overCapBytes),
+          },
         }),
       );
       try {
@@ -315,7 +319,10 @@ describe('api_setup tool', () => {
         );
         expect(result).toContain('exceeds');
         expect(result).toContain('docs_url');
-        expect(result).toContain('create');
+        expect(result).toMatch(/action="create"/);
+        // Guards against the wording regressing to the pre-PR message that
+        // sent the agent down a manual-only detour.
+        expect(result).not.toContain('split the API');
       } finally {
         fetchSpy.mockRestore();
       }
