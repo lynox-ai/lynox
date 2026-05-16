@@ -750,7 +750,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.keys': { de: 'API Keys', en: 'API Keys' },
 	'settings.integrations': { de: 'Integrationen', en: 'Integrations' },
 	'settings.integrations_desc': { de: 'E-Mail (IMAP/SMTP), Google Workspace, Websuche', en: 'Email (IMAP/SMTP), Google Workspace, Web Search' },
-	'settings.tasks': { de: 'Scheduled Tasks', en: 'Scheduled Tasks' },
+	// PRD-IA-V2 P3-PR-G — `settings.tasks` retired; Tasks now lives under
+	// Automation Hub via `hub.automation.tasks`. Key was already unused in
+	// templates (only the definition remained after SettingsIndex never wired
+	// Tasks into a section).
 	'settings.save': { de: 'Speichern', en: 'Save' },
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
 	'settings.saved': { de: 'Gespeichert', en: 'Saved' },
