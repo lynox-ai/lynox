@@ -761,6 +761,389 @@ export const MULTI_STEP_REASONING_INTEREST: SetBenchScenario = {
   timeoutMs: 120_000,
 };
 
+// ──────────────────────────────────────────────────────────────
+// Phase 3 PR C — DE twin scenarios
+//
+// Native German prompts + fixtures for each PR-B EN scenario. The
+// `axis` is a routing concept, not a language concept — twins reuse
+// the same axis as their EN counterpart. Pass-check semantics are
+// preserved; matchers extend with DE bug-class synonyms where needed.
+//
+// Identifier names stay English (lynox primary-English convention);
+// only `description`'s parenthetical hint, prompts, and fixture text
+// are German.
+// ──────────────────────────────────────────────────────────────
+
+// ── KG_EXTRACTION (DE) ──────
+// German entity list — corporate names mirror DACH conventions
+// (GmbH, AG, "Werk", "Logistik"). Personennamen sind alltägliche
+// DACH-Namen, ohne Bezug zu echten Kunden.
+
+const KG_PARAGRAPH_DE = [
+  'Maria Schmidt, Geschäftsführerin der Bayer-Müller Logistik AG, kündigte auf dem Berliner Tech-Gipfel an,',
+  'dass ihr Team mit dem Holzwerk Stuttgart eine gemeinsame Pilotstudie in Frankfurt starten wird.',
+  'Die Partnerschaft wurde von Stefan Weber, Betriebsleiter beim Holzwerk Stuttgart, verhandelt,',
+  'nachdem ein Auftaktgespräch im Bayer-Müller-Büro in München stattgefunden hatte. Die Finanzierung kommt vom',
+  'Helios-Kapital-Fonds, dessen geschäftsführende Partnerin Priya Kapoor letzte Woche das Term Sheet unterzeichnete.',
+  'Maria erwähnte, dass der Rollout bis zum dritten Quartal auch Hamburg erreichen wird.',
+].join(' ');
+
+const KG_EXPECTED_DE: readonly KgEntity[] = [
+  { name: 'Maria Schmidt', aliases: ['maria schmidt', 'maria'], type: 'person' },
+  { name: 'Stefan Weber', aliases: ['stefan weber', 'stefan'], type: 'person' },
+  { name: 'Priya Kapoor', aliases: ['priya kapoor', 'priya'], type: 'person' },
+  { name: 'Bayer-Müller Logistik AG', aliases: ['bayer-müller', 'bayer müller', 'bayer-mueller', 'bayer mueller'], type: 'organization' },
+  { name: 'Holzwerk Stuttgart', aliases: ['holzwerk stuttgart', 'holzwerk'], type: 'organization' },
+  { name: 'Helios-Kapital', aliases: ['helios-kapital', 'helios kapital', 'helios'], type: 'organization' },
+  { name: 'Berlin', aliases: ['berlin', 'berliner tech-gipfel', 'berliner tech gipfel'], type: 'location' },
+  { name: 'München', aliases: ['münchen', 'muenchen', 'munich'], type: 'location' },
+];
+
+export const KG_EXTRACTION_ENTITIES_DE: SetBenchScenario = {
+  id: 'kg-extraction.entities-de',
+  axis: 'kg-extraction',
+  description: 'German-language KG extraction: extract 8 named entities (Personen / Organisationen / Orte) with German names + DACH company conventions from a fixed paragraph into a JSON array. (DE variant)',
+  prompt: [
+    'Lies den folgenden Absatz und extrahiere jede benannte Entität, die darin vorkommt.',
+    'Gib ein JSON-Array zurück. Jedes Element hat genau zwei Felder:',
+    '  - name (String, die kanonische Schreibweise)',
+    '  - type (String, einer der Werte: person, organization, location)',
+    '',
+    'Gib AUSSCHLIESSLICH das JSON-Array aus — keine Fließtexte, keine Markdown-Codeblöcke, keine Kommentare.',
+    '',
+    'Absatz:',
+    KG_PARAGRAPH_DE,
+  ].join('\n'),
+  passCheck: (finalText, _toolCalls): PassResult => {
+    const arr = extractJsonArray(finalText);
+    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
+    // Same claimed-index discipline as the EN twin — a hallucinated
+    // multi-name item must not satisfy two expected entries.
+    const claimed = new Set<number>();
+    let matched = 0;
+    const missing: string[] = [];
+    for (const expected of KG_EXPECTED_DE) {
+      const idx = arr.findIndex((item, i) => !claimed.has(i) && typeof item === 'object' && item !== null && kgEntityMatches(item as { name?: unknown; type?: unknown }, expected));
+      if (idx >= 0) {
+        claimed.add(idx);
+        matched++;
+      } else {
+        missing.push(expected.name);
+      }
+    }
+    if (matched < 7) return { pass: false, reason: `only ${matched}/8 entities matched; missing: ${missing.join(', ')}` };
+    return { pass: true };
+  },
+  maxIterations: 3,
+  timeoutMs: 60_000,
+};
+
+// ── DAG_PLANNING (DE) ──────
+// Step IDs stay English — they are API-shape, not natural language.
+// The prompt describes the same release pipeline in German.
+
+export const DAG_PLANNING_RELEASE_DE: SetBenchScenario = {
+  id: 'dag-planning.release-de',
+  axis: 'dag-planning',
+  description: 'German-language DAG planning: same 3-step release pipeline as the EN twin (cut_tag → run_tests → deploy) but the natural-language framing is German. Step IDs remain English (API shape). (DE variant)',
+  prompt: [
+    'Plane eine Release-Pipeline als gerichteten azyklischen Graphen (DAG).',
+    'Die Pipeline besteht aus genau diesen 3 Schritten:',
+    '  - cut_tag    — einen Release-Tag von main schneiden',
+    '  - run_tests  — die Testsuite gegen den getaggten Commit ausführen',
+    '  - deploy     — den getaggten Build in die Produktion ausrollen',
+    '',
+    'Gib ein JSON-Array zurück. Jedes Element hat genau zwei Felder:',
+    '  - id (String, einer der oben genannten Schrittnamen)',
+    '  - depends_on (Array von Strings — IDs der Schritte, auf die dieser wartet)',
+    '',
+    'Anforderungen:',
+    '  - run_tests muss auf cut_tag warten.',
+    '  - deploy muss auf run_tests warten.',
+    '  - Der Graph MUSS azyklisch sein.',
+    '',
+    'Gib AUSSCHLIESSLICH das JSON-Array aus — keine Fließtexte, keine Markdown-Codeblöcke, keine Kommentare.',
+  ].join('\n'),
+  passCheck: (finalText, _toolCalls): PassResult => {
+    const arr = extractJsonArray(finalText);
+    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
+    const steps = parseDagSteps(arr);
+    if (steps === null) return { pass: false, reason: 'steps did not match {id: string, depends_on: string[]} shape' };
+    if (!isValidDag(steps)) return { pass: false, reason: 'graph is not a valid DAG (cycle or unresolved dependency)' };
+    for (const expected of DAG_STEPS_EXPECTED) {
+      const step = steps.find((s) => s.id === expected.id);
+      if (!step) return { pass: false, reason: `missing required step: ${expected.id}` };
+      for (const required of expected.mustDependOn) {
+        if (!step.depends_on.includes(required)) {
+          return { pass: false, reason: `step '${expected.id}' must depend on '${required}'` };
+        }
+      }
+    }
+    return { pass: true };
+  },
+  maxIterations: 3,
+  timeoutMs: 60_000,
+};
+
+// ── MEMORY_EXTRACTION (DE) ──────
+// Chat snippet in German between Nutzer + Assistent, with 4 known
+// facts mirroring the EN structure (Name, Beruf+Ort, Kommunikations-
+// präferenz, Partner-Beziehung).
+
+const MEMORY_CHAT_DE = [
+  'nutzer: Hallo, ich heiße Jordan und betreibe eine kleine Bäckerei in Wien.',
+  'assistent: Schön, Sie kennenzulernen, Jordan. Was backen Sie?',
+  'nutzer: Hauptsächlich Sauerteig und Roggenbrot. Für Aktualisierungen bevorzuge ich E-Mail statt Telefon.',
+  'assistent: Verstanden — ich melde mich dann per E-Mail.',
+  'nutzer: Danke. Übrigens, meine Partnerin Sam kümmert sich um die Großhandelsbestellungen.',
+].join('\n');
+
+const MEMORY_EXPECTED_DE: readonly MemoryFact[] = [
+  { anchor: 'Name ist Jordan', mustContain: ['jordan'] },
+  // Mustermatch acceptiert "Bäckerei"/"baeckerei" durch lowercased substring.
+  { anchor: 'betreibt eine Bäckerei in Wien', mustContain: ['wien'] },
+  { anchor: 'bevorzugt E-Mail statt Telefon', mustContain: ['mail'] },
+  { anchor: 'Partnerin Sam macht Großhandel', mustContain: ['sam'] },
+];
+
+export const MEMORY_EXTRACTION_CHAT_DE: SetBenchScenario = {
+  id: 'memory-extraction.chat-de',
+  axis: 'memory-extraction',
+  description: 'German-language memory extraction: pull memorable facts (Name, Beruf, Präferenzen, Beziehungen) from a 5-line German chat snippet into a JSON array. (DE variant)',
+  prompt: [
+    'Unten siehst du einen kurzen Chat zwischen einem Nutzer und einem Assistenten. Extrahiere die',
+    'merkenswerten Fakten über den Nutzer — Dinge, die für künftige Gespräche relevant sind.',
+    'Zum Beispiel Name, Wohnort, Beruf, Präferenzen und Personen, die er erwähnt.',
+    '',
+    'Gib ein JSON-Array mit Fakten-Objekten zurück. Die genaue Form bleibt dir überlassen,',
+    'aber jeder Fakt sollte für sich verständlich und gut lesbar sein.',
+    '',
+    'Gib AUSSCHLIESSLICH das JSON-Array aus — keine Fließtexte, keine Markdown-Codeblöcke, keine Kommentare.',
+    '',
+    'Chat:',
+    MEMORY_CHAT_DE,
+  ].join('\n'),
+  passCheck: (finalText, _toolCalls): PassResult => {
+    const arr = extractJsonArray(finalText);
+    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
+    const flattened = arr.map(flattenFact);
+    let matched = 0;
+    const missing: string[] = [];
+    for (const fact of MEMORY_EXPECTED_DE) {
+      const hit = flattened.some((joined) => fact.mustContain.every((needle) => joined.includes(needle)));
+      if (hit) matched++;
+      else missing.push(fact.anchor);
+    }
+    if (matched < 3) return { pass: false, reason: `only ${matched}/4 facts matched; missing: ${missing.join('; ')}` };
+    return { pass: true };
+  },
+  maxIterations: 3,
+  timeoutMs: 60_000,
+};
+
+// ── LONG_CONTEXT (DE) ──────
+// DE-native Produktspezifikation für ein Industrie-Gateway. Anchors
+// sind deutsche Fachtermini sowie sprachunabhängige Token (ARM, IP54,
+// AES, SFP+) — diese gelten in beiden Sprachen.
+
+const LONG_DOC_DE = [
+  '# MERIDIAN-IG3 Industrie-Gateway — Produktspezifikation',
+  '',
+  '## 1. Überblick',
+  'Das MERIDIAN-IG3 ist eine On-Premises-Netzwerk-Appliance für Industriestandorte, die ohne zuverlässige Cloud-Anbindung betrieben werden. Das Gerät wird in einem halbhohen 19-Zoll-Gehäuse mit einem Gewicht von 4,2 Kilogramm ausgeliefert und nimmt unter Volllast maximal 65 Watt auf. Die Montagegarnitur unterstützt sowohl Hutschiene als auch klassische 19-Zoll-Schränke. Das Gateway basiert auf einem kundenspezifischen ARM-SoC mit acht Kernen bei 1,8 Gigahertz und 16 Gigabyte fehlerkorrigierendem Arbeitsspeicher. Als Datenspeicher dienen zwei 512-Gigabyte-NVMe-Laufwerke, die als gespiegelter Verbund für Ausfallsicherheit konfiguriert sind. Jedes Gerät wird mit fünf Jahren Garantie und einem Software-Wartungsvertrag über denselben Zeitraum ausgeliefert.',
+  '',
+  '## 2. Konnektivität',
+  'Auf der Netzwerkseite stellt das Gateway vier 2,5-Gigabit-Ethernet-Ports sowie zwei SFP+-Käfige bereit, die 10-Gigabit-Glasfaserverbindungen ermöglichen. Die drahtlose Anbindung umfasst Wi-Fi 6E mit Tri-Band-Funk und ein optionales Mobilfunkmodul, das LTE Cat 18 und 5G sub-6 unterstützt. Das Mobilfunkmodul lässt sich austauschen, ohne das Hauptgehäuse zu öffnen. Für klassische Industrieprotokolle stehen zwei RS-485-Schnittstellen, ein CAN-Bus-Anschluss sowie ein Modbus-TCP-Gateway-Dienst im eingebetteten Betriebssystem bereit. Ein dedizierter Out-of-Band-Management-Port bietet isolierten administrativen Zugriff auf einer separaten physikalischen Schnittstelle, getrennt vom Produktiv-Datenverkehr.',
+  '',
+  '## 3. Sicherheitsmodell',
+  'Das Sicherheitsmodell ist um einen Hardware-Vertrauensanker (Hardware Root of Trust) aufgebaut. Jedes Gerät wird mit einem einzigartigen Gerätezertifikat ausgeliefert, das ab Werk in den Sicherheitsbaustein eingebrannt ist; der Bootloader prüft jede Stufe der Boot-Kette gegen diesen Anker. Firmware-Updates erfordern sowohl eine Hersteller-Signatur als auch eine kundenseitige Gegensignatur — ein einzelner kompromittierter Signaturschlüssel reicht damit nicht für unautorisierte Rollouts. Sämtliche persistenten Daten werden mit AES-256-XTS verschlüsselt; die Schlüssel werden aus dem Gerätezertifikat abgeleitet. Der Netzwerk-Datenverkehr zwischen Gateway und zentraler Management-Ebene nutzt Mutual TLS mit rotierenden Client-Zertifikaten, die von der internen Zertifizierungsstelle des Kunden ausgestellt werden. Es existieren weder Remote-Backdoors noch Werks-Standardpasswörter.',
+  '',
+  '## 4. Software',
+  'Das Gateway läuft auf einer gehärteten Linux-Distribution, die auf einem minimalen Yocto-Linux-Image basiert. Die Container-Laufzeit ist eine abgespeckte Variante von Podman, die ausschließlich signierte OCI-Images akzeptiert. Die Management-Ebene folgt einem deklarativen Konfigurationsmodell: Operatoren übertragen ein Konfigurationsbündel, das vom Gateway entweder vollständig übernommen oder atomar zurückgerollt wird. Einen imperativen Konfigurationsmodus gibt es nicht. Das Gerät stellt einen Prometheus-kompatiblen Metrik-Endpunkt bereit, der CPU, Arbeitsspeicher, Datenträger, Netzwerk-Durchsatz und Container-Ressourcen abdeckt. Logs werden per Syslog über TLS gestreamt, mit konfigurierbarer Puffergröße für den Offline-Betrieb.',
+  '',
+  '## 5. Betriebsumgebung',
+  'Das MERIDIAN-IG3 ist für den Betrieb zwischen minus 20 Grad Celsius und plus 65 Grad Celsius ohne aktive Kühlung ausgelegt. Das Gehäuse ist nach IP54 gegen Staub und Spritzwasser geschützt und hat Schock- und Vibrationsprüfungen gemäß IEC 60068 bestanden. Das Gerät ist für den industriellen Einsatz in der Europäischen Union mit dem CE-Zeichen zertifiziert und in Nordamerika nach FCC Part 15B zugelassen. Die RoHS-3-Konformität ist für alle Materialien dokumentiert. Die erwartete mittlere Betriebsdauer zwischen Ausfällen (MTBF) liegt unter typischen Industriebedingungen bei 350.000 Stunden.',
+].join('\n');
+
+/**
+ * DE anchor patterns — German technical terms PLUS the universal
+ * tokens (ARM, IP54, AES, SFP+) that read the same in both
+ * languages. Word-boundary regex prevents `arm`/`aes`/`lte`/`5g` from
+ * matching inside generic prose like "alarm" or "aesthetic".
+ */
+const LONG_DOC_DE_ANCHOR_PATTERNS: readonly RegExp[] = [
+  /\barm-?soc\b/i,
+  /\barm\b/i,                       // standalone "ARM" reference, not "Alarm"
+  /\bethernet\b/i,
+  /\bsfp\+/i,
+  /\bmodbus\b/i,
+  /mobilfunk/i,
+  /\blte\b/i,
+  /\b5g\b/i,
+  /hardware[- ]?(vertrauensanker|root of trust)/i,
+  /mutual tls/i,
+  /\baes\b/i,
+  /\bpodman\b/i,
+  /\byocto\b/i,
+  /\bprometheus\b/i,
+  /\bsyslog\b/i,
+  /\bip54\b/i,
+  /ce-?zeichen/i,
+  /\bfcc\b/i,
+  /\brohs\b/i,
+  /\bmtbf\b/i,
+  /mittlere betriebsdauer/i,
+  /350\.000\s*stunden/i,
+  /65\s*watt/i,
+  /hutschiene/i,
+  /container-laufzeit/i,
+];
+
+export const LONG_CONTEXT_SPEC_SUMMARY_DE: SetBenchScenario = {
+  id: 'long-context.spec-summary-de',
+  axis: 'long-context',
+  description: 'German-language long-context summary: condense a fixed ~3.5K-token Industrie-Gateway-Spezifikation into exactly 5 bullets, each anchored to DE technical terms or universal tokens (ARM, IP54, MTBF). (DE variant)',
+  prompt: [
+    'Fasse die unten stehende Produktspezifikation in GENAU 5 Stichpunkten zusammen.',
+    'Jeder Stichpunkt muss einen eigenständigen Aspekt des Produkts erfassen (keine',
+    'Umformulierung desselben Punkts). Strebe einen Stichpunkt pro Hauptabschnitt an.',
+    '',
+    'Format:',
+    '  - Bindestrich ("-") als Marker je Stichpunkt, einer pro Zeile.',
+    '  - Genau 5 Stichpunkte — nicht weniger, nicht mehr.',
+    '  - Keine Einleitung, kein Schlusssatz, keine Markdown-Überschriften.',
+    '',
+    'Dokument:',
+    LONG_DOC_DE,
+  ].join('\n'),
+  passCheck: (finalText, _toolCalls): PassResult => {
+    const bullets = extractBullets(finalText);
+    if (bullets.length !== 5) return { pass: false, reason: `expected exactly 5 bullets, got ${bullets.length}` };
+    let anchored = 0;
+    for (const bullet of bullets) {
+      if (LONG_DOC_DE_ANCHOR_PATTERNS.some((re) => re.test(bullet))) anchored++;
+    }
+    if (anchored < 4) {
+      return { pass: false, reason: `only ${anchored}/5 bullets contained a corpus-specific anchor phrase` };
+    }
+    return { pass: true };
+  },
+  maxIterations: 3,
+  timeoutMs: 90_000,
+};
+
+// ── CODE_REVIEW (DE) ──────
+// Code, Variablennamen und Inline-Kommentare bleiben Englisch (das
+// ist Codebasis-Realität). Die Aufgabe + die zu nutzenden Bug-Klassen
+// werden auf Deutsch gestellt. classMatchers erweitern um deutsche
+// Synonyme (Nullzeiger, SQL-Injektion, parametrisierte Abfrage,
+// Vorbereitete Anweisung).
+
+const CODE_REVIEW_BUGS_DE: readonly CodeBugClaim[] = [
+  {
+    label: 'null-deref on userId',
+    classMatchers: [
+      // EN matchers retained — DE prompts still leak EN technical terms.
+      'null', 'undefined', 'nullable', 'null-deref', 'null reference', 'nullish',
+      // DE synonyms — `null` already covered above as substring; these
+      // catch the canonical DE phrasings that small models emit when
+      // asked to respond in German.
+      'nullzeiger', 'nullreferenz', 'null-referenz', 'nullwert',
+    ],
+    lineWindow: [5, 6, 7, 8, 9],
+  },
+  {
+    label: 'SQL injection on query / id',
+    classMatchers: [
+      'sql injection', 'sql-injection', 'sqli', 'string concatenation', 'template literal', 'parameterized', 'prepared statement',
+      // DE synonyms covering the same bug-class.
+      'sql-injektion', 'sql injektion', 'parametrisierte abfrage', 'vorbereitete anweisung', 'vorbereiteten anweisung', 'zeichenketten-verkettung', 'zeichenkettenverkettung', 'string-verkettung',
+    ],
+    lineWindow: [7, 8, 9, 10, 11, 13, 14, 15, 16, 17],
+  },
+];
+
+export const CODE_REVIEW_PLANTED_BUGS_DE: SetBenchScenario = {
+  id: 'code-review.planted-bugs-de',
+  axis: 'code-review',
+  description: 'German-language code review: same 16-line TS diff with the same 2 planted bugs (null-deref + SQL injection); model is asked to respond in German. classMatchers extended with DE synonyms. (DE variant)',
+  prompt: [
+    'Prüfe den unten stehenden TypeScript-Code auf Sicherheits- und Korrektheitsfehler.',
+    'Gib für JEDEN gefundenen Fehler eine Zeile in genau diesem Format aus:',
+    '  BUG: <Fehlerklasse> at line <N> — <ein-Satz-Erklärung>',
+    '',
+    'Verwende treffende Fehlerklassen-Namen (z. B. "Nullzeiger", "SQL-Injektion",',
+    '"parametrisierte Abfrage"). Nutze die Zeilennummern aus den inline `// Line N`',
+    'Kommentaren — das sind die maßgeblichen Zeilennummern.',
+    '',
+    'Gib AUSSCHLIESSLICH die BUG:-Zeilen aus, keinen weiteren Text.',
+    '',
+    'Code:',
+    CODE_REVIEW_DIFF,
+  ].join('\n'),
+  passCheck: (finalText, _toolCalls): PassResult => {
+    const lower = finalText.toLowerCase();
+    const lines = extractLineRefs(finalText);
+    const flagged: string[] = [];
+    for (const bug of CODE_REVIEW_BUGS_DE) {
+      const classHit = bug.classMatchers.some((m) => lower.includes(m));
+      const lineHit = lines.some((n) => bug.lineWindow.includes(n));
+      if (classHit && lineHit) flagged.push(bug.label);
+    }
+    if (flagged.length < 2) {
+      const missing = CODE_REVIEW_BUGS_DE.filter((b) => !flagged.includes(b.label)).map((b) => b.label);
+      return { pass: false, reason: `only flagged ${flagged.length}/2 planted bugs; missing: ${missing.join(', ')}` };
+    }
+    return { pass: true };
+  },
+  maxIterations: 3,
+  timeoutMs: 90_000,
+};
+
+// ── MULTI_STEP_REASONING (DE) ──────
+// Same compound-interest scenario as the EN twin — numbers and the
+// canonical ANSWER= value are identical so the bench's cross-language
+// signal stays coherent. Only the prose framing is German.
+
+export const MULTI_STEP_REASONING_COMPOUND_INTEREST_DE: SetBenchScenario = {
+  id: 'multi-step-reasoning.compound-interest-de',
+  axis: 'multi-step-reasoning',
+  description: 'German-language multi-step reasoning: same 3-step Zinseszins-Rechnung as the EN twin (10000 EUR @ 6% p.a., Zwischenentnahme 2000 EUR, 2 weitere Jahre). Identical numbers → identical canonical ANSWER=966296. (DE variant)',
+  prompt: [
+    'Löse die folgende Aufgabe Schritt für Schritt und gib am Ende das Ergebnis aus.',
+    '',
+    'Ein Kunde zahlt 10000,00 EUR auf ein Konto ein, das jährlich 6 % Zinsen abwirft,',
+    'die am Jahresende kapitalisiert werden (Zinseszins).',
+    '',
+    'Jahr 1: Die Zinsen werden auf den gesamten Betrag aufgeschlagen.',
+    'Zum BEGINN von Jahr 2 (unmittelbar nachdem die Zinsen für Jahr 1 gutgeschrieben',
+    'wurden) entnimmt der Kunde genau 2000,00 EUR. Der verbleibende Betrag verzinst',
+    'sich für zwei weitere volle Jahre zu jeweils 6 %.',
+    '',
+    'Wie hoch ist der Kontostand am Ende von Jahr 3 in EUR?',
+    '',
+    'Gib zuerst die Rechenschritte aus und schreibe dann in einer letzten Zeile GENAU:',
+    '  ANSWER=<Wert>',
+    'wobei <Wert> der Saldo in EUR-Cent ist (ohne Dezimalpunkt — den EUR-Betrag mit',
+    '100 multiplizieren und auf den nächsten Cent runden). Beispiel: 5000,50 EUR',
+    'würden als ANSWER=500050 geschrieben.',
+  ].join('\n'),
+  passCheck: (finalText, _toolCalls): PassResult => {
+    // Same last-match policy as the EN twin — models echo template lines.
+    const matches = [...finalText.matchAll(/ANSWER\s*=\s*(\d+)/gi)];
+    if (matches.length === 0) return { pass: false, reason: 'final answer missing ANSWER=<n>' };
+    const last = matches[matches.length - 1]!;
+    const got = parseInt(last[1]!, 10);
+    const delta = Math.abs(got - MULTI_STEP_ANSWER_CENTS);
+    if (delta > MULTI_STEP_TOLERANCE_CENTS) {
+      return { pass: false, reason: `wrong answer: got ${got} cents, want ${MULTI_STEP_ANSWER_CENTS} (±${MULTI_STEP_TOLERANCE_CENTS})` };
+    }
+    return { pass: true };
+  },
+  maxIterations: 3,
+  timeoutMs: 120_000,
+};
+
 export const SET_BENCH_SCENARIOS: readonly SetBenchScenario[] = [
   TOOL_CHAIN_ZURICH_X2,
   ORCHESTRATION_EMAIL_TRIAGE,
@@ -770,6 +1153,13 @@ export const SET_BENCH_SCENARIOS: readonly SetBenchScenario[] = [
   LONG_CONTEXT_SPEC_SUMMARY,
   CODE_REVIEW_PLANTED_BUGS,
   MULTI_STEP_REASONING_INTEREST,
+  // DE twins — same axes, native German prompts + fixtures.
+  KG_EXTRACTION_ENTITIES_DE,
+  DAG_PLANNING_RELEASE_DE,
+  MEMORY_EXTRACTION_CHAT_DE,
+  LONG_CONTEXT_SPEC_SUMMARY_DE,
+  CODE_REVIEW_PLANTED_BUGS_DE,
+  MULTI_STEP_REASONING_COMPOUND_INTEREST_DE,
 ];
 
 /** Frozen Zurich population — exposed for the mocked-tool variant. */
