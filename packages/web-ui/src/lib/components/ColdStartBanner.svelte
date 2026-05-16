@@ -7,7 +7,8 @@
 	// (red one-liner with retry hint). User can dismiss either state — the
 	// store remembers the dismissal per account for the session.
 
-	import { getLocale, t } from '../i18n.svelte.js';
+	import { formatCost } from '../format.js';
+	import { t } from '../i18n.svelte.js';
 	import {
 		dismissColdStartForAccount,
 		getVisibleColdStartActive,
@@ -31,16 +32,6 @@
 		// clamp so the bar visually settles at 100%, not 101%.
 		const ratio = Math.min(progress.uniqueThreads / progress.capValue, 1);
 		return Math.round(ratio * 100);
-	}
-
-	function formatCost(usd: number): string {
-		const locale = getLocale() === 'de' ? 'de-CH' : 'en-US';
-		return new Intl.NumberFormat(locale, {
-			style: 'currency',
-			currency: 'USD',
-			minimumFractionDigits: 2,
-			maximumFractionDigits: 4,
-		}).format(usd);
 	}
 
 	function progressText(entry: ColdStartActiveEntry): string {
