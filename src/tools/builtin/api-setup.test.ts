@@ -294,6 +294,33 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('points the agent at docs_url when an OpenAPI spec is over the size cap', async () => {
+      // Crystal-Ball smoke 2026-05-16: agent picked GitHub's full OpenAPI spec
+      // (~13 MB) for bootstrap, hit the 5 MB body cap, and the old error
+      // ("split the API into multiple profiles") sent it down a manual-create
+      // detour. The new message must steer it to docs_url + manual create so
+      // the recovery doesn't burn three extra LLM rounds.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('x'.repeat(6 * 1024 * 1024), {
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/huge-spec.json' },
+          agent,
+        );
+        expect(result).toContain('exceeds');
+        expect(result).toContain('docs_url');
+        expect(result).toContain('create');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('refuses to fetch a private-IP openapi_url (SSRF guard)', async () => {
       // No fetch mock — validateUrl must reject before any network call.
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
