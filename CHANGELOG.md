@@ -1,14 +1,14 @@
 # Changelog
 
-## 1.6.0 — 2026-05-16
+## 1.5.1 — UNRELEASED
 
-Minor — **IA Consolidation V2 (Phase 1 + Phase 2)**. Two-phase refactor of the post-onboarding shell. Phase 1 collapses the dual-home `ConfigView` SSoT drift (1100+ LOC deleted, 12 settings now have single canonical pages, schema switches to `.strict()`). Phase 2 moves Activity into its own `/app/activity` root, repoints the footer cost/runs pills, and starts the Cost-Limits page sunset (banner now, final delete in v1.7). Mobile gets a net-new bottom-tab (Chat · Inbox · Activity · Intelligence · More). One canonical `formatCost` replaces three drifted implementations. All legacy URLs 301-redirect — bookmarks survive.
+Patch — **IA Consolidation V2**. Three-phase refactor of the post-onboarding shell shipped as a single patch release. Phase 1 collapses the dual-home `ConfigView` SSoT drift (1100+ LOC deleted, 12 settings now have single canonical pages, schema switches to `.strict()`). Phase 2 moves Activity into its own `/app/activity` root and repoints the footer cost/runs pills. Phase 3 (pending) finalizes Settings into 5 tier-conditional sections and deletes the deprecated Cost-Limits page. Mobile gets a net-new bottom-tab (Chat · Inbox · Activity · Intelligence · More). One canonical `formatCost` replaces three drifted implementations. All legacy URLs 301-redirect — bookmarks survive.
 
 ### Changed
 
 - **NEW top-level `/app/activity` route** — canonical home for Cost / Runs / History. Footer cost-pill and runs-pill now land here. Replaces the old `/app/hub?section=activity` sub-tab (auto-redirected for one release). (#422, #424)
 - **`/app/hub` shrinks to 3 tabs** (Workflows / Tasks / APIs) — Activity tab stripped; legacy `?section=activity*` query-strings redirect to `/app/activity?tab=*`. (#425)
-- **Cost & Limits page deprecated** (`/app/hub/cost-limits`). Page still works during the transition with a prominent deprecation banner; cost limits move to Settings → Workspace → Limits in v1.7. The 200k/500k/1M context-window radio is already available now under Settings → LLM. One-time transition toast on first visit. (#423, this PR)
+- **Cost & Limits page deprecated** (`/app/hub/cost-limits`). Page still works during the transition with a prominent deprecation banner; final removal lands in Phase 3 of this release. Cost limits move to Settings → Workspace → Limits, context window to Settings → LLM → Advanced. The 200k/500k/1M context-window radio is already available now under Settings → LLM. One-time transition toast on first visit. (#423, #427)
 - **Mobile bottom-tab** — new on smaller viewports: Chat · Inbox · Activity · Intelligence · More-Drawer. `AppShell.svelte` previously only carried the desktop nav-rail. (#426)
 - **CommandPalette** — Activity entry added; `nav.activity` i18n key landed. (#426)
 - **Footer Status-Panel** — pulls from `/usage/summary?period=today` (Voice STT/TTS included) instead of `/history/cost/daily`. One-time "now includes Voice" hint dismissed via localStorage. (#424)
