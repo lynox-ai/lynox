@@ -1,7 +1,8 @@
 <!--
 	Voice Settings — STT + TTS provider pickers + voice catalog.
 	PRD-SETTINGS-REFACTOR Phase 3 extraction from ConfigView Compliance tab
-	to a top-level /app/settings/voice/ route (Principle 5).
+	(Principle 5). Mounted at /app/settings/privacy/voice per PRD-IA-V2 P3-PR-D
+	— old /app/settings/voice route is a 301 redirect.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
