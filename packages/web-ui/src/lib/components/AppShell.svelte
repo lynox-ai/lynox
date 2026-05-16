@@ -14,6 +14,7 @@
 	import SetupBanner from './SetupBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
+	import MobileBottomTab from './MobileBottomTab.svelte';
 	import { isSessionExpired, clearSessionExpired } from '../stores/session.svelte.js';
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import type { Snippet } from 'svelte';
@@ -697,6 +698,11 @@
 			</main>
 		</div>
 	</div>
+
+	<!-- Mobile Bottom-Tab (PRD-IA-V2 P2-PR-E) — net-new UI, only renders below
+		 the `md:` breakpoint. Lives in normal flow above the StatusBar so the
+		 chat input shrinks to make room; no fixed-positioning padding hacks. -->
+	<MobileBottomTab {inboxEnabled} />
 
 	<!-- Status Bar -->
 	<StatusBar />

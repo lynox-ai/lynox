@@ -21,7 +21,12 @@
 	const items: PaletteItem[] = [
 		{ id: 'new-chat', label: t('cmd.new_chat'), group: t('cmd.actions'), action: () => { newChat(); goto('/app'); }, keywords: 'new chat neu' },
 		{ id: 'nav-chat', label: t('nav.chat'), group: t('cmd.nav'), action: () => goto('/app'), keywords: 'chat home' },
-		{ id: 'nav-automation', label: t('nav.automation'), group: t('cmd.nav'), action: () => goto('/app/hub'), keywords: 'workflows pipelines automation dag abläufe tasks aufgaben aktivität activity history runs' },
+		// PRD-IA-V2 P2-PR-E: Activity has its own root since P2-PR-A. Position
+		// matches Desktop-Sidebar (after Chat/Inbox, before Hub) so palette
+		// search aligns with the nav-rail. Inbox is feature-flag gated and
+		// intentionally has no palette entry today — added when the flag GAs.
+		{ id: 'nav-activity', label: t('nav.activity'), group: t('cmd.nav'), action: () => goto('/app/activity'), keywords: 'activity aktivität cost kosten history runs verbrauch usage' },
+		{ id: 'nav-automation', label: t('nav.automation'), group: t('cmd.nav'), action: () => goto('/app/hub'), keywords: 'workflows pipelines automation dag abläufe tasks aufgaben hub' },
 		{ id: 'nav-intelligence', label: t('nav.intelligence'), group: t('cmd.nav'), action: () => goto('/app/intelligence'), keywords: 'intelligence dashboards reports knowledge memory wissen graph insights kpi contacts kontakte crm' },
 		{ id: 'nav-artifacts', label: t('nav.artifacts'), group: t('cmd.nav'), action: () => goto('/app/artifacts'), keywords: 'artifacts dashboards diagrams files galerie' },
 		{ id: 'nav-settings', label: t('nav.settings'), group: t('cmd.nav'), action: () => goto('/app/settings'), keywords: 'settings einstellungen config' },

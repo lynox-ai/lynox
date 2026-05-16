@@ -73,6 +73,24 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.rail_pin': { de: 'Sidebar fixieren', en: 'Pin sidebar' },
 	'nav.rail_unpin': { de: 'Sidebar ausklappbar lassen', en: 'Unpin sidebar' },
 
+	// Mobile Bottom-Tab (PRD-IA-V2 P2-PR-E) — net-new component, 5 slots.
+	// Chat keeps position 1 (left-thumb invariant per Round-1 UX U5).
+	// "Mehr" opens a drawer with Hub / Artefakte / Settings / Logout so the
+	// 5-slot budget covers daily flows without forcing the user to memorize
+	// where less-frequent surfaces live.
+	'mobile_nav.aria_label':   { de: 'Mobile Navigation', en: 'Mobile navigation' },
+	'mobile_nav.chat':         { de: 'Chat',         en: 'Chat' },
+	'mobile_nav.inbox':        { de: 'Inbox',        en: 'Inbox' },
+	'mobile_nav.activity':     { de: 'Aktivität',    en: 'Activity' },
+	'mobile_nav.intelligence': { de: 'Intelligence', en: 'Intelligence' },
+	'mobile_nav.more':         { de: 'Mehr',         en: 'More' },
+	'mobile_nav.drawer.hub':       { de: 'Automation',    en: 'Automation' },
+	'mobile_nav.drawer.artifacts': { de: 'Artefakte',     en: 'Artifacts' },
+	'mobile_nav.drawer.settings':  { de: 'Einstellungen', en: 'Settings' },
+	'mobile_nav.drawer.logout':    { de: 'Abmelden',      en: 'Log out' },
+	'mobile_nav.drawer.title':     { de: 'Weitere Bereiche', en: 'More sections' },
+	'mobile_nav.drawer.close':     { de: 'Menü schließen',  en: 'Close menu' },
+
 	// Hub tabs
 	'hub.intelligence.wissen': { de: 'Wissen', en: 'Knowledge' },
 	'hub.intelligence.graph': { de: 'Graph (Beta)', en: 'Graph (beta)' },
@@ -83,8 +101,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.automation.tasks': { de: 'Aufgaben', en: 'Tasks' },
 	'hub.automation.reminders': { de: 'Erinnerungen', en: 'Reminders' },
 	'hub.automation.apis': { de: 'APIs', en: 'APIs' },
+	// PRD-IA-V2 P2-PR-E (X6): orphan after V2 — AutomationHub loses the
+	// Activity tab in P2-PR-D. Key left in place to avoid merge-conflict
+	// with that parallel PR; final retire happens once P2-PR-D lands.
 	'hub.automation.activity': { de: 'Aktivität', en: 'Activity' },
-	'hub.migration_toast': { de: 'Aktivität liegt jetzt unter /app/hub — Lesezeichen aktualisieren.', en: 'Activity moved to /app/hub — please update your bookmark.' },
+	// PRD-IA-V2 P2-PR-E (X6): toast text rewritten — V2 moves Activity to
+	// its own root at /app/activity (not /app/hub). Shown when users land
+	// on the legacy /app/automation URL (which still 301s to /app/hub).
+	'hub.migration_toast': { de: 'Aktivität ist jetzt unter /app/activity — Lesezeichen aktualisieren.', en: 'Activity moved to /app/activity — please update your bookmark.' },
 	// Cost & Limits surface (PRD-SETTINGS-REFACTOR Phase 1)
 	'cost_limits.title':           { de: 'Kosten & Limits',                              en: 'Cost & Limits' },
 	'cost_limits.subtitle':        { de: 'Verbrauch, Budgets und Kontextfenster an einem Ort.', en: 'Usage, budgets, and context window in one place.' },
