@@ -757,6 +757,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.account.mobile': { de: 'Mobiler Zugang', en: 'Mobile Access' },
 	'settings.account.migration': { de: 'Migration zu Managed', en: 'Migration to Managed' },
 	// PRD-IA-V2 P3-PR-B — Workspace & System section (Self-Host only).
+	// Underscore naming matches existing section_main / section_data / section_access.
 	'settings.section_workspace': { de: 'Workspace & System', en: 'Workspace & System' },
 	'settings.workspace.backups': { de: 'Backups', en: 'Backups' },
 	'settings.workspace.backups_desc': { de: 'Backups erstellen, wiederherstellen und planen', en: 'Create, restore and schedule backups' },
@@ -768,8 +769,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.workspace.limits.spend_subtitle': { de: 'Harte Kosten-Caps für diese Engine. Leer = kein Limit.', en: 'Hard cost caps for this engine. Empty = no limit.' },
 	'settings.workspace.updates': { de: 'Updates', en: 'Updates' },
 	'settings.workspace.updates_desc': { de: 'Beim Engine-Start nach neuen Versionen suchen', en: 'Check for new versions at engine startup' },
-	'settings.workspace.tools': { de: 'Tool-Berechtigungen', en: 'Tool permissions' },
-	'settings.workspace.tools_desc': { de: 'Steuere, welche Tools dem Agenten zur Verfügung stehen', en: 'Control which tools the agent can use' },
+	// `settings.workspace.tools[_desc]` keys removed — SettingsIndex tile reuses
+	// the existing `tools.heading` / `tools.subtitle` keys (i18n.svelte.ts:267-268).
 	'settings.keys': { de: 'API Keys', en: 'API Keys' },
 	'settings.integrations': { de: 'Integrationen', en: 'Integrations' },
 	'settings.integrations_desc': { de: 'E-Mail (IMAP/SMTP), Google Workspace, Websuche', en: 'Email (IMAP/SMTP), Google Workspace, Web Search' },

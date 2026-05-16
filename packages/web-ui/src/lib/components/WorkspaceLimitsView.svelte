@@ -1,16 +1,8 @@
 <!--
-	Workspace Limits — NEW canonical home (PRD-IA-V2 P3-PR-B) for the four
-	non-monetary + monetary spend caps users can adjust themselves:
-	  - max_session_cost_usd
-	  - max_daily_cost_usd
-	  - max_monthly_cost_usd
-	  - max_http_requests_per_hour
-	Self-host only — managed pool is CP-gated (`requiresConfigLockGate`),
-	customers contact support for quota changes.
-
-	CostLimits.svelte stays live with its deprecation banner until P3-PR-X
-	deletes it; both surfaces PUT the same fields to /api/config (SSoT in
-	backend), so a stale tab cannot drift state.
+	Workspace Limits (PRD-IA-V2 P3-PR-B) — Self-Host only. Managed pool is
+	CP-gated. CostLimits.svelte stays live with deprecation banner until
+	P3-PR-X deletes it; both surfaces PUT the same fields to /api/config
+	(backend SSoT), so a stale tab cannot drift state.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
