@@ -138,6 +138,26 @@ describe('api_setup tool', () => {
       expect(result).toContain('Invalid auth.type');
     });
 
+    it('accepts auth.type "none" for public APIs without triggering the "no auth specified" warning', async () => {
+      // Crystal-Ball smoke 2026-05-16 surfaced this: a public API (HN-Algolia,
+      // arXiv) had no path to assert "intentionally no auth" — the agent had
+      // to fake `auth: {type: bearer, vault_keys: []}` to dodge the
+      // create-action's incomplete-profile warning, which costs an extra LLM
+      // round-trip mid-bootstrap.
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const publicProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'hn-algolia',
+        name: 'HN Algolia',
+        auth: { type: 'none' },
+      };
+      const result = await apiSetupTool.handler({ action: 'create', profile: publicProfile }, agent);
+      expect(result).toContain('Created API profile');
+      expect(result).not.toContain('No auth method specified');
+      expect(store.get('hn-algolia')?.auth?.type).toBe('none');
+    });
+
     it('requires profile object', async () => {
       const agent = createMockAgent();
       const result = await apiSetupTool.handler({ action: 'create' }, agent);
