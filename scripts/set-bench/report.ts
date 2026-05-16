@@ -43,8 +43,13 @@ export function buildReport(runs: readonly CellRun[], cells: readonly SetBenchCe
     grouped.set(run.cellLabel, arr);
   }
 
-  const summary: BenchReport['summary'] = [...grouped.entries()].map(([label, cellRuns]) => {
-    const cell = cellsByLabel.get(label)!;
+  // Orphan-run guard: if a CellRun references a label that's not in `cells`,
+  // skip it. This shouldn't happen in normal use (runs are produced from
+  // the same cell list passed here), but the silent contract drift would
+  // surface as a TypeError on `.axis` access — keep the report robust.
+  const summary: BenchReport['summary'] = [...grouped.entries()].flatMap(([label, cellRuns]) => {
+    const cell = cellsByLabel.get(label);
+    if (!cell) return [];
     const passCount = cellRuns.filter((r) => r.pass).length;
     const passRate = cellRuns.length === 0 ? 0 : passCount / cellRuns.length;
     const avgCostUsd = cellRuns.reduce((acc, r) => acc + r.costUsd, 0) / Math.max(1, cellRuns.length);
@@ -176,9 +181,11 @@ export function computeParetoFrontier(
     }
     if (dominated) continue;
     // Dedupe exact-tie cells (rare, but happens when two cells produce
-    // the same n=5 trace). Key on the (cost,passRate) pair, not label —
-    // label-dupes would already be a data-shape bug.
-    const key = `${a.avgCostUsd.toFixed(8)}:${a.passRate.toFixed(8)}`;
+    // the same n=5 trace). Key on the (cost, passRate) pair at full
+    // numeric precision — Number.toString() round-trips losslessly for
+    // JS numbers, so $1e-9 and $1.0000001e-9 won't collapse even though
+    // both formatted-to-8-decimals would.
+    const key = `${a.avgCostUsd}:${a.passRate}`;
     if (seen.has(key)) continue;
     seen.add(key);
     frontier.push(a);

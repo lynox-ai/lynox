@@ -327,6 +327,10 @@ describe('buildReport + formatReportMarkdown', () => {
     expect(md).toContain('p50');
     expect(md).toContain('p95');
     expect(md).toContain('Pareto frontier');
+    // Pin rendered values, not just column-header presence — catches
+    // a regression where columns swap or the toFixed formatting changes.
+    expect(md).toContain('0.3s'); // p50DurationMs=300ms → "0.3s"
+    expect(md).toContain('0.5s'); // p95DurationMs=480ms → "0.5s" (toFixed(1) rounds 0.48 → 0.5)
   });
 
   it('omits Pareto section when no cells exist for the axis', () => {
