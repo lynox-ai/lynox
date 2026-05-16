@@ -207,7 +207,7 @@ describe('OpenAIAdapter', () => {
         }];
 
         await collectEvents(adapter.beta.messages.stream({
-          model: 'ignored-uses-modelId',
+          model: 'claude-sonnet-4-6',
           max_tokens: 1024,
           system: 'You are a helpful assistant.',
           messages: [{ role: 'user', content: 'Remember this.' }],
@@ -222,7 +222,9 @@ describe('OpenAIAdapter', () => {
           max_tokens: number;
         };
 
-        // Model should be from adapter config, not from params
+        // Anthropic-style request model falls back to ctor modelId
+        // (downstream Mistral/OpenAI reject claude-* ids). Real downstream
+        // ids are covered in the "model id forwarding" describe.
         expect(parsed.model).toBe('mistral-large-latest');
         // System prompt should be first message
         expect(parsed.messages[0]!.role).toBe('system');
@@ -264,6 +266,72 @@ describe('OpenAIAdapter', () => {
       } finally {
         server.close();
       }
+    });
+  });
+
+  describe('model id forwarding', () => {
+    async function captureRequestModel(
+      params: { ctorModel: string; requestModel: string },
+    ): Promise<string> {
+      let captured = '';
+      const server = await createMockServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        req.on('end', () => {
+          captured = body;
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write(sseChunk({ id: 'x', choices: [{ index: 0, delta: { content: 'OK' }, finish_reason: 'stop' }] }));
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'key',
+          modelId: params.ctorModel,
+        });
+        await collectEvents(adapter.beta.messages.stream({
+          model: params.requestModel, max_tokens: 100,
+          messages: [{ role: 'user', content: 'Hi' }],
+        }));
+      } finally {
+        server.close();
+      }
+
+      return (JSON.parse(captured) as { model: string }).model;
+    }
+
+    it('forwards request-provided model id when it is a real downstream id', async () => {
+      // Tier-routing path: getModelId('sonnet', 'openai') resolved to a
+      // Mistral id via MISTRAL_MODEL_MAP, caller sends it through, adapter
+      // forwards it as-is. Without this the adapter would always send its
+      // constructor modelId — collapsing all tiers onto a single model.
+      const sent = await captureRequestModel({
+        ctorModel: 'mistral-large-2512',
+        requestModel: 'mistral-small-2603',
+      });
+      expect(sent).toBe('mistral-small-2603');
+    });
+
+    it('falls back to constructor modelId when request model is an Anthropic alias', async () => {
+      // Legacy path: no tier-map registered, getModelId returns Anthropic
+      // ids. Forwarding those would make Mistral/OpenAI reject the call —
+      // so the adapter swaps in its own configured id.
+      const sent = await captureRequestModel({
+        ctorModel: 'mistral-large-2512',
+        requestModel: 'claude-sonnet-4-6',
+      });
+      expect(sent).toBe('mistral-large-2512');
+    });
+
+    it('falls back to constructor modelId on empty request model', async () => {
+      const sent = await captureRequestModel({
+        ctorModel: 'mistral-large-2512',
+        requestModel: '',
+      });
+      expect(sent).toBe('mistral-large-2512');
     });
   });
 

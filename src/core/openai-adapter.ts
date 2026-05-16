@@ -463,8 +463,17 @@ export class OpenAIAdapter {
     const openaiMessages = translateMessages(params.system, params.messages);
     const openaiTools = params.tools ? translateTools(params.tools) : undefined;
 
+    // Honour caller-provided model id when it's a real downstream id (e.g.
+    // 'mistral-large-2512' from the registered tier-map). Reject Anthropic
+    // tier aliases that leak through when no tier-map is registered — those
+    // get rejected by Mistral/OpenAI endpoints. Empty/undefined → fall back
+    // to the adapter's constructor modelId (legacy single-model behaviour).
+    const requestedModel = typeof params.model === 'string' ? params.model : '';
+    const looksAnthropic = requestedModel.startsWith('claude-');
+    const model = requestedModel && !looksAnthropic ? requestedModel : this.modelId;
+
     const body: Record<string, unknown> = {
-      model: this.modelId,
+      model,
       messages: openaiMessages,
       max_tokens: params.max_tokens,
       stream: true,

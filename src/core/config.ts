@@ -191,7 +191,12 @@ export function loadConfig(): LynoxUserConfig {
     merged.provider = 'openai';
     merged.api_key = process.env['MISTRAL_API_KEY'];
     merged.api_base_url = 'https://api.mistral.ai/v1';
-    merged.openai_model_id = 'mistral-large-latest';
+    // Pin a versioned snapshot rather than the auto-rolling `*-latest` alias
+    // so behaviour stays reproducible across Mistral model refreshes. Tier
+    // routing (haiku/sonnet/opus) is wired separately via MISTRAL_MODEL_MAP
+    // — see Engine._configureOpenAIResolver for the bootstrap path. This
+    // field remains the single-model fallback when no tier is requested.
+    merged.openai_model_id = 'mistral-large-2512';
   }
 
   _cachedConfig = merged;
