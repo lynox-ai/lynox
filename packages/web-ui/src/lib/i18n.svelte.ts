@@ -767,7 +767,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Settings
 	'settings.title': { de: 'Settings', en: 'Settings' },
 	'settings.config': { de: 'Konfiguration', en: 'Configuration' },
-	'settings.config_desc': { de: 'KI-Modell, Provider, Budget', en: 'AI model, provider, budget' },
+	'settings.config_desc': { de: 'KI-Modell, Provider, Erweitert', en: 'AI model, provider, advanced' },
 	'settings.section_main': { de: 'Haupteinstellungen', en: 'Main Settings' },
 	'settings.section_data': { de: 'Daten & Sicherung', en: 'Data & Backup' },
 	'settings.section_access': { de: 'Zugang', en: 'Access' },
@@ -800,7 +800,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// drift; the legacy `/app/settings/integrations` routes still 301 to the
 	// new hub but the UI labels point at "Channels".
 	'settings.channels': { de: 'Kanäle', en: 'Channels' },
-	'settings.channels_desc': { de: 'E-Mail, WhatsApp, Google Workspace, Push, Websuche', en: 'Email, WhatsApp, Google Workspace, Push, Web search' },
+	'settings.channels_desc': { de: 'E-Mail, Google Workspace, Push, Websuche', en: 'Email, Google Workspace, Push, Web search' },
 	// Hub + per-channel labels (used by ChannelHub + each sub-page heading).
 	// Each language written natively — never translated one from the other.
 	'settings.channels.back': { de: 'Kanäle', en: 'Channels' },
