@@ -249,6 +249,22 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tools.saved':         { de: 'Gespeichert.',                                                                 en: 'Saved.' },
 	'tools.save_failed':   { de: 'Speichern fehlgeschlagen.',                                                    en: 'Save failed.' },
 	'tools.load_failed':   { de: 'Tool-Liste konnte nicht geladen werden.',                                      en: 'Could not load tool list.' },
+	// Tool categories (P3-FOLLOWUP-HOTFIX) — UI-only grouping; engine knows
+	// nothing about these labels. Order rendered top-to-bottom.
+	'tools.category.communication': { de: 'Kommunikation',     en: 'Communication' },
+	'tools.category.google':        { de: 'Google Workspace',  en: 'Google Workspace' },
+	'tools.category.web':           { de: 'Web',               en: 'Web' },
+	'tools.category.files':         { de: 'Dateien',           en: 'Files' },
+	'tools.category.artifacts':     { de: 'Artefakte',         en: 'Artifacts' },
+	'tools.category.memory':        { de: 'Erinnerung',        en: 'Memory' },
+	'tools.category.data':          { de: 'Datenspeicher',     en: 'Data store' },
+	'tools.category.crm':           { de: 'CRM',               en: 'CRM' },
+	'tools.category.tasks':         { de: 'Aufgaben',          en: 'Tasks' },
+	'tools.category.orchestration': { de: 'Orchestrierung',    en: 'Orchestration' },
+	'tools.category.interaction':   { de: 'Interaktion',       en: 'Interaction' },
+	'tools.category.integration':   { de: 'Integration',       en: 'Integration' },
+	'tools.category.system':        { de: 'System',            en: 'System' },
+	'tools.category.other':         { de: 'Sonstige',          en: 'Other' },
 	'hub.workflow.list': { de: 'Workflows', en: 'Workflows' },
 	'hub.workflow.analytics': { de: 'Analyse (Beta)', en: 'Analytics (beta)' },
 	// LLM settings page (PRD-SETTINGS-REFACTOR Phase 2)
@@ -274,7 +290,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.save_failed':        { de: 'Speichern fehlgeschlagen.',                                                 en: 'Save failed.' },
 	'llm.load_failed':        { de: 'LLM-Daten konnten nicht geladen werden.',                                   en: 'Could not load LLM data.' },
 	'llm.locked_notice':      { de: 'Anbieter und Modell werden vom Managed-Hosting-Plan vorgegeben.',           en: 'Provider and model are managed by your hosting plan.' },
-	'llm.locked_provider':    { de: 'Anbieter ist auf diesem Plan nicht änderbar.',                              en: 'Provider is locked on this plan.' },
+	'llm.locked_provider':    { de: 'Dieser Anbieter ist im aktuellen Plan nicht verfügbar.',                    en: 'This provider is not available on the current plan.' },
+	'llm.custom_endpoints_locked_notice': { de: 'Eigene OpenAI- oder Anthropic-kompatible Endpunkte sind im Managed-Plan nicht verfügbar. Anthropic und Mistral kannst du frei wechseln.', en: 'Custom OpenAI- or Anthropic-compatible endpoints are not available on the managed plan. You can switch freely between Anthropic and Mistral.' },
 	'llm.confirm_title':      { de: 'Eigene Endpoint-URL bestätigen',                                            en: 'Confirm custom endpoint URL' },
 	'llm.confirm_body_1':     { de: 'Beim Testen wird dein API-Schlüssel an folgende URL gesendet:',             en: 'Testing will send your API key to this URL:' },
 	'llm.confirm_body_2':     { de: 'Nur fortfahren, wenn du dieser Domain vollständig vertraust. SSRF-Schutz blockiert interne Adressen, aber ein bösartiger öffentlicher Endpoint könnte deinen Key abgreifen.', en: 'Only proceed if you fully trust this domain. SSRF guard blocks internal addresses, but a malicious public endpoint could still capture your key.' },
@@ -289,7 +306,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// PRD-IA-V2 P1-PR-A1 — backfill labels for Advanced + Memory + custom-model + empty-state.
 	'llm.empty_state_title':       { de: 'Provider und API-Schlüssel fehlen.',                                  en: 'Provider and API key not yet set.' },
 	'llm.empty_state_body':        { de: 'Wähle unten einen Anbieter und trage deinen Schlüssel ein, um lynox zu starten.', en: 'Pick a provider below and paste your key to get lynox running.' },
-	'llm.empty_state_hint':        { de: 'Generic API-Keys (Tavily, Brevo, andere) leben unter „API-Keys".',     en: 'Generic API keys (Tavily, Brevo, others) live under "API keys".' },
+	'llm.empty_state_hint':        { de: 'Drittanbieter-API-Schlüssel verwaltest du unter „API-Keys".',          en: 'Third-party API keys are managed under "API keys".' },
 	'llm.advanced_heading':        { de: 'Erweitert',                                                             en: 'Advanced' },
 	'llm.memory_heading':          { de: 'Erinnerung',                                                            en: 'Memory' },
 	'llm.custom_model_id':         { de: 'Modell-ID',                                                             en: 'Model ID' },
@@ -314,7 +331,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.back_to_llm':                    { de: 'Zurück zu LLM',                                                                en: 'Back to LLM' },
 	'llm.subnav.heading':                 { de: 'LLM-Untermenüs',                                                               en: 'LLM sub-pages' },
 	'llm.subnav.keys.title':              { de: 'API-Keys',                                                                     en: 'API keys' },
-	'llm.subnav.keys.desc':               { de: 'Drittanbieter-Keys (Tavily, Brevo, eigene Namen).',                            en: 'Third-party keys (Tavily, Brevo, custom names).' },
+	'llm.subnav.keys.desc':               { de: 'API-Schlüssel für Drittanbieter-Integrationen.',                              en: 'API keys for third-party integrations.' },
 	'llm.subnav.advanced.title':          { de: 'Erweitert',                                                                    en: 'Advanced' },
 	'llm.subnav.advanced.desc':           { de: 'Gründlichkeit, Nachdenken, Kontextfenster, Erfahrungslevel.',                   en: 'Thoroughness, thinking, context window, experience level.' },
 	'llm.subnav.memory.title':            { de: 'Erinnerung',                                                                   en: 'Memory' },
@@ -797,7 +814,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.channels.notifications': { de: 'Push-Benachrichtigungen', en: 'Push notifications' },
 	'settings.channels.notifications_desc': { de: 'Browser-Push, Ruhezeiten, Drosselung, Konto-Stummschaltung', en: 'Browser push, quiet hours, throttling, per-account mute' },
 	'settings.channels.search': { de: 'Websuche', en: 'Web search' },
-	'settings.channels.search_desc': { de: 'SearXNG (selbstgehostet) oder Tavily als Fallback', en: 'SearXNG (self-hosted) or Tavily as a fallback' },
+	'settings.channels.search_desc': { de: 'SearXNG-Endpunkt für Webrecherche', en: 'SearXNG endpoint for web research' },
 	// PRD-IA-V2 P3-PR-G — `settings.tasks` retired; Tasks now lives under
 	// Automation Hub via `hub.automation.tasks`. Key was already unused in
 	// templates (only the definition remained after SettingsIndex never wired
@@ -1018,19 +1035,19 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Separate namespace from `keys.*` to keep the legacy KeysView translations intact;
 	// `/settings/keys` itself is now a 301 stub pointing at `/settings/llm/keys` (P1-PR-C).
 	'secrets.title':                { de: 'API-Keys',                                                              en: 'API keys' },
-	'secrets.subtitle':             { de: 'Drittanbieter-Schlüssel (Tavily, Brevo, Custom). LLM-Provider-Keys liegen unter LLM-Provider.', en: 'Third-party keys (Tavily, Brevo, custom). LLM provider keys live under LLM Provider.' },
+	'secrets.subtitle':             { de: 'API-Schlüssel für Drittanbieter-Integrationen. LLM-Provider-Keys liegen unter LLM-Provider.', en: 'API keys for third-party integrations. LLM provider keys live under LLM Provider.' },
 	'secrets.back_to_llm':          { de: 'Zurück zu LLM-Provider',                                                en: 'Back to LLM provider' },
 	'secrets.list_heading':         { de: 'Gespeicherte Keys',                                                     en: 'Stored keys' },
 	'secrets.empty':                { de: 'Keine API-Keys gespeichert.',                                           en: 'No API keys stored.' },
 	'secrets.add_title':            { de: 'Neuen Key hinzufügen',                                                  en: 'Add new key' },
-	'secrets.name_hint':            { de: 'Vorschläge: TAVILY_API_KEY, BREVO_API_KEY, SEARCH_API_KEY, GOOGLE_CLIENT_ID. Eigene Namen sind erlaubt.', en: 'Suggestions: TAVILY_API_KEY, BREVO_API_KEY, SEARCH_API_KEY, GOOGLE_CLIENT_ID. Custom names allowed.' },
+	'secrets.name_hint':            { de: 'Beliebige UPPER_SNAKE_CASE-Namen erlaubt, z. B. SEARCH_API_KEY oder GOOGLE_CLIENT_ID.', en: 'Any UPPER_SNAKE_CASE name allowed, e.g. SEARCH_API_KEY or GOOGLE_CLIENT_ID.' },
 	'secrets.use_llm_page':         { de: 'Dieser Key gehört in die LLM-Provider-Seite, nicht hierher.',           en: 'This key belongs on the LLM provider page, not here.' },
 	'secrets.managed_blocked':      { de: 'Auf Managed-Hosting nicht beschreibbar — schreib uns für custom Integrationen.', en: 'Not writable on managed hosting — contact us for custom integrations.' },
 	'secrets.managed_notice_title': { de: 'Managed-Hosting',                                                       en: 'Managed hosting' },
-	'secrets.managed_notice_body':  { de: 'Generische API-Keys (Tavily, Brevo, Custom) werden auf managed Hosting zentral verwaltet. Nur Anthropic- und OpenAI-kompatible Schlüssel sind hier schreibbar.', en: 'Generic API keys (Tavily, Brevo, custom) are centrally managed on managed hosting. Only Anthropic- and OpenAI-compatible keys are writable here.' },
+	'secrets.managed_notice_body':  { de: 'Drittanbieter-API-Schlüssel werden auf Managed-Hosting zentral verwaltet. Nur Anthropic- und OpenAI-kompatible Schlüssel sind hier schreibbar.', en: 'Third-party API keys are centrally managed on managed hosting. Only Anthropic- and OpenAI-compatible keys are writable here.' },
 	'secrets.no_admin':             { de: 'Keine Admin-Berechtigung — Key-Liste nicht verfügbar.',                 en: 'No admin permission — key list unavailable.' },
 	'secrets.link_to_keys':         { de: 'API-Keys verwalten →',                                                  en: 'Manage API keys →' },
-	'secrets.link_to_keys_hint':    { de: 'Drittanbieter-Keys (Tavily, Brevo, eigene Namen).',                     en: 'Third-party keys (Tavily, Brevo, custom names).' },
+	'secrets.link_to_keys_hint':    { de: 'API-Schlüssel für Drittanbieter-Integrationen.',                       en: 'API keys for third-party integrations.' },
 
 	// Tasks
 	'tasks.title': { de: 'Aufgaben', en: 'Tasks' },
@@ -1158,11 +1175,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.search_managed_hint': { de: 'Auf Managed-Hosting ist die Websuche vorkonfiguriert — du musst nichts einrichten.', en: 'On managed hosting, web search is pre-configured — there is nothing for you to set up.' },
 	'integrations.search_configured': { de: 'Konfiguriert', en: 'Configured' },
 	'integrations.search_not_configured': { de: 'Nicht konfiguriert', en: 'Not configured' },
-	'integrations.search_saved': { de: 'Key gespeichert. Engine wird neu gestartet...', en: 'Key saved. Restarting engine...' },
-	'integrations.tavily_label': { de: 'Tavily API Key', en: 'Tavily API Key' },
-	'integrations.search_step1': { de: 'Kostenloses Konto erstellen auf', en: 'Create a free account at' },
-	'integrations.search_step2': { de: 'API-Key im Dashboard kopieren und unten einfügen', en: 'Copy API key from dashboard and paste below' },
-	'integrations.search_step3': { de: 'Gratis-Tier: 1.000 Suchen/Monat', en: 'Free tier: 1,000 searches/month' },
+	'integrations.search_saved': { de: 'Gespeichert.', en: 'Saved.' },
 
 	// SearXNG
 	'integrations.searxng': { de: 'SearXNG (Self-Hosted)', en: 'SearXNG (Self-Hosted)' },

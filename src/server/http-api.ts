@@ -196,7 +196,59 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'max_context_window_tokens',  // LLM Advanced radios (200k / 500k / 1M) — caps the agent trim budget, no cost / capability impact on CP.
   'custom_endpoints',           // LLM-settings bookmarks — UI sugar over api_base_url, engine still consumes api_base_url.
   'disabled_tools',             // Tool-Toggles — strictly narrows excludeTools, never widens.
+  // P3-FOLLOWUP-HOTFIX: provider switching between curated managed providers
+  // (Anthropic + Mistral; future: openai-native). The value-range guard at
+  // `enforceManagedProviderConstraints()` below caps the allowed set —
+  // free-text endpoints (`provider='custom'` or `provider='openai'` with a
+  // non-Mistral host) get rejected with a clear 403, never blanket-allowed.
+  'provider',
+  'api_base_url',
+  'openai_model_id',
+  'llm_mode',
 ]);
+
+/**
+ * On Managed, `provider` is constrained to a curated set so a customer
+ * cannot point the engine at a free-text endpoint we'd then proxy traffic to.
+ * Anthropic: always allowed (CP-pinned default). `openai` provider is allowed
+ * ONLY when paired with the Mistral preset (`api_base_url ==='https://api.mistral.ai/v1'`).
+ * `custom` / `vertex` are blocked on Managed (free-text or GCP-OAuth surfaces
+ * the CP doesn't manage). Returns null when accepted, a 403-reason string
+ * otherwise.
+ */
+const MANAGED_CURATED_PROVIDERS = new Set<string>(['anthropic', 'openai']);
+const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
+  'https://api.mistral.ai/v1',
+  'https://api.mistral.ai',
+]);
+
+function enforceManagedProviderConstraints(update: Record<string, unknown>): string | null {
+  // 1. provider field present — must be in the curated allowlist (anthropic
+  //    or openai-with-Mistral-host). 'custom' and 'vertex' are blocked outright.
+  if ('provider' in update) {
+    const provider = update['provider'];
+    if (typeof provider !== 'string' || !MANAGED_CURATED_PROVIDERS.has(provider)) {
+      return `Managed instance: provider '${String(provider)}' is not in the curated allowlist (Anthropic, Mistral preset).`;
+    }
+    if (provider === 'openai') {
+      const baseUrl = update['api_base_url'];
+      if (typeof baseUrl !== 'string' || !MANAGED_OPENAI_MISTRAL_HOSTS.has(baseUrl)) {
+        return `Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got '${String(baseUrl)}'.`;
+      }
+    }
+  }
+  // 2. api_base_url alone (without provider) — only the Mistral host is
+  //    accepted on Managed. Attacker-controlled URLs are rejected even if
+  //    the field is in MANAGED_USER_WRITABLE_CONFIG, because a free-text URL
+  //    would let a managed customer redirect engine traffic.
+  if ('api_base_url' in update && !('provider' in update)) {
+    const baseUrl = update['api_base_url'];
+    if (typeof baseUrl === 'string' && baseUrl.length > 0 && !MANAGED_OPENAI_MISTRAL_HOSTS.has(baseUrl)) {
+      return `Managed instance: cannot change api_base_url to '${baseUrl}' — only the curated Mistral preset is allowed.`;
+    }
+  }
+  return null;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -2296,7 +2348,12 @@ export class LynoxHTTPApi {
         voice_tts_available: speakMod.hasSpeakProvider(),
         whisper_local_available: transcribeMod.whisperCppProvider.isAvailable,
         // Capability gates — drive UI visibility instead of tier checks
-        can_set_provider: !isManagedTier,
+        // P3-FOLLOWUP-HOTFIX: provider switching is now allowed on Managed
+        // between the curated allowlist (anthropic + mistral preset), so
+        // `can_set_provider` is true everywhere. The narrower lock lives in
+        // `can_set_custom_provider_endpoints` for free-text base_url tiles.
+        can_set_provider: true,
+        can_set_custom_provider_endpoints: !isManagedTier,
         can_set_limits: !isManagedTier,
         can_set_context_window: true,
         can_set_thinking_effort: true,
@@ -2316,7 +2373,13 @@ export class LynoxHTTPApi {
       // human-readable reason instead of an unexplained disabled input.
       const locks: CapabilityLocks = {};
       if (isManagedTier) {
-        locks.provider = { reason: 'managed-tier' };
+        // P3-FOLLOWUP-HOTFIX: provider was previously fully locked on Managed;
+        // we now allow switching between curated providers (Anthropic + Mistral)
+        // and only lock the free-text custom-endpoint tiles. UI consumes the
+        // `custom_provider_endpoints` flag to disable `requires_base_url` tiles
+        // while keeping the curated tiles clickable. Backend enforces the same
+        // rule via `enforceManagedProviderConstraints()` on PUT.
+        locks.custom_provider_endpoints = { reason: 'managed-tier' };
         locks.limits = {
           reason: 'managed-tier',
           contact_cta: { href: 'mailto:support@lynox.ai?subject=Quota%20adjustment', label: 'Contact support' },
@@ -2353,6 +2416,16 @@ export class LynoxHTTPApi {
       if (requiresConfigLockGate(process.env['LYNOX_MANAGED_MODE'])) {
         const fileConfig = loadConfig() as Record<string, unknown>;
         const update = parsed.data as Record<string, unknown>;
+        // P3-FOLLOWUP-HOTFIX: value-range validation for the curated provider
+        // allowlist. `provider` is in MANAGED_USER_WRITABLE_CONFIG (so the
+        // strict-diff below lets it pass) — this is the additional guard that
+        // caps the allowed set to Anthropic + Mistral. Reject FIRST so a
+        // malformed save can't pollute downstream config-merge state.
+        const providerReason = enforceManagedProviderConstraints(update);
+        if (providerReason) {
+          errorResponse(res, 403, providerReason);
+          return;
+        }
         const attempted: string[] = [];
         for (const [field, value] of Object.entries(update)) {
           if (MANAGED_USER_WRITABLE_CONFIG.has(field)) continue;

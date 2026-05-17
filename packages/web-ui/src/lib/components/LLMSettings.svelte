@@ -64,7 +64,14 @@
 	}
 
 	interface Locks {
+		// Legacy hard-lock: operator pinned a provider in config.json (rare).
+		// When set, NO provider tile is clickable.
 		provider?: { reason: string; upgrade_cta?: { href: string; label: string } };
+		// P3-FOLLOWUP-HOTFIX: Managed lock on free-text endpoints. Curated tiles
+		// (Anthropic, Mistral preset) stay clickable; tiles with
+		// `requires_base_url === true` (OpenAI-compat, Anthropic-compat) are
+		// disabled.
+		custom_provider_endpoints?: { reason: string };
 	}
 
 	let providers = $state<CatalogProvider[]>([]);
@@ -180,7 +187,7 @@
 	}
 
 	function selectCatalogEntry(entry: CatalogProvider): void {
-		if (locks.provider) {
+		if (isTileLocked(entry)) {
 			addToast(t('llm.locked_provider'), 'info', 3000);
 			return;
 		}
@@ -281,11 +288,12 @@
 					if (!secretRes.ok) throw new Error(`Vault rejected ${slot}: HTTP ${secretRes.status}`);
 				}
 			}
-			// 2. Save config. Provider-bound fields only stage when the user can change
-			// them. On managed-tier the CP locks provider; sending provider-bound
-			// fields runs them through the lock-gate's effective-default diff and
-			// any tiny drift (e.g. llm_mode that has no MANAGED_EFFECTIVE_DEFAULTS
-			// entry) returns 403, silently breaking the entire save.
+			// 2. Save config. Provider-bound fields stage whenever a provider tile
+			// is selectable in the UI. On Managed we stage them too — the curated
+			// allowlist (Anthropic + Mistral preset) is validated server-side via
+			// `enforceManagedProviderConstraints()`. Only the legacy hard-lock
+			// `providerLocked` (operator pinned a provider in config.json) skips
+			// the staging, because there the value is operator-owned.
 			const update: UserConfig = {};
 			if (!providerLocked && activeProvider) {
 				update.provider = activeProvider;
@@ -338,6 +346,17 @@
 		?? providers.find((p) => p.provider === activeProvider),
 	);
 	const providerLocked = $derived(!!locks.provider);
+	const customEndpointsLocked = $derived(!!locks.custom_provider_endpoints);
+
+	// Per-tile predicate (P3-FOLLOWUP-HOTFIX): replaces the binary providerLocked
+	// gate on tile click. On Managed, only free-text endpoints (`requires_base_url`)
+	// are off-limits; the curated tiles (Anthropic, Mistral) stay interactive.
+	// `providerLocked` (operator hard-lock) still blanket-disables everything.
+	function isTileLocked(entry: CatalogProvider): boolean {
+		if (providerLocked && catalogEntryKey(entry) !== activeCatalogKey) return true;
+		if (customEndpointsLocked && entry.requires_base_url) return true;
+		return false;
+	}
 
 	// Empty-state CTA (PRD acceptance: fresh ~/.lynox/config.json → SetupBanner
 	// → click → lands on /settings/llm empty-state). Triggers when neither a
@@ -376,6 +395,12 @@
 				<a href={locks.provider.upgrade_cta.href} class="text-accent-text underline mt-1 inline-block">{locks.provider.upgrade_cta.label}</a>
 			{/if}
 		</div>
+	{:else if customEndpointsLocked}
+		<!-- P3-FOLLOWUP-HOTFIX: narrower notice for Managed — curated providers
+		     stay switchable, only free-text endpoints are off-limits. -->
+		<div class="border border-warning/50 bg-warning/5 rounded p-3 text-sm">
+			<p>{t('llm.custom_endpoints_locked_notice')}</p>
+		</div>
 	{/if}
 
 	{#if showEmptyState}
@@ -392,12 +417,30 @@
 		</div>
 	{/if}
 
+	<!-- Provider picker — Anthropic / Mistral / Custom. P3-FOLLOWUP-HOTFIX:
+	     moved to the top of the page so the user sees the selection control
+	     before the sub-route nav. Vertex is wired in the engine for legacy
+	     `provider: 'vertex'` config.json setups (see core CLAUDE.md) but no
+	     longer offered in-product per project_eu_providers_strategy — filter
+	     it out of the tile list. -->
+	<section aria-labelledby="llm-provider-heading">
+		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
+		<div class="grid gap-2 sm:grid-cols-2">
+			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogEntryKey(p))}
+				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={isTileLocked(p)}
+					class="text-left p-3 rounded border-2 transition-colors {catalogEntryKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
+					<div class="font-medium text-sm">{p.display_name}</div>
+					<div class="text-xs text-text-muted mt-0.5">{p.default_residency}</div>
+				</button>
+			{/each}
+		</div>
+	</section>
+
 	<!--
 		LLM sub-route nav (PRD-IA-V2 P3-PR-C). Data-driven so the OpenAI-native
 		Phase 4 sub-route slots in as a single array append on `llmSubRoutes`
-		without touching the render-tree. Generic API-Keys (Tavily / Brevo /
-		custom names) live under `/keys`; Advanced + Memory got their own
-		sub-pages with this PR.
+		without touching the render-tree. Generic third-party API keys live
+		under `/keys`; Advanced + Memory got their own sub-pages with this PR.
 	-->
 	<nav aria-labelledby="llm-subnav-heading" class="space-y-2">
 		<h2 id="llm-subnav-heading" class="sr-only">{t('llm.subnav.heading')}</h2>
@@ -409,23 +452,6 @@
 			</a>
 		{/each}
 	</nav>
-
-	<!-- Provider picker — Anthropic / Mistral / Custom. Vertex is wired in the
-	     engine for legacy `provider: 'vertex'` config.json setups (see core
-	     CLAUDE.md) but no longer offered in-product per
-	     project_eu_providers_strategy — filter it out of the tile list. -->
-	<section aria-labelledby="llm-provider-heading">
-		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
-		<div class="grid gap-2 sm:grid-cols-2">
-			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogEntryKey(p))}
-				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={providerLocked && catalogEntryKey(p) !== activeCatalogKey}
-					class="text-left p-3 rounded border-2 transition-colors {catalogEntryKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
-					<div class="font-medium text-sm">{p.display_name}</div>
-					<div class="text-xs text-text-muted mt-0.5">{p.default_residency}</div>
-				</button>
-			{/each}
-		</div>
-	</section>
 
 	{#if activeProviderEntry}
 		<!-- Per-provider config form -->

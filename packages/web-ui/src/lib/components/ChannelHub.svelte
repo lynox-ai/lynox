@@ -14,12 +14,14 @@
 		descKey: string;
 	}
 
+	// WhatsApp is wired end-to-end (component + route at `/channels/whatsapp`)
+	// but the marketing / docs surface isn't ready yet. Hidden from the hub
+	// until release; the direct route still works for internal testing.
 	// When a future channel needs tier-gating, reintroduce `hideOnManaged` here
 	// and bring back the `loadManagedStatus` probe (see git history pre-P3-PR-A2
 	// review fixup). Removed eagerly now to drop one /api/config RTT on hub mount.
 	const channels: ChannelItem[] = [
 		{ href: '/app/settings/channels/mail', titleKey: 'settings.channels.mail', descKey: 'settings.channels.mail_desc' },
-		{ href: '/app/settings/channels/whatsapp', titleKey: 'settings.channels.whatsapp', descKey: 'settings.channels.whatsapp_desc' },
 		{ href: '/app/settings/channels/google', titleKey: 'settings.channels.google', descKey: 'settings.channels.google_desc' },
 		{ href: '/app/settings/channels/notifications', titleKey: 'settings.channels.notifications', descKey: 'settings.channels.notifications_desc' },
 		{ href: '/app/settings/channels/search', titleKey: 'settings.channels.search', descKey: 'settings.channels.search_desc' },

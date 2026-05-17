@@ -1,6 +1,6 @@
 // === Integrations: managed-tier detection ===
 //
-// Several channel-cards (Anthropic, SearXNG, Tavily) and Google-OAuth hide
+// Several channel-cards (Anthropic, SearXNG) and Google-OAuth hide
 // or reshape themselves on managed instances. Centralised here so the per-
 // channel routes in P3-PR-A2 share one fetch + one source of truth.
 //

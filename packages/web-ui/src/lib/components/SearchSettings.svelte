@@ -2,28 +2,23 @@
 	// === Web Search channel card ===
 	//
 	// Extracted from IntegrationsView.svelte during PRD-IA-V2 P3-PR-A2.
-	// Combines the two Search-related cards from the old view:
-	//   - Tavily (paid fallback) — key save
-	//   - SearXNG (free self-hosted primary) — URL save + health check
-	// Both are hidden on managed (SearXNG is a pre-configured sidecar there).
+	// SearXNG is the only surfaced provider: free, self-hosted, no third-party
+	// quota. Tavily backend support still exists in the engine for backward-
+	// compat with TAVILY_API_KEY env var, but is no longer surfaced in the UI
+	// (P3-FOLLOWUP-HOTFIX). Hidden entirely on managed (SearXNG is a
+	// pre-configured sidecar there).
 	//
 	// State lives in `stores/integrations/search.svelte.ts` (P3-PR-A1).
 
 	import { t } from '../i18n.svelte.js';
 	import {
 		isSecretsLoading,
-		isSearchConfigured,
 		isSearxngConfigured,
 		getSearxngConfiguredUrl,
 		loadSecretStatuses,
 	} from '../stores/integrations/secrets.svelte.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import {
-		getSearchKey,
-		setSearchKey,
-		isSearchSaving,
-		isSearchSaved,
-		saveSearch,
 		getSearxngUrl,
 		setSearxngUrl,
 		isSearxngSaving,
@@ -43,62 +38,13 @@
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
-	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('integrations.search')}</h1>
+	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.search')}</h1>
 
 	{#if isManaged()}
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 			<p class="text-sm text-text-muted">{t('integrations.search_managed_hint')}</p>
 		</div>
 	{:else}
-		<!-- Tavily (paid fallback) -->
-		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
-			<div class="flex items-center justify-between mb-4">
-				<div>
-					<h2 class="font-medium">{t('integrations.search')}</h2>
-					<p class="text-xs text-text-muted mt-1">{t('integrations.search_desc')}</p>
-				</div>
-				{#if isSecretsLoading()}
-					<span class="text-xs text-text-subtle">{t('common.loading')}</span>
-				{:else if isSearchConfigured()}
-					<span class="text-xs text-success">{t('integrations.search_configured')}</span>
-				{:else}
-					<span class="text-xs text-text-subtle">{t('integrations.search_not_configured')}</span>
-				{/if}
-			</div>
-
-			{#if isSearchSaved()}
-				<p class="text-sm text-success">{t('integrations.search_saved')}</p>
-			{:else}
-				<div class="space-y-3">
-					{#if !isSearchConfigured()}
-						<ol class="text-xs text-text-muted space-y-1.5 list-decimal list-inside mb-1">
-							<li>{t('integrations.search_step1')} <a href="https://app.tavily.com/sign-in" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">tavily.com</a></li>
-							<li>{t('integrations.search_step2')}</li>
-							<li class="text-text-subtle">{t('integrations.search_step3')}</li>
-						</ol>
-					{/if}
-					<div>
-						<label for="search-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('integrations.tavily_label')}</label>
-						<input
-							id="search-key"
-							value={getSearchKey()}
-							oninput={(e) => setSearchKey((e.currentTarget as HTMLInputElement).value)}
-							type="password"
-							placeholder="tvly-..."
-							class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
-						/>
-					</div>
-					<button
-						onclick={saveSearch}
-						disabled={!getSearchKey().trim() || isSearchSaving()}
-						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
-					>
-						{isSearchSaving() ? t('settings.saving') : t('settings.save')}
-					</button>
-				</div>
-			{/if}
-		</div>
-
 		<!-- SearXNG (free self-hosted primary) -->
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 			<div class="flex items-center justify-between mb-4">

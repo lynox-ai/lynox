@@ -385,5 +385,15 @@ export interface CapabilityLock {
   contact_cta?: { href: string; label: string } | undefined;
 }
 
-/** Map of locked setting → lock metadata. Empty on self-host / BYOK. */
-export type CapabilityLocks = Partial<Record<'provider' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort', CapabilityLock>>;
+/**
+ * Map of locked setting → lock metadata. Empty on self-host / BYOK.
+ *
+ * `provider`: legacy hard-lock — set when the operator pinned a provider via
+ *   `~/.lynox/config.json` and the UI must refuse all switches. NOT set on
+ *   default Managed any more (P3-FOLLOWUP-HOTFIX, 2026-05-17); Managed now
+ *   carries the narrower `custom_provider_endpoints` lock so curated
+ *   providers (Anthropic, Mistral) stay switchable.
+ * `custom_provider_endpoints`: free-text base_url tiles disabled (Managed).
+ *   Mirror in code: catalog entries with `requires_base_url === true`.
+ */
+export type CapabilityLocks = Partial<Record<'provider' | 'custom_provider_endpoints' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort', CapabilityLock>>;

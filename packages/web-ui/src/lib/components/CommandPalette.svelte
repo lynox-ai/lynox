@@ -51,8 +51,8 @@
 		{ id: 'nav-artifacts', label: t('nav.artifacts'), group: t('cmd.nav'), action: () => goto('/app/artifacts'), keywords: 'artifacts dashboards diagrams files galerie' },
 		{ id: 'nav-settings', label: t('nav.settings'), group: t('cmd.nav'), action: () => goto('/app/settings'), keywords: 'settings einstellungen config' },
 		// PRD-IA-V2 P1-PR-C — `/app/settings/keys` is now a 301 stub; SecretsView
-		// (generic API-Key CRUD for Tavily/Brevo/custom) lives at `/llm/keys`,
-		// the SSoT per PRD. Palette skips the redirect bounce and lands directly.
+		// (generic third-party API-Key CRUD) lives at `/llm/keys`, the SSoT per
+		// PRD. Palette skips the redirect bounce and lands directly.
 		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/llm/keys'), keywords: 'keys api schluessel' },
 		// PRD-IA-V2 P3-PR-A2 — `settings.integrations` retired in favour of
 		// `settings.channels`. Keywords still include the old "integrations"
