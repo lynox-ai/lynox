@@ -35,7 +35,7 @@
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
-	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('integrations.push_notifications')}</h1>
+	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.notifications')}</h1>
 
 	{#if isIosWithoutPwa()}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">

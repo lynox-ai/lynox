@@ -7,22 +7,16 @@
 	// hub just lists them, mirroring how `SettingsIndex` works for the parent.
 
 	import { t } from '../i18n.svelte.js';
-	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 	interface ChannelItem {
 		href: string;
 		titleKey: string;
 		descKey: string;
-		// Managed-only blocks (e.g. SearXNG-on-managed is hidden because the
-		// sidecar is pre-configured) — kept here for future tier-gating; today
-		// none of the channels are tier-restricted at the top level.
-		hideOnManaged?: boolean;
 	}
 
-	$effect(() => {
-		void loadManagedStatus();
-	});
-
+	// When a future channel needs tier-gating, reintroduce `hideOnManaged` here
+	// and bring back the `loadManagedStatus` probe (see git history pre-P3-PR-A2
+	// review fixup). Removed eagerly now to drop one /api/config RTT on hub mount.
 	const channels: ChannelItem[] = [
 		{ href: '/app/settings/channels/mail', titleKey: 'settings.channels.mail', descKey: 'settings.channels.mail_desc' },
 		{ href: '/app/settings/channels/whatsapp', titleKey: 'settings.channels.whatsapp', descKey: 'settings.channels.whatsapp_desc' },
@@ -30,8 +24,6 @@
 		{ href: '/app/settings/channels/notifications', titleKey: 'settings.channels.notifications', descKey: 'settings.channels.notifications_desc' },
 		{ href: '/app/settings/channels/search', titleKey: 'settings.channels.search', descKey: 'settings.channels.search_desc' },
 	];
-
-	const visibleChannels = $derived(channels.filter(c => !(c.hideOnManaged && isManaged())));
 </script>
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
@@ -39,7 +31,7 @@
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels')}</h1>
 
 	<div class="space-y-2">
-		{#each visibleChannels as channel}
+		{#each channels as channel}
 			<a
 				href={channel.href}
 				class="block rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 hover:border-border-hover transition-colors"

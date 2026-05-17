@@ -52,6 +52,28 @@ describe('assertChannelTarget', () => {
     });
   });
 
+  describe('Open-Redirect edge cases (pin exact-string semantics)', () => {
+    // The allowlist is a Set.has() exact-string match — these cases all rely on
+    // that. If a future refactor switches to `startsWith` or regex, several of
+    // these would silently pass. Pinning them here keeps the contract auditable.
+    it.each([
+      // URL-encoded variants — `Set.has` is byte-literal, encoded paths don't match.
+      '%2F%2Fevil.com',
+      '/app/settings/channels%2F../admin',
+      // Whitespace / control-char injection.
+      '\t/app/settings/channels',
+      '/app/settings/channels\n',
+      ' /app/settings/channels',
+      // Case-sensitivity probe — channels are lowercase only.
+      '/app/settings/Channels',
+      '/APP/settings/channels',
+      // Trailing-slash variant — distinct from the exact allowlisted entry.
+      '/app/settings/channels/',
+    ])('rejects %s', (target) => {
+      expect(() => assertChannelTarget(target)).toThrow();
+    });
+  });
+
   describe('non-allowlisted /app/ paths still rejected', () => {
     it.each([
       // Valid /app/ prefix but not on the allowlist — defence-in-depth.

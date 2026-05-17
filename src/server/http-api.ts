@@ -3479,7 +3479,7 @@ export class LynoxHTTPApi {
       // SameSite=Strict session cookies wouldn't be sent). Meta-refresh from this
       // same-origin page navigates with cookies intact.
       const sendSuccessRedirect = (): void => {
-        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/integrations`;
+        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/channels/google`;
         const escaped = target.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${escaped}"><title>Connected</title></head><body><p>Google connected. Returning to settings…</p><p><a href="${escaped}">Click here if not redirected.</a></p></body></html>`);
