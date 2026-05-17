@@ -1495,6 +1495,25 @@ describe('LynoxHTTPApi', () => {
         },
       );
 
+      it('PUT /api/config rejects max_context_window_tokens above 1M on managed (Security S3 schema cap)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          // The field is allowlisted (MANAGED_USER_WRITABLE_CONFIG), so the
+          // tier lock-gate would otherwise let it through. The zod .max(1M)
+          // is the last line of defense against memory/cost DoS via a
+          // multi-million-token trim window.
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ max_context_window_tokens: 5_000_000 }),
+          });
+          expect(res.status).toBe(400);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       it.each([
         ['default_tier', 'haiku'],
         ['max_session_cost_usd', 1_000_000],

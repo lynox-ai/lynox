@@ -96,10 +96,10 @@
 		}
 	}
 
-	$effect(() => { void load(); });
-
 	const providerLocked = $derived(!!locks.provider);
 	const isManaged = $derived(managed === true);
+
+	$effect(() => { void load(); });
 
 	// Context-window radio options — mirrors `CONTEXT_OPTIONS` in CostLimits.svelte
 	// (interim home) and the equivalent literal that used to live on LLMSettings.

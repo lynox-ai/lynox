@@ -243,15 +243,15 @@ describe('LynoxUserConfigSchema — max_context_window_tokens', () => {
     expect(LynoxUserConfigSchema.safeParse({ max_context_window_tokens: 200_000.5 }).success).toBe(false);
   });
 
-  it('accepts the 2M upper-bound exactly (PRD-IA-V2 P3-PR-C Security S3)', () => {
-    const result = LynoxUserConfigSchema.safeParse({ max_context_window_tokens: 2_000_000 });
+  it('accepts the 1M upper-bound exactly (PRD-IA-V2 P3-PR-C Security S3)', () => {
+    const result = LynoxUserConfigSchema.safeParse({ max_context_window_tokens: 1_000_000 });
     expect(result.success).toBe(true);
   });
 
-  it('rejects values above 2M — blocks unbounded-window DoS on Managed (Security S3)', () => {
+  it('rejects values above 1M — blocks unbounded-window DoS on Managed (Security S3)', () => {
     // An attacker on a managed instance with the field in MANAGED_USER_WRITABLE_CONFIG
     // could otherwise force multi-million-token reads per turn (memory + cost DoS).
-    const result = LynoxUserConfigSchema.safeParse({ max_context_window_tokens: 2_000_001 });
+    const result = LynoxUserConfigSchema.safeParse({ max_context_window_tokens: 1_000_001 });
     expect(result.success).toBe(false);
   });
 });
