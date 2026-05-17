@@ -12,6 +12,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	// Local enum mirror — the engine type lives in src/types/models.ts but
 	// web-ui doesn't import core types directly (avoids dist/ rebuild churn).
 	type LLMProvider = 'anthropic' | 'vertex' | 'openai' | 'custom';
@@ -296,46 +297,23 @@
 					if (!secretRes.ok) throw new Error(`Vault rejected ${slot}: HTTP ${secretRes.status}`);
 				}
 			}
-			// 2. Save config. Provider-bound fields stage whenever a provider tile
-			// is selectable in the UI. On Managed we stage them too — the curated
-			// allowlist (Anthropic + Mistral preset) is validated server-side via
-			// `enforceManagedProviderConstraints()`. Only the legacy hard-lock
-			// `providerLocked` (operator pinned a provider in config.json) skips
-			// the staging, because there the value is operator-owned.
-			const update: UserConfig = {};
-			if (!providerLocked && activeProvider) {
-				update.provider = activeProvider;
-				// Always stage api_base_url so a stale value from a previous
-				// provider can't leak through (P3-FOLLOWUP-HOTFIX-2). Empty
-				// string explicitly clears the stored URL on the backend.
-				// Order: free-text (requires_base_url) → pinned (base_url_default)
-				// → cleared (Anthropic / Vertex / anything else).
-				if (activeProviderEntry?.requires_base_url && config.api_base_url) {
-					update.api_base_url = config.api_base_url;
-				} else if (activeProviderEntry?.base_url_default) {
-					update.api_base_url = activeProviderEntry.base_url_default;
-				} else {
-					update.api_base_url = '';
-				}
-				if (activeProviderEntry?.requires_region) {
-					update.gcp_project_id = config.gcp_project_id;
-					update.gcp_region = config.gcp_region;
-				}
-				if (config.default_tier) update.default_tier = config.default_tier;
-				// `openai_model_id` covers BOTH 'openai' (Mistral / generic OpenAI-compat)
-				// AND 'custom' (Anthropic-compat proxies via LiteLLM etc.) — engine reads
-				// the same field for both (engine.ts:307, session.ts:968). Always stage
-				// so a stale Mistral value can't leak through after switching to
-				// Anthropic — empty string clears it backend-side (P3-FOLLOWUP-HOTFIX-2).
-				if ((activeProvider === 'openai' || activeProvider === 'custom') && config.openai_model_id) {
-					update.openai_model_id = config.openai_model_id;
-				} else {
-					update.openai_model_id = '';
-				}
-				if (activeProvider === 'custom') {
-					update.custom_endpoints = config.custom_endpoints ?? [];
-				}
-			}
+			// 2. Save config. Provider-binding logic extracted to a pure helper
+			// so it can be unit-tested without a Svelte runtime — see
+			// `utils/llm-config-update.ts` for the contract + regression-pin
+			// tests for the F1 stale-fields bug (2026-05-17 staging QA).
+			const update: UserConfig = buildLLMConfigUpdate({
+				providerLocked,
+				activeProvider,
+				activeProviderEntry: activeProviderEntry ?? null,
+				config: {
+					api_base_url: config.api_base_url,
+					gcp_project_id: config.gcp_project_id,
+					gcp_region: config.gcp_region,
+					default_tier: config.default_tier,
+					openai_model_id: config.openai_model_id,
+					custom_endpoints: config.custom_endpoints,
+				},
+			});
 			// Advanced / Memory / Context-Window have moved to /settings/llm/advanced
 			// and /settings/llm/memory (PRD-IA-V2 P3-PR-C) — their save paths live on
 			// those views and PUT the same /api/config endpoint.
