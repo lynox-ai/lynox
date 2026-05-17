@@ -208,6 +208,14 @@
 			// entry's base_url_default which is undefined for free-text
 			// presets, so the URL never cleared.
 			config = { ...config, api_base_url: '' };
+		} else if (!entry.requires_base_url && !entry.base_url_default) {
+			// P3-FOLLOWUP-HOTFIX-2: switching to a provider that uses neither
+			// a free-text nor a pinned base_url (Anthropic). Clear any stale
+			// value left over from a previous Mistral selection — otherwise
+			// the Anthropic adapter gets initialised with the Mistral host
+			// and every chat 404s. Same for `openai_model_id`, which is
+			// only valid when provider ∈ {openai, custom}.
+			config = { ...config, api_base_url: '', openai_model_id: '' };
 		}
 		testResult = null;
 	}
@@ -297,15 +305,17 @@
 			const update: UserConfig = {};
 			if (!providerLocked && activeProvider) {
 				update.provider = activeProvider;
-				// Send api_base_url for both free-text presets (requires_base_url)
-				// AND pinned presets (base_url_default — e.g. Mistral). Without
-				// the second case a user picking "Mistral" would save without
-				// the api.mistral.ai host, and the engine would default to
-				// Anthropic Direct.
+				// Always stage api_base_url so a stale value from a previous
+				// provider can't leak through (P3-FOLLOWUP-HOTFIX-2). Empty
+				// string explicitly clears the stored URL on the backend.
+				// Order: free-text (requires_base_url) → pinned (base_url_default)
+				// → cleared (Anthropic / Vertex / anything else).
 				if (activeProviderEntry?.requires_base_url && config.api_base_url) {
 					update.api_base_url = config.api_base_url;
 				} else if (activeProviderEntry?.base_url_default) {
 					update.api_base_url = activeProviderEntry.base_url_default;
+				} else {
+					update.api_base_url = '';
 				}
 				if (activeProviderEntry?.requires_region) {
 					update.gcp_project_id = config.gcp_project_id;
@@ -314,9 +324,13 @@
 				if (config.default_tier) update.default_tier = config.default_tier;
 				// `openai_model_id` covers BOTH 'openai' (Mistral / generic OpenAI-compat)
 				// AND 'custom' (Anthropic-compat proxies via LiteLLM etc.) — engine reads
-				// the same field for both (engine.ts:307, session.ts:968).
+				// the same field for both (engine.ts:307, session.ts:968). Always stage
+				// so a stale Mistral value can't leak through after switching to
+				// Anthropic — empty string clears it backend-side (P3-FOLLOWUP-HOTFIX-2).
 				if ((activeProvider === 'openai' || activeProvider === 'custom') && config.openai_model_id) {
 					update.openai_model_id = config.openai_model_id;
+				} else {
+					update.openai_model_id = '';
 				}
 				if (activeProvider === 'custom') {
 					update.custom_endpoints = config.custom_endpoints ?? [];
