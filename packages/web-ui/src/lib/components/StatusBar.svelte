@@ -292,9 +292,9 @@
 	<span class="text-border">|</span>
 
 	<!-- Today's Cost — points to the canonical Activity Overview.
-	     Per PRD-IA-CONSOLIDATION-V2 Phase 2 P2-PR-B the click target
-	     moves from the legacy hub cost-limits route to /app/activity.
-	     CostLimits page remains the SSoT for edit-limits until P3-PR-B/X. -->
+	     Per PRD-IA-CONSOLIDATION-V2 Phase 2 P2-PR-B the click target moves
+	     from the legacy hub cost-limits route to /app/activity. Edit-limits
+	     SSoT now lives in /app/settings/workspace/limits (P3-PR-X). -->
 	<a href="/app/activity" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
 		{formatCost(todayCost)} {t('status.today')}
 	</a>

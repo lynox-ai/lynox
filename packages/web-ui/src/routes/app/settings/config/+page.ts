@@ -16,12 +16,11 @@ import type { PageLoad } from './$types';
 // Map keys are the legacy `?tab=` query strings from the old ConfigView.
 const TAB_TARGETS: Record<string, string> = {
   provider: '/app/settings/llm',
-  // Phase-3 will route `?tab=ai` to `/app/settings/llm/advanced`; until then
-  // the LLM-page Advanced section (backfilled in P1-PR-A1) is the closest home.
-  ai: '/app/settings/llm',
+  // P3-PR-C landed `/app/settings/llm/advanced`; route `?tab=ai` there.
+  ai: '/app/settings/llm/advanced',
   compliance: '/app/settings/privacy',
-  // Workspace/Limits lands Phase 3; cost-limits page stays the interim home.
-  budget: '/app/hub/cost-limits',
+  // P3-PR-X retired `/app/hub/cost-limits`; spend-limits live at Workspace/Limits.
+  budget: '/app/settings/workspace/limits',
   system: '/app/settings/system',
 };
 
@@ -29,9 +28,10 @@ const TAB_TARGETS: Record<string, string> = {
 // against a future TAB_TARGETS edit accidentally introducing a non-/app/ path.
 const ALLOWED_PATHS = new Set<string>([
   '/app/settings/llm',
+  '/app/settings/llm/advanced',
   '/app/settings/privacy',
   '/app/settings/system',
-  '/app/hub/cost-limits',
+  '/app/settings/workspace/limits',
 ]);
 
 const DEFAULT_TARGET = '/app/settings/llm';

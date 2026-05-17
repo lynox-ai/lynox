@@ -14,8 +14,8 @@
 	              Per-step drill stays in Hub-Builder via the deep-link.
 
 	Cost formatters come from `format.ts` (canonical SSoT — never re-implemented
-	locally). The CostLimits-Page + AutomationHub Activity-Tab still exist
-	during the P2 phase; deletion lands in P2-PR-B/D.
+	locally). CostLimits-Page was deleted in P3-PR-X; AutomationHub Activity-Tab
+	was retired earlier in P2-PR-D.
 -->
 <script lang="ts">
 	import { page } from '$app/stores';

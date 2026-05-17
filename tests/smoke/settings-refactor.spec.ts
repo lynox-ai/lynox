@@ -113,17 +113,27 @@ test('0e — /api/usage/summary is an alias of /api/usage/current (same payload)
 
 // ─────────────────────────────────────────────────────────────────────
 // Phase 1 — Cost & Limits surface (feature depth)
+// PRD-IA-V2 P3-PR-X retired `/app/hub/cost-limits` (CostLimits.svelte deleted).
+// Spend-limits + HTTP-cap moved to `/app/settings/workspace/limits` (Self-Host
+// only — WorkspaceLimitsView), context-window radio moved to
+// `/app/settings/llm/advanced` (LLMAdvancedView). The legacy URL 301-redirects
+// to `/app/settings/workspace/limits`.
 // ─────────────────────────────────────────────────────────────────────
 
-test('1 — /app/hub/cost-limits renders limits form, context-window radios, hard-limits panel', async ({ page }) => {
+test('1 — /app/hub/cost-limits 301-redirects to /app/settings/workspace/limits', async ({ page }) => {
   const { errors } = consoleErrorCollector(page);
   await page.goto(`${BASE}/app/hub/cost-limits`, { waitUntil: 'domcontentloaded' });
-  await expect(page.locator('h1')).toContainText(/Cost.*Limits|Kosten.*Limits/i);
-  // Context-window radio group should expose all 4 options
-  const radios = page.locator('input[name="context-window"]');
+  // After 301 SvelteKit lands on the canonical home.
+  expect(page.url()).toContain('/app/settings/workspace/limits');
+  expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
+});
+
+test('1 — /app/settings/llm/advanced exposes 4 context-window radios', async ({ page }) => {
+  const { errors } = consoleErrorCollector(page);
+  await page.goto(`${BASE}/app/settings/llm/advanced`, { waitUntil: 'domcontentloaded' });
+  // Context-window radio group should expose all 4 options (default + 200k / 500k / 1M)
+  const radios = page.locator('input[name="llm-context-window"]');
   await expect(radios).toHaveCount(4);
-  // Hard-limits section heading
-  await expect(page.getByText(/System.*Hard.*Limits|System.*Schutzlimits/i).first()).toBeVisible();
   expect(errors, `console errors: ${errors.join(' | ')}`).toEqual([]);
 });
 
@@ -296,10 +306,10 @@ test('5 — /app/settings/system renders Vault + Token + Update-check sections',
 // Cross-surface — StatusBar SSoT consistency + mobile + a11y
 // ─────────────────────────────────────────────────────────────────────
 
-test('X — StatusBar cost-pill links to /app/hub/cost-limits (canonical SSoT)', async ({ page }) => {
+test('X — StatusBar cost-pill links to /app/activity (P2-PR-B target after P3-PR-X retired CostLimits)', async ({ page }) => {
   await page.goto(`${BASE}/app`, { waitUntil: 'domcontentloaded' });
-  const pill = page.locator('a[href="/app/hub/cost-limits"]');
-  await expect(pill.first()).toHaveAttribute('href', '/app/hub/cost-limits');
+  const pill = page.locator('a[href="/app/activity"]');
+  await expect(pill.first()).toHaveAttribute('href', '/app/activity');
 });
 
 test('X — Mobile 390px: LLM page renders without horizontal scroll', async ({ page }) => {
@@ -309,9 +319,9 @@ test('X — Mobile 390px: LLM page renders without horizontal scroll', async ({ 
   expect(scrollX, 'horizontal scroll on mobile').toBeLessThanOrEqual(2);
 });
 
-test('X — Mobile 390px: Cost & Limits renders without horizontal scroll', async ({ page }) => {
+test('X — Mobile 390px: Workspace Limits renders without horizontal scroll', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`${BASE}/app/hub/cost-limits`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${BASE}/app/settings/workspace/limits`, { waitUntil: 'domcontentloaded' });
   const scrollX = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(scrollX, 'horizontal scroll on mobile').toBeLessThanOrEqual(2);
 });
