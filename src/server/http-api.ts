@@ -2733,18 +2733,28 @@ export class LynoxHTTPApi {
     });
 
     // ── Available tools (T5 — Tool Toggles UI) ──
-    // Drives the Integrations → Tool Toggles checkboxes. Returns name +
-    // description for every tool registered at startup. Disabled tools
-    // are merged into `excludeTools` in session.ts so the agent never
-    // sees them (server-side enforcement, not UI-only hide).
+    // Drives the categorised Tool Toggles surface (P3-FOLLOWUP-HOTFIX).
+    // Returns name + description for every tool registered at startup.
+    // Disabled tools are merged into `excludeTools` in session.ts so the
+    // agent never sees them (server-side enforcement, not UI-only hide).
+    //
+    // Description size: 500 chars max (was 200 — F3 from 2026-05-17 staging
+    // QA: the old 200-char cap chopped mid-sentence in the categorised view
+    // because most tool descriptions are 250-400 chars). Whole description
+    // (incl. newlines folded to spaces) instead of first-line-only —
+    // multi-paragraph descriptions kept their useful "do not use when…"
+    // caveats below the summary, and the UI now has room to render them.
+    // Truncated descriptions get a trailing "…" so users see the clip.
     this.addStatic('user', 'GET /api/tools/available', async (_req, res) => {
       const entries = engine.registry.getEntries();
-      const tools = entries.map((e) => ({
-        name: e.definition.name,
-        description: typeof e.definition.description === 'string'
-          ? e.definition.description.split('\n')[0]?.slice(0, 200) ?? ''
-          : '',
-      }));
+      const tools = entries.map((e) => {
+        const raw = typeof e.definition.description === 'string' ? e.definition.description : '';
+        const flattened = raw.replace(/\s+/g, ' ').trim();
+        const description = flattened.length > 500
+          ? flattened.slice(0, 499) + '…'
+          : flattened;
+        return { name: e.definition.name, description };
+      });
       jsonResponse(res, 200, { tools });
     });
 
