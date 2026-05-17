@@ -77,7 +77,15 @@ export const LynoxUserConfigSchema = z.object({
   max_monthly_cost_usd: z.number().optional(),
   // Preferred max context-window in tokens — UI offers 200k / 500k / 1M.
   // Backend clamps the trim window to this when set; default = model native.
-  max_context_window_tokens: z.number().int().positive().optional(),
+  // Hard upper-bound 1M tokens (PRD-IA-V2 P3-PR-C Security S3): blocks an
+  // attacker on a Managed instance from setting an unbounded value that
+  // would force the agent to read multi-million-token windows on every
+  // turn (memory-exhaustion DoS, and runaway provider spend). Matches the
+  // current frontier native window (Sonnet 4.6 = 1M) and the largest UI
+  // radio option in LLMAdvancedView's CONTEXT_OPTIONS; values above are
+  // unreachable from the UI anyway. Raise this only when a model that
+  // takes >1M context lands AND the UI radio gains a matching option.
+  max_context_window_tokens: z.number().int().positive().max(1_000_000).optional(),
   max_http_requests_per_hour: z.number().optional(),
   max_http_requests_per_day:  z.number().optional(),
   max_mail_sends_per_hour:    z.number().optional(),
