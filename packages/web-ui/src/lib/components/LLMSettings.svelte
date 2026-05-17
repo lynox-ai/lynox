@@ -57,21 +57,10 @@
 		default_tier?: string;
 		openai_model_id?: string;
 		custom_endpoints?: CustomEndpoint[];
-		// Advanced / Memory backfill (PRD-IA-V2 P1-PR-A1) — moved out of legacy
-		// ConfigView. Schema source-of-truth: core/src/types/schemas.ts.
-		experience?: 'business' | 'developer';
-		effort_level?: 'low' | 'medium' | 'high' | 'max';
-		thinking_mode?: 'adaptive' | 'disabled';
-		embedding_provider?: 'onnx' | 'local';
-		llm_mode?: 'standard' | 'eu-sovereign';
-		memory_extraction?: boolean;
-		memory_half_life_days?: number;
-		// Context-window (PRD-IA-V2 P2-PR-C interim move from CostLimits). Same field
-		// the backend has always read — both /app/hub/cost-limits and /settings/llm
-		// PUT to /api/config, no schema change. Final route lands in P3-PR-C.
-		max_context_window_tokens?: number;
-		managed?: string;
-		capabilities?: { mistral_available?: boolean };
+		// Advanced + Memory + Context-Window have moved to /settings/llm/advanced
+		// and /settings/llm/memory (PRD-IA-V2 P3-PR-C). The fields stay on
+		// /api/config (same SSoT) but live on their own surfaces; this page
+		// owns only Provider + Key + Model + Custom-Endpoint Registry.
 	}
 
 	interface Locks {
@@ -324,27 +313,10 @@
 				if (activeProvider === 'custom') {
 					update.custom_endpoints = config.custom_endpoints ?? [];
 				}
-				// llm_mode is admin-only on managed (per project_managed_llm_strategy:
-				// "eu-sovereign admin-only"); self-host with Mistral wired = user-pickable.
-				if (config.llm_mode) update.llm_mode = config.llm_mode;
-				// embedding_provider is self-host only (ONNX); managed doesn't expose it.
-				if (config.embedding_provider) update.embedding_provider = config.embedding_provider;
 			}
-			// Advanced + Memory — managed-allowlist-writable per MANAGED_USER_WRITABLE_CONFIG.
-			if (config.experience) update.experience = config.experience;
-			if (config.effort_level) update.effort_level = config.effort_level;
-			if (config.thinking_mode) update.thinking_mode = config.thinking_mode;
-			if (typeof config.memory_extraction === 'boolean') update.memory_extraction = config.memory_extraction;
-			if (typeof config.memory_half_life_days === 'number' && config.memory_half_life_days > 0) {
-				update.memory_half_life_days = config.memory_half_life_days;
-			}
-			// Context-window: `undefined` is a meaningful value (= model default), so
-			// we send the field whenever the radio has been touched (i.e. the key is
-			// present on `config`). Backend reads `max_context_window_tokens` from the
-			// same /api/config endpoint as CostLimits.svelte — single SSoT.
-			if ('max_context_window_tokens' in config) {
-				update.max_context_window_tokens = config.max_context_window_tokens;
-			}
+			// Advanced / Memory / Context-Window have moved to /settings/llm/advanced
+			// and /settings/llm/memory (PRD-IA-V2 P3-PR-C) — their save paths live on
+			// those views and PUT the same /api/config endpoint.
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
@@ -367,14 +339,6 @@
 	);
 	const providerLocked = $derived(!!locks.provider);
 
-	// Capability gate for the llm_mode toggle — mirrors ConfigView's same-name
-	// derived. Hidden until the engine reports a working Mistral path, so the
-	// radio doesn't tease BYOK self-hosters who don't have Mistral wired.
-	const mistralAvailable = $derived(config.capabilities?.mistral_available === true);
-	// Managed tiers can't write embedding_provider + max_http_requests_per_hour
-	// (allowlist gate in http-api.ts MANAGED_USER_WRITABLE_CONFIG); hide those
-	// inputs on managed to avoid the silent-403 trap.
-	const isManaged = $derived(config.managed === 'managed' || config.managed === 'managed_pro' || config.managed === 'eu');
 	// Empty-state CTA (PRD acceptance: fresh ~/.lynox/config.json → SetupBanner
 	// → click → lands on /settings/llm empty-state). Triggers when neither a
 	// provider was persisted to config.json nor an LLM key exists in the vault.
@@ -383,19 +347,18 @@
 		loaded && !providerLocked && !providerExplicit && apiKeyConfigured === false,
 	);
 
-	// Memory-section toggle (collapsible — final `/llm/memory` route lands in P3-PR-C).
-	let memoryOpen = $state(false);
-	let advancedOpen = $state(false);
-
-	// Context-window radio options (PRD-IA-V2 P2-PR-C). Mirrors `CONTEXT_OPTIONS`
-	// in CostLimits.svelte; both surfaces write the same backend field. Kept in
-	// sync here rather than hoisted to a shared util so the lift can be deleted
-	// cleanly when P3-PR-X removes the CostLimits-Page copy.
-	const CONTEXT_OPTIONS: ReadonlyArray<{ value: number | undefined; labelKey: string; hintKey: string }> = [
-		{ value: undefined,  labelKey: 'llm.context_window.option.default', hintKey: 'llm.context_window.option.default_hint' },
-		{ value: 200_000,    labelKey: 'llm.context_window.option.200k',    hintKey: 'llm.context_window.option.200k_hint' },
-		{ value: 500_000,    labelKey: 'llm.context_window.option.500k',    hintKey: 'llm.context_window.option.500k_hint' },
-		{ value: 1_000_000,  labelKey: 'llm.context_window.option.1m',      hintKey: 'llm.context_window.option.1m_hint' },
+	// Data-driven sub-route nav (PRD-IA-V2 P3-PR-C). Single source of truth for
+	// the LLM-page sub-nav so adding a 4th entry is a one-line array append.
+	// Future: openai-native sub-route slots in here, see PRD-OPENAI-NATIVE.md Phase 4.
+	interface SubRoute {
+		href: string;
+		titleKey: string;
+		descKey: string;
+	}
+	const llmSubRoutes: ReadonlyArray<SubRoute> = [
+		{ href: '/app/settings/llm/keys',     titleKey: 'llm.subnav.keys.title',     descKey: 'llm.subnav.keys.desc' },
+		{ href: '/app/settings/llm/advanced', titleKey: 'llm.subnav.advanced.title', descKey: 'llm.subnav.advanced.desc' },
+		{ href: '/app/settings/llm/memory',   titleKey: 'llm.subnav.memory.title',   descKey: 'llm.subnav.memory.desc' },
 	];
 </script>
 
@@ -429,11 +392,23 @@
 		</div>
 	{/if}
 
-	<!-- Generic API-Keys (Tavily / Brevo / custom) live on their own sub-page. -->
-	<div class="text-xs text-text-muted">
-		<a href="/app/settings/llm/keys" class="text-accent-text underline hover:opacity-90">{t('secrets.link_to_keys')}</a>
-		— {t('secrets.link_to_keys_hint')}
-	</div>
+	<!--
+		LLM sub-route nav (PRD-IA-V2 P3-PR-C). Data-driven so the OpenAI-native
+		Phase 4 sub-route slots in as a single array append on `llmSubRoutes`
+		without touching the render-tree. Generic API-Keys (Tavily / Brevo /
+		custom names) live under `/keys`; Advanced + Memory got their own
+		sub-pages with this PR.
+	-->
+	<nav aria-labelledby="llm-subnav-heading" class="space-y-2">
+		<h2 id="llm-subnav-heading" class="sr-only">{t('llm.subnav.heading')}</h2>
+		{#each llmSubRoutes as route (route.href)}
+			<a href={route.href}
+				class="block rounded border border-border bg-bg-subtle p-3 hover:border-border-hover transition-colors">
+				<div class="text-sm font-medium">{t(route.titleKey)}</div>
+				<div class="text-xs text-text-muted mt-0.5">{t(route.descKey)}</div>
+			</a>
+		{/each}
+	</nav>
 
 	<!-- Provider picker — Anthropic / Mistral / Custom. Vertex is wired in the
 	     engine for legacy `provider: 'vertex'` config.json setups (see core
@@ -593,171 +568,8 @@
 			</div>
 		</section>
 
-		<!--
-			Advanced section — backfilled from legacy ConfigView (PRD-IA-V2 P1-PR-A1).
-			Collapsible to keep the picker-flow visually clean; final dedicated
-			sub-route `/settings/llm/advanced` lands in P3-PR-C.
-		-->
-		<section aria-labelledby="llm-advanced-heading" class="border-t border-border pt-4 space-y-4">
-			<button type="button" onclick={() => { advancedOpen = !advancedOpen; }}
-				class="flex items-center gap-2 text-left w-full"
-				aria-expanded={advancedOpen} aria-controls="llm-advanced-body">
-				<span class="text-sm font-medium">{t('llm.advanced_heading')}</span>
-				<span class="text-xs text-text-muted">{advancedOpen ? '▾' : '▸'}</span>
-			</button>
-			{#if advancedOpen}
-				<div id="llm-advanced-body" class="space-y-4">
-					<!-- LLM mode (capability-gated): only render when Mistral path is
-					     wired AND the user can actually change provider. On managed
-					     tiers the provider is locked and eu-sovereign is admin-only
-					     (per project_managed_llm_strategy), so this radio would be
-					     visually live but silently 403 the save. Hiding it removes
-					     the dual-model-picker confusion. -->
-					{#if mistralAvailable && !providerLocked}
-						<fieldset class="space-y-2 border border-border rounded p-3">
-							<legend class="px-1 text-xs font-medium uppercase tracking-wider text-text-muted">{t('config.llm_mode')}</legend>
-							<p class="text-xs text-text-muted">{t('config.llm_mode_desc')}</p>
-							<label class="flex items-start gap-3 p-2 rounded border border-border bg-bg cursor-pointer">
-								<input type="radio" name="llm-mode" value="standard"
-									checked={(config.llm_mode ?? 'standard') === 'standard'}
-									onchange={() => { config.llm_mode = 'standard'; }}
-									class="mt-1 accent-accent shrink-0" />
-								<span class="text-sm">
-									<span class="font-medium block">{t('config.llm_mode_standard')}</span>
-									<span class="text-xs text-text-muted">{t('config.llm_mode_standard_desc')}</span>
-								</span>
-							</label>
-							<label class="flex items-start gap-3 p-2 rounded border border-border bg-bg cursor-pointer">
-								<input type="radio" name="llm-mode" value="eu-sovereign"
-									checked={config.llm_mode === 'eu-sovereign'}
-									onchange={() => { config.llm_mode = 'eu-sovereign'; }}
-									class="mt-1 accent-accent shrink-0" />
-								<span class="text-sm">
-									<span class="font-medium block">{t('config.llm_mode_eu_sovereign')}</span>
-									<span class="text-xs text-text-muted">{t('config.llm_mode_eu_sovereign_desc')}</span>
-								</span>
-							</label>
-							<p class="text-xs text-text-muted italic">{t('config.llm_mode_restart_required')}</p>
-						</fieldset>
-					{/if}
-
-					<label class="block">
-						<span class="block text-sm font-medium mb-1">{t('config.effort')}</span>
-						<span class="block text-xs text-text-muted mb-1">{t('config.effort_desc')}</span>
-						<select bind:value={config.effort_level} disabled={!loaded}
-							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-							<option value="low">{t('config.effort_low')}</option>
-							<option value="medium">{t('config.effort_medium')}</option>
-							<option value="high">{t('config.effort_high')}</option>
-							<option value="max">{t('config.effort_max')}</option>
-						</select>
-					</label>
-
-					<label class="block">
-						<span class="block text-sm font-medium mb-1">{t('config.thinking')}</span>
-						<span class="block text-xs text-text-muted mb-1">{t('config.thinking_desc')}</span>
-						<select bind:value={config.thinking_mode} disabled={!loaded}
-							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-							<option value="disabled">{t('config.thinking_disabled')}</option>
-							<option value="adaptive">{t('config.thinking_adaptive')}</option>
-						</select>
-					</label>
-
-					<label class="block">
-						<span class="block text-sm font-medium mb-1">{t('config.experience')}</span>
-						<span class="block text-xs text-text-muted mb-1">{t('config.experience_desc')}</span>
-						<select bind:value={config.experience} disabled={!loaded}
-							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-							<option value="business">{t('config.experience_business')}</option>
-							<option value="developer">{t('config.experience_developer')}</option>
-						</select>
-					</label>
-
-					{#if !isManaged}
-						<!-- embedding_provider is not in MANAGED_USER_WRITABLE_CONFIG (http-api.ts:175).
-						     Hiding on managed avoids the silent-403 UX trap. -->
-						<label class="block">
-							<span class="block text-sm font-medium mb-1">{t('config.embedding_provider')}</span>
-							<select bind:value={config.embedding_provider} disabled={!loaded}
-								class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-								<option value="onnx">{t('config.embedding_onnx')}</option>
-							</select>
-						</label>
-					{/if}
-				</div>
-			{/if}
-		</section>
-
-		<!--
-			Memory section — backfilled from legacy ConfigView (PRD-IA-V2 P1-PR-A1).
-			Final dedicated sub-route `/settings/llm/memory` lands in P3-PR-C; for
-			now this lives as a collapsible panel on the LLM page so the settings
-			don't go missing between ConfigView delete (P1-PR-A2) and Phase 3.
-		-->
-		<section aria-labelledby="llm-memory-heading" class="border-t border-border pt-4 space-y-4">
-			<button type="button" onclick={() => { memoryOpen = !memoryOpen; }}
-				class="flex items-center gap-2 text-left w-full"
-				aria-expanded={memoryOpen} aria-controls="llm-memory-body">
-				<span class="text-sm font-medium">{t('llm.memory_heading')}</span>
-				<span class="text-xs text-text-muted">{memoryOpen ? '▾' : '▸'}</span>
-			</button>
-			{#if memoryOpen}
-				<div id="llm-memory-body" class="space-y-4">
-					<div class="flex items-center justify-between gap-3">
-						<div>
-							<p class="text-sm font-medium">{t('config.memory_extraction')}</p>
-							<p class="text-xs text-text-muted mt-0.5">{t('config.memory_extraction_desc')}</p>
-						</div>
-						<button type="button"
-							onclick={() => { config.memory_extraction = !config.memory_extraction; }}
-							disabled={!loaded}
-							aria-pressed={config.memory_extraction === true}
-							aria-label={t('config.memory_extraction')}
-							class="relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 {config.memory_extraction ? 'bg-accent' : 'bg-border'}">
-							<span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform {config.memory_extraction ? 'translate-x-4' : ''}"></span>
-						</button>
-					</div>
-
-					<label class="block">
-						<span class="block text-sm font-medium mb-1">{t('config.memory_half_life')}</span>
-						<span class="block text-xs text-text-muted mb-1">{t('config.memory_half_life_desc')}</span>
-						<input type="number" min="1" max="3650" placeholder="90"
-							bind:value={config.memory_half_life_days} disabled={!loaded}
-							class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
-					</label>
-				</div>
-			{/if}
-		</section>
-
-		<!--
-			Context-window section — interim move from /app/hub/cost-limits
-			(PRD-IA-V2 P2-PR-C). Both surfaces remain functional during the
-			interim; final dedicated sub-route `/settings/llm/advanced` lands
-			in P3-PR-C, after which the radio leaves the CostLimits-Page.
-		-->
-		<section aria-labelledby="llm-context-window-heading" class="border-t border-border pt-6">
-			<h2 id="llm-context-window-heading" class="text-lg font-medium mb-1">{t('llm.context_window.heading')}</h2>
-			<p class="text-xs text-text-muted mb-3">{t('llm.context_window.description')}</p>
-			<div class="space-y-2">
-				{#each CONTEXT_OPTIONS as opt (opt.value ?? 'default')}
-					<label class="flex items-start gap-3 cursor-pointer">
-						<input type="radio" name="llm-context-window" value={opt.value}
-							bind:group={config.max_context_window_tokens}
-							disabled={!loaded} class="mt-1 disabled:opacity-50" />
-						<div class="flex-1">
-							<div class="text-sm font-medium">{t(opt.labelKey)}</div>
-							<div class="text-xs text-text-muted">{t(opt.hintKey)}</div>
-						</div>
-					</label>
-				{/each}
-			</div>
-		</section>
-
-		<!-- Save row — on managed-tier the provider is locked but Advanced /
-		     Memory / Context-Window are user-writable (MANAGED_USER_WRITABLE_CONFIG).
-		     The button used to disable on `providerLocked` and stranded managed
-		     users on the page with no way to persist context-window changes.
-		     Save-handler itself already gates locked fields (see line ~218). -->
+		<!-- Save row — provider / model / custom-endpoint changes only. Advanced,
+		     Memory, Context-Window each save from their own sub-pages now. -->
 		<div class="flex justify-end">
 			<button type="button" onclick={saveConfig} disabled={saving || !loaded}
 				class="px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50">

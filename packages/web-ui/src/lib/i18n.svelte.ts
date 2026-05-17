@@ -330,6 +330,32 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.context_window.option.1m':            { de: 'Maximum — 1M Tokens',                                                      en: 'Maximum — 1M tokens' },
 	'llm.context_window.option.1m_hint':       { de: 'Volle Modell-Kapazität. ~5× teurer, +30 % Latenz. Nur für sehr lange Threads.', en: 'Full model capacity. ~5× cost, +30% latency. Only for very long threads.' },
 
+	// LLM sub-route nav (PRD-IA-V2 P3-PR-C). Data-driven on LLMSettings.svelte —
+	// adding a 4th entry (e.g. OpenAI-native, PRD-OPENAI-NATIVE.md Phase 4) is
+	// a one-line array append on `llmSubRoutes`. Headings on the dedicated
+	// sub-pages mirror the titleKeys here.
+	'llm.back_to_llm':                    { de: 'Zurück zu LLM',                                                                en: 'Back to LLM' },
+	'llm.subnav.heading':                 { de: 'LLM-Untermenüs',                                                               en: 'LLM sub-pages' },
+	'llm.subnav.keys.title':              { de: 'API-Keys',                                                                     en: 'API keys' },
+	'llm.subnav.keys.desc':               { de: 'Drittanbieter-Keys (Tavily, Brevo, eigene Namen).',                            en: 'Third-party keys (Tavily, Brevo, custom names).' },
+	'llm.subnav.advanced.title':          { de: 'Erweitert',                                                                    en: 'Advanced' },
+	'llm.subnav.advanced.desc':           { de: 'Gründlichkeit, Nachdenken, Kontextfenster, Erfahrungslevel.',                   en: 'Thoroughness, thinking, context window, experience level.' },
+	'llm.subnav.memory.title':            { de: 'Erinnerung',                                                                   en: 'Memory' },
+	'llm.subnav.memory.desc':             { de: 'Auto-Lernen und Erinnerungsdauer steuern.',                                    en: 'Control auto-learning and memory duration.' },
+
+	// LLM Advanced sub-page (PRD-IA-V2 P3-PR-C). Final home for effort, thinking,
+	// context-window, llm_mode, embedding_provider, experience.
+	'llm.advanced.title':                 { de: 'LLM — Erweitert',                                                              en: 'LLM — Advanced' },
+	'llm.advanced.subtitle':              { de: 'Wie gründlich der Agent arbeitet und wie viel Kontext er pro Anfrage lädt.',   en: 'How thoroughly the agent works and how much context it loads per request.' },
+	'llm.advanced.reasoning_heading':     { de: 'Denkstil',                                                                     en: 'Reasoning style' },
+	'llm.advanced.experience_heading':    { de: 'Kommunikation',                                                                en: 'Communication' },
+
+	// LLM Memory sub-page (PRD-IA-V2 P3-PR-C). Final home for memory_extraction
+	// and memory_half_life_days. Foundation-Rework may re-home this — sub-route
+	// nav is data-driven so the re-home is one array entry.
+	'llm.memory.title':                   { de: 'LLM — Erinnerung',                                                             en: 'LLM — Memory' },
+	'llm.memory.subtitle':                { de: 'Was der Agent sich aus Gesprächen merkt und wie lange.',                        en: 'What the agent remembers from conversations, and for how long.' },
+
 	// Workflows
 	'workflow.title': { de: 'Workflows', en: 'Workflows' },
 	'workflow.empty': { de: 'Noch keine Workflows ausgeführt.', en: 'No workflows executed yet.' },
