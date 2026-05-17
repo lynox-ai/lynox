@@ -50,7 +50,7 @@ export function resolveProviders(registry: MailRegistry, requested: string | und
 
   const ids = registry.list();
   if (ids.length === 0) {
-    throw new MailError('not_found', 'No mail account configured. Add one in Settings → Integrations → Mail.');
+    throw new MailError('not_found', 'No mail account configured. Add one in Settings → Channels → Mail.');
   }
   return ids.map(id => registry.get(id)!).filter((p): p is MailProvider => p !== null);
 }
@@ -71,7 +71,7 @@ export function resolveProvider(registry: MailRegistry, requested: string | unde
 
   const fallback = registry.default();
   if (!fallback) {
-    throw new MailError('not_found', 'No mail account configured. Add one in Settings → Integrations → Mail.');
+    throw new MailError('not_found', 'No mail account configured. Add one in Settings → Channels → Mail.');
   }
   const provider = registry.get(fallback);
   if (!provider) {

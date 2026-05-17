@@ -105,7 +105,7 @@ export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
       try {
         // Check write scope
         if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DOCS)) {
-          return `Error: This action requires document write permissions. Grant access in Settings → Integrations → Google.`;
+          return `Error: This action requires document write permissions. Grant access in Settings → Channels → Google.`;
         }
 
         // Write actions confirmation is owned by the permission guard

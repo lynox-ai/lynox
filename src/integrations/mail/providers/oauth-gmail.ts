@@ -628,7 +628,7 @@ export class OAuthGmailProvider implements MailProvider {
   async send(input: MailSendInput): Promise<MailSendResult> {
     if (this.closed) throw new MailError('connection_failed', 'Provider closed');
     if (!this.googleAuth.hasScope('https://www.googleapis.com/auth/gmail.send')) {
-      throw new MailError('unsupported', 'Gmail send requires the gmail.send scope. Grant write access in Settings → Integrations → Google.');
+      throw new MailError('unsupported', 'Gmail send requires the gmail.send scope. Grant write access in Settings → Channels → Google.');
     }
     const fromAddress = await this.resolveFromAddress();
     const raw = base64urlEncode(Buffer.from(buildRfc2822(input, fromAddress), 'utf-8'));
@@ -864,7 +864,7 @@ export class OAuthGmailProvider implements MailProvider {
     }
     const bodyText = await res.text().catch(() => '');
     if (res.status === 401) {
-      throw new MailError('auth_failed', `Gmail ${label}: 401 — token rejected. Re-authorize in Settings → Integrations → Google.`);
+      throw new MailError('auth_failed', `Gmail ${label}: 401 — token rejected. Re-authorize in Settings → Channels → Google.`);
     }
     if (res.status === 403) {
       // Gmail uses 403 for both insufficient-scope AND quota-exceeded. The
@@ -880,7 +880,7 @@ export class OAuthGmailProvider implements MailProvider {
       if (isQuota) {
         throw new MailError('rate_limited', `Gmail ${label}: 403 ${reason} — quota or rate limit exceeded; back off and retry.`);
       }
-      throw new MailError('auth_failed', `Gmail ${label}: 403${reason ? ` ${reason}` : ''} — missing scope. Grant write access in Settings → Integrations → Google.`);
+      throw new MailError('auth_failed', `Gmail ${label}: 403${reason ? ` ${reason}` : ''} — missing scope. Grant write access in Settings → Channels → Google.`);
     }
     if (res.status === 404) {
       throw new MailError('not_found', `Gmail ${label}: 404 not found`);

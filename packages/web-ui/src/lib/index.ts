@@ -12,7 +12,18 @@ export { default as SettingsIndex } from './components/SettingsIndex.svelte';
 // `/settings/config` now 301-redirects to the appropriate extracted page.
 export { default as KeysView } from './components/KeysView.svelte';
 export { default as SecretsView } from './components/SecretsView.svelte';
-export { default as IntegrationsView } from './components/IntegrationsView.svelte';
+// PRD-IA-V2 P3-PR-A2 — `IntegrationsView` retired. The monolithic settings
+// page is gone; per-channel sub-pages live at `/app/settings/channels/*`. The
+// library export name stays as an alias to `ChannelHub` so any downstream
+// consumer (pro/pwa) that still imports `IntegrationsView` keeps rendering
+// the hub instead of a missing-component error.
+export { default as ChannelHub } from './components/ChannelHub.svelte';
+export { default as IntegrationsView } from './components/ChannelHub.svelte';
+export { default as MailSettings } from './components/MailSettings.svelte';
+export { default as WhatsAppSettings } from './components/WhatsAppSettings.svelte';
+export { default as GoogleSettings } from './components/GoogleSettings.svelte';
+export { default as NotificationsSettings } from './components/NotificationsSettings.svelte';
+export { default as SearchSettings } from './components/SearchSettings.svelte';
 export { default as KnowledgeGraphView } from './components/KnowledgeGraphView.svelte';
 export { default as MemoryInsightsView } from './components/MemoryInsightsView.svelte';
 export { default as ContactsView } from './components/ContactsView.svelte';

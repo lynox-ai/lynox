@@ -34,7 +34,10 @@
 		// (generic API-Key CRUD for Tavily/Brevo/custom) lives at `/llm/keys`,
 		// the SSoT per PRD. Palette skips the redirect bounce and lands directly.
 		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/llm/keys'), keywords: 'keys api schluessel' },
-		{ id: 'nav-integrations', label: t('settings.integrations'), group: t('cmd.nav'), action: () => goto('/app/settings/integrations'), keywords: 'integrations google tavily mail email imap smtp' },
+		// PRD-IA-V2 P3-PR-A2 — `settings.integrations` retired in favour of
+		// `settings.channels`. Keywords still include the old "integrations"
+		// term so muscle-memory queries still hit the right command.
+		{ id: 'nav-channels', label: t('settings.channels'), group: t('cmd.nav'), action: () => goto('/app/settings/channels'), keywords: 'channels integrations google tavily mail email imap smtp whatsapp push notifications search' },
 		// PRD-IA-V2 P1-PR-A2 — /app/settings/config was deleted; target the
 		// LLM-page (Provider + Model + Advanced + Memory). Phase-3 splits this
 		// further into /llm/advanced, /llm/memory, /workspace/limits, etc.

@@ -801,8 +801,26 @@ const translations: Record<string, Record<Locale, string>> = {
 	// `settings.workspace.tools[_desc]` keys removed — SettingsIndex tile reuses
 	// the existing `tools.heading` / `tools.subtitle` keys (i18n.svelte.ts:267-268).
 	'settings.keys': { de: 'API Keys', en: 'API Keys' },
-	'settings.integrations': { de: 'Integrationen', en: 'Integrations' },
-	'settings.integrations_desc': { de: 'E-Mail (IMAP/SMTP), Google Workspace, Websuche', en: 'Email (IMAP/SMTP), Google Workspace, Web Search' },
+	// PRD-IA-V2 P3-PR-A2 — `settings.integrations*` retired in favour of
+	// `settings.channels*`. Old keys removed so dead translations don't
+	// drift; the legacy `/app/settings/integrations` routes still 301 to the
+	// new hub but the UI labels point at "Channels".
+	'settings.channels': { de: 'Kanäle', en: 'Channels' },
+	'settings.channels_desc': { de: 'E-Mail, WhatsApp, Google Workspace, Push, Websuche', en: 'Email, WhatsApp, Google Workspace, Push, Web search' },
+	// Hub + per-channel labels (used by ChannelHub + each sub-page heading).
+	// Each language written natively — never translated one from the other.
+	'settings.channels.back': { de: 'Kanäle', en: 'Channels' },
+	'settings.channels.mail': { de: 'E-Mail', en: 'Email' },
+	'settings.channels.mail_desc': { de: 'IMAP/SMTP-Konten verwalten, App-Passwörter, Postfach-Regeln', en: 'Manage IMAP/SMTP accounts, app passwords, inbox rules' },
+	'settings.channels.mail_rules_link': { de: 'Regeln', en: 'Rules' },
+	'settings.channels.whatsapp': { de: 'WhatsApp', en: 'WhatsApp' },
+	'settings.channels.whatsapp_desc': { de: 'WhatsApp Business Cloud API (BYOK) anbinden', en: 'Connect WhatsApp Business Cloud API (BYOK)' },
+	'settings.channels.google': { de: 'Google Workspace', en: 'Google Workspace' },
+	'settings.channels.google_desc': { de: 'Gmail, Drive, Calendar, Sheets und Docs verbinden', en: 'Connect Gmail, Drive, Calendar, Sheets and Docs' },
+	'settings.channels.notifications': { de: 'Push-Benachrichtigungen', en: 'Push notifications' },
+	'settings.channels.notifications_desc': { de: 'Browser-Push, Ruhezeiten, Drosselung, Konto-Stummschaltung', en: 'Browser push, quiet hours, throttling, per-account mute' },
+	'settings.channels.search': { de: 'Websuche', en: 'Web search' },
+	'settings.channels.search_desc': { de: 'SearXNG (selbstgehostet) oder Tavily als Fallback', en: 'SearXNG (self-hosted) or Tavily as a fallback' },
 	// PRD-IA-V2 P3-PR-G — `settings.tasks` retired; Tasks now lives under
 	// Automation Hub via `hub.automation.tasks`. Key was already unused in
 	// templates (only the definition remained after SettingsIndex never wired
@@ -1138,6 +1156,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.push_denied_hint': { de: 'Benachrichtigungen wurden im Browser blockiert. Setze die Berechtigung in den Browser-Einstellungen zurück.', en: 'Notifications are blocked in your browser. Reset the permission in browser settings.' },
 	'integrations.push_ios_hint': { de: 'Füge lynox zum Homescreen hinzu, um Push-Benachrichtigungen zu aktivieren: Teilen → Zum Home-Bildschirm.', en: 'Add lynox to your home screen to enable push notifications: Share → Add to Home Screen.' },
 	'integrations.push_ios_hint_short': { de: 'Homescreen nötig', en: 'Homescreen required' },
+	// Surfaced when the browser doesn't support Web Push (e.g. desktop
+	// Safari without the experimental flag). Previously the entire push card
+	// was hidden — now the channel has its own route so we show a status.
+	'integrations.push_unavailable': { de: 'Vom Browser nicht unterstützt', en: 'Not supported by this browser' },
 	'integrations.push_inbox_toggle': { de: 'Bei Mails, die deine Aktion brauchen', en: 'When mail needs your action' },
 	'integrations.push_inbox_toggle_hint': { de: 'Nur „Braucht dich"-Mails — automatisch erledigte oder Entwurf-bereite werden nie gepusht. Erinnerungen und geplante Sendungen sind separat.', en: 'Only "Needs you" mail — auto-handled and drafted-for-you items never push. Reminders and scheduled sends are separate.' },
 	'integrations.push_inbox_save_failed': { de: 'Konnte Einstellung nicht speichern', en: 'Could not save preference' },
@@ -1154,6 +1176,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Web Search
 	'integrations.search': { de: 'Web Search', en: 'Web Search' },
 	'integrations.search_desc': { de: 'Webrecherche für den Agent', en: 'Web research for the agent' },
+	// Managed-tier hint for the search channel page. On managed, SearXNG runs
+	// as a pre-configured sidecar so the customer has nothing to set up.
+	'integrations.search_managed_hint': { de: 'Auf Managed-Hosting ist die Websuche vorkonfiguriert — du musst nichts einrichten.', en: 'On managed hosting, web search is pre-configured — there is nothing for you to set up.' },
 	'integrations.search_configured': { de: 'Konfiguriert', en: 'Configured' },
 	'integrations.search_not_configured': { de: 'Nicht konfiguriert', en: 'Not configured' },
 	'integrations.search_saved': { de: 'Key gespeichert. Engine wird neu gestartet...', en: 'Key saved. Restarting engine...' },

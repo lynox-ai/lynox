@@ -324,7 +324,7 @@ export class GoogleAuth {
     }
 
     if (!this.tokenData) {
-      throw new Error('Not authenticated. Connect your Google account in Settings → Integrations.');
+      throw new Error('Not authenticated. Connect your Google account in Settings → Channels → Google.');
     }
 
     // Check if token needs refresh
@@ -663,7 +663,7 @@ export class GoogleAuth {
 
   private async _doRefresh(): Promise<void> {
     if (!this.tokenData?.refresh_token) {
-      throw new Error('No refresh token available. Re-connect your Google account in Settings → Integrations.');
+      throw new Error('No refresh token available. Re-connect your Google account in Settings → Channels → Google.');
     }
 
     const response = await fetch(TOKEN_URL, {
@@ -691,7 +691,7 @@ export class GoogleAuth {
         this.tokenData = null;
         deleteTokenData(this.vault);
       }
-      throw new Error(`Token refresh failed: ${response.status} ${text}.${isPermanent ? ' Re-connect your Google account in Settings → Integrations.' : ' Retry in a moment — the refresh token is still on file.'}`);
+      throw new Error(`Token refresh failed: ${response.status} ${text}.${isPermanent ? ' Re-connect your Google account in Settings → Channels → Google.' : ' Retry in a moment — the refresh token is still on file.'}`);
     }
 
     const refreshed = validateTokenResponse(await response.json());
