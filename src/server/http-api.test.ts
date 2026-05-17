@@ -1035,8 +1035,12 @@ describe('LynoxHTTPApi', () => {
           expect(res.status).toBe(200);
           const body = await res.json() as Record<string, unknown>;
           const caps = body['capabilities'] as Record<string, unknown>;
-          // can_set_* gates flip false for managed-restricted fields
-          expect(caps['can_set_provider']).toBe(false);
+          // P3-FOLLOWUP-HOTFIX: provider-switching is allowed on Managed
+          // between the curated allowlist (anthropic + mistral). The narrower
+          // lock now lives in `can_set_custom_provider_endpoints` (free-text
+          // base_url tiles) instead of the blanket `can_set_provider`.
+          expect(caps['can_set_provider']).toBe(true);
+          expect(caps['can_set_custom_provider_endpoints']).toBe(false);
           expect(caps['can_set_limits']).toBe(false);
           expect(caps['can_set_custom_endpoints']).toBe(false);
           // But context-window and thinking-effort stay editable everywhere
@@ -1048,9 +1052,12 @@ describe('LynoxHTTPApi', () => {
           expect(hl['contact_for_quotas']).toBe(true);
           expect(hl['per_spawn_cents']).toBeUndefined();
           expect(hl['tool_http_per_hour']).toBeUndefined();
-          // locks populated with reason + contact CTA on limits
+          // locks populated with reason + contact CTA on limits.
+          // `custom_provider_endpoints` replaces the legacy `provider` lock
+          // (which is now only set for operator-pinned providers).
           const locks = body['locks'] as Record<string, Record<string, unknown>>;
-          expect(locks['provider']?.['reason']).toBe('managed-tier');
+          expect(locks['provider']).toBeUndefined();
+          expect(locks['custom_provider_endpoints']?.['reason']).toBe('managed-tier');
           expect(locks['limits']?.['reason']).toBe('managed-tier');
           expect((locks['limits']?.['contact_cta'] as Record<string, unknown>)?.['href']).toContain('mailto:support@lynox.ai');
           expect(locks['custom_endpoints']?.['reason']).toBe('managed-tier');

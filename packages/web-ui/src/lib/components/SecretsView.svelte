@@ -1,5 +1,5 @@
 <!--
-	Secrets View — generic API-key CRUD (Tavily / Brevo / custom-named).
+	Secrets View — generic third-party API-key CRUD.
 	PRD-IA-CONSOLIDATION-V2 Phase 1 P1-PR-A1: own sub-page at /settings/llm/keys.
 
 	Distinct from LLM provider keys (ANTHROPIC_API_KEY / MISTRAL_API_KEY / etc.),

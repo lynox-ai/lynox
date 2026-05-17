@@ -1,6 +1,6 @@
 // === Integrations: shared secrets-status store ===
 //
-// Several channel-cards in IntegrationsView (Anthropic, Tavily/Search, SearXNG)
+// Several channel-cards in IntegrationsView (Anthropic, Search, SearXNG)
 // read from the same `/api/secrets/status` endpoint. This store centralises that
 // fetch + the per-secret "configured" flags so each channel route in P3-PR-A2
 // can subscribe to only the slice it needs.
