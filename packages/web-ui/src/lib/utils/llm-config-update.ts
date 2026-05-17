@@ -65,6 +65,7 @@ export interface LLMConfigUpdate {
   default_tier?: string;
   openai_model_id?: string;
   custom_endpoints?: CustomEndpoint[];
+  llm_mode?: 'standard' | 'eu-sovereign';
 }
 
 /**
@@ -81,6 +82,11 @@ export interface LLMConfigUpdate {
  *    activeProvider ∉ {openai, custom}. Same F1 prevention rationale.
  *  - Vertex (`requires_region`) attaches gcp_project_id + gcp_region.
  *  - `custom_endpoints` only stages when provider === 'custom'.
+ *  - `llm_mode` ALWAYS stages, derived from the catalog preset. Mistral
+ *    preset → 'eu-sovereign' so the engine's `config.ts:191` auto-promote
+ *    flows MISTRAL_API_KEY from env to userConfig.api_key. Without this,
+ *    the OpenAIAdapter for Mistral gets an empty api_key → chat 404s.
+ *    Anything else → 'standard'.
  *
  * Anything Advanced/Memory/Context-Window related belongs to LLMAdvancedView /
  * LLMMemoryView — they own those PUTs to the same endpoint (PRD-IA-V2 P3-PR-C).
@@ -121,6 +127,17 @@ export function buildLLMConfigUpdate(input: LLMConfigUpdateInput): LLMConfigUpda
   if (input.activeProvider === 'custom') {
     update.custom_endpoints = input.config.custom_endpoints ?? [];
   }
+
+  // llm_mode mirrors the selected tile so the engine's auto-promote logic
+  // (`config.ts:191`) can flow MISTRAL_API_KEY from env → userConfig.api_key
+  // when the user picks the Mistral preset. Without this, the OpenAIAdapter
+  // gets instantiated with an empty / Anthropic api_key and every chat to
+  // Mistral fails with "404 no Route matched" (2026-05-17 staging QA).
+  //
+  // - Mistral preset → 'eu-sovereign' (curated EU-sovereign path)
+  // - Anyone else (Anthropic / Vertex / OpenAI-compat / Anthropic-compat) →
+  //   'standard' (Anthropic-Direct or operator-owned key path)
+  update.llm_mode = entry?.preset_id === 'mistral' ? 'eu-sovereign' : 'standard';
 
   return update;
 }

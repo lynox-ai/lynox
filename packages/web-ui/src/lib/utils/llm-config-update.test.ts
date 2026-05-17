@@ -82,7 +82,7 @@ describe('buildLLMConfigUpdate — provider-binding round-trip', () => {
   });
 
   describe('Anthropic (no base_url, no model_id)', () => {
-    it('stages provider + empty api_base_url + empty openai_model_id', () => {
+    it('stages provider + empty api_base_url + empty openai_model_id + llm_mode=standard', () => {
       const update = buildLLMConfigUpdate(input({
         activeProvider: 'anthropic',
         activeProviderEntry: anthropic,
@@ -91,6 +91,7 @@ describe('buildLLMConfigUpdate — provider-binding round-trip', () => {
       expect(update.provider).toBe('anthropic');
       expect(update.api_base_url).toBe('');
       expect(update.openai_model_id).toBe('');
+      expect(update.llm_mode).toBe('standard');
     });
 
     it('F1 regression-pin: switching Mistral → Anthropic CLEARS stale api_base_url + openai_model_id', () => {
@@ -107,6 +108,7 @@ describe('buildLLMConfigUpdate — provider-binding round-trip', () => {
       }));
       expect(update.api_base_url).toBe('');
       expect(update.openai_model_id).toBe('');
+      expect(update.llm_mode).toBe('standard');
       // Anthropic doesn't take custom_endpoints
       expect(update.custom_endpoints).toBeUndefined();
     });
@@ -121,6 +123,17 @@ describe('buildLLMConfigUpdate — provider-binding round-trip', () => {
       }));
       expect(update.provider).toBe('openai');
       expect(update.api_base_url).toBe('https://api.mistral.ai/v1');
+    });
+
+    it('stages llm_mode=eu-sovereign so the engine auto-promotes MISTRAL_API_KEY from env', () => {
+      // F-MISTRAL regression-pin: without this, the OpenAIAdapter for Mistral
+      // gets instantiated with an empty api_key and every chat 404s.
+      const update = buildLLMConfigUpdate(input({
+        activeProvider: 'openai',
+        activeProviderEntry: mistral,
+        config: { api_base_url: 'https://api.mistral.ai/v1' },
+      }));
+      expect(update.llm_mode).toBe('eu-sovereign');
     });
 
     it('stages openai_model_id when set', () => {
@@ -243,6 +256,7 @@ describe('buildLLMConfigUpdate — provider-binding round-trip', () => {
       }));
       expect(step1.api_base_url).toBe('');
       expect(step1.openai_model_id).toBe('');
+      expect(step1.llm_mode).toBe('standard');
 
       // Step 2: user clicks Mistral. selectCatalogEntry stamps the pinned
       // base_url into local form state. Save sends it through.
@@ -252,6 +266,7 @@ describe('buildLLMConfigUpdate — provider-binding round-trip', () => {
         config: { api_base_url: 'https://api.mistral.ai/v1' },
       }));
       expect(step2.api_base_url).toBe('https://api.mistral.ai/v1');
+      expect(step2.llm_mode).toBe('eu-sovereign');
 
       // Step 3: user clicks Anthropic again. With the F1 fix applied at
       // the selectCatalogEntry layer, local form state should be cleared.
@@ -269,6 +284,7 @@ describe('buildLLMConfigUpdate — provider-binding round-trip', () => {
       }));
       expect(step3WithStaleState.api_base_url).toBe('');
       expect(step3WithStaleState.openai_model_id).toBe('');
+      expect(step3WithStaleState.llm_mode).toBe('standard');
     });
 
     it('Mistral → OpenAI-compat keeps the user-supplied URL if they typed one', () => {
