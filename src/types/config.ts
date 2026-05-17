@@ -31,9 +31,10 @@ export interface AgentConfig {
   /**
    * User-preferred maximum context window in tokens — clamps the agent's
    * effective context window to `min(model_native, user_pref)`. Sourced from
-   * the CostLimits UI (200k / 500k / 1M radios). When undefined the agent
-   * uses the model's native window. Plumbed through to spawned sub-agents +
-   * pipeline child agents so a single user preference applies tree-wide.
+   * the LLM-Advanced UI (200k / 500k / 1M radios — `/app/settings/llm/advanced`,
+   * canonical home after PRD-IA-V2 P3-PR-X). When undefined the agent uses the
+   * model's native window. Plumbed through to spawned sub-agents + pipeline
+   * child agents so a single user preference applies tree-wide.
    */
   maxContextWindowTokens?: number | undefined;
   apiKey?:             string | undefined;

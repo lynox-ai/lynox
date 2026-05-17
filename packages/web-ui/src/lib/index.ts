@@ -48,7 +48,10 @@ export { default as WorkspaceSecurityView } from './components/WorkspaceSecurity
 export { default as WorkspaceUpdatesView } from './components/WorkspaceUpdatesView.svelte';
 export { default as WorkspaceLimitsView } from './components/WorkspaceLimitsView.svelte';
 export { default as LLMSettings } from './components/LLMSettings.svelte';
-export { default as CostLimits } from './components/CostLimits.svelte';
+// CostLimits deleted PRD-IA-V2 P3-PR-X — settings moved: spend-limits +
+// HTTP-cap → WorkspaceLimitsView (`/settings/workspace/limits`),
+// context-window → LLMAdvancedView (`/settings/llm/advanced`). Legacy URL
+// `/app/hub/cost-limits` now 301-redirects to `/settings/workspace/limits`.
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
 export { default as ChangesetReview } from './components/ChangesetReview.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';

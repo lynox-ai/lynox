@@ -1,8 +1,8 @@
 <!--
 	Workspace Limits (PRD-IA-V2 P3-PR-B) — Self-Host only. Managed pool is
-	CP-gated. CostLimits.svelte stays live with deprecation banner until
-	P3-PR-X deletes it; both surfaces PUT the same fields to /api/config
-	(backend SSoT), so a stale tab cannot drift state.
+	CP-gated. Final canonical home for spend-limits + HTTP-rate-cap after
+	P3-PR-X deleted CostLimits.svelte. Backend SSoT is `/api/config` (PUT).
+	Legacy URL `/app/hub/cost-limits` 301-redirects here.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';

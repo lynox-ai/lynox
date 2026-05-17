@@ -113,38 +113,19 @@ const translations: Record<string, Record<Locale, string>> = {
 	// its own root at /app/activity (not /app/hub). Shown when users land
 	// on the legacy /app/automation URL (which still 301s to /app/hub).
 	'hub.migration_toast': { de: 'Aktivität ist jetzt unter /app/activity — Lesezeichen aktualisieren.', en: 'Activity moved to /app/activity — please update your bookmark.' },
-	// Cost & Limits surface (PRD-SETTINGS-REFACTOR Phase 1)
-	'cost_limits.title':           { de: 'Kosten & Limits',                              en: 'Cost & Limits' },
-	'cost_limits.subtitle':        { de: 'Verbrauch, Budgets und Kontextfenster an einem Ort.', en: 'Usage, budgets, and context window in one place.' },
-	'cost_limits.usage_heading':   { de: 'Verbrauch',                                    en: 'Usage' },
-	'cost_limits.limits_heading':  { de: 'Budget-Grenzen',                               en: 'Spend limits' },
-	'cost_limits.projection':      { de: 'Aktuelles Tempo: Budget aufgebraucht in {days} Tagen.', en: 'At current pace, budget exhausts in {days} days.' },
+	// Cost & Limits surface (PRD-SETTINGS-REFACTOR Phase 1).
+	// CostLimits.svelte was deleted in PRD-IA-V2 P3-PR-X; the keys retained
+	// below are still used by WorkspaceLimitsView (spend-limits +
+	// http-rate-cap) and LLMAdvancedView / LLMMemoryView (shared loading
+	// indicator). CostLimits-only keys (title/subtitle/projection/context.*/
+	// deprecated.*/toast.*/hard.*) have been removed.
 	'cost_limits.saved':           { de: 'Gespeichert.',                                 en: 'Saved.' },
 	'cost_limits.save':            { de: 'Speichern',                                    en: 'Save' },
 	'cost_limits.saving':          { de: 'Speichere …',                                  en: 'Saving …' },
 	'cost_limits.save_failed':     { de: 'Speichern fehlgeschlagen.',                    en: 'Save failed.' },
 	'cost_limits.loading':         { de: 'Lädt …',                                       en: 'Loading …' },
 	'cost_limits.load_failed':     { de: 'Daten konnten nicht geladen werden.',          en: 'Could not load data.' },
-	'cost_limits.context.default':       { de: 'Modell-Default',                                                                en: 'Model default' },
-	'cost_limits.context.default_hint':  { de: 'Verwendet die native Kontext-Größe des aktiven Modells. Empfohlen.',            en: 'Uses the active model\'s native context window. Recommended.' },
-	'cost_limits.context.heading':       { de: 'Kontextfenster',                                                                 en: 'Context window' },
-	'cost_limits.context.subtitle':      { de: 'Wie viele Tokens Lynox pro Anfrage in den Kontext lädt. Größer = teurer.',         en: 'How many tokens lynox loads into context per request. Bigger = more expensive.' },
-	'cost_limits.context.standard':      { de: 'Standard — 200k Tokens',                                                          en: 'Standard — 200k tokens' },
-	'cost_limits.context.standard_hint': { de: 'Default. Empfohlen für die meisten Aufgaben.',                                    en: 'Default. Recommended for most tasks.' },
-	'cost_limits.context.extended':      { de: 'Erweitert — 500k Tokens',                                                         en: 'Extended — 500k tokens' },
-	'cost_limits.context.extended_hint': { de: 'Mehr Historie pro Antwort. ~2.5× teurer.',                                        en: 'More history per response. ~2.5× cost.' },
-	'cost_limits.context.maximum':       { de: 'Maximum — 1M Tokens',                                                             en: 'Maximum — 1M tokens' },
-	'cost_limits.context.maximum_hint':  { de: 'Volle Modell-Kapazität. ~5× teurer, +30 % Latenz. Nur für sehr lange Threads.',   en: 'Full model capacity. ~5× cost, +30% latency. Only for very long threads.' },
-	'cost_limits.context.also_in_llm':   { de: 'Auch verfügbar unter Einstellungen → LLM.',                                       en: 'Also available under Settings → LLM.' },
-	// Deprecation banner (PRD-IA-V2 P2-PR-C) — page is being moved (final delete in Phase 3 / P3-PR-X).
-	'cost_limits.deprecated.heading':    { de: 'Diese Seite zieht um',                                                            en: 'This page is being moved' },
-	'cost_limits.deprecated.body':       { de: 'Kosten-Limits ziehen nach Einstellungen → Workspace → Limits, das Kontextfenster nach Einstellungen → LLM → Erweitert. Du kannst sie schon dort einstellen.', en: 'Cost limits are moving to Settings → Workspace → Limits, and the context window to Settings → LLM → Advanced. Both are already available from there.' },
-	// One-time transition toast (PRD-IA-V2 P2-PR-F) — shown on the first visit
-	// to /app/hub/cost-limits after the P2 deploy. localStorage flag keeps it
-	// from re-firing. CTA links to /app/settings/llm where the context-window
-	// radio already lives (final spend-limits home lands via Phase 3 / P3-PR-B).
-	'cost_limits.toast.message': { de: 'Cost-Limits sind in den Einstellungen verfügbar. Lesezeichen aktualisieren.', en: 'Cost limits are now available in Settings. Please update your bookmark.' },
-	'cost_limits.toast.cta':     { de: 'Einstellungen öffnen', en: 'Open Settings' },
+	'cost_limits.hard.managed_notice':    { de: 'Verwaltetes Konto — Kontingente werden über den Support angepasst:',             en: 'Managed account — quotas are adjusted via support:' },
 	// Voice settings page (PRD-SETTINGS-REFACTOR Phase 3)
 	'voice.title':         { de: 'Sprache',                                                          en: 'Voice' },
 	'voice.subtitle':      { de: 'Spracheingabe (STT) und -ausgabe (TTS) konfigurieren.',            en: 'Configure speech input (STT) and output (TTS).' },
@@ -209,14 +190,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	// PRD-IA-V2 P1-PR-A1 — temporary home for HTTP rate-cap until P3-PR-B moves it to /workspace/limits.
 	'system.http_rate_heading':     { de: 'HTTP-Limit',                                                                    en: 'HTTP rate limit' },
 	'system.http_rate_temp_home':   { de: 'Hinweis: dieser Schalter zieht später nach Einstellungen → Workspace → Limits.', en: 'Note: this control moves to Settings → Workspace → Limits in a later release.' },
-	'cost_limits.hard_heading':           { de: 'System-Schutzlimits',                                                            en: 'System hard limits' },
-	'cost_limits.hard_subtitle':          { de: 'Schützt vor Runaway-Loops und unbeschränkten Kosten. Nicht änderbar.',           en: 'Protects against runaway loops and unbounded cost. Not user-editable.' },
-	'cost_limits.hard.per_spawn':         { de: 'Pro Sub-Agent (Default)',                                                        en: 'Per sub-agent (default)' },
-	'cost_limits.hard.max_per_spawn':     { de: 'Pro Sub-Agent (Maximum)',                                                        en: 'Per sub-agent (max)' },
-	'cost_limits.hard.http_rate':         { de: 'HTTP-Tool Rate',                                                                 en: 'HTTP tool rate' },
-	'cost_limits.hard.spawn_parallel':    { de: 'Parallel-Spawns pro Aufruf',                                                     en: 'Parallel spawns per call' },
-	'cost_limits.hard.depth':             { de: 'Tiefe',                                                                          en: 'depth' },
-	'cost_limits.hard.managed_notice':    { de: 'Verwaltetes Konto — Kontingente werden über den Support angepasst:',             en: 'Managed account — quotas are adjusted via support:' },
+	// PRD-IA-V2 P3-PR-X — `cost_limits.hard_*` and `cost_limits.hard.*`
+	// (except `managed_notice`) were CostLimits-only. They are removed; the
+	// only remaining `hard.*` key is `managed_notice` (kept above, still used
+	// by WorkspaceLimitsView for the Managed-tier support-link section).
 	'hub.artifacts.gallery': { de: 'Galerie', en: 'Gallery' },
 	'hub.artifacts.files': { de: 'Dateien', en: 'Files' },
 	'hub.activity.dashboard': { de: 'Dashboard', en: 'Dashboard' },
@@ -317,8 +294,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.memory_heading':          { de: 'Erinnerung',                                                            en: 'Memory' },
 	'llm.custom_model_id':         { de: 'Modell-ID',                                                             en: 'Model ID' },
 	'llm.custom_model_id_hint':    { de: 'Frei wählbar (LiteLLM, Ollama, eigene Proxies). Beispiel: claude-3-5-sonnet-20241022 oder llama3.2.', en: 'Free-form (LiteLLM, Ollama, custom proxies). Example: claude-3-5-sonnet-20241022 or llama3.2.' },
-	// Context-window section on the LLM page (PRD-IA-V2 P2-PR-C interim move from
-	// /app/hub/cost-limits). Final home `/settings/llm/advanced` lands in P3-PR-C.
+	// Context-window section on the LLM page — final home is /settings/llm/advanced
+	// (PRD-IA-V2 P3-PR-C). Previously routed through CostLimits.svelte (deleted in P3-PR-X).
 	'llm.context_window.heading':         { de: 'Kontextfenster',                                                                en: 'Context window' },
 	'llm.context_window.description':     { de: 'Wie viele Tokens lynox pro Anfrage in den Kontext lädt. Größer = teurer.',     en: 'How many tokens lynox loads into context per request. Bigger = more expensive.' },
 	'llm.context_window.option.default':       { de: 'Standard (vom Modell vorgegeben)',                                         en: 'Default (model-defined)' },

@@ -3,9 +3,9 @@
 	provider-adjacent dials that previously lived as collapsible panels on
 	LLMSettings (effort, thinking, llm_mode, embedding_provider, experience)
 	and the context-window radio that took a temporary detour through
-	CostLimits.svelte (P2-PR-C interim). Backend SSoT stays `/api/config`;
-	this surface PUTs the same fields the legacy locations did, so a stale
-	tab cannot drift state.
+	CostLimits.svelte (P2-PR-C interim, deleted in P3-PR-X). Backend SSoT
+	stays `/api/config`; this surface PUTs the same fields the legacy
+	locations did, so a stale tab cannot drift state.
 
 	Managed-tier gotchas baked in:
 	- `embedding_provider` is NOT in MANAGED_USER_WRITABLE_CONFIG (silent-403
@@ -101,10 +101,11 @@
 
 	$effect(() => { void load(); });
 
-	// Context-window radio options — mirrors `CONTEXT_OPTIONS` in CostLimits.svelte
-	// (interim home) and the equivalent literal that used to live on LLMSettings.
-	// All three surfaces PUT the same `max_context_window_tokens` field; this is
-	// the final canonical home after P3-PR-X deletes CostLimits.
+	// Context-window radio options — final canonical home for the
+	// `max_context_window_tokens` radio after P3-PR-X deleted CostLimits.svelte.
+	// LLMSettings used to host this literal too (pre-P3-PR-C extraction); both
+	// historic surfaces PUT the same `/api/config` field, so backend SSoT was
+	// never duplicated.
 	const CONTEXT_OPTIONS: ReadonlyArray<{ value: number | undefined; labelKey: string; hintKey: string }> = [
 		{ value: undefined,  labelKey: 'llm.context_window.option.default', hintKey: 'llm.context_window.option.default_hint' },
 		{ value: 200_000,    labelKey: 'llm.context_window.option.200k',    hintKey: 'llm.context_window.option.200k_hint' },
@@ -205,8 +206,8 @@
 		</section>
 
 		<!-- Context window — was a temporary interim on CostLimits.svelte (P2-PR-C),
-		     now lands at its final canonical home. CostLimits-Page deprecation banner
-		     points users here; the page itself stays live until P3-PR-X deletes it. -->
+		     now lands at its final canonical home. CostLimits page was deleted in
+		     P3-PR-X; the legacy URL 301-redirects to `/app/settings/workspace/limits`. -->
 		<section aria-labelledby="adv-context-heading" class="border-t border-border pt-6">
 			<h2 id="adv-context-heading" class="text-lg font-medium mb-1">{t('llm.context_window.heading')}</h2>
 			<p class="text-xs text-text-muted mb-3">{t('llm.context_window.description')}</p>

@@ -958,7 +958,8 @@ export class Session {
         ...(this.agentOverrides.excludeTools ?? []),
       ],
       // User-preferred max context window — clamps the agent's trim budget
-      // below the model's native window (CostLimits UI offers 200k/500k/1M).
+      // below the model's native window (LLM Advanced UI offers 200k/500k/1M
+      // at `/app/settings/llm/advanced` post P3-PR-X).
       maxContextWindowTokens: userConfig.max_context_window_tokens,
       apiKey: this._profileOverride?.api_key ?? userConfig.api_key,
       apiBaseURL: this._profileOverride?.api_base_url ?? userConfig.api_base_url,
