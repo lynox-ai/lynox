@@ -143,7 +143,7 @@ export function createSheetsTool(auth: GoogleAuth): ToolEntry<SheetsInput> {
       try {
         // Check write scope
         if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.SHEETS)) {
-          return `Error: This action requires write permissions (${SCOPES.SHEETS}). Grant access in Settings → Integrations → Google.`;
+          return `Error: This action requires write permissions (${SCOPES.SHEETS}). Grant access in Settings → Channels → Google.`;
         }
 
         // Confirmation for destructive actions — fail-safe: block if no prompt available

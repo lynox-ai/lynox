@@ -4,8 +4,10 @@
 	`excludeTools` at session creation (session.ts), so a prompt-injected
 	tool_call never reaches the registry.
 
-	Mounted under /app/settings/integrations/ as a sibling section. Power
-	users disable web_search / http_request etc. for minimal-surface agents.
+	Mounted under /app/settings/workspace/tools (Self-Host) per PRD-IA-V2
+	P3-PR-B. P3-PR-E will additionally surface this under /privacy/tools on
+	Managed. Power users disable web_search / http_request etc. for
+	minimal-surface agents.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';

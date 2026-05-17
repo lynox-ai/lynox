@@ -64,7 +64,7 @@ export function createWhatsAppTool(ctx: WhatsAppContext): ToolEntry<WhatsAppTool
     requiresConfirmation: true,
     handler: async (input: WhatsAppToolInput, agent: IAgent): Promise<string> => {
       if (!ctx.isConfigured()) {
-        return 'WhatsApp not configured. Add Access Token, WABA-ID, Phone-Number-ID and App-Secret in Settings → Integrations → WhatsApp.';
+        return 'WhatsApp not configured. Add Access Token, WABA-ID, Phone-Number-ID and App-Secret in Settings → Channels → WhatsApp.';
       }
 
       switch (input.action) {

@@ -1829,7 +1829,7 @@ describe('LynoxHTTPApi', () => {
 
       const body = await cbRes.text();
       expect(body).toContain('meta http-equiv="refresh"');
-      expect(body).toContain('https://test.example.com/app/settings/integrations');
+      expect(body).toContain('https://test.example.com/app/settings/channels/google');
       // CSP `default-src 'none'` blocks inline scripts — must not regress
       expect(body).not.toContain('<script>');
       expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledWith('valid-code', expect.stringContaining('/api/google/callback'));
@@ -1845,7 +1845,7 @@ describe('LynoxHTTPApi', () => {
 
       const body = await cbRes.text();
       expect(body).toContain('meta http-equiv="refresh"');
-      expect(body).toContain('/app/settings/integrations');
+      expect(body).toContain('/app/settings/channels/google');
       // Idempotent — must NOT re-exchange the (already-spent) code
       expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
     });
