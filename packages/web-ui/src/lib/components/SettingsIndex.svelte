@@ -7,6 +7,11 @@
 		titleKey: string;
 		descKey: string;
 		selfHostOnly?: boolean;
+		// PRD-IA-V2 P3-PR-E — symmetric mirror of `selfHostOnly`. Default-null
+		// pattern (see `managed = $state<boolean | null>(null)` below): hidden
+		// while we don't yet know the tier. Used to route ToolToggles to its
+		// Managed-home (`/settings/privacy/tools`) without an async redirect race.
+		managedOnly?: boolean;
 		hideOnMobile?: boolean;
 	}
 
@@ -91,6 +96,16 @@
 			],
 		},
 		{
+			// PRD-IA-V2 P3-PR-E — Privacy section. Currently hosts the Managed-home
+			// Tool-Toggles tile (mirror of `/workspace/tools` on Self-Host). Both
+			// routes mount `ToolToggles.svelte` and always 200 OK; `keepItem()`
+			// hides the tier-inappropriate entry from the nav — no redirect race.
+			labelKey: 'settings.section_privacy',
+			items: [
+				{ href: '/app/settings/privacy/tools', titleKey: 'tools.heading', descKey: 'tools.subtitle', managedOnly: true },
+			],
+		},
+		{
 			// PRD-IA-V2 P3-PR-F: Migration tile is self-host-only (Managed users skip the wizard).
 			labelKey: 'settings.section_account',
 			items: [
@@ -101,12 +116,18 @@
 	];
 
 	// Hide self-host-only items when managed is true OR still unknown.
+	// Hide managed-only items when managed is false OR still unknown — symmetric
+	// mirror of self-host-only (PRD-IA-V2 P3-PR-E). Both default to hidden until
+	// the /api/config probe confirms the tier, so the user never sees a
+	// tier-inappropriate flash during the ~300 ms before the response arrives.
 	// Hide mobile-only items on PWA / narrow viewports (and while unknown).
 	const hideSelfHostOnly = $derived(managed !== false);
+	const hideManagedOnly = $derived(managed !== true);
 	const hideMobileOnly = $derived(isMobileOrPwa !== false);
 
 	function keepItem(i: SettingsItem): boolean {
 		if (i.selfHostOnly && hideSelfHostOnly) return false;
+		if (i.managedOnly && hideManagedOnly) return false;
 		if (i.hideOnMobile && hideMobileOnly) return false;
 		return true;
 	}

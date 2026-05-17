@@ -759,6 +759,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	// PRD-IA-V2 P3-PR-B — Workspace & System section (Self-Host only).
 	// Underscore naming matches existing section_main / section_data / section_access.
 	'settings.section_workspace': { de: 'Workspace & System', en: 'Workspace & System' },
+	// PRD-IA-V2 P3-PR-E — Privacy section (Managed-home for tier-conditional
+	// items like Tool-Toggles + future Voice/Privacy-Data tiles).
+	'settings.section_privacy': { de: 'Privatsphäre', en: 'Privacy' },
 	'settings.workspace.backups': { de: 'Backups', en: 'Backups' },
 	'settings.workspace.backups_desc': { de: 'Backups erstellen, wiederherstellen und planen', en: 'Create, restore and schedule backups' },
 	'settings.workspace.security': { de: 'Sicherheit', en: 'Security' },
