@@ -207,11 +207,18 @@
 	 * model — users couldn't see that switching providers also swaps the
 	 * small/fast model used in pipelines and spawn calls.
 	 */
-	function tierSetFor(entry: CatalogProvider | null | undefined): { main: CatalogModel | null; small: CatalogModel | null } {
+	function tierSetFor(entry: CatalogProvider | null | undefined, defaultTier?: string | undefined): { main: CatalogModel | null; small: CatalogModel | null } {
 		if (!entry || !entry.models || entry.models.length === 0) {
 			return { main: null, small: null };
 		}
-		const main = entry.models.find((m) => m.tier === 'sonnet') ?? entry.models[0] ?? null;
+		// Main reflects the user's selected default_tier; fall back to the
+		// sonnet tier (lynox's standard recommendation) then the first model.
+		// Without this, picking "Magistral" in the tier picker would still show
+		// "Main: Mistral Large" in the summary — confusing inconsistency.
+		const main = (defaultTier ? entry.models.find((m) => m.tier === defaultTier) : undefined)
+			?? entry.models.find((m) => m.tier === 'sonnet')
+			?? entry.models[0]
+			?? null;
 		const small = entry.models.find((m) => m.tier === 'haiku') ?? null;
 		return { main, small };
 	}
@@ -570,29 +577,33 @@
 			{/if}
 
 			{#if activeProviderEntry.models.length > 0}
-				{#if activeProvider === 'anthropic'}
-					<!-- Anthropic: the dropdown binds to `default_tier` which IS
-					     runtime-meaningful (sets the starting orchestration tier
-					     before auto-downgrade). Keep it. -->
-					<label class="block">
-						<span class="block text-sm font-medium mb-1">{t('llm.default_tier_heading')}</span>
-						<select disabled={!loaded || providerLocked} bind:value={config.default_tier}
-							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-							{#each activeProviderEntry.models as m (m.id)}
-								<option value={m.tier ?? m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in, ${m.pricing?.output ?? '?'}/M out</option>
-							{/each}
-						</select>
-					</label>
-				{/if}
+				<!-- Default-tier picker for every tier-aware provider with a catalog
+				     (Anthropic + Mistral). Binds to `default_tier` which IS
+				     runtime-meaningful — sets the starting orchestration tier
+				     before auto-downgrade. On Mistral, the tier maps via
+				     MISTRAL_MODEL_MAP: sonnet→Large, opus→Magistral, haiku→Small.
+				     v1.5.2 parity (rafael QA 2026-05-18): Mistral previously had
+				     no picker because the old single-model dropdown wrote
+				     openai_model_id (no runtime effect). Now the tier-bound picker
+				     gives Mistral users the same control as Anthropic users have. -->
+				<label class="block">
+					<span class="block text-sm font-medium mb-1">{t('llm.default_tier_heading')}</span>
+					<select disabled={!loaded || providerLocked} bind:value={config.default_tier}
+						class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+						{#each activeProviderEntry.models as m (m.id)}
+							<option value={m.tier ?? m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in, ${m.pricing?.output ?? '?'}/M out</option>
+						{/each}
+					</select>
+				</label>
 				<!--
-					Mistral preset (activeProvider==='openai' with catalog): the old
-					dropdown wrote `openai_model_id`, which is only consulted as a
-					fallback when a tier is missing from MISTRAL_MODEL_MAP. All three
-					Mistral tiers (sonnet→Large, haiku→Small, opus→Magistral) are
-					mapped, so the dropdown value was never actually used at runtime.
-					Users picked "Magistral Medium" and the engine still routed to
-					Mistral Large. v1.5.2 UX cleanup (rafael QA 2026-05-18): drop
-					the dropdown for this case — the tier-set summary below is the
+					Pre-1.5.2 Mistral had a separate single-model dropdown that wrote
+					openai_model_id — but that field is only consulted as a fallback
+					when a tier is missing from MISTRAL_MODEL_MAP. All three Mistral
+					tiers (sonnet→Large, haiku→Small, opus→Magistral) are mapped,
+					so the dropdown value was never actually used. Users picked
+					"Magistral Medium" and the engine still routed to Mistral Large.
+					Replaced with the unified default-tier picker above + the
+					tier-set summary block below (single source of truth).
 					single source of truth and lynox routes automatically per turn.
 				-->
 			{:else if activeProvider === 'custom'}
@@ -614,7 +625,7 @@
 			{/if}
 
 			{#if activeProviderEntry.models.length > 0}
-				{@const tierSet = tierSetFor(activeProviderEntry)}
+				{@const tierSet = tierSetFor(activeProviderEntry, config.default_tier)}
 				{#if tierSet.main && tierSet.small}
 					<!--
 						Fix D (v1.5.2): make the provider's tier-set visible. lynox dispatches
