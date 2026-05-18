@@ -109,8 +109,14 @@
 		},
 		{
 			// PRD-IA-V2 P3-PR-F: Migration tile is self-host-only (Managed users skip the wizard).
+			// Settings v3 PR 4 (2026-05-19): added billing + security tiles. Billing is
+			// managed-only (no subscription on self-host). Security tile is shown on
+			// every tier — Item 8 show-all-grayed pattern handles the per-tier disable
+			// state inside AccountSecurityView itself.
 			labelKey: 'settings.section_account',
 			items: [
+				{ href: '/app/settings/account/billing', titleKey: 'settings.account.billing', descKey: 'settings.account.billing_desc', managedOnly: true },
+				{ href: '/app/settings/account/security', titleKey: 'settings.account.security', descKey: 'settings.account.security_desc' },
 				{ href: '/app/settings/account/mobile', titleKey: 'settings.account.mobile', descKey: 'mobile.settings_desc', hideOnMobile: true },
 				{ href: '/app/settings/account/migration', titleKey: 'settings.account.migration', descKey: 'migration.subtitle', selfHostOnly: true },
 			],
