@@ -106,6 +106,9 @@
 	let loaded = $state(false);
 	let testing = $state(false);
 	let saving = $state(false);
+	// PR 4.6: deferred mount of embedded LLMAdvancedView — avoids the duplicate
+	// /api/config fetch until the user actually expands the section.
+	let advancedOpen = $state(false);
 	let testResult = $state<{ ok: boolean; latency_ms?: number; message?: string } | null>(null);
 	// Live `/api/secrets/status` snapshot — drives the empty-state predicate
 	// alongside the explicit-provider flag. Both must be false to show the CTA.
@@ -715,16 +718,24 @@
 		<!-- Settings v3 PR 4.6 (Items 3 + 5): Advanced sub-page collapsed inline
 		     as expandable section. The standalone /llm/advanced route stays for
 		     back-compat with deep links; mounting LLMAdvancedView with
-		     embedded=true reuses the same component without its page chrome. -->
-		<details class="border-t border-border pt-6 group">
-			<summary class="cursor-pointer text-base font-medium text-text-muted hover:text-text transition-colors flex items-center gap-2">
+		     embedded=true reuses the same component without its page chrome.
+
+		     Mount-on-expand pattern: `<details>` mounts its children eagerly,
+		     which would fire a second /api/config fetch on every page load.
+		     The `bind:open` + `{#if advancedOpen}` gate defers the mount until
+		     the user actually clicks the summary, so the duplicate fetch only
+		     happens when needed. -->
+		<details bind:open={advancedOpen} class="border-t border-border pt-6 group">
+			<summary class="cursor-pointer text-base font-medium text-text-muted hover:text-text transition-colors flex items-center gap-2 list-none">
 				<svg class="w-4 h-4 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
 				</svg>
 				{t('llm.advanced.expand_label')}
 			</summary>
-			<div class="mt-4">
-				<LLMAdvancedView embedded={true} />
+			<div class="mt-4 px-1">
+				{#if advancedOpen}
+					<LLMAdvancedView embedded={true} />
+				{/if}
 			</div>
 		</details>
 	{/if}
