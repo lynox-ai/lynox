@@ -161,7 +161,7 @@ export interface LynoxConfig {
   memory?:         boolean | undefined;
   promptUser?:     ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?:     ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
-  promptSecret?:   ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
+  promptSecret?:   PromptSecretFn | undefined;
   context?:        LynoxContext | undefined;
   /** Default response language (e.g. 'de', 'en'). */
   language?:       string | undefined;

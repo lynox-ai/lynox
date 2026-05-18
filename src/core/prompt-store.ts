@@ -15,7 +15,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { TabQuestion } from '../types/agent.js';
+import type { TabQuestion, SecretOutcome } from '../types/index.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +34,11 @@ export interface PendingPromptRow {
   secret_key_type: string | null;
   answer: string | null;
   answer_saved: number | null;
+  /** Non-NULL when the secret answer was a server-side rejection rather
+   * than a user cancel. See migration v29 and the `SecretOutcome` type for
+   * the canonical value set. NULL for ask_user rows and for real save/
+   * cancel. */
+  answer_error: string | null;
   status: PromptStatus;
   created_at: string;
   answered_at: string | null;
@@ -199,10 +204,16 @@ export class PromptStore {
     return result.changes > 0;
   }
 
-  /** Answer an ask_secret. `saved=true` means the user accepted the secret
-   * prompt; the value itself is never held by the PromptStore. */
-  answerSecret(promptId: string, saved: boolean): boolean {
-    const result = this._getAnswerSecretStmt().run(saved ? 1 : 0, promptId);
+  /** Answer an ask_secret. The outcome distinguishes a real user-cancel from
+   * a server-side rejection (managed write-allowlist or vault error) — see
+   * the SecretOutcome contract for why. The value itself is never held by
+   * the PromptStore. */
+  answerSecret(promptId: string, outcome: SecretOutcome): boolean {
+    const savedFlag = outcome === 'saved' ? 1 : 0;
+    // 'saved' and 'canceled' = real user-driven outcomes → answer_error stays NULL.
+    // 'managed_blocked' and 'vault_error' = server-side rejection → record reason.
+    const errorReason = outcome === 'saved' || outcome === 'canceled' ? null : outcome;
+    const result = this._getAnswerSecretStmt().run(savedFlag, errorReason, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -338,7 +349,7 @@ export class PromptStore {
   private _getAnswerSecretStmt(): Database.Statement {
     return (this._stmtAnswerSecret ??= this.db.prepare(`
       UPDATE pending_prompts
-      SET answer_saved = ?, status = 'answered', answered_at = datetime('now')
+      SET answer_saved = ?, answer_error = ?, status = 'answered', answered_at = datetime('now')
       WHERE id = ? AND status = 'pending' AND expires_at > datetime('now')
     `));
   }

@@ -25,7 +25,7 @@ import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
-import type { StreamEvent, PromptMeta, CapabilityLocks } from '../types/index.js';
+import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 
@@ -1749,8 +1749,8 @@ export class LynoxHTTPApi {
       }
 
       // Wire promptSecret — secret value never enters SSE, only the prompt metadata
-      session.promptSecret = async (name: string, prompt: string, keyType?: string, meta?: PromptMeta): Promise<boolean> => {
-        if (!promptStore) return false;
+      session.promptSecret = async (name: string, prompt: string, keyType?: string, meta?: PromptMeta): Promise<SecretOutcome> => {
+        if (!promptStore) return 'vault_error';
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
         hasActivePendingPrompt = true;
         if (!aborted && !res.writableEnded) {
@@ -1762,7 +1762,18 @@ export class LynoxHTTPApi {
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
-        return row?.answer_saved === 1;
+        // answer_error wins over answer_saved when set — see SecretOutcome contract
+        // (server-side rejection must not be mistranslated as a user cancel).
+        if (row?.answer_error === 'managed_blocked') return 'managed_blocked';
+        if (row?.answer_error === 'vault_error') return 'vault_error';
+        if (row?.answer_saved === 1) return 'saved';
+        // No row means the prompt expired or the session aborted before the
+        // user could answer — NOT a user cancel. Returning 'canceled' here
+        // would trigger the agent's hard "DO NOT retry, DO NOT plaintext"
+        // guards inappropriately. 'vault_error' keeps the door open for a
+        // retry once the connection / session is healthy again.
+        if (!row) return 'vault_error';
+        return 'canceled';
       };
 
       // Heartbeat — every 10s emit a real SSE event (not a comment line) so
@@ -1971,16 +1982,47 @@ export class LynoxHTTPApi {
 
       const b = body as Record<string, unknown> | null;
       const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
-      const saved = b && typeof b['saved'] === 'boolean' ? b['saved'] : false;
 
+      // Prefer the v29 `status` field — it distinguishes managed_blocked /
+      // vault_error from a real user cancel. Fall back to legacy `saved`
+      // boolean so older UI bundles still close out cleanly. When neither
+      // is parseable, default to 'vault_error' — NOT 'canceled' — because a
+      // missing field is "we don't know what happened" not "user said no",
+      // and the ask_secret tool result treats 'canceled' as a hard guard
+      // that blocks retry + plaintext fallback (the exact spiral this PR
+      // exists to fix).
+      const rawStatus = b && typeof b['status'] === 'string' ? b['status'] : undefined;
+      const legacySaved = b && typeof b['saved'] === 'boolean' ? b['saved'] : undefined;
+      let outcome: SecretOutcome;
+      if (rawStatus === 'saved' || rawStatus === 'canceled' || rawStatus === 'managed_blocked' || rawStatus === 'vault_error') {
+        outcome = rawStatus;
+      } else if (legacySaved === true) {
+        outcome = 'saved';
+      } else if (legacySaved === false) {
+        // Old UI bundles only sent `saved:false` on real user-cancel; vault
+        // failures from those bundles are indistinguishable here, accept
+        // the cancel reading rather than escalating, since the user-cancel
+        // case dominates by frequency.
+        outcome = 'canceled';
+      } else {
+        outcome = 'vault_error';
+      }
+
+      // Bind the supplied promptId to the URL session to prevent an
+      // authenticated client from settling a different session's prompt.
+      // Mirrors the partial-answers route at L1965. Fails closed: an
+      // unbindable promptId falls through to the per-session lookup.
       let answered = false;
       if (promptId) {
-        answered = ps.answerSecret(promptId, saved);
+        const existing = ps.getById(promptId);
+        if (existing && existing.session_id === params['id'] && existing.prompt_type === 'ask_secret') {
+          answered = ps.answerSecret(promptId, outcome);
+        }
       }
       if (!answered) {
         const pending = ps.getPending(params['id']!);
         if (pending && pending.prompt_type === 'ask_secret') {
-          answered = ps.answerSecret(pending.id, saved);
+          answered = ps.answerSecret(pending.id, outcome);
         }
       }
       if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }

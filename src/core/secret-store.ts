@@ -11,18 +11,23 @@ export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 const SECRET_PATTERNS: RegExp[] = [
   // Anthropic
   /\bsk-ant-[A-Za-z0-9_-]{20,}\b/,
-  // OpenAI
+  // OpenAI (sk-, sk-proj-)
   /\bsk-[A-Za-z0-9]{20,}\b/,
   // Stripe
   /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/,
-  // GitHub
-  /\b(ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{10,}\b/,
+  // GitHub (ghu_ added 2026-05-18 — user installation tokens missed previously)
+  /\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}\b/,
   // AWS
   /\bAKIA[A-Z0-9]{16}\b/,
   // Google
   /\bAIza[A-Za-z0-9_-]{35}\b/,
-  // Slack
-  /\bxox[bpras]-[A-Za-z0-9-]{10,}\b/,
+  // Slack (xoxo + xoxr added — webhook + refresh-token prefixes)
+  /\bxox[bpoasr]-[A-Za-z0-9-]{10,}\b/,
+  // Shopify (admin / app-secret / partner / custom — added 2026-05-18 after
+  // a Shopify integration flow leaked the prefix into the agent transcript)
+  /\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}\b/,
+  // JWT (three base64-url segments) — catches OAuth ID tokens etc.
+  /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/,
   // Generic Bearer tokens (long base64-ish)
   /\bBearer\s+[A-Za-z0-9_\-.]{20,}\b/,
   // Generic long hex/base64 secrets (40+ chars, likely tokens)

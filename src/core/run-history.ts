@@ -636,6 +636,17 @@ const MIGRATIONS: string[] = [
    ALTER TABLE runs ADD COLUMN kind TEXT;
    ALTER TABLE runs ADD COLUMN units INTEGER NOT NULL DEFAULT 0;
    CREATE INDEX IF NOT EXISTS idx_runs_kind ON runs(kind);`,
+
+  // v29: Distinguish server-side ask_secret failures from user cancel.
+  // Pre-v29 the UI mapped vault 403 (managed write-allowlist) and 5xx
+  // (vault write error) to the same `answer_saved = 0` row that a real
+  // user-cancel produced — so the agent saw "User canceled" for every
+  // tool-key on managed hosting and started offering plaintext fallbacks.
+  // `answer_error` is NULL when the row is a real saved/cancel; non-NULL
+  // when the answer was actually a server-side rejection. See ask-secret
+  // tool + http-api /secret-saved endpoint for the wire shape.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (29);
+   ALTER TABLE pending_prompts ADD COLUMN answer_error TEXT;`,
 ];
 
 export class RunHistory {

@@ -476,15 +476,20 @@
 		}
 	});
 
-	// Common secret patterns for chat input guard
+	// Common secret patterns for chat input guard. Coverage matches the
+	// providers we ship with first-class integrations + the prefixes that
+	// most often leak into chat ("here's my Shopify token: shpat_…"). When
+	// a paste matches, the input is rejected with `chat.secret_warning`.
 	const SECRET_INPUT_PATTERNS = [
-		/\bsk-ant-[A-Za-z0-9_-]{20,}/,
-		/\bsk-[A-Za-z0-9]{20,}/,
-		/\b[sr]k_(live|test)_[A-Za-z0-9]{10,}/,
-		/\b(ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{10,}/,
-		/\bAKIA[A-Z0-9]{16}/,
-		/\bAIza[A-Za-z0-9_-]{35}/,
-		/\bxox[bpras]-[A-Za-z0-9-]{10,}/,
+		/\bsk-ant-[A-Za-z0-9_-]{20,}/,                       // Anthropic
+		/\bsk-[A-Za-z0-9]{20,}/,                             // OpenAI (sk-, sk-proj-)
+		/\b[sr]k_(live|test)_[A-Za-z0-9]{10,}/,              // Stripe
+		/\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}/, // GitHub
+		/\bAKIA[A-Z0-9]{16}/,                                // AWS access-key
+		/\bAIza[A-Za-z0-9_-]{35}/,                           // Google API key
+		/\bxox[bpoasr]-[A-Za-z0-9-]{10,}/,                   // Slack
+		/\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}/,                    // Shopify (admin / app secret / partner / custom)
+		/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/, // JWT (3 base64 segments — header.payload.signature)
 	];
 
 	function looksLikeSecret(text: string): boolean {
@@ -493,11 +498,13 @@
 
 	async function handleSecretSave() {
 		if (!pendingSecret || !secretValue.trim()) return;
-		const ok = await submitSecret(pendingSecret.name, secretValue.trim());
-		if (ok) {
+		const result = await submitSecret(pendingSecret.name, secretValue.trim());
+		if (result === 'saved') {
 			addToast(t('chat.secret_saved'), 'success', 3000);
+		} else if (result === 'managed_blocked') {
+			addToast(t('chat.secret_managed_blocked'), 'error', 7000);
 		} else {
-			addToast('Failed to store secret. Check vault configuration.', 'error', 5000);
+			addToast(t('chat.secret_vault_error'), 'error', 5000);
 		}
 		secretValue = '';
 		secretConsented = false;

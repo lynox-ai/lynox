@@ -649,6 +649,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.secret_save': { de: 'Speichern', en: 'Save' },
 	'chat.secret_cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.secret_saved': { de: 'Sicher gespeichert', en: 'Saved securely' },
+	'chat.secret_managed_blocked': { de: 'Dieser Schlüssel kann auf Managed-Hosting nicht selbst gesetzt werden. Nur LLM-Provider-Keys sind hier schreibbar — andere Integrationen werden zentral provisioniert. Kontaktiere support@lynox.ai.', en: 'This key cannot be set yourself on managed hosting. Only LLM provider keys are user-writable here — other integrations are provisioned centrally. Please contact support@lynox.ai.' },
+	'chat.secret_vault_error': { de: 'Speichern fehlgeschlagen. Versuche es nochmal oder prüfe die Vault-Konfiguration.', en: 'Failed to store secret. Please retry or check vault configuration.' },
 	'chat.secret_warning': { de: 'Das sieht nach einem API-Key oder Passwort aus. Bitte nicht im Chat eingeben — nutze „Speichere ein Secret" stattdessen.', en: 'This looks like an API key or password. Don\'t paste it in chat — ask me to "store a secret" instead.' },
 	'chat.analyze_files': { de: 'Analysiere diese Dateien.', en: 'Analyze these files.' },
 	'chat.mic_unavailable': { de: 'Kein Mikrofon gefunden. Prüfe deine Geräteeinstellungen.', en: 'No microphone found. Check your device settings.' },
@@ -1042,8 +1044,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Separate namespace from `keys.*` to keep the legacy KeysView translations intact;
 	// `/settings/keys` itself is now a 301 stub pointing at `/settings/llm/keys` (P1-PR-C).
 	'secrets.title':                { de: 'API-Keys',                                                              en: 'API keys' },
-	'secrets.subtitle':             { de: 'API-Schlüssel für Drittanbieter-Integrationen. LLM-Provider-Keys liegen unter LLM-Provider.', en: 'API keys for third-party integrations. LLM provider keys live under LLM Provider.' },
-	'secrets.back_to_llm':          { de: 'Zurück zu LLM-Provider',                                                en: 'Back to LLM provider' },
+	'secrets.subtitle':             { de: 'Schlüssel für Tool- und Integrations-APIs (DataForSEO, Brevo, OAuth, …). LLM-Schlüssel verwaltest du unter Einstellungen → LLM-Provider.', en: 'Keys for tool and integration APIs (DataForSEO, Brevo, OAuth, …). LLM keys live under Settings → LLM Provider.' },
 	'secrets.list_heading':         { de: 'Gespeicherte Keys',                                                     en: 'Stored keys' },
 	'secrets.empty':                { de: 'Keine API-Keys gespeichert.',                                           en: 'No API keys stored.' },
 	'secrets.add_title':            { de: 'Neuen Key hinzufügen',                                                  en: 'Add new key' },

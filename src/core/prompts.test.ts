@@ -165,6 +165,46 @@ describe('SYSTEM_PROMPT honesty guardrail', () => {
   });
 });
 
+// Doc-research hard-rule regression-pin (2026-05-18 staging incident): a
+// Shopify-integration walkthrough used model-knowledge for OAuth scopes
+// (read-only recommended for an SEO-optimisation use case that obviously
+// needs writes); Haiku 4.5 also called `ask_secret` mid-walkthrough before
+// the user had created the app. The new HARD RULES block in SYSTEM_PROMPT
+// closes both failure modes. Pin the headings + at least one negative
+// imperative per intent so a paraphrase preserves the meaning.
+//
+// Assertions are deliberately a mix of literal heading (stable anchor) and
+// intent regexes — a copy edit that keeps the meaning passes, a silent
+// deletion or weakening of any of the four intents fails.
+describe('SYSTEM_PROMPT doc-research hard rules', () => {
+  it('frames the rules as applying to ANY third-party tool / UI / API', () => {
+    expect(SYSTEM_PROMPT).toMatch(/guiding the user through external software/i);
+    expect(SYSTEM_PROMPT).toMatch(/(any third-party|third.party tool)/i);
+  });
+
+  it('forbids recommending scopes / endpoints / UI paths from memory', () => {
+    // "No memory-based recommendations" intent — at least one negative
+    // imperative around scopes / endpoints / paths sourced from memory.
+    expect(SYSTEM_PROMPT).toMatch(/(no memory.based|never from memory|not your prior knowledge|from a doc you fetched)/i);
+  });
+
+  it('requires research before guiding setup', () => {
+    expect(SYSTEM_PROMPT).toMatch(/research first/i);
+    expect(SYSTEM_PROMPT).toMatch(/web_research/);
+  });
+
+  it('forbids empty "I will verify" promises without an actual call', () => {
+    // The Sonnet-said-but-skipped-web_research failure mode.
+    expect(SYSTEM_PROMPT).toMatch(/(no empty promises|must call.*web_research.*same turn|verify.*same turn)/i);
+  });
+
+  it('requires holding ask_secret until user signals readiness', () => {
+    // Premature ask_secret was the Haiku-mid-walkthrough failure mode.
+    expect(SYSTEM_PROMPT).toMatch(/hold.*ask_secret/i);
+    expect(SYSTEM_PROMPT).toMatch(/(user signals|readiness|done.*have the token|user.*ready)/i);
+  });
+});
+
 // Fix C regression-pin (v1.5.2): SYSTEM_PROMPT alone does not anchor model
 // identity, so a Mistral/Custom model can hallucinate "I am Claude Haiku"
 // from training-data bias. modelIdentityContext is the injection point —

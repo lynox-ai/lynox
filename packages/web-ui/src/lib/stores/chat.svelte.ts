@@ -1396,38 +1396,64 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 	}
 }
 
-export async function submitSecret(name: string, value: string): Promise<boolean> {
-	if (!sessionId || !pendingSecretPrompt) return false;
+/** Result of a vault write attempt — distinguishes the three failure modes
+ *  so the agent can react correctly. Mirrors `SecretOutcome` on the engine
+ *  side (core/src/types/agent.ts). See PRD/feedback 2026-05-18 for why a
+ *  plain boolean wasn't enough. */
+export type SecretSubmitResult = 'saved' | 'managed_blocked' | 'vault_error';
+
+/** Vault PUT timeout — if the server doesn't respond within this window we
+ *  surface a vault_error to the engine so the user can retry. Without it a
+ *  hung connection silently parks the prompt + pendingSecretPrompt=null
+ *  state, blocking any further submission. 30 s matches typical proxy idle
+ *  timeouts and is generous for a single PUT. */
+const SECRET_PUT_TIMEOUT_MS = 30_000;
+
+export async function submitSecret(name: string, value: string): Promise<SecretSubmitResult> {
+	if (!sessionId || !pendingSecretPrompt) return 'vault_error';
 	const sid = sessionId;
 	const promptId = pendingSecretPrompt.promptId;
+	const ac = new AbortController();
+	const timer = setTimeout(() => ac.abort(), SECRET_PUT_TIMEOUT_MS);
 	try {
 		// Store secret directly in vault (bypasses chat — value never enters SSE/messages)
 		const vaultRes = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ value }),
+			signal: ac.signal,
 		});
-		if (!vaultRes.ok) {
-			// Vault write failed — don't tell engine it was saved
-			pendingSecretPrompt = null;
-			await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ saved: false, promptId }),
-			});
-			return false;
-		}
-		// Notify engine that secret was saved
+		// 403 = managed-tier write-allowlist rejected the name (only the LLM
+		// provider keys are user-writable on managed). The agent must NOT
+		// retry — surface this as a distinct status so the tool result tells
+		// it to escalate to admin provisioning instead of looping.
+		clearTimeout(timer);
+		const status: SecretSubmitResult = vaultRes.ok
+			? 'saved'
+			: vaultRes.status === 403
+				? 'managed_blocked'
+				: 'vault_error';
 		pendingSecretPrompt = null;
 		await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ saved: true, promptId }),
+			body: JSON.stringify({ status, promptId }),
 		});
-		return true;
+		return status;
 	} catch {
+		clearTimeout(timer);
 		pendingSecretPrompt = null;
-		return false;
+		// Best-effort notify so the agent isn't stuck waiting — but if the
+		// network is completely dead this POST will fail too, in which case
+		// the engine's expireOld() / orphan watchdog eventually clears it.
+		try {
+			await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ status: 'vault_error', promptId }),
+			});
+		} catch {/* swallow — engine will expire the prompt */}
+		return 'vault_error';
 	}
 }
 
@@ -1438,7 +1464,7 @@ export async function cancelSecret(): Promise<void> {
 	await fetch(`${getApiBase()}/sessions/${sessionId}/secret-saved`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ saved: false, promptId }),
+		body: JSON.stringify({ status: 'canceled', promptId }),
 	});
 }
 

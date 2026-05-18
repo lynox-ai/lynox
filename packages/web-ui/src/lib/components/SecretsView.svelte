@@ -31,7 +31,7 @@
 	// Showing them in the generic-keys list confuses operators because the
 	// "Ändern" button here writes to a different code path than the channel's
 	// edit form, races silently, and the names (e.g. MAIL_ACCOUNT_STAGING_RULE)
-	// don't read as "API keys" the way TAVILY_API_KEY does. Filter by prefix.
+	// don't read as "API keys" the way DATAFORSEO_LOGIN does. Filter by prefix.
 	const CHANNEL_MANAGED_PREFIXES: ReadonlyArray<string> = [
 		'MAIL_ACCOUNT_',
 		'WHATSAPP_',
@@ -42,9 +42,13 @@
 	}
 
 	// Suggested names — drives the "Add new key" dropdown. Free-text still works
-	// for anything custom (zapier, replicate, etc.).
+	// for anything custom (zapier, replicate, etc.). Tavily is intentionally
+	// absent: web search defaults to SearXNG (docker-compose) and the chat
+	// settings don't surface a Tavily input, so suggesting it here misleads
+	// users into thinking they need a Tavily key for search.
 	const SUGGESTED_NAMES = [
-		'TAVILY_API_KEY',
+		'DATAFORSEO_LOGIN',
+		'DATAFORSEO_PASSWORD',
 		'BREVO_API_KEY',
 		'SEARCH_API_KEY',
 		'GOOGLE_CLIENT_ID',
@@ -54,7 +58,7 @@
 
 	let allNames = $state<string[]>([]);
 	let managed = $state<boolean>(false);
-	let newName = $state('TAVILY_API_KEY');
+	let newName = $state('');
 	let newValue = $state('');
 	let loading = $state(true);
 	let saving = $state(false);
@@ -192,8 +196,7 @@
 </script>
 
 <div class="p-6 max-w-3xl mx-auto">
-	<a href="/app/settings/llm" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('secrets.back_to_llm')}</a>
-	<header class="mt-2 mb-4">
+	<header class="mb-4">
 		<h1 class="text-2xl font-semibold mb-1">{t('secrets.title')}</h1>
 		<p class="text-sm text-text-muted">{t('secrets.subtitle')}</p>
 	</header>
@@ -285,7 +288,7 @@
 					id="secret-name"
 					list="secrets-suggested-names"
 					bind:value={newName}
-					placeholder="TAVILY_API_KEY"
+					placeholder="z.B. DATAFORSEO_API_KEY"
 					class="mt-1 w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 font-mono text-sm focus:border-accent focus:outline-none"
 				/>
 				<datalist id="secrets-suggested-names">
@@ -301,7 +304,7 @@
 					id="secret-value"
 					bind:value={newValue}
 					type="password"
-					placeholder="sk-..."
+					placeholder="••••"
 					autocomplete="off"
 					class="mt-1 w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 font-mono text-sm focus:border-accent focus:outline-none"
 				/>

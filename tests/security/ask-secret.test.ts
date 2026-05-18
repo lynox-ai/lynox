@@ -31,8 +31,37 @@ describe('ask_secret security', () => {
       expect(matchesSecretPattern('AIzaSyA1234567890abcdefghijklmnopqrstuv')).not.toBeNull();
     });
 
-    it('detects Slack tokens', () => {
+    it('detects Slack tokens (bot/user/admin + webhook/refresh prefixes)', () => {
       expect(matchesSecretPattern('xoxb-123456789012-abcdefgh')).not.toBeNull();
+      // 2026-05-18: xoxo (incoming webhook) + xoxr (refresh) added.
+      expect(matchesSecretPattern('xoxo-123456789012-abcdefgh')).not.toBeNull();
+      expect(matchesSecretPattern('xoxr-123456789012-abcdefgh')).not.toBeNull();
+    });
+
+    it('detects GitHub user-installation tokens (ghu_)', () => {
+      // 2026-05-18: ghu_ added to cover user-to-server installation tokens.
+      expect(matchesSecretPattern('ghu_abcdefghijklmnopqrstuv')).not.toBeNull();
+    });
+
+    it('detects Shopify tokens (admin / app secret / partner / custom)', () => {
+      // 2026-05-18: Shopify shp* added after a real flow leaked the prefix
+      // into the agent transcript and triggered the user-cancel-loop bug.
+      // Tokens assembled at runtime so GitHub Secret Scanning doesn't
+      // flag this test file as a leaked-credential commit (the literal
+      // shape matches the real token format too closely to embed as a
+      // string constant).
+      const body = 'a'.repeat(24);
+      const prefix = 'shp';
+      expect(matchesSecretPattern(`${prefix}at_${body}`)).not.toBeNull();
+      expect(matchesSecretPattern(`${prefix}ss_${body}`)).not.toBeNull();
+      expect(matchesSecretPattern(`${prefix}pa_${body}`)).not.toBeNull();
+      expect(matchesSecretPattern(`${prefix}ca_${body}`)).not.toBeNull();
+    });
+
+    it('detects JWT (three base64-url segments)', () => {
+      // 2026-05-18: JWT pattern added — catches OAuth ID tokens etc.
+      const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+      expect(matchesSecretPattern(jwt)).not.toBeNull();
     });
 
     it('returns null for normal text', () => {

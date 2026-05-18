@@ -19,6 +19,7 @@ function makeDb(): Database.Database {
       secret_key_type TEXT,
       answer TEXT,
       answer_saved INTEGER,
+      answer_error TEXT,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       answered_at TEXT,
@@ -183,6 +184,44 @@ describe('PromptStore', () => {
       const row = store.getPending('s1');
       expect(row?.id).toBe(id);
       expect(row?.questions_json).toBeTruthy();
+    });
+  });
+
+  // Each SecretOutcome must hit the right column pair on the row.
+  // The bug this guards against is a regression that swaps the bind order
+  // of (answer_saved, answer_error) and silently produces wrong state.
+  describe('answerSecret outcome → column mapping', () => {
+    it('saved → answer_saved=1, answer_error=NULL', () => {
+      const id = store.insertAskSecret('s1', 'API_KEY', 'enter');
+      expect(store.answerSecret(id, 'saved')).toBe(true);
+      const row = store.getById(id);
+      expect(row?.answer_saved).toBe(1);
+      expect(row?.answer_error).toBeNull();
+      expect(row?.status).toBe('answered');
+    });
+
+    it('canceled → answer_saved=0, answer_error=NULL', () => {
+      const id = store.insertAskSecret('s1', 'API_KEY', 'enter');
+      expect(store.answerSecret(id, 'canceled')).toBe(true);
+      const row = store.getById(id);
+      expect(row?.answer_saved).toBe(0);
+      expect(row?.answer_error).toBeNull();
+    });
+
+    it('managed_blocked → answer_saved=0, answer_error="managed_blocked"', () => {
+      const id = store.insertAskSecret('s1', 'SHOPIFY_TOKEN', 'enter');
+      expect(store.answerSecret(id, 'managed_blocked')).toBe(true);
+      const row = store.getById(id);
+      expect(row?.answer_saved).toBe(0);
+      expect(row?.answer_error).toBe('managed_blocked');
+    });
+
+    it('vault_error → answer_saved=0, answer_error="vault_error"', () => {
+      const id = store.insertAskSecret('s1', 'API_KEY', 'enter');
+      expect(store.answerSecret(id, 'vault_error')).toBe(true);
+      const row = store.getById(id);
+      expect(row?.answer_saved).toBe(0);
+      expect(row?.answer_error).toBe('vault_error');
     });
   });
 });

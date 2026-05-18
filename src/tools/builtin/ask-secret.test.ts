@@ -15,7 +15,7 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
 
 describe('askSecretTool', () => {
   it('calls promptSecret and returns success message', async () => {
-    const promptSecret = vi.fn().mockResolvedValue(true);
+    const promptSecret = vi.fn().mockResolvedValue('saved');
     const agent = makeAgent({ promptSecret });
 
     const result = await askSecretTool.handler(
@@ -28,7 +28,7 @@ describe('askSecretTool', () => {
   });
 
   it('passes key_type to promptSecret', async () => {
-    const promptSecret = vi.fn().mockResolvedValue(true);
+    const promptSecret = vi.fn().mockResolvedValue('saved');
     const agent = makeAgent({ promptSecret });
 
     await askSecretTool.handler(
@@ -38,8 +38,8 @@ describe('askSecretTool', () => {
     expect(promptSecret).toHaveBeenCalledWith('OPENAI_KEY', 'Enter key', 'openai');
   });
 
-  it('returns cancel message when user cancels', async () => {
-    const promptSecret = vi.fn().mockResolvedValue(false);
+  it('returns cancel message AND a hard guard against plaintext fallback', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('canceled');
     const agent = makeAgent({ promptSecret });
 
     const result = await askSecretTool.handler(
@@ -47,9 +47,54 @@ describe('askSecretTool', () => {
       agent,
     );
     expect(result).toContain('canceled');
+    // The whole point of the v29 refactor — these guards must appear in the
+    // tool result so the model is told, not just hoped, not to fall back.
+    expect(result).toMatch(/DO NOT offer a plaintext fallback/i);
+    expect(result).toMatch(/vault flow is the only way/i);
   });
 
-  it('returns fallback when promptSecret is undefined', async () => {
+  it('returns a distinct message for managed_blocked (NOT a cancel)', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('managed_blocked');
+    const agent = makeAgent({ promptSecret });
+
+    const result = await askSecretTool.handler(
+      { name: 'SHOPIFY_TOKEN', prompt: 'Enter Shopify token' },
+      agent,
+    );
+    expect(result).toMatch(/rejected|isn't user-installable/i);
+    // Hard guards: no retry, no plaintext. Both case-insensitive so a
+    // future copy edit to lowercase "do not retry" / "Don't retry" still
+    // pins the intent without flaking.
+    expect(result).toMatch(/do ?not retry|don't retry/i);
+    expect(result).toMatch(/plaintext fallback/i);
+    // Must NOT include "User canceled" — different outcome path.
+    expect(result).not.toMatch(/user canceled/i);
+    // The implementation-leak bug this iteration fixes: tool result
+    // must NOT name the BYOK allowlist or the specific LLM providers,
+    // because the agent paraphrases the result string into chat.
+    expect(result).not.toMatch(/Anthropic\s*\/\s*OpenAI\s*\/\s*Mistral/);
+    expect(result).not.toMatch(/BYOK/i);
+    expect(result).not.toMatch(/user-writable/i);
+    expect(result).not.toMatch(/writable secrets/i);
+    // Should give the agent a concrete script to read back to the user.
+    expect(result).toMatch(/support@lynox\.ai/);
+    expect(result).toMatch(/selbst hosten|self.host/i);
+  });
+
+  it('returns a distinct message for vault_error (NOT a cancel)', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('vault_error');
+    const agent = makeAgent({ promptSecret });
+
+    const result = await askSecretTool.handler(
+      { name: 'MY_KEY', prompt: 'Enter key' },
+      agent,
+    );
+    expect(result).toMatch(/server-side error/i);
+    expect(result).toMatch(/NOT a user cancel/i);
+    expect(result).toMatch(/DO NOT offer a plaintext fallback/i);
+  });
+
+  it('returns fallback when promptSecret is undefined — and warns against chat', async () => {
     const agent = makeAgent();
     const result = await askSecretTool.handler(
       { name: 'MY_KEY', prompt: 'Enter key' },
@@ -57,6 +102,9 @@ describe('askSecretTool', () => {
     );
     expect(result).toContain('not available');
     expect(result).toContain('Settings');
+    // Even when the secure path is unavailable, the model must not ask for
+    // the secret in chat.
+    expect(result).toMatch(/Do NOT ask the user to paste the secret into chat/i);
   });
 
   it('rejects invalid secret names', async () => {
@@ -85,7 +133,7 @@ describe('askSecretTool', () => {
   });
 
   it('accepts valid UPPER_SNAKE_CASE names', async () => {
-    const promptSecret = vi.fn().mockResolvedValue(true);
+    const promptSecret = vi.fn().mockResolvedValue('saved');
     const agent = makeAgent({ promptSecret });
 
     for (const name of ['API_KEY', 'STRIPE_API_KEY', 'X', 'MY_TOKEN_123']) {
@@ -99,7 +147,7 @@ describe('askSecretTool', () => {
 
   it('never returns the secret value itself', async () => {
     const secret = 'sk-ant-super-secret-key-12345';
-    const promptSecret = vi.fn().mockResolvedValue(true);
+    const promptSecret = vi.fn().mockResolvedValue('saved');
     const agent = makeAgent({ promptSecret });
 
     const result = await askSecretTool.handler(
