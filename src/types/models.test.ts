@@ -7,6 +7,7 @@ import {
   getMaxContinuations,
   getOpenAIModelMap,
   setOpenAIModelResolver,
+  effectiveContextWindow,
   MISTRAL_MODEL_MAP,
   MISTRAL_API_BASE,
 } from './models.js';
@@ -157,5 +158,72 @@ describe('getModelId for openai provider', () => {
     expect(getModelId('sonnet', 'anthropic')).toBe('claude-sonnet-4-6');
     expect(getModelId('sonnet', 'vertex')).toBe('claude-sonnet-4-6');
     expect(getModelId('sonnet', 'custom')).toBe('claude-sonnet-4-6');
+  });
+});
+
+// Regression-pin: pre-2026-05-18 the `[1m]`-suffix variants Anthropic uses
+// for the context-1m-2025-08-07 beta path were absent from CONTEXT_WINDOW /
+// DEFAULT_MAX_TOKENS / MAX_CONTINUATIONS. The lookup fell through to the
+// 200k default — engine treated a 1M-beta session as 200k for trim and
+// percentage calc, producing the staging "Kontext: 423%" mismatch. Explicit
+// variant entries now in place; this suite locks them down so silent
+// removal during a future cleanup regresses loudly.
+describe('1M-context variant lookups', () => {
+  it('getContextWindow resolves Sonnet 1M variant to 1_000_000', () => {
+    expect(getContextWindow('claude-sonnet-4-6[1m]')).toBe(1_000_000);
+  });
+
+  it('getContextWindow resolves Opus 1M variants to 1_000_000', () => {
+    expect(getContextWindow('claude-opus-4-6[1m]')).toBe(1_000_000);
+    expect(getContextWindow('claude-opus-4-7[1m]')).toBe(1_000_000);
+    expect(getContextWindow('claude-opus-4-7')).toBe(1_000_000);
+  });
+
+  it('getDefaultMaxTokens for 1M variants mirrors base model', () => {
+    expect(getDefaultMaxTokens('claude-sonnet-4-6[1m]')).toBe(getDefaultMaxTokens('claude-sonnet-4-6'));
+    expect(getDefaultMaxTokens('claude-opus-4-6[1m]')).toBe(getDefaultMaxTokens('claude-opus-4-6'));
+    expect(getDefaultMaxTokens('claude-opus-4-7[1m]')).toBe(getDefaultMaxTokens('claude-opus-4-7'));
+  });
+
+  it('getMaxContinuations for 1M variants mirrors base model', () => {
+    expect(getMaxContinuations('claude-sonnet-4-6[1m]')).toBe(getMaxContinuations('claude-sonnet-4-6'));
+    expect(getMaxContinuations('claude-opus-4-6[1m]')).toBe(getMaxContinuations('claude-opus-4-6'));
+  });
+
+  it('unknown bracket-suffix variants still fall through to 200k default', () => {
+    // `normalizeModelId` strips @YYYYMMDD but NOT bracket suffixes; an
+    // unknown bracketed id has no explicit entry → default. Guards against
+    // silently treating an unrecognised variant as 1M.
+    expect(getContextWindow('claude-future-9-9[whatever]')).toBe(200_000);
+  });
+});
+
+describe('effectiveContextWindow', () => {
+  it('returns the native window when no user cap is set', () => {
+    expect(effectiveContextWindow('claude-sonnet-4-6', undefined)).toBe(200_000);
+    expect(effectiveContextWindow('claude-opus-4-6', undefined)).toBe(1_000_000);
+  });
+
+  it('returns min(native, cap) when user cap is smaller', () => {
+    expect(effectiveContextWindow('claude-opus-4-6', 500_000)).toBe(500_000);
+    expect(effectiveContextWindow('claude-sonnet-4-6', 100_000)).toBe(100_000);
+  });
+
+  it('caps to native when user cap exceeds it (Sonnet base, not the 1M variant)', () => {
+    // User picks 500k on plain Sonnet 4.6 — model only supports 200k native,
+    // so effective is 200k. The mismatch is a UX problem (Settings v3 Item 6
+    // will surface it); the engine bookkeeping must be correct regardless.
+    expect(effectiveContextWindow('claude-sonnet-4-6', 500_000)).toBe(200_000);
+  });
+
+  it('respects user cap on the 1M-beta Sonnet variant', () => {
+    // Same user cap, different model variant — picking the [1m] variant
+    // unlocks 1M native, so a 500k cap actually applies.
+    expect(effectiveContextWindow('claude-sonnet-4-6[1m]', 500_000)).toBe(500_000);
+  });
+
+  it('treats zero / negative cap as "no cap"', () => {
+    expect(effectiveContextWindow('claude-sonnet-4-6', 0)).toBe(200_000);
+    expect(effectiveContextWindow('claude-sonnet-4-6', -1)).toBe(200_000);
   });
 });

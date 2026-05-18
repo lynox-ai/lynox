@@ -15,6 +15,14 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'claude-opus-4-6':           { input: 5,    output: 25, cacheWrite: 6.25,  cacheRead: 0.50 },
   'claude-sonnet-4-6':         { input: 3,    output: 15, cacheWrite: 3.75,  cacheRead: 0.30 },
   'claude-haiku-4-5-20251001': { input: 1,    output: 5,  cacheWrite: 1.25,  cacheRead: 0.10 },
+  // `[1m]`-suffix variants — Anthropic's identifier when the
+  // `context-1m-2025-08-07` beta header is on. Pricing mirrors the base
+  // model; revisit if/when Anthropic publishes a separate 1M-tier rate.
+  // See types/models.ts _CONTEXT_WINDOW comment for the broader
+  // explicit-variant-entry rationale.
+  'claude-opus-4-7[1m]':       { input: 5,    output: 25, cacheWrite: 6.25,  cacheRead: 0.50 },
+  'claude-opus-4-6[1m]':       { input: 5,    output: 25, cacheWrite: 6.25,  cacheRead: 0.50 },
+  'claude-sonnet-4-6[1m]':     { input: 3,    output: 15, cacheWrite: 3.75,  cacheRead: 0.30 },
   // Mistral set (eu-sovereign tier-map; see MISTRAL_MODEL_MAP in types/models.ts).
   // No prompt-cache pricing — Mistral exposes `prompt_cache_key` but bills the
   // cached prefix at the standard input rate. Mirror cacheRead/cacheWrite =
