@@ -4,7 +4,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
-import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn } from './agent.js';
+import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, SecretOutcome } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
@@ -161,7 +161,7 @@ export interface LynoxConfig {
   memory?:         boolean | undefined;
   promptUser?:     ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?:     ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
-  promptSecret?:   ((name: string, prompt: string, keyType?: string) => Promise<boolean>) | undefined;
+  promptSecret?:   ((name: string, prompt: string, keyType?: string) => Promise<SecretOutcome>) | undefined;
   context?:        LynoxContext | undefined;
   /** Default response language (e.g. 'de', 'en'). */
   language?:       string | undefined;

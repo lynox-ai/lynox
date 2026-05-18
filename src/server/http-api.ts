@@ -25,7 +25,7 @@ import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
-import type { StreamEvent, PromptMeta, CapabilityLocks } from '../types/index.js';
+import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
 import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 
@@ -1749,8 +1749,8 @@ export class LynoxHTTPApi {
       }
 
       // Wire promptSecret — secret value never enters SSE, only the prompt metadata
-      session.promptSecret = async (name: string, prompt: string, keyType?: string, meta?: PromptMeta): Promise<boolean> => {
-        if (!promptStore) return false;
+      session.promptSecret = async (name: string, prompt: string, keyType?: string, meta?: PromptMeta): Promise<SecretOutcome> => {
+        if (!promptStore) return 'vault_error';
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
         hasActivePendingPrompt = true;
         if (!aborted && !res.writableEnded) {
@@ -1762,7 +1762,11 @@ export class LynoxHTTPApi {
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
-        return row?.answer_saved === 1;
+        // answer_error wins over answer_saved when set — see SecretOutcome contract
+        // (server-side rejection must not be mistranslated as a user cancel).
+        if (row?.answer_error === 'managed_blocked') return 'managed_blocked';
+        if (row?.answer_error === 'vault_error') return 'vault_error';
+        return row?.answer_saved === 1 ? 'saved' : 'canceled';
       };
 
       // Heartbeat — every 10s emit a real SSE event (not a comment line) so
@@ -1971,16 +1975,29 @@ export class LynoxHTTPApi {
 
       const b = body as Record<string, unknown> | null;
       const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
-      const saved = b && typeof b['saved'] === 'boolean' ? b['saved'] : false;
+
+      // Prefer the v29 `status` field — it distinguishes managed_blocked /
+      // vault_error from a real user cancel. Fall back to legacy `saved`
+      // boolean so older UI bundles still close out cleanly.
+      const rawStatus = b && typeof b['status'] === 'string' ? b['status'] : undefined;
+      const legacySaved = b && typeof b['saved'] === 'boolean' ? b['saved'] : undefined;
+      let outcome: SecretOutcome;
+      if (rawStatus === 'saved' || rawStatus === 'canceled' || rawStatus === 'managed_blocked' || rawStatus === 'vault_error') {
+        outcome = rawStatus;
+      } else if (legacySaved === true) {
+        outcome = 'saved';
+      } else {
+        outcome = 'canceled';
+      }
 
       let answered = false;
       if (promptId) {
-        answered = ps.answerSecret(promptId, saved);
+        answered = ps.answerSecret(promptId, outcome);
       }
       if (!answered) {
         const pending = ps.getPending(params['id']!);
         if (pending && pending.prompt_type === 'ask_secret') {
-          answered = ps.answerSecret(pending.id, saved);
+          answered = ps.answerSecret(pending.id, outcome);
         }
       }
       if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }

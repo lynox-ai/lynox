@@ -358,7 +358,7 @@ describe('buildSubAgentPromptCallbacks', () => {
     const budget = new PromptBudget(2);
     const cbs = buildSubAgentPromptCallbacks(step, {
       parentPromptTabs: vi.fn(async () => ['ok']),
-      parentPromptSecret: vi.fn(async () => true),
+      parentPromptSecret: vi.fn(async () => 'saved'),
       promptBudget: budget,
     });
     await cbs.promptTabs!([{ question: 'q' }]);

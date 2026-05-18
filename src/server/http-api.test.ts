@@ -831,6 +831,7 @@ describe('LynoxHTTPApi', () => {
         secret_key_type TEXT,
         answer TEXT,
         answer_saved INTEGER,
+        answer_error TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,

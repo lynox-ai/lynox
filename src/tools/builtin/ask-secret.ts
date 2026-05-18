@@ -44,15 +44,33 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     }
 
     if (!agent.promptSecret) {
-      return 'Secure secret input is not available in this context. Ask the user to enter the key in Settings → API Keys instead.';
+      return 'Secure secret input is not available in this context. Ask the user to enter the key in Settings → API Keys instead. Do NOT ask the user to paste the secret into chat.';
     }
 
-    const saved = await agent.promptSecret(input.name, input.prompt, input.key_type);
+    const outcome = await agent.promptSecret(input.name, input.prompt, input.key_type);
 
-    if (!saved) {
-      return `User canceled the secret prompt for "${input.name}".`;
+    switch (outcome) {
+      case 'saved':
+        return `Secret "${input.name}" saved securely in the vault. Use secret:${input.name} to reference it.`;
+
+      case 'canceled':
+        // Hard guard against the failure mode that prompted this refactor:
+        // the model used to follow a cancel with "want to send it as text
+        // instead?", leaking credentials into chat history. The tool result
+        // now spells out the contract for the next decision.
+        return `User canceled the secret prompt for "${input.name}". Acknowledge briefly and stop. DO NOT offer a plaintext fallback (no "tell me as text", "paste in chat", "send via DM"). The vault flow is the only way to submit credentials. If the task can't continue without this secret, ask the user once whether they want to retry; otherwise move on.`;
+
+      case 'managed_blocked':
+        // Managed-tier write allowlist (BYOK_USER_WRITABLE_SECRETS) only
+        // permits the LLM provider keys. Tool/integration keys 403. The
+        // model must not retry the same name and must not propose to
+        // receive the secret directly.
+        return `Server refused to write "${input.name}" — on managed hosting, only LLM provider keys (Anthropic / OpenAI / Mistral / Custom) are user-writable. Tool & integration secrets are provisioned admin-side. Tell the user this clearly, suggest contacting support@lynox.ai or using a self-hosted instance if they need this integration. DO NOT retry ask_secret with the same name. DO NOT offer to receive the secret as plaintext.`;
+
+      case 'vault_error':
+        // Distinct from user-cancel: the user submitted but the server
+        // couldn't persist. Likely transient — let the model offer a retry.
+        return `Vault write failed for "${input.name}" — this is a server-side error, NOT a user cancel. Tell the user the secret could not be stored, and ask if they want to retry. If retry also fails, escalate. DO NOT offer a plaintext fallback.`;
     }
-
-    return `Secret "${input.name}" saved securely in the vault. Use secret:${input.name} to reference it.`;
   },
 };

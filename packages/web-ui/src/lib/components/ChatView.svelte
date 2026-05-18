@@ -493,11 +493,16 @@
 
 	async function handleSecretSave() {
 		if (!pendingSecret || !secretValue.trim()) return;
-		const ok = await submitSecret(pendingSecret.name, secretValue.trim());
-		if (ok) {
+		const result = await submitSecret(pendingSecret.name, secretValue.trim());
+		// Three outcomes: success / managed-tier blocked the name / generic
+		// vault failure. The agent gets a matching tool-result on the engine
+		// side; the UI toast just tells the user what happened.
+		if (result === 'saved') {
 			addToast(t('chat.secret_saved'), 'success', 3000);
+		} else if (result === 'managed_blocked') {
+			addToast(t('chat.secret_managed_blocked'), 'error', 7000);
 		} else {
-			addToast('Failed to store secret. Check vault configuration.', 'error', 5000);
+			addToast(t('chat.secret_vault_error'), 'error', 5000);
 		}
 		secretValue = '';
 		secretConsented = false;

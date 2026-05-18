@@ -25,7 +25,20 @@ export interface PromptMeta {
 
 export type PromptUserFn = (question: string, options?: string[], meta?: PromptMeta) => Promise<string>;
 export type PromptTabsFn = (questions: TabQuestion[], meta?: PromptMeta) => Promise<string[]>;
-export type PromptSecretFn = (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => Promise<boolean>;
+
+/** Four distinct outcomes for an ask_secret prompt:
+ *  - 'saved'           : user submitted, vault accepted
+ *  - 'canceled'        : user clicked cancel
+ *  - 'managed_blocked' : managed-tier write-allowlist rejected the name (403)
+ *  - 'vault_error'     : server-side vault write failed (NOT a user cancel)
+ *
+ * Distinguishing these lets the agent stop conflating server-side rejection
+ * with user intent — previously 'managed_blocked' surfaced as 'canceled',
+ * which trained the model to offer plaintext fallbacks. See PRD/feedback
+ * 2026-05-18.
+ */
+export type SecretOutcome = 'saved' | 'canceled' | 'managed_blocked' | 'vault_error';
+export type PromptSecretFn = (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => Promise<SecretOutcome>;
 
 /**
  * Mutable per-Session state previously held as module-level globals in
