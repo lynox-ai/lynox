@@ -567,6 +567,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_copy_detail': { de: 'Fehlerdetails kopieren', en: 'Copy error details' },
 	'chat.retry': { de: 'Wiederhole… Versuch {attempt}/{max}', en: 'Retrying… attempt {attempt}/{max}' },
 	'chat.busy_wait': { de: 'Agent arbeitet noch am vorherigen Schritt — deine Nachricht wartet…', en: 'Agent still working on the previous step — your message is queued…' },
+	'chat.busy_cancel': { de: 'Abbrechen', en: 'Cancel' },
+	'chat.busy_cancel_title': { de: 'Vorherigen Vorgang abbrechen und neu starten', en: 'Cancel the previous task and start over' },
+	'chat.busy_aborted': { de: 'Vorgang abgebrochen — du kannst jetzt eine neue Nachricht senden.', en: 'Task cancelled — you can send a new message now.' },
 
 	// Chat
 	'chat.placeholder': { de: 'Nachricht eingeben...', en: 'Type a message...' },

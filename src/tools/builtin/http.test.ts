@@ -991,4 +991,66 @@ describe('httpRequestTool', () => {
       expect(events.some(e => e['type'] === 'api_cost')).toBe(false);
     });
   });
+
+  // Cat 2026-05-19: a hanging Shopify endpoint locked her session for 28 min
+  // because readBodyLimited's reader doesn't honour AbortController.signal
+  // once headers have arrived (Node fetch quirk). The session-lock cascade
+  // produced 30+ min of POST /run 409 from her browser. Hard cap + wall-clock
+  // race below is the wrap-around guarantee.
+  describe('hard timeout cap (wall-clock)', () => {
+    it('caps an above-cap timeout_ms (5s test cap) — hung fetch resolves within cap+1s', async () => {
+      // To keep tests fast we use a 5s value below the 60s production cap; the
+      // important invariant is that Promise.race(fetch, wallTimeout) rejects
+      // even when fetch never resolves.
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* never */ })));
+
+      const agent = { sessionCounters: testCounters } as never;
+      const started = Date.now();
+      let err: Error | undefined;
+      try {
+        await handler({ url: 'https://hung.example.com/x', timeout_ms: 5000 }, agent);
+      } catch (e) {
+        err = e as Error;
+      }
+      const elapsed = Date.now() - started;
+      expect(err).toBeDefined();
+      expect(err!.message).toMatch(/timed out/i);
+      expect(elapsed).toBeGreaterThan(5000);
+      expect(elapsed).toBeLessThan(7500);
+    }, 10_000);
+
+    it('honours sub-cap timeout_ms (2s) without waiting for the 60s production cap', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* hang */ })));
+
+      const agent = { sessionCounters: testCounters } as never;
+      const started = Date.now();
+      let err: Error | undefined;
+      try {
+        await handler({ url: 'https://hung.example.com/x', timeout_ms: 2000 }, agent);
+      } catch (e) {
+        err = e as Error;
+      }
+      const elapsed = Date.now() - started;
+      expect(err).toBeDefined();
+      expect(elapsed).toBeLessThan(4500);
+    }, 8000);
+
+    it('clamps a zero/negative timeout_ms to a sane minimum (1ms)', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* hang */ })));
+
+      const agent = { sessionCounters: testCounters } as never;
+      const started = Date.now();
+      let err: Error | undefined;
+      try {
+        await handler({ url: 'https://hung.example.com/x', timeout_ms: 0 }, agent);
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err).toBeDefined();
+      expect(Date.now() - started).toBeLessThan(3000);
+    }, 5000);
+  });
 });

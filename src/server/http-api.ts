@@ -406,7 +406,7 @@ export class LynoxHTTPApi {
   // Per-session run tracking. `streamAlive=false` after the SSE connection
   // closes; if a pending prompt is then blocking the previous run, a fresh
   // /run can take it over instead of 409-looping forever (Bug 3).
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void }>();
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>();
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
   /**
@@ -1578,24 +1578,32 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
 
-      // Stale-run takeover: a previous /run whose SSE stream has already
-      // closed and which is parked on a pending prompt would otherwise lock
-      // this session forever — the client polled /run on reconnect, got 409
-      // every time, and the prompt-wait never resolved (Bug 3: "forever
-      // thinking" after disconnect + reload + new message). When the slot
-      // matches that pattern, hand control to the new request.
+      // Stale-run takeover. A previous /run whose SSE stream has closed +
+      // one of these holds → hand control to the new request:
+      //   (a) parked on a pending prompt (Bug 3 — original case)
+      //   (b) silent for >STALE_RUN_SILENCE_MS (cat 2026-05-19 — run stuck on
+      //       a hanging http_request, no SSE activity, no pending prompt,
+      //       session locked for 30 min until the engine's hard run cap).
+      // Without (b), a hung tool call locks the session forever from the
+      // client's perspective — every /run retry gets 409 until the 30-min
+      // streamTimeout fires server-side.
+      const STALE_RUN_SILENCE_MS = 60_000;
       const promptStoreEarly = this.engine?.getPromptStore();
       const existingSlot = this.runningSessions.get(sessionId);
-      if (existingSlot && !existingSlot.streamAlive && promptStoreEarly?.getPending(sessionId)) {
-        existingSlot.takeover();
-        // Wait for the previous handler's `finally` to clear the slot.
-        // Realistic drain after takeover() is sub-100 ms (one tick to
-        // resolve waitForSettled, then session.run unwinds); the 1 s cap
-        // bounds worker-tying if the previous handler is unexpectedly slow
-        // to unwind. Falls through to a 409 if the slot still hasn't drained.
-        const drainStart = Date.now();
-        while (this.runningSessions.has(sessionId) && Date.now() - drainStart < 1000) {
-          await new Promise<void>((r) => setTimeout(r, 25));
+      if (existingSlot && !existingSlot.streamAlive) {
+        const hasPrompt = !!promptStoreEarly?.getPending(sessionId);
+        const stale = Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
+        if (hasPrompt || stale) {
+          existingSlot.takeover();
+          // Wait for the previous handler's `finally` to clear the slot.
+          // Realistic drain after takeover() is sub-100 ms (one tick to
+          // resolve waitForSettled, then session.run unwinds); the 1 s cap
+          // bounds worker-tying if the previous handler is unexpectedly slow
+          // to unwind. Falls through to a 409 if the slot still hasn't drained.
+          const drainStart = Date.now();
+          while (this.runningSessions.has(sessionId) && Date.now() - drainStart < 1000) {
+            await new Promise<void>((r) => setTimeout(r, 25));
+          }
         }
       }
 
@@ -1855,6 +1863,13 @@ export class LynoxHTTPApi {
       const keepaliveTimer = setInterval(() => {
         if (!aborted && !res.writableEnded) {
           res.write(`event: heartbeat\ndata: ${JSON.stringify({ sentAt: Date.now() })}\n\n`);
+          // Bump lastEventAt so the stale-run-takeover at /run entry can
+          // distinguish "actively streaming" from "silent for >60s, probably
+          // stuck on a hung tool". Stops updating as soon as the SSE write
+          // gate (aborted/writableEnded) closes — which is exactly when we
+          // want the stale clock to start counting.
+          const slot = this.runningSessions.get(sessionId);
+          if (slot) slot.lastEventAt = Date.now();
         }
       }, 10_000);
 
@@ -1905,7 +1920,7 @@ export class LynoxHTTPApi {
         sessionAbortController.abort();
         session.abort();
       };
-      this.runningSessions.set(sessionId, { streamAlive: true, takeover });
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
       try {
         const result = await session.run(task, runOptions);
         if (!aborted) {
