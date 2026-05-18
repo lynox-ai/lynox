@@ -2330,18 +2330,26 @@
 		</div>
 	{/if}
 
-	<!-- Context-usage banner (only renders at ≥60 %, silent below) -->
+	<!-- Context-usage banner (only renders at ≥60 %, silent below).
+	     Tone: amber up to 90 % (advisory — "context filling up"), red only
+	     at ≥95 % (genuine "auto-compact about to fire"). Pre-fix this went
+	     red at 75 % and rendered as "Kontext: 423 %" when the denominator
+	     was stale — users read it as an error. Now the displayed percent is
+	     clamped to 100 (no scary 4xx %) and the colour only escalates when
+	     auto-compact is actually imminent. The triangle icon was the other
+	     "error" signal; replaced with a softer chat-pressure pictogram. -->
 	{#if ctxBudget && ctxBudget.usagePercent >= 60}
-		{@const pct = ctxBudget.usagePercent}
-		{@const critical = pct >= 75}
+		{@const rawPct = ctxBudget.usagePercent}
+		{@const pct = Math.min(rawPct, 100)}
+		{@const critical = rawPct >= 95}
 		<div
-			class="border-t {critical ? 'border-danger/30 bg-danger/10 text-danger' : 'border-warning/30 bg-warning/10 text-warning'} px-4 py-1.5 text-xs"
+			class="border-t {critical ? 'border-warning/40 bg-warning/15 text-warning' : 'border-warning/20 bg-warning/5 text-warning/90'} px-4 py-1.5 text-xs"
 			role="status"
 			aria-live="polite"
 		>
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-2">
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3l-6.93-12a2 2 0 00-3.48 0l-6.93 12a2 2 0 001.74 3z" />
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M8 7h8m-8 4h8m-8 4h5m6 5l-3-3v-2a2 2 0 00-2-2H6a2 2 0 00-2-2V6a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2h-2z" />
 				</svg>
 				<span class="font-mono tabular-nums">{t('status.context')}: {pct}%</span>
 				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">·</span>

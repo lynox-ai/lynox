@@ -60,6 +60,38 @@ function formatSearchResults(results: SearchResult[]): string {
   }).join('\n\n');
 }
 
+/**
+ * Detect when a web_research call is API-setup-related. Heuristic — false
+ * positives are cheap (extra reminder) and false negatives are the cost we
+ * shipped this for (Haiku ignoring the system-prompt HARD RULES because
+ * the docs themselves don't carry the reminder).
+ *
+ * Triggers on:
+ *  - URL host: `developer.*`, `developers.*`, `*.dev` (Shopify/Stripe/etc.)
+ *  - URL path: `/api`, `/admin/api`, `/docs/api`, `oauth`, `/scopes`, `/auth`
+ *  - Search query mentioning: API / OAuth / scopes / auth / access token /
+ *    custom app / webhook / integration / endpoint
+ */
+function looksLikeApiSetupResearch(query?: string, url?: string): boolean {
+  const hostRe = /\b(developer|developers)\./i;
+  const tldRe = /\.dev(\/|$)/i;
+  const pathRe = /\/(api|oauth|scopes?|admin\/api|docs\/api|auth(?:entication)?|access[-_]?token)\b/i;
+  const queryRe = /\b(api|oauth|scope|auth(?:entication)?|access[-_ ]?token|custom app|webhook|integration|endpoint|client[-_ ]?(?:id|secret))\b/i;
+  if (url && (hostRe.test(url) || tldRe.test(url) || pathRe.test(url))) return true;
+  if (query && queryRe.test(query)) return true;
+  return false;
+}
+
+/** Reminder block appended OUTSIDE the untrusted_data wrap so the model
+ *  treats it as system guidance, not page content. Kept short — the system
+ *  prompt already has the full HARD RULES; this is the just-in-time
+ *  pointer the model sees right next to the docs it's about to act on. */
+const API_SETUP_AGENT_REMINDER = `
+**Agent reminder (auto-injected because this looks like API-setup research):**
+- Match the user's stated use case to the scopes/permissions in these docs. Don't default to read-only — if the user said "optimize", "update", "sync", "post", "manage", they need \`write_*\` scopes too. Cite the exact scope names from the docs you just read.
+- Don't recommend any scope / endpoint / UI path you didn't see in these results. If the docs are incomplete, do another web_research call before guiding the user.
+- Hold \`ask_secret\` until the user explicitly signals readiness ("done", "have the token"). Don't open the secret prompt mid-walkthrough.`;
+
 export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSearchInput> {
   return {
     definition: {
@@ -138,7 +170,10 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
-          return wrapUntrustedData(formatted, 'web_search');
+          const wrapped = wrapUntrustedData(formatted, 'web_search');
+          return looksLikeApiSetupResearch(input.query, undefined)
+            ? wrapped + '\n' + API_SETUP_AGENT_REMINDER
+            : wrapped;
         } catch (err: unknown) {
           return `Search failed: ${getErrorMessage(err)}`;
         }
@@ -152,7 +187,10 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           if (result.truncated) parts.push('(Content truncated)');
           parts.push('', result.content);
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
-          return wrapUntrustedData(parts.join('\n'), 'web_page');
+          const wrapped = wrapUntrustedData(parts.join('\n'), 'web_page');
+          return looksLikeApiSetupResearch(undefined, input.url)
+            ? wrapped + '\n' + API_SETUP_AGENT_REMINDER
+            : wrapped;
         } catch (err: unknown) {
           return `Failed to read URL: ${getErrorMessage(err)}`;
         }

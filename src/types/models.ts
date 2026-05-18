@@ -190,6 +190,18 @@ export function getContextWindow(model: string): number {
   return _CONTEXT_WINDOW[model] ?? _CONTEXT_WINDOW[normalizeModelId(model)] ?? 200_000;
 }
 
+/** Effective context window after applying the user's optional cap. Mirrors
+ *  Agent._effectiveContextWindow so server-side endpoints + session bookkeeping
+ *  can compute the same value the agent actually uses internally — staging
+ *  2026-05-18 shipped this with three separate copies of the formula that
+ *  drifted (UI showed 423% because /sessions returned the native window
+ *  while the agent had applied a smaller user cap). Single source of truth.
+ *  Never returns more than the model's native window. */
+export function effectiveContextWindow(model: string, userCap: number | undefined): number {
+  const native = getContextWindow(model);
+  return userCap !== undefined && userCap > 0 ? Math.min(native, userCap) : native;
+}
+
 /** Look up default max output tokens. Normalizes provider-prefixed model IDs automatically. */
 export function getDefaultMaxTokens(model: string): number {
   return _DEFAULT_MAX_TOKENS[model] ?? _DEFAULT_MAX_TOKENS[normalizeModelId(model)] ?? 16_000;

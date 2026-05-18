@@ -26,7 +26,7 @@ import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
-import { MODEL_MAP, CONTEXT_WINDOW } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -1520,10 +1520,19 @@ export class LynoxHTTPApi {
       const tier = session.getModelTier();
       const threadStore = engine.getThreadStore();
       const thread = threadStore?.getThread(sessionId);
+      // Use the SAME effective window the agent itself uses (min of model
+      // native and user's max_context_window_tokens cap). Pre-fix this
+      // returned native only, so a session whose effective window was
+      // smaller (or larger via 1M-beta) showed nonsense percentages in
+      // the UI — staging 2026-05-18 saw "Kontext: 423%" because the UI
+      // divided real tokensIn by a stale 200k while the engine had
+      // applied a different cap. Single source of truth via models.ts.
+      const userCap = engine.getUserConfig().max_context_window_tokens;
+      const modelId = MODEL_MAP[tier];
       jsonResponse(res, 201, {
         sessionId,
         model: tier,
-        contextWindow: CONTEXT_WINDOW[MODEL_MAP[tier]] ?? 200_000,
+        contextWindow: effectiveContextWindow(modelId, userCap),
         threadId: sessionId,
         resumed: !!threadId && !!thread,
       });
@@ -1751,6 +1760,19 @@ export class LynoxHTTPApi {
       // Wire promptSecret — secret value never enters SSE, only the prompt metadata
       session.promptSecret = async (name: string, prompt: string, keyType?: string, meta?: PromptMeta): Promise<SecretOutcome> => {
         if (!promptStore) return 'vault_error';
+
+        // Predict managed-tier rejection BEFORE opening the UI prompt.
+        // On managed mode, only BYOK_USER_WRITABLE_SECRETS names can ever
+        // succeed at the vault PUT — opening the prompt for any other
+        // name leads to a guaranteed 403 round-trip plus a confused user
+        // who typed a secret that wasn't writable, then a wasted agent
+        // turn to interpret the failure. Predict + short-circuit so the
+        // tool result is `managed_blocked` on the first call, never a
+        // false-start cancel. Staging incident 2026-05-18.
+        if (requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && !BYOK_USER_WRITABLE_SECRETS.has(name)) {
+          return 'managed_blocked';
+        }
+
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
         hasActivePendingPrompt = true;
         if (!aborted && !res.writableEnded) {
