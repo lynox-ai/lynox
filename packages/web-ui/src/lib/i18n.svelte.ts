@@ -355,6 +355,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// context-window, llm_mode, embedding_provider, experience.
 	'llm.advanced.title':                 { de: 'LLM — Erweitert',                                                              en: 'LLM — Advanced' },
 	'llm.advanced.subtitle':              { de: 'Wie gründlich der Agent arbeitet und wie viel Kontext er pro Anfrage lädt.',   en: 'How thoroughly the agent works and how much context it loads per request.' },
+	'llm.advanced.expand_label':          { de: 'Erweiterte Einstellungen',                                                     en: 'Advanced settings' },
 	'llm.advanced.reasoning_heading':     { de: 'Denkstil',                                                                     en: 'Reasoning style' },
 	'llm.advanced.experience_heading':    { de: 'Kommunikation',                                                                en: 'Communication' },
 	// Settings v3 PR 3 (Item 8) — show-all-grayed tooltips

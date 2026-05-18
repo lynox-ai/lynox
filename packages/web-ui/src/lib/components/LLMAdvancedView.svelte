@@ -32,6 +32,12 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildContextOptions, formatContextWindow, type ContextMilestone } from '../utils/context-window.js';
 
+	// Settings v3 PR 4.6 (2026-05-19) — `embedded=true` skips the page chrome
+	// (back-link + h1 + subtitle) so this component can render inline inside
+	// LLMSettings.svelte as an expandable section. Standalone /llm/advanced
+	// page keeps `embedded=false` (default) for back-compat with deep links.
+	let { embedded = false }: { embedded?: boolean } = $props();
+
 	interface UserConfig {
 		experience?: 'business' | 'developer';
 		effort_level?: 'low' | 'medium' | 'high' | 'max';
@@ -177,12 +183,14 @@
 	]);
 </script>
 
-<div class="space-y-6 max-w-3xl mx-auto p-4">
-	<a href="/app/settings/llm" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('llm.back_to_llm')}</a>
-	<header>
-		<h1 class="text-2xl font-semibold mb-1">{t('llm.advanced.title')}</h1>
-		<p class="text-sm text-text-muted">{t('llm.advanced.subtitle')}</p>
-	</header>
+<div class="space-y-6 {embedded ? '' : 'max-w-3xl mx-auto p-4'}">
+	{#if !embedded}
+		<a href="/app/settings/llm" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('llm.back_to_llm')}</a>
+		<header>
+			<h1 class="text-2xl font-semibold mb-1">{t('llm.advanced.title')}</h1>
+			<p class="text-sm text-text-muted">{t('llm.advanced.subtitle')}</p>
+		</header>
+	{/if}
 
 	{#if !loaded}
 		<p class="text-sm text-text-muted">{t('cost_limits.loading')}</p>

@@ -25,6 +25,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	// Local enum mirror — the engine type lives in src/types/models.ts but
 	// web-ui doesn't import core types directly (avoids dist/ rebuild churn).
 	type LLMProvider = 'anthropic' | 'vertex' | 'openai' | 'custom';
@@ -431,7 +432,9 @@
 	const llmSubRoutes: ReadonlyArray<SubRoute> = [
 		// v1.5.2: API keys for 3rd-party tools (Tavily, DataForSEO, …) moved
 		// to /app/hub?section=keys so they live next to API Profile endpoints.
-		{ href: '/app/settings/llm/advanced', titleKey: 'llm.subnav.advanced.title', descKey: 'llm.subnav.advanced.desc' },
+		// Settings v3 PR 4.6 (2026-05-19): /llm/advanced removed from this nav
+		// — Advanced settings now render inline below as an expandable section.
+		// The /advanced route still exists for back-compat with deep links.
 		{ href: '/app/settings/llm/memory',   titleKey: 'llm.subnav.memory.title',   descKey: 'llm.subnav.memory.desc' },
 	];
 </script>
@@ -699,14 +702,31 @@
 			{/if}
 		</section>
 
-		<!-- Save row — provider / model / custom-endpoint changes only. Advanced,
-		     Memory, Context-Window each save from their own sub-pages now. -->
+		<!-- Save row — provider / model / custom-endpoint changes only. Memory
+		     still saves from its own sub-page (Foundation-Rework may re-home).
+		     Advanced (PR 4.6, 2026-05-19) collapses inline below. -->
 		<div class="flex justify-end">
 			<button type="button" onclick={saveConfig} disabled={saving || !loaded}
 				class="px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50">
 				{saving ? t('llm.saving') : t('llm.save')}
 			</button>
 		</div>
+
+		<!-- Settings v3 PR 4.6 (Items 3 + 5): Advanced sub-page collapsed inline
+		     as expandable section. The standalone /llm/advanced route stays for
+		     back-compat with deep links; mounting LLMAdvancedView with
+		     embedded=true reuses the same component without its page chrome. -->
+		<details class="border-t border-border pt-6 group">
+			<summary class="cursor-pointer text-base font-medium text-text-muted hover:text-text transition-colors flex items-center gap-2">
+				<svg class="w-4 h-4 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+				</svg>
+				{t('llm.advanced.expand_label')}
+			</summary>
+			<div class="mt-4">
+				<LLMAdvancedView embedded={true} />
+			</div>
+		</details>
 	{/if}
 </div>
 
