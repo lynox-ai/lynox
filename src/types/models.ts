@@ -489,6 +489,14 @@ export function modelCapability(model: string): ModelCapability | undefined {
   return MODEL_CAPABILITIES[model] ?? MODEL_CAPABILITIES[normalizeModelId(model)];
 }
 
+/** Backstop for unknown model ids. Matches the pre-registry hard-coded
+ *  fallbacks in getContextWindow / getDefaultMaxTokens / getMaxContinuations. */
+const FALLBACK_CAPABILITY = {
+  contextWindow: 200_000,
+  defaultMaxOutput: 16_000,
+  maxContinuations: 10,
+} as const;
+
 /** Resolve a model id to its capability entry, falling back to a sensible
  *  default capability if the id is unknown. Used by helpers like
  *  `getContextWindow` that historically returned safe defaults rather than
@@ -500,14 +508,6 @@ function modelCapabilityOrFallback(model: string): {
 } {
   return modelCapability(model) ?? FALLBACK_CAPABILITY;
 }
-
-/** Backstop for unknown model ids. Matches the pre-registry hard-coded
- *  fallbacks in getContextWindow / getDefaultMaxTokens / getMaxContinuations. */
-const FALLBACK_CAPABILITY = {
-  contextWindow: 200_000,
-  defaultMaxOutput: 16_000,
-  maxContinuations: 10,
-} as const;
 
 /** Look up context window size. Normalizes provider-prefixed model IDs automatically. */
 export function getContextWindow(model: string): number {

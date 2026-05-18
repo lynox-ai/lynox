@@ -16,6 +16,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
+import { modelCapability } from '../types/models.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -68,22 +69,19 @@ export interface StructuredJsonResult<T> {
 }
 
 /**
- * List prices per 1M tokens for the models this helper can invoke. Used by
- * both the pre-flight budget estimate and the post-call exact-cost calc, so
- * an unknown model would silently mis-budget. Falls back to the Sonnet rate
- * (highest of the three) — fail-closed for the budget gate.
+ * List prices per 1M tokens for the models this helper can invoke. Reads
+ * from the MODEL_CAPABILITIES registry (types/models.ts) — pre-2026-05-18
+ * this helper carried its own divergent rate table that drifted from
+ * pricing.ts (e.g. Haiku 0.80/4 here vs 1/5 in pricing.ts). Falls back to
+ * the Sonnet rate (registry default) — fail-closed for the budget gate
+ * since Sonnet is the engine-wide primary client.
  */
 interface ModelPricing { input: number; output: number; }
-const MODEL_PRICING: Record<string, ModelPricing> = {
-  // Anthropic list prices, 2026-05.
-  'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00 },
-  'claude-sonnet-4-6':         { input: 3.00, output: 15.00 },
-  'claude-opus-4-7':           { input: 15.00, output: 75.00 },
-};
-const FALLBACK_PRICING: ModelPricing = MODEL_PRICING['claude-sonnet-4-6']!;
+const FALLBACK_MODEL_ID = 'claude-sonnet-4-6';
 
 function pricingFor(model: string): ModelPricing {
-  return MODEL_PRICING[model] ?? FALLBACK_PRICING;
+  const cap = modelCapability(model) ?? modelCapability(FALLBACK_MODEL_ID);
+  return { input: cap?.pricing.input ?? 3, output: cap?.pricing.output ?? 15 };
 }
 
 const DEFAULT_MAX_INPUT_TOKENS = 100_000;
