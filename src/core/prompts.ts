@@ -119,6 +119,27 @@ The user is a developer. Adjust your communication style:
 - Show file paths, error codes, and stack traces when debugging
 - For setup instructions, include both UI and CLI/config options`;
 
+/** Anchor active provider + model so a non-Anthropic adapter can't hallucinate
+ *  its identity. Inputs are user-controllable on managed tier — sanitize
+ *  before interpolation to close the prompt-injection vector. */
+export function modelIdentityContext(provider: string | undefined | null, modelId: string | undefined | null): string {
+  if (!provider || !modelId) return '';
+  const label: Record<string, string> = {
+    anthropic: 'Anthropic (Claude family)',
+    openai: 'Mistral / OpenAI-compatible',
+    custom: 'a custom Anthropic-compatible proxy',
+    vertex: 'Google Cloud Vertex AI (Claude family)',
+  };
+  // Sanitize: strip backticks + control chars + any markdown/prompt boundary
+  // chars, then cap length. Model IDs are conventionally `[a-z0-9._-]+` —
+  // anything else is treated as adversarial.
+  const safeId = String(modelId).replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 64);
+  const safeProviderKey = String(provider).toLowerCase().replace(/[^a-z-]/g, '');
+  const prettyProvider = label[safeProviderKey] ?? safeProviderKey.slice(0, 24);
+  if (!safeId || !prettyProvider) return '';
+  return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${safeId}\`. If asked what model or provider you are, state exactly this — do not guess, do not claim a different brand, do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
+}
+
 /**
  * Hour-truncated current datetime + weekday for the cached system prompt.
  * Hour granularity keeps Anthropic prompt caching effective (the cache key

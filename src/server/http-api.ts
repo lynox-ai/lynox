@@ -20,6 +20,8 @@ import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { getActiveProvider } from '../core/llm-client.js';
+import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
+import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
@@ -172,7 +174,16 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
  * admin-only. Self-host has no admin secret, so cookie users are promoted to
  * admin scope at the auth layer and this gate never applies to them.
  */
-const BYOK_USER_WRITABLE_SECRETS = new Set(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+const BYOK_USER_WRITABLE_SECRETS = new Set([
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  // v1.5.2: Mistral + Custom (Anthropic-compat) live in dedicated slots so
+  // switching providers in the UI doesn't clobber an existing Anthropic key.
+  // The web-ui LLMSettings.svelte VAULT_SLOTS map is the source of truth;
+  // mirror it here so managed users can actually save those keys.
+  'MISTRAL_API_KEY',
+  'CUSTOM_API_KEY',
+]);
 
 /**
  * Config fields a managed-tier user can change via PUT /api/config. Everything
@@ -2282,15 +2293,32 @@ export class LynoxHTTPApi {
         errorResponse(res, 503, msg);
         return;
       }
+      // PRD-IA-V2 P3-PR-B (Security S4) parity: emit a names-only audit row
+      // for every BYOK secret write. /api/config audits at L~2510; secrets
+      // need the same trail for compliance + incident-replay.
+      try {
+        const audit = engine.getSecurityAudit();
+        audit?.record({
+          event_type: 'secret_update',
+          decision: 'applied',
+          source: 'http_api',
+          detail: JSON.stringify({
+            slot: name,
+            tier: process.env['LYNOX_MANAGED_MODE'] ?? 'self-host',
+          }),
+        });
+      } catch {
+        // Audit failure must not mask the user-visible write success.
+      }
       // Hot-reload the LLM client so subsequent sessions pick up the new key
-      // without a process restart. Wrap defensively — the secret is already
-      // persisted; a failed re-init shouldn't make the caller think the write
-      // didn't land. Surface the partial success with `hot_reload: false` so
-      // the UI can choose to nudge the user to refresh.
+      // without a process restart. Uses reloadCredentials (not reloadUserConfig)
+      // because the gate in reloadUserConfig only re-creates `engine.client`
+      // when a config.json field changes — vault-only writes wouldn't fire it
+      // and `engine.client` (KG init + batch) would keep a stale key.
       let hotReload = true;
-      if (name === 'ANTHROPIC_API_KEY') {
+      if (PROVIDER_KEY_SLOTS.has(name)) {
         try {
-          engine.setApiKey(value);
+          await engine.reloadCredentials();
         } catch {
           hotReload = false;
         }
@@ -2840,7 +2868,23 @@ export class LynoxHTTPApi {
         return;
       }
       const provider = b['provider'];
-      const apiKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
+      // Validate against the LLMProvider union before the cast — keeps
+      // attacker-chosen slot names out of SECONDARY_SLOTS expansion paths.
+      const ALLOWED_PROVIDERS: ReadonlySet<string> = new Set(['anthropic', 'openai', 'custom', 'vertex']);
+      if (!ALLOWED_PROVIDERS.has(provider)) {
+        errorResponse(res, 400, `Unknown provider "${provider}"`);
+        return;
+      }
+      const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
+      // Vault fallback: when the user already saved the key earlier and now
+      // hits "Verbindung testen" without re-typing, the form posts an empty
+      // body key. Pre-1.5.2 the endpoint 400'd "API key required" even though
+      // the vault had the value.
+      const apiKey = bodyKey || (resolveProviderApiKey({
+        provider: provider as LLMProvider,
+        secretStore: engine.getSecretStore(),
+        userConfig: engine.getUserConfig(),
+      }) ?? '');
       const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
       const model = typeof b['model'] === 'string' ? b['model'] : '';
       const started = Date.now();
