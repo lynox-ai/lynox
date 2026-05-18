@@ -1635,10 +1635,12 @@ describe('Agent', () => {
     });
 
     it('fires after assistant message AND after tool_results on a tool_use turn', async () => {
-      const checkpoint = vi.fn();
+      // Pin BOTH the call count AND the message growth — semantic coverage
+      // of "each checkpoint observes a longer buffer than the last", so a
+      // loop refactor that preserves checkpoint-per-stable-point but changes
+      // the exact count still passes IFF it remains monotonic.
+      const observedLengths: number[] = [];
       const tool = makeTool('fake_tool');
-      // First response: tool_use → triggers tool dispatch → tool_results pushed
-      // Second response: end_turn after tool_results
       mockProcess
         .mockResolvedValueOnce({
           content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'fake_tool', input: {} }],
@@ -1651,12 +1653,14 @@ describe('Agent', () => {
         name: 'test',
         model: 'claude-sonnet-4-6',
         tools: [tool],
-        onMessageCheckpoint: checkpoint,
+        onMessageCheckpoint: () => { observedLengths.push(agent.getMessages().length); },
       });
       await agent.send('Use the tool');
-      // Three checkpoints: one after assistant tool_use, one after tool_results,
-      // plus one after the final assistant end_turn.
-      expect(checkpoint).toHaveBeenCalledTimes(3);
+      // Three checkpoints: assistant tool_use → tool_results → assistant end_turn.
+      expect(observedLengths.length).toBe(3);
+      // Strictly monotonic — every checkpoint sees more messages than the previous.
+      expect(observedLengths[1]!).toBeGreaterThan(observedLengths[0]!);
+      expect(observedLengths[2]!).toBeGreaterThan(observedLengths[1]!);
     });
 
     it('does not break the loop when the checkpoint hook throws', async () => {

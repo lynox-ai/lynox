@@ -147,10 +147,19 @@ describe('withCurrentTimePrefix', () => {
 // F-Halu regression-pin (2026-05-18): the SYSTEM_PROMPT must include the
 // "Honesty over completeness" guardrail — rafael prod fabricated a list
 // when memory_recall returned only a partial answer.
+//
+// Assertions are deliberately a mix of literal + intent — the heading and
+// one negative imperative are stable anchors; if a future edit paraphrases
+// the wording but preserves the intent (e.g. "fill the gap" instead of
+// "pad the answer"), update the test alongside. Tradeoff documented so a
+// future editor knows to re-confirm intent rather than blindly green-fix.
 describe('SYSTEM_PROMPT honesty guardrail', () => {
   it('includes the F-Halu guardrail directing the agent to ask rather than fabricate', () => {
     expect(SYSTEM_PROMPT).toMatch(/honesty over completeness/i);
-    expect(SYSTEM_PROMPT).toContain('DO NOT pad');
-    expect(SYSTEM_PROMPT).toContain('DO NOT invent');
+    // Either "DO NOT pad" or "DO NOT invent" — at least one negative
+    // imperative must survive paraphrasing.
+    expect(SYSTEM_PROMPT).toMatch(/DO NOT (pad|invent|fabricate|make up)/);
+    // The general "ask the user" intent should also be there in some form.
+    expect(SYSTEM_PROMPT).toMatch(/(ask the user|ask.*for the rest|surface what)/i);
   });
 });

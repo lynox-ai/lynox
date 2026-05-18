@@ -1477,9 +1477,21 @@ export class LynoxHTTPApi {
     const engine = this.engine!;
 
     // ── Sessions ──
+    // UUID format gate for client-supplied threadId — without it, an attacker
+    // could POST oversized / arbitrary strings as threadId, polluting the
+    // in-memory sessionStore Map + the SQLite primary key namespace (DoS /
+    // hygiene; SQLi neutralised by parameterised statements). UUID v4 shape
+    // matches what `randomUUID()` produces and what every legitimate client
+    // resends. /pr-review #456 finding S-M1, 2026-05-18.
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     this.addStatic('user', 'POST /api/sessions', async (_req, res, _params, body) => {
       const opts = body && typeof body === 'object' ? body as Record<string, unknown> : {};
-      const threadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
+      const rawThreadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
+      if (rawThreadId !== undefined && !UUID_REGEX.test(rawThreadId)) {
+        errorResponse(res, 400, 'Invalid threadId — expected UUID');
+        return;
+      }
+      const threadId = rawThreadId;
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
         model: typeof opts['model'] === 'string' ? opts['model'] as 'opus' | 'sonnet' | 'haiku' : undefined,

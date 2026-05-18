@@ -43,6 +43,7 @@ import {
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
+import { persistAgentMessages } from './eager-persist.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -508,28 +509,32 @@ export class Session {
         }
       }
 
-      // Persist messages + roll up run-level fields (fire-and-forget).
-      // The eager `_persistMessages` hook (F-Eager-Persist) usually drains
-      // `newMessages` to zero before we reach this point — keep the
-      // `appendMessages` call gated on a non-empty delta but ALWAYS update
-      // cost / token / title here, otherwise those run-level rollups would
-      // stop landing in SQLite once eager-persist is on.
+      // Roll up run-level fields. After F-Eager-Persist, `_persistMessages`
+      // has typically already appended every message + updated message_count
+      // during the run, so `appendMessages` here is normally a no-op. We
+      // still ALWAYS write the cost / token rollup (eager-persist doesn't
+      // know token counts; those are only computed here at run-end) plus
+      // the first-run title — both gated on the START count, not the now
+      // (`startMessageCount === 0` = "thread was empty when this run began").
       if (threadStore) {
         try {
           const allMessages = this.saveMessages();
           const existingCount = threadStore.getMessageCount(this.sessionId);
           const newMessages = allMessages.slice(existingCount);
           if (newMessages.length > 0) {
-            threadStore.appendMessages(this.sessionId, newMessages, existingCount);
+            // Combined append + rollup in one transaction (P1).
+            threadStore.appendMessages(this.sessionId, newMessages, existingCount, {
+              message_count: allMessages.length,
+              total_tokens: this.usage.input_tokens + this.usage.output_tokens,
+              total_cost_usd: costUsd,
+            });
+          } else {
+            // Eager already persisted — just stamp the cost/token rollup.
+            threadStore.updateThread(this.sessionId, {
+              total_tokens: this.usage.input_tokens + this.usage.output_tokens,
+              total_cost_usd: costUsd,
+            });
           }
-          threadStore.updateThread(this.sessionId, {
-            message_count: allMessages.length,
-            total_tokens: this.usage.input_tokens + this.usage.output_tokens,
-            total_cost_usd: costUsd,
-          });
-          // Auto-generate title on first run — uses `startMessageCount`
-          // captured BEFORE the run started, since eager-persist has by now
-          // inflated `existingCount` past 0 on the very first run too.
           if (startMessageCount === 0) {
             const title = generateThreadTitle(taskText);
             threadStore.updateThread(this.sessionId, { title });
@@ -803,24 +808,16 @@ export class Session {
    * an empty delta.
    */
   private _persistMessages(): void {
-    const threadStore = this.engine.getThreadStore();
-    if (!threadStore || !this.agent) return;
-    try {
-      const allMessages = this.agent.getMessages();
-      const existingCount = threadStore.getMessageCount(this.sessionId);
-      // In-memory buffer below SQLite floor means `_truncateHistory` ran and
-      // dropped earlier messages from the agent's view — SQLite still owns
-      // the full history. Skip (disk truth wins) but log once so a divergent
-      // thread doesn't go silently stale across runs.
-      if (allMessages.length < existingCount) {
-        console.warn(`[session] in-memory buffer (${allMessages.length}) shorter than persisted floor (${existingCount}) for thread ${this.sessionId} — skipping eager persist; disk remains source of truth`);
-        return;
-      }
-      if (allMessages.length === existingCount) return;
-      const delta = allMessages.slice(existingCount);
-      threadStore.appendMessages(this.sessionId, delta, existingCount);
-      threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
-    } catch { /* fire-and-forget — persistence failures must never break the run */ }
+    if (!this.agent) return;
+    persistAgentMessages({
+      threadStore: this.engine.getThreadStore() ?? null,
+      sessionId: this.sessionId,
+      allMessages: this.agent.getMessages(),
+    });
+    // Returned outcome is intentionally ignored — fire-and-forget contract.
+    // The helper handles its own try/catch and returns `{ kind: 'error' }`
+    // on throws; we don't propagate because the run must never die on a
+    // persist failure.
   }
 
   // ── Model / Effort / Thinking ──
