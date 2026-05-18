@@ -3,6 +3,7 @@
 	import { page } from '$app/stores';
 	import { t } from '../i18n.svelte.js';
 	import ApiStoreView from './ApiStoreView.svelte';
+	import SecretsView from './SecretsView.svelte';
 	import TasksView from './TasksView.svelte';
 	import WorkflowsView from './WorkflowsView.svelte';
 
@@ -10,7 +11,11 @@
 	// `/app/hub?section=activity*` is redirected SSR-side by
 	// `routes/app/hub/+page.ts` to `/app/activity?tab=*`.
 	// `hub.automation.activity` i18n key intentionally kept here; retire = P2-PR-E.
-	type Tab = 'workflows' | 'tasks' | 'apis';
+	// v1.5.2 (rafael QA 2026-05-18): "API Keys" 3rd-party-credentials view
+	// moved here from /settings/llm/keys. Sits next to APIs (endpoints) so
+	// related Automation surfaces — endpoint definitions + their auth — share
+	// one place instead of straddling LLM Settings and Automation.
+	type Tab = 'workflows' | 'tasks' | 'apis' | 'keys';
 
 	// `?section=` (not `?tab=`) is intentional — historic collision-avoidance
 	// with the embedded ActivityHub which used `?tab=`. Now that Activity is
@@ -21,7 +26,7 @@
 	// still rewrite via the $effect below (1-release grace; cleanup later).
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('section');
-		if (p === 'tasks' || p === 'apis') return p;
+		if (p === 'tasks' || p === 'apis' || p === 'keys') return p;
 		if (p === 'reminders') return 'tasks'; // backwards-compat
 		return 'workflows';
 	})());
@@ -52,6 +57,7 @@
 		{ id: 'workflows', labelKey: 'hub.automation.workflows' },
 		{ id: 'tasks', labelKey: 'hub.automation.tasks' },
 		{ id: 'apis', labelKey: 'hub.automation.apis' },
+		{ id: 'keys', labelKey: 'hub.automation.keys' },
 	];
 </script>
 
@@ -70,8 +76,10 @@
 			<WorkflowsView />
 		{:else if tab === 'tasks'}
 			<TasksView />
-		{:else}
+		{:else if tab === 'apis'}
 			<ApiStoreView />
+		{:else}
+			<SecretsView />
 		{/if}
 	</div>
 </div>
